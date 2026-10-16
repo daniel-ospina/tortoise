@@ -400,6 +400,136 @@ def test_extraction_state_set_agreement():
 # ── the projection (§D): new columns go at the END, pinned by POSITION ─────
 
 
+def _python_strings(text: str) -> str:
+    """Rebuild an implicit Python string concatenation from a source slice.
+
+    The slice is Python source: the Cypher is split over adjacent string
+    literals with Python comments and indentation between them. This drops the
+    comments (outside literals) and concatenates the double-quoted literal
+    contents, so what comes back IS the query the engine runs.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "#":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ch == '"':
+            i += 1
+            buf: list[str] = []
+            while i < n:
+                c = text[i]
+                if c == "\\" and i + 1 < n:
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                if c == '"':
+                    i += 1
+                    break
+                buf.append(c)
+                i += 1
+            out.append("".join(buf))
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _strip_cypher_comments(cypher: str) -> str:
+    """Remove ``//`` line and ``/* … */`` block comments, keeping literals."""
+    out: list[str] = []
+    i, n = 0, len(cypher)
+    quote = ""
+    while i < n:
+        ch = cypher[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(cypher[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and cypher[i + 1] == "/":
+            j = cypher.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ch == "/" and i + 1 < n and cypher[i + 1] == "*":
+            j = cypher.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_top_level(payload: str) -> list[str]:
+    """Split a RETURN payload on commas NOT inside ()/[]/{} or a literal — a
+    parenthesised expression must not hide its own comma."""
+    parts: list[str] = []
+    cur: list[str] = []
+    depth = 0
+    quote = ""
+    i, n = 0, len(payload)
+    while i < n:
+        ch = payload[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < n:
+                cur.append(payload[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    tail = "".join(cur).strip()
+    if tail:
+        parts.append(tail)
+    return [p for p in parts if p]
+
+
+def _return_column_tokens(py_source: str) -> list[str]:
+    """The COMPLETE ordered projection token list from a slice of Python source.
+
+    Rebuilds the Cypher, strips any Cypher comments, isolates the
+    ``RETURN … ORDER BY`` payload and splits it on TOP-LEVEL commas. Returning
+    EVERY token — not only ``s.``-prefixed ones — is the point: an inserted
+    ``properties(s)`` / ``coalesce(...)`` / ``labels(s)`` shifts the positional
+    wire mapping exactly as an inserted ``s.foo`` does, while an ``s.``-only
+    scan stays byte-identical and green through precisely the re-bind the guard
+    exists to catch.
+    """
+    cypher = _strip_cypher_comments(_python_strings(py_source))
+    upper = cypher.upper()
+    ret = upper.find("RETURN")
+    assert ret != -1, f"no RETURN in reconstructed Cypher: {cypher!r}"
+    order = upper.find("ORDER BY", ret)
+    payload = cypher[ret + len("RETURN"):order if order != -1 else len(cypher)]
+    return _split_top_level(payload)
+
+
 def test_new_columns_appended_at_end():
     """The new columns are APPENDED, and the positions are pinned.
 
@@ -469,11 +599,17 @@ def test_new_columns_appended_at_end():
     head = source.index('"WHERE (p.pointKind IS NULL OR p.pointKind <> \'event\') "')
     tail = source.index('"ORDER BY s.created_at DESC LIMIT 50"', head)
     clause = source[head:tail]
-    # The projected `s.*` columns in ORDER, as the concatenated literals spell
-    # them (comments between the literals are comments, not columns).
-    selected = re.findall(r"s\.[a-z_]+", clause)
+    # The projected columns in ORDER, as the concatenated literals spell them.
+    #  COMPLETE tokens — `s.*` names AND everything else (`count(p)`, and any
+    # future `properties(s)` / `coalesce(...)`) — because an INSERT of ANY
+    # projection token shifts the positional wire mapping, while an `s.`-only
+    # scan stays byte-identical. Comments between the literals are comments,
+    # not columns; the RETURN payload is split on TOP-LEVEL commas so a
+    # parenthesised expression cannot hide its own comma.
+    selected = _return_column_tokens(clause)
     assert selected == [
-        "s.id", "s.created_at", "s.turn_count", "s.actor_user_id", "s.harness",
+        "s.id", "s.created_at", "s.turn_count", "count(p)",
+        "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",
         "s.client_captured_at", "s.client_captured_at_source", "s.capture_lane",
     ], (
@@ -485,7 +621,7 @@ def test_new_columns_appended_at_end():
     detail_head = source.index(
         '"MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "')
     detail_tail = source.index('params={"sid": session_id},', detail_head)
-    detail_sel = re.findall(r"s\.[a-z_]+", source[detail_head:detail_tail])
+    detail_sel = _return_column_tokens(source[detail_head:detail_tail])
     assert detail_sel == [
         "s.id", "s.created_at", "s.turn_count", "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",

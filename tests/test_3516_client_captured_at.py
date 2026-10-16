@@ -576,6 +576,37 @@ def test_journal_fold_keeps_the_stamp_and_a_replay_recovers_it():
     assert _stamp(sdk, sid, "client_captured_at_source") == "cli_observed"
 
 
+def test_journal_fold_keeps_the_transcript_source_and_a_replay_recovers_it():
+    """The journal fold must carry `source`, or a journal-only replay loses the
+    transcript stem the capture came from — the asymmetry the live raw SET
+    (`sdk._write_session_and_turns`) never had, because its sibling fields in
+    the same block are all folded.
+
+    MUTATION THAT REDS THIS: drop the `source` coalesce arm from
+    `_fold_session_recorded`.
+    """
+    from tortoise.sdk import _write_session_and_turns
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    proj = sdk._get_proj()
+    sid = "3516-journal-source"
+    emitted: list[dict] = []
+    _write_session_and_turns(
+        proj, sdk, sid, [{"role": "user", "content": "hi"}],
+        now="2026-10-04T00:00:00Z", harness="pi",
+        source="hook-stem",
+        on_session_merged=emitted.append)
+    assert any(ev.get("source") == "hook-stem" for ev in emitted), (
+        "the writer dropped `source` from its journal carrier")
+
+    # Simulate a journal-only REPLAY: wipe the live node, then fold the journal.
+    proj.g.query("MATCH (s:Session {id:$sid}) DELETE s", params={"sid": sid})
+    for ev in emitted:
+        proj._fold_session_recorded({"type": "SessionRecorded", **ev})
+    assert _stamp(sdk, sid, "source") == "hook-stem", (
+        "a journal-only replay lost the transcript source")
+
+
 # ── values that are PRESENT but are not readings ──────────────────────────
 
 
@@ -1150,6 +1181,64 @@ def test_the_floor_inputs_are_served_on_the_session_read_path(tmp_path):
             INSTALL,
         )
         assert verdict == VERDICT_PASSED, reason
+    finally:
+        os.environ.pop("TORTOISE_DB_PATH", None)
+        _restore_tortoise_sdk_init(orig)
+
+
+def test_the_floor_inputs_are_served_on_the_session_LIST_path(tmp_path):
+    """The LIST route (`GET /v1/sessions`) serves the same triplet.
+
+    The read-path test above pins `GET /v1/sessions/{id}`; nothing pinned the
+    list route, whose positional binding (`_session_row_dict` reads r[10..12])
+    is a SEPARATE query with its own RETURN clause. A column dropped from the
+    list SELECT, or the triplet re-ordered there, would leave the detail test
+    green while every dashboard row silently lost its capture provenance.
+
+    MUTATION THAT REDS THIS: drop the triplet from the list RETURN (or move it
+    before `s.capture_ok`, re-binding r[8..12]).
+    """
+    import os
+
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha_mod
+    from tests.test_hosted_api import (
+        _patch_tortoise_sdk_init,
+        _restore_tortoise_sdk_init,
+        _seed_team_graphs,
+    )
+
+    org = "team-3516-floor-list"
+    db_path = os.path.join(str(tmp_path), "floor-list.db")
+    orig = _patch_tortoise_sdk_init(db_path)
+    os.environ["TORTOISE_DB_PATH"] = db_path
+    sdk = ha_mod._make_sdk(namespace="registry")
+    _seed_team_graphs(sdk, org, "pro", None)
+    try:
+        key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
+        h = {"Authorization": f"Bearer {key['api_key']}"}
+        with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+            r = tc.post("/v1/sessions", headers=h, json={
+                "conversation": [{"role": "user", "content": "hello"}],
+                "session_id": "s-3516-floor-list",
+                "harness": "claude",
+                "capture_lane": "hook",
+                "client_captured_at": INSTALL + 10.0,
+                "client_captured_at_source": "cli_observed",
+            })
+            assert r.status_code == 200, r.text[:300]
+            lst = tc.get("/v1/sessions", headers=h)
+            assert lst.status_code == 200, lst.text[:300]
+            rows = lst.json()["sessions"]
+        row = next((s for s in rows if s.get("id") == "s-3516-floor-list"),
+                   None)
+        assert row is not None, (
+            f"the session was not served on the list route: {rows}")
+        assert row.get("client_captured_at") == pytest.approx(INSTALL + 10.0), (
+            f"the list route did not serve the floor's instant: {row}")
+        assert row.get("client_captured_at_source") == "cli_observed"
+        assert row.get("capture_lane") == "hook"
     finally:
         os.environ.pop("TORTOISE_DB_PATH", None)
         _restore_tortoise_sdk_init(orig)
