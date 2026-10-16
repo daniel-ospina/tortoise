@@ -126,11 +126,17 @@ today.
 1. **`tortoise/assembly.py` — classifier.**
    - `AssemblyShape.CLASS_PLURAL = "class-plural"`.
    - `_RE_CLASS_PLURAL`: `^(what|which) (is|was) the order of <CLASS> (I|we|…)
-     <verb> (in|during|over|within) the (past|last) [<count>] <unit> <tail>?`.
+     <verb> (in|during|over|within) the (past|last) [<count>] <unit> <order>?`.
      Deliberately narrow: the ordering HEAD + the first-person RELATIVE CLAUSE +
      the explicit relative WINDOW. The count is optional (`the past month` ⇒
      1) and a plural unit without a count is NOT admitted (`the past months` is
-     ambiguous — unmeasured).
+     ambiguous — unmeasured). The `<CLASS>` span is TEMPERED at the first
+     relative-clause boundary, so a repeated clause (`the concerts I attended
+     and the plays I saw …`) ABSTAINS instead of absorbing the first clause's
+     verb into the class vocabulary — a verb token (`attended`) would match
+     almost every narrative row, a false include. The trailing ordering
+     INSTRUCTION is captured and its direction read (`newest_first`), so a
+     reverse-order request is rendered in the direction it asked for.
    - `classify_question`: the class-plural branch is evaluated AFTER the
      calendar-anchor branch and BEFORE the blanket R13 guard block (the
      placement IS the recency override — see the OVERRIDES note), with the rest
@@ -140,8 +146,10 @@ today.
      `None`.
 2. **`tortoise/assembly.py` — the pure resolver.**
    - `ClassWindow` (frozen): `class_phrase`, `tokens`, `unit`, `count`,
-     `window_lo`, `window_hi`, `newest_first=False` (the question asks the order
-     from the EARLIEST).
+     `window_lo`, `window_hi`, `newest_first` (read from the question's own
+     ordering instruction — `starting from the earliest` / `from earliest to
+     latest` is chronological, `from latest to earliest` / `newest first` is
+     newest-first; #8779 P1).
    - `resolve_class_window(question, question_date)` — deterministic, never
      raises (the `resolve_relative_anchor` contract): gated on
      `classify_question(question) is AssemblyShape.CLASS_PLURAL` (the two entry
@@ -167,7 +175,8 @@ today.
    `RelativeAnchor` both satisfy it).
 4. **`tortoise/assembly.py` — the render.** `_synthesize_class_hits(slices,
    window, question_date)`: ONE `CLASS ORDER (<phrase>): <n> dated events, …
-   earliest first` header, then per row a position line (`<pos>. <date>`, where
+   earliest first | newest first` header (the direction is the question's own
+   request), then per row a position line (`<pos>. <date>`, where
    same-DAY rows SHARE a position — a tie is never rendered as a strict order,
    the module's existing tie discipline) followed by the row itself; the
    pure-walker derivation keys (`date`/`tier`) are stripped. Empty ⇒ `[]`.

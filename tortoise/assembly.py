@@ -654,16 +654,35 @@ _RE_ORDERING = re.compile(
 _CLASS_COUNT_RX = (
     r"(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
     r"twelve|\d+)")
+#: the relative-clause SUBJECT. Shared by the outer clause and the class-span
+#: boundary below, so the two can never drift apart. The `\b` guards are
+#: LOAD-BEARING for the boundary: without them `he` matches inside "the" and
+#: `we` inside "wedding", so the tempered class span stops mid-word and the
+#: whole template fails.
+_CLASS_REL_PRONOUN = r"\b(?:i|we|you|they|he|she|the\s+narrator)\b"
 _RE_CLASS_PLURAL = re.compile(
     r"^\s*(?:what|which)\s+(?:is|was)\s+the\s+order\s+of\s+"
-    r"(?P<cls>.+?)\s"
+    # ⛔ the class span may NOT cross a relative-clause boundary: this is a
+    # TEMPERED lazy run — it stops at the FIRST `<pronoun> <verb>` — so a
+    # repeated relative clause ("the concerts I attended and the plays I
+    # saw") can no longer be swallowed whole (#8779 P2). Before the bound the
+    # lazy `.+?` reached the LAST pronoun and absorbed the first clause's VERB
+    # into the class vocabulary; `attended` then matched almost every
+    # narrative row and the class filter degraded to a near-no-op — a FALSE
+    # INCLUDE, the dangerous direction. The repeated-clause form now
+    # ABSTAINS (no match -> the caller's legacy fall-through), which is the
+    # plan's recorded recall-loss posture, never a false include.
+    r"(?P<cls>(?:(?!" + _CLASS_REL_PRONOUN + r"\s+\w).)+?)\s"
     r"(?:(?:that|which)\s+)?"
-    r"(?:i|we|you|they|he|she|the\s+narrator)\s+\w+(?:\s+\w+)?\s+"
+    r"(?:" + _CLASS_REL_PRONOUN + r")\s+\w+(?:\s+\w+)?\s+"
     r"(?:in|during|over|within)\s+the\s+(?:past|last)\s+"
     r"(?:(?P<count>" + _CLASS_COUNT_RX + r")\s+"
     r"(?P<unit>days?|weeks?|months?|years?)"
     r"|(?P<unit_sg>day|week|month|year))(?![a-z])"
-    r"[^?]*\??\s*$",
+    # the ordering INSTRUCTION is CAPTURED, not merely skipped, so the
+    # resolver can read its DIRECTION (#8779 P1): a `from latest to earliest`
+    # request must render newest-first, never the reverse.
+    r"(?P<order>[^?]*)\??\s*$",
     re.IGNORECASE | re.DOTALL)
 # interval: "how many <unit> (had|have) passed between A and B"
 # interval "between": "how many <unit> (had|have) passed between A and B" and
@@ -2604,20 +2623,24 @@ def _class_header_line(window: ClassWindow, rendered: int,
     """
     count = window.count or 1
     unit = window.unit or ""
+    # #8779 P1: the direction phrase is the question's OWN request, read by
+    # ``_class_order_newest_first`` — never a hard-coded `earliest first`.
+    direction = "newest first" if window.newest_first else "earliest first"
     return (
         f"CLASS ORDER ({window.class_phrase}): {rendered} dated "
         f"event{'s' if rendered != 1 else ''} in "
         f"{_fmt_date(window.window_lo)} -> {_fmt_date(window.window_hi)} "
         f"({count} {unit}{'s' if count != 1 else ''} before "
-        f"{_fmt_date(qd)}), earliest first")
+        f"{_fmt_date(qd)}), {direction}")
 
 
 def _synthesize_class_hits(slices: AssemblySlices, window: ClassWindow,
                            question_date: str | None) -> list[dict]:
     """#8056 CLASS_PLURAL render: ONE header naming the class and the window,
-    then the class's dated rows in CHRONOLOGICAL order, each preceded by its
-    own position line — the deterministic tier owns the ordering arithmetic
-    the question asks for.
+    then the class's dated rows in the order the question ASKED for —
+    chronological, or reverse-chronological when its ordering instruction says
+    so (#8779 P1) — each preceded by its own position line — the
+    deterministic tier owns the ordering arithmetic the question asks for.
 
     Same-DAY rows SHARE a position ("1. 2026-07-04" twice), so a tie is never
     rendered as a strict order — the module's existing tie discipline (the
@@ -2638,7 +2661,8 @@ def _synthesize_class_hits(slices: AssemblySlices, window: ClassWindow,
         return []
     rows = sorted((r for r in slices.timeline_rows
                    if isinstance(r.get("date"), _date)),
-                  key=lambda r: (r["date"], _as_str(r.get("id"))))
+                  key=lambda r: (r["date"], _as_str(r.get("id"))),
+                  reverse=window.newest_first)
     # dedupe BEFORE the header is built, so the count it names is the count
     # this renderer INTENDS to list (the collector already dedupes its own
     # fetch; a hand-built AssemblySlices may not have). The FIRED path
@@ -3251,6 +3275,35 @@ def _class_stem(tok: str) -> str:
     return t
 
 
+#: #8779 P1 — the ORDERING-DIRECTION vocabulary of the class-plural head's
+#: ordering instruction. The template now CAPTURES the instruction; this reads
+#: its direction. `reverse` is listed first so `in reverse chronological
+#: order` reads as reverse-chronological; `most\W+recent` precedes `recent` so
+#: the compound is one word, not two. `start`/`beginning` are deliberately NOT
+#: here: "starting from the latest" takes its direction from `latest`, and
+#: treating the verb as an old-end marker would invert it.
+_CLASS_ORDER_DIRECTION = re.compile(
+    r"\b(?P<recent>reverse|latest|newest|most\W+recent|recent|last)\b|"
+    r"\b(?P<old>earliest|oldest|first)\b",
+    re.IGNORECASE)
+
+
+def _class_order_newest_first(instruction: str) -> bool:
+    """Does the question's ordering instruction ask for the NEWEST first?
+
+    ``False`` — the census spelling ("starting from the earliest" / "from
+    earliest to latest") and the head's own default when the question carries
+    no instruction at all — is chronological; ``True`` is
+    reverse-chronological. The FIRST direction word decides: an instruction
+    names its BOUNDS IN ORDER ("from earliest to latest" / "from latest to
+    earliest"), so the first bound is the end the enumeration must start
+    from, which is exactly what the rendered positions must begin at.
+    """
+    for m in _CLASS_ORDER_DIRECTION.finditer(_as_str(instruction)):
+        return m.group("recent") is not None
+    return False
+
+
 def _class_tokens(span: str) -> tuple[str, ...]:
     """The question's CLASS vocabulary (ordered, deduped, stemmed).
 
@@ -3306,9 +3359,13 @@ class ClassWindow:
     """#8056 resolver output: the CLASS the question asks to enumerate, and
     the relative window it asks over (see ``resolve_class_window``).
 
-    ``newest_first`` is always False: the census class asks for the order
-    STARTING FROM THE EARLIEST, so its spine is chronological. It exists
-    because the shared ``collect_window_slices`` reads it.
+    ``newest_first`` reads the question's OWN ordering instruction (#8779
+    P1): the census spelling ("starting from the earliest" / "from earliest
+    to latest") is chronological, a reverse spelling ("from latest to
+    earliest" / "newest first") is newest-first. It is threaded into the
+    shared ``collect_window_slices`` walk AND into this shape's own renderer
+    (sort, position numbering and header direction), which is what keeps a
+    reverse-order request from being answered in the opposite order.
     """
     class_phrase: str            # the question's own class span, verbatim
     tokens: tuple[str, ...]      # the stemmed class vocabulary
@@ -3380,7 +3437,9 @@ def resolve_class_window(question: str,
         return None
     return ClassWindow(class_phrase=_as_str(m.group("cls")).strip(),
                        tokens=tokens, unit=unit, count=count,
-                       window_lo=lo, window_hi=qd, newest_first=False)
+                       window_lo=lo, window_hi=qd,
+                       newest_first=_class_order_newest_first(
+                           m.group("order") or ""))
 
 
 def collect_class_slices(port, window: ClassWindow, *,

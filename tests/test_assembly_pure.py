@@ -4518,6 +4518,16 @@ def test_census_class_plural_coverage():
     # the colon introducer the N-ary shape requires)
     "What is the order of the concerts, musicals and events I attended in "
     "the past two months?",
+    # #8779 P1: a REVERSE ordering instruction is the SAME shape, answered
+    # newest-first — it fires, and the direction is read rather than ignored
+    "What is the order of the concerts I attended in the past two months, "
+    "from latest to earliest?",
+    "What is the order of the concerts I attended in the past two months, "
+    "from most recent to oldest?",
+    "What is the order of the concerts I attended in the past two months, "
+    "newest first?",
+    "What is the order of the concerts I attended in the past two months, "
+    "in reverse chronological order?",
 ])
 def test_class_plural_fires(question):
     assert classify_question(question) is AssemblyShape.CLASS_PLURAL
@@ -4531,6 +4541,12 @@ def test_class_plural_fires(question):
     "What is the order of the six museums I visited from earliest to latest?",
     "What is the order of the six museums I visited from earliest to most "
     "recent?",
+    # a REPEATED relative clause: the class span may not cross a clause
+    # boundary (#8779 P2), so this ABSTAINS rather than leak the first
+    # clause's VERB into the class vocabulary (a false include that would
+    # select almost every narrative row)
+    "What is the order of the concerts I attended and the plays I saw in "
+    "the past two months?",
     # CALENDAR-MONTH window — a different window family (#2655's surface)
     "What is the order of the sports events I watched in January?",
     # OPEN-LEFT window — no bounded lookback to enumerate
@@ -4669,6 +4685,115 @@ def test_resolve_class_window_arithmetic(question, qd, lo, hi, count, unit,
     # pronoun — it carries no verb, which is what makes the token set the
     # class's own content words (see ``_class_tokens``)
     assert window.class_phrase == phrase
+
+
+@pytest.mark.parametrize("instruction,newest_first", [
+    # the census spelling and the head's own default: chronological
+    ("starting from the earliest", False),
+    ("from earliest to latest", False),
+    ("from earliest to most recent", False),
+    ("from the oldest to the newest", False),
+    ("in chronological order", False),
+    ("", False),
+    # #8779 P1: the reverse spellings — the SAME shape, opposite direction
+    ("from latest to earliest", True),
+    ("from most recent to oldest", True),
+    ("from the newest to the oldest", True),
+    ("from last to first", True),
+    ("latest first", True),
+    ("newest first", True),
+    ("in reverse chronological order", True),
+])
+def test_class_order_direction_reads_the_question_instruction(
+        instruction, newest_first):
+    """#8779 P1: the ordering DIRECTION is read from the question's own
+    instruction, not hard-coded. The FIRST bound decides: an instruction names
+    its ends in order, so `from latest to earliest` must enumerate newest
+    first while `from earliest to latest` stays chronological.
+
+    Non-vacuous: at the pre-fix head every reverse spelling resolved to
+    ``newest_first=False`` (the field was hard-coded), so the True rows fail
+    there.
+    """
+    q = ("What is the order of the concerts I attended in the past two months"
+         + (f", {instruction}?" if instruction else "?"))
+    window = resolve_class_window(q, "2026-09-10")
+    assert isinstance(window, ClassWindow), q
+    assert window.newest_first is newest_first, q
+
+
+def test_class_plural_reverse_order_renders_newest_first():
+    """#8779 P1: a reverse-order request renders the reversed spine — the
+    positions count DOWN from the newest date and the header names that
+    direction. PRE-FIX this fails: the header always said `earliest first`
+    and the rows always sorted ascending, i.e. the block asserted the
+    opposite of what the question asked."""
+    q = ("What is the order of the concerts I attended in the past two "
+         "months, from latest to earliest?")
+    window = resolve_class_window(q, "2026-09-10")
+    assert window is not None and window.newest_first is True
+    slices = collect_class_slices(_DictWindowPort([
+        _day_row("p-early", created_at="2026-08-14",
+                 content="attended the Jazz Festival concert"),
+        _day_row("p-late", created_at="2026-08-25",
+                 content="went to a music festival concert"),
+    ]), window)
+    hits = synthesize_hits(slices, shape=AssemblyShape.CLASS_PLURAL,
+                           question_date="2026-09-10", anchor=window)
+    header = hits[0]["content"]
+    assert header.endswith("newest first"), header
+    assert "earliest first" not in header
+    positions = [h["content"] for h in hits if h["kind"] == "class-order"]
+    assert positions == ["1. 2026-08-25", "2. 2026-08-14"]
+
+
+def test_connected_class_reverse_order_lists_newest_first(monkeypatch):
+    """#8779 P1 through the REAL orchestration: a reverse-order block's
+    rendered lines count down from the newest date and its header says so."""
+    port = _class_port([
+        _day_row("p-early", created_at="2026-08-05",
+                 content="an early concert"),
+        _day_row("p-late", created_at="2026-08-20",
+                 content="a late concert"),
+    ])
+    block = _drive_connected(
+        monkeypatch, port,
+        "What is the order of the concerts I attended in the past two months, "
+        "from latest to earliest?",
+        question_date="2026-09-10")
+    assert block.fired is True
+    rendered = [str(h.get("content") or "") for h in block.post_cap_lines]
+    assert any("newest first" in line for line in rendered), rendered
+    order_rows = [line for line in rendered
+                  if line[:2] in ("1.", "2.", "3.")]
+    assert order_rows == ["1. 2026-08-20", "2. 2026-08-05"], rendered
+
+
+def test_class_plural_repeated_clause_abstains_instead_of_leaking_a_verb():
+    """#8779 P2: the class span may not cross a relative-clause boundary. A
+    repeated clause used to be swallowed WHOLE by the lazy ``.+?``, absorbing
+    the first clause's VERB into the class vocabulary — and a verb token makes
+    the class filter a near-no-op (``attended`` matches almost every narrative
+    row), a FALSE INCLUDE. The form now abstains (the caller's legacy
+    fall-through), which is the plan's recorded recall-loss posture.
+
+    Non-vacuous: pre-fix ``classify_question`` returned CLASS_PLURAL and the
+    resolver's token set carried ``attended`` (and the filter then selected a
+    row that shares only that verb).
+    """
+    q = ("What is the order of the concerts I attended and the plays I saw "
+         "in the past two months?")
+    assert classify_question(q) is None
+    assert resolve_class_window(q, "2026-09-10") is None
+    # the single-clause boundary the repeated form must not cross: the token
+    # set is the class's OWN content words, with no verb in it
+    window = resolve_class_window(_CLASS_PLURAL_Q, "2026-09-10")
+    assert window is not None
+    assert window.class_phrase == "the concerts and musical events"
+    assert "attended" not in window.tokens
+    # there is no ``attended`` token to select a wedding with
+    assert not _class_owns_row({"content": "I attended a wedding"},
+                               ("concert",))
 
 
 def test_resolve_class_window_abstains_never_raises():
