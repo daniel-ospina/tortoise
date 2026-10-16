@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile  # noqa: F401
 import time
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -485,6 +486,22 @@ def test_snapshot_key_memory_tracks_the_daemon_not_the_registry_slot(
         fs._store.clear()
 
 
+class _NoStoreHandle:
+    """A duck-typed projection that exposes no store handle AND REJECTS the
+    stamp the pre-fix code attempted (``__slots__``).
+
+    Both halves are load-bearing for the #7773 P2 test: without ``__slots__``
+    the per-projection stamp SUCCEEDS, so the pre-fix code's key was stable
+    anyway and ``k1 == k2`` passed without the fix. Only a client the token
+    cannot be stamped on reproduces the per-call re-mint. Shared by both
+    unidentified-identity tests so the double cannot drift between them.
+    """
+    __slots__ = ()
+    _path = ":memory:"
+    graph_name = "tortoise"
+    db = object()
+
+
 def test_snapshot_key_memory_fallback_is_stable_not_minted(caplog):
     """#7773 P2: an unreadable store identity must NOT re-mint a key per call.
 
@@ -494,20 +511,6 @@ def test_snapshot_key_memory_fallback_is_stable_not_minted(caplog):
     the corpus re-fetch + TF-IDF re-fit ran silently on every degraded search.
     The key must stay stable, and the shortfall must be reported loudly.
     """
-    class _NoStoreHandle:
-        """A duck-typed projection that exposes no store handle AND REJECTS
-        the stamp the pre-fix code attempted (``__slots__``).
-
-        Both halves are load-bearing for this test: without ``__slots__`` the
-        per-projection stamp SUCCEEDS, so the old code's key was stable anyway
-        and ``k1 == k2`` passed without the fix. Only a client the token cannot
-        be stamped on reproduces the per-call re-mint.
-        """
-        __slots__ = ()
-        _path = ":memory:"
-        graph_name = "tortoise"
-        db = object()
-
     proj = _NoStoreHandle()
     with caplog.at_level(logging.ERROR, logger="tortoise.fallback_snapshot"):
         k1 = fs.snapshot_key(proj, None)
@@ -517,6 +520,121 @@ def test_snapshot_key_memory_fallback_is_stable_not_minted(caplog):
         f"fresh per-call key — got {k1!r} then {k2!r}")
     assert any(r.levelno >= logging.ERROR for r in caplog.records), (
         "the fallback must be loud, not a silent fail-open")
+
+
+def test_snapshot_key_memory_fallback_is_process_wide_shared():
+    """#7827: the unidentified-store identity is a PROCESS-WIDE constant, not
+    a per-projection token.
+
+    The sibling test pins per-call stability of ONE instance — a property a
+    per-projection MEMO also satisfies, while two distinct unidentified
+    projections then derive two keys, so ``_mark_dirty``'s ``invalidate``
+    reaches only the writer's and a sibling serves the pre-write corpus: the
+    #7773 under-invalidation, in the branch the source comment calls the safe
+    direction. The stated contract (``fallback_snapshot.py``,
+    ``_UNIDENTIFIED_MEMORY_STORE``) is that ALL such projections share it.
+
+    The sharing is pinned together with its documented cost: the shared tuple
+    keys the READ path too, so the branch is deliberately NOT
+    isolation-preserving. Pinning that residual means a later change to this
+    branch has to be deliberate rather than silent.
+
+    MUTATION PIN: replacing the constant with a per-projection token
+    (``_memo.setdefault(id(proj), str(uuid.uuid4()))``) leaves the sibling
+    test green and reddens this one.
+    """
+    a, b = _NoStoreHandle(), _NoStoreHandle()
+    ka = fs.snapshot_key(a, None)
+    kb = fs.snapshot_key(b, None)
+    assert ka == kb, (
+        "every projection whose store identity is unreadable must share ONE "
+        f"process-wide key, got {ka!r} for one instance and {kb!r} for another")
+    assert ka[1] == ("memory", fs._UNIDENTIFIED_MEMORY_STORE), (
+        f"the shared identity must be the documented constant: {ka[1]!r}")
+
+    fs._store.clear()
+    try:
+        fs._store.put(ka, _snap())
+        assert fs._store.get(kb) is not None, (
+            "the unidentified branch is deliberately not isolation-preserving "
+            "— one such store's cached snapshot is visible under another's "
+            "key, which is the residual the source comment states")
+    finally:
+        fs._store.clear()
+
+
+def test_snapshot_key_memory_prefers_the_socket_over_the_registry_slot(
+        tmp_path):
+    """#7827 finding 3: with BOTH handles exposed the socket wins.
+
+    ``socket_file`` identifies the running daemon INSTANCE (a replacement
+    daemon at the same registry slot gets a new socket); the registry path is
+    only the SLOT, so keying on it alone serves a dead store's phantom point
+    (#7773 review). The #7786 reviewers confirmed the socket-first ordering is
+    the safer direction but no test pinned it.
+
+    MUTATION PIN: swapping the tuple order in ``_embedded_store_identity`` to
+    ``("settingregistryfile", "socket_file")`` reddens this test.
+    """
+    class _Client:
+        socket_file = str(tmp_path / "live-daemon.socket")
+        settingregistryfile = str(tmp_path / ":memory:.settings")
+
+    class _Proj:
+        _path = ":memory:"
+        graph_name = "tortoise"
+        db = SimpleNamespace(client=_Client())
+
+    key = fs.snapshot_key(_Proj(), None)
+    assert key[1] == ("memory", os.path.realpath(_Client.socket_file)), (
+        "a client exposing both handles must key on the live daemon's socket "
+        f"(the registry path is only a reusable slot): {key[1]!r}")
+
+
+@pytest.mark.parametrize("handle", ["client", "db"])
+def test_snapshot_key_memory_registry_slot_is_the_fallback(tmp_path, handle):
+    """#7827 finding 3: a client exposing ONLY ``settingregistryfile`` must key
+    on the registry path, not fall through to the process-wide constant.
+
+    Both real handles always expose ``socket_file``, so no real client reaches
+    the fallback — the tuple entry appeared only in prose (an error message).
+    Deleting it therefore changed no real behaviour and reddened nothing,
+    which left the stated intent ("the registry path as fallback")
+    unverifiable: a registry-only client silently became the process-wide
+    key, i.e. over-invalidation plus the loud ERROR.
+
+    ``handle`` selects WHERE the attribute lives — ``_embedded_store_identity``
+    reads the projection's ``db`` and then ``db.client``, and only the
+    ``client`` shape is what a real projection exposes.
+
+    MUTATION PIN: ``for attr in ("socket_file",)`` reddens both parameters
+    (the identity becomes the constant); dropping the ``os.path.realpath``
+    normalization also reddens them (the symlinked registry path must resolve
+    to one identity).
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / ":memory:.settings").write_text("")
+    link = tmp_path / "linked"
+    link.symlink_to(real, target_is_directory=True)
+    linked_registry = str(link / ":memory:.settings")
+
+    class _Client:
+        def __init__(self):
+            self.settingregistryfile = linked_registry
+
+    class _Proj:
+        _path = ":memory:"
+        graph_name = "tortoise"
+
+        def __init__(self):
+            self.db = (_Client() if handle == "db"
+                       else SimpleNamespace(client=_Client()))
+
+    key = fs.snapshot_key(_Proj(), None)
+    assert key[1] == ("memory", os.path.realpath(str(real / ":memory:.settings"))), (
+        f"a registry-only client (attribute on `{handle}`) must key on the "
+        f"registry path, not the process-wide constant: {key[1]!r}")
 
 
 def _snap():

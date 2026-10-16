@@ -183,6 +183,47 @@ class TestEquivalence:
         statuses = {v["status"] for v in state["points"].values()}
         assert "live" in statuses  # contradiction sources promoted
 
+    def test_explicit_draft_source_is_never_retro_promoted(self, fresh_db):
+        """#1088: the reference lane's promotion clause fills ONLY a never-set
+        status — an EXPLICIT draft on an operator SOURCE is the request ("an
+        agent that asked for draft keeps it"), so a re-setup must NOT flip it
+        live.
+
+        The batched lane mints every point live ON CREATE, so on a fresh store
+        the clause never fires and this branch was a mutation survivor (issue
+        #7981 row 4). Mutation that reds this test: widening the clause to
+        ``WHERE src.status IS NULL OR src.status = 'draft'`` — the explicit
+        draft is retro-promoted and reads live.
+        """
+        proj = fresh_db._get_proj()
+        scenarios = _scenarios()
+        legacy = [s for s in scenarios
+                  if derive_scenario_graph(s, seed_mode=False).operators]
+        assert legacy, "corpus must carry an operator-bearing scenario"
+        scenario = legacy[0]
+        source_id = derive_scenario_graph(
+            scenario, seed_mode=False).operators[0]["source_id"]
+
+        batch_setup(proj, [scenario], embedding_fn=_embedding_fn,
+                    seed_mode=False)
+        # The agent-requested EXPLICIT draft (never a never-set status).
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'draft'",
+            params={"id": source_id},
+        )
+        assert graph_state_equivalence(
+            proj, [scenario])["points"][source_id]["status"] == "draft"
+
+        # Re-seed: query 1 MERGEs onto the existing point (status is set ON
+        # CREATE only, so the draft survives), then the promotion clause must
+        # leave that explicit draft alone.
+        batch_setup(proj, [scenario], embedding_fn=_embedding_fn,
+                    seed_mode=False)
+        state = graph_state_equivalence(proj, [scenario])
+        assert state["points"][source_id]["status"] == "draft", (
+            "an explicit draft on an operator source was retro-promoted (#1088)"
+        )
+
     def test_nand_unidirectional_both_paths(self, fresh_db, tmp_path):
         # RELOCK (#2284 T4): same seed_mode-default re-anchor as
         # test_promote_source_live — the planted-pair NAND canonicalization

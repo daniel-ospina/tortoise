@@ -427,6 +427,63 @@ class TestPromotionPolicy:
             "asked for draft"
         )
 
+    def test_auto_relation_point_target_is_born_live(self, sdk):
+        """#1088: a point that is the `to` of a RELATION connection is NOT an
+        operator-connection TARGET, so under auto nothing asks for draft —
+        it is born live by create_point's default.
+
+        The relation branch of the scan contributes no target (the
+        ``if not (isinstance(_conn, dict) and "operator" in _conn): continue``
+        guard). Mutation that reds this test: dropping that guard, which
+        sweeps the relation connection's point `to` into ``_auto_targets``
+        and injects status="draft" on it — p2 reads draft.
+        """
+        bundle = {
+            "points": [
+                {"ref": "p1", "kind": "claim", "content": "A references B"},
+                {"ref": "p2", "kind": "claim", "content": "B"},
+            ],
+            "connections": [
+                {"from": "p1", "to": "p2", "relation": "references"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        p1, p2 = res["ids"]["points"]
+        assert sdk.get_point(p1)["status"] == "live"
+        # A relation connection has no promotion path at all — neither
+        # endpoint is status-injected, so the target is born live.
+        assert sdk.get_point(p2)["status"] == "live", (
+            "a relation connection's `to` is not a promotion target (#1088)"
+        )
+
+    def test_auto_list_to_operator_targets_are_draft(self, sdk):
+        """#3263 (review P1): `to` is a LIST on a many-to-many operator
+        connection, and EVERY element must be collected as an
+        ``_auto_target`` — only the scalar form was, so the list endpoints
+        were misclassified as STANDALONE points and inherited the live
+        default under auto while the scalar shape wrote them draft.
+
+        Mutation that reds this test: deleting the
+        ``elif isinstance(_to, list)`` branch of the target collection —
+        pB/pC then read live instead of the contract's draft.
+        """
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B and C"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+                {"ref": "pC", "kind": "claim", "content": "C"},
+            ],
+            "connections": [
+                {"from": "pA", "to": ["pB", "pC"], "operator": "IMPL",
+                 "reify": True},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA, pB, pC = res["ids"]["points"]
+        assert sdk.get_point(pA)["status"] == "live"   # source promoted
+        assert sdk.get_point(pB)["status"] == "draft"  # list-`to` target
+        assert sdk.get_point(pC)["status"] == "draft"  # list-`to` target
+
     def test_auto_granular_parity(self, sdk):
         # E2E-5 discriminating cell: auto holds in granular mode — the
         # promote flag must not be dropped on the granular code path.
