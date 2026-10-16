@@ -816,10 +816,18 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # a period the passage has held true since.
         "Model version v3.15 retires the `:Document` label.",
     ]
-    # The SCOPE is pinned too. Without this, narrowing `STATUS_ABSENCE_DOCS` back
-    # to a subset keeps every test green while silently dropping `ONTOLOGY.md`
-    # from the absence arm — a guard that can be narrowed without reddening is a
-    # guard that will be.
+    # The SCOPE is pinned too, and pinned ABSOLUTELY. Two narrowings are possible
+    # and both must red a test:
+    #   - narrowing `STATUS_ABSENCE_DOCS` alone drops `ONTOLOGY.md` from the
+    #     absence arm while the class check keeps it;
+    #   - narrowing `DESIGN_DOCS` drops it from every status guard at once, and
+    #     an equality between the two names survives that edit untouched
+    #     (measured: `DESIGN_DOCS = (DOC, STORAGE)` left all 8 tests green).
+    # A guard that can be narrowed without reddening is a guard that will be.
+    assert set(DESIGN_DOCS) == {ONTOLOGY, DOC, STORAGE}, (
+        "DESIGN_DOCS is the set of documents these guards police; a document "
+        "silently leaving it is the narrowing this assert exists to catch"
+    )
     assert set(STATUS_ABSENCE_DOCS) == set(DESIGN_DOCS), (
         "STATUS_ABSENCE_DOCS no longer covers the same documents as the class "
         "check: the absence arm must not narrow silently"
