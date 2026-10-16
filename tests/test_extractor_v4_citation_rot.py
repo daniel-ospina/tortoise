@@ -580,8 +580,9 @@ DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
 #: Scope: this arm catches three absence forms — the CAPS form, the
 #: `#NNN`-adjacent lowercase form, and the producer-absence form (`no producer`,
 #: `spec-only`). It is NOT "the design documents are free of status prose":
-#: `ONTOLOGY.md:426` / `:446` (*"**Not written by `_upsert_subject`** — planned
-#: follow-up"*) pass it. That shape was measured (`not written` has 12 corpus
+#: `ONTOLOGY.md:426` (*"**Not written by `_upsert_subject`**"*) and `:446`
+#: (*"**Not written by `_upsert_object`**"*) pass it — each ends *"— planned
+#: follow-up"*. That shape was measured (`not written` has 12 corpus
 #: lines, only 2 of them status claims) and deliberately left out.
 _STATUS_ABSENCE = (
     # The CAPS form is this document set's convention for delivery state, so it
@@ -611,7 +612,7 @@ _STATUS_ABSENCE = (
     re.compile(r"\b(?:has\s+)?no producer\b|\bspec-only\b", re.IGNORECASE),
 )
 #: The documents `_STATUS_ABSENCE` governs — the same set as `DESIGN_DOCS`.
-#: `ONTOLOGY.md` was once excluded because the same shape sat there at two lines
+#: `ONTOLOGY.md` was once excluded because this shape sat there at four lines
 #: awaiting the owner's approval of the exact copy; those lines landed (#8745),
 #: so the exclusion and the reason recorded for it are both gone. Guarding the
 #: owner-gated file adds no new hazard: the CLASS check
@@ -734,7 +735,7 @@ def test_the_design_documents_carry_no_issue_state_or_change_narration():
 
     `_STATUS_ABSENCE` (`not built`, `has not run`, `not yet wired`) is applied to
     `STATUS_ABSENCE_DOCS`, which is `DESIGN_DOCS` — `ONTOLOGY.md` included. It was
-    once excluded because the same shape sat there at two lines awaiting the
+    once excluded because this shape sat there at four lines awaiting the
     owner's approval of the exact copy; those lines landed (#8745), so the
     exclusion and the reason recorded for it are both gone.
     """
@@ -793,7 +794,8 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "**Implementation status.** Both halves are now implemented.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
-        # The change-history date form, on the §8 direction note this branch moved.
+        # The change-history date form, on the §8 direction note #8738 moved (the
+        # line is already absent from `main`; the guard pins the form, not the diff).
         "*(Stored and interpreted on every path since v3.25 \u2026 see the "
         "Transition state note in the changelog.)*",
         # The "absence of a producer" arm, on the two claims this branch removed.
