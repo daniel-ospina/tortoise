@@ -3706,10 +3706,12 @@ def _assemble_class_plural(sdk, question: str, *, question_date: str | None,
                         if h.get("kind") == "class-order")
     if not rendered_rows:
         return _empty_block()
+    qd = _norm_date(question_date)   # narrowed for the header builder's type
+    if qd is None:
+        return _empty_block()
     for h in selected:
         if h.get("kind") == "class-window":
-            h["content"] = _class_header_line(
-                window, rendered_rows, _norm_date(question_date))
+            h["content"] = _class_header_line(window, rendered_rows, qd)
             break
     # the (window ∩ class) IS the scope: no resolved subject rides on the
     # block.
