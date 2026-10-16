@@ -440,7 +440,13 @@ def _literal_domain_reason(
             "SILENTLY clamped to a different number. Store it as a string if "
             "the full value is needed."
         )
-    value = int(token)
+    # Parse the STRIPPED token, never the raw one: ``int()`` refuses a string
+    # past CPython's 4300-digit decimal conversion limit, so a valid,
+    # representable literal such as ``0…01`` (5000 leading zeros) raised a bare
+    # ``ValueError`` out of this seam instead of being admitted (P2, review
+    # 2026-10-16). Leading zeros add no magnitude, so ``digits`` denotes the
+    # same integer; the ``else 0`` covers a token that is all zeros.
+    value = int(digits) if digits else 0
     return numeric_alteration_reason(key, -value if negated else value)
 
 
@@ -453,14 +459,23 @@ def _numeric_literal_reason(cypher: str) -> str | None:
     ``=~`` and #7162 scans, and the reason this is not a second Cypher parser. A
     number token is recognised only where it STARTS one (the character before it
     is not an identifier char, ``$`` or ``.``), which is what keeps ``n.v2``,
-    ``$p1`` and the fraction of an already-walked float out. Hex (``0x1F``) is a
-    literal the engine range-checks itself and is stepped over whole, so its hex
-    digits are never read as a decimal run.
+    ``$p1`` and the fraction of an already-walked float out. A LEADING-DOT
+    double (``.5e-400``) has no integer part, so it must be started at the ``.``
+    itself — otherwise its exponent is never read and an underflow is stored as
+    ``0`` (MEASURED on 6.0.1) — but only where that ``.`` does not continue a
+    name or a walk. Hex (``0x1F``) is a literal the engine range-checks itself
+    and is stepped over whole, so its hex digits are never read as a decimal
+    run.
     """
     masked = _mask_literals(cypher)
     i, n = 0, len(masked)
     while i < n:
-        if not _is_ascii_digit(masked[i]):
+        leading_dot = masked[i] == "."
+        if leading_dot:
+            if i + 1 >= n or not _is_ascii_digit(masked[i + 1]):
+                i += 1
+                continue
+        elif not _is_ascii_digit(masked[i]):
             i += 1
             continue
         if i > 0 and (masked[i - 1] in ".$" or _is_ident_char(masked[i - 1])):
@@ -471,7 +486,8 @@ def _numeric_literal_reason(cypher: str) -> str | None:
         while j < n and _is_ascii_digit(masked[j]):
             j += 1
         if (
-            masked[start] == "0"
+            not leading_dot
+            and masked[start] == "0"
             and j == start + 1
             and j + 1 < n
             and masked[j] in "xX"
@@ -482,7 +498,7 @@ def _numeric_literal_reason(cypher: str) -> str | None:
             if k > j + 1:
                 i = k
                 continue
-        has_frac = False
+        has_frac = leading_dot
         has_exp = False
         if j < n and masked[j] == ".":
             k = j + 1

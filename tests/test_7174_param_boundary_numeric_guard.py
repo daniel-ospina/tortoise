@@ -473,6 +473,78 @@ def test_a_literal_that_leaves_the_double_domain_is_refused():
     assert handle.calls == [], "an out-of-domain float literal reached the handle"
 
 
+@pytest.mark.parametrize("statement", [
+    "RETURN .5e-400",
+    "RETURN .1e-400",
+    "RETURN -.5e-400",
+    "CREATE (n:X {v: .5e-400}) RETURN n",
+    "MATCH (n) WHERE n.v = .5e-400 RETURN n",
+    "RETURN .5e400",
+])
+def test_a_leading_dot_float_out_of_domain_is_refused(statement):
+    """Falsifier: a float with NO integer part is scanned like any other.
+
+    ``.5e-400`` is a legal openCypher double literal and denotes ``5e-401``,
+    which underflows to ``0.0`` — MEASURED stored as ``0`` on docker 6.0.1 when
+    the guarded handle forwarded it. The scan used to START a number token only
+    on a digit, so a leading-dot literal never entered it and its exponent was
+    never read (P1, review 2026-10-16); the guard's own predicate already
+    refuses this token, so the miss was in the walk, not the rule. The same
+    shape at the OVERFLOW end (``.5e400`` -> ``inf``) is caught by the same
+    start. Value that makes it fail: any statement here; the handle must stay
+    EMPTY — pre-fix it records the call.
+    """
+    g, handle = _guarded()
+    with pytest.raises(UnrepresentableNumberError):
+        g.query(statement)
+    assert handle.calls == [], "a leading-dot out-of-domain float reached the handle"
+
+
+@pytest.mark.parametrize("statement", [
+    "RETURN .5",
+    "RETURN .5e10",
+    "RETURN .0e-400",
+    "RETURN -.5",
+    "RETURN [.5, .25]",
+    "RETURN .5, 1.5, 0.0",
+])
+def test_ordinary_leading_dot_literals_reach_the_handle_unchanged(statement):
+    """Anti-overfix guard: no FALSE refusal on an ordinary leading-dot float.
+
+    Starting a token at ``.`` must not turn a property access into a number
+    (``n.v2`` is separately pinned in ``test_the_literal_scan_reads_CODE_and_not_data``)
+    and must not refuse a float that IS in the domain: ``.5`` and ``-.5`` are
+    faithful doubles, ``.0e-400`` denotes ZERO (the exponent digits must not be
+    read as significant, exactly as for ``0.0e-400``). Value that makes it fail:
+    any of these being refused.
+    """
+    g, handle = _guarded()
+    assert g.query(statement) == "SENTINEL-REACHED-HANDLE"
+    assert handle.calls == [("query", (statement, None, None), {})]
+
+
+def test_a_long_leading_zero_integer_is_judged_by_domain_not_length():
+    """Falsifier: a valid literal with >4300 leading zeros is not a bare ValueError.
+
+    ``int()`` refuses a string past CPython's 4300-digit decimal conversion
+    limit. The integer branch stripped leading zeros for its LENGTH test but
+    then parsed the RAW token, so a representable value such as ``0…01`` (5000
+    zeros, ``1``) — valid, and evaluated correctly by the engine — escaped this
+    seam as an unhandled ``ValueError`` instead of being admitted, and an
+    out-of-domain one escaped as the wrong exception type (P2, review
+    2026-10-16). The scan must judge the STRIPPED digits, so a legal value
+    reaches the handle and an illegal one raises the seam's own error. Value
+    that makes it fail: the three statements below.
+    """
+    g, handle = _guarded()
+    zeros = "0" * 5000
+    assert g.query(f"RETURN {zeros}1") == "SENTINEL-REACHED-HANDLE"
+    assert g.query(f"RETURN -{zeros}1") == "SENTINEL-REACHED-HANDLE"
+    with pytest.raises(UnrepresentableNumberError):
+        g.query(f"RETURN {zeros}{INT64_BEYOND}")
+    assert len(handle.calls) == 2, "only the two representable literals may be sent"
+
+
 def test_the_replay_exemption_covers_the_statement_text_too():
     """Falsifier: the #5011 replay scope is the SAME exemption on both surfaces.
 
