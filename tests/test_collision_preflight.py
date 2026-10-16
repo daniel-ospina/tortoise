@@ -6176,8 +6176,10 @@ class GitRepoDirsUnreadableEntryTests(unittest.TestCase):
     `refresh-candidates.sh` uses `--repo .`, the PATH branch, which never reaches
     `find_local_clone` — measured, not exposed to this crash.)
 
-    Both of the first two tests FAIL against the pre-fix code (the probe raises);
-    the third pins the boundary — only `OSError` is swallowed.
+    Both of the first two tests FAIL against the pre-fix code (the probe raises).
+    The last two pin the boundary from both sides: a non-`OSError` still propagates,
+    and a non-`EACCES` `OSError` is still swallowed (the guard is `except OSError`,
+    not `except PermissionError`).
     """
 
     def test_an_unreadable_entry_is_skipped_and_readable_clones_survive(self):
@@ -6232,6 +6234,26 @@ class GitRepoDirsUnreadableEntryTests(unittest.TestCase):
                 self.assertRaises(RuntimeError),
             ):
                 _tool_module()._git_repo_dirs([str(root)])
+
+    def test_a_non_permission_oserror_on_the_entry_probe_is_also_skipped(self):
+        """The other side of the same boundary: the guard is `except OSError`, not
+        `except PermissionError`. #8650's recorded decision is to treat EVERY
+        `OSError` on the entry probe as "not a clone" (fail-closed downstream),
+        so narrowing the guard to `PermissionError` must fail this test."""
+        with tempfile.TemporaryDirectory(prefix="cp-roots-") as tmp:
+            root = Path(tmp)
+            (root / "good-repo" / ".git").mkdir(parents=True)
+            (root / "locked-repo" / ".git").mkdir(parents=True)
+            real_exists = Path.exists
+
+            def io_error_exists(self, *args, **kwargs):
+                if self.name == ".git" and self.parent.name == "locked-repo":
+                    raise OSError(5, "Input/output error", str(self))
+                return real_exists(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "exists", io_error_exists):
+                dirs = _tool_module()._git_repo_dirs([str(root)])
+            self.assertEqual(dirs, [str(root / "good-repo")])
 
 
 if __name__ == "__main__":
