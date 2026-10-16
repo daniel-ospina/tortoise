@@ -4648,6 +4648,18 @@ def test_class_plural_does_not_hijack_an_nary_ordering_question(question):
     assert classify_question(question) is AssemblyShape.ORDERING, question
 
 
+def test_class_plural_does_not_hijack_a_current_state_question():
+    """#8779 F5: the class-plural branch runs BEFORE the current-state arm, so
+    a compound question that also names a current-state subject was answered
+    as a class enumeration -- the status answer was LOST and replaced by an
+    enumeration of the other half. ``main`` routes this string to
+    CURRENT_STATE, so the class-plural head must not outrank that arm.
+    """
+    q = ("What is the order of the concerts I attended in the past two "
+         "months, and what is the current status of my car?")
+    assert classify_question(q) is AssemblyShape.CURRENT_STATE, q
+
+
 def test_class_plural_template_is_not_super_linear_on_space_runs():
     r"""The class-plural head must not backtrack over whitespace runs.
 
@@ -4772,6 +4784,15 @@ def test_resolve_class_window_arithmetic(question, qd, lo, hi, count, unit,
     ("latest first", True),
     ("newest first", True),
     ("in reverse chronological order", True),
+    # #8779 F6: the SAME structural pair spelled WITHOUT the leading `from`.
+    # The bare form was not read as an instruction at all, so a reverse
+    # request rendered CHRONOLOGICAL order under an "earliest first" header --
+    # the opposite of what was asked. The first (control) row pins that the
+    # bare pair read FORWARD still means chronological.
+    ("earliest to latest", False),
+    ("latest to earliest", True),
+    ("newest to oldest", True),
+    ("most recent to oldest", True),
 ])
 def test_class_order_direction_reads_the_question_instruction(
         instruction, newest_first):
@@ -4985,6 +5006,33 @@ def test_class_span_stops_at_an_interposed_possessive_noun_phrase():
                                w.tokens)
     # ...while the class row still is
     assert _class_owns_row({"content": "went to the concert"}, w.tokens)
+
+
+def test_class_vocabulary_ends_at_an_adjunct_preposition():
+    """#8779 F4: a prepositional adjunct inside the class span is NOT class
+    vocabulary. The span runs to the relative-clause pronoun, so "the concerts
+    in Central Park" left `central`/`park` in the token set; `_class_owns_row`
+    ORs ANY shared token, so a walk row was admitted and enumerated as a
+    concert -- the FALSE INCLUDE this shape must never produce.
+
+    The CONTROL (an adjunct-free coordinated class) is asserted FIRST, so the
+    subject assertion cannot be satisfied by an unrelated abstention.
+    """
+    control = _class_tokens("the jazz concerts")
+    assert control == ("jazz", "concert")
+
+    w = resolve_class_window(
+        "What is the order of the concerts in Central Park I attended in "
+        "the past two months?", "2026-09-10")
+    assert w is not None
+    assert w.tokens == ("concert",), w.tokens
+    # subject: a row that merely shares the LOCATIVE is not the class...
+    assert not _class_owns_row(
+        {"content": "I took a walk in Central Park with a friend"},
+        w.tokens)
+    # ...while a row that IS of the class still is
+    assert _class_owns_row({"content": "attended a jazz concert downtown"},
+                           w.tokens)
 
 
 def test_class_owns_row_matches_content_and_search_keys():

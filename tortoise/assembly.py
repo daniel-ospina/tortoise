@@ -989,7 +989,14 @@ def classify_question(question: str) -> AssemblyShape | None:
     # main and `class-plural`/`None` here (#8779 F1, the list half).
     m_cls = _RE_CLASS_PLURAL.match(q)
     if m_cls is not None and not (
-            _RE_ORDERING.match(q) or _RE_ORDERING_LIST.match(q)):
+            _RE_ORDERING.match(q) or _RE_ORDERING_LIST.match(q)
+            # ...and a compound question that names a CURRENT-STATE subject
+            # ("…, and what is the current status of my car?") is not a class
+            # enumeration either: this branch runs BEFORE the current-state
+            # arm, so claiming it LOST the status answer and replaced it with
+            # an enumeration of the other half (#8779 F5). `main` routes that
+            # string to CURRENT_STATE, so it must not be outranked here.
+            or _RE_CURRENT.match(q) or _RE_CURRENT_STILL.match(q)):
         # The shape's OWN window IS the relative window the template already
         # resolved, and it may itself spell `last <unit>`; `_RE_AGO_OTHER`'s
         # calendar surface is an ADDITIONAL such offset ELSEWHERE in the
@@ -3307,6 +3314,21 @@ _CLASS_STOPWORDS = frozenset({
 #: nothing, and the caller falls through to legacy rather than to a wrong
 #: answer (fail-closed, below).
 _CLASS_GENERIC = frozenset({"event", "thing", "activity", "item", "time"})
+#: prepositions that OPEN an adjunct inside the class span. The span runs to
+#: the relative-clause pronoun, so an adjunct the user did NOT mean as part of
+#: the class ("the concerts IN CENTRAL PARK I attended …") lands inside it, and
+#: `_class_owns_row` ORs ANY shared token -- `central` and `park` therefore
+#: became alternative SELECTORS and a "walk in Central Park" row was enumerated
+#: as a concert (#8779 F4: the same FALSE INCLUDE the possessive boundary
+#: closed, for the adjunct case). A class noun phrase's own head and modifiers
+#: PRECEDE its first prepositional phrase, so the vocabulary ENDS there.
+#: "and"/"or" are deliberately NOT here: a coordinated class ("the concerts
+#: and musical events") must keep both sides of the coordination.
+_CLASS_ADJUNCT_PREP = frozenset({
+    "about", "after", "around", "at", "before", "between", "by", "during",
+    "for", "from", "in", "into", "near", "of", "on", "over", "through",
+    "to", "under", "with", "within",
+})
 
 
 def _class_stem(tok: str) -> str:
@@ -3361,6 +3383,19 @@ _RE_CLASS_ORDER_FROM_TO = re.compile(
     r"\bfrom\s+(?:the\s+)?(?P<first>" + _CLASS_DIR_WORD + r")\s+to\s+"
     r"(?:the\s+)?" + _CLASS_DIR_WORD + r"\b",
     re.IGNORECASE)
+#: the SAME structural pair WITHOUT the leading `from` -- "latest to
+#: earliest", "newest to oldest", "most recent to oldest" (#8779 F6). The
+#: census spells the form WITH `from`, so a reverse request spelled without it
+#: was not read as an instruction at all: `newest_first` stayed False and the
+#: fired block rendered CHRONOLOGICAL order under an "earliest first" header
+#: -- the opposite of what the question asked, which this shape's posture
+#: (abstain rather than answer wrong) forbids. It remains a STRUCTURAL pair,
+#: never a scan for a direction word, so a `last`/`latest` merely MENTIONED in
+#: the question still reverses nothing (#8779 E2).
+_RE_CLASS_ORDER_BARE_TO = re.compile(
+    r"\b(?P<first>" + _CLASS_DIR_WORD + r")\s+to\s+(?:the\s+)?"
+    + _CLASS_DIR_WORD + r"\b",
+    re.IGNORECASE)
 _RE_CLASS_ORDER_STARTING = re.compile(
     r"\bstarting\s+from\s+(?:the\s+)?(?P<first>" + _CLASS_DIR_WORD + r")\b",
     re.IGNORECASE)
@@ -3375,7 +3410,9 @@ _RE_CLASS_ORDER_INSTRUCTION = re.compile(
     + _CLASS_DIR_WORD + r"\b"
     r"|\bstarting\s+from\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\b"
     r"|\b" + _CLASS_DIR_WORD + r"\s+first\b"
-    r"|\breverse\s+chronological\s+order\b",
+    r"|\breverse\s+chronological\s+order\b"
+    r"|\b" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?" + _CLASS_DIR_WORD
+    + r"\b",
     re.IGNORECASE)
 
 
@@ -3394,8 +3431,8 @@ def _class_order_newest_first(question: str) -> bool:
     """
     text = _as_str(question)
     best = None
-    for rx in (_RE_CLASS_ORDER_FROM_TO, _RE_CLASS_ORDER_STARTING,
-               _RE_CLASS_ORDER_FIRST):
+    for rx in (_RE_CLASS_ORDER_FROM_TO, _RE_CLASS_ORDER_BARE_TO,
+               _RE_CLASS_ORDER_STARTING, _RE_CLASS_ORDER_FIRST):
         m = rx.search(text)
         if m is not None and (best is None or m.start() < best.start()):
             best = m
@@ -3442,6 +3479,8 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     t = _CLASS_LEAD_COUNT.sub("", t, count=1).strip()
     out: list[str] = []
     for raw in _CLASS_WORD.findall(t.lower()):
+        if raw in _CLASS_ADJUNCT_PREP:
+            break
         if raw in _CLASS_STOPWORDS:
             continue
         stem = _class_stem(raw)
