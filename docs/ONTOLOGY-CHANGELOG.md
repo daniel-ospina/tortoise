@@ -896,14 +896,18 @@ moved here.
 
 | Where | Removed |
 |---|---|
-| §3.6 `CORRECTS` row | *"edge disposition is restatement-scoped (the design was `#2421`, CLOSED `COMPLETED`) … v1 still transfers, the triage is not yet implemented and has no open tracker"* |
-| §3.6 supersession semantics | *"the **restatement-vs-correction policy** (#2421 — the design is CLOSED `COMPLETED`; the per-edge triage is not implemented and has no open tracker)"* |
-| §3.6 deterministic policy | *"**Implementation status:** `supersede_point` currently performs the legacy universal transfer … the design was #2421 (CLOSED `COMPLETED`) and it has no open tracker."* |
-| §3.6 direction flag | *"`direction_basis` (#7852 W1) … (#7852 v3.25) … the direct-edge and ingest paths still source the direction from `op_type` — a separate gap … tracked as `#7852` (`#7813` is CLOSED `COMPLETED`)"* |
-| Lifecycle table, `superseded` row | *"(#2421 — the design, CLOSED `COMPLETED`: semantic edges are to be triaged per-edge … that triage is not yet implemented and has no open tracker)"* |
-| §8 direction note | *"*(Stored and interpreted on every path since v3.25 … see the Transition state note in the changelog.)*"* |
-| §8 lazy-promotion note | *"*(today's shipped code reads the semantics on the operator write path … `create_direct_edge` and the ingest path still resolve by `op_type` … the direction-sourcing gap is separate and tracked as `#7852` (`#7813` is CLOSED `COMPLETED`).)*"* |
+| §3.1 `CORRECTS` row | "edge disposition is **restatement-scoped (the design was `#2421`, CLOSED `COMPLETED`)** … v1 still transfers, the triage is not yet implemented and has no open tracker" |
+| §3.1 supersession semantics | "(#2421 — the design is CLOSED `COMPLETED`; the per-edge triage is NOT yet implemented and has no open tracker)" |
+| §3.1 deterministic policy | "*Implementation status:* `supersede_point` currently performs the legacy universal transfer … the design was #2421 (CLOSED `COMPLETED`) and it has no open tracker." |
+| §3.1 direction flag | "The direct-edge and ingest paths still *source* the direction from `op_type` rather than `semantics` — a separate gap from this storage vocabulary, tracked as `#7852` (`#7813` is CLOSED `COMPLETED`)." |
+| Lifecycle table, `superseded` row | "(#2421 — the design, CLOSED `COMPLETED`: semantic edges are to be triaged per-edge … that triage is not yet implemented and has no open tracker)" |
+| §8 direction note | "(Stored and interpreted on every path since v3.25; the legacy `bidirectional` / `unidirectional` tokens remain accepted and readable aliases — see the *Transition state* note in the changelog.)" |
+| §10.5 direction-aware EP note | "(today's shipped code reads the semantics on the operator write path … `create_direct_edge` and the ingest path still resolve by `op_type`. See the *Transition state* note — it covers the v3.25 **storage** transition; the direction-*sourcing* gap is separate and tracked as `#7852` (`#7813` is CLOSED `COMPLETED`).)" |
+| §4.2 Subject `validFrom` / `validTo` | "; not yet written by `_upsert_subject`" — the *"declared §4.7, #3642"* lead-in stays in the model. |
+| §4.3 Object `validFrom` / `validTo` | "; not yet written by `_upsert_object`" — the *"declared §4.7, #3642"* lead-in stays in the model. |
+| §3.6 edge table, `participatesIn` row | "⚠️ spec-only — no producer yet, tracked in issue #7884" — a producer exists: the event write path auto-creates the edge from the event's `participants`, falling back to the event's `subject` when no explicit list is given (`projection/entities.py:4491`, the `#212` auto-create, CLOSED `COMPLETED`). The cited `#7884` is a merged PR about hosted lifespan warm-up, not this predicate. |
+| §3.2 Session/aboutObject note, closing sentence | "`aboutSubject` has no producer here: … the capture entity model mints Objects, not Subjects." — the capture spine routes §5 Subject kinds to the `:Subject` label and binds Points with `bind_point_subjects` (`#4934`, CLOSED `COMPLETED`), which `tortoise/subject_binding.py` declares the only confidence-gated `aboutSubject` producer. |
 
-**Enforced from here on:** `tests/test_extractor_v4_citation_rot.py::
-test_the_design_documents_carry_no_issue_state_or_change_narration` reds if any
-of this shape returns to `ONTOLOGY.md`.
+The table lists the status-notes taken out of the model body, not every line the
+split moved — the complete text of the split is the commit that made it. Each
+row's *Where* names the section the quoted text was in *before* the removal.
