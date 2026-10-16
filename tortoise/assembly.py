@@ -3360,6 +3360,18 @@ _CLASS_RELATIVE = frozenset({"that", "which", "who", "whom", "whose",
 #: names no class, so it must not become the vocabulary.
 _CLASS_PRONOUN = frozenset({"i", "we", "you", "he", "she", "it", "they",
                             "me", "us", "him", "her", "them"})
+#: common IRREGULAR past participles, which the `-ed`/`-ing` suffix test cannot
+#: see. Only meaningful in post-modifier position, where the position rule
+#: already protects the head noun: an unlisted one then costs a stray selector,
+#: never the class noun.
+_CLASS_PARTICIPLE = frozenset({
+    "held", "put", "given", "written", "sung", "eaten", "heard", "made",
+    "taken", "seen", "done", "built", "sent", "bought", "brought",
+    "thought", "found", "kept", "felt", "told", "sold", "run", "won",
+    "lost", "met", "paid", "said", "spent", "taught", "caught",
+    "chosen", "hidden", "known", "shown", "spoken", "stolen", "torn",
+    "broken", "frozen", "drawn", "grown", "thrown", "blown", "flown",
+})
 
 
 def _class_stem(tok: str) -> str:
@@ -3391,7 +3403,7 @@ def _class_stem(tok: str) -> str:
 #: the class-span SCRUBBER below cannot disagree about what an instruction is.
 #: `most\W+recent` precedes `recent` so the compound is one word, not two.
 _CLASS_DIR_RECENT = r"(?:reverse|latest|newest|most\W+recent|recent|last)"
-_CLASS_DIR_OLD = r"(?:earliest|oldest|first)"
+_CLASS_DIR_OLD = r"(?:earliest|oldest|least\W+recent|first)"
 _CLASS_DIR_WORD = r"(?:" + _CLASS_DIR_RECENT + r"|" + _CLASS_DIR_OLD + r")"
 _CLASS_DIR_RECENT_FULL = re.compile(_CLASS_DIR_RECENT, re.IGNORECASE)
 
@@ -3572,12 +3584,30 @@ def _class_tokens(span: str) -> tuple[str, ...]:
         if raw in _CLASS_ADJUNCT_PREP or raw in _CLASS_RELATIVE:
             cut = i
             break
-    out = _stems(words[:cut])
+    run = words[:cut]
+    # ⛔ a token AFTER the class's generic head noun is a POST-MODIFIER -- a
+    # participle or an adjunct ("the events PUT on by ...", "the concerts HELD
+    # at ...") -- and the generic-drop rule would otherwise promote it to
+    # "the discriminator" and DELETE THE HEAD NOUN, leaving a bare verb as the
+    # vocabulary. Measured: "the events put on by the club" became ('put',),
+    # which selected "put the keys on the table" and EXCLUDED the row that
+    # actually named the class (#8779 F13). Irregular participles have no
+    # suffix to test, so POSITION decides: nothing between the head noun and
+    # the boundary is class vocabulary.
+    last_generic = max((i for i, w in enumerate(run)
+                        if _class_stem(w) in _CLASS_GENERIC), default=-1)
+    if last_generic >= 0:
+        run = run[:last_generic + 1]
+    out = _stems(run)
     # a PARTICIPLE immediately before the boundary is a reduced relative, not a
     # class word — dropped only when a DISCRIMINATOR would survive it. A bare
     # one-word class ("the wedding") is never trimmed, and a word is only a
-    # post-modifier when something follows it (a boundary was found).
-    if cut < len(words) and len(out) > 1 and out[-1].endswith(("ed", "ing")) \
+    # post-modifier when something follows it (a boundary was found). The
+    # SUFFIX test misses irregulars, so a bounded list covers the common ones;
+    # an unlisted one now costs only a stray selector (the head noun survives
+    # the rule above), never the head itself.
+    if cut < len(words) and len(out) > 1 and (
+            out[-1].endswith(("ed", "ing")) or out[-1] in _CLASS_PARTICIPLE) \
             and any(x not in _CLASS_GENERIC for x in out[:-1]):
         out = out[:-1]
     # ⛔ the cut above is only correct while the HEAD noun phrase still carries
@@ -3600,11 +3630,28 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     # the generic head is kept as a WEAK filter rather than a wrong one.
     if cut < len(words) and not [x for x in out if x not in _CLASS_GENERIC]:
         rest = words[cut + 1:]
-        inner = next((j for j, w in enumerate(rest)
-                      if w in _CLASS_ADJUNCT_PREP), None)
-        cand = rest[inner + 1:] if inner is not None else rest
-        if not any(w in _CLASS_PRONOUN for w in cand):
-            complement = _stems(cand)
+        # ⛔ what the complement IS depends on what opened it (#8779 F13):
+        # after a PREPOSITION it is the noun phrase that preposition governs,
+        # so it ENDS at its own next preposition; after a RELATIVE MARKER the
+        # words up to the first preposition belong to the clause, so the
+        # complement STARTS after it. Treating both alike took the FINAL
+        # adjunct instead of the complement's head — "the events at the jazz
+        # festival in the park" became ('park',) and "the activities in the
+        # park near my house" became ('house',), each selecting a row that
+        # merely shared the locator and dropping the real class row.
+        if words[cut] in _CLASS_RELATIVE:
+            inner = next((j for j, w in enumerate(rest)
+                          if w in _CLASS_ADJUNCT_PREP), None)
+            rest = rest[inner + 1:] if inner is not None else []
+        else:
+            stop = next((j for j, w in enumerate(rest)
+                         if w in _CLASS_ADJUNCT_PREP), None)
+            rest = rest[:stop] if stop is not None else rest
+        # a PRONOUN in the span means it is a CLAUSE ("after I graduated"),
+        # which names no class — the generic head then stays a WEAK filter
+        # rather than becoming a verb.
+        if rest and not any(w in _CLASS_PRONOUN for w in rest):
+            complement = _stems(rest)
             if complement:
                 out = complement
     discriminative = [tok for tok in out if tok not in _CLASS_GENERIC]
@@ -4067,6 +4114,22 @@ def _assemble_class_plural(sdk, question: str, *, question_date: str | None,
             if nxt is None or nxt.get("kind") not in ("point", "event"):
                 continue
         pruned.append(h)
+    # ⛔ ...and re-derive the ORDINALS with the count (#8779 F14). The position
+    # lines were numbered over the PRE-cap class order, so one dropped MIDDLE
+    # row left the header claiming "N dated events" while the block's last
+    # member was labelled with a HIGHER ordinal than N — the same
+    # claims-what-it-does-not-list defect the count re-derivation fixed, still
+    # visible in the labels themselves. Renumbered over the SURVIVING rows,
+    # keeping the builder's tie rule (rows sharing a date share a position).
+    positions: dict[str, int] = {}
+    for h in pruned:
+        if h.get("kind") != "class-order":
+            continue
+        text = str(h.get("content") or "")
+        date_text = text.split(". ", 1)[1] if ". " in text else text
+        if date_text not in positions:
+            positions[date_text] = len(positions) + 1
+        h["content"] = f"{positions[date_text]}. {date_text}"
     rendered_rows = sum(1 for h in pruned
                         if h.get("kind") in ("point", "event"))
     if header is None or not rendered_rows:

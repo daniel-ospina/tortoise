@@ -4784,6 +4784,10 @@ def test_resolve_class_window_arithmetic(question, qd, lo, hi, count, unit,
     # #8779 P1: the reverse spellings — the SAME shape, opposite direction
     ("from latest to earliest", True),
     ("from most recent to oldest", True),
+    # `least recent` is the natural antonym of `most recent`; without it the
+    # FIRST bound was not a direction word, so the pair went unread and the
+    # block rendered chronological order for a reverse request (#8779 F13)
+    ("from most recent to least recent", True),
     ("from the newest to the oldest", True),
     ("from last to first", True),
     ("latest first", True),
@@ -5129,6 +5133,15 @@ def test_class_vocabulary_excludes_clauses_appositives_and_postmodifiers():
     # a weak filter rather than becoming the clause's verb
     assert _class_tokens("the events that took place after I graduated") == \
         ("event",)
+    # an IRREGULAR participle has no -ed/-ing suffix to test, so position
+    # decides — the head noun survives and the verb does not become the class
+    assert _class_tokens("the events put on by the club") == ("event",)
+    assert _class_tokens("the concerts held at the jazz festival") == \
+        ("concert",)
+    # a complement that is itself a PP keeps its OWN head, not the final
+    # adjunct
+    assert _class_tokens("the events at the jazz festival in the park") == \
+        ("jazz", "festiv")
 
 
 def test_class_order_instruction_is_terminal_not_a_class_prefix():
@@ -5503,6 +5516,18 @@ def test_connected_class_block_never_fires_content_less(monkeypatch):
                 f"orphan position line: {h.get('content')!r}"
     listed = sum(1 for h in lines if h.get("kind") in ("point", "event"))
     assert f"{listed} dated events" in str(lines[0].get("content"))
+    # ...and the ORDINALS are re-derived with the count, so no label can name a
+    # member the block does not list (#8779 F14)
+    labels = [str(h.get("content")) for h in lines
+              if h.get("kind") == "class-order"]
+    ords = [int(lab.split(". ", 1)[0]) for lab in labels]
+    assert ords, "the block must carry position lines"
+    assert ords[0] == 1
+    # the builder's tie rule: a position repeats for rows sharing a date, and
+    # otherwise advances by exactly one — so no ordinal can name a member the
+    # block does not list
+    for i in range(1, len(ords)):
+        assert ords[i] in (ords[i - 1], ords[i - 1] + 1), ords[i]
 
 
 def test_connected_refuses_when_no_row_carries_the_class(monkeypatch):
