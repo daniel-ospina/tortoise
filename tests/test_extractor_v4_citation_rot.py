@@ -557,12 +557,22 @@ _STATUS_WORDS = r"(?:CLOSED|COMPLETED|LANDED|FILED|FIXED|SHIPPED|RETIRED|BUILT|D
 #: `landed` and `shipped` are the two that are delivery almost every time.
 _STATUS_LOWER = r"(?:landed|shipped)"
 
+#: The documents that STATE A DESIGN — as opposed to the three changelogs, which
+#: keep the record of how each got there. The same class of pollution reached all
+#: three: `ONTOLOGY.md` carried a 730-line changelog (37% of the file) plus a
+#: per-field `Impl` column; the two architecture documents carried issue-state
+#: assertions, `CORRECTED 20xx-xx-xx` stamps and *"an earlier draft said X"*
+#: narration. Each header already declared the opposite of what the body did.
+#:
+#: Defined above the class test that uses it because `STATUS_ABSENCE_DOCS` reads
+#: it — one definition, so the two guards cannot come to disagree about the set.
+DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
+
 #: Absence of work spoken as absence: *"`#3011` has not run"*, *"THE S0 HALF IS
 #: NOT BUILT"*, *"not yet wired"*. A design document states what the design IS;
-#: what is missing is a tracker's job. Applied to the two architecture documents
-#: only — `ONTOLOGY.md` is OWNER-GATED (the file states its own rule), the same
-#: shape is present there at two lines, and that is recorded for approval rather
-#: than edited. See the class test's docstring.
+#: what is missing is a tracker's job. Applied to every design document,
+#: `ONTOLOGY.md` included: the two lines it once carried went to
+#: `ONTOLOGY-CHANGELOG.md` when the owner approved the exact copy (#8745).
 _STATUS_ABSENCE = (
     # The CAPS form is this document set's convention for delivery state, so it
     # carries no ambiguity.
@@ -577,9 +587,14 @@ _STATUS_ABSENCE = (
         re.IGNORECASE,
     ),
 )
-#: The documents `_STATUS_ABSENCE` governs. `ONTOLOGY.md` is excluded until the
-#: owner approves the two edits; when that lands this becomes `DESIGN_DOCS`.
-STATUS_ABSENCE_DOCS: tuple[Path, ...] = (DOC, STORAGE)
+#: The documents `_STATUS_ABSENCE` governs — the same set as `DESIGN_DOCS`.
+#: `ONTOLOGY.md` was once excluded because the same shape sat there at two lines
+#: awaiting the owner's approval of the exact copy; those lines landed (#8745),
+#: so the exclusion and the reason recorded for it are both gone. Guarding the
+#: owner-gated file adds no new hazard: the CLASS check
+#: (`test_the_design_documents_carry_no_issue_state_or_change_narration`) already
+#: iterates `DESIGN_DOCS`, so `ONTOLOGY.md` was never outside a guard.
+STATUS_ABSENCE_DOCS: tuple[Path, ...] = DESIGN_DOCS
 
 #: Uses that are ordinary English, not a delivery claim. Matched against the
 #: token and its immediate context, and dropped.
@@ -664,15 +679,6 @@ def _delivery_hits(line: str) -> list[str]:
     return hits
 
 
-#: The documents that STATE A DESIGN — as opposed to the three changelogs, which
-#: keep the record of how each got there. The same class of pollution reached all
-#: three: `ONTOLOGY.md` carried a 730-line changelog (37% of the file) plus a
-#: per-field `Impl` column; the two architecture documents carried issue-state
-#: assertions, `CORRECTED 20xx-xx-xx` stamps and *"an earlier draft said X"*
-#: narration. Each header already declared the opposite of what the body did.
-DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
-
-
 def test_the_design_documents_carry_no_issue_state_or_change_narration():
     """A design document states the design. Status and change history do not.
 
@@ -700,11 +706,10 @@ def test_the_design_documents_carry_no_issue_state_or_change_narration():
     date.
 
     `_STATUS_ABSENCE` (`not built`, `has not run`, `not yet wired`) is applied to
-    `STATUS_ABSENCE_DOCS` rather than to `DESIGN_DOCS`: the same shape is present
-    in `ONTOLOGY.md` at two lines, and that file is OWNER-GATED — it states its
-    own rule that no change lands without the owner approving the exact diff.
-    The two passages are recorded for approval, not edited behind the rule. When
-    they land, point `STATUS_ABSENCE_DOCS` at `DESIGN_DOCS`.
+    `STATUS_ABSENCE_DOCS`, which is `DESIGN_DOCS` — `ONTOLOGY.md` included. It was
+    once excluded because the same shape sat there at two lines awaiting the
+    owner's approval of the exact copy; those lines landed (#8745), so the
+    exclusion and the reason recorded for it are both gone.
     """
     offenders = []
     for path in DESIGN_DOCS:
