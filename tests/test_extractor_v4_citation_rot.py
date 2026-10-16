@@ -571,8 +571,16 @@ DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
 #: Absence of work spoken as absence: *"`#3011` has not run"*, *"THE S0 HALF IS
 #: NOT BUILT"*, *"not yet wired"*. A design document states what the design IS;
 #: what is missing is a tracker's job. Applied to every design document,
-#: `ONTOLOGY.md` included: the two lines it once carried went to
-#: `ONTOLOGY-CHANGELOG.md` when the owner approved the exact copy (#8745).
+#: `ONTOLOGY.md` included: the two lines it once carried were dropped when the
+#: owner approved the exact copy (#8745). Their build status was ALREADY recorded
+#: per field in `ONTOLOGY-CHANGELOG.md` (§4.2/§4.3, `❌` both), so nothing moved
+#: into that file — the drop removed the status from the MODEL, not from the
+#: record.
+#:
+#: Scope: this arm catches the CAPS form and the `#NNN`-adjacent lowercase form
+#: only. It is NOT "the design documents are free of status prose" —
+#: `ONTOLOGY.md:426` / `:446` (*"**Not written by `_upsert_subject`** — planned
+#: follow-up"*) pass it.
 _STATUS_ABSENCE = (
     # The CAPS form is this document set's convention for delivery state, so it
     # carries no ambiguity.
@@ -776,6 +784,14 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "Everything is done in S6.",
         "`#4999` records the trace mechanism.",
     ]
+    # The SCOPE is pinned too. Without this, narrowing `STATUS_ABSENCE_DOCS` back
+    # to a subset keeps every test green while silently dropping `ONTOLOGY.md`
+    # from the absence arm — a guard that can be narrowed without reddening is a
+    # guard that will be.
+    assert set(STATUS_ABSENCE_DOCS) == set(DESIGN_DOCS), (
+        "STATUS_ABSENCE_DOCS no longer covers the same documents as the class "
+        "check: the absence arm must not narrow silently"
+    )
     for line in must_flag:
         assert flagged(line), f"the class check no longer fires on: {line!r}"
     for line in must_not_flag:
