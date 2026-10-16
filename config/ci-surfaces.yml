@@ -4578,8 +4578,14 @@ durations:
   # samples push-to-main runs only), so the >=90% coverage floor (#2876) fails
   # by construction for any test-adding PR. Reading: pytest session total
   # 27.1s for 26 tests on the embedded carve-out lane
-  # (`TORTOISE_TEST_CARVE_OUT=1`, HF_HUB_OFFLINE=1), on this host. Replace it in
-  # the next sweep.
+  # (`TORTOISE_TEST_CARVE_OUT=1`, HF_HUB_OFFLINE=1), on this host. LANE
+  # MISMATCH, stated so the next sweep REPLACES it rather than carries it: this
+  # file is registered under `core`, which the pilot puts in `fast_pool`, and the
+  # `test` job runs that pool with the docker `TORTOISE_DB_URI` — while the
+  # reading above was taken on the carve-out lane. Every other entry in this map
+  # is a per-file reading from the fast band, so the unit here is "cost in the
+  # lane the file runs in" and this one entry is a different unit. Replace it
+  # with a fast-band reading in the next sweep.
   test_change_feed_2353.py: 27.1
   test_health_ready_nonblocking.py: 3.1
   test_hosted_auth.py: 1.8

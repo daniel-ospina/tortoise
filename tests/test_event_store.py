@@ -17,6 +17,20 @@ def _events(proj):
     return [r[0] for r in rows]
 
 
+@pytest.fixture(autouse=True)
+def _change_feed_off(monkeypatch):
+    """Every test in this file pins the store's DEFAULT (transition-only) contract.
+
+    `TORTOISE_CHANGE_FEED` is the switch that routes `PointRevised` to the
+    `:GraphEvent` store (#2353), so each assertion here is about the OFF state.
+    Clearing the variable makes the pin independent of the ambient shell: a lane
+    that follows #2353's own instruction to switch the feature on before running
+    the suite would otherwise see `test_content_edit_emits_nothing` fail — a
+    false red that reports a regression where the configuration simply differs.
+    """
+    monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
+
+
 def test_create_point_emits_graph_event(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
     p = sdk.create_point("statement", "hello events")

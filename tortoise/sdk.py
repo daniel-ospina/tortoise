@@ -2764,16 +2764,14 @@ def _deleted_point_payload(id: str) -> dict:
     reading — a fabricated `after` whose `precondition` contradicted its own
     `before`.
 
-    The `deleted` marker is written ONLY under the change-feed switch, so the
-    default `:GraphEvent` payload (and therefore `poll_events`' reply) stays
-    byte-identical; the consumer that needs the distinction is the same one the
-    switch turns on. A missing marker means `retract_point`, the type's other
-    producer.
+    The `deleted` marker is written UNCONDITIONALLY. It states what THIS call
+    did, so it cannot depend on whether the READING process has the change feed
+    switched on: a deployment whose writer has it off and whose reader has it on
+    would otherwise fold every hard delete it sees as a tombstone. Rows written
+    before the marker existed keep their old `{"id": ...}` shape and are read
+    as tombstones — a residual the change feed documents rather than hides.
     """
-    payload: dict = {"id": id}
-    if _change_feed_enabled():
-        payload["deleted"] = True
-    return payload
+    return {"id": id, "deleted": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -10062,10 +10060,12 @@ class TortoiseSDK:
         # Two stores, one meaning each:
         #   * :GraphEvent ONLY (payload style, `id=` omitted) — the subscriber
         #     surface is UNCHANGED; `tortoise_events_poll` still sees the
-        #     point-delete lifecycle row. #2353: the payload is MARKED while the
-        #     change feed is on (`_deleted_point_payload`) so the feed can tell
-        #     this hard delete from `retract_point`'s tombstone; off, the payload
-        #     is the same `{"id": id}` it always was.
+        #     point-delete lifecycle row. #2353: the payload gains
+        #     `deleted: true` (`_deleted_point_payload`) so the change feed can
+        #     tell this hard delete from `retract_point`'s tombstone. The marker
+        #     is UNCONDITIONAL — it records what this write did, and gating it on
+        #     the reader's switch mislabelled every hard delete performed by an
+        #     unswitched writer.
         #   * JSONL ONLY (`EntityMutated` is not in _GRAPH_EVENT_TYPES) — the
         #     replay journal carries the honest hard-delete record, whose fold is
         #     `_delete_entity_by_id`. No `state`: the recorded shape carries

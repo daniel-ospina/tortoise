@@ -44,10 +44,32 @@ the capture stale-turn sweep's HARD delete (node destroyed, no guard). The two
 payloads were identical, so a fold keyed on the type alone reported the
 tombstone reading for a destroyed node — a fabricated ``after`` whose
 ``precondition`` contradicted its own ``before``. The hard-delete producers
-therefore mark their payload ``deleted: true`` while this feature is switched
-on (so the default store stays byte-identical), and the fold reports that
-producer as ``change: "deleted"`` with NO ``status`` and NO precondition. A
-row without the marker is ``retract_point`` — the type's remaining producer.
+therefore mark their payload ``deleted: true`` **unconditionally**: the marker
+records what the WRITE PATH did, so it cannot be a function of the reading
+process's switch. Gating it on the switch made the distinction depend on the
+emitting process's environment — a deployment whose writer has the feed off and
+whose reader has it on folded every hard delete as a tombstone, a fake
+``status: retracted`` plus a ``precondition`` the delete path never enforced.
+The fold reports a marked row as ``change: "deleted"`` with NO ``status`` and
+NO precondition.
+
+⚠️ **Residual, stated rather than papered over:** a row written BEFORE the
+marker existed carries nothing that separates the two producers, and the fold
+reads it as the tombstone. The distinction is exact from the marker's
+introduction onward.
+
+``before`` IS SCOPED TO THE PAGE IT WAS OBSERVED IN
+---------------------------------------------------
+The fold sees ONE page — the rows ``read_after(..., limit=limit)`` returned —
+so ``before`` is a property of the page, not of the claim's history. The same
+event reports ``before`` when its predecessor is in the page, and NO ``before``
+when a page boundary falls between them; a client that pages therefore loses
+``before`` for exactly those claims whose events straddle a boundary. It is
+still never invented (an unobserved field is absent, never back-filled from a
+``precondition``), but "the window observed no earlier value" and "the window
+started after the earlier value" are not distinguishable from the reply. A
+pagination-stable ``before`` is a deliberate non-goal here: it would need a
+per-subject back-read, which is a new read surface rather than a fold.
 
 Shape (``changes`` in the ``poll_events`` response)::
 
@@ -71,6 +93,7 @@ order. An event naming several claims (``OperatorAdded`` names its operator, its
 """
 from __future__ import annotations
 
+import copy
 import os
 from typing import Any
 
@@ -82,6 +105,18 @@ CHANGE_FEED_ENV = "TORTOISE_CHANGE_FEED"
 
 #: Payload keys that NAME claims rather than describe a changed value.
 _SUBJECT_KEYS = ("id", "new_id", "source_id", "target_ids")
+
+#: Keys `_emit_event` merges into the payload for the STORE's benefit — envelope
+#: metadata about who wrote the row, never state of the claim. On the hosted/MCP
+#: surface the actor ContextVar is set, so a catch-all revision arm would report
+#: `actor_user_id` as claim state AND change the delta's field set depending on
+#: whether a human was attached — the one thing the `_after` derivation must
+#: never do.
+_ENVELOPE_KEYS = frozenset({"actor_user_id"})
+
+#: The four EP dimensions `annotate_operator` writes. Named once because two
+#: event types carry them under two spellings (see the `PointRevised` arm).
+_EP_DIMENSIONS = ("bias", "precision", "consistency", "directness")
 
 #: Keys a `PointRevised` record may carry that are PLUMBING, not news: the
 #: vector-machinery keys `update_point` journals (`#4208`/`#5004` — derived from
@@ -109,7 +144,10 @@ _PRECONDITIONS: dict[str, dict[str, Any]] = {
     # producer enforces: `draft` alone overstates the capture leg. Admitted
     # values are listed when there is more than one.
     "PointPromoted": {"status": ["draft", None]},
-    "OperatorPromoted": {"status": "draft"},
+    # `_promote_incident_operators` CASes `status='draft'`; `_apply_capture_ingest_ep`
+    # admits an UNSET status too. Same union argument as `PointPromoted` above —
+    # `draft` alone would claim a prior status the capture leg never required.
+    "OperatorPromoted": {"status": ["draft", None]},
 }
 
 
@@ -154,7 +192,8 @@ def _after(type_: str, payload: dict[str, Any]) -> dict[str, Any]:
                 after[k] = payload[k]
     elif type_ == "PointRevised":
         for k, v in payload.items():
-            if k in _SUBJECT_KEYS or k in _PLUMBING_KEYS:
+            if (k in _SUBJECT_KEYS or k in _PLUMBING_KEYS
+                    or k in _ENVELOPE_KEYS):
                 continue
             if k == "new_content":
                 # `update_point` ALWAYS passes `new_content=props.get("content")`
@@ -171,9 +210,26 @@ def _after(type_: str, payload: dict[str, Any]) -> dict[str, Any]:
                 # claim's canonical field name, so the delta speaks canonical.
                 after["content"] = v
                 continue
+            # `annotate_operator` emits `OperatorAnnotated` (payload short
+            # aliases) and THEN calls `update_point(..., annotator_bias=...)`,
+            # which emits THIS type. One EP dimension must not reach the feed
+            # under two names: a consumer folding `after` would hold both `bias`
+            # and `annotator_bias` for one number, two answers that can drift.
+            # Fold the journal spelling to the canonical short alias.
+            short = k[len("annotator_"):] if k.startswith("annotator_") else ""
+            if short in _EP_DIMENSIONS:
+                after[short] = v
+                continue
             after[k] = v
     elif type_ == "PointSuperseded":
         after["status"] = "superseded"
+        # `supersede_point` writes the legacy `outdated` flag alongside the
+        # status (sdk.py: "#432: status='superseded' alongside the legacy
+        # outdated=true"), and `record_projection.RECORD_MUTATIONS` carries it
+        # for this same type. The `PointInvalidated` arm below reports it; a
+        # consumer folding `after` must not see `outdated` present for one
+        # terminal transition and absent for the other, on the same write.
+        after["outdated"] = True
         if payload.get("new_id"):
             after["supersededBy"] = payload["new_id"]
         for src, dst in (("valid_to", "validTo"), ("expired_at", "expiredAt")):
@@ -200,7 +256,7 @@ def _after(type_: str, payload: dict[str, Any]) -> dict[str, Any]:
             if payload.get(k) is not None:
                 after[k] = payload[k]
     elif type_ == "OperatorAnnotated":
-        for k in ("bias", "precision", "consistency", "directness"):
+        for k in _EP_DIMENSIONS:
             if payload.get(k) is not None:
                 after[k] = payload[k]
     # `DedupeRecorded` / `DedupeRejected` deliberately have NO arm. Every
@@ -218,7 +274,13 @@ def _after(type_: str, payload: dict[str, Any]) -> dict[str, Any]:
         for k in ("supersedes_by", "session_id"):
             if payload.get(k) is not None:
                 after[k] = payload[k]
-    return after
+    # COPY. `after` is built from the event payload's OWN objects, and the same
+    # response carries that payload back under `events`; without a copy, a
+    # consumer normalising or redacting one delta's `after` would silently
+    # mutate the raw page — and every sibling delta for the same event — in the
+    # same reply (measured: `changes[...].after["target_ids"] is
+    # events[...].payload["target_ids"]`).
+    return copy.deepcopy(after)
 
 
 #: event type -> the semantic change name the delta carries.
@@ -238,17 +300,29 @@ _CHANGE_NAME = {
 }
 
 
+def _is_promote_revision(type_: str, payload: dict[str, Any]) -> bool:
+    """Is this `PointRevised` row the draft→live promote door?
+
+    `update_point` is "non-status except the draft→live promote" (sdk.py),
+    enforced by the same `n.status IS NULL OR n.status = 'draft'` CAS
+    `promote_point` uses — but it emits `PointRevised`, not `PointPromoted`. A
+    consumer counting promotions from the feed would therefore miss every
+    promotion made through the ordinary update path, and the guarded route
+    carried no precondition at all. The payload's `status` tells them apart;
+    everything else about the row is an ordinary revision.
+    """
+    return type_ == "PointRevised" and payload.get("status") == "live"
+
+
 def _is_hard_delete(type_: str, payload: dict[str, Any]) -> bool:
     """Is this `PointRetracted` row a HARD delete rather than a tombstone?
 
     `PointRetracted` has two producers with one shared payload shape (#3300):
     `retract_point` keeps the node (`status='retracted'`, terminal-guarded) and
     `delete_point` / the capture stale-turn sweep DESTROY it (no guard). The
-    hard-delete emit marks its payload `deleted: true` while the change feed is
-    on — written only under the switch, so the default `:GraphEvent` payload is
-    byte-identical — which is what lets the fold report the two end-states
-    apart. A row WITHOUT the marker is the tombstone: `retract_point` is the
-    type's remaining producer, so nothing is invented for it.
+    hard-delete emit marks its payload `deleted: true` — unconditionally, since
+    the marker describes the write and not the reader's switch. Rows written
+    before the marker existed cannot be told apart and read as tombstones.
     """
     return type_ == "PointRetracted" and payload.get("deleted") is True
 
@@ -262,6 +336,8 @@ def _change_name(type_: str, payload: dict[str, Any]) -> str | None:
     """
     if _is_hard_delete(type_, payload):
         return "deleted"
+    if _is_promote_revision(type_, payload):
+        return "promoted"
     return _CHANGE_NAME.get(type_)
 
 
@@ -275,6 +351,8 @@ def _precondition(type_: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """
     if _is_hard_delete(type_, payload):
         return None
+    if _is_promote_revision(type_, payload):
+        return _PRECONDITIONS["PointPromoted"]
     return _PRECONDITIONS.get(type_)
 
 
@@ -325,8 +403,13 @@ def aggregate_changes(events: list[dict[str, Any]] | None) -> list[dict[str, Any
                 delta["before"] = before
             precondition = _precondition(type_, payload)
             if precondition:
-                delta["precondition"] = dict(precondition)
-            delta["after"] = after
+                # Deep copy: a shallow `dict(...)` leaves the value OBJECT
+                # (`["draft", None]`) shared with the module constant, so a
+                # consumer mutating what it was handed corrupts the
+                # precondition every later call in this long-lived process
+                # reports.
+                delta["precondition"] = copy.deepcopy(precondition)
+            delta["after"] = copy.deepcopy(after)
             group = grouped.get(subject)
             if group is None:
                 group = {"id": subject, "changes": []}

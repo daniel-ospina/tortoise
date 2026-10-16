@@ -354,11 +354,18 @@ def test_hard_delete_of_a_live_point_keeps_the_deleted_kind(monkeypatch,
         sdk.close()
 
 
-def test_off_switch_keeps_the_hard_delete_payload_byte_identical(
+def test_hard_delete_marker_records_the_write_not_the_reader(
         monkeypatch, sdk_factory, tmp_path):
-    """The `deleted` marker is opt-in: with the switch off the hard-delete
-    `:GraphEvent` payload is exactly the `{"id": ...}` mapping it always was
-    (the off-contract passes unchanged by construction — that is its purpose)."""
+    """The `deleted` marker is UNCONDITIONAL; the RESPONSE half is not.
+
+    The marker states what the WRITE PATH did, so it cannot be a function of
+    whether the READING process has the feed switched on. Gating it on the
+    switch let a deployment whose writer has the feed off and whose reader has
+    it on fold every hard delete as a tombstone — a fabricated
+    `status: retracted` plus a `precondition` the delete path never enforces (a
+    review P1), and it mislabelled every row written before the switch existed.
+    The response half stays off-contract: no `changes` key.
+    """
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
     sdk = sdk_factory(tmp_path)
     try:
@@ -367,7 +374,7 @@ def test_off_switch_keeps_the_hard_delete_payload_byte_identical(
         rows = [e for e in _graph_events(sdk._get_proj())
                 if e["type"] == "PointRetracted"]
         assert len(rows) == 1, rows
-        assert json.loads(rows[0]["payload"]) == {"id": p["id"]}
+        assert json.loads(rows[0]["payload"]) == {"id": p["id"], "deleted": True}
         assert "changes" not in sdk.poll_events()
     finally:
         sdk.close()
@@ -475,7 +482,14 @@ def test_pure_fold_needs_no_graph(monkeypatch):
 def test_revision_status_before_after_is_observed_only(monkeypatch):
     """Status before→after is reported when the window OBSERVED the prior
     status (a promote is a PointRevised carrying `status`), and omitted — never
-    fabricated — for the first sighting."""
+    fabricated — for the first sighting.
+
+    The second row IS the promote door. `update_point(status='live')` emits
+    `PointRevised`, not `PointPromoted`, and CASes the same draft-or-unset
+    precondition, so it is named `promoted` and carries that precondition —
+    otherwise a consumer counting promotions from the feed misses every one made
+    through the ordinary update path (a review P2).
+    """
     from tortoise.change_feed import aggregate_changes
     events = [
         {"seq": 1, "ts": "t1", "event_id": "e1", "type": "PointRevised",
@@ -485,9 +499,11 @@ def test_revision_status_before_after_is_observed_only(monkeypatch):
     ]
     deltas = aggregate_changes(events)[0]["changes"]
     assert "before" not in deltas[0]
+    assert deltas[0]["change"] == "revised"
     assert deltas[1]["before"] == {"status": "draft"}
     assert deltas[1]["after"] == {"status": "live"}
-    assert "precondition" not in deltas[1]
+    assert deltas[1]["change"] == "promoted"
+    assert deltas[1]["precondition"] == {"status": ["draft", None]}
 
 
 def test_dedupe_delta_reports_the_event_without_inventing_fields():
@@ -612,3 +628,108 @@ def test_enabled_reads_the_declared_truthy_contract(monkeypatch):
         assert enabled() is want, raw
     monkeypatch.delenv(CHANGE_FEED_ENV, raising=False)
     assert enabled() is False
+
+
+def test_a_hard_delete_written_unswitched_still_folds_as_a_delete(
+        monkeypatch, sdk_factory, tmp_path):
+    """The P1's exact scenario: the WRITER has the feed off, the READER on.
+
+    Gating the marker on the emitting process's switch made the distinction a
+    property of a process rather than of the row, so this fold reported
+    `retracted` — with a fabricated `after.status` and a `precondition` the
+    delete path never enforces — for a node that is provably gone.
+    """
+    monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
+    sdk = sdk_factory(tmp_path)
+    try:
+        p = sdk.create_point("statement", "gone")
+        assert sdk.delete_point(p["id"]) is True
+        # …now the READER switches the feed on over the same store.
+        monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+        assert _kinds(sdk.poll_events()["changes"], p["id"]) == ["created", "deleted"]
+    finally:
+        sdk.close()
+
+
+def test_operator_promote_precondition_admits_an_unset_status():
+    """`OperatorPromoted` has two producers with different admission predicates.
+
+    `_promote_incident_operators` CASes `status='draft'`; the capture
+    `_apply_capture_ingest_ep` admits an UNSET status too. A precondition is the
+    predicate the write path refuses WITHOUT, so it is the union — `draft` alone
+    claims a prior status the capture leg never required (a review P2).
+    """
+    from tortoise.change_feed import aggregate_changes
+    events = [{"seq": 1, "ts": "t", "event_id": "e", "type": "OperatorPromoted",
+               "payload": {"id": "op"}}]
+    delta = aggregate_changes(events)[0]["changes"][0]
+    assert delta["precondition"] == {"status": ["draft", None]}
+    assert delta["after"] == {"status": "live"}
+
+
+def test_envelope_actor_is_not_claim_state():
+    """`_emit_event` merges `actor_user_id` for the STORE, so a catch-all
+    revision arm would report it as claim state — and change the delta's field
+    set depending on whether a human was attached (a review P2)."""
+    from tortoise.change_feed import aggregate_changes
+    events = [{"seq": 1, "ts": "t", "event_id": "e", "type": "PointRevised",
+               "payload": {"id": "p", "new_content": "v2",
+                           "actor_user_id": "daniel-ospina"}}]
+    delta = aggregate_changes(events)[0]["changes"][0]
+    assert delta["after"] == {"content": "v2"}
+
+
+def test_annotation_dimensions_use_one_spelling():
+    """`annotate_operator` emits `OperatorAnnotated` (short aliases) and then
+    `update_point(..., annotator_bias=...)`, which emits `PointRevised`. One EP
+    dimension must not reach the feed under two names — a consumer folding
+    `after` would hold both for one number (a review P2)."""
+    from tortoise.change_feed import aggregate_changes
+    events = [{"seq": 1, "ts": "t", "event_id": "e", "type": "PointRevised",
+               "payload": {"id": "op", "annotator_bias": 0.5,
+                           "annotator_precision": 0.4}}]
+    delta = aggregate_changes(events)[0]["changes"][0]
+    assert delta["after"] == {"bias": 0.5, "precision": 0.4}
+
+
+def test_superseded_reports_the_legacy_outdated_flag():
+    """`supersede_point` writes the legacy `outdated` flag alongside the status,
+    and the `PointInvalidated` arm reports its own — a consumer folding `after`
+    must not see one terminal transition carry it and the other omit it, on the
+    same write (a review P2)."""
+    from tortoise.change_feed import aggregate_changes
+    events = [{"seq": 1, "ts": "t", "event_id": "e", "type": "PointSuperseded",
+               "payload": {"id": "p", "new_id": "p2"}}]
+    delta = aggregate_changes(events)[0]["changes"][0]
+    assert delta["after"] == {"status": "superseded", "outdated": True,
+                              "supersededBy": "p2"}
+
+
+def test_the_delta_and_the_raw_page_do_not_share_objects():
+    """`after` is built from the payload's own objects and the SAME response
+    carries that payload back under `events`; without a copy, normalising one
+    delta's `after` mutates the raw page — and every sibling delta for the same
+    event (a review P2)."""
+    from tortoise.change_feed import aggregate_changes
+    payload = {"id": "op", "op_type": "IMPL", "target_ids": ["t1"]}
+    events = [{"seq": 1, "ts": "t", "event_id": "e", "type": "OperatorAdded",
+               "payload": payload}]
+    delta = aggregate_changes(events)[0]["changes"][0]
+    assert delta["after"]["target_ids"] == ["t1"]
+    delta["after"]["target_ids"].append("t2")
+    assert payload["target_ids"] == ["t1"]
+
+
+def test_precondition_objects_are_not_shared_between_calls():
+    """A shallow `dict(...)` leaves the value OBJECT shared with the module
+    constant, so a consumer mutating what it was handed corrupts the
+    precondition every later call in this long-lived process reports (a review
+    P2)."""
+    from tortoise.change_feed import _PRECONDITIONS, aggregate_changes
+    events = [{"seq": 1, "ts": "t", "event_id": "e", "type": "PointPromoted",
+               "payload": {"id": "p"}}]
+    delta = aggregate_changes(events)[0]["changes"][0]
+    delta["precondition"]["status"].append("CORRUPTED")
+    assert _PRECONDITIONS["PointPromoted"]["status"] == ["draft", None]
+    again = aggregate_changes(events)[0]["changes"][0]
+    assert again["precondition"] == {"status": ["draft", None]}
