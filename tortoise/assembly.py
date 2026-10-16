@@ -675,13 +675,19 @@ _RE_CLASS_PLURAL = re.compile(
     r"(?P<cls>(?:(?!" + _CLASS_REL_PRONOUN + r"\s+\w).)+?)\s"
     r"(?:(?:that|which)\s+)?"
     r"(?:" + _CLASS_REL_PRONOUN + r")\s+\w+(?:\s+\w+)?\s+"
-    r"(?:in|during|over|within)\s+the\s+(?:past|last)\s+"
+    # the window is a NAMED group so the classifier can blank exactly its own
+    # text before `_RE_AGO_OTHER` (#8779 E4/F2): the count-less `last <unit>`
+    # spelling IS this shape's window, not an extra calendar offset, and
+    # without the blanking that guard made the singular-unit arm dead for
+    # week/month/year.
+    r"(?P<window>(?:in|during|over|within)\s+the\s+(?:past|last)\s+"
     r"(?:(?P<count>" + _CLASS_COUNT_RX + r")\s+"
     r"(?P<unit>days?|weeks?|months?|years?)"
-    r"|(?P<unit_sg>day|week|month|year))(?![a-z])"
-    # the ordering INSTRUCTION is CAPTURED, not merely skipped, so the
-    # resolver can read its DIRECTION (#8779 P1): a `from latest to earliest`
-    # request must render newest-first, never the reverse.
+    r"|(?P<unit_sg>day|week|month|year)))(?![a-z])"
+    # The ordering INSTRUCTION is CAPTURED here, but the direction reader
+    # scans the WHOLE question (#8779 E1: the instruction may sit BEFORE the
+    # relative clause, inside the class span), so this group records the
+    # tail's instruction rather than being the reader's only input.
     r"(?P<order>[^?]*)\??\s*$",
     re.IGNORECASE | re.DOTALL)
 # interval: "how many <unit> (had|have) passed between A and B"
@@ -936,13 +942,40 @@ def classify_question(question: str) -> AssemblyShape | None:
     #
     # The rest of the R13 discipline IS re-applied here explicitly: this
     # branch skips the guard block, so every guard surface that is not the
-    # recency arm must still hold. A co-present calendar-anchor/other
-    # relative surface (`_RE_AGO_OTHER`), a promoted or bare relative offset,
-    # a frequency/count head, an advice frame, or a 2+ `or` chain (the N-ary
-    # shape's surface) rejects the question exactly as it does below.
-    if _RE_CLASS_PLURAL.match(q):
-        if (_RE_AGO_OTHER.search(q) or _RE_FREQUENCY.search(q)
+    # recency arm must still hold. A calendar-anchor/other relative surface
+    # OUTSIDE this shape's own window (`_RE_AGO_OTHER`), a promoted or bare
+    # relative offset, a frequency/count head, a duration head (`_RE_DURATION`
+    # — this branch returns before the blanket duration guard below, so it
+    # must re-apply it itself: #8779 E3), an advice frame, or a 2+ `or` chain
+    # (the N-ary surface) all reject with `None`, exactly as they do below.
+    #
+    # CLAIM ACCURACY: "still reject" is not the whole truth for this branch.
+    # Two constructs `main` ROUTED to a firing shape — "... in the past two
+    # months, most recently?" (AGO_RELATIVE) and "... in the past two months
+    # last Saturday?" (RELATIVE_DATE) — now land on `None` here, because the
+    # branch is entered first and its `_relative_match`/`_RE_AGO_OTHER` guard
+    # fires. That is the SAFE direction (legacy answers), but it is a routing
+    # change, and it is recorded rather than implied.
+    #
+    # A binary `first … or …` ordering question is DIFFERENT: it names two
+    # subjects, so the shape ("names NO subjects") must not claim it — but at
+    # main it was routed to `ORDERING`, not rejected. So it is NOT put in the
+    # guard list (a `return None` here would short-circuit the ordering branch
+    # below and LOSE that answer): the class-plural branch is SKIPPED for it,
+    # and the ordinary pipeline routes it to `ORDERING` as before (#8779 F1).
+    m_cls = _RE_CLASS_PLURAL.match(q)
+    if m_cls is not None and not _RE_ORDERING.match(q):
+        # The shape's OWN window IS the relative window the template already
+        # resolved, and it may itself spell `last <unit>`; `_RE_AGO_OTHER`'s
+        # calendar surface is an ADDITIONAL such offset ELSEWHERE in the
+        # question ("... in the last month last Saturday?"), so the window's
+        # own text is blanked before that one guard. Without this the
+        # count-less `last <unit>` arm of the template was dead for
+        # week/month/year while the grammar advertised it (#8779 E4/F2).
+        residual = q[:m_cls.start("window")] + " " + q[m_cls.end("window"):]
+        if (_RE_AGO_OTHER.search(residual) or _RE_FREQUENCY.search(q)
                 or _RE_ADVICE.search(q) or _RE_OR_CHAIN.search(q)
+                or _RE_DURATION.search(q)
                 or _relative_match(q) is not None
                 or _RE_AGO_RESIDUAL.search(q)):
             return None
@@ -3275,33 +3308,92 @@ def _class_stem(tok: str) -> str:
     return t
 
 
-#: #8779 P1 — the ORDERING-DIRECTION vocabulary of the class-plural head's
-#: ordering instruction. The template now CAPTURES the instruction; this reads
-#: its direction. `reverse` is listed first so `in reverse chronological
-#: order` reads as reverse-chronological; `most\W+recent` precedes `recent` so
-#: the compound is one word, not two. `start`/`beginning` are deliberately NOT
-#: here: "starting from the latest" takes its direction from `latest`, and
-#: treating the verb as an old-end marker would invert it.
-_CLASS_ORDER_DIRECTION = re.compile(
-    r"\b(?P<recent>reverse|latest|newest|most\W+recent|recent|last)\b|"
-    r"\b(?P<old>earliest|oldest|first)\b",
+#: #8779 E1/E2 — the ORDERING-DIRECTION vocabulary of the class-plural head's
+#: ordering instruction. The words are named ONCE so the direction READER and
+#: the class-span SCRUBBER below cannot disagree about what an instruction is.
+#: `most\W+recent` precedes `recent` so the compound is one word, not two.
+_CLASS_DIR_RECENT = r"(?:reverse|latest|newest|most\W+recent|recent|last)"
+_CLASS_DIR_OLD = r"(?:earliest|oldest|first)"
+_CLASS_DIR_WORD = r"(?:" + _CLASS_DIR_RECENT + r"|" + _CLASS_DIR_OLD + r")"
+_CLASS_DIR_RECENT_FULL = re.compile(_CLASS_DIR_RECENT, re.IGNORECASE)
+
+# ⛔ The instruction is matched STRUCTURALLY, not by scanning for a direction
+# word anywhere in the text (#8779 E2). A trailing clause that merely CONTAINS
+# `last` — "and which was the last?", "how long did each last?" — is not an
+# ordering instruction, and reading it as one reversed the block for a
+# question that asked for no direction at all. A direction word counts only
+# inside one of these bound forms:
+#   * `from [the] X to [the] Y` — the FIRST bound is the end to start from;
+#   * `starting from [the] X`   — the census's own spelling;
+#   * `X first`                 — "newest first" / "latest first";
+#   * `in reverse chronological order`.
+# Position is FREE (#8779 E1): an instruction placed BEFORE the relative clause
+# ("the concerts, from latest to earliest, that I attended …") sits inside the
+# class span rather than the captured tail, so the reader runs over the WHOLE
+# question and `_class_span_without_instruction` strips the same forms out of
+# the class vocabulary.
+_RE_CLASS_ORDER_FROM_TO = re.compile(
+    r"\bfrom\s+(?:the\s+)?(?P<first>" + _CLASS_DIR_WORD + r")\s+to\s+"
+    r"(?:the\s+)?" + _CLASS_DIR_WORD + r"\b",
+    re.IGNORECASE)
+_RE_CLASS_ORDER_STARTING = re.compile(
+    r"\bstarting\s+from\s+(?:the\s+)?(?P<first>" + _CLASS_DIR_WORD + r")\b",
+    re.IGNORECASE)
+_RE_CLASS_ORDER_FIRST = re.compile(
+    r"\b(?P<first>" + _CLASS_DIR_WORD + r")\s+first\b",
+    re.IGNORECASE)
+_RE_CLASS_ORDER_REVERSE = re.compile(
+    r"\breverse\s+chronological\s+order\b", re.IGNORECASE)
+#: every structural form, for scrubbing the instruction out of the class span.
+_RE_CLASS_ORDER_INSTRUCTION = re.compile(
+    r"\bfrom\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?"
+    + _CLASS_DIR_WORD + r"\b"
+    r"|\bstarting\s+from\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\b"
+    r"|\b" + _CLASS_DIR_WORD + r"\s+first\b"
+    r"|\breverse\s+chronological\s+order\b",
     re.IGNORECASE)
 
 
-def _class_order_newest_first(instruction: str) -> bool:
+def _class_order_newest_first(question: str) -> bool:
     """Does the question's ordering instruction ask for the NEWEST first?
 
     ``False`` — the census spelling ("starting from the earliest" / "from
     earliest to latest") and the head's own default when the question carries
     no instruction at all — is chronological; ``True`` is
-    reverse-chronological. The FIRST direction word decides: an instruction
-    names its BOUNDS IN ORDER ("from earliest to latest" / "from latest to
-    earliest"), so the first bound is the end the enumeration must start
-    from, which is exactly what the rendered positions must begin at.
+    reverse-chronological. Only a STRUCTURAL bound phrase is read (see
+    ``_RE_CLASS_ORDER_FROM_TO`` and friends): the first bound of a `from X to
+    Y` / `starting from X` pair, or the word in an `X first` form, decides; a
+    bare `latest`/`last` left over in the tail is NOT an instruction (#8779
+    E2). The reader takes the WHOLE question so the instruction's position —
+    before or after the relative clause — cannot change the answer (#8779 E1).
     """
-    for m in _CLASS_ORDER_DIRECTION.finditer(_as_str(instruction)):
-        return m.group("recent") is not None
-    return False
+    text = _as_str(question)
+    best = None
+    for rx in (_RE_CLASS_ORDER_FROM_TO, _RE_CLASS_ORDER_STARTING,
+               _RE_CLASS_ORDER_FIRST):
+        m = rx.search(text)
+        if m is not None and (best is None or m.start() < best.start()):
+            best = m
+    if best is not None:
+        return _CLASS_DIR_RECENT_FULL.fullmatch(best.group("first")) is not None
+    return _RE_CLASS_ORDER_REVERSE.search(text) is not None
+
+
+def _class_span_without_instruction(span: str) -> str:
+    """The class span with any ordering instruction removed (#8779 E1).
+
+    A class-plural question may place its instruction BEFORE the relative
+    clause ("the concerts, from latest to earliest, that I attended …"), where
+    the class capture picks it up. The direction words are not class
+    vocabulary: left in, ``_class_owns_row`` returns True for any row that
+    merely mentions "latest" (a FALSE INCLUDE — the dangerous direction), and
+    the header would name the instruction as part of the class. Removing the
+    structural forms and tidying the separator they leave keeps the token set
+    the class's own content words.
+    """
+    scrubbed = _RE_CLASS_ORDER_INSTRUCTION.sub(" ", _as_str(span))
+    scrubbed = re.sub(r"\s+", " ", scrubbed)
+    return scrubbed.strip(" ,;:-")
 
 
 def _class_tokens(span: str) -> tuple[str, ...]:
@@ -3311,12 +3403,14 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     span with no usable token yields ``()`` (the resolver then abstains — see
     ``resolve_class_window``).
 
-    The span is ``_RE_CLASS_PLURAL``'s own capture, which ends at the
-    relative-clause pronoun, so it carries NO verb — the token set is the
-    class's own content words. That boundary is pinned by the exact
-    ``class_phrase`` assertion in ``test_resolve_class_window_arithmetic``,
-    not by a verb stoplist (a stoplist would need every verb in the
-    language).
+    The span is ``_RE_CLASS_PLURAL``'s own capture, TRIMMED by
+    ``_class_span_without_instruction`` (so any ordering instruction the
+    capture swallowed is gone) and ending at the relative-clause pronoun, so
+    it carries NO verb — the token set is the class's own content words. That
+    boundary is pinned by the exact ``class_phrase`` assertions in
+    ``test_resolve_class_window_arithmetic`` and
+    ``test_class_order_direction_reads_an_instruction_before_the_clause``, not
+    by a verb stoplist (a stoplist would need every verb in the language).
     """
     t = _as_str(span).strip()
     t = _CLASS_LEAD_DET.sub("", t, count=1).strip()
@@ -3432,14 +3526,17 @@ def resolve_class_window(question: str,
             return None
     except (OverflowError, ValueError):
         return None
-    tokens = _class_tokens(m.group("cls"))
+    span = _class_span_without_instruction(m.group("cls"))
+    tokens = _class_tokens(span)
     if not tokens:
         return None
-    return ClassWindow(class_phrase=_as_str(m.group("cls")).strip(),
+    return ClassWindow(class_phrase=span or _as_str(m.group("cls")).strip(),
                        tokens=tokens, unit=unit, count=count,
                        window_lo=lo, window_hi=qd,
-                       newest_first=_class_order_newest_first(
-                           m.group("order") or ""))
+                       # the WHOLE question: the instruction's position is
+                       # free (#8779 E1), so the captured tail alone is not
+                       # enough
+                       newest_first=_class_order_newest_first(question))
 
 
 def collect_class_slices(port, window: ClassWindow, *,

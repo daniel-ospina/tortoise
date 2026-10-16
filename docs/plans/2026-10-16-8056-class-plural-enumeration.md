@@ -61,8 +61,11 @@ bounded relative window**:
 the other 3 stay non-firing with their reasons recorded (never absorbed).
 
 Precision measurement beyond the census: the template was run over **every
-question-shaped string literal in `tests/` + `tortoise/`** (2,379 strings,
-re-measured after the implementation landed). **No question that fires a shape
+question-shaped string literal in `tests/` + `tortoise/`** (ast string
+constants, `8 ≤ len < 2500`, carrying both `?` and a space, unioned with the
+133 committed census questions ⇒ **1,542** strings, re-measured after the
+implementation landed; the count moves with the tree, so the RULE — not the
+digit — is the reproducible part). **No question that fires a shape
 at HEAD matches the new template** (0 conflicts of that kind), and the only
 template matches that do NOT fire ``CLASS_PLURAL`` are the shape's own
 deliberate R13 rejections — pinned as negatives (§5.4). The census run adds
@@ -117,7 +120,7 @@ shape (see §3).
 second date implementation (the walk and the R2 ladder are the #2652 ones), it
 is as-of safe by construction (`window_hi = question_date`, never a future row),
 it never silently degrades a question another shape owns (0 conflicts measured
-over 1,955 question strings), and its failure mode is the safe one — a class no
+over 1,542 question strings), and its failure mode is the safe one — a class no
 row matches renders NOTHING and the legacy lane answers exactly as it does
 today.
 
@@ -208,7 +211,7 @@ today.
 
 | Surface | Test layer | Bug-pattern flag |
 |---|---|---|
-| `tortoise/assembly.py` classifier | pure unit + the committed 133-row census + the 1,955-string sweep | precision floor: no NEW false fire over the negatives (asserted) |
+| `tortoise/assembly.py` classifier | pure unit + the committed 133-row census + the 1,542-string sweep | precision floor: no NEW false fire over the negatives (asserted) |
 | `resolve_class_window` (pure) | pure unit | window arithmetic (month clamp, count absent, as-of), never-raises on garbage |
 | `collect_class_slices` | dict-stub port unit + hermetic `_assemble_connected` | undated-row leak; cap accounting; class over/under-match |
 | `_synthesize_class_hits` | pure unit | empty-class render; same-day tie; derivation-key leak |
@@ -247,16 +250,21 @@ Implemented as planned. Measured results pinned in tests:
 
 - census class-plural family: **3/6 fire** (was 0/6); the 3 non-fires stay
   non-firing with their window family recorded.
-- precision sweep: **2,379** question strings scanned (tests + `tortoise/`)
-  ⇒ **no question that fires a shape at HEAD matches the new template**; the
+- precision sweep: **1,542** question strings scanned (tests + `tortoise/`
+  + the committed census; the derivation rule is at §«Status», the count moves
+  with the tree) ⇒ **no question that fires a shape at HEAD matches the new template**; the
   only template matches that are not `CLASS_PLURAL` are the shape's own
   deliberate R13 rejections (pinned negatives). The census run adds the third
   measured row.
 - negative-set floor: `_CLASS_PLURAL_COVERED` removes the 2 adjudicated rows
   (32 → 30 in the boxed set, denominator 29 → 27); the fire SET assertion is
   unchanged and still green.
-- `tests/test_assembly_pure.py`: **260 passed, 18 skipped** (HEAD: 211 passed,
-  18 skipped — +49 tests).
+- `tests/test_assembly_pure.py`: **296 passed, 18 skipped** (314 collected)
+  at the review-fix head. The pre-review head (`2e3106b4b`) measured 282
+  passed, 18 skipped; `origin/main` collects 229. The +14 over `2e3106b4b` are
+  the tests added by the review fixes (binary-ordering hijack, direction read
+  before the clause, bare-`last` direction, the `last <unit>` window arm, the
+  duration guard); the +85 over `main` is the PR's total.
 - `tests/test_assembly_sdk.py` (the ask-lane/SDK integration lane, embedded):
   **33 passed** — the #2652 window path and the flag-off legacy goldens are
   unaffected.
@@ -282,6 +290,14 @@ pins it with a deliberately out-of-bound probe (20k), because no in-bound
 probe can separate linear from quadratic.
 
 ## 6. Residuals (recorded, not hidden)
+
+- **Two `main`-routed constructs now land on `None` (safe direction).** The
+  class-plural branch is entered before the rest of `classify_question`, so
+  `"… in the past two months, most recently?"` (main: `AGO_RELATIVE`) and
+  `"… in the past two months last Saturday?"` (main: `RELATIVE_DATE`) are
+  rejected by the branch's own guards. Neither fires `CLASS_PLURAL`, and
+  legacy answers — the safe direction — but this is a routing change, not
+  "still rejected"; it is pinned in the classifier comment.
 
 - **The class filter runs after the fetch cap.** `port.window_rows` fetches
   `cap` points + `cap` events (cap = `PER_ENTITY_FANOUT_CAP` = 200) newest-first

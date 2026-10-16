@@ -4511,6 +4511,13 @@ def test_census_class_plural_coverage():
     "What is the order of the concerts I went to in the past 2 weeks?",
     "What is the order of the festivals I attended over the last five days?",
     "What is the order of the conferences I went to within the past year?",
+    # #8779 E4/F2: the count-LESS `last <unit>` spelling is the shape's own
+    # primary phrasing — it must fire for EVERY singular unit, not only `day`
+    # (the singular arm was dead for week/month/year because the branch's
+    # `_RE_AGO_OTHER` guard matched the window's own `last <unit>`)
+    "What is the order of the concerts I attended in the last month?",
+    "What is the order of the concerts I attended during the last week?",
+    "What is the order of the concerts I attended over the last year?",
     # the ordering instruction is optional (the head already asks the order)
     "What is the order of the concerts and musical events I attended in the "
     "past two months?",
@@ -4572,6 +4579,20 @@ def test_class_plural_fires(question):
     "two months?",
     "What is the order of the concerts or musicals or events I attended in "
     "the past two months?",
+    # ... a DURATION head (#8779 E3): this branch returns before the blanket
+    # `_RE_DURATION` guard below, so it must re-apply it itself — otherwise a
+    # compound duration question `main` rejected is claimed by the new shape
+    "What is the order of the concerts I attended in the past month and how "
+    "long did each last?",
+    "What is the order of the concerts I attended in the past two months "
+    "and how many days did I spend?",
+    "What is the order of the concerts I attended in the past two months "
+    "and how long did each last?",
+    # ... the shape's own count-less window must NOT shield an ADDITIONAL
+    # calendar offset elsewhere in the question (#8779 E4/F2 blanks only the
+    # window's own text before `_RE_AGO_OTHER`)
+    "What is the order of the concerts I attended in the last month last "
+    "Saturday?",
     # the head is NOT this shape's (who/what did I …)
     "What did I attend in the past two months?",
     "Which concerts did I attend in the past two months?",
@@ -4583,6 +4604,24 @@ def test_class_plural_fires(question):
 def test_class_plural_does_not_fire(question):
     assert classify_question(question) is not AssemblyShape.CLASS_PLURAL, \
         question
+
+
+@pytest.mark.parametrize("question", [
+    # #8779 F1: a BINARY `first … or …` ordering question NAMES TWO subjects,
+    # so the class-plural shape (which "names NO subjects") must not claim it.
+    # At main these were routed to ORDERING; the class-plural branch is
+    # SKIPPED for them so that routing survives (a `return None` would
+    # short-circuit the ordering branch below and LOSE the answer).
+    "What is the order of the concerts I attended in the past two months, "
+    "which happened first, the concert or the play?",
+    "What is the order of the events I attended in the past two months "
+    "first in the past two months or the trip I took?",
+])
+def test_class_plural_does_not_hijack_a_binary_ordering_question(question):
+    """Non-vacuous: pre-fix both strings classified as ``CLASS_PLURAL``
+    (the branch never consulted ``_RE_ORDERING``), i.e. a named-subject
+    ordering question was answered as a class enumeration."""
+    assert classify_question(question) is AssemblyShape.ORDERING, question
 
 
 def test_class_plural_template_is_not_super_linear_on_space_runs():
@@ -4665,6 +4704,12 @@ def test_class_plural_abstentions_extract_nothing(question):
     ("What is the order of the conferences I went to within the past year?",
      "2026-09-10", "2025-09-10", "2026-09-10", 1, "year", ("conference",),
      "the conferences"),
+    # #8779 E4/F2: the count-less `last <unit>` window — the singular arm
+    # resolves to ONE unit, and the window's own `last month` must not
+    # self-reject against `_RE_AGO_OTHER`
+    ("What is the order of the concerts I attended in the last month?",
+     "2026-09-10", "2026-08-10", "2026-09-10", 1, "month", ("concert",),
+     "the concerts"),
     # calendar month subtraction CLAMPS the day (03-31 − 1 month = 02-28),
     # never a 30-day approximation
     ("What is the order of the concerts I went to in the past month?",
@@ -4720,6 +4765,53 @@ def test_class_order_direction_reads_the_question_instruction(
     window = resolve_class_window(q, "2026-09-10")
     assert isinstance(window, ClassWindow), q
     assert window.newest_first is newest_first, q
+
+
+@pytest.mark.parametrize("question,newest_first", [
+    ("What is the order of the concerts, from latest to earliest, that I "
+     "attended in the past two months?", True),
+    ("What is the order of the concerts from latest to earliest that I "
+     "attended in the past two months?", True),
+    ("What is the order of the concerts, from earliest to latest, that I "
+     "attended in the past two months?", False),
+])
+def test_class_order_direction_reads_an_instruction_before_the_clause(
+        question, newest_first):
+    """#8779 E1: the ordering instruction may sit BETWEEN the class and the
+    relative clause, where the class capture swallows it. The direction must
+    still be read (position is free) AND the instruction words must be
+    scrubbed out of the class vocabulary — left in, ``latest`` makes
+    ``_class_owns_row`` true for any row that merely mentions it (a FALSE
+    INCLUDE).
+
+    Non-vacuous: pre-fix the direction was ``False`` for the reverse rows
+    (the captured tail was empty) and the token set carried
+    ``latest``/``earliest``.
+    """
+    window = resolve_class_window(question, "2026-09-10")
+    assert isinstance(window, ClassWindow), question
+    assert window.newest_first is newest_first, question
+    assert window.tokens == ("concert",), window.tokens
+    assert window.class_phrase == "the concerts", window.class_phrase
+    assert not _class_owns_row({"content": "read the latest news"},
+                               window.tokens)
+
+
+def test_class_order_direction_ignores_a_non_instruction_last():
+    """#8779 E2: a direction word only counts inside a STRUCTURAL bound phrase
+    (``from X to Y``, ``X first``, ``starting from X``, ``reverse
+    chronological order``). A trailing clause that merely CONTAINS ``last``
+    — "which was the last?" — is not an ordering request and must not reverse
+    the block.
+
+    Non-vacuous: pre-fix ``_CLASS_ORDER_DIRECTION`` matched the bare ``last``
+    and returned ``newest_first=True`` for this question.
+    """
+    q = ("What is the order of the concerts I attended in the past two "
+         "months, and which was the last?")
+    window = resolve_class_window(q, "2026-09-10")
+    assert isinstance(window, ClassWindow)
+    assert window.newest_first is False
 
 
 def test_class_plural_reverse_order_renders_newest_first():
