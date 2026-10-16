@@ -4789,6 +4789,10 @@ def test_resolve_class_window_arithmetic(question, qd, lo, hi, count, unit,
     ("latest first", True),
     ("newest first", True),
     ("in reverse chronological order", True),
+    # #8779 F9: the HYPHENATED spelling of the same phrase — `\s+` alone left
+    # it unmatched, so a reverse request rendered chronological order under an
+    # "earliest first" header.
+    ("in reverse-chronological order", True),
     # #8779 F6: the SAME structural pair spelled WITHOUT the leading `from`.
     # The bare form was not read as an instruction at all, so a reverse
     # request rendered CHRONOLOGICAL order under an "earliest first" header --
@@ -5288,6 +5292,41 @@ def test_connected_fires_on_the_class_window_hermetically(monkeypatch):
     assert "an old concert outside the window" not in rendered
     assert block.admission["class_filtered_out"] == 1
     assert block.admission["rows_admitted"] == 2
+
+
+def test_connected_class_block_never_fires_content_less(monkeypatch):
+    """#8779 F8: the post-cap accounting counted POSITION LINES
+    (``class-order``), not the ROWS they point at. The cap tail's
+    skip-not-starve drop can remove a ROW while its tiny ordinal line
+    survives, so a tight-but-valid cap let the block FIRE with the header
+    itself dropped and one orphan position line left — no header naming the
+    scope and no row at all, replacing a working legacy pool.
+
+    The CONTROL (default caps, same rows) is asserted FIRST, so the subject
+    assertion cannot be satisfied by the shape simply never firing.
+    """
+    rows = [_day_row(f"p-concert-{i}",
+                     created_at=f"2026-08-{1 + i % 28:02d}",
+                     content=f"concert {i}") for i in range(40)]
+
+    # CONTROL: default caps -> fires, and the header names exactly as many
+    # members as the block actually LISTS as rows
+    control = _drive_connected(monkeypatch, _class_port(rows),
+                               _CLASS_PLURAL_Q, question_date="2026-09-10")
+    assert control.fired is True
+    listed = sum(1 for h in control.post_cap_lines
+                 if h.get("kind") in ("point", "event"))
+    assert listed > 0
+    assert (f"{listed} dated events") in str(
+        control.post_cap_lines[0].get("content"))
+
+    # SUBJECT: a cap under which every ROW is dropped must NOT fire
+    tight = _drive_connected(
+        monkeypatch, _class_port(rows), _CLASS_PLURAL_Q,
+        question_date="2026-09-10",
+        caps={"context_item_cap": 5, "context_token_cap": 8,
+              "context_byte_cap": 128000, "limit": 5})
+    assert tight.fired is False
 
 
 def test_connected_refuses_when_no_row_carries_the_class(monkeypatch):

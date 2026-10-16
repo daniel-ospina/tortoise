@@ -3408,14 +3408,19 @@ _RE_CLASS_ORDER_FIRST = re.compile(
     r"\b(?P<first>" + _CLASS_DIR_WORD + r")\s+first\b",
     re.IGNORECASE)
 _RE_CLASS_ORDER_REVERSE = re.compile(
-    r"\breverse\s+chronological\s+order\b", re.IGNORECASE)
+    # the HYPHENATED spelling is the ordinary one for this phrase, and `\s+`
+    # alone left it unmatched: `newest_first` stayed False and the block
+    # rendered CHRONOLOGICAL order under an "earliest first" header for a
+    # reverse request (#8779 F9). The sibling vocabulary already absorbs
+    # spelling variation this way (`most\W+recent`).
+    r"\breverse[\s-]+chronological[\s-]+order\b", re.IGNORECASE)
 #: every structural form, for scrubbing the instruction out of the class span.
 _RE_CLASS_ORDER_INSTRUCTION = re.compile(
     r"\bfrom\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?"
     + _CLASS_DIR_WORD + r"\b"
     r"|\bstarting\s+(?:from|with)\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\b"
     r"|\b" + _CLASS_DIR_WORD + r"\s+first\b"
-    r"|\breverse\s+chronological\s+order\b"
+    r"|\breverse[\s-]+chronological[\s-]+order\b"
     r"|\b" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?" + _CLASS_DIR_WORD
     + r"\b",
     re.IGNORECASE)
@@ -3948,19 +3953,27 @@ def _assemble_class_plural(sdk, question: str, *, question_date: str | None,
     # the member count the header names from what actually SURVIVED. A
     # truncated block then never claims a membership it does not list, and a
     # block whose rows were ALL cut falls through under the same P1-1 rule
-    # (a header-only block is a content-less replacement). The header is the
-    # pool's first hit and always admitted, so its kind anchors the rewrite.
+    # (a header-only block is a content-less replacement).
+    #
+    # ⛔ Count the ROWS, not the position lines (#8779 F8). A `class-order`
+    # hit is only the ordinal line ("3. 2026-08-21"); the row it points at is
+    # the `point`/`event` hit that follows it, and the same drop can remove
+    # the ROW while the tiny line survives. Counting lines therefore (a) let
+    # the header claim a membership the block does not list, and (b) let a
+    # CONTENT-LESS block FIRE — the header itself dropped, one orphan position
+    # line left — with no header naming the scope and no row at all, replacing
+    # a working legacy pool. The header is NOT always admitted, so its
+    # presence is checked rather than assumed.
+    header = next((h for h in selected
+                   if h.get("kind") == "class-window"), None)
     rendered_rows = sum(1 for h in selected
-                        if h.get("kind") == "class-order")
-    if not rendered_rows:
+                        if h.get("kind") in ("point", "event"))
+    if header is None or not rendered_rows:
         return _empty_block()
     qd = _norm_date(question_date)   # narrowed for the header builder's type
     if qd is None:
         return _empty_block()
-    for h in selected:
-        if h.get("kind") == "class-window":
-            h["content"] = _class_header_line(window, rendered_rows, qd)
-            break
+    header["content"] = _class_header_line(window, rendered_rows, qd)
     # the (window ∩ class) IS the scope: no resolved subject rides on the
     # block.
     return _AssembledBlock(
