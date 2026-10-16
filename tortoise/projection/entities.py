@@ -1369,22 +1369,35 @@ class _EntityHandlers:
         "_searchText",
     })
     # D10 B6 (#5135): the RETIRED document fields — THE single declaration of
-    # the retirement. Every :Source write/replay door consults THIS set; none
-    # keeps an INDEPENDENT copy (the historical `_DOCUMENT_HANDLED` overlap on
-    # three of these keys is incidental — the call-site unions below are what
-    # make the denial complete, e.g. `object_kind`/`docStatus` reach the
-    # document passthrough ONLY through the registry):
-    #   * `sdk._update_entity`'s target-aware guard reads it directly;
-    #   * `_upsert_document`'s open passthrough and its promotion scrub both
-    #     compose with it at CALL time (see below), so a member added here is
-    #     denied and scrubbed without a second edit;
-    #   * the `EntityMutated` fold drops it — the keys are absent from
-    #     `_SOURCE_NODE_PROPS`, the declared surface every replay filters to.
-    # ⛔ ONE list. The divergence between this set and the per-path copies it
-    # used to have is what let the #5135 third door (`update_entity`) and the
-    # promotion fourth door exist at all: a writer that consults a stale copy
-    # silently misses the newest member. Adding a retired field must mean
-    # editing THIS set and nothing else.
+    # the retirement for the write/replay doors THAT CONSULT IT. Those are:
+    #   * `sdk._update_entity`'s target-aware guard, which reads it directly;
+    #   * `_upsert_document`'s open passthrough and its promotion scrub, which
+    #     both compose with it at CALL time (see below) — so a member added
+    #     here is denied and scrubbed in this class without a second edit.
+    # (The historical `_DOCUMENT_HANDLED` overlap on three of these keys is
+    # incidental: `object_kind`/`docStatus` reach the document passthrough ONLY
+    # through the registry union at the call site, not through that set.)
+    # ⛔ Two further graph-side doors deny the retirement by a DIFFERENT route
+    # and so do NOT consult this set. They are named here so the next member is
+    # not assumed covered:
+    #   * `_upsert_source`'s open passthrough denies by its CLOSED ALLOWLIST
+    #     (`_SOURCE_HANDLED` ∪ `_SOURCE_EXTRA_PROPS`). Every retired key is
+    #     outside both today, so the denial holds — but a key added here that is
+    #     ALSO declared in `_SOURCE_EXTRA_PROPS` would pass that door. Widen
+    #     that allowlist check; do not assume this set covers it.
+    #   * the `EntityMutated` fold drops by the DECLARED SURFACE: the keys are
+    #     absent from `_SOURCE_NODE_PROPS`, the surface every replay filters to
+    #     (`filter_source_props`). That is a different question from the
+    #     retirement, answered by a different set.
+    # NOT in this module's reach, and therefore NOT consolidated by this change:
+    # the record mirror in `record_projection.py` spells the same five keys as a
+    # literal `drop` on its `DocumentCreated` mutation (that layer imports no
+    # graph projection, by design), and `log.py`'s tear-immunity note lists them
+    # in prose. A member added HERE must be added THERE too.
+    # ⛔ ONE list — for this class. The divergence between this set and the
+    # per-path copies it used to have is what let the #5135 third door
+    # (`update_entity`) and the promotion fourth door exist at all: a writer
+    # that consults a stale copy silently misses the newest member.
     # BOTH spellings are denied: the projection normalizes to camelCase for
     # the FIXED clauses, but a raw journal payload (a hand-written JSONL line,
     # `EventAPI.add_document`, or a producer's `create_source(**props)`) can

@@ -2817,8 +2817,15 @@ def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
 
 def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch):
     """#5135 root cause: ONE declared registry for the retired document
-    fields, consulted by EVERY `:Source` write door — so a member added to it
-    cannot be silently missed by a stale per-path copy.
+    fields, so a member added to it cannot be silently missed by a stale
+    per-path copy IN THE CLASS THAT DECLARES IT. It is consulted by the generic
+    entity surface, the document open passthrough and the promotion scrub.
+    Scope, stated so the claim is not read as broader than it is: two further
+    graph-side doors deny the retirement by a DIFFERENT route and are
+    deliberately NOT driven here — `_upsert_source`'s closed allowlist
+    (`_SOURCE_HANDLED` ∪ `_SOURCE_EXTRA_PROPS`) and the `EntityMutated` fold's
+    declared `_SOURCE_NODE_PROPS` surface — and the record mirror in
+    `record_projection.py` keeps its own literal `drop` on `DocumentCreated`.
 
     The specific #5135 door (`update_entity`) is already closed by the
     target-aware guard. What this pins is the property whose absence let that
@@ -2827,7 +2834,7 @@ def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch)
     `doc_status`/`objectKind`, the doc passthrough skip-set `_DOC_RETIRED`, the
     promotion `REMOVE` literal, and `_DOC_RETIRED_KEYS`). The check is
     therefore behavioural, not structural: add a key to the ONE registry and
-    every door must deny it.
+    each door this test drives must deny it.
 
     Mutation (scratch copy, pre-consolidation code): the document passthrough
     and the promotion `REMOVE` are separate copies, so the probe key is
