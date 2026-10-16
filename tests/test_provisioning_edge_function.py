@@ -324,15 +324,27 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     # above a `let` missing `app.premiselabs.co` passed). An optional type
     # annotation is accepted so a typed declaration is compared, not reported as
     # absent. Enumerated by FUNCTION, not by the files that happen to contain the
-    # literal: a sweep keyed on the literal drops a file the moment a refactor
-    # renames the constant, and dropping it is silently safe (the remaining files
-    # still satisfy the floor). Every HTTP-facing function must declare an
-    # allowlist — `_shared` has no browser surface and is skipped explicitly, not
-    # by accident. The glob covers the extensions Supabase accepts, not just
-    # `.ts`.
+    # literal: a sweep keyed on the literal would drop a file the moment the
+    # constant is renamed — and dropping it is LOUD (the `missing` check fires),
+    # which is the point. Every HTTP-facing function must declare an allowlist —
+    # `_shared` has no browser surface and is skipped explicitly, not by
+    # accident. The glob covers the extensions Supabase accepts, not just `.ts`.
     def pattern_for(const: str) -> re.Pattern[str]:
         return re.compile(
             rf"(?:export\s+)?(?:const|let|var)\s+{const}\s*(?::[^=\n]+)?=\s*\[([^\]]*)\]"
+        )
+
+    def non_literal(const: str) -> re.Pattern[str]:
+        """A declaration of `const` whose right-hand side is not an array literal.
+
+        Reading literals alone cannot see a wrapped or imported value, so a file
+        could serve `Object.freeze([...])` or `makeOrigins()` while a commented
+        literal satisfied the comparison — measured GREEN with a comment copy of
+        the reference above a served non-literal. A declaration the sweep cannot
+        read is a RED, not a gap.
+        """
+        return re.compile(
+            rf"(?:export\s+)?(?:const|let|var)\s+{const}\s*(?::[^=\n]+)?=(?!\s*\[)"
         )
 
     def values(text: str, pat: re.Pattern[str]) -> list[str]:
@@ -341,22 +353,38 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     decl = pattern_for("ALLOWED_ORIGINS")
     declaring: dict[str, str] = {}
     missing: list[str] = []
+    unreadable: list[str] = []
     functions_dir = _REPO_ROOT / "supabase" / "functions"
     for fn_dir in sorted(p for p in functions_dir.iterdir() if p.is_dir()):
         if fn_dir.name == "_shared":
             continue
-        hits = [
+        files = [
             f for f in sorted(fn_dir.rglob("*"))
-            if f.suffix in {".ts", ".tsx", ".mts", ".cts"} and decl.search(f.read_text())
+            if f.suffix in {".ts", ".tsx", ".mts", ".cts"}
         ]
-        if not hits:
+        hits = [f for f in files if decl.search(f.read_text())]
+        wrapped = [f for f in files if non_literal("ALLOWED_ORIGINS").search(f.read_text())]
+        if not hits and not wrapped:
             missing.append(fn_dir.name)
+        unreadable.extend(
+            f"{fn_dir.name}/{f.relative_to(fn_dir)}" for f in wrapped
+        )
         for hit in hits:
             declaring[f"{fn_dir.name}/{hit.relative_to(fn_dir)}"] = hit.read_text()
+    # The specific diagnosis first: a declaration the sweep cannot READ is not an
+    # absent one, and the two need different remedies.
+    assert not unreadable, (
+        f"these declarations are not array literals: {unreadable} — the sweep "
+        "reads literals, so a wrapped or imported allowlist cannot be compared "
+        "(and a commented literal beside it would pass while the served value "
+        "drifted). Declare it inline as a literal array, or extend the sweep."
+    )
     assert not missing, (
         f"these functions declare no ALLOWED_ORIGINS: {missing} — an HTTP-facing "
-        "function needs one; a function with no browser surface needs a "
-        "deliberate skip here, not a silent absence"
+        "function needs one. If it declares one the sweep cannot READ, that is "
+        "the other assertion; do NOT add the function to the `_shared` skip, "
+        "which would trade a loud failure for a permanent false green on a "
+        "function whose drift fails SHUT."
     )
     assert len(declaring) >= 2, f"allowlist sweep found only {sorted(declaring)}"
     waitlist = (
@@ -370,7 +398,11 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
         assert len(want) == 1, f"the reference must declare {const} exactly once"
         for name, src in sorted(declaring.items()):
             have = values(src, pat)
-            assert have, f"{name} declares no {const} the guard can parse"
+            assert have, (
+                f"{name} declares no {const} the sweep can read — a declaration "
+                "the sweep cannot parse is a RED, not a gap: declare it inline as "
+                "an array literal, or extend the sweep. Do not skip the file."
+            )
             assert all(h == want[0] for h in have), (
                 f"{name} {const} must match waitlist-subscribe in EVERY "
                 "declaration — change every declaring function together (see "

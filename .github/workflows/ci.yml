@@ -80,13 +80,28 @@ jobs:
           fetch-depth: 0   # PR base SHA must be present for the diff
       - name: Compute per-surface path gates (#2149)
         id: gate
+        env:
+          # #8734: these two are the only `${{ }}` spans in this `run:`, and GitHub
+          # compiles a `run:` that contains any expression under a 21000-byte cap —
+          # measured at 20944 raw + 66 expression bytes = 21010, so `ci.yml` stopped
+          # loading and the whole workflow ran ZERO jobs on every event (the required
+          # `docs`/`legal-e2e`/`license-surface`/`pricing-artifact`/`test-isolation`
+          # contexts could not be produced, and a push run with no jobs is the
+          # signature of that refusal). A scalar with no `${{ }}` is never compiled
+          # (`ai-review-gate.yml` loads a 34 KB one), so as step env these are
+          # substituted before the script is assembled and the cap stops applying to
+          # it — instead of being re-armed by the next comment anyone adds. Keep
+          # expression spans out of this `run:`; the byte budget is tracked by
+          # tests/test_ci_selection.py.
+          MAIN_HEALTH: ${{ inputs.main_health }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base,
           # so the empty-diff fallback below would set EVERY gate true and re-run
           # the whole ~20-gate matrix nightly. Under `main_health` only the five
           # always-on required jobs run, so every gated surface is explicitly
-          # false. (`inputs.main_health` is empty on a `pull_request` event.)
-          if [ "${{ inputs.main_health }}" = "true" ]; then
+          # false. (`MAIN_HEALTH` is empty on a `pull_request` event.)
+          if [ "$MAIN_HEALTH" = "true" ]; then
             for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
                        client packaging website hosted flip python drift \
                        driver_scripts ai_review_gate watchdog_scripts \
@@ -97,7 +112,7 @@ jobs:
             echo "changes: main_health call — all gated surfaces false; only the 5 required jobs run"
             exit 0
           fi
-          BASE="${{ github.event.pull_request.base.sha }}"
+          BASE="$BASE_SHA"
           [ -n "$BASE" ] || BASE="origin/main"
           CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"

@@ -241,9 +241,10 @@
       color: #fff;
       max-width: 60ch;
       letter-spacing: normal; margin-bottom: 0;
-      /* Both lede lines end on a single word without this (measured: 1 word,
-         101-120px of a 612px measure at 768-1600px). Every other multi-line
-         prose block here already carries it. */
+      /* Without this both lede lines can end on a single word (measured at the
+         612px measure, over the 320-1600px widths tested: the `#solution` line
+         81.89px at 1024-1600px, the `#how-it-works` line 101-120px). Every
+         other multi-line prose block here already carries it. */
       text-wrap: pretty;
     }
 
