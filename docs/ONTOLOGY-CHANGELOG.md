@@ -904,6 +904,9 @@ moved here.
 | §8 direction note | *"*(Stored and interpreted on every path since v3.25 … see the Transition state note in the changelog.)*"* |
 | §8 lazy-promotion note | *"*(today's shipped code reads the semantics on the operator write path … `create_direct_edge` and the ingest path still resolve by `op_type` … the direction-sourcing gap is separate and tracked as `#7852` (`#7813` is CLOSED `COMPLETED`).)*"* |
 
+| §3.2 edge table, `participatesIn` row | *"⚠️ spec-only — no producer yet, tracked in issue #7884"* — a producer exists: the event write path auto-creates the edge from the event's `participants`, falling back to the event's `subject` when no explicit list is given (`projection/entities.py:4491`, the `#212` auto-create, CLOSED `COMPLETED`). The cited `#7884` is a merged PR about hosted lifespan warm-up, not this predicate. |
+| §3.4 Session/aboutObject note, closing sentence | *"`aboutSubject` has no producer here: … the capture entity model mints Objects, not Subjects."* — the capture spine routes §5 Subject kinds to the `:Subject` label and binds Points with `bind_point_subjects` (`#4934`, CLOSED `COMPLETED`), which `tortoise/subject_binding.py` declares the only confidence-gated `aboutSubject` producer. |
+
 **Enforced from here on:** `tests/test_extractor_v4_citation_rot.py::
 test_the_design_documents_carry_no_issue_state_or_change_narration` reds if any
 of this shape returns to `ONTOLOGY.md`.
