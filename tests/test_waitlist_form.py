@@ -20,11 +20,17 @@ regex + normalizer. If the legal suite's pinned set changes, sync
 EXPECTED_GUARD_MATCHES here too.
 
 Run:  python -m pytest tests/test_waitlist_form.py -v
+
+Also covers the /investors surface: its list form feeds the same table under its
+own source, and its email gate writes a DIFFERENT table (deck_views) through a
+different function, so a reader who traded an address for access is not on a
+mailing list they never joined.
 """
 from __future__ import annotations
 
 import html as html_lib
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -166,6 +172,170 @@ def test_edge_function_markers() -> None:
     assert "__resetRateLimit" in handle, "rate-limit reset export required (harness isolation)"
     assert "serve" in index and "Deno.env.toObject()" in index, \
         "index.ts must wire env: serve((req) => handle(req, Deno.env.toObject()))"
+
+
+# ── Second surface: /investors feeds the same list under its own source ────
+
+INVESTORS_HTML = WEBSITE_DIR / "investors.html"
+# The source the /investors list form declares; the edge function must allow it,
+# because the page and the function ship together and a source the server does
+# not recognise degrades to `landing_page` with no error anywhere.
+INVESTORS_SOURCES = ("investors",)
+DECK_VIEW_URL = FUNCTION_URL.replace("waitlist-subscribe", "deck-view")
+# The page's own constants, and the two wire() calls that bind a form to one of
+# them. Parsed rather than substring-matched: the endpoint NAMES occur twice each
+# (constant + call) and the quoted 'investors' twice (both wire calls), so a
+# substring check cannot tell which form writes where (see the test's docstring).
+VIEW_ENDPOINT_DECL = f"var VIEW_ENDPOINT = '{DECK_VIEW_URL}';"
+LIST_ENDPOINT_DECL = f"var LIST_ENDPOINT = '{FUNCTION_URL}';"
+WIRE_CALL = re.compile(
+    r"wire\('([a-z-]+)',\s*'[a-z-]+',\s*'[a-z-]+',\s*([A-Z_]+),\s*\{([^}]*)\}\s*[,)]",
+)
+
+
+class _FormRegions(HTMLParser):
+    """Map each <form id> to the region of the page it sits in.
+
+    `wire()` binds a handler to an element ID, so the id is only half the
+    contract: swapping the two id attributes keeps every other assertion green
+    while attaching the gate's handler to the mailing-list form and vice versa
+    — the same shipped failure as swapping the endpoints, reached the other way.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.regions: dict[str, str | None] = {}
+        self._stack: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        a = dict(attrs)
+        if tag == "form":
+            self.regions[a.get("id") or ""] = next((m for m in reversed(self._stack) if m), None)
+            return
+        if tag not in ("div", "section"):
+            return
+        if tag == "div" and "gate" in (a.get("class") or "").split():
+            self._stack.append("gate")
+        elif tag == "section" and a.get("id") == "stay-in-touch":
+            self._stack.append("stay-in-touch")
+        else:
+            self._stack.append("")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("div", "section") and self._stack:
+            self._stack.pop()
+
+
+def test_investors_page_posts_to_the_same_endpoint_and_declares_its_source() -> None:
+    """One table, two surfaces — and a third path for the gate.
+
+    The list form must point at the endpoint derived from config.toml (the same
+    single source of truth as index.html above) and declare the source the
+    function is asked to record, or attribution silently collapses to the
+    landing page's value and "who joined via the investor page" is unanswerable
+    from the data. The gate must point at deck-view instead: a view is not a
+    subscription, and the two must never share a write path.
+    """
+    raw = INVESTORS_HTML.read_text(encoding="utf-8")
+    assert "name=\"email\"" in raw, "investors.html must carry the email field"
+    # The honeypot protects both forms on the page: the submit handler reads the
+    # field by name, so a form without it has nothing for the functions' bot
+    # gate to receive.
+    assert raw.count('name="hp"') >= 2, "both investors.html forms need the honeypot field"
+
+    # Bind each form to ITS endpoint and ITS body — presence alone is not enough.
+    # The endpoint NAMES occur twice each (constant + call) and the quoted
+    # 'investors' twice (both wire calls), so a substring check passes even with
+    # the write paths swapped — the one regression that must not ship: the swap
+    # would put every deck reader on the mailing list they never joined, and would
+    # collapse attribution to the landing page's value with no error anywhere.
+    calls = WIRE_CALL.findall(raw)
+    assert len(calls) == 2, f"expected the two wire() calls, found {len(calls)}"
+    bound = {form: (endpoint, extra) for form, endpoint, extra in calls}
+    assert set(bound) == {"gate-form", "waitlist-form"}, f"unexpected form ids: {sorted(bound)}"
+
+    # ...and each id must still be ON the form it names.
+    regions = _FormRegions()
+    regions.feed(raw)
+    assert regions.regions.get("gate-form") == "gate", (
+        "the gate form must sit inside .gate — an id swap would attach its handler to the list form"
+    )
+    assert regions.regions.get("waitlist-form") == "stay-in-touch", (
+        "the list form must sit inside #stay-in-touch"
+    )
+
+    gate_endpoint, gate_extra = bound["gate-form"]
+    assert gate_endpoint == "VIEW_ENDPOINT", "the gate must post to the deck-view endpoint constant"
+    assert "deck:" in gate_extra and '\'investors\'' in gate_extra, "the gate must name its deck"
+    assert "source" not in gate_extra, "a view is not a subscription: the gate must send no source"
+
+    list_endpoint, list_extra = bound["waitlist-form"]
+    assert list_endpoint == "LIST_ENDPOINT", "the list must post to the waitlist endpoint constant"
+    for source in INVESTORS_SOURCES:
+        assert f"source: '{source}'" in list_extra, f"the list must declare source {source!r}"
+    assert "deck" not in list_extra, "the list is not a deck view: it must send no deck"
+
+    # ...and the constants must be the URLs derived from config.toml's project id.
+    assert VIEW_ENDPOINT_DECL in raw, f"VIEW_ENDPOINT must be {DECK_VIEW_URL!r}"
+    assert LIST_ENDPOINT_DECL in raw, f"LIST_ENDPOINT must be {FUNCTION_URL!r}"
+    assert DECK_VIEW_URL.endswith("/deck-view") and FUNCTION_URL.endswith("/waitlist-subscribe")
+
+    handle = (FUNCTIONS_DIR / "waitlist-subscribe" / "handle.ts").read_text(encoding="utf-8")
+    assert "ALLOWED_SOURCES" in handle, "handle.ts must allow-list attribution sources"
+    for source in INVESTORS_SOURCES:
+        assert f'"{source}"' in handle, f"handle.ts must allow-list {source!r}"
+    assert '"landing_page"' in handle, "landing_page must stay the default source"
+
+
+def test_investors_turnstile_resets_its_own_widget() -> None:
+    """One widget per form, and each form resets only its own.
+
+    `turnstile.reset()` with no argument re-renders the most recently created
+    widget. This page has two forms, so a no-arg reset would re-render the
+    OTHER form's widget and leave this one spent: the token is cleared, the
+    widget still shows a completed check, and the next submit is refused
+    client-side with nothing to re-verify — a one-shot form.
+    """
+    raw = INVESTORS_HTML.read_text(encoding="utf-8")
+    captured = re.search(r"(\w+)\s*=\s*window\.turnstile\.render\(", raw)
+    assert captured, "each form must retain the id its own render() call returns"
+    assert f"window.turnstile.reset({captured.group(1)})" in raw, \
+        "the reset must name the same widget id the render captured"
+    assert "window.turnstile.reset()" not in raw, \
+        "a no-arg reset re-renders the last-created widget (the other form's)"
+
+
+def test_deck_view_function_and_table_exist() -> None:
+    """The gate's write path: its own function, its own table, no email.
+
+    A view record is what "who opened the deck" needs; making the gate write
+    `waitlist_subscribers` would merge viewing with subscribing and put readers
+    on a list they did not join (the behaviour harness pins the write target —
+    this pins that the pieces exist and that the function is browser-reachable).
+    """
+    handle = (FUNCTIONS_DIR / "deck-view" / "handle.ts").read_text(encoding="utf-8")
+    index = (FUNCTIONS_DIR / "deck-view" / "index.ts").read_text(encoding="utf-8")
+    assert "import " not in handle, "handle.ts must have zero imports (Node harness)"
+    assert "deck_views" in handle, "the function must write deck_views"
+    assert "api.resend.com" not in handle, "the gate emails nobody"
+    assert "__resetRateLimit" in handle, "rate-limit reset export required (harness isolation)"
+    assert "serve" in index and "Deno.env.toObject()" in index, \
+        "index.ts must wire env: serve((req) => handle(req, Deno.env.toObject()))"
+
+    mig = MIGRATIONS_DIR / "20261015000001_deck_views.sql"
+    assert mig.exists(), "deck_views migration missing"
+    raw = mig.read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS public.deck_views" in raw
+    assert re.search(r"email\s+text\s+NOT\s+NULL", raw, re.I), "email column required"
+    assert "ENABLE ROW LEVEL SECURITY" in raw.upper()
+    assert re.search(r"TO\s+service_role", raw, re.I), "service_role policy required"
+    assert not re.search(r"TO\s+anon\b", raw, re.I), "no anon policy — writes via service role only"
+
+    config = CONFIG_TOML.read_text(encoding="utf-8")
+    assert "[functions.deck-view]" in config, "deck-view must be declared in config.toml"
+    section = config.split("[functions.deck-view]", 1)[1].split("[functions.", 1)[0]
+    assert re.search(r"verify_jwt\s*=\s*false", section), \
+        "deck-view must have verify_jwt=false (anonymous browser POSTs carry no JWT)"
 
 
 # ── Legal mirror: privacy.html present-tense guard (set equality) ──────────
