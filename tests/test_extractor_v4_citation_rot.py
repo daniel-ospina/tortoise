@@ -571,16 +571,18 @@ DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
 #: Absence of work spoken as absence: *"`#3011` has not run"*, *"THE S0 HALF IS
 #: NOT BUILT"*, *"not yet wired"*. A design document states what the design IS;
 #: what is missing is a tracker's job. Applied to every design document,
-#: `ONTOLOGY.md` included: the two lines it once carried were dropped when the
-#: owner approved the exact copy (#8745). Their build status was ALREADY recorded
-#: per field in `ONTOLOGY-CHANGELOG.md` (§4.2/§4.3, `❌` both), so nothing moved
-#: into that file — the drop removed the status from the MODEL, not from the
-#: record.
+#: `ONTOLOGY.md` included: the lines it carried were dropped when the owner
+#: approved the exact copy (#8745) — the two `not yet written by …` clauses, plus
+#: the producer-absence claims. The per-field build status for
+#: `validFrom`/`validTo` was ALREADY recorded in `ONTOLOGY-CHANGELOG.md`
+#: (§4.2/§4.3, `❌` both), so the record did not need to gain it.
 #:
-#: Scope: this arm catches the CAPS form and the `#NNN`-adjacent lowercase form
-#: only. It is NOT "the design documents are free of status prose" —
+#: Scope: this arm catches three absence forms — the CAPS form, the
+#: `#NNN`-adjacent lowercase form, and the producer-absence form (`no producer`,
+#: `spec-only`). It is NOT "the design documents are free of status prose":
 #: `ONTOLOGY.md:426` / `:446` (*"**Not written by `_upsert_subject`** — planned
-#: follow-up"*) pass it.
+#: follow-up"*) pass it. That shape was measured (`not written` has 12 corpus
+#: lines, only 2 of them status claims) and deliberately left out.
 _STATUS_ABSENCE = (
     # The CAPS form is this document set's convention for delivery state, so it
     # carries no ambiguity.
@@ -653,7 +655,11 @@ _CHANGE_NARRATION = re.compile(
     r"|Corrections? to (?:an )?earlier"
     r"|(?:CORRECTED|AMENDED) 20[0-9]{2}-"
     r"|\bDraft [0-9]\b"
-    r"|rewritten twice",
+    r"|rewritten twice"
+    # A version the passage says it has been true since — change history, not the
+    # rule it settled on. Measured across the three design documents before
+    # adding: 0 hits at HEAD.
+    r"|\bsince v[0-9]+\.[0-9]+\b",
     re.IGNORECASE,
 )
 
@@ -787,6 +793,9 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "**Implementation status.** Both halves are now implemented.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
+        # The change-history date form, on the §8 direction note this branch moved.
+        "*(Stored and interpreted on every path since v3.25 \u2026 see the "
+        "Transition state note in the changelog.)*",
         # The "absence of a producer" arm, on the two claims this branch removed.
         "| `participatesIn` | Subject \u2192 Event | Subjects involved in an event "
         "(\u26a0\ufe0f spec-only \u2014 no producer yet, tracked in issue #7884) |",
@@ -803,6 +812,9 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "`#4999` records the trace mechanism.",
         # A near-miss for the producer arm: names a producer, claims no absence.
         '`tortoise/subject_binding.py` is the ONLY confidence-gated `aboutSubject` producer.',
+        # A near-miss for the version-date arm: a version NAMED, not asserted as
+        # a period the passage has held true since.
+        "Model version v3.15 retires the `:Document` label.",
     ]
     # The SCOPE is pinned too. Without this, narrowing `STATUS_ABSENCE_DOCS` back
     # to a subset keeps every test green while silently dropping `ONTOLOGY.md`
