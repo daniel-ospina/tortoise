@@ -1066,7 +1066,11 @@ class TestGraphSurface:
     """C2 (#2111) contract: POST /v1/graphs is the session alias of the ONE
     provisioning service — free tier 402s (E2E-3 pin), the graphs row is
     written in Supabase mode (C1 deferred the INSERT; C2 owns it), and the
-    list shape carries status/key_count (point_count dropped, §6.2)."""
+    list shape carries status/key_count (point_count dropped, §6.2).
+
+    Also carries the #8000 pin for the team-switcher read's verdict contract
+    (`test_my_teams_route_is_refused_and_the_read_is_converted`), since that
+    read is one of this class's own sites."""
 
     def _seed_default_graph(self, fake):
         """Real teams rows always carry graph_name (provision_team requires
@@ -1170,13 +1174,51 @@ class TestGraphSurface:
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
         fake.seed("org_memberships", [_owner_membership()])
-        r = tc.get("/v1/organizations")
+        # #8000: this nodeid 504'd on the required `test (b)` leg (PR #8416,
+        # run 38371075736) on a head that touches no runtime path. The route is
+        # NOT wait-bound-EXEMPT, so the refusal is a non-answer (#5049 rule 1) —
+        # `require_answered` makes it an INCONCLUSIVE skip instead of the
+        # `assert 504 == 200` FAIL, while an ANSWERED non-200 still reaches the
+        # assertion below, so a genuine regression stays a FAIL.
+        r = require_answered(tc.get("/v1/organizations"),
+                             what="GET /v1/organizations answered")
         assert r.status_code == 200, r.text
         rows = r.json()
         assert len(rows) == 1
         assert rows[0]["org_id"] == "team-free-001"
         assert rows[0]["graph_count"] == 1
         assert rows[0]["default_graph_id"] == "default"
+
+    def test_my_teams_route_is_refused_and_the_read_is_converted(
+            self, user_client, monkeypatch):
+        """#8000: the site's route really can be refused, and the refusal is a
+        non-answer — not the ``assert 504 == 200`` the #8416 `test (b)` leg
+        recorded.
+
+        Deterministic (no load, no wall-clock wait): the SAME middleware the
+        request meets in production (``hosted_api.WaitBoundMiddleware``, whose
+        bound's only home is ``mcp_auth``) is forced to breach on this route.
+        ``self.test_list_my_teams_uses_derived_graphs`` reading a bare
+        ``status_code`` again goes RED at
+        ``test_verdict_contract.py::test_every_converted_site_wires_the_verdict_contract``
+        (the site is registered), and if the route is ever EXEMPTED this test
+        says so instead of the conversion silently becoming dead code.
+        """
+        from tests._verdict import is_transport_wait_bound_refusal
+        from tortoise import mcp_auth
+        from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+        assert ("GET", "/v1/organizations") not in _TRANSPORT_WAIT_BOUND_EXEMPT
+        monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+        tc, _fake, _ = user_client
+        # The product's own refusal, through the real middleware.
+        r = tc.get("/v1/organizations")
+        assert r.status_code == 504, r.text
+        assert is_transport_wait_bound_refusal(r) is True, r.text
+        # ...and the read the site performs turns it into a non-answer.
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            require_answered(r, what="GET /v1/organizations answered")
+        assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
 
     def test_graph_quota_409_at_cap_solo(self, user_client):
         """C2 quota gate: solo (max 2 — default + 1 custom) 201s the 1st
