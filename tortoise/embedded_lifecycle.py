@@ -1027,7 +1027,8 @@ def _open_construct_lock(key: str, *, sidecar: str | None = None) -> int:
     caller can reuse this whole discipline (O_NOFOLLOW, the regular-file check,
     the announced wait, the -1-not-raise failures) for a DIFFERENT file that
     still needs one exclusive cross-process flock — #7935's restore-journal
-    lock, which cannot share the store's contract but must not grow a second,
+    lock, which cannot share the store's key but must not grow a second,
+    divergent lock implementation.
 
     Two failures deliberately yield -1 ("no lock", the caller keeps the
     in-process RLock) rather than raising, mirroring `_acquire_owner_lock`'s
