@@ -4624,6 +4624,30 @@ def test_class_plural_does_not_hijack_a_binary_ordering_question(question):
     assert classify_question(question) is AssemblyShape.ORDERING, question
 
 
+@pytest.mark.parametrize("question", [
+    # #8779 F1, the LIST half: the branch exempted only the BINARY
+    # `_RE_ORDERING` head, not the N-ary colon-list `_RE_ORDERING_LIST` --
+    # which main treats as an ORDERING path too (`_nary_terms` +
+    # `_RE_ORDERING.match(q) or _RE_ORDERING_LIST.match(q)`). The branch
+    # caught the colon list FIRST and lost ORDERING both ways: the comma
+    # form was answered as a class enumeration (the three listed subjects
+    # discarded), and the `or`-chain form hit the branch's own
+    # `_RE_OR_CHAIN` re-guard and returned None (the answer lost entirely).
+    "What is the order of the three events I attended in the past two "
+    "months: the wedding, the trip, and the concert?",
+    "What is the order of the three events I attended in the past two "
+    "months: the wedding or the trip or the concert?",
+])
+def test_class_plural_does_not_hijack_an_nary_ordering_question(question):
+    """Non-vacuous: both strings are ``ORDERING`` at main, while on the
+    pre-fix head the first classified ``CLASS_PLURAL`` and the second
+    returned ``None``."""
+    from tortoise.assembly import _RE_ORDERING_LIST
+
+    assert _RE_ORDERING_LIST.match(question), "the N-ary head must claim it"
+    assert classify_question(question) is AssemblyShape.ORDERING, question
+
+
 def test_class_plural_template_is_not_super_linear_on_space_runs():
     r"""The class-plural head must not backtrack over whitespace runs.
 
@@ -4933,6 +4957,34 @@ def test_class_tokens_select_the_discriminative_vocabulary():
     # stems reconcile the plural / adjectival spellings on BOTH sides
     assert _class_tokens("my musical gigs") == ("music", "gig")
     assert _class_tokens("") == ()
+
+
+def test_class_span_stops_at_an_interposed_possessive_noun_phrase():
+    """#8779 F3: the class span must NOT absorb an interposed possessive noun
+    phrase. ``_class_owns_row`` matches on ANY shared token, so a stray
+    ``cousin`` in the class vocabulary becomes an alternative SELECTOR and a
+    cousin row is admitted to a CONCERT question -- a FALSE INCLUDE, the
+    direction this shape must never produce.
+
+    The CONTROL (non-possessive form) is asserted FIRST, so the subject
+    assertion below cannot be satisfied vacuously by an abstention.
+    """
+    control = resolve_class_window(
+        "What is the order of the concerts I attended in the past two "
+        "months?", "2026-09-10")
+    assert control is not None and control.tokens == ("concert",)
+
+    w = resolve_class_window(
+        "What is the order of the concerts my cousin and I attended in "
+        "the past two months?", "2026-09-10")
+    assert w is not None, "the interposed NP must not kill the template"
+    assert w.tokens == ("concert",), w.tokens
+    assert "cousin" not in w.class_phrase, w.class_phrase
+    # subject: a cousin row is not the class...
+    assert not _class_owns_row({"content": "my cousin came to visit"},
+                               w.tokens)
+    # ...while the class row still is
+    assert _class_owns_row({"content": "went to the concert"}, w.tokens)
 
 
 def test_class_owns_row_matches_content_and_search_keys():

@@ -660,6 +660,16 @@ _CLASS_COUNT_RX = (
 #: `we` inside "wedding", so the tempered class span stops mid-word and the
 #: whole template fails.
 _CLASS_REL_PRONOUN = r"\b(?:i|we|you|they|he|she|the\s+narrator)\b"
+#: possessive determiners. NOT folded into `_CLASS_REL_PRONOUN`: that pattern is
+#: the relative-clause SUBJECT, and a possessive is never one. But they DO end
+#: the class span -- an interposed possessive noun phrase ("the concerts MY
+#: COUSIN and I attended") otherwise lands INSIDE the class vocabulary, and
+#: `_class_owns_row`'s any-token overlap then treats it as an alternative
+#: selector (#8779 F3: a cousin row was selected for a CONCERT question -- a
+#: FALSE INCLUDE, the direction this shape must never produce).
+_CLASS_POSSESSIVE = r"\b(?:my|our|his|her|their|its)\b"
+_CLASS_SPAN_STOP = (r"\b(?:i|we|you|they|he|she|the\s+narrator"
+                   r"|my|our|his|her|their|its)\b")
 _RE_CLASS_PLURAL = re.compile(
     r"^\s*(?:what|which)\s+(?:is|was)\s+the\s+order\s+of\s+"
     # ⛔ the class span may NOT cross a relative-clause boundary: this is a
@@ -672,7 +682,14 @@ _RE_CLASS_PLURAL = re.compile(
     # INCLUDE, the dangerous direction. The repeated-clause form now
     # ABSTAINS (no match -> the caller's legacy fall-through), which is the
     # plan's recorded recall-loss posture, never a false include.
-    r"(?P<cls>(?:(?!" + _CLASS_REL_PRONOUN + r"\s+\w).)+?)\s"
+    r"(?P<cls>(?:(?!" + _CLASS_SPAN_STOP + r"\s+\w).)+?)\s"
+    # an interposed possessive noun phrase sitting between the class and its
+    # relative clause ("... concerts MY COUSIN and I attended ..."). It is
+    # consumed HERE so the span can stop early without the template failing.
+    # Consequence, accepted: a class phrase that ITSELF begins with a
+    # possessive now abstains -- a recall loss, which is the posture this shape
+    # already records for the repeated-clause form, and never a false include.
+    r"(?:(?:" + _CLASS_POSSESSIVE + r")\s+\w+\s+(?:and\s+)?)?"
     r"(?:(?:that|which)\s+)?"
     r"(?:" + _CLASS_REL_PRONOUN + r")\s+\w+(?:\s+\w+)?\s+"
     # the window is a NAMED group so the classifier can blank exactly its own
@@ -963,8 +980,16 @@ def classify_question(question: str) -> AssemblyShape | None:
     # guard list (a `return None` here would short-circuit the ordering branch
     # below and LOSE that answer): the class-plural branch is SKIPPED for it,
     # and the ordinary pipeline routes it to `ORDERING` as before (#8779 F1).
+    # `_RE_ORDERING_LIST` is exempted for the SAME reason: the N-ary colon-list
+    # ordering question is an ORDERING path at main too (`_nary_terms` +
+    # `(_RE_ORDERING or _RE_ORDERING_LIST)` guard), and this branch caught it
+    # FIRST -- which lost `ORDERING` two ways (→ `class-plural` for the
+    # comma form, → `None` via the `_RE_OR_CHAIN` re-guard for the or-chain
+    # form). Measured on the head: a colon-list form classified `ordering` at
+    # main and `class-plural`/`None` here (#8779 F1, the list half).
     m_cls = _RE_CLASS_PLURAL.match(q)
-    if m_cls is not None and not _RE_ORDERING.match(q):
+    if m_cls is not None and not (
+            _RE_ORDERING.match(q) or _RE_ORDERING_LIST.match(q)):
         # The shape's OWN window IS the relative window the template already
         # resolved, and it may itself spell `last <unit>`; `_RE_AGO_OTHER`'s
         # calendar surface is an ADDITIONAL such offset ELSEWHERE in the
