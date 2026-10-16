@@ -438,5 +438,18 @@ def aggregate_changes(events: list[dict[str, Any]] | None) -> list[dict[str, Any
             # observed state is what the next delta for that subject compares to.
             observed[subject] = {**seen, **after}
             last_after[subject] = after
+            # A HARD delete destroys the incarnation, so it clears the subject's
+            # OBSERVED state as well as the suppression slot: the next event for
+            # this id is a BIRTH, and carrying the destroyed node's fields
+            # forward would report a content transition that never happened —
+            # and, on a same-content re-create, `change: "created"` with
+            # `before == after`. This is the module contract ("a claim's FIRST
+            # event in the window reports no `before` rather than a fabricated
+            # one") applied to an incarnation boundary.
+            #
+            # Only the HARD delete: `DedupeRecorded` / `DedupeRejected` also
+            # fold to an empty `after`, and the subject is still there.
+            if _is_hard_delete(type_, payload):
+                observed.pop(subject, None)
 
     return [grouped[s] for s in order]

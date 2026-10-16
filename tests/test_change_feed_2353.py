@@ -703,12 +703,18 @@ def test_a_recreated_point_is_reported_as_a_second_creation(monkeypatch, sdk_fac
     """A hard delete CLEARS the subject's observed state, so a re-create is news.
 
     The no-op suppression drops a delta that repeats the IMMEDIATELY PRECEDING
-    one for its subject. A hard delete carries `after == {}`, which is what
-    keeps delete-then-re-create from being swallowed — the re-created point's
-    `after` repeats its pre-delete values, so suppressing on "we have seen
-    these values before" instead would report `['created', 'deleted']` for a
-    claim that is present in the graph, telling a consumer it is gone (a review
-    P2 on this PR's own no-op fix).
+    one for its subject. A hard delete carries `after == {}` and clears both
+    that slot and the subject's observed state, which is what keeps
+    delete-then-re-create from being swallowed — the re-created point's `after`
+    repeats its pre-delete values, so suppressing on "we have seen these values
+    before" would report `['created', 'deleted']` for a claim that is present in
+    the graph (a review P2 on this PR's own no-op fix).
+
+    Clearing the OBSERVED state too is what makes the re-create a birth rather
+    than a content transition: `delete_point` destroyed the old incarnation, so
+    reporting its fields as the new node's `before` would claim a change that
+    never happened (and, on a same-content re-create, `before == after` on a
+    `created`). A review P2.
     """
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
@@ -716,8 +722,11 @@ def test_a_recreated_point_is_reported_as_a_second_creation(monkeypatch, sdk_fac
         first = sdk.create_point("statement", "resurrect-me")
         sdk.delete_point(first["id"])
         sdk.create_point("statement", "resurrect-me", id=first["id"])
-        kinds = _kinds(sdk.poll_events()["changes"], first["id"])
+        changes = sdk.poll_events()["changes"]
+        kinds = _kinds(changes, first["id"])
         assert kinds == ["created", "deleted", "created"], kinds
+        recreated = [c for c in changes if c["id"] == first["id"]][0]["changes"][-1]
+        assert "before" not in recreated, recreated
     finally:
         sdk.close()
 
