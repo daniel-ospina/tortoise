@@ -146,7 +146,10 @@ today.
      of the R13 discipline re-applied explicitly inside the branch: a
      co-present `_RE_AGO_OTHER` surface, a promoted/bare relative offset, a
      frequency/count head, an advice frame, or a 2+ `or` chain still returns
-     `None`.
+     `None` — and so does any other co-present calendar day, read through the
+     SHARED anchor finder rather than `_RE_AGO_OTHER`'s partial vocabulary
+     (F12: a named holiday used to be claimed by the shape, dropping the day
+     `main` resolved).
 2. **`tortoise/assembly.py` — the pure resolver.**
    - `ClassWindow` (frozen): `class_phrase`, `tokens`, `unit`, `count`,
      `window_lo`, `window_hi`, `newest_first` (read from the question's own
@@ -259,12 +262,14 @@ Implemented as planned. Measured results pinned in tests:
 - negative-set floor: `_CLASS_PLURAL_COVERED` removes the 2 adjudicated rows
   (32 → 30 in the boxed set, denominator 29 → 27); the fire SET assertion is
   unchanged and still green.
-- `tests/test_assembly_pure.py`: **296 passed, 18 skipped** (314 collected)
-  at the review-fix head. The pre-review head (`2e3106b4b`) measured 282
-  passed, 18 skipped; `origin/main` collects 229. The +14 over `2e3106b4b` are
-  the tests added by the review fixes (binary-ordering hijack, direction read
-  before the clause, bare-`last` direction, the `last <unit>` window arm, the
-  duration guard); the +85 over `main` is the PR's total.
+- `tests/test_assembly_pure.py`: **316 passed, 18 skipped** (334 collected) at
+  the head of this branch; the head before the F12 round (`e7cd26792`)
+  measured 312 passed, 18 skipped (330 collected). The pre-review head
+  (`2e3106b4b`, as recorded there) measured 282 passed, 18 skipped;
+  `origin/main` collects 229 (re-measured here). The tests added by the review
+  fixes are the binary-ordering hijack, the direction read before the clause,
+  the bare-`last` direction, the `last <unit>` window arm, the duration guard
+  and the F12 pins; the +105 collected over `main` is the PR's total.
 - `tests/test_assembly_sdk.py` (the ask-lane/SDK integration lane, embedded):
   **33 passed** — the #2652 window path and the flag-off legacy goldens are
   unaffected.
