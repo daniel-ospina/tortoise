@@ -699,6 +699,29 @@ def test_one_annotation_call_is_one_delta(monkeypatch, sdk_factory, tmp_path):
         sdk.close()
 
 
+def test_a_recreated_point_is_reported_as_a_second_creation(monkeypatch, sdk_factory, tmp_path):
+    """A hard delete CLEARS the subject's observed state, so a re-create is news.
+
+    The no-op suppression drops a delta that repeats the IMMEDIATELY PRECEDING
+    one for its subject. A hard delete carries `after == {}`, which is what
+    keeps delete-then-re-create from being swallowed — the re-created point's
+    `after` repeats its pre-delete values, so suppressing on "we have seen
+    these values before" instead would report `['created', 'deleted']` for a
+    claim that is present in the graph, telling a consumer it is gone (a review
+    P2 on this PR's own no-op fix).
+    """
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+    sdk = sdk_factory(tmp_path)
+    try:
+        first = sdk.create_point("statement", "resurrect-me")
+        sdk.delete_point(first["id"])
+        sdk.create_point("statement", "resurrect-me", id=first["id"])
+        kinds = _kinds(sdk.poll_events()["changes"], first["id"])
+        assert kinds == ["created", "deleted", "created"], kinds
+    finally:
+        sdk.close()
+
+
 def test_operator_promote_precondition_admits_an_unset_status():
     """`OperatorPromoted` has two producers with different admission predicates.
 

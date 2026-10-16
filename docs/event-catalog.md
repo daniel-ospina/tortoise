@@ -56,11 +56,11 @@
 > `retract_point`'s tombstone (`status='retracted'`, terminal-guarded) and
 > `delete_point` / the capture stale-turn sweep's HARD delete (node destroyed,
 > no guard). Their payloads were identical, so the feed reported the tombstone
-> reading for a destroyed node. While the switch is truthy the hard-delete
-> producer adds `deleted: true` to its payload, and the fold reports that
-> producer as `change: "deleted"` with NO `status` and NO precondition; without
-> the marker the row is the tombstone, the type's remaining producer. The
-> marker is written UNCONDITIONALLY (#2353 review P1): gating it on the READING
+> reading for a destroyed node. The hard-delete producer adds `deleted: true`
+> to its payload, and the fold reports that producer as `change: "deleted"`
+> with NO `status` and NO precondition; without the marker the row is the
+> tombstone, the type's remaining producer. The marker is written
+> UNCONDITIONALLY (#2353 review P1): gating it on the READING
 > process's switch folded an unswitched writer's hard deletes as tombstones.
 > Rows written before the marker existed carry nothing that separates the two
 > producers and are read as tombstones — a stated residual.

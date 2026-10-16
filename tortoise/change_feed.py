@@ -241,8 +241,8 @@ def _after(type_: str, payload: dict[str, Any]) -> dict[str, Any]:
     elif type_ == "PointRetracted":
         # Two producers, two end-states (#3300): the tombstone keeps the node
         # and sets `status='retracted'`; the HARD delete DESTROYS it, so there
-        # is no status to report. The marker (written by the hard-delete emit
-        # only under the switch) is what tells them apart.
+        # is no status to report. The marker (written UNCONDITIONALLY by the
+        # hard-delete emit) is what tells them apart.
         if not _is_hard_delete(type_, payload):
             after["status"] = "retracted"
     elif type_ == "PointInvalidated":
@@ -380,6 +380,7 @@ def aggregate_changes(events: list[dict[str, Any]] | None) -> list[dict[str, Any
     does not know.
     """
     observed: dict[str, dict[str, Any]] = {}
+    last_after: dict[str, dict[str, Any]] = {}
     grouped: dict[str, dict[str, Any]] = {}
     order: list[str] = []
 
@@ -413,14 +414,19 @@ def aggregate_changes(events: list[dict[str, Any]] | None) -> list[dict[str, Any
                 # reports.
                 delta["precondition"] = copy.deepcopy(precondition)
             delta["after"] = copy.deepcopy(after)
-            # A delta that changes NOTHING is not news. `annotate_operator`
-            # emits `OperatorAnnotated` and then a JSONL-parity `PointRevised`
-            # carrying the same numbers — the same keys, once the annotation
-            # spelling is folded — so without this the feed reported a second
-            # `revised` whose `after` equalled its own `before`. `before` is
-            # observed-only by construction, so this can only suppress a
-            # genuine no-op.
-            if after and all(seen.get(k) == v for k, v in after.items()):
+            # A delta that repeats the IMMEDIATELY PRECEDING one for this subject
+            # is not news. `annotate_operator` emits `OperatorAnnotated` and then
+            # a JSONL-parity `PointRevised` carrying the same numbers under the
+            # same folded keys, so without this the feed reported an extra
+            # `revised` whose `after` equalled its own `before`.
+            #
+            # IMMEDIATELY PRECEDING, not "we have seen these values before": a
+            # hard delete carries `after == {}` and CLEARS this slot, which is
+            # what keeps delete-then-re-create from being swallowed — the
+            # re-created point's `after` repeats its pre-delete values, so a
+            # seen-before rule would tell a consumer the claim is still gone.
+            if after and after == last_after.get(subject):
+                last_after[subject] = after
                 continue
             group = grouped.get(subject)
             if group is None:
@@ -431,5 +437,6 @@ def aggregate_changes(events: list[dict[str, Any]] | None) -> list[dict[str, Any
             # The fold advances on EVERY subject the event named: the same
             # observed state is what the next delta for that subject compares to.
             observed[subject] = {**seen, **after}
+            last_after[subject] = after
 
     return [grouped[s] for s in order]
