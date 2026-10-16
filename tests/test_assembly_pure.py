@@ -4771,6 +4771,11 @@ def test_resolve_class_window_arithmetic(question, qd, lo, hi, count, unit,
 @pytest.mark.parametrize("instruction,newest_first", [
     # the census spelling and the head's own default: chronological
     ("starting from the earliest", False),
+    # #8779 F7: `starting WITH` is the SAME structural bound as `starting
+    # from`; unread, it rendered CHRONOLOGICAL order under an "earliest first"
+    # header for an unambiguous reverse request.
+    ("starting with the earliest", False),
+    ("starting with the most recent", True),
     ("from earliest to latest", False),
     ("from earliest to most recent", False),
     ("from the oldest to the newest", False),
@@ -5033,6 +5038,37 @@ def test_class_vocabulary_ends_at_an_adjunct_preposition():
     # ...while a row that IS of the class still is
     assert _class_owns_row({"content": "attended a jazz concert downtown"},
                            w.tokens)
+
+
+def test_class_vocabulary_falls_back_to_the_complement_of_a_generic_head():
+    """#8779 F5: ending the vocabulary at a preposition is only correct while
+    the HEAD noun phrase still carries a DISCRIMINATIVE token. "the events at
+    the jazz festival" has a GENERIC head (``event``), so the cut left the
+    near-universal ``event`` alone -- which selected an unrelated security
+    event and MISSED the jazz-festival row: a WRONG answer, not an abstention
+    (the defect the cut exists to fix, inverted). A generic head is therefore
+    identified by its own complement instead.
+
+    The CONTROL (a DISCRIMINATIVE head, same sentence shape) is asserted
+    FIRST, so the subject assertion cannot be satisfied by the fallback firing
+    for every prepositional class.
+    """
+    # CONTROL: a discriminative head keeps the cut and drops the locative
+    assert _class_tokens("the concerts in Central Park") == ("concert",)
+
+    # SUBJECT: a generic head falls back to what follows the preposition
+    assert _class_tokens("the events at the jazz festival") == \
+        ("jazz", "festiv")
+    w = resolve_class_window(
+        "What is the order of the events at the jazz festival I attended "
+        "in the past two months?", "2026-09-10")
+    assert w is not None and w.tokens == ("jazz", "festiv")
+    # the class row IS selected...
+    assert _class_owns_row(
+        {"content": "went to the jazz festival opening night"}, w.tokens)
+    # ...and the row sharing only the generic head is NOT
+    assert not _class_owns_row(
+        {"content": "attended a security event at work"}, w.tokens)
 
 
 def test_class_owns_row_matches_content_and_search_keys():

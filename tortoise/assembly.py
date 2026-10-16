@@ -3397,7 +3397,12 @@ _RE_CLASS_ORDER_BARE_TO = re.compile(
     + _CLASS_DIR_WORD + r"\b",
     re.IGNORECASE)
 _RE_CLASS_ORDER_STARTING = re.compile(
-    r"\bstarting\s+from\s+(?:the\s+)?(?P<first>" + _CLASS_DIR_WORD + r")\b",
+    # `starting with` is the SAME structural bound as `starting from`: a
+    # reverse request spelled "starting with the most recent" was not read at
+    # all, so the block rendered CHRONOLOGICAL order under an "earliest first"
+    # header for an unambiguous reverse question (#8779 F7).
+    r"\bstarting\s+(?:from|with)\s+(?:the\s+)?(?P<first>"
+    + _CLASS_DIR_WORD + r")\b",
     re.IGNORECASE)
 _RE_CLASS_ORDER_FIRST = re.compile(
     r"\b(?P<first>" + _CLASS_DIR_WORD + r")\s+first\b",
@@ -3408,7 +3413,7 @@ _RE_CLASS_ORDER_REVERSE = re.compile(
 _RE_CLASS_ORDER_INSTRUCTION = re.compile(
     r"\bfrom\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?"
     + _CLASS_DIR_WORD + r"\b"
-    r"|\bstarting\s+from\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\b"
+    r"|\bstarting\s+(?:from|with)\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\b"
     r"|\b" + _CLASS_DIR_WORD + r"\s+first\b"
     r"|\breverse\s+chronological\s+order\b"
     r"|\b" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?" + _CLASS_DIR_WORD
@@ -3477,15 +3482,38 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     t = _as_str(span).strip()
     t = _CLASS_LEAD_DET.sub("", t, count=1).strip()
     t = _CLASS_LEAD_COUNT.sub("", t, count=1).strip()
-    out: list[str] = []
-    for raw in _CLASS_WORD.findall(t.lower()):
+
+    def _stems(words) -> list[str]:
+        acc: list[str] = []
+        for raw in words:
+            if raw in _CLASS_STOPWORDS:
+                continue
+            stem = _class_stem(raw)
+            if stem and stem not in acc:
+                acc.append(stem)
+        return acc
+
+    words = _CLASS_WORD.findall(t.lower())
+    cut = len(words)
+    for i, raw in enumerate(words):
         if raw in _CLASS_ADJUNCT_PREP:
+            cut = i
             break
-        if raw in _CLASS_STOPWORDS:
-            continue
-        stem = _class_stem(raw)
-        if stem and stem not in out:
-            out.append(stem)
+    out = _stems(words[:cut])
+    # ⛔ the cut above is only correct while the HEAD noun phrase still carries
+    # a DISCRIMINATIVE token. When it does not -- "the events AT THE JAZZ
+    # FESTIVAL", whose head `event` is generic -- cutting leaves the
+    # near-universal `event` alone, which selects almost any narrative row (a
+    # security event, say) and MISSES the jazz-festival row: a WRONG answer
+    # rather than an abstention, i.e. the same defect the cut exists to fix,
+    # inverted (#8779 F5). A generic head is identified by its own complement,
+    # so fall back to the tokens after the preposition when that is all there
+    # is. `the concerts in Central Park` (a DISCRIMINATIVE head) keeps the cut
+    # and drops the locative, as before.
+    if cut < len(words) and not [x for x in out if x not in _CLASS_GENERIC]:
+        complement = _stems(words[cut + 1:])
+        if complement:
+            out = complement
     discriminative = [tok for tok in out if tok not in _CLASS_GENERIC]
     return tuple(discriminative or out)
 
