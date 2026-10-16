@@ -328,7 +328,9 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     # renames the constant, and dropping it is silently safe (the remaining
     # files still satisfy the floor). Every HTTP-facing function must declare an
     # allowlist — `_shared` has no browser surface and is skipped explicitly,
-    # not by accident.
+    # not by accident. Every DECLARING FILE is compared, not just the first per
+    # function: a function with two declarations could otherwise satisfy the
+    # guard from a decoy while the served handler drifted.
     decl = re.compile(r"(?:export\s+)?(?:const|let|var)\s+ALLOWED_ORIGINS\s*=")
     declaring: dict[str, str] = {}
     missing: list[str] = []
@@ -336,11 +338,11 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     for fn_dir in sorted(p for p in functions_dir.iterdir() if p.is_dir()):
         if fn_dir.name == "_shared":
             continue
-        src = "\n".join(f.read_text() for f in sorted(fn_dir.rglob("*.ts")))
-        if decl.search(src):
-            declaring[fn_dir.name] = src
-        else:
+        hits = [f for f in sorted(fn_dir.rglob("*.ts")) if decl.search(f.read_text())]
+        if not hits:
             missing.append(fn_dir.name)
+        for hit in hits:
+            declaring[f"{fn_dir.name}/{hit.relative_to(fn_dir)}"] = hit.read_text()
     assert not missing, (
         f"these functions declare no ALLOWED_ORIGINS: {missing} — an HTTP-facing "
         "function needs one; a function with no browser surface needs a "
@@ -352,7 +354,7 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     ).read_text()
     for name, src in sorted(declaring.items()):
         assert arrays(src) == arrays(waitlist), (
-            f"{name}'s ALLOWED_ORIGINS/ORIGIN_SUFFIXES must match "
+            f"{name} ALLOWED_ORIGINS/ORIGIN_SUFFIXES must match "
             "waitlist-subscribe — change every declaring function together "
             "(see the keep-in-sync comment in tenant-provision/index.ts)"
         )

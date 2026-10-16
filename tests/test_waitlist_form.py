@@ -376,8 +376,12 @@ def test_investors_forms_bound_the_request_and_expose_their_errors() -> None:
     # `aria-describedby` then reads that message as the field's description.
     assert raw.count("markInvalid();") == 2, \
         "only the address-validation sites may mark the field invalid"
-    assert "emailInput.addEventListener('input', clear)" in raw, \
+    assert "emailInput.addEventListener('input'" in raw, \
         "editing the value must clear the invalid claim without a submit"
+    assert re.search(
+        r"addEventListener\('input', function \(\) \{\s*if \(!emailInput\.hasAttribute\('aria-invalid'\)\) \{ return; \}",
+        raw,
+    ), "a keystroke must not erase a message that is not about the field"
     # A 2xx whose body cannot be read resolves the fetch and rejects the body
     # read; treating that as `{}` announces a subscription that was never
     # recorded. Only a non-2xx may fall through to an empty object.

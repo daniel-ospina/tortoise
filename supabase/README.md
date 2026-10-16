@@ -89,7 +89,9 @@ Responses:
 
 CORS: allowlist echoes premiselabs.co, tortoise.premiselabs.co,
 app.premiselabs.co, premise-labs.pages.dev (+ *.premise-labs.pages.dev
-previews, localhost:8788), with `Vary: Origin`, on every response path.
+previews, localhost:8788), with `Vary: Origin`, on every response path. A
+refused origin gets the default allowlist entry back, never an echo of the
+caller's origin.
 
 Anti-abuse:
 
@@ -231,8 +233,8 @@ Responses:
 CORS: the same allowlist as waitlist-subscribe (`https://premiselabs.co`,
 `https://tortoise.premiselabs.co`, `https://app.premiselabs.co`,
 `https://premise-labs.pages.dev`, `*.premise-labs.pages.dev` previews,
-localhost:8788), on every response path. A refused origin gets the default
-allowlist entry back, never an echo of the caller's origin.
+localhost:8788), with `Vary: Origin`, on every response path. A refused origin
+gets the default allowlist entry back, never an echo of the caller's origin.
 
 Anti-abuse:
 

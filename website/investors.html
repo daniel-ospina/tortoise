@@ -1151,9 +1151,16 @@
           emailInput.removeAttribute('aria-invalid');
         }
         // A corrected value must not keep claiming to be invalid: the attribute
-        // says "this value does not conform", which is stale the moment the
-        // reader edits it, and it is only otherwise cleared on the next submit.
-        emailInput.addEventListener('input', clear);
+        // says "this value does not conform" and is otherwise only cleared at
+        // the next submit. Only the field's own error goes with it — the status
+        // message, and a server error the reader cannot fix by editing, are not
+        // claims about this value and must survive a keystroke.
+        emailInput.addEventListener('input', function () {
+          if (!emailInput.hasAttribute('aria-invalid')) { return; }
+          emailInput.removeAttribute('aria-invalid');
+          err.classList.remove('visible');
+          err.textContent = '';
+        });
 
         if (useCaptcha) {
           var slot = document.createElement('div');
