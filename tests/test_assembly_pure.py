@@ -5075,6 +5075,57 @@ def test_class_vocabulary_falls_back_to_the_complement_of_a_generic_head():
         {"content": "attended a security event at work"}, w.tokens)
 
 
+def test_class_vocabulary_drops_a_relative_clause_before_the_adjunct():
+    """#8779 F10: when a RELATIVE CLAUSE sits before the prepositional
+    complement ("the events THAT TOOK PLACE at the jazz festival I attended"),
+    the tokens before the preposition are the clause's, not the class's. A verb
+    is not generic, so the complement fallback did not trigger and the
+    vocabulary became ``('took','place')`` — a verb selects almost any
+    narrative row (a FALSE INCLUDE) while the real class words were discarded.
+
+    The CONTROL (no relative clause) is asserted FIRST, so the subject
+    assertion cannot pass because the fallback fires for everything.
+    """
+    control = resolve_class_window(
+        "What is the order of the events at the jazz festival I attended in "
+        "the past two months?", "2026-09-10")
+    assert control is not None and control.tokens == ("jazz", "festiv")
+
+    w = resolve_class_window(
+        "What is the order of the events that took place at the jazz "
+        "festival I attended in the past two months?", "2026-09-10")
+    assert w is not None and w.tokens == ("jazz", "festiv"), w.tokens
+    # the class row IS selected...
+    assert _class_owns_row(
+        {"content": "went to the jazz festival opening night"}, w.tokens)
+    # ...and the row that only shares the swallowed VERB is NOT
+    assert not _class_owns_row(
+        {"content": "took a walk in the park with a friend"}, w.tokens)
+
+
+def test_class_order_instruction_is_terminal_not_a_class_prefix():
+    """#8779 F11: ``X first`` is the TERMINAL order instruction. Read loosely it
+    matched a direction word merely PRECEDING a compound class word, so "the
+    latest first-aid training sessions" was reversed AND scrubbed of its
+    ``first-aid`` ("the -aid training sessions").
+
+    The CONTROL (the same class with no direction word) is asserted FIRST.
+    """
+    control = resolve_class_window(
+        "What is the order of the first-aid training sessions I attended in "
+        "the past two months?", "2026-09-10")
+    assert control is not None and control.newest_first is False
+    assert control.tokens == ("first-aid", "training", "session")
+
+    w = resolve_class_window(
+        "What is the order of the latest first-aid training sessions I "
+        "attended in the past two months?", "2026-09-10")
+    assert w is not None
+    assert w.newest_first is False, "a class prefix is not an instruction"
+    assert w.tokens == ("latest", "first-aid", "training", "session"), \
+        w.tokens
+
+
 def test_class_owns_row_matches_content_and_search_keys():
     assert _class_owns_row({"content": "I attended a concert downtown"},
                            ("concert", "music"))
@@ -5327,6 +5378,24 @@ def test_connected_class_block_never_fires_content_less(monkeypatch):
         caps={"context_item_cap": 5, "context_token_cap": 8,
               "context_byte_cap": 128000, "limit": 5})
     assert tight.fired is False
+
+    # and when the cap DOES bite, no position line may be left naming a row
+    # the block does not list (#8779 F10)
+    wide = _class_port([_day_row(f"p-wide-{i}",
+                                 created_at=f"2026-08-{1 + i % 28:02d}",
+                                 content=f"concert number {i}")
+                        for i in range(300)])
+    capped = _drive_connected(monkeypatch, wide, _CLASS_PLURAL_Q,
+                              question_date="2026-09-10")
+    assert capped.fired is True
+    lines = capped.post_cap_lines
+    for i, h in enumerate(lines):
+        if h.get("kind") == "class-order":
+            nxt = lines[i + 1] if i + 1 < len(lines) else None
+            assert nxt is not None and nxt.get("kind") in ("point", "event"), \
+                f"orphan position line: {h.get('content')!r}"
+    listed = sum(1 for h in lines if h.get("kind") in ("point", "event"))
+    assert f"{listed} dated events" in str(lines[0].get("content"))
 
 
 def test_connected_refuses_when_no_row_carries_the_class(monkeypatch):

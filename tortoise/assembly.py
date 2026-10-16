@@ -3405,7 +3405,15 @@ _RE_CLASS_ORDER_STARTING = re.compile(
     + _CLASS_DIR_WORD + r")\b",
     re.IGNORECASE)
 _RE_CLASS_ORDER_FIRST = re.compile(
-    r"\b(?P<first>" + _CLASS_DIR_WORD + r")\s+first\b",
+    # ⛔ the `X first` INSTRUCTION is TERMINAL: it specifies the order of the
+    # answer and is appended to the question. Without that bound a direction
+    # word merely PRECEDING a compound class word reversed the block and was
+    # scrubbed out of the class: "the latest first-aid training sessions"
+    # became "the -aid training sessions" with the order reversed, and "the
+    # most recent first impressions I formed" became "the impressions"
+    # (#8779 F11). Requiring end-of-question (bar trailing punctuation) fixes
+    # both and still admits "latest first" / "newest first".
+    r"\b(?P<first>" + _CLASS_DIR_WORD + r")\s+first\b(?=\s*[?.!,]?\s*$)",
     re.IGNORECASE)
 _RE_CLASS_ORDER_REVERSE = re.compile(
     # the HYPHENATED spelling is the ordinary one for this phrase, and `\s+`
@@ -3419,7 +3427,7 @@ _RE_CLASS_ORDER_INSTRUCTION = re.compile(
     r"\bfrom\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?"
     + _CLASS_DIR_WORD + r"\b"
     r"|\bstarting\s+(?:from|with)\s+(?:the\s+)?" + _CLASS_DIR_WORD + r"\b"
-    r"|\b" + _CLASS_DIR_WORD + r"\s+first\b"
+    r"|\b" + _CLASS_DIR_WORD + r"\s+first\b(?=\s*[?.!,]?\s*$)"
     r"|\breverse[\s-]+chronological[\s-]+order\b"
     r"|\b" + _CLASS_DIR_WORD + r"\s+to\s+(?:the\s+)?" + _CLASS_DIR_WORD
     + r"\b",
@@ -3515,7 +3523,17 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     # so fall back to the tokens after the preposition when that is all there
     # is. `the concerts in Central Park` (a DISCRIMINATIVE head) keeps the cut
     # and drops the locative, as before.
-    if cut < len(words) and not [x for x in out if x not in _CLASS_GENERIC]:
+    # ...and the fallback is also required when the head phrase is a RELATIVE
+    # CLAUSE rather than a noun phrase: "the events THAT TOOK PLACE at the jazz
+    # festival I attended" keeps `took`/`place` as its head, and a verb is not
+    # generic, so without this the vocabulary became ('took','place') -- a verb
+    # selects almost any narrative row (a FALSE INCLUDE) while the real class
+    # words are discarded (#8779 F10). A relative marker before the
+    # preposition means the tokens before it belong to the clause, not to the
+    # class.
+    if cut < len(words) and (
+            any(w in ("that", "which") for w in words[:cut])
+            or not [x for x in out if x not in _CLASS_GENERIC]):
         complement = _stems(words[cut + 1:])
         if complement:
             out = complement
@@ -3966,7 +3984,20 @@ def _assemble_class_plural(sdk, question: str, *, question_date: str | None,
     # presence is checked rather than assumed.
     header = next((h for h in selected
                    if h.get("kind") == "class-window"), None)
-    rendered_rows = sum(1 for h in selected
+    # ⛔ ...and drop ORPHAN position lines (#8779 F10). The same drop can cut
+    # the ROW while leaving the ordinal that names it, so the block would
+    # present "96. 2026-08-14" with no row beneath it -- a member the block
+    # claims but does not list. A position line is kept only when the row it
+    # names survived immediately after it (the builder emits the pair
+    # adjacently and the cap tail preserves order).
+    pruned: list[dict] = []
+    for idx, h in enumerate(selected):
+        if h.get("kind") == "class-order":
+            nxt = selected[idx + 1] if idx + 1 < len(selected) else None
+            if nxt is None or nxt.get("kind") not in ("point", "event"):
+                continue
+        pruned.append(h)
+    rendered_rows = sum(1 for h in pruned
                         if h.get("kind") in ("point", "event"))
     if header is None or not rendered_rows:
         return _empty_block()
@@ -3981,7 +4012,7 @@ def _assemble_class_plural(sdk, question: str, *, question_date: str | None,
         slices={"state_rows": [],
                 "timeline_rows": list(slices.timeline_rows),
                 "evidence_rows": list(slices.evidence_rows)},
-        admission=dict(slices.admission), post_cap_lines=selected,
+        admission=dict(slices.admission), post_cap_lines=pruned,
         cap_stats=cap_stats)
 
 
