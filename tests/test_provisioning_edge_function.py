@@ -315,22 +315,28 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     added to the guarded pair while deck-view drifts would lock readers out with
     nothing red.
     """
-    def extract(consts: str, name: str) -> str:
-        m = re.search(rf"const {name} = \[([^\]]*)\]", consts)
-        assert m, f"{name} not found"
-        return " ".join(m.group(1).split())
+    def declared_lists(src_text: str, name: str) -> list[str]:
+        """EVERY declaration of `name` in the file, normalised.
 
-    def arrays(src_text: str) -> str:
-        return extract(src_text, "ALLOWED_ORIGINS") + "|" + extract(src_text, "ORIGIN_SUFFIXES")
+        `re.search` would read only the first textual match, so a commented-out
+        or shadowed declaration earlier in the file could satisfy the guard while
+        the array the request path uses drifted — the decoy class one level down
+        from the per-function join this replaced.
+        """
+        return [
+            " ".join(hit.split())
+            for hit in re.findall(rf"const {name} = \[([^\]]*)\]", src_text)
+        ]
 
     # Enumerated by FUNCTION, not by the files that happen to contain the
     # literal: a sweep keyed on the literal drops a file the moment a refactor
     # renames the constant, and dropping it is silently safe (the remaining
     # files still satisfy the floor). Every HTTP-facing function must declare an
     # allowlist — `_shared` has no browser surface and is skipped explicitly,
-    # not by accident. Every DECLARING FILE is compared, not just the first per
-    # function: a function with two declarations could otherwise satisfy the
-    # guard from a decoy while the served handler drifted.
+    # not by accident. Every declaring FILE is compared, and every declaration
+    # within a file: a function with two declarations could otherwise satisfy
+    # the guard from a decoy while the served handler drifted. The glob covers
+    # the extensions Supabase accepts, not just `.ts`.
     decl = re.compile(r"(?:export\s+)?(?:const|let|var)\s+ALLOWED_ORIGINS\s*=")
     declaring: dict[str, str] = {}
     missing: list[str] = []
@@ -338,7 +344,10 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     for fn_dir in sorted(p for p in functions_dir.iterdir() if p.is_dir()):
         if fn_dir.name == "_shared":
             continue
-        hits = [f for f in sorted(fn_dir.rglob("*.ts")) if decl.search(f.read_text())]
+        hits = [
+            f for f in sorted(fn_dir.rglob("*"))
+            if f.suffix in {".ts", ".tsx", ".mts", ".cts"} and decl.search(f.read_text())
+        ]
         if not hits:
             missing.append(fn_dir.name)
         for hit in hits:
@@ -352,12 +361,17 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     waitlist = (
         _REPO_ROOT / "supabase" / "functions" / "waitlist-subscribe" / "handle.ts"
     ).read_text()
-    for name, src in sorted(declaring.items()):
-        assert arrays(src) == arrays(waitlist), (
-            f"{name} ALLOWED_ORIGINS/ORIGIN_SUFFIXES must match "
-            "waitlist-subscribe — change every declaring function together "
-            "(see the keep-in-sync comment in tenant-provision/index.ts)"
-        )
+    for const in ("ALLOWED_ORIGINS", "ORIGIN_SUFFIXES"):
+        reference = declared_lists(waitlist, const)
+        assert len(reference) == 1, f"the reference must declare {const} exactly once"
+        for name, src in sorted(declaring.items()):
+            got = declared_lists(src, const)
+            assert got, f"{name} declares no {const} the guard can parse"
+            assert all(g == reference[0] for g in got), (
+                f"{name} {const} must match waitlist-subscribe — change every "
+                "declaring function together (see the keep-in-sync comment in "
+                "tenant-provision/index.ts)"
+            )
 
 
 def test_edge_function_rejects_unknown_origins():

@@ -371,17 +371,22 @@ def test_investors_forms_bound_the_request_and_expose_their_errors() -> None:
         "a shown error must mark the field invalid"
     assert "emailInput.removeAttribute('aria-invalid')" in raw, \
         "a re-submit must clear the invalid flag"
-    # Only the two address errors are about the address: a server error (403,
-    # 405) or a missing captcha marks a VALID address invalid otherwise, and
-    # `aria-describedby` then reads that message as the field's description.
-    assert raw.count("markInvalid();") == 2, \
-        "only the address-validation sites may mark the field invalid"
+    # Only errors about the address may mark the field invalid: the two client
+    # validation sites and a refused request (the address is the only part of
+    # this form the reader controls). A server error (403, 405), a captcha prompt
+    # or a network failure must leave a VALID address alone.
+    assert raw.count("markInvalid();") == 3, \
+        "only address-related sites may mark the field invalid"
     assert "emailInput.addEventListener('input'" in raw, \
         "editing the value must clear the invalid claim without a submit"
     assert re.search(
         r"addEventListener\('input', function \(\) \{\s*if \(!emailInput\.hasAttribute\('aria-invalid'\)\) \{ return; \}",
         raw,
     ), "a keystroke must not erase a message that is not about the field"
+    # A 400 is refused input: on this form the address is the only part the
+    # reader controls, so it must be markable and therefore clearable by editing.
+    assert re.search(r"if \(res\.status === 400\) \{ markInvalid\(\); \}", raw), \
+        "a refused request must mark the field so editing can clear the error"
     # A 2xx whose body cannot be read resolves the fetch and rejects the body
     # read; treating that as `{}` announces a subscription that was never
     # recorded. Only a non-2xx may fall through to an empty object.

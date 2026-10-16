@@ -1240,6 +1240,11 @@
                 // a reader out of an investor deck; anything else non-2xx
                 // (400, 403) is the request itself refused, and keeps it shut.
                 if ((res.status >= 500 || res.status === 429) && onOk) { onOk(); return; }
+                // A 400 is the request itself refused, and on this form the only
+                // component the reader controls is the address — so the field is
+                // what gets corrected, and the error must be clearable by editing
+                // it. A 403/405 is not about the value, so it leaves the field alone.
+                if (res.status === 400) { markInvalid(); }
                 show(err, (data && data.error) || 'Something went wrong — please try again.');
                 emailInput.focus();
                 return;
