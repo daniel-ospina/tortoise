@@ -3112,7 +3112,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
     operator ``--upgrade-all`` path (projection maps ``source_path`` →
-    ``d.sourcePath`` via ``_SOURCE_HANDLED``/``_DOC_RETIRED``); a tenant setting them turns the
+    ``d.sourcePath`` via ``_SOURCE_HANDLED``/``_DOC_PASSTHROUGH_HANDLED``); a tenant setting them turns the
     graph into a file-read oracle. ``id`` overrides on entity surfaces mutate
     node identity / mint tenant-chosen Document ids. Both are rejected with a
     clear ValueError (fail-closed). ``api.add_document``'s explicit

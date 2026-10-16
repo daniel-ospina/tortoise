@@ -1383,20 +1383,68 @@ class _EntityHandlers:
         "source_path",
         "_searchText",
     })
-    # D10 (ONTOLOGY v3.15 §4.4): the document write path now targets a :Source,
-    # so its passthrough skip-set is ``_SOURCE_HANDLED | _DOC_RETIRED``. This
-    # keeps every fixed-clause key off the passthrough AND denies the RETIRED
-    # fields — `content`, `doc_status`/`docStatus`, `objectKind`/`object_kind`
-    # — so they can never re-enter the graph through the open passthrough
-    # (adversarial class B6).
+    # D10 B6 (#5135): the RETIRED document fields — THE single declaration of
+    # the retirement for the write/replay doors THAT CONSULT IT. Those are:
+    #   * `sdk._update_entity`'s target-aware guard, which reads it directly;
+    #   * `_upsert_document`'s open passthrough and its promotion scrub, which
+    #     both compose with it at CALL time (see below) — so a member added
+    #     here is denied and scrubbed in this class without a second edit.
+    # (The historical `_DOCUMENT_HANDLED` overlap on three of these keys is
+    # incidental: `object_kind`/`docStatus` reach the document passthrough ONLY
+    # through the registry union at the call site, not through that set.)
+    # ⛔ Two further graph-side doors deny the retirement by a DIFFERENT route
+    # and so do NOT consult this set. They are named here so the next member is
+    # not assumed covered:
+    #   * `_upsert_source`'s open passthrough denies by its CLOSED ALLOWLIST
+    #     (`_SOURCE_HANDLED` ∪ `_SOURCE_EXTRA_PROPS`). Every retired key is
+    #     outside both today, so the denial holds — but a key added here that is
+    #     ALSO declared in `_SOURCE_EXTRA_PROPS` would pass that door. Widen
+    #     that allowlist check; do not assume this set covers it.
+    #   * the `EntityMutated` fold drops by the DECLARED SURFACE: the keys are
+    #     absent from `_SOURCE_NODE_PROPS`, the surface every replay filters to
+    #     (`filter_source_props`). That is a different question from the
+    #     retirement, answered by a different set.
+    # NOT in this module's reach, and therefore NOT consolidated by this change:
+    # the record mirror in `record_projection.py` spells the same five keys as a
+    # literal `drop` on its `DocumentCreated` mutation (that layer imports no
+    # graph projection, by design), and `log.py`'s tear-immunity note lists them
+    # in prose. A member added HERE must be added THERE too.
+    # ⛔ ONE list — for this class. The divergence between this set and the
+    # per-path copies it used to have is what let the #5135 third door
+    # (`update_entity`) and the promotion fourth door exist at all: a writer
+    # that consults a stale copy silently misses the newest member.
     # BOTH spellings are denied: the projection normalizes to camelCase for
     # the FIXED clauses, but a raw journal payload (a hand-written JSONL line,
     # `EventAPI.add_document`, or a producer's `create_source(**props)`) can
     # carry the snake_case spelling, which would otherwise persist verbatim as
     # a node property no reader owns — a B6 re-entry through the snake door.
+    # ``object_kind`` (synonym of ``objectKind``) and ``docStatus`` (synonym of
+    # ``doc_status``) are the two the write path can actually produce;
+    # ``content`` has no second spelling.
+    _DOC_RETIRED_KEYS: frozenset = frozenset({
+        "content", "doc_status", "docStatus", "objectKind", "object_kind",
+    })
+    # D10 (ONTOLOGY v3.15 §4.4): the document write path now targets a :Source,
+    # so its passthrough skip-set is
+    # ``_SOURCE_HANDLED | _DOC_PASSTHROUGH_HANDLED | _DOC_RETIRED_KEYS``. This
+    # keeps every fixed-clause key off the passthrough. It carries no
+    # INDEPENDENT copy of the retirement: the three registry keys it holds do
+    # so only as historical `_DOCUMENT_HANDLED` members, while the registry is
+    # unioned at the call site — which is the only thing that can cover a key
+    # added to it (e.g. `object_kind`/`docStatus` are not in
+    # `_DOCUMENT_HANDLED`), so the two cannot drift (#5135).
     # The historical `_DOCUMENT_HANDLED` set is retained as the base so no
     # previously-handled key becomes an accidental passthrough key.
-    _DOC_RETIRED: frozenset = _DOCUMENT_HANDLED | frozenset({
+    # ⛔ Distinct from the registry: a SUPERSET of the historical
+    # `_DOCUMENT_HANDLED` is only safe on the document path (there,
+    # `_upsert_document`'s fixed clause owns every other key). Applying the
+    # full `_DOCUMENT_HANDLED` union to a Source write would ALSO deny
+    # `summary` / `topics` / `embedding` / `status` / `about_entities`, which
+    # `_upsert_source`'s fixed clause does NOT write and which a Source
+    # legitimately carries (a `SourceCreated` passthrough write of `summary` or
+    # an `embedding` — read by the vector retrieval leg — would be silently
+    # dropped). Deny the retirement, not the history.
+    _DOC_PASSTHROUGH_HANDLED: frozenset = _DOCUMENT_HANDLED | frozenset({
         "needs_extraction",
         # #5422: the snake_case spelling of the version anchor. The fixed
         # clause above writes `contentHash` from `ev["content_hash"]`; the
@@ -1405,25 +1453,6 @@ class _EntityHandlers:
         # `s.content_hash` property beside the camelCase the readers use
         # (the same snake-door class as `needs_extraction` below).
         "content_hash",
-        # D10 B6: snake/camel synonyms of the retired props. ``object_kind``
-        # (synonym of ``objectKind``) and ``docStatus`` (synonym of
-        # ``doc_status``) are the two the write path can actually produce;
-        # ``content`` has no second spelling.
-        "object_kind", "docStatus",
-    })
-    # D10 B6: the RETIRED document fields as a LITERAL set — the keys that must
-    # not be writable through ANY open passthrough.
-    # ⛔ Distinct from `_DOC_RETIRED`, which is a SUPERSET of the historical
-    # `_DOCUMENT_HANDLED` and is therefore only safe on the document path
-    # (there, `_upsert_document`'s fixed clause owns every other key). Applying
-    # the full `_DOCUMENT_HANDLED` union to a Source write would ALSO deny
-    # `summary` / `topics` / `embedding` / `status` / `about_entities`, which
-    # `_upsert_source`'s fixed clause does NOT write and which a Source
-    # legitimately carries (a `SourceCreated` passthrough write of `summary` or
-    # an `embedding` — read by the vector retrieval leg — would be silently
-    # dropped). Deny the retirement, not the history.
-    _DOC_RETIRED_KEYS: frozenset = frozenset({
-        "content", "doc_status", "docStatus", "objectKind", "object_kind",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
     # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
@@ -3870,8 +3899,9 @@ class _EntityHandlers:
         identity is ``url``). It is written by the fixed clause above, gated
         so a hash-less write preserves it, and stays out of the open
         passthrough because BOTH spellings (``contentHash`` via
-        ``_SOURCE_HANDLED``, ``content_hash`` via ``_DOC_RETIRED``) are
-        denied. ``version`` is advanced in the same clause, per §4.6.
+        ``_SOURCE_HANDLED``, ``content_hash`` via
+        ``_DOC_PASSTHROUGH_HANDLED``) are denied. ``version`` is advanced in
+        the same clause, per §4.6.
         """
         did = ev.get("id")
         # #7369: `did` is the Source MERGE key (`MERGE (s:Source {url:$id})`),
@@ -4017,9 +4047,13 @@ class _EntityHandlers:
             # creator MERGEs onto that SAME node by `url`, inheriting the
             # retired values live AND on replay. The deny-sets above (and in
             # `_upsert_source`) stop NEW writes; this REMOVE clears an
-            # INHERITED one. Keys = `_DOC_RETIRED_KEYS`.
-            "REMOVE s.content, s.doc_status, s.docStatus, s.objectKind, "
-            "       s.object_kind",
+            # INHERITED one.
+            # ⛔ GENERATED from the ONE registry (#5135) rather than spelled
+            # again: the previous hand-written literal was a fourth copy of
+            # the retirement, so a member added to `_DOC_RETIRED_KEYS` would
+            # not have been scrubbed here.
+            "REMOVE " + ", ".join(
+                f"s.{k}" for k in sorted(self._DOC_RETIRED_KEYS)),
             params={"id": did, "title": ev.get("title", did),
                     # NO "" default here: a present null and an omitted key
                     # both stay Cypher null and fall to the third coalesce
@@ -4047,7 +4081,14 @@ class _EntityHandlers:
         # the ROOT bag, which used to bypass it (#5196, P1).
         self._persist_extra_props(
             "MATCH (n:Source {url: $id})", {"id": did},
-            ev, self._SOURCE_HANDLED | self._DOC_RETIRED,
+            ev,
+            self._SOURCE_HANDLED
+            | self._DOC_PASSTHROUGH_HANDLED
+            # The retirement is the ONE registry, unioned HERE at call time
+            # (#5135): `_DOC_PASSTHROUGH_HANDLED` deliberately carries no
+            # copy, so a member added to the registry is denied without a
+            # second edit.
+            | self._DOC_RETIRED_KEYS,
         )
         # #205 — wire references edge (Source → document Source) for provenance
         # chain. D10: only when the corpus Source is DISTINCT from the document

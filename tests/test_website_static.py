@@ -37,7 +37,8 @@ import sys
 from html import unescape
 from pathlib import Path
 
-import pytest
+# `pytest` is deliberately not imported (#8066): this file's only use was the
+# `pytest.skip` that made the tortoise-decide gate green-while-blind.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # tests/ and tools/ are not installed packages
@@ -518,19 +519,43 @@ class TestRenderElementInventory:
 # ── #1566: welcome.html's provisioning pipeline must stay dead ──
 
 
+# #8066/#8027: the subject is the SERVED copy, NOT the machine-local relay.
+# This gate used to read `skills/tortoise-decide/SKILL.md` through the tracked
+# `skills` symlink, whose committed blob is an ABSOLUTE path in one developer's
+# home (`/Users/danielospina/Documents/GitHub/agent-infra/skills`). The link
+# dangles everywhere else, so the test `pytest.skip`ped: the gate was green
+# exactly where it could not see the file (measured 2026-10-16 on the CI-style
+# checkout — `SKIPPED [1] ... skills/ symlink not present`), and on a machine
+# where it did resolve it graded whichever unrelated agent-infra checkout
+# happened to be linked. The skip's own explanation was wrong on BOTH kinds of
+# machine: `/Users/home/agent-infra/skills` (a live agent-infra, 95/98 of this
+# repo's `operations/skills/*` targets present) does NOT carry `tortoise-decide`
+# at all — it ships `how-to-use-tortoise`, `tortoise-file-finding` and
+# `tortoise-verify-chain`. The product skills are tracked in THIS repo, under
+# `website/apps/dashboard/public/skills/`, and those are the bytes the
+# onboarding installer serves (`https://app.premiselabs.co/skills/<name>/SKILL.md`).
+# Reading the tracked served copy is deterministic and is the pattern
+# `tests/test_ingest_conformance.py` adopted for the same relay in #8499 and
+# that `tests/test_served_skills.py` already uses. The dead relay itself is
+# #8066/#8027 (owner-gated remedy — see #8027's "the choice is the owner's");
+# the source↔served parity gap is #4358/#4643.
+DECIDE_SKILL = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
+                / "skills" / "tortoise-decide" / "SKILL.md")
+
+
 def test_tortoise_decide_skill_ships_the_workflow():
-    """#1643 (Task 3): skills/tortoise-decide/SKILL.md exists and AUTHORS the
-    decision workflow (options → criteria → findings → edges → mitigations →
-    EP ranking) — the onboarding skills primer links a REAL invokable skill."""
-    p = Path("skills/tortoise-decide/SKILL.md")
-    if not p.exists():
-        # The repo's skills/ is a symlink to a local agent-infra checkout
-        # (broken on CI) — the skill is committed there; skip with an
-        # annotation rather than fail the CI checkout (TORTISE_HOST_CHECK
-        # pattern).
-        pytest.skip("skills/ symlink not present (agent-infra not checked out)")
-    assert p.exists(), "skills/tortoise-decide/SKILL.md missing"
-    src = p.read_text()
+    """#1643 (Task 3): the SERVED tortoise-decide skill exists in the tracked
+    tree and AUTHORS the decision workflow (options → criteria → findings →
+    edges → mitigations → EP ranking) — the onboarding skills primer links a
+    REAL invokable skill.
+
+    ⛔ A missing subject is a FAIL, not a skip (#8066): a gate whose subject is
+    resolved through a machine-local path has no result on the CI path, and its
+    green is an artifact of absence."""
+    assert DECIDE_SKILL.exists(), (
+        f"the tracked served skill is missing: {DECIDE_SKILL} — the onboarding "
+        "primer links it, so this gate has no subject (#8066)")
+    src = DECIDE_SKILL.read_text()
     for marker in ("tortoise-decide", "options", "criteria", "findings",
                    "IMPL", "NAND", "mitigation", "confidence"):
         assert marker in src, f"skill missing the {marker!r} step"

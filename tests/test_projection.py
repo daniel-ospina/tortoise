@@ -2819,6 +2819,88 @@ def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
         f"non-retired `status` dropped by the deny-set (over-reach): {rows[10]!r}"
 
 
+def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch):
+    """#5135 root cause: ONE declared registry for the retired document
+    fields, so a member added to it cannot be silently missed by a stale
+    per-path copy IN THE CLASS THAT DECLARES IT. It is consulted by the generic
+    entity surface, the document open passthrough and the promotion scrub.
+    Scope, stated so the claim is not read as broader than it is: two further
+    graph-side doors deny the retirement by a DIFFERENT route and are
+    deliberately NOT driven here — `_upsert_source`'s closed allowlist
+    (`_SOURCE_HANDLED` ∪ `_SOURCE_EXTRA_PROPS`) and the `EntityMutated` fold's
+    declared `_SOURCE_NODE_PROPS` surface — and the record mirror in
+    `record_projection.py` keeps its own literal `drop` on `DocumentCreated`.
+
+    The specific #5135 door (`update_entity`) is already closed by the
+    target-aware guard. What this pins is the property whose absence let that
+    door stand open while two sibling doors were closed: the retirement used
+    to be spelled in four places (`_DOCUMENT_HANDLED`'s incidental `content`/
+    `doc_status`/`objectKind`, the doc passthrough skip-set `_DOC_RETIRED`, the
+    promotion `REMOVE` literal, and `_DOC_RETIRED_KEYS`). The check is
+    therefore behavioural, not structural: add a key to the ONE registry and
+    each door this test drives must deny it.
+
+    Mutation (scratch copy, pre-consolidation code): the document passthrough
+    and the promotion `REMOVE` are separate copies, so the probe key is
+    PERSISTED by door 2 and INHERITED by door 3 — this test goes red. The fold
+    door (4, `_fold_entity_mutation` -> `rebuild_all`) drops any undeclared
+    key by construction and is covered independently by
+    `test_3998_raw_absent_state.py::
+    test_rebuild_drops_a_payload_carried_by_an_entity_mutated_record`.
+    """
+    from tortoise.projection.entities import _EntityHandlers
+
+    probe = "zzRetiredProbe"
+    monkeypatch.setattr(
+        _EntityHandlers, "_DOC_RETIRED_KEYS",
+        _EntityHandlers._DOC_RETIRED_KEYS | {probe})
+
+    sdk = sdk_factory()
+    proj = sdk._get_proj()
+
+    # Door 1 — the generic entity surface (#5135 itself); reads the registry
+    # directly at the boundary.
+    doc = sdk.create_document("Registry1", "report")
+    with pytest.raises(ValueError, match="retired field"):
+        sdk.update_entity(doc["id"], **{probe: "FORGED"})
+
+    # Door 2 — the document open passthrough (`_upsert_document`). The only
+    # way to deny a key absent from the historical `_DOCUMENT_HANDLED` base is
+    # the registry union at the call site.
+    d2 = sdk.create_document("Registry2", "report", **{probe: "FORGED"})
+    got2 = proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) RETURN s.{probe}",
+        params={"u": d2["id"]}).result_set[0][0]
+    assert got2 is None, (
+        f"document passthrough wrote a member of the single registry: {got2!r}")
+
+    # Door 3 — the promotion scrub: a node that inherited the key, then became
+    # a document, must lose it. Seeded by raw Cypher because the write paths
+    # no longer produce such a node.
+    sdk.create_source("corpus://reg3", "document")
+    proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) SET s.{probe}='INHERITED'",
+        params={"u": "corpus://reg3"})
+    assert proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) RETURN s.{probe}",
+        params={"u": "corpus://reg3"}).result_set[0][0] == "INHERITED", \
+        "precondition: the inherited value was seeded"
+    proj.apply({"type": "DocumentCreated", "id": "corpus://reg3",
+                "title": "Registry3", "document_kind": "report"})
+    got3 = proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) RETURN s.{probe}",
+        params={"u": "corpus://reg3"}).result_set[0][0]
+    assert got3 is None, (
+        f"promotion scrub missed a member of the single registry: {got3!r}")
+
+    # Contrast — the union did not turn the passthrough into a no-op: a key it
+    # does NOT list still rides through (the #228 pin).
+    d4 = sdk.create_document("Registry4", "report", domain="legal")
+    assert proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.domain",
+        params={"u": d4["id"]}).result_set[0][0] == "legal"
+
+
 # ── #214: Vocabulary edge cleanup ──────────────────────────────────────
 
 

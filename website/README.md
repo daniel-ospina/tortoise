@@ -92,18 +92,27 @@ form (index.html) ──fetch JSON──▶ waitlist-subscribe edge function
 **Endpoint:** the `WAITLIST_ENDPOINT` constant in `index.html` points at the
 `waitlist-subscribe` edge function on the premise-labs Supabase project.
 
-**Turnstile:** the `TURNSTILE_SITE_KEY` constant in `index.html` starts empty
-— the widget + script are only injected when a real site key is set (see
-[Human steps](#human-steps-launch-blocking)). Never use a placeholder literal.
+**Turnstile:** the `TURNSTILE_SITE_KEY` constant starts empty in `index.html`
+and in `investors.html` — the widget + script are only injected when a real site
+key is set (see [Human steps](#human-steps-launch-blocking)). Never use a
+placeholder literal. `waitlist-subscribe` verifies the token server-side when
+`TURNSTILE_SECRET_KEY` is set, so every page that posts to it must send one;
+`/investors` renders a widget on its mailing-list form for that reason. Its
+deck-view gate posts to `deck-view`, which verifies no token, so that form
+deliberately renders no widget.
 
 **Storage:** `waitlist_subscribers` table (migration `0005`) — email (unique),
 source, consented_at. Confirmation email includes an unsubscribe link.
 Writes go through the function's service role only (RLS enabled, no anon
-policy).
+policy). Separately, `/investors` records deck views in `deck_views` (email,
+deck, viewed_at; RLS, service role only) through the `deck-view` function — a
+view is not a subscription, and nothing on that path touches
+`waitlist_subscribers`.
 
 **Tests:** `tests/test_waitlist_form.py` (static) +
 `tests/test_waitlist_subscribe.mjs` (Node behavioral harness,
-`node --experimental-strip-types tests/test_waitlist_subscribe.mjs`).
+`node --experimental-strip-types tests/test_waitlist_subscribe.mjs`) +
+`tests/test_deck_view.mjs` (the deck-view path, same harness shape).
 
 ## Contact form (#2409)
 
@@ -226,7 +235,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/contact/s
    unknown_source` without it. Same credential as the Pages var above, on the
    receiving side. (Tracked on `swarm#18407`'s lane / the #2409 record.)
 4. **Turnstile site key** → paste into the `TURNSTILE_SITE_KEY` constant in
-   `index.html`.
+   `index.html` and in `investors.html` (two pages, two constants: the secret is
+   verified per endpoint, so a page that omits the token is refused once
+   `TURNSTILE_SECRET_KEY` is set).
 5. **Deploy** — see `supabase/README.md` (CI workflow does it on merge once
    `SUPABASE_ACCESS_TOKEN` + `SUPABASE_DB_URL` repo secrets are set).
 6. **Smoke test:** submit a test email → confirm the row appears in Supabase
