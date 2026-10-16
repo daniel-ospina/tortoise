@@ -229,17 +229,18 @@
     #capability-gaps p { text-wrap: pretty; }
 
     /* ── A block's opening statement ─────────────────────────────────────
-       Used by the two sections that carry an opening statement: in #solution
-       the lede IS the section's opening (that section carries no heading), and
-       in #how-it-works it sits under the `h2`. Set
-       serif and white like an `h2` but one step down in size, so in #solution
-       it anchors the section without reading as a section title. */
+       Set serif and white like an `h2` but one step down in size, so it reads
+       as the block's opening line rather than as a section title. In #solution
+       it is that section's heading (the supplied outline heads the block); in
+       #how-it-works it sits under the `h2`. The tracking and margin pins keep
+       its rendering identical to the paragraph it was promoted from. */
     .lede {
       font-family: var(--serif);
       font-size: clamp(1.1rem, 2.2vw, 1.3rem);
       line-height: 1.4;
       color: #fff;
       max-width: 60ch;
+      letter-spacing: normal; margin-bottom: 0;
     }
 
     /* ── The solution's connected steps ──────────────────────────────────
@@ -411,11 +412,19 @@
       flex: 1 1 13rem; min-width: 0;
       font: inherit; font-size: 0.85rem; color: var(--text);
       background: rgba(255, 255, 255, 0.04);
-      border: 1px solid var(--border); border-radius: 0.5rem;
+      /* The field's own fill is ~1.08:1 against the page, so this border is the
+         only boundary it has; `--border` (#1e293b) measured 1.35:1 against
+         #060b14, under the 3:1 non-text bar (WCAG 1.4.11). #64748b = 4.14:1. */
+      border: 1px solid #64748b; border-radius: 0.5rem;
       padding: 0.8rem 1rem;
     }
     .subscribe input[type="email"]::placeholder { color: var(--text-dim); }
     .subscribe input[type="email"]:focus { outline: none; border-color: var(--accent); }
+    /* `:focus` above drops the outline, so keyboard focus gets its own ring: a
+       1px border recolour is otherwise the only cue, and an easy one to miss. */
+    .subscribe input[type="email"]:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
     .subscribe button {
       font: inherit; font-size: 0.85rem; font-weight: 600;
       letter-spacing: 0.02em;
@@ -523,7 +532,7 @@
           <h1>Investors presentation</h1>
           <p class="gate-note">Enter your email to view the presentation.</p>
           <form class="subscribe" id="gate-form" novalidate>
-            <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" autocomplete="email" required>
+            <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" aria-describedby="gate-error" autocomplete="email" required>
             <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
             <button type="submit">View presentation</button>
           </form>
@@ -617,7 +626,7 @@
     <!-- ══ The solution ════════════════════════════════════════════════ -->
     <section id="solution">
       <div class="wrap">
-        <p class="lede">Tortoise gives agent teams shared memory, reasoning, and learning.</p>
+        <h2 class="lede">Tortoise gives agent teams shared memory, reasoning, and learning.</h2>
         <ol class="steps">
           <li>Onboard in 5 minutes: Agents use Tortoise to analyze complex decisions without losing track of variables or assumptions. The reasoning gets saved as memory.</li>
           <li>As agents work and new sources (documents, systems of record, BI, etc) are connected, Tortoise builds a logical model of the organization. Agents use this model to evaluate alternatives, calculate implications, and understand how their decisions affect other work.</li>
@@ -750,7 +759,7 @@
       <div class="wrap">
         <h2>Stay in touch</h2>
         <form class="subscribe" id="waitlist-form" novalidate>
-          <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" autocomplete="email" required>
+          <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" aria-describedby="waitlist-error" autocomplete="email" required>
           <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
           <button type="submit">Subscribe</button>
         </form>
@@ -1129,9 +1138,15 @@
         // only widget.
         var widgetId = null;
 
-        function show(el, text) { el.textContent = text; el.classList.add('visible'); }
+        function show(el, text) {
+          el.textContent = text; el.classList.add('visible');
+          // A `role="alert"` region announces once; the flag is what makes the
+          // field itself read as invalid if the reader navigates back to it.
+          if (el === err) { emailInput.setAttribute('aria-invalid', 'true'); }
+        }
         function clear() {
           [msg, err].forEach(function (el) { el.classList.remove('visible'); el.textContent = ''; });
+          emailInput.removeAttribute('aria-invalid');
         }
 
         if (useCaptcha) {
@@ -1182,10 +1197,18 @@
           for (var key in extra) { payload[key] = extra[key]; }
           if (useCaptcha && !turnstileFailed) { payload['cf-turnstile-response'] = token || ''; }
 
+          var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+          var timer = controller ? setTimeout(function () { controller.abort(); }, 8000) : null;
+
           fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            // A request that never settles must not strand the reader on a
+            // disabled button: the gate's policy is to open when OUR side is
+            // unhealthy, and a hang is that. The abort lands in .catch below,
+            // which opens the gate and shows the list form an error.
+            signal: controller ? controller.signal : undefined
           }).then(function (res) {
             return res.json().catch(function () { return {}; }).then(function (data) {
               if (!res.ok) {
@@ -1195,6 +1218,7 @@
                 // (400, 403) is the request itself refused, and keeps it shut.
                 if ((res.status >= 500 || res.status === 429) && onOk) { onOk(); return; }
                 show(err, (data && data.error) || 'Something went wrong — please try again.');
+                emailInput.focus();
                 return;
               }
               if (onOk) {
@@ -1208,6 +1232,7 @@
             // Unreachable server: open for the gate, an error for the list.
             if (onOk) { onOk(); } else { show(err, 'Something went wrong — please try again.'); }
           }).then(function () {
+            if (timer) { clearTimeout(timer); }
             busy = false;
             form.removeAttribute('aria-busy');
             button.disabled = false;
@@ -1228,6 +1253,15 @@
         try { localStorage.setItem(GATE_KEY, '1'); } catch (e) {}
         document.documentElement.classList.remove('gated');
         window.scrollTo(0, 0);
+        // Move focus into the revealed document. The gate's button is disabled
+        // and re-enabled around the request, so without this a keyboard or
+        // screen-reader reader is left on <body> with nothing announced while a
+        // whole document appears above them.
+        var heading = document.querySelector('.doc h1');
+        if (heading) {
+          heading.setAttribute('tabindex', '-1');
+          heading.focus();
+        }
       }
 
       wire('gate-form', 'gate-msg', 'gate-error', VIEW_ENDPOINT, { deck: 'investors' }, unlock, false);

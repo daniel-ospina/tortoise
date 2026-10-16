@@ -342,6 +342,40 @@ def test_investors_turnstile_resets_its_own_widget() -> None:
         "a no-arg reset re-renders the last-created widget (the other form's)"
 
 
+def test_investors_forms_bound_the_request_and_expose_their_errors() -> None:
+    """Three properties of the two forms that no other assertion covers.
+
+    A request that never settles must not strand the reader on a disabled
+    button: the gate's recorded policy is to open when our side is unhealthy,
+    and a hang is that. An error must be attached to the field it belongs to,
+    not only announced once. And the unlock must move focus into the document it
+    reveals, because the button is disabled and re-enabled behind the reader.
+    """
+    raw = INVESTORS_HTML.read_text(encoding="utf-8")
+
+    assert "new AbortController()" in raw and "controller.abort()" in raw, \
+        "the submissions need a time bound"
+    assert "signal: controller ? controller.signal : undefined" in raw, \
+        "the abort controller must actually be attached to the fetch"
+    assert re.search(r"controller\.abort\(\); \}, 8000\)", raw), \
+        "the 8 s deadline is what bounds a hung request"
+
+    # The abort must land in the fail-open path, not in an error state.
+    chain = raw.split("fetch(endpoint", 1)[1].split("function unlock", 1)[0]
+    assert re.search(r"\}\)\.catch\(function \(\) \{.*?if \(onOk\) \{ onOk\(\); \}", chain, re.S), \
+        "an aborted or unreachable request must take the fail-open path"
+
+    for described in ('aria-describedby="gate-error"', 'aria-describedby="waitlist-error"'):
+        assert described in raw, f"each field must name its own error region: {described}"
+    assert "emailInput.setAttribute('aria-invalid', 'true')" in raw, \
+        "a shown error must mark the field invalid"
+    assert "emailInput.removeAttribute('aria-invalid')" in raw, \
+        "a re-submit must clear the invalid flag"
+
+    assert "heading.setAttribute('tabindex', '-1')" in raw and "heading.focus()" in raw, \
+        "the unlock must move focus into the revealed document"
+
+
 def test_deck_view_function_and_table_exist() -> None:
     """The gate's write path: its own function, its own table, no email.
 

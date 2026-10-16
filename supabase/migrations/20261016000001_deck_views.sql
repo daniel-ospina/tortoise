@@ -9,9 +9,10 @@
 -- asked to be mailed, and merging them would put someone on a list they never
 -- joined.
 --
--- Append-only, one row per recorded view. The page asks once per browser, so
--- re-reading the deck does not add rows; `SELECT DISTINCT email` answers "who
--- viewed the deck" and the row count answers "how often".
+-- Append-only: one row per recorded view, so the row count answers "how often".
+-- The page's gate asks once per BROWSER (the unlock is remembered in
+-- localStorage), which bounds how often a reader is asked, not how many rows
+-- they can produce — a cleared or separate browser asks again.
 --
 -- Idempotent (CREATE … IF NOT EXISTS; the policy is dropped before it is
 -- recreated) so a re-run cannot abort, matching the 0005 convention for this

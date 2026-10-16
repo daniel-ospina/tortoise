@@ -169,6 +169,8 @@ automated flip and turns that run red.
 supabase db push --project-ref ybetwichurajbfswfeqa
 supabase functions deploy waitlist-subscribe \
   --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+supabase functions deploy tenant-provision \
+  --project-ref ybetwichurajbfswfeqa --no-verify-jwt
 supabase functions deploy deck-view \
   --project-ref ybetwichurajbfswfeqa --no-verify-jwt
 gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co-move
@@ -210,3 +212,30 @@ records a view, and joining the mailing list stays a separate act (`POST
 /functions/v1/waitlist-subscribe`, with `source: "investors"` when it comes from
 the same page). `deck` is allow-listed and falls back to `investors`. There is no
 captcha on this endpoint; the honeypot and a per-IP limit are what bound it.
+
+Responses:
+
+| Case                     | Response                     |
+|--------------------------|------------------------------|
+| Recorded view            | 200 {ok:true}                |
+| Honeypot filled (bot)    | 200 {ok:true} silently       |
+| CORS preflight           | 204, no body                 |
+| Rate limited             | 429 with `Retry-After: 3600` |
+| Invalid email / body     | 400                          |
+| Bad origin / method      | 403 / 405                    |
+| Storage failure          | 500                          |
+
+CORS: the same allowlist as waitlist-subscribe (`https://premiselabs.co`,
+`https://tortoise.premiselabs.co`, `https://app.premiselabs.co`,
+`https://premise-labs.pages.dev`), on every response path. A refused origin gets
+the default allowlist entry back, never an echo of the caller's origin.
+
+Anti-abuse:
+
+- IP rate limit (30/hr, keyed on the gateway-appended XFF entry, best-effort
+  per-isolate) — higher than the list's 10/hr because a deck view is a cheaper,
+  more repeatable act than a subscribe
+- honeypot field
+- no captcha: this endpoint verifies no Turnstile token, which is why the gate
+  form renders no widget (the mailing-list form renders one once a site key is
+  provisioned, since `waitlist-subscribe` does verify)

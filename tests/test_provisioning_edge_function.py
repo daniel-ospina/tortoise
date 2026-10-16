@@ -301,12 +301,20 @@ def test_edge_function_allowlists_welcome_page_origins():
 
 
 def test_edge_function_allowlist_parity_with_waitlist_subscribe():
-    """ALLOWED_ORIGINS + ORIGIN_SUFFIXES must stay identical to
-    waitlist-subscribe (keep-in-sync comment in index.ts) so a host added for
-    the welcome page in one function can never silently drift from the other
+    """EVERY function that declares an allowlist must agree with
+    waitlist-subscribe (the keep-in-sync comment in
+    tenant-provision/index.ts) so a host added for
+    the welcome page in one function can never silently drift from the others
     (the #1110 failure mode). Local-origin handling deliberately diverges
     (tenant-provision: any local port; waitlist: 8788 only) and is NOT
-    compared."""
+    compared.
+
+    Enumerated rather than named: the guard originally compared two functions,
+    and a third (deck-view, #8732) joined them unguarded. Its failure mode is
+    fail-SHUT — the gate answers 403 and the deck stays locked — so a host
+    added to the guarded pair while deck-view drifts would lock readers out with
+    nothing red.
+    """
     def extract(consts: str, name: str) -> str:
         m = re.search(rf"const {name} = \[([^\]]*)\]", consts)
         assert m, f"{name} not found"
@@ -318,11 +326,19 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     waitlist = (
         _REPO_ROOT / "supabase" / "functions" / "waitlist-subscribe" / "handle.ts"
     ).read_text()
-    src = EDGE_FN.read_text()
-    assert arrays(src) == arrays(waitlist), (
-        "ALLOWED_ORIGINS/ORIGIN_SUFFIXES must match waitlist-subscribe — "
-        "change both files together (see keep-in-sync comment in index.ts)"
+    declared = sorted(
+        p for p in (_REPO_ROOT / "supabase" / "functions").glob("*/*.ts")
+        if "const ALLOWED_ORIGINS" in p.read_text()
     )
+    # waitlist-subscribe is the reference, so the enumeration must at least see
+    # it plus one peer — an empty or single-entry sweep would pass vacuously.
+    assert len(declared) >= 2, f"allowlist sweep found only {declared}"
+    for path in declared:
+        assert arrays(path.read_text()) == arrays(waitlist), (
+            f"{path.relative_to(_REPO_ROOT)} ALLOWED_ORIGINS/ORIGIN_SUFFIXES must "
+            "match waitlist-subscribe — change every declaring function together "
+            "(see the keep-in-sync comment in tenant-provision/index.ts)"
+        )
 
 
 def test_edge_function_rejects_unknown_origins():
