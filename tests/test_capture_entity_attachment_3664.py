@@ -95,18 +95,15 @@ def _object_id(g, name: str) -> str:
 #
 # Coverage, stated plainly: membership in the SET does not by itself buy a
 # red. Measured in this file's scenario, six declared props are None on both
-# sides and so cannot red here: `harness` (the only optional capture argument
-# `capture_session` takes, omitted by `_capture`) and `actor_user_id` (from a
-# ContextVar the local lane leaves unset), plus the capture-origin quartet
-# (client_captured_at, client_captured_at_source, capture_lane, source), for
-# which `capture_session` exposes no argument at all. The quartet's fold ARMS
-# live in `_fold_session_recorded`, reached by the `rebuild_all` this file
-# does run, but they never fire here because no value is journaled. The
-# dedicated #3516 journal test populates and exercises three of the four
-# (client_captured_at, client_captured_at_source, source); `capture_lane` has
-# no journaling producer yet, so its arm is a guard, not a live parity
-# property. Listing the quartet keeps this declaration true to the write path
-# and closes the gap for any future fixture here that does populate it.
+# sides and so cannot red here: `harness` and `actor_user_id`, plus the
+# capture-origin quartet (client_captured_at, client_captured_at_source,
+# capture_lane, source). The quartet's fold ARMS live in
+# `_fold_session_recorded`, reached by the `rebuild_all` this file does run,
+# but they never fire here because no value is journaled. The dedicated #3516
+# journal test exercises three of the four (client_captured_at,
+# client_captured_at_source, source); no production caller journals
+# `capture_lane` yet. Listing the quartet keeps this declaration true to the
+# write path and closes the gap for any future fixture here that populates it.
 _SESSION_PROPS_SQL = (
     "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.is_episodic, "
     "s.created_at, s.harness, s.actor_user_id, s.capture_ok, "
