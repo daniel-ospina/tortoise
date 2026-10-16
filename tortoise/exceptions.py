@@ -404,13 +404,16 @@ class UnrepresentableNumberError(ValueError):
     success and stores a different number (``2**70`` is stored as
     ``9223372036854775807``; ``Decimal('0.12345678901234567890')`` is rounded).
 
-    Raised by the param-boundary seam (``tortoise.cypher_guard``) on every
+    Raised by the numeric-domain seam (``tortoise.cypher_guard``) on every
     guarded handle BEFORE the statement is sent, so a writer no longer has to be
-    on the SDK's hand-maintained call-site list to be covered (#7174). It is
-    specifically a PARAM boundary: a number written as a LITERAL in the statement
-    text still reaches the store, as does one sent through a raw vendor client
-    the package did not build. The message names the param KEY and the reason,
-    and never interpolates Cypher (same contract as
+    on the SDK's hand-maintained call-site list to be covered (#7174). The seam
+    covers TWO surfaces: a value in a ``params`` map (``SET n.v = $v``) and a
+    number written as a LITERAL in the statement text (``CREATE (n {v: 2**70})``)
+    or inlined into a ``CYPHER k=<v>`` header (#8479) — so a statement-text
+    literal no longer reaches the store. What it still does NOT cover is a number
+    sent through a raw vendor client the package did not build. The message names
+    the param KEY, or the literal's OFFSET in the statement, and the reason, and
+    never interpolates Cypher (same contract as
     :class:`UnsupportedCypherOperatorError`).
 
     Subclasses ``ValueError``: the SDK's #4647 call sites raise ``ValueError``

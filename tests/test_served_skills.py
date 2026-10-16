@@ -195,6 +195,17 @@ def test_1652_installer_core_set_unchanged_and_new_skills_are_documented():
             "the next available set in docs/onboarding.md")
 
 
+# ── #8066: the served-skill relay ratchet lives in its own static file ─────
+#
+# The ratchet's SUBJECT is every `tests/**/*.py`, so it cannot live here: this
+# file is registered under `onboarding` alone, and a `core`-owned test file's
+# diff (the sharp case being `tests/test_ingest_conformance.py`, the very file
+# #8499 retargeted off the relay) does not select `onboarding`. It moved to
+# `tests/test_8066_served_skill_relay_ratchet.py`, registered on `core` AND
+# `onboarding`, and that file pins the registration property by enumerating
+# every in-scope file (the #1349/#2938 silent-drop class).
+
+
 # ── #3513: the renumbered SKILL sections must stay findable BY NUMBER ──────
 # The onboarding SKILL.md's sections are cited by NUMBER from outside the file
 # (mcp_server.py, hosted_api.py, tests, and a live research routing pointer).

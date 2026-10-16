@@ -476,3 +476,8 @@ verify_jwt = false
 # be false or every submission 401s before the function runs.
 [functions.waitlist-subscribe]
 verify_jwt = false
+
+# deck-view is called from the gated /investors page when a reader gives an
+# address to open the deck. Same reason: anonymous browser POST, no JWT.
+[functions.deck-view]
+verify_jwt = false

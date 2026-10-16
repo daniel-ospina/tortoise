@@ -557,12 +557,33 @@ _STATUS_WORDS = r"(?:CLOSED|COMPLETED|LANDED|FILED|FIXED|SHIPPED|RETIRED|BUILT|D
 #: `landed` and `shipped` are the two that are delivery almost every time.
 _STATUS_LOWER = r"(?:landed|shipped)"
 
+#: The documents that STATE A DESIGN — as opposed to the three changelogs, which
+#: keep the record of how each got there. The same class of pollution reached all
+#: three: `ONTOLOGY.md` carried a 730-line changelog (37% of the file) plus a
+#: per-field `Impl` column; the two architecture documents carried issue-state
+#: assertions, `CORRECTED 20xx-xx-xx` stamps and *"an earlier draft said X"*
+#: narration. Each header already declared the opposite of what the body did.
+#:
+#: Defined above the class test that uses it because `STATUS_ABSENCE_DOCS` reads
+#: it — one definition, so the two guards cannot come to disagree about the set.
+DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
+
 #: Absence of work spoken as absence: *"`#3011` has not run"*, *"THE S0 HALF IS
 #: NOT BUILT"*, *"not yet wired"*. A design document states what the design IS;
-#: what is missing is a tracker's job. Applied to the two architecture documents
-#: only — `ONTOLOGY.md` is OWNER-GATED (the file states its own rule), the same
-#: shape is present there at two lines, and that is recorded for approval rather
-#: than edited. See the class test's docstring.
+#: what is missing is a tracker's job. Applied to every design document,
+#: `ONTOLOGY.md` included: the lines it carried were dropped when the owner
+#: approved the exact copy (#8745) — the two `not yet written by …` clauses, plus
+#: the producer-absence claims. The per-field build status for
+#: `validFrom`/`validTo` was ALREADY recorded in `ONTOLOGY-CHANGELOG.md`
+#: (§4.2/§4.3, `❌` both), so the record did not need to gain it.
+#:
+#: Scope: this arm catches three absence forms — the CAPS form, the
+#: `#NNN`-adjacent lowercase form, and the producer-absence form (`no producer`,
+#: `spec-only`). It is NOT "the design documents are free of status prose":
+#: `ONTOLOGY.md:426` (*"**Not written by `_upsert_subject`**"*) and `:446`
+#: (*"**Not written by `_upsert_object`**"*) pass it — each ends *"— planned
+#: follow-up"*. That shape was measured (`not written` has 12 corpus
+#: lines, only 2 of them status claims) and deliberately left out.
 _STATUS_ABSENCE = (
     # The CAPS form is this document set's convention for delivery state, so it
     # carries no ambiguity.
@@ -576,10 +597,28 @@ _STATUS_ABSENCE = (
         r"|\bnot\s+(?:yet\s+)?(?:run|built|wired|implemented|written)\b[^.\n]{0,40}?#[0-9]{3,5}",
         re.IGNORECASE,
     ),
+    # The "absence of a producer" form: *"no producer yet"*, *"has no producer
+    # here"*, *"spec-only"*. Absence of work is a tracker's business, and this is
+    # how this document set spells it when the missing thing is a writer rather
+    # than a step.
+    #
+    # Measured against the three design documents before adding: 0 hits at HEAD,
+    # and it fires on both claims #8774 removed. NOT widened to the general
+    # `not written` form — measured, that shape has 12 corpus lines and only 2 are
+    # status claims; the other 10 are design English (*"appended, never written
+    # onto the Object"*, *"a claim not worth keeping is not written"*). Precision
+    # over coverage: an arm that fires on design prose is a guard that gets
+    # deleted.
+    re.compile(r"\b(?:has\s+)?no producer\b|\bspec-only\b", re.IGNORECASE),
 )
-#: The documents `_STATUS_ABSENCE` governs. `ONTOLOGY.md` is excluded until the
-#: owner approves the two edits; when that lands this becomes `DESIGN_DOCS`.
-STATUS_ABSENCE_DOCS: tuple[Path, ...] = (DOC, STORAGE)
+#: The documents `_STATUS_ABSENCE` governs — the same set as `DESIGN_DOCS`.
+#: `ONTOLOGY.md` was once excluded because this shape sat there at four lines
+#: awaiting the owner's approval of the exact copy; those lines landed (#8745),
+#: so the exclusion and the reason recorded for it are both gone. Guarding the
+#: owner-gated file adds no new hazard: the CLASS check
+#: (`test_the_design_documents_carry_no_issue_state_or_change_narration`) already
+#: iterates `DESIGN_DOCS`, so `ONTOLOGY.md` was never outside a guard.
+STATUS_ABSENCE_DOCS: tuple[Path, ...] = DESIGN_DOCS
 
 #: Uses that are ordinary English, not a delivery claim. Matched against the
 #: token and its immediate context, and dropped.
@@ -617,7 +656,11 @@ _CHANGE_NARRATION = re.compile(
     r"|Corrections? to (?:an )?earlier"
     r"|(?:CORRECTED|AMENDED) 20[0-9]{2}-"
     r"|\bDraft [0-9]\b"
-    r"|rewritten twice",
+    r"|rewritten twice"
+    # A version the passage says it has been true since — change history, not the
+    # rule it settled on. Measured across the three design documents before
+    # adding: 0 hits at HEAD.
+    r"|\bsince v[0-9]+\.[0-9]+\b",
     re.IGNORECASE,
 )
 
@@ -664,15 +707,6 @@ def _delivery_hits(line: str) -> list[str]:
     return hits
 
 
-#: The documents that STATE A DESIGN — as opposed to the three changelogs, which
-#: keep the record of how each got there. The same class of pollution reached all
-#: three: `ONTOLOGY.md` carried a 730-line changelog (37% of the file) plus a
-#: per-field `Impl` column; the two architecture documents carried issue-state
-#: assertions, `CORRECTED 20xx-xx-xx` stamps and *"an earlier draft said X"*
-#: narration. Each header already declared the opposite of what the body did.
-DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
-
-
 def test_the_design_documents_carry_no_issue_state_or_change_narration():
     """A design document states the design. Status and change history do not.
 
@@ -700,11 +734,10 @@ def test_the_design_documents_carry_no_issue_state_or_change_narration():
     date.
 
     `_STATUS_ABSENCE` (`not built`, `has not run`, `not yet wired`) is applied to
-    `STATUS_ABSENCE_DOCS` rather than to `DESIGN_DOCS`: the same shape is present
-    in `ONTOLOGY.md` at two lines, and that file is OWNER-GATED — it states its
-    own rule that no change lands without the owner approving the exact diff.
-    The two passages are recorded for approval, not edited behind the rule. When
-    they land, point `STATUS_ABSENCE_DOCS` at `DESIGN_DOCS`.
+    `STATUS_ABSENCE_DOCS`, which is `DESIGN_DOCS` — `ONTOLOGY.md` included. It was
+    once excluded because this shape sat there at four lines awaiting the
+    owner's approval of the exact copy; those lines landed (#8745), so the
+    exclusion and the reason recorded for it are both gone.
     """
     offenders = []
     for path in DESIGN_DOCS:
@@ -761,6 +794,15 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "**Implementation status.** Both halves are now implemented.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
+        # The change-history date form, on the §8 direction note #8738 moved (the
+        # line is already absent from `main`; the guard pins the form, not the diff).
+        "*(Stored and interpreted on every path since v3.25 \u2026 see the "
+        "Transition state note in the changelog.)*",
+        # The "absence of a producer" arm, on the two claims #8774 removed.
+        "| `participatesIn` | Subject \u2192 Event | Subjects involved in an event "
+        "(\u26a0\ufe0f spec-only \u2014 no producer yet, tracked in issue #7884) |",
+        "`aboutSubject` has no producer here: the ONTOLOGY registers Session as an "
+        "`aboutObject` source only.",
     ]
     must_not_flag = [
         "The gate is FAIL-CLOSED at the boundary.",
@@ -770,7 +812,28 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "Supersession does not rewrite an earlier one.",
         "Everything is done in S6.",
         "`#4999` records the trace mechanism.",
+        # A near-miss for the producer arm: names a producer, claims no absence.
+        '`tortoise/subject_binding.py` is the ONLY confidence-gated `aboutSubject` producer.',
+        # A near-miss for the version-date arm: a version NAMED, not asserted as
+        # a period the passage has held true since.
+        "Model version v3.15 retires the `:Document` label.",
     ]
+    # The SCOPE is pinned too, and pinned ABSOLUTELY. Two narrowings are possible
+    # and both must red a test:
+    #   - narrowing `STATUS_ABSENCE_DOCS` alone drops `ONTOLOGY.md` from the
+    #     absence arm while the class check keeps it;
+    #   - narrowing `DESIGN_DOCS` drops it from every status guard at once, and
+    #     an equality between the two names survives that edit untouched
+    #     (measured: `DESIGN_DOCS = (DOC, STORAGE)` left all 8 tests green).
+    # A guard that can be narrowed without reddening is a guard that will be.
+    assert set(DESIGN_DOCS) == {ONTOLOGY, DOC, STORAGE}, (
+        "DESIGN_DOCS is the set of documents these guards police; a document "
+        "silently leaving it is the narrowing this assert exists to catch"
+    )
+    assert set(STATUS_ABSENCE_DOCS) == set(DESIGN_DOCS), (
+        "STATUS_ABSENCE_DOCS no longer covers the same documents as the class "
+        "check: the absence arm must not narrow silently"
+    )
     for line in must_flag:
         assert flagged(line), f"the class check no longer fires on: {line!r}"
     for line in must_not_flag:
