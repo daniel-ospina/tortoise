@@ -799,14 +799,23 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # (``retract_point`` writes status='retracted' and no window and
             # no CORRECTS edge). Sourced from the search PAYLOAD (which
             # carries it), never from ``point_props_for_hits`` (which does
-            # not fetch it). Additive key — the annotated key set is 18, or 20
-            # when the point carries a verbatim span (#2684, added below).
+            # not fetch it). Additive key — the annotated key set is 21 (18
+            # + the #2350 precision/end-state triple, added below), or 23 when
+            # the point carries a verbatim span (#2684, added below).
             "status": h.get("status") or "",
             # E6 (#1538) D7: promoted validity-window fields — additive,
             # only when present (undated hits render no [valid …] marker).
             "valid_from": h.get("valid_from") or "",
             "valid_to": h.get("valid_to") or "",
             "expired_at": h.get("expired_at") or "",
+            # #2350 (E-prec): the 3-state end rides the annotated surface too,
+            # or the eval lane's reader cannot render an ended-unknown window
+            # as distinct from a still-true one (``_validity_marker`` reads
+            # these keys). Sourced from the search payload — the same place
+            # the window fields above come from.
+            "valid_from_precision": h.get("valid_from_precision") or "",
+            "valid_to_precision": h.get("valid_to_precision") or "",
+            "end_state": h.get("end_state") or "",
         }
         # #2684 (Slice B): the value-bearing verbatim SPAN — the offsets of
         # the point's own quote inside its source turn, surfaced WITH the
@@ -828,7 +837,7 @@ def annotate_pool_additions(hits: list[dict], props: dict, dates: list[str],
     needs the eval lane's annotation readers, so a product home would force
     a product→harness import).
 
-    Delegates to :func:`_annotate_hits` (all 18 annotated keys — including
+    Delegates to :func:`_annotate_hits` (all 21 annotated keys — including
     ``session_date``, which is derived from the QUESTION's ``haystack_dates``
     and is not derivable from ``proj`` or the point props, hence the
     required ``dates`` argument) and then stamps ``match_source`` — the
@@ -2395,6 +2404,34 @@ def retrieve_for_question(
             len(ctx_evidence_ids) / reader_surface_denom
             if reader_surface_denom else None)
 
+    # ── #2516 (C1, amended): answer_evidence@k — the FACT-GRAIN bridge
+    # between session recall and the answer. Binary per question: does the
+    # assembled reader context's k-prefix share >= ANSWER_EVIDENCE_MIN_WORDS
+    # (3) contiguous verbatim words with the question's GOLD ANSWER? The
+    # session surface (session_recall@k / official recall_all@k) and the
+    # marked-content surface (reader_evidence@k / reader_surface@k) can both
+    # read complete while the answer-bearing unit never reached the reader
+    # (the A2 gap, measured: recall_all@5 0.8592 / reader_surface@5 0.9436 on
+    # the n=71 multi-session tail) — this is the leg the A-levers are gated
+    # on, reported BESIDE the official number, never instead of it.
+    # The k-prefix follows the SAME context list the reader receives (the
+    # render is re-run on the prefix so the measured text IS the reader's
+    # text). N/A (None) when the question has no gold answer (abstention /
+    # `_abs`) — dropped from the mean, never counted as a miss
+    # (evidence.answer_evidence_in_context semantics; the D3 instrument's
+    # "answerable questions only" denominator). LEXICAL FLOOR — a
+    # paraphrase/inferential answer reads as absent (a lower bound).
+    # ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════
+    # Like #1948's reader_surface@k, this measures the eval's reader context;
+    # the product has no reader surface, so it is harness-only by nature.
+    # ═════════════════════════════════════════════════════════════════════
+    gold_answer = str(question.get("answer") or "")
+    answer_evidence: dict[str, float | None] = {}
+    for k in ks:
+        answer_evidence[str(k)] = evidence.answer_evidence_in_context(
+            render_context(context_points[:k], question_date=question_date),
+            gold_answer)
+
     # ── C5 (#2521, #2513): aggregative-intent + per-facet coverage verdict
     # (MEASUREMENT seam — retrieval behavior is untouched; the completeness
     # loop is C3-1/C3-3 #2519). Under the arm ONLY: run the hermetic
@@ -2505,6 +2542,13 @@ def retrieve_for_question(
         # window; reader_evidence@k counts points only); k-independent
         # by construction, N/A on empty denominators.
         "reader_surface@k": reader_surface,
+        # #2516 (C1, amended): the fact-grain answer-evidence leg — binary
+        # (1.0/0.0) per question, N/A (None) when the question carries no
+        # gold answer. The bridge metric between the session surface and the
+        # marked-content surface; report.py aggregates it as
+        # ``retrieval.answer_evidence@k`` and per category in
+        # ``retrieval.retrieval_by_category``.
+        "answer_evidence@k": answer_evidence,
         # Task 0 (#1745): ranked ids + evidence-turn matches populated for
         # the hybrid arm (the pilot's context composition was
         # unreconstructable — 0/50). ``ranked_ids`` is the effective pool

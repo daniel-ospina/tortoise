@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from .env_truthy import is_truthy
 from .security import entity_label, validate_entity_type
+from .validity import window_read_fields  # #2350: ONE read-projection home
 # #8316: the READ half of the stored-embedding shape seam. A caller-supplied
 # embedding is stored VERBATIM as a plain Cypher `List` (PR #3018's recorded
 # decision) and a read spelled `<alias>.embedding` makes
@@ -631,6 +632,15 @@ class SearchResult:
     valid_from: str = ""
     valid_to: str = ""
     expired_at: str = ""
+    # #2350 (E-prec): the additive per-end precision layer + the 3-state end
+    # (``open`` | ``known`` | ``unknown``). Empty means the precision was not
+    # declared (legacy window — ``valid_from``/``valid_to`` read as day
+    # precision, the pre-#2350 default); ``end_state`` is emitted whenever the
+    # point carries ANY window information, so an ended-unknown window is
+    # distinguishable from a still-true one on the wire.
+    valid_from_precision: str = ""
+    valid_to_precision: str = ""
+    end_state: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
     # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
     # when the whole batch resolved no subject AND the graph has no
@@ -708,6 +718,23 @@ class SearchResult:
             d["valid_to"] = self.valid_to
         if self.expired_at:
             d["expired_at"] = self.expired_at
+        # #2350 (E-prec): the precision block, emitted only when the point
+        # carries window information at all — undated points stay byte-
+        # identical (no keys), a dated point states its end state so a
+        # still-true window (``open``) is never confused with one whose end is
+        # un-datable (``unknown``). ``valid_from_precision`` is INCLUDED in the
+        # gate: a falsey-but-present start (``""``) is a real bound for the
+        # ONE read-projection home, so the resolved ``day`` must reach the
+        # wire — gating on a truthy ``valid_from`` alone silently dropped the
+        # block on that surface only (the cross-surface drift of #2350).
+        if (self.valid_from or self.valid_to or self.valid_to_precision
+                or self.valid_from_precision):
+            if self.valid_from_precision:
+                d["valid_from_precision"] = self.valid_from_precision
+            if self.valid_to_precision:
+                d["valid_to_precision"] = self.valid_to_precision
+            if self.end_state:
+                d["end_state"] = self.end_state
         if self.subject:
             d["subject"] = self.subject
         # #4889: loud counterpart to the absent ``subject`` key above — only
@@ -1280,7 +1307,18 @@ def run_vector_query(
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
-    query_vec must be a 384-dim embedding matching the index dimension.
+    ``query_vec``'s required width is the STORE's, never a literal. The index
+    path needs a vector matching the width the index was created with — the
+    one ``FalkorProjection.required_embedding_dim`` declares (#4280) — while
+    the brute-force branch below (the embedded lane, an old FalkorDB, or any
+    lane whose index query fails) is DIMENSION-AGNOSTIC: it is
+    ``vec.euclideanDistance`` over ``vecf32``-wrapped values with no width
+    literal anywhere. An index-less store therefore reads back whatever width
+    its own encoder produced, and that is DELIBERATE — pinning the
+    brute-force lane to 384 re-introduces the #4280 regression (an
+    index-less store silently loses usable vectors) rather than fixing
+    anything. ``required_embedding_dim`` is the ONE home of the width rule;
+    do not mint a second one here.
 
     R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
     at every exit branch. The empty-embedding case is an EXPLICIT zero-row
@@ -2181,6 +2219,24 @@ def degradation_chain(
     ``reason="timeout", ran=True, degraded=True`` (never absent). Default
     None = no trace (byte-identical behavior).
 
+    #6851 — what the cap does NOT promise. ``elevated_timeout_ms`` (default
+    500ms) bounds the WAIT, never the COLLECTION, so it is not a hard edge on
+    what a call returns: a leg that finished AFTER the deadline can still be
+    returned. Two measured windows admit one. (a) ``as_completed``'s own wait
+    wakes on a future's completion as well as on the deadline, so it can
+    overshoot the cap and then yield that future as if it had arrived on time.
+    The overshoot is SCHEDULING noise, not a budget: measured over a 30-run
+    sample against the 500ms cap, the ``TimeoutError`` raise landed a median
+    ~100ms late, with a worst case of ~270ms (0.501s–0.772s). That is why
+    #6842's 100ms stub margin was never enough — a 100ms margin sits at the
+    median of the overshoot it has to outrun, and the red was this window, not
+    a logic error. (b) The post-deadline rescan collects every
+    future that is ``done()`` by the time it runs. Only a worker STILL running
+    at that rescan is discarded, and only that one is recorded as ``timeout``.
+    A leg discarded this way is not a relevance verdict (see ``floored_legs``).
+    Pinned by ``tests/bench/test_degradation_chain.py::
+    test_post_deadline_rescan_collects_a_late_leg``.
+
     min_vector_similarity (#4028): optional COSINE relevance floor for the
         vector leg, forwarded to :func:`run_vector_query`. A nearest
         neighbour below it carries no relevance signal and is dropped rather
@@ -2297,11 +2353,23 @@ def degradation_chain(
                 "Strategies timed out (500ms) — collected %d/%d, cancelling remaining",
                 len(results), len(futures),
             )
-            # R3 (#1542) D4: a future not completed by the deadline is
-            # discarded AND self-recorded as ``timeout`` (never absent). The
-            # merge reads only done futures via result(timeout=0) — a
-            # still-running worker is never joined past the deadline; its
-            # late private-list entries are discarded (timed_out skip below).
+            # R3 (#1542) D4 (#6851): THE CAP BOUNDS THE WAIT, NOT THE
+            # COLLECTION. A future is discarded only if it is STILL not done
+            # HERE. One that finished after the deadline but before this
+            # rescan runs is COLLECTED, exactly like a leg that finished on
+            # time, and its private-list entries are merged normally — it is
+            # NOT recorded as ``timeout``. (The pre-#6851 wording claimed such
+            # a future was "discarded AND self-recorded as timeout"; this loop
+            # has never done that, and that claim is what let #6842 read the
+            # cap as a deterministic boundary.) The read stays non-blocking:
+            # result(timeout=0) on a done future, cancel() on the rest, never
+            # a join — so a worker still running here is not waited for, and
+            # its late private-list entries are discarded (timed_out skip
+            # below). Note cancel() cannot stop a thread that has already
+            # started, so a cancelled worker runs to completion regardless:
+            # the ThreadPoolExecutor.__exit__ join below is what actually
+            # bounds this call's wall-clock duration. The caller therefore
+            # pays a straggler's own latency, never the cap.
             for f in list(futures):
                 strategy_name = futures[f]
                 if strategy_name in results:
@@ -3315,7 +3383,11 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "  coalesce(n.outdated, false), "
             # #1423: the Subject's own lifecycle status, appended AFTER #2294's
             # index-18 flag so neither addition shifts the other's mapping.
-            "  s.status, es.status",
+            "  s.status, es.status, "
+            # #2350 (E-prec): the per-end precision declaration, appended
+            # LAST so every index above is untouched. Read into the additive
+            # precision block by ``window_read_fields`` below.
+            "  n.validFromPrecision, n.validToPrecision",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -3335,6 +3407,24 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             st.setdefault("valid_from", row[2] or None)
             st.setdefault("valid_to", row[3] or None)
             st.setdefault("expired_at", row[4] or None)
+            # #2350 (E-prec): the additive precision block, resolved by the ONE
+            # read-projection home so search/recall annotation cannot drift
+            # from ``get_historical_knowledge``/``assembly``. The bounds are
+            # passed RAW: ``window_read_fields``' presence gate is
+            # ``is not None`` (a falsey-but-present bound — ``""``, ``0`` —
+            # is a REAL bound, matching ``_covers`` and
+            # ``_assert_window_start_not_inverted``). Pre-normalizing with
+            # ``or None`` here made the same stored window read ``day`` in
+            # assembly / ``get_historical_knowledge`` and ``None`` here — the
+            # exact cross-surface drift this module exists to prevent.
+            _wf = window_read_fields(
+                row[2], row[3],
+                row[21] if len(row) > 21 else None,
+                row[22] if len(row) > 22 else None,
+            )
+            st.setdefault("valid_from_precision", _wf["valid_from_precision"])
+            st.setdefault("valid_to_precision", _wf["valid_to_precision"])
+            st.setdefault("end_state", _wf["end_state"])
             old_id, old_content, old_created = row[5], row[6], row[7]
             new_id, new_status, new_content, new_created = row[8], row[9], row[10], row[11]
             if old_id and old_id not in {s["id"] for s in st["supersedes"]}:

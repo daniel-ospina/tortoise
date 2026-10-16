@@ -349,9 +349,9 @@ def test_rebuild_all_restores_the_edge_message_state(journaled_sdk):
     Operator edges are used deliberately: ``create_operator`` JOURNALS the
     operator, so pass-1a re-creates the edge and the assertion is about its
     PROPERTY rather than about a missing edge. (A plain raw-Cypher direct edge
-    is not journalled at all, and ``DirectEdgeCreated`` replay is deferred and
-    unimplemented — A10 #1048 — so a direct edge is lost regardless of this
-    change.)
+    is not journalled AT ALL — no ``create_direct_edge`` call, so no
+    ``DirectEdgeCreated`` record to replay, and the journaled shape IS
+    replayed since #8499 — so that edge is lost regardless of this change.)
     """
     sdk, events = journaled_sdk
     ids = _claims(sdk, 3)
@@ -570,7 +570,8 @@ def test_rebuild_reports_drop_for_a_post_upgrade_journal(
 
     proj = sdk._get_proj()
     # A dressed edge the journal NEVER records: raw Cypher, no create_operator,
-    # and DirectEdgeCreated is not folded by the replay (A10 #1048), so it is
+    # and no create_direct_edge either — so there is no DirectEdgeCreated
+    # record to replay (the journaled shape IS replayed since #8499), and it is
     # lost by the wipe+replay. This is the "older dressed edge" half.
     extra = _claims(sdk, 1)[0]
     _direct_impl_edge(sdk, ids[0], extra)

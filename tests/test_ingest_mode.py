@@ -274,20 +274,28 @@ class TestModeIsomorphism:
         for bid in (b1, b2):
             assert isinstance(bid, str) and len(bid) == 26
             assert _CROCKFORD_ULID_RE.match(bid), bid
-        # every bundle-created Point carries it — the 2 plain points (the
-        # bundle's plain IMPL routes to an OPERATOR-LESS DIRECT EDGE since
-        # A3 #1053 — the edge carries the batch_id on the EDGE, §5.3)
+        # every bundle-created Point carries it — the 2 plain points AND the
+        # reified IMPL OPERATOR (#8499 endpoint-kind gate, owner ruling
+        # 2026-10-13: a plain Point↔Point IMPL is operator-mediated, so the
+        # operator Point is bundle-created and stamped like any other, §4.2).
+        # The stamp lives on the OPERATOR NODE, never on its edges.
         for g, r in ((g1, r_bulk), (g2, r_gran)):  # noqa: B007
             stamped = _count(
                 g,
                 "MATCH (n:Point {batch_id:$b}) RETURN count(n)",
                 {"b": b1},
             )
-            assert stamped == 2, "2 plain points stamped"
+            assert stamped == 3, "2 plain points + the IMPL operator stamped"
+            assert _count(
+                g,
+                "MATCH (n:Point {is_operator:true, batch_id:$b}) "
+                "RETURN count(n)",
+                {"b": b1},
+            ) == 1, "the reified operator carries the batch_id"
             assert _count(
                 g, "MATCH ()-[r:IMPL|NAND {batch_id:$b}]->() RETURN count(r)",
                 {"b": b1},
-            ) == 1, "the plain IMPL direct edge carries the batch_id"
+            ) == 0, "no operator-less edge carries the batch_id any more"
             assert _count(
                 g, "MATCH (n:Point) WHERE n.batch_id IS NULL RETURN count(n)"
             ) == 1, "only the pre-seeded live anchor L is unstamped"

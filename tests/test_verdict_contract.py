@@ -734,7 +734,11 @@ _CONVERTED_SITES: dict[str, frozenset[str]] = {
         {"test_registry_revoke_pbkdf2_only_node"}),
     "tests/test_writer_inventory.py": frozenset(
         {"test_signup_provisions_identity_path",
-         "test_create_graph_writes_row_supabase_mode"}),
+         "test_create_graph_writes_row_supabase_mode",
+         # #8000: the second nodeid the #8416 `test (b)` red recorded — the
+         # SAME route class as the graph-write site above, left unconverted by
+         # #8579 because the issue-measured inventory named only two sites.
+         "test_list_my_teams_uses_derived_graphs"}),
 }
 
 

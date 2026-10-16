@@ -36,7 +36,7 @@ Report sections (counts + samples, all read-only):
     (id = name, subjectKind='other' — edges.py _create_about_edges; exit
     criterion 8)
   - cap_skip                            UNVERIFIABLE from graph state — the edge is
-    silently skipped (no trace); source of truth = event log > content-string,
+    silently skipped (no trace); reconstruction source = event log > content-string,
     neither available → class UNVERIFIABLE (scoping exit criterion 2). Decision
     owner + default documented (event-log normalization decision, Phase 1).
 
@@ -427,7 +427,7 @@ def _cap_skip(proj) -> dict:
     # Graph-detectable proxy: operator declared an op_type but has NO typed
     # input edges — every input edge was skipped (per-instance 500-stub cap,
     # edges.py ~L60) or the operator is fully degenerate. The skipped edge
-    # itself leaves no trace: source of truth = event log > content-string;
+    # itself leaves no trace: reconstruction source = event log > content-string;
     # neither available here → class UNVERIFIABLE (exit criterion 2 floor).
     base = ("MATCH (o:Point {is_operator: true}) "
             "WHERE o.op_type IS NOT NULL "
@@ -446,8 +446,10 @@ def _cap_skip(proj) -> dict:
         "decision": {
             "owner": "TBD (epistemic-team)",
             "event_log_normalization_default": "graph-only durability unless "
-                "the JSONL event log is declared source of truth (Phase 1 "
-                "decision, scoping P1-2/exit criterion 2).",
+                "the JSONL event log is declared the reconstruction source "
+                "(Phase 1 decision, scoping P1-2/exit criterion 2); the store "
+                "is the durability authority (docs/durability-posture.md, "
+                "#2881).",
             "blocks_close": True,
         },
         "note": "Cap-skip: at the per-instance 500-stub cap _create_edges "

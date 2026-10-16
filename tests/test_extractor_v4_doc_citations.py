@@ -2,7 +2,7 @@
 
 THE DEFECT THIS PINS
 --------------------
-`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §15 describes
+`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §7 describes
 `tortoise/value_gate.py`'s identifier-only DISCARD (`#4899`). The row first
 stated the rule as `^#\\d{3,}$`-style — `#4899`'s *proposed* pattern, not the
 shipped one — and it was wrong in BOTH directions:
@@ -19,8 +19,9 @@ is that "the symbol name is authoritative and the line number is a convenience".
 
 WHAT THIS PINS
 --------------
-1. §15's value-gate row names the shipped symbol (`value_gate._REFERENCE` /
-   `identifier_only()`) and carries no hand-written `^#\\d{3,}$` pattern.
+1. §7's value-gate row names the shipped symbols (`value_gate._REFERENCE` /
+   `identifier_only()`) and denies the anchored `^#\\d{3,}$` form as the rule —
+   it may appear only as a REJECTED pattern, never as a competing definition.
 2. Those symbols exist and behave as the shipped module does — so the guard
    cannot pass over a rename that would make the citation stale.
 
@@ -37,10 +38,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
 
-#: The §15 row that describes the shipped gate. Scoping the read to this row
-#: keeps a `\\d{3,}` elsewhere in the document (e.g. §4.2 quoting `#4899`'s
-#: false-positive text) from reding a guard that pins §15, not the whole doc.
-ROW_ANCHOR = "§1 the mechanism"
+#: The §7 statement of the shipped gate. This fact previously lived in the
+#: §15 issue-map row; §15 was removed as out-of-scope status tracking, so the
+#: statement — and this guard — live in §7.
+ROW_ANCHOR = "The design requires ENFORCEMENT BY DEFAULT"
 
 
 def _value_gate_row() -> str:
@@ -50,18 +51,23 @@ def _value_gate_row() -> str:
     return text[start : text.index("\n", start)]
 
 
-def test_the_value_gate_row_names_the_shipped_symbol_not_a_proposed_pattern():
+def test_the_value_gate_statement_names_the_real_symbol_not_a_proposed_pattern():
     row = _value_gate_row()
     assert "value_gate._REFERENCE" in row, (
-        "§15's value-gate row must name the shipped symbol "
+        "§7's value-gate statement must name the real symbol "
         "(`value_gate._REFERENCE`); a hand-written pattern is what the #8498 "
         "review found wrong in both directions. Row: " + row
     )
     assert "identifier_only()" in row, row
-    assert "^#\\d{3,}$" not in row, (
-        "the `^#\\d{3,}$`-style pattern is #4899's PROPOSAL, not the shipped "
-        "rule — `_REFERENCE` is `#\\d{1,6}(?!\\d)` and `identifier_only()` is a "
-        "whole-residue test. Row: " + row
+    assert "NOT `E7`" in row, (
+        "the statement must name the gate site (`S2.2b`) and deny `E7` — the "
+        "`#5198` defect was the document asserting both sites. Row: " + row
+    )
+    assert "anchored pattern is not the rule" in row, (
+        "`^#\\d{3,}$` may appear only as a REJECTED pattern: `_REFERENCE` is "
+        "`#\\d{1,6}(?!\\d)` and `identifier_only()` is a whole-residue test. "
+        "A mention that does not deny the anchored form reads as a second, "
+        "competing definition. Row: " + row
     )
 
 

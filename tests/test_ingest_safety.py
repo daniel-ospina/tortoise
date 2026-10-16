@@ -144,8 +144,10 @@ def test_e2e6_identical_resubmission_all_deduped(sdk):
     assert r1["batch_id"] == r2["batch_id"]
     assert r2["created"]["points"] == 0 and r2["deduped"]["points"] == 2
     assert r2["created"]["connections"] == 0
-    assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 2
-    assert _count(sdk, "MATCH ()-[r:IMPL]->() RETURN count(r)") == 1
+    assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 3  # +IMPL operator
+    # #8499 endpoint-kind gate: the plain Point↔Point IMPL is REIFIED, so the
+    # operator carries one IMPL edge per input (not one bare pA→pB edge).
+    assert _count(sdk, "MATCH ()-[r:IMPL]->() RETURN count(r)") == 2
 
 
 def test_e2e6_crash_between_create_and_stamp_converges(sdk):
@@ -264,7 +266,7 @@ def test_e2e17_read_surfaces_reachable_after_ingest(sdk):
         f"recall must reach the specific ingested content: {str(hits)[:200]}"
     # list_batch (A13 surface): the stamped set is queryable
     audit = sdk.list_batch(res["batch_id"])
-    assert audit["counts"]["points"] == 2, audit
+    assert audit["counts"]["points"] == 3, audit  # 2 statements + IMPL operator
 
 
 # ── Track B (post-#780) — red-first, inert under -m "not track_b" ────

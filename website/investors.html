@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Investor Presentation — Tortoise</title>
-  <meta name="description" content="Investor presentation — Tortoise, the cognitive layer for agentic organizations.">
+  <title>Investors Presentation — Tortoise</title>
+  <meta name="description" content="Investors Presentation — Tortoise, enabling agents to reason, learn, and coordinate as an organization.">
   <meta name="theme-color" content="#060b14">
   <!-- noindex, deliberately — same reason as the design-partner one-pager this
        page is forked from. Both are OUTREACH DOCUMENTS delivered by link to
@@ -19,8 +19,8 @@
   <meta name="robots" content="noindex,follow">
   <link rel="canonical" href="https://tortoise.premiselabs.co/investors">
   <link rel="icon" type="image/png" href="/logo.png">
-  <meta property="og:title" content="Investor Presentation — Tortoise">
-  <meta property="og:description" content="Tortoise — the cognitive layer for agentic organizations.">
+  <meta property="og:title" content="Investors Presentation — Tortoise">
+  <meta property="og:description" content="Tortoise — enabling agents to reason, learn, and coordinate as an organization.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://tortoise.premiselabs.co/investors">
   <!-- A summary_large_image card is UNSATISFIABLE without an image, so the card
@@ -47,7 +47,7 @@
   <meta property="og:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Investor Presentation — Tortoise, the cognitive layer for agentic organizations.">
+  <meta property="og:image:alt" content="Investors Presentation — Tortoise, enabling agents to reason, learn, and coordinate as an organization.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://tortoise.premiselabs.co/assets/investors-og.jpg">
   <style>
@@ -211,46 +211,84 @@
 
     p { max-width: 68ch; }
     p + p { margin-top: 1.15rem; }
+    /* A paragraph that follows a list needs the space the list itself opens
+       with, or it reads as part of the list rather than as what comes after
+       it: the capability gaps close on a sentence after their bullets, and the
+       solution's steps close on one after their `ol`, which opens wider
+       (1.35rem). Without this they sit flush against the list (0px at every
+       width). */
+    ul + p { margin-top: 1.15rem; }
+    ol + p { margin-top: 1.35rem; }
 
-    /* The Market Gaps intro is prose, not a list item, so the anti-widow wrap
-       is declared for it separately. Without it the sentence ends on
-       "operations" alone — 84px of a 272px measure — at 320-342px and
-       394-486px; with it the hyphen the author already wrote in "AI-forward"
-       may break, and the last line becomes "forward operations" (152px). A
-       hyphen break there is not novel: at 343-393px the measure forces one.
-       Swept at every width from 320px to 540px plus 620/768/1280/1600, the
-       line count and element height are unchanged and the wrap at 620px and
-       above is identical. */
-    #market-gaps p { text-wrap: pretty; }
+    /* The Capability Gaps closing sentence is prose, not a list item, so the
+       anti-widow wrap is declared for it separately. Without it the sentence
+       ends on "ontologies." alone — 93px of a 295px measure at 343px; with it
+       the last line is "modeling ontologies." (169px). Swept at every width
+       from 320px to 540px plus 620/768/1280/1600, it changes the last line at
+       42 of the 225 widths and the line count and element height at none. */
+    #capability-gaps p { text-wrap: pretty; }
 
-    /* ── The solution block's opening sentence ────────────────────────────
-       The source copy titles every block EXCEPT this one ("Tortoise provides an
-       agent-native cognitive layer: reasoning, memory, learning." has no
-       heading above it — the other five do). Inventing a title would be copy
-       the author did not write, so the sentence itself anchors the section:
-       serif and white like an `h2`, one step down in size so it is legible as
-       a statement rather than read as a heading. */
+    /* ── A block's opening statement ─────────────────────────────────────
+       Set serif and white like an `h2` but one step down in size, so it reads
+       as the block's opening line rather than as a section title. In #solution
+       it is that section's heading (the supplied outline heads the block); in
+       #how-it-works it sits under the `h2`. The tracking and margin pins keep
+       its rendering identical to the paragraph it was promoted from. */
     .lede {
       font-family: var(--serif);
       font-size: clamp(1.1rem, 2.2vw, 1.3rem);
       line-height: 1.4;
       color: #fff;
       max-width: 60ch;
+      letter-spacing: normal; margin-bottom: 0;
+      /* Without this both lede lines can end on a single word (measured at the
+         612px measure, over the 320-1600px widths tested: the `#solution` line
+         81.89px at 1024-1600px, the `#how-it-works` line 101-120px). Every
+         other multi-line prose block here already carries it. */
+      text-wrap: pretty;
+    }
+
+    /* ── The solution's connected steps ──────────────────────────────────
+       The three steps are a sequence, so they are an `ol` whose order the
+       graphic makes visible: a cyan node per step on a rail that runs from
+       node centre to node centre. Each item's `::before` draws the segment to
+       the next node, and `li:last-child` suppresses the one after the final
+       node (nothing follows it). Because each segment is drawn from its own
+       item's top it stays attached to the next node when a step wraps to
+       several lines.
+       The node is the `::after`, so it paints over the rail's end and no gap
+       shows. Sizes are in `em` against the item's own line box (1.75 line
+       height inherited): the first line's centre is 0.875em down, which is
+       where both the node and the rail are pinned. */
+    .steps { list-style: none; margin-top: 1.35rem; max-width: 62ch; }
+    .steps li { position: relative; padding-left: 1.7rem; font-size: 0.95rem; text-wrap: pretty; }
+    .steps li + li { margin-top: 1.15rem; }
+    .steps li::before {
+      content: ""; position: absolute; left: calc(0.25rem - 0.5px);
+      top: 0.875em; bottom: calc(-1.15rem - 0.875em);
+      width: 1px; background: var(--accent); opacity: 0.35;
+    }
+    .steps li:last-child::before { display: none; }
+    .steps li::after {
+      content: ""; position: absolute; left: 0; top: calc(0.875em - 0.25rem);
+      width: 0.5rem; height: 0.5rem; border-radius: 50%;
+      background: var(--accent);
     }
 
     /* ── Plain bulleted lists ─────────────────────────────────────────────
-       For the parallel one-line claims (the coordination problems, the market
-       gaps) and for the GTM proof points and biography lines. The marker is
-       the accent dot, at the same visual weight as the ↑/↓ markers below.
+       For the parallel one-line claims (the coordination problem, the
+       capability gaps, the why-now shifts) and for the Progress and biography
+       lines. The marker is the accent dot, at the same visual weight as the
+       ↑/↓ markers below.
        `text-wrap: pretty` re-breaks a paragraph to avoid ending it on a short
-       lone word, which this copy does easily: the third market gap ended on
-       "teams." alone — 55px against a 591px measure — and now ends at 146px.
-       The declaration on the list carries no `.profile` exception, because the
-       trade it makes is not one a wider measure fixes — the Wedge proof point's
-       middle line holds ~156px of ink whether the measure is 262px or 272px —
-       so a narrower column reset would buy nothing. Line count and element
-       height are unchanged for all 14 items across the page's 5 `.bullets`
-       lists, from 320px to 1600px. */
+       lone word, which this copy does easily: the third capability gap ends on
+       "modeling." alone — 82px against a 592px measure — and with the
+       declaration ends at 165px. The list carries no `.profile` exception
+       because the `.profile` cells want it too — the Progress "1M+ views" line
+       ends on "leads" alone, 43px of a 262px measure, and ends at 113px with
+       it. Line count and element height are unchanged for all 22 items across
+       the page's 7 `.bullets` lists at any of the 225 widths swept, 320px to
+       1600px. */
     .bullets { list-style: none; margin-top: 1.15rem; }
     .bullets li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; text-wrap: pretty; }
     .bullets li + li { margin-top: 0.4rem; }
@@ -259,15 +297,26 @@
        without reading each sentence. */
     .bullets strong { color: #fff; font-weight: 600; }
 
-    /* ── The why-now shifts ───────────────────────────────────────────────
-       Each item is a before → after claim plus the sentence that supports it.
-       The claim leads on its own line, the sentence sits beneath it in the
-       secondary colour, so the three shifts can be read as pairs rather than
-       as run-on paragraphs. It is the same `.bullets` list and accent dot as
-       everywhere else on the page; the claim's white/600 already comes from
-       `.bullets strong`, so only the line break is declared here. */
-    .shifts .claim { display: block; }
-    .shifts .why { display: block; margin-top: 0.2rem; color: var(--text-dim); }
+    /* ── The founder portrait ─────────────────────────────────────────────
+       A square headshot shown as a circle: `border-radius: 50%` on the square
+       IS the crop, so no `object-fit` or crop box is involved and none is
+       declared. The ring is `--border` rather than the accent so the page's
+       one photograph does not read as another cyan marker.
+       The owner's original 400×400 is served unresized: at 2× it covers the
+       8.5rem circle (272px) with room to spare, and the file is already a
+       26 KB progressive JPEG. */
+    .about { display: flex; gap: 1.9rem; align-items: flex-start; }
+    /* The portrait and its three profile links are one identity block, so they
+       stack in their own column; the prose column stays prose. */
+    .about-side { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 1.1rem; }
+    .about-photo {
+      flex: 0 0 auto; width: 8.5rem; height: 8.5rem;
+      border-radius: 50%; border: 1px solid var(--border);
+    }
+    .about-links { list-style: none; display: flex; gap: 1.15rem; }
+    .about-links a { display: block; color: var(--text-dim); transition: color .2s; }
+    .about-links a:hover { color: var(--accent); }
+    .about-links svg { display: block; width: 1.15rem; height: 1.15rem; fill: currentColor; }
 
     /* ── The six outcomes ─────────────────────────────────────────────── */
     .outcomes {
@@ -284,19 +333,122 @@
 
     /* ── Two-column label/value grid — label above value, no boxes ─────── */
     .profile { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem 3rem; }
+    /* The five labels (Wedge / Expansion / Monetization / Early demand /
+       Product & distribution) are the only structure cues these two grids
+       carry, and at `--text-dim` they read as grey filler rather than as
+       labels: 10.88px of dim colour with nothing to distinguish them from the
+       0.9rem body text 0.7rem below. A step up in size and weight at the
+       page's own emphasis colour (#fff, the same as `h2` and `.bullets
+       strong`) measures 19.7:1 against the background, against 7.7:1 for the
+       dim colour it replaces — the accent would have given 8.1:1 and is left
+       to the markers, which it already owns. */
     .profile h3 {
-      font-weight: 500;
-      font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--text-dim); margin-bottom: 0.7rem;
+      font-weight: 600;
+      font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
+      color: #fff; margin-bottom: 0.7rem;
     }
     .profile p { font-size: 0.9rem; }
     .profile p strong { color: #fff; font-weight: 600; }
+    /* A cell's sentences are short and sit in a narrow column, so they end on a
+       lone word easily: without this the GTM sentences finish on "agents."
+       (61px of a 282px cell) and "capabilities." (113px of 590px). Same
+       re-break as `.bullets li` and `#capability-gaps p`; it changes no line
+       count and no cell height at any width. */
+    .profile p { text-wrap: pretty; }
     /* The `.bullets` base size is 0.95rem, which is right under the 15px body
-       copy but wrong inside this grid: a `.profile` cell's own text is
-       `.profile p` at 0.9rem, so an unscoped list made the Wedge column's
-       proof points render LARGER than the sentence they support and broke the
-       uniformity every other cell in this grid has. Match the cell. */
+       copy but wrong inside this grid: a cell's own text is `.profile p` at
+       0.9rem, so an unscoped list renders larger than the sentences beside it.
+       Match the cell. The Progress cells carry the page's only such lists. */
     .profile .bullets li { font-size: 0.9rem; }
+    /* Three labelled motions in a two-column grid leave the second half of the
+       last row empty — the only unbalanced grid on the page, since Progress
+       below it holds two cells. The third cell spans both columns instead, so
+       the block has no void. Inert at and below 620px, where the grid is one
+       column. */
+    #gtm .profile > div:last-child { grid-column: 1 / -1; }
+
+    /* ── CTA — the one action the document asks for ───────────────────── */
+    .cta {
+      display: inline-block;
+      background: var(--accent);
+      color: #04121a;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      padding: 0.8rem 1.5rem;
+      border-radius: 0.5rem;
+      transition: background .2s, transform .2s;
+    }
+    .cta:hover {
+      background: #22d3ee; color: #04121a;
+      text-decoration: none; transform: translateY(-1px);
+    }
+
+    /* ── Email gate ─────────────────────────────────────────────────────
+       A DocSend-style cover: the document is replaced by a card that asks for
+       an email. Two properties are deliberate rather than incidental.
+
+       The gate is CLIENT-SIDE. The document is in this response, so a visitor
+       who reads the source — or who has JavaScript disabled, since the class is
+       applied by script — reads it without giving an address. It is friction
+       and capture, not access control; genuinely withholding the document
+       needs the gate in the response path rather than the page.
+
+       `html.gated` hides the document, the sections and the footer but keeps
+       the masthead, so the cover still carries the brand. The gate card is a
+       plain div, not a section — `html.gated section` would hide it too. */
+    .gate { display: none; padding: 4.5rem 0 5rem; }
+    html.gated .gate { display: block; }
+    html.gated .doc, html.gated section, html.gated footer.wrap { display: none; }
+    .gate-card { max-width: 27rem; }
+    .gate h1 {
+      font-family: var(--serif); font-weight: 400;
+      font-size: clamp(1.6rem, 3.4vw, 2.1rem); line-height: 1.2;
+      letter-spacing: -0.01em; color: #fff;
+    }
+    .gate-note { margin-top: 0.9rem; font-size: 0.95rem; }
+    .privacy-note { margin-top: 1.1rem; font-size: 0.75rem; color: var(--text-dim); }
+    .privacy-note a { color: var(--text-dim); }
+    .privacy-note a:hover { color: var(--accent); text-decoration: none; }
+
+    /* ── Subscribe forms — the gate and the mailing list ──────────────── */
+    .subscribe { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 1.5rem; }
+    .subscribe input[type="email"] {
+      flex: 1 1 13rem; min-width: 0;
+      font: inherit; font-size: 0.85rem; color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+      /* The field's own fill is ~1.08:1 against the page, so this border is the
+         only boundary it has; `--border` (#1e293b) measured 1.35:1 against
+         #060b14, under the 3:1 non-text bar (WCAG 1.4.11). #64748b = 4.14:1. */
+      border: 1px solid #64748b; border-radius: 0.5rem;
+      padding: 0.8rem 1rem;
+    }
+    .subscribe input[type="email"]::placeholder { color: var(--text-dim); }
+    .subscribe input[type="email"]:focus { outline: none; border-color: var(--accent); }
+    /* `:focus` above drops the outline, so keyboard focus gets its own ring: a
+       1px border recolour is otherwise the only cue, and an easy one to miss. */
+    .subscribe input[type="email"]:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+    .subscribe button {
+      font: inherit; font-size: 0.85rem; font-weight: 600;
+      letter-spacing: 0.02em;
+      color: #04121a; background: var(--accent);
+      border: 0; border-radius: 0.5rem;
+      padding: 0.8rem 1.5rem; cursor: pointer;
+      transition: background .2s, transform .2s;
+    }
+    .subscribe button:hover { background: #22d3ee; transform: translateY(-1px); }
+    .subscribe button[disabled] { opacity: 0.6; cursor: wait; }
+    /* Honeypot — off-canvas, never visible to a human (bots fill it). */
+    .subscribe .hp-field {
+      position: absolute; left: -9999px;
+      width: 1px; height: 1px; overflow: hidden; opacity: 0;
+    }
+    .form-msg { display: none; margin-top: 0.9rem; font-size: 0.8rem; }
+    .form-msg.visible { display: block; }
+    .form-msg.ok { color: var(--green); }
+    .form-msg.bad { color: #f87171; }
 
     /* ── Footer ───────────────────────────────────────────────────────── */
     /* `footer.wrap`, NOT a bare `footer`: the element also carries `.wrap`, whose
@@ -325,6 +477,10 @@
       .video figcaption { text-align: center; }
       .outcomes, .profile { grid-template-columns: 1fr; gap: 1.9rem; }
       .outcomes { gap: 0.6rem; }
+      /* At this width the prose column is too narrow to sit beside the
+         portrait, so the portrait stacks above it, centred. */
+      .about { flex-direction: column; align-items: center; gap: 1.5rem; }
+      .about-text { width: 100%; }
     }
 
     /* ── Reduced motion — MUST stay the LAST block in this stylesheet ────
@@ -335,10 +491,25 @@
        survived the preference. Every transition this stylesheet declares is
        switched off here. */
     @media (prefers-reduced-motion: reduce) {
-      .play, .overlay { transition: none; }
+      .play, .overlay, .cta, .about-links a, .subscribe button { transition: none; }
       .overlay:hover .play { transform: none; }
+      .cta:hover { transform: none; }
+      .subscribe button:hover { transform: none; }
     }
   </style>
+  <script>
+    /* Applied before first paint so a gated visitor never sees the document
+       flash past. `localStorage` can throw (Safari private mode) — an
+       unreadable preference store is treated as gated, so the failure keeps
+       the gate rather than silently opening the document. */
+    try {
+      if (!localStorage.getItem('tortoise-investors-access')) {
+        document.documentElement.classList.add('gated');
+      }
+    } catch (e) {
+      document.documentElement.classList.add('gated');
+    }
+  </script>
 </head>
 <body>
 
@@ -355,12 +526,33 @@
       </nav>
     </div>
 
+    <!-- ══ Email gate ══════════════════════════════════════════════════
+         Shown in place of the document until an address is given. The heading
+         repeats the document's own title rather than introducing new copy, and
+         exactly one of the two is visible in either state (`html.gated` hides
+         the document, and the gate is hidden once it is unlocked). -->
+    <div class="gate" role="region" aria-label="Email required">
+      <div class="wrap">
+        <div class="gate-card">
+          <h1>Investor presentation</h1>
+          <p class="gate-note">Enter your email to view the presentation.</p>
+          <form class="subscribe" id="gate-form" novalidate>
+            <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" aria-describedby="gate-error" autocomplete="email" required>
+            <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
+            <button type="submit">View presentation</button>
+          </form>
+          <p class="form-msg ok" id="gate-msg" role="status"></p>
+          <p class="form-msg bad" id="gate-error" role="alert"></p>
+        </div>
+      </div>
+    </div>
+
     <!-- ══ Title + video ═══════════════════════════════════════════════ -->
     <div class="doc">
       <div class="wrap doc-grid">
         <div>
           <h1>Investor presentation</h1>
-          <p class="doc-sub"><strong>Tortoise</strong> - the cognitive layer for agentic organizations</p>
+          <p class="doc-sub"><strong>Tortoise</strong> - Enabling agents to reason, learn, and coordinate as an organization.</p>
         </div>
 
         <figure class="video">
@@ -396,28 +588,42 @@
       </div>
     </div>
 
-    <!-- ══ The problem ═════════════════════════════════════════════════ -->
+    <!-- ══ The Problem ═════════════════════════════════════════════════ -->
     <section id="problem">
       <div class="wrap">
         <h2>The Problem</h2>
-        <p>Agents can make decisions. They struggle to keep them consistent as things change.</p>
+        <p>Agents make decisions faster than they can keep them consistent.</p>
         <p>More agents, faster execution → More assumptions and dependencies → coordination failures at machine speed:</p>
         <ul class="bullets">
           <li><span>Local fixes that create problems elsewhere</span></li>
-          <li><span>Repeated work and outdated decisions</span></li>
+          <li><span>Repeated work and incoherent decisions</span></li>
           <li><span>Self-propagating Bureaucracy</span></li>
         </ul>
+      </div>
+    </section>
+
+    <!-- ══ Capability gaps ═════════════════════════════════════════════ -->
+    <section id="capability-gaps">
+      <div class="wrap">
+        <h2>Capability Gaps</h2>
+        <ul class="bullets">
+          <li><span><strong>Harnesses</strong> coordinate execution, but reasoning is agent-local.</span></li>
+          <li><span><strong>Agent Memory Systems</strong> retrieve information, but don&rsquo;t model its logical implications.</span></li>
+          <li><span><strong>Enterprise Intelligence Platforms</strong> model business operations and decisions, but assume substantial integration and ontology modeling.</span></li>
+          <li><span><strong>Chat platforms and forums</strong> enable communication but also create noise and sidetrack agents.</span></li>
+        </ul>
+        <p>Agentic organizations lack a system to understand and reason across the broader organizational context - a shared cognitive layer. But they can&rsquo;t afford months of modeling ontologies.</p>
       </div>
     </section>
 
     <!-- ══ Why now ═════════════════════════════════════════════════════ -->
     <section id="why-now">
       <div class="wrap">
-        <h2>WHY NOW</h2>
-        <ul class="bullets shifts">
-          <li><span><strong class="claim">Large teams → Small teams, enterprise-scale complexity</strong><span class="why">Lean teams operate functions previously requiring entire departments.</span></span></li>
-          <li><span><strong class="claim">Periodic coordination → Continuous adaptation</strong><span class="why">Work moves faster than human coordination cycles.</span></span></li>
-          <li><span><strong class="claim">Human knowledge → Machine-computable understanding</strong><span class="why">Collective reasoning and organizational learning, not just information retrieval.</span></span></li>
+        <h2>Why Now</h2>
+        <ul class="bullets">
+          <li><span><strong>Lean teams → Large agent workforces</strong></span></li>
+          <li><span><strong>Human-paced bureaucracy → Machine-speed coordination</strong></span></li>
+          <li><span><strong>Human knowledge → Machine-computable understanding</strong></span></li>
         </ul>
       </div>
     </section>
@@ -425,9 +631,13 @@
     <!-- ══ The solution ════════════════════════════════════════════════ -->
     <section id="solution">
       <div class="wrap">
-        <p class="lede">Tortoise provides an agent-native cognitive layer: reasoning, memory, learning.</p>
-        <p>Connect documents, systems of record, BI, agent sessions, or conversation streams. Tortoise builds a logical model of your organization (plug-and-play epistemics).</p>
-        <p>Agents can compute over broad organizational context, unlocking autonomy, distributed reasoning, and learning. Your organization operates coherently at machine speed.</p>
+        <h2 class="lede">Tortoise gives agent teams shared memory, reasoning, and learning.</h2>
+        <ol class="steps">
+          <li>Onboard in 5 minutes: Agents use Tortoise to analyze complex decisions without losing track of variables or assumptions. The reasoning gets saved as memory.</li>
+          <li>As agents work and new sources (documents, systems of record, BI, etc) are connected, Tortoise builds a logical model of the organization. Agents use this model to evaluate alternatives, calculate implications, and understand how their decisions affect other work.</li>
+          <li>When new evidence arrives, the model recalculates dependent beliefs, allowing agents to build on each other&rsquo;s learning and adapt their decisions.</li>
+        </ol>
+        <p>The result: autonomous agents that can coordinate, learn, and adapt together at machine speed.</p>
 
         <div class="outcomes">
           <ul class="up">
@@ -444,15 +654,16 @@
       </div>
     </section>
 
-    <!-- ══ Market gaps ═════════════════════════════════════════════════ -->
-    <section id="market-gaps">
+    <!-- ══ How it works ════════════════════════════════════════════════ -->
+    <section id="how-it-works">
       <div class="wrap">
-        <h2>Market Gaps</h2>
-        <p>Plug-and-play context and organizational intelligence for AI-native and AI-forward operations</p>
+        <h2>How it works</h2>
+        <p class="lede">LLMs identify the premises; Tortoise connects and computes their implications.</p>
         <ul class="bullets">
-          <li><span><strong>Harnesses</strong> coordinate execution, but reasoning is agent-local.</span></li>
-          <li><span><strong>Memory systems</strong> retrieve information, but don&rsquo;t model its logical implications.</span></li>
-          <li><span><strong>Enterprise Intelligence platforms</strong> model business operations and decisions, but require substantial infrastructure and dedicated teams.</span></li>
+          <li><span><strong>Eliminate biases:</strong> frequency and recency optimize search speed but don&rsquo;t determine truth.</span></li>
+          <li><span><strong>Argument graphs:</strong> logical chains (A-contradicts-B-supports-C) map reasoning; system performance improves as models become cheaper.</span></li>
+          <li><span><strong>Traceable synthesis, not compression:</strong> Inspired by interconnected prediction markets, our algorithm resolves confidence across dependent claims. Evidence links to conclusions.</span></li>
+          <li><span><strong>Continuous learning:</strong> New evidence recalculates dependent conclusions, enabling agents to adapt and trigger automations.</span></li>
         </ul>
       </div>
     </section>
@@ -465,31 +676,101 @@
           <div>
             <h3>Wedge</h3>
             <p>AI-native startups and developers running multiple agents.</p>
-            <ul class="bullets">
-              <li><span>Viral content: 1m+ views on a single tweet</span></li>
-              <li><span>1 design partner (team) &amp; 20+ beta testers (individuals) waiting</span></li>
-            </ul>
           </div>
           <div>
             <h3>Expansion</h3>
-            <p>Agent memory → Shared team reasoning → Organizational cognitive infrastructure.</p>
-            <p>Monetization through managed infrastructure, usage, and enterprise capabilities.</p>
+            <p>One-person&rsquo;s agents → Shared team reasoning → Organization-wide cognitive infrastructure.</p>
+          </div>
+          <div>
+            <h3>Monetization</h3>
+            <p>Usage-based hosting, managed infrastructure, and enterprise capabilities.</p>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ══ About us ════════════════════════════════════════════════════ -->
+    <!-- ══ Progress ════════════════════════════════════════════════════ -->
+    <section id="progress">
+      <div class="wrap">
+        <h2>Progress</h2>
+        <div class="profile">
+          <div>
+            <h3>Early demand</h3>
+            <ul class="bullets">
+              <li><span>20+ prospective beta testers</span></li>
+              <li><span>1 team design partner providing data &amp; feedback</span></li>
+              <li><span>Enterprise discussions underway</span></li>
+            </ul>
+          </div>
+          <div>
+            <h3>Product &amp; distribution</h3>
+            <ul class="bullets">
+              <li><span>Working alpha, beta in development</span></li>
+              <li><span>1M+ views on founder-led content, generating inbound leads</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ Founder ═════════════════════════════════════════════════════
+         No heading: the block is one person, so a label over it would either
+         read "About us" (there is no us) or repeat the name below it. The
+         section's top border and the portrait open it instead. -->
     <section id="about">
       <div class="wrap">
-        <h2>About us</h2>
-        <p><strong>Daniel Ospina</strong> - Founder</p>
-        <p>A decade building and studying coordination systems:</p>
-        <ul class="bullets">
-          <li><span>4 years running RnD Ventures - Venture Studio focused on the future of work</span></li>
-          <li><span>Previous AI memory startup (Techstars alumni, $500k revenue)</span></li>
-          <li><span>Trained BCG consultants, Daimler, Oxford visiting lecturer, author (book on networked organizations, TEDx, HBR)</span></li>
-        </ul>
+        <div class="about">
+          <div class="about-side">
+            <img class="about-photo" src="assets/daniel-ospina.jpg" alt="Daniel Ospina" width="400" height="400">
+            <ul class="about-links">
+              <li><a href="https://www.linkedin.com/in/conductal" target="_blank" rel="noopener" aria-label="Daniel Ospina on LinkedIn"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg></a></li>
+              <li><a href="https://twitter.com/_daniel_ospina" target="_blank" rel="noopener" aria-label="Daniel Ospina on X (Twitter)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a></li>
+              <li><a href="https://danielospina.info" target="_blank" rel="noopener" aria-label="Daniel Ospina's website"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg></a></li>
+            </ul>
+          </div>
+          <div class="about-text">
+            <p><strong>Daniel Ospina</strong> - Founder</p>
+            <p>A decade building and studying coordination systems:</p>
+            <ul class="bullets">
+              <li><span>4 years running RnD Ventures - Venture Studio focused on the future of work</span></li>
+              <li><span>Previous AI memory startup (Techstars alumni, $500k revenue)</span></li>
+              <li><span>Trained BCG consultants, Daimler, Oxford visiting lecturer, author (book on networked organizations, TEDx, HBR)</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ Contact ═════════════════════════════════════════════════════
+         The document's one action: what a reader does after reading to the
+         bottom. The address is the founder's, not the outside surface's
+         `hello@`: this page is sent by link to a named reader who is replying
+         to the person who sent it, so #2409's ruling is overridden here
+         deliberately — recorded as a per-page `ADDRESS_EXCEPTIONS` entry in
+         tests/test_contact_form.py, which is what keeps the guard green on this
+         page and every other one. -->
+    <section id="contact">
+      <div class="wrap">
+        <h2>Contact</h2>
+        <p><a class="cta" href="mailto:daniel@premiselabs.co">daniel@premiselabs.co</a></p>
+      </div>
+    </section>
+
+    <!-- ══ Stay in touch ═══════════════════════════════════════════════
+         The mailing list the landing page already feeds, on this surface, with
+         the source the edge function records for it. Same fields, same honeypot
+         and same endpoint, so a subscriber is one row however they arrived. -->
+    <section id="stay-in-touch">
+      <div class="wrap">
+        <h2>Stay in touch</h2>
+        <form class="subscribe" id="waitlist-form" novalidate>
+          <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" aria-describedby="waitlist-error" autocomplete="email" required>
+          <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
+          <button type="submit">Subscribe</button>
+        </form>
+        <p class="form-msg ok" id="waitlist-msg" role="status"></p>
+        <p class="form-msg bad" id="waitlist-error" role="alert"></p>
+        <p class="privacy-note"><a href="/privacy">Privacy Policy</a></p>
       </div>
     </section>
 
@@ -790,6 +1071,241 @@
       // run. Painting here too would be a second paint site that can drift out
       // of sync with the resize path.
       if (!REDUCED) { start(); }
+    })();
+
+    /* ── Subscribe forms — the gate and the mailing list ────────────────
+       Two endpoints, deliberately: the gate records a VIEW (deck-view →
+       deck_views) and the list form records a SUBSCRIPTION
+       (waitlist-subscribe → waitlist_subscribers). One address may do both,
+       and a gated reader who never joins the list is not on it. */
+    (function () {
+      var VIEW_ENDPOINT = 'https://ybetwichurajbfswfeqa.supabase.co/functions/v1/deck-view';
+      var LIST_ENDPOINT = 'https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe';
+      var GATE_KEY = 'tortoise-investors-access';
+      // Empty until a Turnstile site key is provisioned (human step, #373).
+      // Only a form whose endpoint verifies a token sends one: the mailing-list
+      // form posts to `waitlist-subscribe`, which verifies, while the gate posts
+      // to `deck-view`, which verifies nothing and so renders no widget. The
+      // widget is rendered explicitly and its id retained, so a submit resets
+      // the widget this form rendered (a no-arg `turnstile.reset()` targets the
+      // most recently created widget on the page).
+      var TURNSTILE_SITE_KEY = '';
+      // A 400 is only about the address when the server says so (see the 400
+      // branch below): it also covers a captcha refusal and a body-cap breach.
+      var ADDRESS_ERROR = 'Invalid email address';
+      var turnstilePending = [];
+      var turnstileLoading = false;
+      // A blocked CDN (ad-blockers do this) or an unreachable one must not make
+      // the GATE unusable: the reader cannot correct it, and the gate is capture
+      // rather than access control. A form whose endpoint DOES verify a token
+      // cannot be rescued this way — with TURNSTILE_SECRET_KEY set, its
+      // submission carries no token and the server refuses it, which is the
+      // honest outcome (the reader's own network is why it is missing). Set
+      // once, for the whole page.
+      var turnstileFailed = false;
+
+      // The API script is a shared singleton: load it once, then render the
+      // widget for the form that wants one. On failure the queue is dropped, so
+      // a late-arriving script cannot render a widget no form is waiting for.
+      function onTurnstileReady(fn) {
+        if (turnstileFailed) { return; }
+        if (window.turnstile) { fn(); return; }
+        turnstilePending.push(fn);
+        if (turnstileLoading) { return; }
+        turnstileLoading = true;
+        function giveUp() {
+          turnstileFailed = true;
+          turnstileLoading = false;
+          turnstilePending.length = 0;
+        }
+        var timer = setTimeout(giveUp, 8000);
+        var script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+        script.async = true;
+        script.defer = true;
+        script.onload = function () {
+          clearTimeout(timer);
+          turnstilePending.splice(0).forEach(function (f) { f(); });
+        };
+        script.onerror = function () { clearTimeout(timer); giveUp(); };
+        document.head.appendChild(script);
+      }
+
+      function wire(formId, msgId, errId, endpoint, extra, onOk, captcha) {
+        var form = document.getElementById(formId);
+        if (!form) return;
+        // Per-form: `waitlist-subscribe` verifies a Turnstile token server-side
+        // when its secret is set, so that form must send one. `deck-view` never
+        // verifies one — asking the reader to solve a challenge the server
+        // discards would be friction with nothing behind it.
+        var useCaptcha = !!captcha && !!TURNSTILE_SITE_KEY;
+        var msg = document.getElementById(msgId);
+        var err = document.getElementById(errId);
+        var emailInput = form.querySelector('input[name="email"]');
+        var button = form.querySelector('button[type="submit"]');
+        var token = null;
+        // The id this form's own render() call returned: `turnstile.reset()`
+        // with no argument targets the most recently created widget on the
+        // page, so the reset names the id rather than relying on this being the
+        // only widget.
+        var widgetId = null;
+
+        function show(el, text) {
+          el.textContent = text; el.classList.add('visible');
+        }
+        function markInvalid() { emailInput.setAttribute('aria-invalid', 'true'); }
+        function clear() {
+          [msg, err].forEach(function (el) { el.classList.remove('visible'); el.textContent = ''; });
+          emailInput.removeAttribute('aria-invalid');
+        }
+        // A corrected value must not keep claiming to be invalid: the attribute
+        // says "this value does not conform" and is otherwise only cleared at
+        // the next submit. Only the field's own error goes with it — the status
+        // message, and a server error the reader cannot fix by editing, are not
+        // claims about this value and must survive a keystroke.
+        emailInput.addEventListener('input', function () {
+          if (!emailInput.hasAttribute('aria-invalid')) { return; }
+          emailInput.removeAttribute('aria-invalid');
+          err.classList.remove('visible');
+          err.textContent = '';
+        });
+
+        if (useCaptcha) {
+          var slot = document.createElement('div');
+          form.appendChild(slot);
+          onTurnstileReady(function () {
+            widgetId = window.turnstile.render(slot, {
+              sitekey: TURNSTILE_SITE_KEY,
+              callback: function (t) { token = t; },
+              'expired-callback': function () { token = null; },
+              'error-callback': function () { token = null; }
+            });
+          });
+        }
+
+        var busy = false;
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          if (busy) return;
+          clear();
+
+          var email = emailInput.value.trim();
+          if (!email) {
+            show(err, 'Please enter your email address.');
+            markInvalid();
+            emailInput.focus();
+            return;
+          }
+          if (!emailInput.checkValidity()) {
+            show(err, 'Please enter a valid email address.');
+            markInvalid();
+            emailInput.focus();
+            return;
+          }
+          if (useCaptcha && !turnstileFailed && !token) {
+            show(err, 'Please complete the verification check first.');
+            return;
+          }
+
+          busy = true;
+          form.setAttribute('aria-busy', 'true');
+          button.disabled = true;
+          var label = button.textContent;
+          button.textContent = 'Sending…';
+
+          var payload = {
+            email: email,
+            hp: form.querySelector('input[name="hp"]').value || ''
+          };
+          for (var key in extra) { payload[key] = extra[key]; }
+          if (useCaptcha && !turnstileFailed) { payload['cf-turnstile-response'] = token || ''; }
+
+          var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+          var timer = controller ? setTimeout(function () { controller.abort(); }, 8000) : null;
+
+          fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            // A request that never settles must not strand the reader on a
+            // disabled button: the gate's policy is to open when OUR side is
+            // unhealthy, and a hang is that. An abort lands in .catch below,
+            // as does a 2xx whose body cannot be read (see the json catch).
+            signal: controller ? controller.signal : undefined
+          }).then(function (res) {
+            return res.json().catch(function (e) {
+              // A 2xx whose body cannot be read is NOT a success: the record may
+              // or may not exist, and announcing "Thanks" would be a claim we
+              // cannot support — whether the body was cut off, malformed, or the
+              // read was aborted at the deadline. A non-2xx still falls through
+              // to {} so its own message path is unchanged.
+              if (res.ok) { throw e; }
+              return {};
+            }).then(function (data) {
+              if (!res.ok) {
+                // The gate's failure policy, by status: a 5xx or a 429 is OUR
+                // failure (the server, our own rate limiter) and must not lock
+                // a reader out of an investor deck; anything else non-2xx
+                // (400, 403) is the request itself refused, and keeps it shut.
+                if ((res.status >= 500 || res.status === 429) && onOk) { onOk(); return; }
+                // Only a 400 that names the ADDRESS marks the field. A 400 is not
+                // automatically about the value: `waitlist-subscribe` answers 400
+                // for a captcha refusal and a body-cap breach too, and marking the
+                // field for those asserts a valid address is malformed
+                // (`aria-describedby` then reads the message out as the field's
+                // description) and lets one keystroke delete an error the reader
+                // cannot fix by editing. Both handlers name the address fault with
+                // the same string, pinned in tests/test_waitlist_form.py.
+                if (res.status === 400 && data && data.error === ADDRESS_ERROR) { markInvalid(); }
+                show(err, (data && data.error) || 'Something went wrong — please try again.');
+                emailInput.focus();
+                return;
+              }
+              if (onOk) {
+                onOk();
+              } else {
+                show(msg, (data && data.message) || 'Thanks — we\'ll be in touch.');
+                emailInput.value = '';
+              }
+            });
+          }).catch(function () {
+            // Unreachable server: open for the gate, an error for the list.
+            if (onOk) { onOk(); } else { show(err, 'Something went wrong — please try again.'); }
+          }).then(function () {
+            if (timer) { clearTimeout(timer); }
+            busy = false;
+            form.removeAttribute('aria-busy');
+            button.disabled = false;
+            button.textContent = label;
+            // Turnstile tokens are single-use — clear the widget this form rendered
+            // and re-render it, so a second submit carries a fresh token.
+            if (useCaptcha) {
+              token = null;
+              if (widgetId !== null && window.turnstile) {
+                try { window.turnstile.reset(widgetId); } catch (e) { /* widget may be mid-render */ }
+              }
+            }
+          });
+        });
+      }
+
+      function unlock() {
+        try { localStorage.setItem(GATE_KEY, '1'); } catch (e) {}
+        document.documentElement.classList.remove('gated');
+        window.scrollTo(0, 0);
+        // Move focus into the revealed document. The gate's button is disabled
+        // and re-enabled around the request, so without this a keyboard or
+        // screen-reader reader is left on <body> with nothing announced while a
+        // whole document appears above them.
+        var heading = document.querySelector('.doc h1');
+        if (heading) {
+          heading.setAttribute('tabindex', '-1');
+          heading.focus();
+        }
+      }
+
+      wire('gate-form', 'gate-msg', 'gate-error', VIEW_ENDPOINT, { deck: 'investors' }, unlock, false);
+      wire('waitlist-form', 'waitlist-msg', 'waitlist-error', LIST_ENDPOINT, { source: 'investors' }, null, true);
     })();
   </script>
 </body>

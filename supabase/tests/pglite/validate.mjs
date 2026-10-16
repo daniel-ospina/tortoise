@@ -393,6 +393,14 @@ const suites = [
   // named here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
   '20261013000002_oauth_mint_rpcs.sql',  // #3025
+  // #4492 — the Postgres storage footprint + per-org analytics row growth,
+  // driven against the REAL SQL functions. NOTE: this list is EXPLICIT, not a
+  // glob — a suite file that is not named here never runs, and "the suite
+  // exists" is then mistaken for "the suite passes". Add the entry in the same
+  // commit as the file. Deliberately LAST: it seeds analytics_events rows it
+  // cannot delete (the append-only trigger), so it must not run before a suite
+  // whose counts those rows could move.
+  '20261015000001_postgres_storage_footprint.sql',  // #4492
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

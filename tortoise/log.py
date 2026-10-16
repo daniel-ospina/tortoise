@@ -153,11 +153,23 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     # refusing the new type would be a silent tightening of the recovery
     # posture (it blocks `rebuild_all`/`recover_from_log`/`backup.restore`).
     "SourceCreated", "SourceVersioned",
-    # Bookkeeping records: ``_NO_PROJECTION_FOLD`` (projection/__init__.py:
-    # 1868) — recognized and INTENTIONALLY not folded by any dispatcher
-    # (``apply``/``_apply_one``/``rebuild_all`` pass over them), so their loss
-    # is a proof-carrying NO-OP on the graph. Refusing them would be pure
-    # over-refusal on a record that is often the FIRST line of an ingest.
+    # Bookkeeping records: ``_NO_PROJECTION_FOLD`` / ``_NO_POINT_FOLD``
+    # (projection/__init__.py) — recognized and INTENTIONALLY not folded by any
+    # dispatcher, so their loss is a proof-carrying NO-OP on the graph.
+    # Refusing them would be pure over-refusal on a record that is often the
+    # FIRST line of an ingest.
+    #
+    # ⛔ ``DirectEdgeCreated`` is listed here but its loss is NO LONGER a
+    # no-op: #8499 landed a real `rebuild_all` pass-2b fold for it (it used to
+    # sit unfolded in `_NO_PROJECTION_FOLD`), so a TORN FINAL LINE now costs
+    # that one edge its replay. It stays tolerated — refusing a torn tail
+    # would block `rebuild_all`/`recover_from_log`/`backup.restore` for a
+    # journal whose last write was merely cut off, and the loss is bounded to
+    # the torn record itself (the edge was written live; only its descriptor
+    # is missing) — but the tolerant posture now has a real, named cost
+    # instead of being free. The one-record ``apply()`` engine still does not
+    # fold it (`_APPLY_WARN_ONLY_TYPES`), so for `rebuild(log)` the no-op
+    # claim still holds.
     "BatchIdStamped", "IngestStarted", "CalibrationRecorded",
     "DedupeRecorded", "DedupeRejected", "EntityBindingRefused",
     "DirectEdgeCreated",

@@ -80,13 +80,28 @@ jobs:
           fetch-depth: 0   # PR base SHA must be present for the diff
       - name: Compute per-surface path gates (#2149)
         id: gate
+        env:
+          # #8734: these two are the only `${{ }}` spans in this `run:`, and GitHub
+          # compiles a `run:` that contains any expression under a 21000-byte cap —
+          # measured at 20944 raw + 66 expression bytes = 21010, so `ci.yml` stopped
+          # loading and the whole workflow ran ZERO jobs on every event (the required
+          # `docs`/`legal-e2e`/`license-surface`/`pricing-artifact`/`test-isolation`
+          # contexts could not be produced, and a push run with no jobs is the
+          # signature of that refusal). A scalar with no `${{ }}` is never compiled
+          # (`ai-review-gate.yml` loads a 34 KB one), so as step env these are
+          # substituted before the script is assembled and the cap stops applying to
+          # it — instead of being re-armed by the next comment anyone adds. Keep
+          # expression spans out of this `run:`; the byte budget is tracked by
+          # tests/test_ci_selection.py.
+          MAIN_HEALTH: ${{ inputs.main_health }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base,
           # so the empty-diff fallback below would set EVERY gate true and re-run
           # the whole ~20-gate matrix nightly. Under `main_health` only the five
           # always-on required jobs run, so every gated surface is explicitly
-          # false. (`inputs.main_health` is empty on a `pull_request` event.)
-          if [ "${{ inputs.main_health }}" = "true" ]; then
+          # false. (`MAIN_HEALTH` is empty on a `pull_request` event.)
+          if [ "$MAIN_HEALTH" = "true" ]; then
             for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
                        client packaging website hosted flip python drift \
                        driver_scripts ai_review_gate watchdog_scripts \
@@ -97,7 +112,7 @@ jobs:
             echo "changes: main_health call — all gated surfaces false; only the 5 required jobs run"
             exit 0
           fi
-          BASE="${{ github.event.pull_request.base.sha }}"
+          BASE="$BASE_SHA"
           [ -n "$BASE" ] || BASE="origin/main"
           CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
@@ -219,7 +234,7 @@ jobs:
                   startswith("packs/"),
               ),
               # welcome-e2e (wrangler preview of website/ + mocked playwright
-              # + the two edge-function node harnesses). Separate-app changes
+              # + the three edge-function node harnesses). Separate-app changes
               # under website/apps/ do NOT trigger it — dashboard-js-tests
               # covers dashboard; blog-admin has no gated suite. (#2160 P3-1:
               # excluded website/apps/ wholesale, not dashboard only.)
@@ -235,26 +250,26 @@ jobs:
                          # needs a path entry or a test-only PR would not run it.
                          "tests/test_blog_markdown.mjs",
                          "docs/blog-authoring.md",
-                         # #8293: the SEO keyword + agent-limiter harness. Same
-                         # reason as #4481 above — its subjects live under
-                         # website/ but a harness-only PR still needs this entry
-                         # or the assertions never run.
-                         "tests/test_blog_seo_meta.mjs"),
-                  # #3501: the BFF auth suites live here and had NO path entry,
-                  # so a PR touching only them could not trigger the job that
-                  # runs them — the job would be skipped, not failed.
+                         # #8293: the SEO keyword + agent-limiter harness.
+                         "tests/test_blog_seo_meta.mjs", "tests/test_deck_view.mjs"),
+                  # #3501: the BFF auth suites live here and had NO path entry —
+                  # a suite-only PR could not trigger the job that runs them.
                   startswith("tests/e2e/auth/"),
                   isfile("tests/test_no_legacy_token_path.py"),
                   isfile("tests/e2e/test_auth_bff_clickthrough.py",
                          "tests/e2e/test_auth_cross_origin_cookie.py"),
                   startswith("supabase/functions/waitlist-subscribe/"),
                   startswith("supabase/functions/tenant-provision/"),
+                  startswith("supabase/functions/deck-view/"),
                   # #2810: the edge-function harnesses above import these stubs
-                  # (supabase-js.ts, _shared/lookup.ts). Without a path entry a
-                  # PR touching ONLY a stub would skip the job that runs them —
-                  # the stub is an input to the subject under test, and a broken
-                  # stub is exactly the change this job exists to catch.
+                  # (supabase-js.ts, _shared/lookup.ts) — the stub is an input to
+                  # the subject under test, so a stub-only PR must still run them.
                   startswith("tests/edge-function-stubs/"),
+                  # #4311: the strict tsc project for website/functions/** lives in
+                  # tools/ts/ — kept OUTSIDE the Pages upload root (tools/ts/README.md)
+                  # — so a change to the project or its pinned toolchain runs the
+                  # `website-functions-typecheck` job too.
+                  startswith("tools/ts/"),
                   startswith("supabase/functions/_shared/"),
               ),
               # hosted-e2e (boots uvicorn tortoise.hosted_api:app; engine
@@ -1496,6 +1511,62 @@ jobs:
           test -f docs/EXPANSION_PACKS.md || { echo "::error::EXPANSION_PACKS.md missing"; exit 1; }
           echo "doc-consistency OK"
 
+  # #4311: `website/functions/**` is the production edge surface (agent write
+  # API, admin gate, cache purge, contact form) and NOTHING typechecked it — no
+  # CI job, and the blog-admin SPA's `tsc --noEmit` does not include it. The
+  # strict project already FAILED on `main`:
+  #
+  #   blog/api/posts/[[path]].ts: error TS2322: Type 'string' is not assignable
+  #   to type '"draft" | "published"'.
+  #
+  # — invisible until runtime, on the one tree whose failures are a 500 at the
+  # edge with no test in front of it.
+  #
+  # It rides the EXISTING `website` gate rather than a new `changes` output: a
+  # new output key would spend headroom the next editor needs. That gate script
+  # carries no `${{ }}` spans now, so GitHub does not compile it and the
+  # 21000-byte cap no longer applies to it (#8734 moved the two expression
+  # spans into the step's `env:`; before that it sat at 20944 raw + 66 = 21010
+  # and GitHub refused to LOAD ci.yml — ZERO jobs, every required context
+  # unproducible). `tests/test_merge_throughput.py` pins the pair: the params
+  # stay bound in `env:`, and no expression span returns to the `run:`.
+  # This change adds the `tools/ts/` entry to the `website` predicate (which
+  # already covers `website/functions/**`). The `tools/ts/` entry is what makes
+  # a change to the tsc project itself (strict, include, the pinned toolchain)
+  # run this job too.
+  #
+  # The tsc project + pinned toolchain live in `tools/ts/` OUTSIDE `website/` on
+  # purpose: everything under `website/` is STAGED for public upload
+  # (`rsync -a website/ → $STAGE`, deploy-pages.yml), so a tsconfig.json or
+  # package.json placed next to the Functions would be served at
+  # /functions/tsconfig.json — the same reason config/required-bindings.yml lives
+  # in config/ (tests/test_pages_bindings.py pins that).
+  website-functions-typecheck:
+    needs: changes
+    if: needs.changes.outputs.website == 'true'  # #4311: website/functions/** + tools/ts/ (the tsc project)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/ts/package-lock.json
+      # `npm ci` is lockfile-pinned: the exact TypeScript and workers-types
+      # revisions are a REVIEWED artifact, so the strictness of this gate cannot
+      # drift without a diff (the same pinning rule as the wrangler/ruff pins).
+      - name: Install the pinned TypeScript toolchain
+        run: |
+          cd tools/ts
+          npm ci --no-audit --no-fund
+      # No `--noEmit` flag here: it is a compilerOption in the project
+      # (`noEmit: true`), and the project's `include` is the whole Functions
+      # tree — an empty match is a hard tsc error, never a silent pass.
+      - name: Typecheck website/functions (strict, Workers globals)
+        run: |
+          cd tools/ts
+          ./node_modules/.bin/tsc -p tsconfig.website-functions.json
+
   welcome-e2e:
     needs: changes
     if: needs.changes.outputs.website == 'true'  # #2149: website/ (minus dashboard app) + welcome/edge-fn tests
@@ -1507,8 +1578,9 @@ jobs:
     # renderer. Without that path entry a docs-only edit to the authoring
     # contract ran the CommonMark/heading guard but NOT the leg that executes
     # the examples, so a placeholder id that embeds nothing shipped green. The
-    # rationale lives HERE, not inside the gate script: that `run:` scalar is
-    # within ~100 bytes of GitHub's 21000-byte expression cap (#6253).
+    # rationale lives HERE, not inside the gate script: that `run:` scalar
+    # carries no expression span, so GitHub does not compile it and the
+    # 21000-byte cap does not reach it (#8734).
     # Mocked welcome-page suite (#541) — secret-free per-PR coverage against
     # the LIVE page (Supabase calls mocked via Playwright routes). The #801
     # live signup smoke self-skips without SUPABASE secrets and runs in
@@ -1644,6 +1716,10 @@ jobs:
           AUTH_CLICKTHROUGH: "1"
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Run deck-view edge-function behavioral harness (#8732)
+        # The only enforcement of "a view never touches the mailing list": the
+        # gate writes deck_views, and joining the list stays a separate act.
+        run: node --experimental-strip-types tests/test_deck_view.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Run blog SSR markdown renderer harness (#4481)
@@ -1683,10 +1759,18 @@ jobs:
       # boot budget (empty /tmp/wrangler.log = cold npx install never finished;
       # #2211 hit this 4x in a row 2026-09-04). --version is fast; the
       # readiness loop below retries twice at 240s each.
+      #
+      # ⛔ PIN THE EXACT VERSION THE BOOT USES (4.127.0), not a floating `@4`.
+      # A floating pre-warm fetched a DIFFERENT wrangler (4.151.0 on
+      # 2026-10-15) and left the boot's pinned install un-warmed; that install
+      # failed on a runner and the npx shim emitted `sh: 1: wrangler: not
+      # found`, timing out both attempts on a PR that touched no website file
+      # (#8744). Warming the pinned version also lets the retry reuse a
+      # COMPLETE cache entry instead of a half-written one.
       - name: Pre-warm wrangler toolchain
         run: |
-          npx --yes wrangler@4 --version
-          npx --yes wrangler@4 pages dev --help >/dev/null
+          npx --yes wrangler@4.127.0 --version
+          npx --yes wrangler@4.127.0 pages dev --help >/dev/null
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -1724,6 +1808,15 @@ jobs:
             # with > anyway, and deleting after the LAST attempt would remove
             # the only evidence before the final cat (review P1 — a double
             # failure must still surface wrangler's own diagnostics).
+            #
+            # #8744: an npx cache entry left half-written by a failed install
+            # cannot be recovered by REUSING it — the retry relaunched npx,
+            # the shim re-ran, and `sh: 1: wrangler: not found` repeated
+            # identically until the job reddened on a PR that touched no
+            # website file. Clear the npx cache so attempt 2 is a genuinely
+            # clean install (from the warm tarball cache), which is what the
+            # retry was always meant to be.
+            rm -rf "$(npm config get cache)/_npx"
             sleep 3
           done
           # Final cleanup: flush the log + free :8788 before surfacing it

@@ -53,6 +53,7 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from .ids import entity_name_id as _entity_name_id
 from .ids import ulid
 from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     EMBEDDING_PROPERTY,
@@ -65,6 +66,7 @@ from .sdk_retired import retirement_hint
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import _current_status_clause  # #4058 canonical current-status allow-list
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
@@ -79,8 +81,7 @@ from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verd
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .raw_state import (  # #3998: the absent-raw state
-    RAW_ABSENT_STATES,
-    RAW_PRESENT,
+    WRITABLE_RAW_STATES,
     raw_entry,
     validate_raw_state,
 )
@@ -106,6 +107,10 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
 from .projection import _live_write_scope
+# #7951 review P1: the journal payload is built from the WRITE INTENT, so it
+# must state what the store will HOLD — the transport model lives in the
+# projection package (one home), not in a second copy at this call site.
+from .projection import _stored_prop_value, _UNSTORED
 from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_NODE_PROP_NAMES,
     _SOURCE_SERVER_MANAGED_PROPS,
@@ -204,6 +209,69 @@ def _baseline_create_params(baseline: tuple[float, float, str]) -> dict:
     """CREATE params for a resolved (#2199) baseline: (alpha, beta, source)."""
     return {"ba": baseline[0], "bb": baseline[1], "bsrc": baseline[2]}
 
+
+def _journal_snapshot_from_create_map(
+        create_map: dict[str, str], create_params: dict) -> dict:
+    """The journal `point` payload for a fresh Point, built from the WRITE INTENT.
+
+    #7951 §17.1 (docs/architecture/STORAGE-ARCHITECTURE.md) requires the record
+    (truth) to be appended BEFORE the cache write, so `create_point` can no
+    longer journal the post-`CREATE` `get_point` read-back: the read-back does
+    not exist until the cache has already been written. This builds the same
+    property map from `_create_map` (key -> Cypher expression) and
+    `_create_params` (the values) — i.e. exactly the properties the `CREATE`
+    writes — so the record is complete without touching the cache.
+
+    The evaluation is DELIBERATELY closed: a `_create_map` expression form this
+    function does not know raises rather than guessing. A future expression
+    form therefore fails the write loudly instead of silently mis-journaling a
+    record that a replay would then materialise as a different node.
+
+    Every value is put through `_stored_prop_value`, so the record states what
+    the store will actually HOLD rather than the caller's raw object
+    (#7951 review P1): a JSON-native value rides verbatim; a driver-coerced
+    number (`Decimal`, `np.int64`, `Fraction`, ...) rides as the literal the
+    engine will parse; and a value the store keeps no property for — a null, a
+    map/bytes/set, a non-finite float, a NUL string, a null inside an array —
+    is OMITTED, exactly as the historic read-back omitted it. A raw
+    non-JSON-encodable prop reaching `json.dumps` used to raise inside
+    `_emit_event`, and the new commit gate then skipped the cache write — one
+    unlucky prop value silently destroyed the whole Point.
+
+    EMBEDDING is not an exception, and the RAW form is DELIBERATE. A
+    `vecf32($embedding)` vector rides RAW — `_stored_prop_value` never narrows
+    one. (This DIFFERS from the pre-#7951 record, whose `embedding` came from
+    the post-CREATE `get_point` read-back and was therefore `vecf32`-narrowed;
+    the raw intent is the more faithful record.) It is replay-safe: the replay
+    re-narrows it (`projection/entities.py::_upsert_point_props`), `consistency`
+    compares at the stored width, and `embedding_verbatim` already tells the
+    replay which of the two forms was written. A null or
+    unusable vector is omitted here and re-added as an explicit `None` by the
+    producer's own `setdefault` in `_emit_event` (PRESENCE IS OWNERSHIP,
+    #5004), so the key is still on every snapshot a PointAdded emits.
+    """
+    out: dict = {}
+    for key, expr in create_map.items():
+        if expr == "true":
+            val = True
+        elif expr == "false":
+            val = False
+        elif expr.startswith("$"):
+            val = create_params[expr[1:]]
+        elif expr.startswith("vecf32($") and expr.endswith(")"):
+            val = create_params[expr[len("vecf32($"):-1]]
+        else:
+            raise ValueError(
+                "#7951: `_create_map` carries an expression form the journal "
+                f"snapshot builder does not know: {key!r} -> {expr!r}. A new "
+                "form must be taught here (and its replay clause checked) "
+                "before create_point can journal a complete record."
+            )
+        stored = _stored_prop_value(val)
+        if stored is not _UNSTORED:
+            out[key] = stored
+    return out
+
 # baseline_source token family (issue #2199 direction, 2026-09-03):
 #   set-by-author         — belief stated directly by whoever filed the point
 #                           (human OR agent; the species is already tracked in
@@ -250,8 +318,15 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 # — terminal states plus the legacy outdated flag (supersede/invalidate set
 # status='superseded'/'outdated' AND/OR outdated=true). draft/live are the
 # only statuses a connection to is NOT stale.
-STALE_TERMINAL_STATUSES = frozenset(
-    {'retracted', 'superseded', 'outdated', 'archived'})
+#
+# #4058: derived from the canonical Point exclusion, never a second literal.
+# The by-value copy that used to sit here was ``live.TERMINAL_STATUS_VALUES``,
+# so it OMITTED the legacy ``deprecated``: a connection to a deprecated Point
+# was not flagged stale while every read surface (search, recall, EP) excluded
+# that Point as non-current — the same "a reader re-declares a subset" class as
+# #2901. The canonical set is
+# live.TERMINAL_EXCLUDED_STATUSES = TERMINAL_STATUS_VALUES | {deprecated}.
+STALE_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
 
 # The structural rels `supersede_point` transfers in its 2b leg (#122). Single
 # source of truth for the WRITER and for every mirror of it: the MCP dry-run
@@ -346,8 +421,11 @@ def _journal_write_failure_warning(count: int) -> str:
     without this the disclosure would exist only on the SDK lane), naming that
     THIS capture's records never reached the journal and a later rebuild will
     therefore lose them. Deliberately independent of the capture's ``ok`` flag:
-    the graph write persisted, and marking it failed would trip the #2335
-    TRUE-retry gate over a write that was in fact persisted.
+    it NAMES the journal residue; the outcome is decided by what actually
+    persisted. (#7951: since §17.1's outbox ordering a failed append means the
+    cache write is skipped too, so a capture that raises this warning is now
+    normally ``partial`` — the warning remains additive, never a substitute for
+    the outcome.)
     """
     return (
         f"journal append failed {count}x — this capture is live-only and will "
@@ -2068,10 +2146,23 @@ def _write_capture_turns(
             "emb": turn_embs[i],
         })
 
-    rows = proj.g.query(
-        _TURN_WRITE_CYPHER,
-        params={"turns": turn_rows, "sid": session_id, "now": now,
-                "redactions": redacted_total},
+    # #7405 (audit G8): the batched turn store rides the SAME bounded write
+    # retry as `create_point`'s direct writes. Before this it was a bare
+    # `proj.g.query`, so a rebuild's per-query abort landed AFTER the Session
+    # MERGE had committed and left the session with NO turns — the episodic leg
+    # the capture exists for, missing, with the caller told only that a write
+    # failed. The statement is IDEMPOTENT, which is what makes re-issuing it
+    # safe: every row MERGEs `(t:Point {id: turn.id})` (the id derives from
+    # `session_id`, so a re-issue targets the same node), the CONTAINS edge is
+    # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
+    # can neither duplicate a turn nor demote or re-stamp a stored one.
+    rows = sdk._graph_write_with_retry(
+        lambda: proj.g.query(
+            _TURN_WRITE_CYPHER,
+            params={"turns": turn_rows, "sid": session_id, "now": now,
+                    "redactions": redacted_total},
+        ),
+        what="capture turn batch write",
     ).result_set
     stored = {r[0]: (r[1], r[2], r[3]) for r in (rows or [])}
 
@@ -2121,10 +2212,20 @@ def _write_capture_turns(
             if _index >= _first_live:
                 stale.append(_tid)
         if stale:
-            proj.g.query(
-                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                "WHERE t.id IN $ids DETACH DELETE t",
-                params={"sid": session_id, "ids": stale},
+            # #7405 (audit G8): the stale-turn sweep is a write too. The abort
+            # here used to leave the higher-index turns CONTAINS-wired to the
+            # Session while `s.turn_count` reported the new, shorter length —
+            # the stored count and the CONTAINS walk disagreeing, i.e. turns
+            # the session no longer owns still reachable from it. Idempotent:
+            # the delete is keyed by an EXPLICIT id list read BEFORE it, so a
+            # re-issue carries the same list and a no-op for ids already gone.
+            sdk._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                    "WHERE t.id IN $ids DETACH DELETE t",
+                    params={"sid": session_id, "ids": stale},
+                ),
+                what="capture stale-turn sweep",
             )
 
     # #3947: journal the turn writes so a rebuild can recreate them.
@@ -2372,9 +2473,29 @@ def _write_session_and_turns(
     if model:
         merge_sets.append("s.model=coalesce(s.model, $model)")
         merge_params["model"] = model
-    proj.g.query(
-        f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
-        params=merge_params,
+    # #7405 (audit G8): the `:Session` MERGE rides the bounded write retry.
+    # Before this a rebuild's per-query abort raised out of this writer BEFORE
+    # the turn store below, so the capture lost the whole session — row and
+    # turns — and the finding it carried never reached the map.
+    #
+    # Re-issuing is the FIRST application, not a second one: the retry
+    # predicate admits only refusals the engine ABORTED, so the statement did
+    # not land — and the statement is idempotent besides (it MERGEs on `id`,
+    # so it can never mint a second Session; the field list mixes
+    # `coalesce(s.field, $param)` clauses with absolute SETs, and the absolute
+    # ones are safe precisely because the aborted attempt left nothing to
+    # overwrite).
+    #
+    # The probe reads `sdk._proj` (this SDK's live authoritative handle); the
+    # `proj` argument is the caller's projection and every caller in-tree passes
+    # `sdk._get_proj()`, so the two are the same object and the graph-existence
+    # discriminator probes the graph this write targets.
+    sdk._graph_write_with_retry(
+        lambda: proj.g.query(
+            f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
+            params=merge_params,
+        ),
+        what="capture :Session MERGE",
     )
     if on_session_merged is not None:
         on_session_merged(session_record)
@@ -2653,10 +2774,12 @@ _GRAPH_EVENT_TYPES = frozenset({
 # It can therefore NEVER journal itself — a replayed record would journal
 # itself, grow the log on every rebuild, and make replay non-idempotent at the
 # log level. The fold cannot know whether it is live or a replay; only the
-# CALLER does. So the order is drawn at the caller-side live doors. The two
-# that state it explicitly are:
+# CALLER does. So the order is drawn at the caller-side live doors. Those that
+# state it explicitly are (the authoritative inventory is the §17.1 guard's
+# opener list in `tortoise/projection/__init__.py`):
 #   * `EventAPI._emit`                      (tortoise/api.py)
 #   * `TortoiseSDK._apply_and_journal` / `_journal_entity_event` (this module)
+#   * `TortoiseSDK._doc_write`, `_create_entity`, `create_point` (this module)
 # The live doors that do NOT yet conform are listed under KNOWN DEVIATIONS at
 # the end of this block.
 #
@@ -2671,11 +2794,14 @@ _GRAPH_EVENT_TYPES = frozenset({
 #
 #   2. POST-APPLY-SNAPSHOT PAYLOAD (the one real apply-first). When the record
 #      cannot be constructed until the fold has produced it, there is no
-#      pre-fold record to append. The dominant case is `create_point`, whose
-#      `PointAdded` payload IS `get_point(pid)` — the applied node. Such a site
-#      applies first and inherits window (a); the window closes only at §17.1's
-#      one atomic write. A site that CAN form its record before the fold MUST
-#      NOT take this exception.
+#      pre-fold record to append. Such a site applies first and inherits
+#      window (a); the window closes only at §17.1's one atomic write. A site
+#      that CAN form its record before the fold MUST NOT take this exception.
+#      #7951: `create_point` NO LONGER takes it — its `PointAdded` payload is
+#      now built from the write intent (`_create_map`, the properties the
+#      CREATE writes) and appended BEFORE the CREATE. No production site
+#      currently relies on this exception; it is retained for the shape it
+#      names, not as a licence.
 #
 # KNOWN DEVIATIONS in this tree (recorded, not concealed):
 # `TortoiseSDK._create_entity`'s Object/Subject/Event registration blocks are
@@ -2683,8 +2809,9 @@ _GRAPH_EVENT_TYPES = frozenset({
 # so they qualify for neither exception; they also fold regardless of a FAILED
 # append (`_emit_event` is best-effort). They are left as-is in this increment
 # because reordering them rides the #2194/#2295/#2309 first-registration
-# hardening and its pinned tests; `create_point`'s payload is genuinely
-# post-apply (exception 2). The `DocumentCreated` arm (#2296) DOES append
+# hardening and its pinned tests. (`create_point` was the other named
+# deviation; #7951 moved it to the outbox ordering — append first, cache
+# second — so it no longer appears here.) The `DocumentCreated` arm (#2296) DOES append
 # first (its record is a plain id-keyed entity create, and its append is
 # replay-healable)
 # but shares the fail-soft half: one funnel applies once for every arm, and
@@ -2879,8 +3006,9 @@ def _raise_update_point_status_error(proj, id: str) -> None:
 
     #1088: an already-LIVE point is short-circuited in ``update_point``
     (idempotent no-op), so the only statuses that reach this error are the
-    TERMINAL ones (retracted / superseded / outdated / archived) — a terminal
-    point is never resurrected by update_point.
+    TERMINAL ones (``live.TERMINAL_EXCLUDED_STATUSES``: retracted /
+    superseded / outdated / archived / deprecated) — a terminal point is never
+    resurrected by update_point.
     """
     exists = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
@@ -3154,6 +3282,30 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         raise ValueError(
             "'baseline_system_default' is a server-managed baseline-provision "
             "marker and cannot be set via props."
+        )
+    # #7936 (review P2): `_stub` is the event-name-stub DISCRIMINATOR the
+    # first-registration probe in `_create_entity` excludes — a marked stub is
+    # NOT a registered node, so a later `create_entity` for the name still
+    # journals its `ObjectRegistered`/`SubjectAdded` (the durability half of
+    # #2194/#2295). Its VALUE therefore decides whether a registration line is
+    # written, which makes it server-managed: the projection is the only writer
+    # (`_event_plain_merge` sets it inside ON CREATE, `_upsert_object` /
+    # `_upsert_subject` clear it inside ON MATCH), and neither path re-enters
+    # this intake. Hard-reject (never strip), matching
+    # `baseline_system_default`/`__runId`: there is no legitimate caller intent,
+    # and a silent drop would let an attempted forgery pass unnoticed.
+    # Measured before this reject: `update_entity(<stub id>, _stub=False)` was
+    # ACCEPTED by `_update_entity`'s direct `SET n += $p`, journaled as an
+    # `EntityMutated` (so the forged value SURVIVED `rebuild_all`), and the
+    # following `create_entity` then SKIPPED the registration — re-opening the
+    # node-loss + live != replay class #7936 closes (live `_stub` cleared by
+    # adoption, replay `_stub=false` + `objectKind='other'`). The MCP boundary
+    # (`_SERVER_MANAGED_PROPS`) refuses it BEFORE the write is attempted; this
+    # is the fail-closed backstop for the direct SDK route.
+    if "_stub" in props:
+        raise ValueError(
+            "'_stub' is a server-managed event-stub discriminator and cannot "
+            "be set via props."
         )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
@@ -3918,19 +4070,6 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
             warn(f"ingest EP pass failed: {type(e).__name__}: {e}")
 
 
-def _entity_name_id(label: str, name: str) -> str:
-    """Deterministic entity id from name — mirrors create_point's content-hash
-    dedup so the projection's MERGE-by-name is IDEMPOTENT: the same name
-    always yields the same id, so a second create_object/create_subject
-    returns the canonical node id (#452) and the #1155-P1
-    ``coalesce($id, o.id)`` ON-MATCH write is a no-op (same id), while a
-    name-stub Object minted with a random ulid by the event path still gets
-    replaced by the canonical id on the first ObjectRegistered write.
-    """
-    digest = hashlib.sha256(f"{label}:{name}".encode("utf-8")).hexdigest()[:26]  # noqa: UP012
-    return f"{label[:3].lower()}-{digest}"
-
-
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:  # noqa: F821
     """Cosine similarity between two embedding vectors (#438).
 
@@ -4277,6 +4416,18 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
                 r[key] = st[key]
+        # #2350 (E-prec): the precision block owes every read path the same
+        # 3-state end the primary decoration carries — the embedded fallback
+        # must not relabel an ended-unknown window as still-true.
+        if (st.get("valid_from") or st.get("valid_to")
+                or st.get("valid_from_precision")
+                or st.get("valid_to_precision")):
+            if st.get("valid_from_precision"):
+                r["valid_from_precision"] = st["valid_from_precision"]
+            if st.get("valid_to_precision"):
+                r["valid_to_precision"] = st["valid_to_precision"]
+            r["end_state"] = st.get("end_state") or _resolve_end_state(
+                st.get("valid_to"), st.get("valid_to_precision"))
         # #4889: same additive subject field as SearchResult.to_dict.
         if st.get("subject"):
             r["subject"] = st["subject"]
@@ -4598,6 +4749,72 @@ def _refuse_inverted_point_window(g, props: dict, *,
         validate_validity_window(effective_vf, effective_vt)
 
 
+def _resolve_end_state(valid_to: object, valid_to_precision: object) -> str:
+    """#2350: the 3-state end, resolved by validity.py's ONE home."""
+    from tortoise.validity import end_state
+    return end_state(valid_to, valid_to_precision)
+
+
+def _refuse_inconsistent_validity_precision(g, props: dict, *,
+                                            point_id: str | None = None) -> None:
+    """#2350: refuse a validity-precision declaration that contradicts its bound.
+
+    The precision vocabulary's ONE write-boundary guard, mirroring
+    ``_refuse_inverted_point_window``: it resolves the pair a PARTIAL update
+    will actually persist (the caller's key when PRESENT, else the stored
+    value) and delegates the predicate to ``validity.validate_validity_precision``.
+    ``point_id is None`` is a fresh create, where all four values are the
+    caller's.
+
+    TWO consequences a caller will meet, both deliberate fail-closed choices:
+
+    * ``validToPrecision='unknown'`` requires the effective ``validTo`` to be
+      ABSENT — pass ``validTo=None`` alongside it to clear a stored end, since
+      ``SET n += $props`` removes a property whose key is present with a
+      ``None`` value.
+    * moving a window OFF an unknown end (``update_point(id, validTo=…)`` on a
+      point whose stored end is unknown) is refused until the caller states
+      the new precision: leaving the stale ``'unknown'`` marker beside a real
+      date is the fabrication the marker exists to prevent.
+
+    Legacy windows carry no precision property; ``props.get(key, stored)``
+    then yields ``None`` for both sides and the guard is inert, so no
+    pre-existing write changes behaviour.
+    """
+    from tortoise.validity import (
+        FROM_PRECISION_PROP,
+        TO_PRECISION_PROP,
+        validate_validity_precision,
+    )
+    keys = ("validFrom", "validTo", FROM_PRECISION_PROP, TO_PRECISION_PROP)
+    if not any(k in props for k in keys):
+        return
+    if point_id is None:
+        validate_validity_precision(
+            props.get("validFrom"), props.get("validTo"),
+            props.get(FROM_PRECISION_PROP), props.get(TO_PRECISION_PROP),
+        )
+        return
+    rows = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo, "
+        "n.validFromPrecision, n.validToPrecision",
+        params={"id": point_id},
+    ).result_set
+    if not rows:
+        return
+    # EVERY matching node, not just the first: the writers MATCH the id and
+    # stamp in one query, so a first-row-only read could pass the guard and
+    # still leave an inconsistent declaration on a sibling (the same duplicate
+    # fan-out ``_refuse_inverted_point_window`` loops over).
+    for stored_vf, stored_vt, stored_fp, stored_tp in rows:
+        validate_validity_precision(
+            props.get("validFrom", stored_vf),
+            props.get("validTo", stored_vt),
+            props.get(FROM_PRECISION_PROP, stored_fp),
+            props.get(TO_PRECISION_PROP, stored_tp),
+        )
+
+
 #: Sentinel returned by ``_supersede_window_start_source`` when no READABLE
 #: stored start exists, so the writer's own clock (``now``) decides the end.
 _WRITER_CLOCK = object()
@@ -4656,7 +4873,8 @@ def _supersede_window_start_source(stored_vf, successor_created_at):
 
 
 def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
-                          stored_vf, successor_created_at, now):
+                          stored_vf, successor_created_at, now,
+                          skip_inversion_guard: bool = False):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
 
     #4021 — the supersession stamped ``old.validTo`` from the SUCCESSOR's
@@ -4739,6 +4957,15 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     an orderable instant rather than an end no query can order — see the branch
     comments below.)
 
+    ``skip_inversion_guard`` (#2350): the caller is stamping NO end at all
+    (``valid_to_precision='unknown'`` — the closed-unknown marker, which
+    persists ``validTo = None``). The guard's own premise is "persisting
+    ``succ_vf`` would leave an inverted window", and that premise is false of
+    a write that stamps no end — so it is skipped, exactly as
+    ``invalidate_point`` skips its #5358 sibling guard in the same case. The
+    resolved ``succ_vf`` is still RETURNED (it rides the record's
+    informational ``valid_from``), only the refusal is suppressed.
+
     Raises ``ValueError`` BEFORE any mutation at either call site, so no
     event is journaled and no half-write survives a refusal.
 
@@ -4790,7 +5017,7 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
         # that the guard measures that RESOLVED value — so the numeric case is
         # NOT an inversion.
         succ_vf = now if _resolved is _WRITER_CLOCK else _resolved
-    if old_vfs:
+    if old_vfs and not skip_inversion_guard:
         k_succ = _created_sort_key(succ_vf)
         # A NUMERIC KWARG can still resolve unparseable here and is
         # DELIBERATELY left that way (see above and B3): the guard measures the
@@ -5554,11 +5781,20 @@ class TortoiseSDK:
     def _emit_event(self, type_: str, payload: dict | None = None, *,
                     point: dict | None = None,
                     id: str | None = None,
-                    recorded_ts: str | None = None, **extra) -> None:
+                    recorded_ts: str | None = None, **extra) -> bool | None:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
         the mutation).
+
+        **Return value (the #7951 commit signal):** ``True`` when the record was
+        appended to a configured JSONL journal, ``False`` when a configured
+        journal's append RAISED, and ``None`` when there is nothing to log or no
+        journal is configured. The per-call value — not a delta of
+        ``_journal_write_failures`` — is what a live door must gate its cache
+        write on: a shared instance counter can be incremented by a CONCURRENT
+        writer (#5612), which would report a committed record as failed and
+        invite a duplicate re-issue.
 
         Two call styles supported:
         1. ``_emit_event("PointAdded", {"id": ..., ...})``
@@ -5644,10 +5880,11 @@ class TortoiseSDK:
 
         # ── JSONL event log (#548) ─────────────────────────────────
         if point is None and id is None:
-            return  # nothing meaningful to log
+            return None  # nothing meaningful to log
         log = self._get_event_log()
         if log is None:
-            return
+            # No journal configured: there is no rebuild source to commit to.
+            return None
         from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
             "event_id": ulid(),
@@ -5738,6 +5975,7 @@ class TortoiseSDK:
             event["actor_user_id"] = _jsonl_actor
         try:
             log.append(event)
+            return True
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -5774,6 +6012,10 @@ class TortoiseSDK:
                 "LIVE-ONLY and will not survive a rebuild (#4240)",
                 type_, self._event_log_path, exc,
             )
+            # #7951 review I3: the PER-CALL outcome. A caller gating a fold on
+            # "committed?" must read THIS, not the shared counter above, whose
+            # before/after delta can be moved by another thread's failure.
+            return False
 
     def _journal_entity_event(self, event: dict) -> None:
         """Append a canonical entity record to the journal (the WRITE half).
@@ -5819,10 +6061,10 @@ class TortoiseSDK:
         truth first, then project."* `docs/architecture/STORAGE-ARCHITECTURE.md`
         §17.1 mechanism (1) closes even this window with one atomic write.
 
-        A record whose payload cannot exist before the fold (`create_point`'s
-        post-apply snapshot) is the ONE permitted apply-first case — see the
-        contract's exception 2; it does NOT come through this door's normal
-        mode.
+        The one shape the module-top contract still names as exception 2
+        (POST-APPLY-SNAPSHOT PAYLOAD) has NO production site today: `create_point`
+        was the last, and #7951 moved it to the outbox ordering. This door's
+        normal mode is never apply-first.
 
         ``journal=False`` folds WITHOUT appending: for a replay-safe
         RE-application of an already-registered record (the GitHub indexer's
@@ -5952,6 +6194,9 @@ class TortoiseSDK:
         # guard and the read path's `_covers`) instead of re-implementing it.
         # No `point_id`: a fresh CREATE has no stored opposite bound to merge.
         _refuse_inverted_point_window(self._get_proj().g, props)
+        # #2350 (E-prec): the per-end precision declaration is validated by the
+        # same fresh-create rule (no stored opposite to merge).
+        _refuse_inconsistent_validity_precision(self._get_proj().g, props)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -5975,33 +6220,17 @@ class TortoiseSDK:
         # CREATEd but BEFORE PointAdded was journaled, so the graph gained an
         # orphan that a rebuild would drop (live != rebuild). Fail closed here,
         # pre-write, matching the bundle Phase-1 contract.
-        _ef_in = props.get("extractedFrom")
-        if _ef_in is not None:
-            if isinstance(_ef_in, str):
-                if not _ef_in.strip():
-                    # explicit "no provenance" == absent (the bundle contract
-                    # allows an empty list for the same reason), so session
-                    # inference may still apply below.
-                    props.pop("extractedFrom", None)
-            elif isinstance(_ef_in, (list, tuple)):
-                _clean = [r for r in _ef_in
-                          if isinstance(r, str) and r.strip()]
-                if len(_clean) != len(_ef_in):
-                    raise ValueError(
-                        "create_point: extractedFrom must be a non-empty "
-                        f"string or a list of non-empty strings (got {_ef_in!r})"
-                    )
-                if _clean:
-                    props["extractedFrom"] = _clean
-                else:
-                    props.pop("extractedFrom", None)
-            else:
-                raise ValueError(
-                    "create_point: extractedFrom must be a non-empty string "
-                    f"or a list of non-empty strings (got {_ef_in!r}); a "
-                    "non-string scalar would mint a corrupt Source, and raised "
-                    "after the write would leave an un-journaled Point (#3263)"
-                )
+        if props.get("extractedFrom") is not None:
+            # #8171 (review P2): the shape rules that used to be spelled out
+            # here now live in ONE place, `_validate_extracted_from`, shared
+            # with `create_entity`/`create_document`. Keeping a second copy
+            # beside a helper that documents itself as the single home for the
+            # contract is how the two silently drift — the helper's whole
+            # reason to exist is that the doors routing a ref to
+            # `projection._link_source` cannot disagree. Behaviour is
+            # unchanged: this door's inline rules WERE that contract's
+            # definition (#3263).
+            _validate_extracted_from(props, door="create_point")
         if not props.get("extractedFrom"):
             # #3263: branch on TYPE, not truthiness. The contract is "a
             # non-empty string can name a Source", so anything else that is
@@ -6528,8 +6757,10 @@ class TortoiseSDK:
         #
         # #5256: the extractedFrom read-version is resolved from the :Source
         # HERE, on the LIVE path only, and carried in the CREATE map — i.e. in
-        # the Point's OWN journaled snapshot (`get_point` rides it into the
-        # PointAdded payload below). The replay must never re-read the Source:
+        # the Point's OWN journaled snapshot (`_journal_snapshot_from_create_map`
+        # copies it into the PointAdded payload below — the payload is the write
+        # intent, NOT the read-back; the later `get_point` is the write-landed
+        # proof only). The replay must never re-read the Source:
         # `_upsert_source`'s in-place contentHash bump is unjournalled (#5024),
         # so a Source read at rebuild time may hold a NEWER hash than the one
         # this Point was actually read from. A Source that does not exist yet
@@ -6646,55 +6877,96 @@ class TortoiseSDK:
         _create_fields = "".join(
             f", `{str(_k).replace('`', '``')}`: {_v}"
             for _k, _v in _create_map.items())
-        self._graph_write_with_retry(
-            lambda: proj.g.query(
-                "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-                params=_create_params,
-            ),
-            what="create_point CREATE(:Point)",
-        )
-        # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
-        # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
-        # a per-query race and `proj` is as valid after a retry as before it
-        # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
-        # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
-        #
-        # #7209: the follow-up writes of a fresh create ride the SAME bounded
-        # retry as the CREATE above. Before this they were bare `proj.g.query`
-        # calls, so a rebuild's per-query abort landing here aborted the write
-        # AFTER the Point had already landed — leaving a half-materialized
-        # point (no TAGGED / no extractedFrom edges), which is a finding that
-        # provenance and tag reads cannot reach: the same "the map loses a
-        # finding" outcome by a narrower route. Every statement in these two
-        # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
-        # documented no-op on re-run), so re-issuing one after an engine ABORT
-        # cannot duplicate anything — the abort means the statement did not
-        # land, exactly the contract `retryable_aborted_write` is built on.
-        tags = props.get("tags") or []
-        if isinstance(tags, (list, tuple)):
+        # ── #7951 §17.1 — THE OUTBOX ORDERING (docs/architecture/STORAGE-ARCHITECTURE.md) ──
+        # THE APPEND IS THE COMMIT POINT. The `PointAdded` record is built from
+        # the SAME `_create_map`/`_create_params` the CREATE below writes and is
+        # appended BEFORE any `:Point` cache write (`CREATE`/`MERGE` on `:Point`
+        # and its edges), so the derived store cannot lead the truth for the
+        # Point statements. NOTE the scope — the pre-append control-plane writes
+        # (`_advance_ep_version`'s `:EpMeta`, `_emit_event`'s `:GraphEvent`, the
+        # `:Source` adopt-on-touch) are the declared residuals of plan §3/§6.5,
+        # and they DO precede the append. This is the outbox form of §17.1's mechanism (1): the
+        # journal append is the transaction, and the cache write that follows
+        # materialises exactly the record's own properties. The old post-CREATE
+        # `get_point` read-back could not be journalled first — it does not
+        # exist until the cache has already been written, which is how
+        # `create_point` came to be the recorded apply-first deviation.
+        # If the append fails the cache is NOT written (the append's own
+        # returned outcome — the `_doc_write` template used a counter delta;
+        # this door reads the per-call signal, see F1): the record could not be
+        # committed, so the derived store must not be written. ⚠️ `_emit_event` writes the
+        # `:GraphEvent` store BEFORE the JSONL append, so this arm leaves a
+        # `:GraphEvent` for a Point that was never written — a DECLARED residual
+        # (plan §6.7), not a committed rebuild record: the JSONL journal (the
+        # rebuild source) holds nothing.
+        _intended = _journal_snapshot_from_create_map(_create_map, _create_params)
+        # The append's OWN outcome is the commit signal — a per-call value, not
+        # a delta of the shared `_journal_write_failures` counter: a concurrent
+        # writer on the same instance can increment that counter between the
+        # read and the check, which would report THIS call's committed record as
+        # failed and invite a duplicate re-issue (#5612; the sibling doors still
+        # use the delta — plan §6.10).
+        _record_committed = self._emit_event(
+            "PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
+            point=_intended)
+        if _record_committed is False:
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
+        # #7951 §17.1: the cache write runs inside the live-write scope — the
+        # door declares itself to the guard, and every statement below runs
+        # strictly AFTER the append above. (The scope is documentary on the
+        # raw handle: the §17.1 guard covers `FalkorProjection.apply`/`.query`,
+        # and the raw handle's remaining sites are the recorded residual.)
+        with _live_write_scope("create_point"):
             self._graph_write_with_retry(
-                lambda: self._sync_tags(proj, pid, tags),
-                what="create_point TAGGED edges",
+                lambda: proj.g.query(
+                    "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                    params=_create_params,
+                ),
+                what="create_point CREATE(:Point)",
             )
-        # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
-        if props.get("extractedFrom"):
-            self._graph_write_with_retry(
-                lambda: proj._link_source(pid, props["extractedFrom"],
-                                          source_versions=_source_versions),
-                what="create_point extractedFrom edges",
-            )
-            # Inheritance gate dirty-mark: a freshly-sourced point is always
-            # inherit-eligible on the next EP run (no interval wait, #398).
-            # #2952: a born point carries no `inherited_at` stamp, so the
-            # `REMOVE n.inherited_at` the generic helper
-            # (`_invalidate_inheritance_gate`) issues is a no-op on the final
-            # state — and a no-op write on the node still costs a fulltext
-            # re-add. The `extractedFrom` invalidation therefore happens in
-            # the PROPS (see the up-front pop of `inherited_at` above): a
-            # caller-supplied stamp is dropped BEFORE the CREATE map is built
-            # instead of being written and then taken back out, so this path
-            # is ONE graph write too. The EP dirty-marking half is issued once
-            # below.
+            # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+            # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+            # a per-query race and `proj` is as valid after a retry as before it
+            # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
+            # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+            #
+            # #7209: the follow-up writes of a fresh create ride the SAME bounded
+            # retry as the CREATE above. Before this they were bare `proj.g.query`
+            # calls, so a rebuild's per-query abort landing here aborted the write
+            # AFTER the Point had already landed — leaving a half-materialized
+            # point (no TAGGED / no extractedFrom edges), which is a finding that
+            # provenance and tag reads cannot reach: the same "the map loses a
+            # finding" outcome by a narrower route. Every statement in these two
+            # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
+            # documented no-op on re-run), so re-issuing one after an engine ABORT
+            # cannot duplicate anything — the abort means the statement did not
+            # land, exactly the contract `retryable_aborted_write` is built on.
+            tags = props.get("tags") or []
+            if isinstance(tags, (list, tuple)):
+                self._graph_write_with_retry(
+                    lambda: self._sync_tags(proj, pid, tags),
+                    what="create_point TAGGED edges",
+                )
+            # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
+            if props.get("extractedFrom"):
+                self._graph_write_with_retry(
+                    lambda: proj._link_source(pid, props["extractedFrom"],
+                                              source_versions=_source_versions),
+                    what="create_point extractedFrom edges",
+                )
+                # Inheritance gate dirty-mark: a freshly-sourced point is always
+                # inherit-eligible on the next EP run (no interval wait, #398).
+                # #2952: a born point carries no `inherited_at` stamp, so the
+                # `REMOVE n.inherited_at` the generic helper
+                # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+                # state — and a no-op write on the node still costs a fulltext
+                # re-add. The `extractedFrom` invalidation therefore happens in
+                # the PROPS (see the up-front pop of `inherited_at` above): a
+                # caller-supplied stamp is dropped BEFORE the CREATE map is built
+                # instead of being written and then taken back out, so this path
+                # is ONE graph write too. The EP dirty-marking half is issued once
+                # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
@@ -6755,15 +7027,18 @@ class TortoiseSDK:
         # documents but cannot: a state-gated re-issue applied into a rebuilt
         # graph that the rebuild's own replay then replaces again (#7685's
         # escalation line — closing it fully needs an engine identity token).
-        # Raising here also stops the `PointAdded` below from journaling a
-        # point the graph does not hold, so a rebuild cannot resurrect a
-        # journal record that never had a node behind it.
+        # #7951: the record was ALREADY appended ABOVE (the commit point),
+        # before the cache write — see the outbox block at the CREATE. The
+        # read-back below is the write-landed PROOF only; it is no longer the
+        # journal payload. A read-back miss AFTER a committed append means the
+        # TRUTH holds a record the cache has not materialised — a replay heals
+        # it (the ordering contract's replay-healable window) — so this raise
+        # must NEVER be read as "the write is gone": the record stands.
         _snapshot = self.get_point(pid)
         if not _snapshot:
             from .exceptions import WriteNotLandedError
-            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
-        self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
-                         point=_snapshot)
+            raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),
+                                      record_committed=bool(_record_committed))
         if _source_change_notices:
             # #5516: the notice is TRANSIENT — it rides the write result the
             # writer sees, on a COPY, so the journaled snapshot above and every
@@ -7591,13 +7866,20 @@ class TortoiseSDK:
                     # session's single-eventId provenance.
                     source_harness = harness or "unknown"
                     minted_ids = _capture_minted_ids(extracted)
-                    proj.g.query(
-                        "MATCH (n:Point) WHERE n.id IN $ids "
-                        "SET n.eventId=$eid, n.source_session=$sid, "
-                        "    n.source_harness=$harness, n.ingested_at=$ing",
-                        params={"ids": minted_ids,
-                                "eid": event_id, "sid": session_id,
-                                "harness": source_harness, "ing": now},
+                    # #7405 (audit G8): the capture's provenance stamps ride the
+                    # bounded write retry too. Idempotent: the statement SETs
+                    # absolute values on an explicit id list, so a re-issue
+                    # writes the same four fields again.
+                    self._graph_write_with_retry(
+                        lambda: proj.g.query(
+                            "MATCH (n:Point) WHERE n.id IN $ids "
+                            "SET n.eventId=$eid, n.source_session=$sid, "
+                            "    n.source_harness=$harness, n.ingested_at=$ing",
+                            params={"ids": minted_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now},
+                        ),
+                        what="capture minted-point provenance stamp",
                     )
                     # #2552 (layer-2 WIRE — the structural leg): reified
                     # operator Points created by THIS capture must enter the
@@ -7633,10 +7915,20 @@ class TortoiseSDK:
                             "    o.source_harness=$harness, "
                             "    o.ingested_at=$ing"
                         ):
-                            proj.g.query(_q, params={
-                                "ids": minted_ids,
-                                "eid": event_id, "sid": session_id,
-                                "harness": source_harness, "ing": now})
+                            # #7405 (audit G8): each label statement is its own
+                            # write and rides the retry. Idempotent: the
+                            # statement carries an ``o.eventId IS NULL`` guard,
+                            # so a re-issue stamps only what a partial attempt
+                            # did not already stamp. ``_q`` is bound as a default
+                            # so the lambda can never close over a LATER loop
+                            # value.
+                            self._graph_write_with_retry(
+                                lambda _q=_q: proj.g.query(_q, params={
+                                    "ids": minted_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now}),
+                                what="capture operator-label provenance stamp",
+                            )
                     # #4936: the minted-point join above CANNOT reach an
                     # operator whose endpoint RE-KEYED to a pre-existing
                     # graph node (#4716 Part 1): the payload point resolved
@@ -7662,16 +7954,21 @@ class TortoiseSDK:
                     # test_capture_session_stamps_operator_event_ids).
                     operator_ids = list(meta.get("operator_ids") or [])
                     if operator_ids:
-                        proj.g.query(
-                            "MATCH (o:Point {is_operator:true}) "
-                            "WHERE o.id IN $ids "
-                            "AND o.eventId IS NULL "
-                            "SET o.eventId=$eid, o.source_session=$sid, "
-                            "    o.source_harness=$harness, "
-                            "    o.ingested_at=$ing",
-                            params={"ids": operator_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now},
+                        # #7405 (audit G8): same funnel; idempotent by the
+                        # statement's own ``o.eventId IS NULL`` guard.
+                        self._graph_write_with_retry(
+                            lambda: proj.g.query(
+                                "MATCH (o:Point {is_operator:true}) "
+                                "WHERE o.id IN $ids "
+                                "AND o.eventId IS NULL "
+                                "SET o.eventId=$eid, o.source_session=$sid, "
+                                "    o.source_harness=$harness, "
+                                "    o.ingested_at=$ing",
+                                params={"ids": operator_ids,
+                                        "eid": event_id, "sid": session_id,
+                                        "harness": source_harness, "ing": now},
+                            ),
+                            what="capture operator-id provenance stamp",
                         )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
@@ -7694,15 +7991,22 @@ class TortoiseSDK:
                         # (that node already carries its original ingest's
                         # provenance; re-stamping would violate the
                         # single-eventId-per-session rule).
-                        proj.g.query(
-                            "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
-                            "(n:Point) WHERE n.eventId IS NULL "
-                            "AND coalesce(n.is_episodic, false) <> true "
-                            "SET n.eventId=$eid, n.source_session=$sid, "
-                            "    n.source_harness=$harness, "
-                            "    n.ingested_at=$ing",
-                            params={"sid": session_id, "eid": event_id,
-                                    "harness": source_harness, "ing": now},
+                        # #7405 (audit G8): same funnel; idempotent by its
+                        # ``n.eventId IS NULL`` guard, so a re-issue after an
+                        # abort cannot re-stamp a node a partial attempt
+                        # already touched.
+                        self._graph_write_with_retry(
+                            lambda: proj.g.query(
+                                "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                                "(n:Point) WHERE n.eventId IS NULL "
+                                "AND coalesce(n.is_episodic, false) <> true "
+                                "SET n.eventId=$eid, n.source_session=$sid, "
+                                "    n.source_harness=$harness, "
+                                "    n.ingested_at=$ing",
+                                params={"sid": session_id, "eid": event_id,
+                                        "harness": source_harness, "ing": now},
+                            ),
+                            what="capture retry-heal provenance stamp",
                         )
                 else:
                     # P1 #1529 (D4): create_event returning no id/eventId
@@ -7787,12 +8091,18 @@ class TortoiseSDK:
                           for i in range(len(link_texts))],
                 sdk=self)
             if link_result["attempted"]:
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}) SET "
-                    "s.entity_links_attempted=$a, s.entity_links_created=$c",
-                    params={"sid": session_id,
-                            "a": link_result["attempted"],
-                            "c": link_result["created"]})
+                # #7405 (audit G8): the counter SET is idempotent (absolute
+                # values for this link pass), so a re-issue after an abort
+                # cannot double-count.
+                self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (s:Session {id:$sid}) SET "
+                        "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                        params={"sid": session_id,
+                                "a": link_result["attempted"],
+                                "c": link_result["created"]}),
+                    what="capture entity-link counters",
+                )
                 # #3664 review P2: the raw SET above is a LIVE write with no
                 # journal carrier — the first SessionRecorded is emitted
                 # BEFORE the link pass, so its payload cannot carry the
@@ -7876,12 +8186,20 @@ class TortoiseSDK:
             # re-attempting (the TRUE retry silently no-ops). The warning
             # names the residue: capture_ok unset means an unknown prior.
             try:
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}) "
-                    "SET s.capture_ok=$ok, "
-                    "    s.capture_extractor=$extractor",
-                    params={"sid": session_id, "ok": _capture_ok_record,
-                            "extractor": _capture_extractor_record})
+                # #7405 (audit G8): the attempt-outcome SET is idempotent
+                # (absolute ``capture_ok``/``capture_extractor`` values) and
+                # rides the retry. The outer try/except stays: an exhausted
+                # retry surfaces the original error and is downgraded to the
+                # additive warning below, exactly as before.
+                self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (s:Session {id:$sid}) "
+                        "SET s.capture_ok=$ok, "
+                        "    s.capture_extractor=$extractor",
+                        params={"sid": session_id, "ok": _capture_ok_record,
+                                "extractor": _capture_extractor_record}),
+                    what="capture attempt-outcome stamp",
+                )
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
@@ -9390,6 +9708,10 @@ class TortoiseSDK:
         # be checked as (None, EARLY) and pass, persisting the inversion. The
         # predicate itself is the ONE HOME, never a second copy.
         _refuse_inverted_point_window(proj.g, props, point_id=id)
+        # #2350 (E-prec): precision is validated against the STORED pair after
+        # the same merge, so a one-sided update cannot leave a marker beside a
+        # bound it contradicts.
+        _refuse_inconsistent_validity_precision(proj.g, props, point_id=id)
         # #5240: `content`'s None boundary is decided ONCE, here, before any
         # consumer reads the key — because the consumers disagreed. The
         # derived-hash line below tested KEY PRESENCE (``"content" in props``)
@@ -9755,7 +10077,17 @@ class TortoiseSDK:
         # `(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` from them, so
         # `_affected_factors` still re-derives the operator's factor.
         neighbor_ids = [cid for cid in neighbor_claims if cid != id]
-        proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
+        # #7405: the hard delete rides the bounded write retry. A DETACH DELETE
+        # by an explicit id is idempotent — a re-issue after a non-landing ABORT
+        # re-deletes a node that is (at worst) already gone, a no-op. The abort
+        # MUST be proved not-landed, which is exactly what
+        # `retryable_aborted_write` admits (a bare DELETE never rides
+        # `retryable_transient`).
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id}),
+            what="delete_point DETACH DELETE",
+        )
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
         # `PointRetracted` (id=) call emitted BOTH stores, and its fold has
@@ -9776,7 +10108,15 @@ class TortoiseSDK:
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
         # otherwise accumulate in list_tags.
         if has_tag_edges:
-            proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
+            # #7405: the orphan-tag GC is swept through the same retry. The
+            # statement re-derives "orphan" from the graph at issue time and a
+            # DELETE of an already-deleted tag is a no-op, so a re-issue after
+            # a non-landing ABORT cannot double-delete or remove a live tag.
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t"),
+                what="delete_point orphan tag GC",
+            )
         # Dreaming (#85): deletion changes the graph structure around
         # neighbors — mark the pre-captured neighbors dirty (#1916) so the
         # reverse-BFS has surviving edges to traverse (the deleted point's
@@ -9933,7 +10273,8 @@ class TortoiseSDK:
                     f"call retract_point({point_id!r}) instead."
                 ) from None
 
-    def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
+    def invalidate_point(self, id: str, corrected_by_id: str,
+                         *, valid_to_precision: str | None = None) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
         Validation contract (#330/#2498) — all checks run BEFORE any write so
@@ -9964,6 +10305,12 @@ class TortoiseSDK:
         contract let a dead claim's ``expiredAt`` move forward and minted one
         CORRECTS edge per distinct corrector onto a node every read surface
         already excludes.
+
+        E-prec (#2350): ``valid_to_precision='unknown'`` closes the window
+        WITHOUT stamping a fabricated ``validTo=now`` — the closed-unknown
+        state ("this ended, but I cannot date it"). When that marker is given
+        the #5358 inverted-window precondition is skipped: no end is written,
+        so no inversion is possible.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -9986,10 +10333,20 @@ class TortoiseSDK:
         self._assert_lifecycle_guard(
             corrected_by_id, method="invalidation", role="corrector")
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #2350 (E-prec): 'unknown' closes the window WITHOUT a fabricated
+        # validTo — the closed-unknown state (utopia's ``valid_to_precision``
+        # pattern). Resolved before the #5358 inversion guard, which only
+        # applies when a ``validTo`` is actually stamped.
+        from .validity import PRECISION_UNKNOWN as _PREC_UNKNOWN
+        from .validity import normalize_precision as _normalize_precision
+        end_precision = _normalize_precision(
+            valid_to_precision, field="valid_to_precision")
+        stamp_valid_to = None if end_precision == _PREC_UNKNOWN else now
         # #5358: refuse an INVERTED predecessor window BEFORE any mutation.
         # The check is shared with the MCP dry-run preview
         # (`_preview_invalidate`) so the writer and its preview cannot drift.
-        self._assert_window_start_not_inverted(id, now)
+        if stamp_valid_to is not None:
+            self._assert_window_start_not_inverted(id, now)
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
         # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
@@ -10004,14 +10361,18 @@ class TortoiseSDK:
         self._emit_event(
             "PointInvalidated",
             id=id, corrected_by=corrected_by_id,
-            ts=now, valid_to=now, expired_at=now,
+            ts=now, valid_to=stamp_valid_to,
+            valid_to_precision=end_precision, expired_at=now,
         )
 
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, "
-            "n.updatedAt = $now, n.validTo = $now, n.expiredAt = $now, "
+            "n.updatedAt = $now, n.validTo = $valid_to, "
+            "n.validToPrecision = $valid_to_precision, "
+            "n.expiredAt = $now, "
             f"{decay_clause('n')}",
-            params={"id": id, "now": now},
+            params={"id": id, "now": now, "valid_to": stamp_valid_to,
+                    "valid_to_precision": end_precision},
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
@@ -10058,7 +10419,8 @@ class TortoiseSDK:
         return self.invalidate_point(old_id, new_id)
 
     def supersede_point(self, old_id: str, new_id: str,
-                        *, valid_from: str | None = None) -> dict:
+                        *, valid_from: str | None = None,
+                        valid_to_precision: str | None = None) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
 
         E6 (#1538) D2 — bi-temporal validity windows: the supersession ALSO
@@ -10100,6 +10462,16 @@ class TortoiseSDK:
         requires an orderable value and otherwise lands on ``now`` (#5360). A
         numeric-epoch kwarg is deliberately exempt — see
         ``_supersede_window_end``. See docs/ONTOLOGY.md §4.7 (``validTo``).
+
+        E-prec (#2350): ``valid_to_precision`` declares how precisely the
+        predecessor's stamped END is known. ``'unknown'`` is the closed-unknown
+        state — the window ENDED but at a time we cannot pin, so NO ``validTo``
+        is fabricated (the 'half-honest dates are worse than none' rule) and
+        the stored marker is what every read path reports as
+        ``end_state='unknown'``. Otherwise the predecessor's end IS the
+        successor's start, so it inherits the successor's ``validFromPrecision``
+        when the caller does not state one, keeping the contiguous boundary's
+        precision honest on both sides.
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx, AND their reverse
@@ -10229,7 +10601,8 @@ class TortoiseSDK:
         # in #6140; #3985 fixed the falsey-but-ORDERABLE case (`0`), which the
         # branch above now takes.
         vf_rows = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt, "
+            "n.validFromPrecision",
             params={"id": new_id},
         ).result_set
         stored_vf = vf_rows[0][0] if vf_rows else None
@@ -10260,12 +10633,33 @@ class TortoiseSDK:
         # MATCHes and stamps them all, and row order is server-dependent
         # (the #5358 sibling loops over the same fan-out for this reason).
         old_vfs = [r[0] for r in old_vf_rows]
+        # #2350 (E-prec): resolve the precision of the predecessor's stamped
+        # END BEFORE the inverted-window guard. ``'unknown'`` is the
+        # closed-unknown marker: the window ENDED but carries no datable
+        # instant, so NO ``validTo`` is fabricated (the 'half-honest dates are
+        # worse than none' rule) — and because no end is persisted, the
+        # inversion guard's premise cannot hold, so it is SKIPPED, mirroring
+        # ``invalidate_point``. (Pre-fix the guard ran first and refused a
+        # request that writes no end at all: fail-closed, but wrong for its
+        # stated reason and unreachable at the sibling door.) Otherwise the
+        # predecessor's end IS the successor's start, so it inherits the
+        # successor's declared start precision when the caller does not state
+        # one — the precision travels with the contiguous boundary.
+        from .validity import PRECISION_UNKNOWN as _PREC_UNKNOWN
+        from .validity import normalize_precision as _normalize_precision
+        end_precision = _normalize_precision(
+            valid_to_precision, field="valid_to_precision")
+        if end_precision is None and vf_rows:
+            end_precision = vf_rows[0][2] or None
+        _end_is_unknown = end_precision == _PREC_UNKNOWN
         succ_vf = _supersede_window_end(
             old_id=old_id, new_id=new_id, old_vfs=old_vfs,
             valid_from=valid_from, stored_vf=stored_vf,
             successor_created_at=(vf_rows[0][1] if vf_rows else None),
             now=now,
+            skip_inversion_guard=_end_is_unknown,
         )
+        stamp_valid_to = None if _end_is_unknown else succ_vf
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the
@@ -10277,7 +10671,8 @@ class TortoiseSDK:
         self._emit_event(
             "PointSuperseded",
             id=old_id, new_id=new_id,
-            valid_from=succ_vf, valid_to=succ_vf, expired_at=now,
+            valid_from=succ_vf, valid_to=stamp_valid_to,
+            valid_to_precision=end_precision, expired_at=now,
             # #5048: `now` is ALSO the envelope instant, so the replay's
             # `updated_at = _journal_instant(ev)` reads the instant the live
             # SET below writes. Without it the envelope `ts` was a SECOND
@@ -10660,10 +11055,13 @@ class TortoiseSDK:
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
             "n.outdated = true, n.updatedAt = $now, "
-            "n.validTo = $valid_to, n.expiredAt = $expired_at, "
+            "n.validTo = $valid_to, n.validToPrecision = $valid_to_precision, "
+            "n.expiredAt = $expired_at, "
             f"{decay_clause('n')}",
             params={"id": old_id, "now": now,
-                    "valid_to": succ_vf, "expired_at": now},
+                    "valid_to": stamp_valid_to,
+                    "valid_to_precision": end_precision,
+                    "expired_at": now},
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
@@ -10783,7 +11181,8 @@ class TortoiseSDK:
           - operator node → blocked {blocked: True, reason: "is_operator"} —
             operators only go live via the R16 endpoint gate (matching
             retract_point's operator rejection)
-          - terminal (retracted/superseded/outdated/archived) → blocked
+          - not draft/live (terminal — retracted/superseded/outdated/archived,
+            or the legacy `deprecated` — or an absent status) → blocked
             {blocked: True, reason: "not_draft"}
           - Point belongs to a QUARANTINED batch → blocked
             {blocked: True, reason: "batch_quarantined", batch_id} — quarantine
@@ -10846,11 +11245,19 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # CAS-guarded SET (concurrent promote can't double-fire); reviewed is
         # the DERIVED reviewer flag (plan §3 — no new stored status).
-        r = proj.g.query(
-            "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
-            "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
-            "n.updatedAt = $now RETURN n.id",
-            params={"id": point_id, "now": now},
+        # #7405: the CAS promotion rides the bounded write retry. The abort is
+        # a non-landing abort, so a re-issue re-evaluates the SAME
+        # `WHERE n.status = 'draft'` predicate against unchanged state and lands
+        # exactly once; if a concurrent promote won the CAS instead, the empty
+        # result set is the already-existing "raced" branch below, unchanged.
+        r = self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
+                "SET n.status = 'live', n.reviewed = true, n.promotedAt = $now, "
+                "n.updatedAt = $now RETURN n.id",
+                params={"id": point_id, "now": now},
+            ),
+            what="promote_point CAS SET",
         )
         if not r.result_set:
             # Raced with a concurrent promote — re-read and report the outcome.
@@ -11819,9 +12226,18 @@ class TortoiseSDK:
         extra_props.append("status:$st")
         params["st"] = "live" if promote_source else "draft"
         props_clause = ", " + ", ".join(extra_props) if extra_props else ""
-        proj.g.query(
-            f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
-            params=params,
+        # #7405: a bare CREATE is admissible ONLY on `retryable_aborted_write`,
+        # whose arms BOTH prove the statement did not land (a write-slot refusal
+        # raised before the slot is claimed, or a graph-abort). `pid` is minted
+        # once above the loop, so every re-issue names the same node and a
+        # non-landing abort cannot mint a second operator. It must NEVER ride
+        # `retryable_transient` — a lost reply is not a lost write.
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
+                params=params,
+            ),
+            what="create_operator CREATE(:Point)",
         )
         # Ontology v2.1: map part/whole ops to hasPart.
         # A1b (#1272): operator endpoints may be Point OR Event nodes.
@@ -11834,12 +12250,19 @@ class TortoiseSDK:
         # carry identical INPUT edges (fold-parity).
         edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
-            proj.g.query(
-                f"MATCH (o:Point {{id:$oid}}), (s) "
-                f"WHERE {epistemic_disjunction('s')} AND s.id = $sid "
-                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s) "
-                f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
-                params={"oid": pid, "sid": inp_id, "i": i},
+            # #7405: the typed edge and its INPUT mirror are created by ONE
+            # statement; the abort means NEITHER landed, and the endpoints/idx
+            # are fixed parameters, so a re-issue cannot double an edge. Bare
+            # CREATE ⇒ `retryable_aborted_write` only.
+            self._graph_write_with_retry(
+                lambda i=i, inp_id=inp_id: proj.g.query(
+                    f"MATCH (o:Point {{id:$oid}}), (s) "
+                    f"WHERE {epistemic_disjunction('s')} AND s.id = $sid "
+                    f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s) "
+                    f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
+                    params={"oid": pid, "sid": inp_id, "i": i},
+                ),
+                what="create_operator operator edges",
             )
         # #1088: the guarded SET below fills in only a NEVER-SET status with
         # the live default — an explicitly-drafted source is never moved to
@@ -11853,11 +12276,17 @@ class TortoiseSDK:
             # #1088: only a never-set status is filled in with the live
             # default; an explicitly-drafted source is never moved to live
             # by this command.
-            proj.g.query(
-                "MATCH (s:Point {id:$sid}) "
-                "WHERE s.status IS NULL "
-                "SET s.status = 'live'",
-                params={"sid": source_id},
+            # #7405: an absolute SET guarded by the statement's own
+            # `s.status IS NULL` read — a re-issue after a non-landing ABORT
+            # fills in the same never-set status and cannot move a draft.
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (s:Point {id:$sid}) "
+                    "WHERE s.status IS NULL "
+                    "SET s.status = 'live'",
+                    params={"sid": source_id},
+                ),
+                what="create_operator source promote SET",
             )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
@@ -12148,16 +12577,28 @@ class TortoiseSDK:
         # guarded. EP weights read this value, so an inexact Decimal here
         # silently corrupts the operator weight. Guard before the write.
         _reject_unrepresentable_number("strength", strength)
-        proj.g.query(
-            "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
-            "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
-            params={"id": mid, "c": f"[MITIGATION] {reason}", "s": strength, "now": now},
+        # #7405: `mid` is minted once above, every property is a fixed
+        # parameter, and the abort means the statement did not land — so a
+        # re-issue cannot mint a second mitigation Point. Bare CREATE ⇒
+        # `retryable_aborted_write` only.
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
+                "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
+                params={"id": mid, "c": f"[MITIGATION] {reason}", "s": strength, "now": now},
+            ),
+            what="mitigate_operator CREATE(:Point)",
         )
         # Bidirectional link: mitigation Point -[:IMPL]-> operator, operator <-[:mitigated_by]- mitigation
-        proj.g.query(
-            "MATCH (m:Point {id:$mid}), (op:Point {id:$oid}) "
-            "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
-            params={"mid": mid, "oid": id},
+        # #7405: one statement, two fixed endpoints, abort ⇒ neither edge
+        # landed, so a re-issue cannot double the pair.
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (m:Point {id:$mid}), (op:Point {id:$oid}) "
+                "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
+                params={"mid": mid, "oid": id},
+            ),
+            what="mitigate_operator mitigation edges",
         )
         # #2199: mitigation reasons are human-authored judgment — give the
         # fresh live point its explicit, provenance-recorded starting belief
@@ -12251,10 +12692,10 @@ class TortoiseSDK:
         for full-scan mode with EP annotation.
 
         #1391: the default exclusion now covers ALL terminal statuses
-        (retracted, superseded, outdated, archived) — stale claims are not
-        served as current. include_retracted (name kept for compat) surfaces
-        them for audit. Use a raw Cypher query via proj.g.query() to inspect
-        tombstones.
+        (``live.TERMINAL_EXCLUDED_STATUSES``: retracted, superseded, outdated,
+        archived, deprecated) — stale claims are not served as current.
+        include_retracted (name kept for compat) surfaces them for audit. Use
+        a raw Cypher query via proj.g.query() to inspect tombstones.
         """
         proj = self._get_proj()
         clauses = self._operator_scope_clauses(kind)
@@ -12307,7 +12748,8 @@ class TortoiseSDK:
         #432 Task 2: retracted points (status='retracted') are EXCLUDED by
         default — pass include_retracted=True, or an explicit status= filter,
         to surface tombstones. #1391: the default exclusion now covers ALL
-        terminal statuses (retracted, superseded, outdated, archived).
+        terminal statuses (``live.TERMINAL_EXCLUDED_STATUSES``: retracted,
+        superseded, outdated, archived, deprecated).
         """
         # #1914: invalid pagination params fail cleanly instead of looping
         # (limit=0 → hasMore = skip + 0 < total always True on non-empty
@@ -13009,13 +13451,61 @@ class TortoiseSDK:
         """Route classification for a connection item: 'direct' for plain
         IMPL/NAND (operator-less per §8 — the terminal-status guard is
         direct-edge-scoped), 'operator' for mitigation/reify:true/part-whole,
-        'relation' otherwise."""
+        'relation' otherwise.
+
+        ⛔ This reads the CONNECTION ITEM only — it cannot see the endpoints
+        (refs are unresolved at validation time). 'direct' here is therefore a
+        REQUEST, not the final route: the endpoint-kind gate
+        (:meth:`_point_mediated_route`, owner ruling 2026-10-13, #8499) can
+        promote it to 'operator' once the endpoints are known. Callers that
+        need the effective route must apply that gate.
+        """
         if "operator" not in conn:
             return "relation"
         if conn["operator"] in ("IMPL", "NAND") and not conn.get("mitigation") \
                 and not conn.get("reify"):
             return "direct"
         return "operator"
+
+    def _point_mediated_route(self, node_ids: list[str]) -> bool:
+        """True when an operator-less IMPL/NAND between these endpoints is
+        FORBIDDEN by the endpoint-kind contract, so the connection must be
+        reified into an operator instead (owner ruling 2026-10-13, #8499).
+
+        **Point→Point relations are operator-mediated.** An operator-less edge
+        carries no operator node, so it can be neither mitigated nor annotated,
+        and it cannot carry the epistemic weighting a Point's relations claim —
+        those properties are the reason a Point's relations exist at all, so
+        the direct shape is wrong for any pair involving a plain :Point.
+
+        (Durability was the ruling's original third argument: plain direct
+        edges were journaled but never replayed, so ``rebuild_all`` lost them
+        — A10 #1048. #8499 landed the pass-2b ``DirectEdgeCreated`` fold, so an
+        operator-less edge now SURVIVES a rebuild too and the ruling no longer
+        rests on that argument. Do not re-derive the rule from the old loss.)
+
+        ``Object↔Object`` keeps the direct shape (no epistemic weighting is
+        claimed); ``Point↔Object`` is operator-mediated (the ruling's
+        "ideally"). ``Subject``/``Event`` endpoints are not Point-bearing and
+        take the Object path.
+
+        The probe is anchored on ``:Point`` so the per-(label, id) index is
+        kept — the same id-anchored sweep technique ``create_direct_edge``
+        uses, but deliberately narrowed to the ONE label that carries this
+        contract: ``create_direct_edge`` sweeps all four ``EPISTEMIC_LABELS``
+        because a direct edge may connect any of them, whereas only a
+        Point-bearing pair is operator-mediated. Operator endpoints are
+        EXCLUDED for the same reason ``create_direct_edge`` refuses them —
+        silently rerouting a connection TO an operator would hide that misuse
+        rather than report it.
+        """
+        rows = self._get_proj().g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "AND coalesce(p.is_operator, false) = false "
+            "RETURN count(p)",
+            params={"ids": list(node_ids)},
+        ).result_set
+        return bool(rows and rows[0][0])
 
     @staticmethod
     def _direction_from_semantics(semantics: str) -> str | None:
@@ -13874,7 +14364,9 @@ class TortoiseSDK:
         created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         results = [] if granularity == "granular" else None
-        # A3 warnings contract (cycle-23): the ELEVEN-key enumeration lives in
+        # A3 warnings contract (cycle-23): the TWELVE-key enumeration lives in
+        # INGEST_CONTRACT §3.2 (extended from eleven by #8499 — the set is
+        # CLOSED, so a new key is a contract amendment, not a drive-by list)
         # E2E-6.2; this accumulator carries the operator-absorb / residue /
         # drift warnings appended during the connection loop.
         warnings: list[str] = []
@@ -14208,7 +14700,35 @@ class TortoiseSDK:
                 # promotion SET fires only on created==True (the promotion-on-
                 # created-only pin, §5.3/CYCLE-24) — the bare-MERGE dedup hit
                 # applies NO promotion.
-                if self._connection_route(conn) == "direct":
+                # ── ENDPOINT-KIND GATE (owner ruling 2026-10-13, #8499) ──
+                # The route selector reads only the connection ITEM; the
+                # endpoint kinds are knowable only HERE, refs resolved. A
+                # Point-involving pair is operator-mediated by contract, so a
+                # caller who wrote the plain spelling gets the operator form
+                # plus a warning naming what happened — never a silent
+                # structure change, and never a silent operator-less edge.
+                #
+                # NOTE (why the 'direct' branch below is retained): ingest's
+                # endpoint contract is POINT-ONLY (_check_connection rejects
+                # any non-Point endpoint, with a carve-out for an Event on the
+                # operator route), so for a plain IMPL/NAND this gate is
+                # ALWAYS true — the branch cannot be reached today. It is kept
+                # because it is what makes a future widening of that contract
+                # (Object↔Object bundles) automatically correct instead of
+                # silently operator-less.
+                _route = self._connection_route(conn)
+                if _route == "direct" and self._point_mediated_route([src, *dsts]):
+                    self._append_warning(
+                        f"point_mediated_route:{src}->{dsts[0]}:{op_type} — a "
+                        f"plain IMPL/NAND connection between :Point endpoints is "
+                        f"operator-mediated (owner ruling 2026-10-13, #8499): an "
+                        f"operator-less edge can be neither mitigated nor "
+                        f"annotated, and cannot carry the epistemic weighting a "
+                        f"Point's relations claim. Reified automatically; pass "
+                        f"`reify: true` to make the intent explicit."
+                    )
+                    _route = "operator"
+                if _route == "direct":
                     edge_res = self.create_direct_edge(
                         op_type, src, dsts[0],
                         label=label,
@@ -14556,12 +15076,12 @@ class TortoiseSDK:
         Completeness across ``rebuild_all``: batch_id on Points is restored
         from the pre-wipe live-graph snapshot (projection pass-1b tail) —
         a rebuild of the SAME store keeps the POINT half of the audit
-        intact; DIRECT EDGES are lost even on same-store rebuilds today
-        (their ``DirectEdgeCreated`` descriptors are journaled but not
-        replayed). The JSONL journal replay of ``BatchIdStamped`` /
-        ``DirectEdgeCreated`` records (a fresh-store rebuild from the
-        journal only) is A10 pass-2b (#1048, gated on A3) — NOT yet
-        landed, so journal-only rebuilds lose batch_id today (recorded
+        intact, and since #8499 the DIRECT-EDGE half survives too: the
+        ``DirectEdgeCreated`` descriptors that used to be journaled-but-never-
+        replayed now have a real pass-2b fold (``direct_edge_created_events``).
+        The remaining A10 pass-2b gap is ``BatchIdStamped`` on the
+        journal-only leg (a fresh-store rebuild from the journal alone) — NOT
+        yet landed, so journal-only rebuilds lose batch_id today (recorded
         deferral).
 
         Returns ``{"batch_id", "points": [{id, pointKind, status,
@@ -14700,7 +15220,10 @@ class TortoiseSDK:
         absent IMPL stays "bidirectional".
 
         Emits the dedicated JSONL edge descriptor for rebuild durability
-        (plan §4.4 — A10's pass-2b consumer) on created==True.
+        (#8499's pass-2b consumer) on EVERY write, NOT only on
+        ``created==True``: a dedup hit re-emits, so the crash window between
+        the MERGE and the emission is recovered by the retry's emission. (The
+        ``promote_source`` pin above is a separate, created-only rule.)
 
         Returns {"direct_edge": op_type, "from": source_id, "to": target_id,
                  "created": bool, "deduped": bool}.
@@ -14961,7 +15484,7 @@ class TortoiseSDK:
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
             "size(targets) > 0",
-            "(o.status IS NULL OR o.status IN ['draft', 'live'])",
+            _current_status_clause("o.status"),
         ]
         if label is not None:
             pcond.append("o.label = $label")
@@ -15323,8 +15846,12 @@ class TortoiseSDK:
         chain = {"point": {"id": point_id, "content": (point.get("content") or "")[:200],
                            "authoredBy": author}}
         # #3998 (D30): the raw is OPTIONAL. Attach the source's index entry —
-        # including the absent-raw state — so a memory whose raw was deleted,
-        # went offline, or had access revoked is still readable AND SAYABLE.
+        # including the absent-raw state — so a memory whose raw was deleted is
+        # still readable AND SAYABLE. `offline`/`access_revoked` are conditions
+        # observed live, never stored (Option A ruling, 2026-10-14), so this
+        # reader reports the RECORD it holds; a caller that has actually probed
+        # the raw routes the observation through
+        # `raw_state.resolve_raw_availability`.
         # Additive: emitted only when the point HAS an extractedFrom source,
         # so a sourceless point's response is byte-identical. Set BEFORE the
         # early returns below, so every exit path carries it.
@@ -15479,8 +16006,11 @@ class TortoiseSDK:
             EP signals. Flags IMPL/NAND edges (operator-mediated OR direct
             per the reification rule) where:
               * stale         — edge incident to a retracted/superseded/
-                                outdated/archived Point (or legacy
-                                outdated=true flag). suggested_action is
+                                outdated/archived/deprecated Point (or the
+                                legacy outdated=true flag). STALE_TERMINAL_STATUSES
+                                is the canonical exclusion set, so this list
+                                tracks it — the legacy `deprecated` member
+                                included (#4058). suggested_action is
                                 "re-point" when a CORRECTS successor exists,
                                 else "prune".
               * contested     — edge incident to a claim with high posterior
@@ -15718,7 +16248,7 @@ class TortoiseSDK:
             "MATCH (p:Point)-[:extractedFrom]->(s:Source) "
             "WHERE p.is_operator = false "
             "  AND p.embedding IS NOT NULL "
-            "  AND (p.status IS NULL OR p.status IN ['draft', 'live']) "
+            f"  AND {_current_status_clause('p.status')} "
             "  AND (p.outdated IS NULL OR p.outdated = false) "
             "  AND s.sourceKind IN $registered "
             "RETURN p.id, p.content, p.status, s.id, s.url, s.sourceKind, "
@@ -15828,7 +16358,7 @@ class TortoiseSDK:
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
-            "  AND (n.status IS NULL OR n.status IN ['draft', 'live']) "
+            f"  AND {_current_status_clause('n.status')} "
             "  AND (n.outdated IS NULL OR n.outdated = false) "
             "RETURN n.id, n.content, n.status, n.updatedAt",
         ).result_set
@@ -16663,19 +17193,28 @@ class TortoiseSDK:
         # exclusion is atomic with the marking.
         persisted: set[str] = set()
         if dirty_ids and not set(dirty_ids) <= _stamped:
-            persisted_rows = proj.g.query(
-                "UNWIND $ids AS pid "
-                "MATCH (n:Point {id: pid}) "
-                "WHERE NOT coalesce(n.status, 'live') IN $terminal "
-                "AND coalesce(n.outdated, false) = false "
-                "AND NOT pid IN $stamped "
-                "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
-                "RETURN pid",
-                params={"ids": dirty_ids,
-                        "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
-                        "ep": ep_version,
-                        "stamped": sorted(_stamped)},
-            ).result_set
+            # #7405: the dirty-persist SET rides the bounded write retry. It is
+            # an ABSOLUTE SET (fixed literal values) under a WHERE the statement
+            # itself re-reads at write time, so re-issuing it after an engine
+            # ABORT — which means the statement did not land — converges on the
+            # same marking and cannot duplicate; the state-independent and
+            # graph-abort arms of `retryable_aborted_write` both mean that.
+            persisted_rows = self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "UNWIND $ids AS pid "
+                    "MATCH (n:Point {id: pid}) "
+                    "WHERE NOT coalesce(n.status, 'live') IN $terminal "
+                    "AND coalesce(n.outdated, false) = false "
+                    "AND NOT pid IN $stamped "
+                    "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
+                    "RETURN pid",
+                    params={"ids": dirty_ids,
+                            "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
+                            "ep": ep_version,
+                            "stamped": sorted(_stamped)},
+                ).result_set,
+                what="_mark_dirty ep_dirty persist SET",
+            )
             persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
         # #2952: a pre-stamped id is persisted by its own CREATE — it is not
         # a terminal/live classification case, it simply needs no SET here.
@@ -16702,10 +17241,17 @@ class TortoiseSDK:
             terminal_ids = non_persisted & existing
             zombies = non_persisted - existing  # delete zombies (#1916)
             if terminal_ids:
-                proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
-                    "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                    params={"ids": list(terminal_ids)},
+                # #7405: same retry, same reasoning as the persist SET above —
+                # an absolute SET guarded by the statement's own `n.ep_dirty =
+                # true` read, so a re-issue after a non-landing ABORT is
+                # idempotent (clearing an already-cleared flag is a no-op).
+                self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
+                        "SET n.ep_dirty = null, n.ep_dirty_at = null",
+                        params={"ids": list(terminal_ids)},
+                    ),
+                    what="_mark_dirty terminal ep_dirty clear SET",
                 )
                 self._dirty_roots.difference_update(terminal_ids)
         # #1163: persist the dirty markings (points + reverse-BFS claims) so
@@ -21444,6 +21990,24 @@ class TortoiseSDK:
                 or pt.get("validTo") or "",
                 expired_at=point_state.get(pid, {}).get("expired_at")
                 or pt.get("expiredAt") or "",
+                # #2350 (E-prec): the precision block rides the SAME decoration
+                # as the window fields above. ``end_state`` falls back to the
+                # raw props when the batch decoration ran on a graph the
+                # precision fetch could not reach — so a window is never
+                # silently relabelled ``open``.
+                valid_from_precision=(
+                    point_state.get(pid, {}).get("valid_from_precision")
+                    or pt.get("validFromPrecision") or ""),
+                valid_to_precision=(
+                    point_state.get(pid, {}).get("valid_to_precision")
+                    or pt.get("validToPrecision") or ""),
+                end_state=(
+                    point_state.get(pid, {}).get("end_state")
+                    or _resolve_end_state(
+                        point_state.get(pid, {}).get("valid_to")
+                        or pt.get("validTo"),
+                        point_state.get(pid, {}).get("valid_to_precision")
+                        or pt.get("validToPrecision"))),
                 subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
                 summary=cap_summary,
@@ -21896,8 +22460,26 @@ class TortoiseSDK:
 
         Date comparison reuses ``_created_sort_key``'s mixed-format
         tolerance (ISO strings + numeric epoch both parse).
+
+        Per-end precision + the 3-state end (#2350, E-prec). Every entry that
+        carries a window (``chain``, ``valid_point``, ``candidates``,
+        ``nearest``) also carries ``valid_from_precision``,
+        ``valid_to_precision`` and ``end_state`` (``open`` | ``known`` |
+        ``unknown``). A window whose end is marked un-datable
+        (``validToPrecision == "unknown"``, no ``validTo``) is an ENDED window
+        — but because no instant is attested, ``_covers`` cannot exclude it and
+        the reply would otherwise read exactly like a still-true one, so the
+        top level also carries ``end_state_unknown: true`` and
+        ``indeterminate_end_ids`` whenever a COVERING candidate has an unknown
+        end. Read ``end_state_unknown`` before treating a ``found`` reply as
+        attestation that the claim was true at ``at_date``: it says the window
+        may have ended before then, and this read cannot tell. Legacy windows
+        carry no precision property, so their replies are unchanged
+        (``end_state`` is ``open``/``known`` and no unknown markers are
+        emitted).
         """
         from .search_engine import _created_sort_key
+        from .validity import END_UNKNOWN, window_read_fields
 
         at_date = str(at_date or "").strip()
         if not at_date:
@@ -21915,7 +22497,8 @@ class TortoiseSDK:
             seen.add(cur)
             rows = proj.g.query(
                 "MATCH (p:Point {id:$id}) RETURN p.content, p.validFrom, "
-                "p.validTo, p.createdAt",
+                "p.validTo, p.createdAt, p.validFromPrecision, "
+                "p.validToPrecision",
                 params={"id": cur},
             ).result_set
             if not rows:
@@ -21925,9 +22508,11 @@ class TortoiseSDK:
                             "point_id": point_id,
                             "at_date": at_date, "chain": []}
                 break
-            content, vf, vt, created = rows[0]  # noqa: RUF059
-            chain.append({"id": cur, "content": content,
-                          "valid_from": vf, "valid_to": vt})
+            content, vf, vt, created, vfp, vtp = rows[0]  # noqa: RUF059
+            entry = {"id": cur, "content": content,
+                     "valid_from": vf, "valid_to": vt}
+            entry.update(window_read_fields(vf, vt, vfp, vtp))
+            chain.append(entry)
             older = proj.g.query(
                 "MATCH (p:Point {id:$id})-[:CORRECTS]->(old:Point) "
                 "RETURN old.id ORDER BY old.createdAt LIMIT 1",
@@ -21952,19 +22537,44 @@ class TortoiseSDK:
                 return False
             return True
 
+        def window_entry(e: dict, *, include_content: bool = True) -> dict:
+            """One reply entry carrying the #2350 precision block.
+
+            ``chain`` entries never carried ``content``; ``valid_point`` and
+            ``candidates`` always did, while ``nearest`` did NOT (its pre-#2350
+            shape was ``{id, valid_from, valid_to, malformed}``) and stays
+            that way — passing ``include_content=False`` for it keeps this
+            PR's reply-shape change to the additive precision triple alone,
+            rather than silently growing a public field nobody recorded
+            (CONTRIBUTING.md: an added response field must still be recorded).
+            """
+            entry = {"id": e["id"], "valid_from": e["valid_from"],
+                     "valid_to": e["valid_to"],
+                     "valid_from_precision": e["valid_from_precision"],
+                     "valid_to_precision": e["valid_to_precision"],
+                     "end_state": e["end_state"]}
+            if include_content:
+                entry["content"] = e["content"]
+            return entry
+
         covering = [e for e in chain if _covers(e["valid_from"], e["valid_to"])]
         out = {
             "point_id": point_id,
             "at_date": at_date,
             "current": {"id": chain[0]["id"], "content": chain[0]["content"]},
-            "chain": [{"id": e["id"], "valid_from": e["valid_from"],
-                        "valid_to": e["valid_to"]} for e in chain],
+            "chain": [window_entry(e, include_content=False) for e in chain],
         }
+        # #2350: a covering window whose END is un-datable cannot be excluded
+        # by `_covers` (no instant to compare), so the reply would read exactly
+        # like a still-true claim. Say so at the top level.
+        indeterminate = [e["id"] for e in covering
+                         if e.get("end_state") == END_UNKNOWN]
+        if indeterminate:
+            out["end_state_unknown"] = True
+            out["indeterminate_end_ids"] = indeterminate
         if len(covering) == 1:
             e = covering[0]
-            out["valid_point"] = {"id": e["id"], "content": e["content"],
-                                   "valid_from": e["valid_from"],
-                                   "valid_to": e["valid_to"]}
+            out["valid_point"] = window_entry(e)
             out["found"] = True
             out["status"] = "found"
             return out
@@ -21979,10 +22589,7 @@ class TortoiseSDK:
             out["ambiguous"] = True
             out["found"] = True
             out["status"] = "ambiguous"
-            out["candidates"] = [{"id": e["id"], "content": e["content"],
-                                   "valid_from": e["valid_from"],
-                                   "valid_to": e["valid_to"]}
-                                  for e in covering]
+            out["candidates"] = [window_entry(e) for e in covering]
             return out
 
         # Honest absence: no window covers. Report the nearest window.
@@ -22028,9 +22635,7 @@ class TortoiseSDK:
                 best = dist
                 nearest = e
         if nearest is not None:
-            out["nearest"] = {"id": nearest["id"],
-                               "valid_from": nearest["valid_from"],
-                               "valid_to": nearest["valid_to"],
+            out["nearest"] = {**window_entry(nearest, include_content=False),
                                "malformed": _inverted(nearest["valid_from"],
                                                       nearest["valid_to"])}
         return out
@@ -22039,7 +22644,24 @@ class TortoiseSDK:
 
     # Status values excluded from the UC1 "current state" view by default.
     # `retracted` is additionally hard-excluded at the retrieval layer (#689).
-    STATE_EXCLUDED_STATUS = frozenset({"superseded", "deprecated", "retracted"})
+    #
+    # #4058: a NARROWING of the canonical Point exclusion
+    # (``live.TERMINAL_EXCLUDED_STATUSES``), DERIVED rather than re-literalised
+    # so a status added to the Point vocabulary cannot drift out of it. The two
+    # omitted members are not a visibility promise: this set is an ADDITIONAL,
+    # narrower filter applied on top of the canonical one — ``tortoise_fts_query``
+    # applies ``live.TERMINAL_EXCLUDED_STATUSES`` at the retrieval layer whenever
+    # ``include_terminal=False`` (this set's only active mode; it is ``None``
+    # once ``include_superseded`` is set), and
+    # ``fallback_snapshot.search_snapshot`` composes the canonical set with
+    # ``exclude_status`` — so an ``outdated``/``archived`` Point is excluded by
+    # the canonical layer and this set can never widen the read. Measured
+    # 2026-10-14 (#4058, embedded lane): an archived or outdated Point is absent
+    # from the default state view and present under ``include_superseded=True``.
+    # This is also the value the #3308 pin computes
+    # (``OBJECT_TERMINAL_STATUSES - {"archived"}``).
+    STATE_EXCLUDED_STATUS = TERMINAL_EXCLUDED_STATUSES - {
+        "outdated", "archived"}
     # About-edge family used for object-centric linking (mirrors
     # ranking.ABOUT_EDGE_TYPES and supersede_point's about* structural rels).
     _ABOUT_TYPES = "aboutSubject|aboutObject|aboutAction|aboutEvent|aboutPoint|aboutDocument"
@@ -24465,9 +25087,18 @@ class TortoiseSDK:
         # a cross-name sha-digest collision (would otherwise fail-closed on a
         # genuinely new registration). A row = canonical re-mention (MERGE by
         # name, ON MATCH — the #1350 clobber guard keeps status; journaling
-        # again would double-register). No row = fresh create OR #1155 stub
-        # adoption (name-stub under a random ulid — the canonical
-        # registration is genuinely new) → journal after apply. Probe failure
+        # again would double-register). The #7936 `_stub` conjunct restates
+        # the precondition honestly: since the event name-stub now carries the
+        # canonical id (#7936), id+name alone can no longer distinguish a
+        # registered node from an unregistered stub — every name-stub would
+        # HIT and the registration would silently stop being journaled.
+        # `_event_plain_merge` marks its stubs `_stub=true` ON CREATE and
+        # `_upsert_object`/`_upsert_subject` REMOVE it (SET NULL) on adoption,
+        # so the probe counts ONLY nodes whose canonical registration was
+        # journaled. No row = fresh create OR #1155/#7936 stub adoption (a
+        # marked name-stub, or a pre-#7936 random-ulid stub the id conjunct
+        # already misses — either way the canonical registration is genuinely
+        # new) → journal after apply. Probe failure
         # → warning + fail-open-to-journal (a duplicate line is replay-safe;
         # a skip would silently re-open the node-loss bug). Accepted
         # divergences (only-on-create mandate): re-mention prop mutations and
@@ -24492,7 +25123,8 @@ class TortoiseSDK:
                 and event.get("name") and event.get("type") == "ObjectRegistered"):
             try:
                 _journal_object_registration = not proj.g.query(
-                    "MATCH (o:Object {id:$cid, name:$name}) RETURN o.id",
+                    "MATCH (o:Object {id:$cid, name:$name}) "
+                    "WHERE coalesce(o._stub, false) = false RETURN o.id",
                     params={"cid": id_val, "name": event["name"]},
                 ).result_set
             except Exception:
@@ -24522,7 +25154,8 @@ class TortoiseSDK:
                 and event.get("name") and event.get("type") == "SubjectAdded"):
             try:
                 _journal_subject_registration = not proj.g.query(
-                    "MATCH (s:Subject {id:$cid, name:$name}) RETURN s.id",
+                    "MATCH (s:Subject {id:$cid, name:$name}) "
+                    "WHERE coalesce(s._stub, false) = false RETURN s.id",
                     params={"cid": id_val, "name": event["name"]},
                 ).result_set
             except Exception:
@@ -24942,10 +25575,12 @@ class TortoiseSDK:
                     raise ValueError(
                         f"{_managed!r} is server-managed on a :Source and "
                         f"cannot be set through the generic entity surface "
-                        f"(#3998/D30). Record an absence with "
+                        f"(#3998/D30). Record a DELETION with "
                         f"`create_source(..., raw_state=...)`, which validates "
-                        f"the value (accepted: {sorted(RAW_ABSENT_STATES)} or "
-                        f"{RAW_PRESENT!r})."
+                        f"the value (accepted: {sorted(WRITABLE_RAW_STATES)}). "
+                        f"`offline`/`access_revoked` are CONDITIONS, observed "
+                        f"live and never stored (raw_state's \"Option A\" "
+                        f"ruling, 2026-10-14)."
                     )
                 # ⛔ The retired fields are deliberately OUT of this closed
                 # check: they are left to the #5026/D10 guard below, which owns
@@ -25525,8 +26160,19 @@ class TortoiseSDK:
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
+
+        Returns ``{node, nudges}`` plus ``advisories`` when the write carries a
+        provenance gap this door can report — see ``_provenance_advisory``
+        (``no_source`` only for documents, where its remedy is real;
+        ``extracted_from_inert`` on any type that declares an unwired ref).
+        Advisory only: never a block, and it never changes what is stored.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
+        # — the one home is `_validate_extracted_from`, shared with
+        # `create_document` so the two doors cannot disagree. See its docstring
+        # for the three measured failure modes it closes.
+        _validate_extracted_from(props, door="create_entity")
         # W5 Phase F (#2104, review r1): the explicit ``_server_id`` param must
         # never be reachable through the props passthrough — the MCP boundary
         # denylist catches top-level keys, this catches the nested-props
@@ -25615,11 +26261,210 @@ class TortoiseSDK:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
                 f"subject, object, event, document")
+        # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
+        # `extractedFrom` is a recognised prop on this door — it rides the
+        # generic passthrough and is stored on the node.
+        # Storing it is NOT the capability: `create_document` (which
+        # `type='document'` absorbed in the epic #888 / #4282 consolidation)
+        # also wired the Source via `projection._link_source` (#394), and that
+        # half was LOST in the move — `create_entity` minted NO `:Source` node
+        # and NO `extractedFrom` edge, so a caller that had declared a source
+        # got a DOCUMENT the auditor reads as a provenance gap. Measured,
+        # `type='document'`: create_entity wired NOTHING; create_document minted
+        #     create_entity    sourceKind/edge: none
+        #     create_document  :Source node + extractedFrom edge
+        # `_link_source` is "declared inline, created if absent": it MERGEs the
+        # Source stub on the ref and is idempotent, so a re-declared ref
+        # converges instead of duplicating.
+        #
+        # ⛔ DOCUMENT ONLY, and that restriction is the point (review P1).
+        # The PRIMARY reason is the ontology: `extractedFrom` has a declared
+        # domain of Point -> Source (§3.3), and §4.6 says of these very
+        # classes: "Derived Events and Objects reach their source through their
+        # own links rather than `extractedFrom`". Their declared predicate is
+        # `references` (Source -> Event/Object/Source), written by
+        # `link_source_to_entity`. Routing subject/object/event through
+        # `_link_source` would invent an edge domain the ontology does not
+        # declare.
+        # A SECOND, independent reason: live-only edges are worse than no
+        # edge, and NO entity label has a replay writer — `_upsert_subject`,
+        # `_upsert_object`, `_upsert_event` and `_upsert_document` all omit
+        # `_link_source`, and `_create_entity` journals no `DocumentCreated`
+        # line at all, so `rebuild_all` has nothing to re-mint the edge from.
+        # That gap is PRE-EXISTING (#2296) and this change neither creates nor
+        # widens it: it restores the materialization `create_document` has had
+        # since #394, so the document door now behaves as its own alias always
+        # did. It is recorded on #8171 rather than claimed fixed here — this
+        # comment must NOT read as a replay-safety guarantee for the document
+        # edge, because there is none yet.
+        _prov_ref = props.get("extractedFrom")
+        _prov_label = self._ENTITY_SOURCE_LABELS.get(t)
+        if _prov_ref and _prov_label:
+            _prov_id = node.get("id") or node.get("eventId")
+            if _prov_id:
+                # #7405: `_link_source` is MERGE-based at every step — the
+                # Source stub is MERGE'd on its url and the `extractedFrom`
+                # edge is MERGE'd on the (node, Source) pair with its version
+                # write gated `ON CREATE` — so a re-issue after a non-landing
+                # ABORT converges instead of doubling. This is the same funnel
+                # and the same reasoning `create_point`'s `extractedFrom` leg
+                # already rides.
+                self._graph_write_with_retry(
+                    lambda: self._get_proj()._link_source(
+                        _prov_id, _prov_ref, label=_prov_label),
+                    what="create_entity extractedFrom edges",
+                )
         return {
             "node": node,
             "nudges": self._nudge_candidates(
                 name, exclude_ids=[node.get("id") or node.get("eventId")]),
+            **self._provenance_advisory(node, props, entity_type=t),
         }
+
+    # ── #8171: the write-time provenance advisory ────────────────────
+    #
+    # The ruling (#398, delivered by #8171): an agent asserting something
+    # without research is a WEAK source, and the source is the agent-session
+    # transcript. `audit` has no entity-level provenance check — checks 1 and 7
+    # are Point-only (`(op:Point {is_operator:true})-[:IMPL|NAND]->(ev:Point)`)
+    # and cannot see a `:Source`/`:Event`/`:Subject` written here, so nothing
+    # post-hoc reports this gap for an entity write at all. The ruling asks for
+    # it AT WRITE TIME, the only point where it
+    # can change what the writer does next.
+    #
+    # ADVISORY ONLY. The ruling says "guard (advisory)", never a block, so this
+    # returns a note and NEVER raises, NEVER refuses the write and NEVER changes
+    # what was stored. A caller ignoring it loses nothing; a caller reading it
+    # learns the one cheap fix (declare `extractedFrom`, e.g. a
+    # `session:<id>` ref for what the writer itself asserts).
+    _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {"document": "Source"}
+
+    def _provenance_advisory(self, node: dict, props: dict,
+                             *, entity_type: str | None = None) -> dict:
+        """Advisory for a provenance gap this door can report.
+
+        ``no_source`` for a document write that declared no materializable
+        source (the remedy the message names actually works there), and
+        ``extracted_from_inert`` when any type declares an ``extractedFrom``
+        this door does not wire. A type this door cannot source at all gets no
+        ``no_source`` note — see the branch below.
+
+        Returns ``{}`` when the node carries provenance that this door can
+        HONOUR, and ``{"advisories": [...]}`` when it does not. Never raises,
+        never blocks — see the block comment above.
+
+        Sourcedness is not the mere PRESENCE of an ``extractedFrom`` field — it
+        is whether the door will MATERIALIZE it (review P2). Only document-kind
+        writes wire ``extractedFrom`` (``_ENTITY_SOURCE_LABELS``), so a
+        ``subject``/``object``/``event`` that declares one stores the ref as a
+        bare property, mints no ``:Source`` and wires no edge. Treating that as
+        "sourced" made the advisory silent about exactly the invented-provenance
+        gap it exists to report: the node asserts a source nothing can traverse
+        to, which is worse than declaring none (design contract #3).
+
+        ``no_source`` is given only where the door has a remedy (review P1).
+        ``extractedFrom`` is the only source this door materializes, and only a
+        document write can. For a ``subject``/``object``/``event`` the
+        ``no_source`` message would name ``extractedFrom='session:<id>'`` — a
+        fix the door CANNOT honour: applying it swaps this advisory for
+        ``extracted_from_inert`` and leaves the gap exactly where it was. An
+        advisory that fires on every write of 3 of the 4 types, with inert
+        advice, is the noise the design note warns "is how an advisory stops
+        changing behaviour", so there is no note to give. A declared-but-inert
+        ref is still reported (the ``extracted_from_inert`` branch below).
+        """
+        _ref = props.get("extractedFrom")
+        _source_label = self._ENTITY_SOURCE_LABELS.get(entity_type or "")
+        if _ref and _source_label:
+            return {}
+        if _ref:
+            # Declared, but INERT for this type: no writer honours it.
+            _node_id = node.get("id") or node.get("eventId")
+            return {"advisories": [{
+                "code": "extracted_from_inert",
+                "node_id": _node_id,
+                "message": (
+                    f"extractedFrom is not wired for type={entity_type!r}. The "
+                    "ref is stored as a plain property and NO :Source is "
+                    "created, so the provenance cannot be traversed. "
+                    "`extractedFrom` is declared Point -> Source (ONTOLOGY "
+                    "3.3); a derived Event or Object reaches its source "
+                    "through its own `references` link (link_source_to_entity, "
+                    "4.6). Either use a door that wires it, or drop the ref so "
+                    "the node does not assert a source it cannot show."
+                ),
+                "advisory": True,
+            }]}
+        # ── no_source: only where this door HAS a remedy (review P1) ─────
+        # `extractedFrom` is the only source this door materializes, and only a
+        # document write can (`_ENTITY_SOURCE_LABELS`). For subject/object/event
+        # a `no_source` advisory would name `extractedFrom='session:<id>'` — a
+        # fix the door cannot honour: applying it swaps this advisory for the
+        # `extracted_from_inert` branch above and leaves the provenance gap
+        # exactly where it was. An advisory that fires on EVERY write of 3 of
+        # the 4 types and whose advice is inert is the noise the design note
+        # warns "is how an advisory stops changing behaviour". So a type this
+        # door cannot source gets no `no_source` note: a Subject has no source
+        # predicate at all, and Event/Object provenance goes through a separate
+        # `references` writer, never this door's `extractedFrom`. (A
+        # declared-but-unwireable ref is still reported just above.)
+        if not _source_label:
+            return {}
+        # ⛔ NO `session_id` BYPASS (review P1). An earlier revision returned
+        # `{}` here on the reasoning that "`create_point` infers `session:<id>`"
+        # (#3263). That inference lives ONLY in `create_point` — and
+        # `create_point` never calls this helper. Its only callers are
+        # `create_entity` and `create_document`, and NEITHER derives or
+        # materializes anything from `session_id`, so a `session_id`-only write
+        # through either door is genuinely UNSOURCED: the bypass silenced the
+        # advisory on exactly the class of write the advisory exists to report.
+        # Sourcedness must be judged by what THIS door will materialize, so a
+        # borrowed capability cannot be counted as provenance the door does not
+        # provide — the same rule the inert-`extractedFrom` branch above
+        # applies. The right fix for a writer that wants that inference is the
+        # message's advice, not a silent exemption.
+        _sid = props.get("session_id")
+        _sid_hint = (
+            " (A `session_id` was supplied, but only `create_point` derives a "
+            "source from one; this door does not. Pass "
+            "extractedFrom='session:<session_id>' explicitly.)"
+            if isinstance(_sid, str) and _sid.strip() else ""
+        )
+        # NOTE: no analogous hint for `sourceKind`. It IS still present in
+        # `props` here, but it is not materializable — the WRITE's passthrough
+        # discards it (`projection/entities.py::_SOURCE_HANDLED`) and no
+        # SET clause writes it (`_upsert_document`/`_upsert_source`) — so it
+        # cannot buy silence. There is deliberately no branch keyed on it; the
+        # caller is told in the door's docstring that `sourceKind` is not
+        # stored on these nodes.
+        # No `sourceKind` branch (review P1 in round 7). An earlier revision
+        # treated a declared `sourceKind` as provenance on a document and
+        # returned `{}` — on the D10 reasoning that a document IS a `:Source`.
+        # MEASURED on the head tree: NEITHER document door stores it.
+        # `sourceKind` is in `projection/entities.py::_SOURCE_HANDLED` and
+        # is denied the document upsert's open passthrough, and
+        # `_upsert_document`'s fixed SET clause never writes it — so a document
+        # created through either door with `sourceKind` only ends with no
+        # `sourceKind` property, no separate `:Source` and no edge. Keying
+        # silence on a property the write DISCARDs is the third
+        # borrowed-capability bypass on this function (after `session_id` and
+        # the unconditional `sourceKind`) and it silenced a genuinely
+        # unprovenanced write. There is now no branch here: only a materialized
+        # `extractedFrom` counts.
+        node_id = node.get("id") or node.get("eventId")
+        return {"advisories": [{
+            "code": "no_source",
+            "node_id": node_id,
+            "message": (
+                "No source and no provenance on this write. If it is "
+                "something YOU are asserting, source it from the session "
+                "that produced it with extractedFrom='session:<session_id>' "
+                "(registered as sourceKind=agentSession) — an unsourced "
+                "assertion carries whatever credibility its wording implies."
+                + _sid_hint
+            ),
+            "advisory": True,
+        }]}
 
     # ── Write nudges (epic #888 W2 — nudge, don't enforce) ───────────
 
@@ -25676,6 +26521,23 @@ class TortoiseSDK:
         return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
                 for r in scored[:limit]]
 
+    def _flat_entity_result(self, result: dict) -> dict:
+        """Bare node a legacy ``create_*`` alias returns, plus #8171 advisories.
+
+        The aliases historically unwrapped ``create_entity(...)["node"]``,
+        which DROPS the top-level ``advisories`` key — so the alias MCP tools
+        (``tortoise_create_subject`` / ``-object`` / ``-event``) never surfaced
+        an advisory the identical ``create_entity`` write did (review P2).
+        ``create_document`` returns the flat node WITH the advisory; this
+        restores that shape on the three legacy doors. Additive: with no
+        advisory the return is the same node the alias returned before.
+        """
+        node = dict(result["node"])
+        _adv = result.get("advisories")
+        if _adv:
+            node["advisories"] = _adv
+        return node
+
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -25683,8 +26545,9 @@ class TortoiseSDK:
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self.create_entity("subject", name,
-                                  subjectKind=subjectKind, **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("subject", name,
+                               subjectKind=subjectKind, **props))
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
@@ -25693,8 +26556,9 @@ class TortoiseSDK:
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self.create_entity("object", name,
-                                  objectKind=objectKind, **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("object", name,
+                               objectKind=objectKind, **props))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
@@ -25728,9 +26592,10 @@ class TortoiseSDK:
                 "via props.")
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
-        return self.create_entity("event", name,
-                                  eventKind=eventKind, _server_id=_server_id,
-                                  **props)["node"]
+        return self._flat_entity_result(
+            self.create_entity("event", name,
+                               eventKind=eventKind, _server_id=_server_id,
+                               **props))
 
 
     # ── Session Indexing (AgentSession) ─────────────────────────
@@ -28092,6 +28957,17 @@ class TortoiseSDK:
     def create_document(self, title: str, documentKind: str, **props) -> dict:
         """Thin alias for create_entity(type='document') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #8171 (review P2): this door routes `extractedFrom` to the SAME
+        # `_link_source` as `create_entity`, so it needs the SAME pre-write
+        # shape check. Without it the choke point's container gate turns a bad
+        # ref into a SILENT no-op — the caller gets a 200, no provenance, and
+        # no advisory. Pre-fix, only a NON-ITERABLE scalar failed loudly (and it
+        # failed AFTER the CREATE, leaving an orphan); the two other bad shapes
+        # were silent — a DICT had its keys minted as `:Source` nodes (invented
+        # provenance), and a mixed list DROPPED its non-str members. Those two
+        # silent cases are what this guard is for on this door: a ref the door
+        # cannot honour must not be accepted in silence.
+        _validate_extracted_from(props, door="create_document")
 
         did = self.ulid()
         result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, **props}, "DocumentCreated")
@@ -28099,7 +28975,22 @@ class TortoiseSDK:
         # → Source via extractedFrom (Ontology v3.3) when the caller passes a
         # source ref. D10: the entity label is Source (a document is a :Source).
         if props.get("extractedFrom"):
-            self._get_proj()._link_source(did, props["extractedFrom"], label="Source")
+            # #7405: parity with `create_entity`'s document leg — same
+            # MERGE-idempotent writer, same bounded retry.
+            self._graph_write_with_retry(
+                lambda: self._get_proj()._link_source(
+                    did, props["extractedFrom"], label="Source"),
+                what="create_document extractedFrom edges",
+            )
+        # #8171 (review P2): the ADVISORY must be delivered on this door too.
+        # This is the documented alias AND a live MCP tool
+        # (`tortoise_create_document`), so a caller using it would otherwise
+        # get no advisory while the same write through
+        # `create_entity(type='document')` does — the two doors disagreeing is
+        # the defect the shared guard exists to prevent, and an advisory that
+        # reaches only one of two doors cannot change behaviour.
+        result.update(self._provenance_advisory(result, props,
+                                                entity_type="document"))
         return result
 
     def _resolve_source_url(self, url: str) -> str:
@@ -28176,9 +29067,16 @@ class TortoiseSDK:
             `docs/durability-posture.md` → *`:Source` — recorded vs
             recomputable, field by field* (R2) and
             `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6.
-          - ``raw_state=`` (#3998, D30) — the ABSENT-RAW state: one of
-            ``present`` / ``deleted`` / ``offline`` / ``access_revoked``.
-            Validated strictly (an unknown value raises ``ValueError``) and
+          - ``raw_state=`` (#3998, D30) — the ABSENT-RAW state. A DELETION is
+            an ACT and is recorded durably: one of ``present`` / ``deleted``.
+            ``offline`` / ``access_revoked`` are CONDITIONS, observed live and
+            NEVER stored (the owner's #3998 ruling, Option A, 2026-10-14) —
+            passing one is refused with a message saying so, and the read path
+            derives it through ``raw_state.resolve_raw_availability``. The
+            deletion marker is BOUNDED by ``raw_state.RAW_DELETION_MARKER_TTL``
+            (bounded metadata about the link back to the raw — never a
+            retention period on user content, R1). Validated strictly (an
+            unknown value raises ``ValueError``) and
             PRESERVED by a later upsert that carries none, so a re-ingest
             cannot resurrect a raw deleted between the two writes. Pass
             ``raw_state="present"`` to record that a raw came BACK — that is
@@ -29297,7 +30195,10 @@ class TortoiseSDK:
         reference are preferred, so a Point extracted from several sources
         keeps returning a referenced entity whenever one exists.
         #3998 (D30): the raw is OPTIONAL — the chain must stay readable and
-        SAYABLE when the raw was deleted, is offline, or access was revoked.
+        SAYABLE when the raw was deleted. `offline` / `access_revoked` are
+        conditions observed live and never stored (Option A ruling,
+        2026-10-14), so this reader reports the record it holds and never an
+        empty result standing in for an unreachable raw.
         Every item therefore carries ``raw``: the source's index entry
         (identity + version + availability), never a copy of the raw and never
         an exception. A source whose raw is gone still returns HERE — the node
@@ -29989,10 +30890,35 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
     callers merge a returned dict into the response and set `ok=True`, so a
     dict-shaped refusal would read as a successful commit. Their existing
     `except Exception` channel already turns this into a structured `ok=False`.
+
+    #7405 (audit G8): the POST rides the bounded retry primitive on
+    ``retryable_transient`` — the transport-class predicate, NOT
+    ``retryable_aborted_write`` (the write-abort predicate needs a graph-state
+    probe that is meaningless for an HTTP POST). Re-issuing is safe by
+    construction, which is why this predicate is admissible here at all: the
+    body carries a deterministic ``client_commit_id`` (computed below, before
+    the first attempt) and the server serializes on it atomically
+    (``CommitRecordStore.acquire`` — an atomic MERGE on ``client_commit_id``),
+    so a re-POST after a lost reply sees the winner's record instead of
+    double-applying. That is the ``client_commit_id`` replay + server-side
+    dedup this path's robustness already rested on.
+
+    ``marker_armed=False``: ``WriteStageRetriesExhausted`` exists for the eval
+    lane's R2 whole-question marker, not this primitive's contract. Both
+    callers stringify whatever surfaces into ``ok=False, error=…``, so an
+    exhausted retry must surface the ORIGINAL transport exception unwrapped —
+    keeping the reported failure class unchanged. Budget: ``retries=3`` (4
+    attempts worst case) — a refused connection fails fast, a full 120 s
+    response timeout is the slow case, and the bound stays FINITE so a dead
+    endpoint still surfaces rather than hanging forever. Against a
+    reachable-but-unresponsive endpoint the AGGREGATE worst case is ≈494 s
+    (~8.2 min) — 4 × 120 s plus 7–14 s of jittered backoff (``base=2.0``,
+    ``cap=8.0``) — versus the ~120 s single attempt before this wiring.
     """
     import os  # noqa: I001 — `requests` is imported mid-block, same as before
     from tortoise.capture_consent import capture_declined_reason
     from tortoise.commit_schema import compute_client_commit_id
+    from tortoise.retry import call_with_predicate, retryable_transient
     declined = capture_declined_reason()
     if declined is not None:
         raise PermissionError(declined)
@@ -30003,8 +30929,64 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
     base = base_url or os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
     key = api_key or os.environ.get("TORTOISE_API_KEY", "")
     import requests
-    r = requests.post(f"{base.rstrip('/')}/v1/sessions/commit",
-                      headers={"Authorization": f"Bearer {key}"},
-                      json=payload, timeout=120)
-    r.raise_for_status()
-    return r.json()
+
+    def _post() -> dict:
+        r = requests.post(f"{base.rstrip('/')}/v1/sessions/commit",
+                          headers={"Authorization": f"Bearer {key}"},
+                          json=payload, timeout=120)
+        r.raise_for_status()
+        return r.json()
+
+    return call_with_predicate(
+        _post, predicate=retryable_transient, retries=3,
+        what="POST /v1/sessions/commit", base=2.0, cap=8.0,
+        marker_armed=False)
+
+
+def _validate_extracted_from(props: dict, *, door: str) -> None:
+    """#8171: shape-check ``extractedFrom`` BEFORE any graph write.
+
+    The contract is `create_point`'s #3263 one, and it lives here so the three
+    doors that route a ref to `projection._link_source` — `create_point`,
+    `create_entity`, `create_document` — cannot disagree about what a legal
+    source ref is. `create_point` used to spell the same rules out inline; it
+    now calls this, so there is one definition rather than a copy that can
+    drift. Three input classes matter, and all three were
+    MEASURED to fail badly when unchecked, because `_link_source` fans out with
+    `list(source_ref)`:
+
+      - a non-str scalar (`123`) raised TypeError AFTER the node was CREATEd,
+        leaving an ORPHAN the caller gets no handle to;
+      - a DICT had its KEYS minted as `:Source` nodes, one per key — an
+        INVENTED provenance, which is worse than none (design contract #3);
+      - a list with a non-str member silently DROPPED that member.
+
+    Raising HERE, before the write, is what keeps the refusal atomic: a raise
+    after the CREATE still reports an error, but the node is already in the
+    graph and the caller cannot even name it. Empty and whitespace-only refs
+    are dropped rather than refused — they mean "no provenance", not "bad
+    provenance" (the bundle contract allows an empty list for the same reason).
+    """
+    ref = props.get("extractedFrom")
+    if ref is None:
+        return
+    if isinstance(ref, str):
+        if not ref.strip():
+            props.pop("extractedFrom", None)
+        return
+    if isinstance(ref, (list, tuple)):
+        clean = [r for r in ref if isinstance(r, str) and r.strip()]
+        if len(clean) != len(ref):
+            raise ValueError(
+                f"{door}: extractedFrom must be a non-empty string or a list "
+                f"of non-empty strings (got {ref!r})")
+        if clean:
+            props["extractedFrom"] = clean
+        else:
+            props.pop("extractedFrom", None)
+        return
+    raise ValueError(
+        f"{door}: extractedFrom must be a non-empty string or a list of "
+        f"non-empty strings (got {ref!r}); a non-string scalar would mint a "
+        "corrupt Source, and raising after the write would leave an "
+        "un-journaled orphan (#3263/#8171)")

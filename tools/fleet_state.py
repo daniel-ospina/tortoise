@@ -1141,7 +1141,17 @@ def open_prs(repo: str, limit: int = 400) -> GitHubRows:
     ], what="gh pr list")
 
 
-def open_issues(repo: str, limit: int = 800) -> GitHubRows:
+#: The open-issue window ``build_state`` reads. ``attribute_claims`` gates EVERY
+#: attribution on membership in this set, so a truncated read makes "no lane is
+#: attributed" UNPROVABLE for the issues it did not see — the claim gate would
+#: then answer "nobody" from a read that cannot claim coverage (#8175). The
+#: window is far above any repo the fleet reads; if a repo ever exceeds it the
+#: board SAYS SO (``reconciliation["open_issues_truncated"]``) and the pre-flight
+#: refuses instead of answering.
+OPEN_ISSUES_LIMIT = 2000
+
+
+def open_issues(repo: str, limit: int = OPEN_ISSUES_LIMIT) -> GitHubRows:
     return gh_json([
         "issue", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
         "--json", "number,title,assignees,labels,updatedAt,url",
@@ -1244,6 +1254,11 @@ def build_state(
     issues_read = open_issues(repo)
     prs = list(prs_read)
     issues = list(issues_read)
+    # #8175: the read is the FILTER `attribute_claims` applies, so hitting the cap
+    # means the board cannot see every open issue. Exactly-at-limit is treated as
+    # truncated (the two are indistinguishable), and the flag travels with the
+    # board so a reader can refuse rather than assert a negative.
+    issues_truncated = len(issues_read) >= OPEN_ISSUES_LIMIT
     github_measured = bool(getattr(prs_read, "measured", False)) and bool(
         getattr(issues_read, "measured", False)
     )
@@ -1595,6 +1610,13 @@ def build_state(
             # failure a reader can refuse on, never an empty fleet.
             "registry_measured": registry_measured,
             "registry_error": registry_error,
+            # #8175: was the OPEN-ISSUE read WIDE ENOUGH to prove a negative? A
+            # truncated read cannot support "no lane is attributed to issue N"
+            # for an N it did not see, so the flag travels with the board and the
+            # pre-flight refuses for an absent issue rather than answering.
+            "open_issues_truncated": issues_truncated,
+            "open_issues_read": len(issues_read),
+            "open_issues_limit": OPEN_ISSUES_LIMIT,
         },
         "conflicts": conflicts,
         "conflict_claimants": {str(n): who for n, who in conflict_claimants.items()},

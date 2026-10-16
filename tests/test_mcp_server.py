@@ -974,8 +974,10 @@ class TestIngestPromotionPolicy:
         conn = {"from": "pA", "to": "pB", "operator": "IMPL"}
         if reify:
             # §8 (INGEST_CONTRACT): reify:true anchors a REAL operator node
-            # (route 'operator') — a plain IMPL/NAND without it is
-            # operator-less (direct edge, no node to query).
+            # (route 'operator'). Since #8499 the plain spelling reaches the
+            # SAME route for a Point↔Point pair (endpoint-kind gate, owner
+            # ruling 2026-10-13) — reify:true is now the *explicit* spelling
+            # of the contracted route rather than the only way to reach it.
             conn["reify"] = True
         bundle = {
             "points": [
@@ -990,16 +992,22 @@ class TestIngestPromotionPolicy:
     def test_mcp_gated_default_keeps_source_draft(self, request, monkeypatch, tmp_path):
         # Agent journey: ingest via tortoise_ingest → read status back via
         # tortoise_get_point (the read surface the agent actually calls).
-        # §8 (INGEST_CONTRACT): a plain IMPL connection is an OPERATOR-LESS
-        # direct edge — under gated the sources stay draft, and no operator
-        # node exists to query (the connection entry is the descriptor).
+        # #8499 endpoint-kind gate (owner ruling 2026-10-13): a plain IMPL
+        # between two :Points is REIFIED — under gated the sources stay draft
+        # AND the operator node exists (status 'draft'), so the connection
+        # entry is the operator id, not the direct-edge descriptor.
         res = self._sdk_backed_ingest(request, monkeypatch, tmp_path)
         assert "error" not in res, res
         pA, pB = res["ids"]["points"]
         assert mcp_mod.tortoise_get_point(pA)["status"] == "draft"
         assert mcp_mod.tortoise_get_point(pB)["status"] == "draft"
-        assert res["ids"]["connections"][0] == \
-            {"direct_edge": "IMPL", "from": pA, "to": pB}
+        op_id = res["ids"]["connections"][0]
+        assert isinstance(op_id, str)
+        op = mcp_mod.tortoise_get_point(op_id)
+        assert op["is_operator"] is True and op["op_type"] == "IMPL"
+        assert op["status"] == "draft", op
+        assert any("point_mediated_route" in w for w in res["warnings"]), \
+            res["warnings"]
 
     def test_mcp_auto_promotes_source_live(self, request, monkeypatch, tmp_path):
         res = self._sdk_backed_ingest(
@@ -1008,10 +1016,11 @@ class TestIngestPromotionPolicy:
         pA, pB = res["ids"]["points"]
         assert mcp_mod.tortoise_get_point(pA)["status"] == "live"
         assert mcp_mod.tortoise_get_point(pB)["status"] == "draft"  # source-only
-        # §8 operator-less model: the plain IMPL connection is a direct edge
-        # (no operator node), so the entry is the descriptor, not an id.
-        assert res["ids"]["connections"][0] == \
-            {"direct_edge": "IMPL", "from": pA, "to": pB}
+        # §8 + #8499: the reified operator is observable through the MCP read
+        # surface too — auto promotes it live (the live side of #780).
+        op_id = res["ids"]["connections"][0]
+        assert isinstance(op_id, str)
+        assert mcp_mod.tortoise_get_point(op_id)["status"] == "live"
 
     def test_mcp_granular_auto_parity(self, request, monkeypatch, tmp_path):
         # E2E-5 at the MCP layer: granularity is forwarded verbatim and the
@@ -1035,8 +1044,9 @@ class TestIngestPromotionPolicy:
         pA, pB = res["ids"]["points"]
         assert mcp_mod.tortoise_get_point(pA)["status"] == "draft"
         assert mcp_mod.tortoise_get_point(pB)["status"] == "draft"
-        assert res["ids"]["connections"][0] == \
-            {"direct_edge": "IMPL", "from": pA, "to": pB}
+        # #8499: reified on the granular path too — the gate lives in the
+        # shared connection loop, so bulk and granular cannot diverge.
+        assert isinstance(res["ids"]["connections"][0], str)
 
     def test_mcp_gated_reify_operator_keeps_draft(self, request, monkeypatch, tmp_path):
         # #780 semantics preserved for REAL operator nodes (route 'operator'

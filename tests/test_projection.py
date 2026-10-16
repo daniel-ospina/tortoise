@@ -2247,19 +2247,23 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
 
 
 def test_falkor_subject_stub_resolves_canonical_id():
-    """#1918: a Subject stub minted with a random-ulid id (webhook
-    name-stub) must adopt the canonical id when SubjectAdded lands — parity
-    with the #1155 Object fix (_upsert_object ON MATCH
+    """#1918: a Subject stub minted before the canonical registration (the
+    webhook name-stub) must adopt the canonical id when SubjectAdded lands —
+    parity with the #1155 Object fix (_upsert_object ON MATCH
     o.id=coalesce($id, o.id)). Pre-fix: _upsert_subject ON MATCH only set
     subjectKind/embedding, so MATCH (s:Subject {id:$sid}) wiring silently
-    matched nothing."""
+    matched nothing. #7936: the stub's OWN id is now the canonical
+    `sub-<sha256>` value; this test's canonical spelling (`subject:alice`) is
+    deliberately different, so the ON MATCH id write is what heals it."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()  # wipes all graphs on every call
 
-    # EventRecorded lands FIRST → mints a Subject name-stub with a RANDOM
-    # ulid id (the webhook path, _event_plain_merge). The canonical id is
-    # not yet present on any node.
+    # EventRecorded lands FIRST → mints a Subject name-stub under the
+    # deterministic `sub-<sha256>` id (#7936; the webhook path,
+    # _event_plain_merge). The CANONICAL id below is a DIFFERENT spelling
+    # (`subject:alice`), so it is not yet present on any node — which is the
+    # point: the ON MATCH id write, not the stub value, does the healing.
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-1918", "eventKind": "meeting.held",
         "subject": "alice", "object": "",

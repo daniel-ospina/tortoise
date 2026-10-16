@@ -2051,8 +2051,10 @@ class TestSharedTerminalizerClassifier:
 # unrecognised `clear` scope was a SILENT no-op that resurrected the seeds the
 # live graph dropped (#330/#1242) — the exact divergence the clear leg was
 # added to prevent. Both shapes are EXEMPT (a plain direct edge is
-# legitimately absent after a replay — A10 #1048 — and a future producer's
-# fourth scope must not make a recovery run un-runnable), but an exemption
+# legitimately absent after a replay (the journal never recorded it; the
+# journaled DirectEdgeCreated shape IS replayed since #8499) — and a future
+# producer's fourth scope must not make a recovery run un-runnable), but an
+# exemption
 # still REQUIRES the record: that is the whole point of EXEMPT_SHAPES.
 # ═══════════════════════════════════════════════════════════════════════
 

@@ -75,6 +75,14 @@ README = WEBSITE_DIR / "README.md"
 #: decision, not a code change — it must be argued in the issue, not here.
 CONTACT_TO = "hello@premiselabs.co"
 
+# ⛔ OVERRIDES: the #2409 ruling — "where the outside surface shows an address,
+# it is hello@" — scoped to one document. The owner set the founder's own
+# address on the investor deck (2026-10-15): it is handed to named readers
+# rather than published, and this approach is founder-led. The reversal is
+# recorded on #2409, the ruling's own home; this map is where a future lane
+# adopting the pattern meets it. Every other page still shows only CONTACT_TO.
+ADDRESS_EXCEPTIONS = {"investors.html": {"daniel@premiselabs.co"}}
+
 #: The reply words those commitments land on.
 REPLY_WORD = (
     r"(?:repl(?:y|ies|ying)|respond|response|answer|reaching out|reach out|"
@@ -1175,7 +1183,8 @@ class _AddressProbe(HTMLParser):
 
 def test_hello_is_the_address_other_surfaces_show() -> None:
     """`docs.html` names a contact channel — it must show `hello@`, and no
-    outside surface may show a competing address.
+    outside surface may show a competing address — except the investor deck,
+    which carries a recorded owner override (see ADDRESS_EXCEPTIONS).
 
     DERIVED, not enumerated. This check used to walk a hard-coded tuple of five
     files looking for the literal string `support@` — so its body enforced less
@@ -1209,6 +1218,9 @@ def test_hello_is_the_address_other_surfaces_show() -> None:
 
     competing: dict[str, list[str]] = {}
     for page in pages:
+        # The per-page allow-list: `hello@` everywhere, plus any recorded owner
+        # override for that one document.
+        allowed = {CONTACT_TO} | ADDRESS_EXCEPTIONS.get(page.name, set())
         # `html.unescape` + `re.I` matter: the SCHEME is case-insensitive per
         # RFC 3986 and an attribute value can spell the colon as `&#58;`, so a
         # case-sensitive, raw-source match lets `MAILTO:founder@gmail.com` and
@@ -1224,7 +1236,7 @@ def test_hello_is_the_address_other_surfaces_show() -> None:
             # `Daniel@PremiseLabs.co` (`endswith` is case-sensitive). The rule is
             # "outside surfaces show hello@" — so the comparison is against the
             # whole address, lower-cased.
-            if addr.lower() != CONTACT_TO:
+            if addr.lower() not in allowed:
                 competing.setdefault(page.name, []).append(addr)
 
         # The docstring above says no outside surface may SHOW a competing
@@ -1235,7 +1247,7 @@ def test_hello_is_the_address_other_surfaces_show() -> None:
         shown = _AddressProbe()
         shown.feed(src)
         for addr in sorted(set(re.findall(_EMAIL_RE, "\n".join(shown.chunks)))):
-            if addr.lower() != CONTACT_TO:
+            if addr.lower() not in allowed:
                 competing.setdefault(page.name, []).append(addr)
 
     assert not competing, (

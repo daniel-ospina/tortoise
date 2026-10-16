@@ -106,12 +106,26 @@ function str(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
 
+// The recorded lifecycle is draft → published → archived (plan W4). The union —
+// not a bare `string` — is what keeps an unvalidated status out of the INSERT:
+// `CreateValues.status` and `PatchValues.status` are BOTH typed by it, so the
+// only way to build either is to have narrowed the raw input into it (#4311).
+type PostStatus = "draft" | "published";
+
 function validateCreate(input: PostInput): { ok: true; value: CreateValues } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
-  if (input.status !== undefined && input.status !== null && typeof input.status !== "string") {
-    errors.status = "must be a string";
+  // Narrow ONCE, here. Below this point `status` is a valid member or the
+  // default, so no later branch can hand a raw `string` to the database.
+  let status: PostStatus = "draft";
+  if (input.status !== undefined && input.status !== null) {
+    if (typeof input.status !== "string") {
+      errors.status = "must be a string";
+    } else if (input.status === "draft" || input.status === "published") {
+      status = input.status;
+    } else {
+      errors.status = "status must be draft | published";
+    }
   }
-  const status = str(input.status);
   const title = str(input.title) ?? "";
   if (!title || title.length > TITLE_MAX) errors.title = `title required, max ${TITLE_MAX} chars`;
 
@@ -137,7 +151,6 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
   const author = str(input.author);
   if (author && author.length > 100) errors.author = "author max 100 chars";
 
-  if (status !== null && status !== "draft" && status !== "published") errors.status = "status must be draft | published";
   if (status === "published" && input.hold_for_review === true) errors.hold_for_review = "hold_for_review cannot be combined with status=published";
 
   if (input.tags !== undefined && input.tags !== null) {
@@ -164,7 +177,7 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
       meta_description: metaDesc ?? null,
       author: author ?? null,
       hold_for_review: typeof input.hold_for_review === "boolean" ? input.hold_for_review : false,
-      status: status ?? "draft",
+      status,
     },
   };
 }
@@ -180,7 +193,7 @@ interface CreateValues {
   meta_description: string | null;
   author: string | null;
   hold_for_review: boolean;
-  status: "draft" | "published";
+  status: PostStatus;
 }
 
 function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { ok: false; errors: Record<string, string> } {
@@ -271,7 +284,7 @@ interface PatchValues {
   meta_description?: string | null;
   author?: string | null;
   hold_for_review?: boolean;
-  status?: "draft" | "published";
+  status?: PostStatus;
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
