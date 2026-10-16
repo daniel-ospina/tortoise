@@ -372,9 +372,8 @@ def test_investors_forms_bound_the_request_and_expose_their_errors() -> None:
     assert "emailInput.removeAttribute('aria-invalid')" in raw, \
         "a re-submit must clear the invalid flag"
     # Only errors about the address may mark the field invalid: the two client
-    # validation sites and a refused request (the address is the only part of
-    # this form the reader controls). A server error (403, 405), a captcha prompt
-    # or a network failure must leave a VALID address alone.
+    # validation sites and a 400 naming the address. A server error (403, 405),
+    # a captcha prompt or a network failure must leave a VALID address alone.
     assert raw.count("markInvalid();") == 3, \
         "only address-related sites may mark the field invalid"
     assert "emailInput.addEventListener('input'" in raw, \
@@ -383,10 +382,23 @@ def test_investors_forms_bound_the_request_and_expose_their_errors() -> None:
         r"addEventListener\('input', function \(\) \{\s*if \(!emailInput\.hasAttribute\('aria-invalid'\)\) \{ return; \}",
         raw,
     ), "a keystroke must not erase a message that is not about the field"
-    # A 400 is refused input: on this form the address is the only part the
-    # reader controls, so it must be markable and therefore clearable by editing.
-    assert re.search(r"if \(res\.status === 400\) \{ markInvalid\(\); \}", raw), \
-        "a refused request must mark the field so editing can clear the error"
+    # A 400 is not automatically about the address — `waitlist-subscribe` answers
+    # 400 for a captcha refusal and a body-cap breach as well, and marking the
+    # field for those asserts a VALID address is malformed and lets one keystroke
+    # delete an error the reader cannot fix by editing. Only the address fault
+    # marks it, and only when the server names it.
+    assert re.search(
+        r"if \(res\.status === 400 && data && data\.error === ADDRESS_ERROR\) \{ markInvalid\(\); \}",
+        raw,
+    ), "only a 400 that names the address may mark the field"
+    assert "var ADDRESS_ERROR = 'Invalid email address';" in raw, \
+        "the address fault the page keys on must be the string the handlers send"
+    # ...and both handlers must in fact send it for a 400 address fault, or the
+    # page's key goes dead and a real address error shows unmarked (unclearable).
+    for fn in ("waitlist-subscribe", "deck-view"):
+        handler = (REPO_ROOT / "supabase" / "functions" / fn / "handle.ts").read_text()
+        assert 'json({ error: "Invalid email address" }, 400, corsOrigin)' in handler, \
+            f"{fn} must answer a bad address with the 400 the page keys on"
     # A 2xx whose body cannot be read resolves the fetch and rejects the body
     # read; treating that as `{}` announces a subscription that was never
     # recorded. Only a non-2xx may fall through to an empty object.

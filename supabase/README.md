@@ -198,6 +198,12 @@ gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co
 8. With a real Turnstile site key set: unlock the gate, then confirm the
    mailing-list widget renders correctly — on a gated first visit its container
    (`#stay-in-touch`) is `display: none` while the widget loads.
+9. Verify the GATE's write path too: unlock with a test address, then confirm a
+   row in `deck_views` (`deck = 'investors'`, `viewed_at` recent). The gate
+   fails open on our own failures by design, so a broken write path — migration
+   not applied, mis-scoped key, RLS misconfig — is otherwise invisible: the
+   reader still sees the deck and no row is written, which looks exactly like
+   nobody having visited.
 
 ### deck-view contract (#8732)
 

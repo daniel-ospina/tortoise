@@ -241,6 +241,10 @@
       color: #fff;
       max-width: 60ch;
       letter-spacing: normal; margin-bottom: 0;
+      /* Both lede lines end on a single word without this (measured: 1 word,
+         101-120px of a 612px measure at 768-1600px). Every other multi-line
+         prose block here already carries it. */
+      text-wrap: pretty;
     }
 
     /* ── The solution's connected steps ──────────────────────────────────
@@ -1085,6 +1089,9 @@
       // the widget this form rendered (a no-arg `turnstile.reset()` targets the
       // most recently created widget on the page).
       var TURNSTILE_SITE_KEY = '';
+      // A 400 is only about the address when the server says so (see the 400
+      // branch below): it also covers a captcha refusal and a body-cap breach.
+      var ADDRESS_ERROR = 'Invalid email address';
       var turnstilePending = [];
       var turnstileLoading = false;
       // A blocked CDN (ad-blockers do this) or an unreachable one must not make
@@ -1240,11 +1247,15 @@
                 // a reader out of an investor deck; anything else non-2xx
                 // (400, 403) is the request itself refused, and keeps it shut.
                 if ((res.status >= 500 || res.status === 429) && onOk) { onOk(); return; }
-                // A 400 is the request itself refused, and on this form the only
-                // component the reader controls is the address — so the field is
-                // what gets corrected, and the error must be clearable by editing
-                // it. A 403/405 is not about the value, so it leaves the field alone.
-                if (res.status === 400) { markInvalid(); }
+                // Only a 400 that names the ADDRESS marks the field. A 400 is not
+                // automatically about the value: `waitlist-subscribe` answers 400
+                // for a captcha refusal and a body-cap breach too, and marking the
+                // field for those asserts a valid address is malformed
+                // (`aria-describedby` then reads the message out as the field's
+                // description) and lets one keystroke delete an error the reader
+                // cannot fix by editing. Both handlers name the address fault with
+                // the same string, pinned in tests/test_waitlist_form.py.
+                if (res.status === 400 && data && data.error === ADDRESS_ERROR) { markInvalid(); }
                 show(err, (data && data.error) || 'Something went wrong — please try again.');
                 emailInput.focus();
                 return;

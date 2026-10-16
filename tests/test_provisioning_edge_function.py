@@ -315,29 +315,30 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     added to the guarded pair while deck-view drifts would lock readers out with
     nothing red.
     """
-    def declared_lists(src_text: str, name: str) -> list[str]:
-        """EVERY declaration of `name` in the file, normalised.
-
-        `re.search` would read only the first textual match, so a commented-out
-        or shadowed declaration earlier in the file could satisfy the guard while
-        the array the request path uses drifted — the decoy class one level down
-        from the per-function join this replaced.
-        """
-        return [
-            " ".join(hit.split())
-            for hit in re.findall(rf"const {name} = \[([^\]]*)\]", src_text)
-        ]
-
-    # Enumerated by FUNCTION, not by the files that happen to contain the
+    # ONE pattern per constant does both jobs — finding the declaring files and
+    # reading their values — so the enumerated set and the compared set cannot
+    # diverge. When they were separate (`decl` accepting `const|let|var`,
+    # `declared_lists` parsing only `const NAME = [`), a `let ALLOWED_ORIGINS =
+    # [...]` was enumerated but not parsed: a comment decoy satisfied the
+    # comparison while the served array rode free (measured: a comment decoy
+    # above a `let` missing `app.premiselabs.co` passed). An optional type
+    # annotation is accepted so a typed declaration is compared, not reported as
+    # absent. Enumerated by FUNCTION, not by the files that happen to contain the
     # literal: a sweep keyed on the literal drops a file the moment a refactor
-    # renames the constant, and dropping it is silently safe (the remaining
-    # files still satisfy the floor). Every HTTP-facing function must declare an
-    # allowlist — `_shared` has no browser surface and is skipped explicitly,
-    # not by accident. Every declaring FILE is compared, and every declaration
-    # within a file: a function with two declarations could otherwise satisfy
-    # the guard from a decoy while the served handler drifted. The glob covers
-    # the extensions Supabase accepts, not just `.ts`.
-    decl = re.compile(r"(?:export\s+)?(?:const|let|var)\s+ALLOWED_ORIGINS\s*=")
+    # renames the constant, and dropping it is silently safe (the remaining files
+    # still satisfy the floor). Every HTTP-facing function must declare an
+    # allowlist — `_shared` has no browser surface and is skipped explicitly, not
+    # by accident. The glob covers the extensions Supabase accepts, not just
+    # `.ts`.
+    def pattern_for(const: str) -> re.Pattern[str]:
+        return re.compile(
+            rf"(?:export\s+)?(?:const|let|var)\s+{const}\s*(?::[^=\n]+)?=\s*\[([^\]]*)\]"
+        )
+
+    def values(text: str, pat: re.Pattern[str]) -> list[str]:
+        return [" ".join(hit.split()) for hit in pat.findall(text)]
+
+    decl = pattern_for("ALLOWED_ORIGINS")
     declaring: dict[str, str] = {}
     missing: list[str] = []
     functions_dir = _REPO_ROOT / "supabase" / "functions"
@@ -361,16 +362,19 @@ def test_edge_function_allowlist_parity_with_waitlist_subscribe():
     waitlist = (
         _REPO_ROOT / "supabase" / "functions" / "waitlist-subscribe" / "handle.ts"
     ).read_text()
-    for const in ("ALLOWED_ORIGINS", "ORIGIN_SUFFIXES"):
-        reference = declared_lists(waitlist, const)
-        assert len(reference) == 1, f"the reference must declare {const} exactly once"
+    for const, pat in (
+        ("ALLOWED_ORIGINS", decl),
+        ("ORIGIN_SUFFIXES", pattern_for("ORIGIN_SUFFIXES")),
+    ):
+        want = values(waitlist, pat)
+        assert len(want) == 1, f"the reference must declare {const} exactly once"
         for name, src in sorted(declaring.items()):
-            got = declared_lists(src, const)
-            assert got, f"{name} declares no {const} the guard can parse"
-            assert all(g == reference[0] for g in got), (
-                f"{name} {const} must match waitlist-subscribe — change every "
-                "declaring function together (see the keep-in-sync comment in "
-                "tenant-provision/index.ts)"
+            have = values(src, pat)
+            assert have, f"{name} declares no {const} the guard can parse"
+            assert all(h == want[0] for h in have), (
+                f"{name} {const} must match waitlist-subscribe in EVERY "
+                "declaration — change every declaring function together (see "
+                "the keep-in-sync comment in tenant-provision/index.ts)"
             )
 
 
