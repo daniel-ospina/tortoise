@@ -450,6 +450,21 @@ def _literal_domain_reason(
     return numeric_alteration_reason(key, -value if negated else value)
 
 
+def _starts_inside_a_token(masked: str, i: int) -> bool:
+    """Whether the number starting at *i* continues a token read before it.
+
+    The scan must not re-read a digit run it has already walked (the fraction of
+    a float), nor read a NAME as a number (``n.v2``, ``$p1``, ``Point2``). A
+    ``.`` does that continuing — UNLESS it is the second dot of openCypher's
+    ``..`` slice/range operator, which is not a fraction and leaves the token
+    after it FRESH (``x[0..9223372036854775808]``).
+    """
+    prev = masked[i - 1]
+    if _is_ident_char(prev) or prev == "$":
+        return True
+    return prev == "." and not (i > 1 and masked[i - 2] == ".")
+
+
 def _numeric_literal_reason(cypher: str) -> str | None:
     """The first statement-text number the store could not hold, else ``None``.
 
@@ -458,18 +473,28 @@ def _numeric_literal_reason(cypher: str) -> str | None:
     cannot be read as a number — the discipline :func:`_mask_literals` gives the
     ``=~`` and #7162 scans, and the reason this is not a second Cypher parser. A
     number token is recognised only where it STARTS one (the character before it
-    is not an identifier char, ``$`` or ``.``), which is what keeps ``n.v2``,
-    ``$p1`` and the fraction of an already-walked float out. A LEADING-DOT
-    double (``.5e-400``) has no integer part, so it must be started at the ``.``
-    itself — otherwise its exponent is never read and an underflow is stored as
-    ``0`` (MEASURED on 6.0.1) — but only where that ``.`` does not continue a
-    name or a walk. Hex (``0x1F``) is a literal the engine range-checks itself
-    and is stepped over whole, so its hex digits are never read as a decimal
-    run.
+    is not an identifier char, ``$`` or a fraction ``.``), which is what keeps
+    ``n.v2``, ``$p1`` and the fraction of an already-walked float out. A
+    LEADING-DOT double (``.5e-400``) has no integer part, so it must be started
+    at the ``.`` itself — otherwise its exponent is never read and an underflow
+    is stored as ``0`` (MEASURED on 6.0.1) — but only where that ``.`` does not
+    continue a name or a walk. ``..`` is the slice/range operator, never a
+    number: both dots are stepped over so the bound that follows starts its own
+    token. Hex (``0x1F``) is a literal the engine range-checks itself and is
+    stepped over whole, so its hex digits are never read as a decimal run.
     """
     masked = _mask_literals(cypher)
     i, n = 0, len(masked)
     while i < n:
+        if masked[i] == "." and i + 1 < n and masked[i + 1] == ".":
+            # ``..`` — neither dot is a number and the token AFTER them is
+            # fresh. Stepping over BOTH is load-bearing: leaving the walk on the
+            # second dot let the digit run that follows be read as the fraction
+            # of the token that ended at the first dot, so
+            # ``x[0..9223372036854775808]`` was ADMITTED (P2, review
+            # 2026-10-16).
+            i += 2
+            continue
         leading_dot = masked[i] == "."
         if leading_dot:
             if i + 1 >= n or not _is_ascii_digit(masked[i + 1]):
@@ -478,8 +503,17 @@ def _numeric_literal_reason(cypher: str) -> str | None:
         elif not _is_ascii_digit(masked[i]):
             i += 1
             continue
-        if i > 0 and (masked[i - 1] in ".$" or _is_ident_char(masked[i - 1])):
-            i += 1
+        if i > 0 and _starts_inside_a_token(masked, i):
+            # The number is part of a token the walk already read from its own
+            # start, or it is a NAME. Consume the WHOLE digit run, never one
+            # character: advancing by one re-enters the run at its second digit
+            # and reads a SHORTER number (``$p12`` read ``2``; the same skip let
+            # a ``..`` bound through — P2, review 2026-10-16).
+            if leading_dot:
+                i += 1
+            else:
+                while i < n and _is_ascii_digit(masked[i]):
+                    i += 1
             continue
         start = i
         j = i
@@ -500,7 +534,14 @@ def _numeric_literal_reason(cypher: str) -> str | None:
                 continue
         has_frac = leading_dot
         has_exp = False
-        if j < n and masked[j] == ".":
+        if (
+            j < n
+            and masked[j] == "."
+            and not (j + 1 < n and masked[j + 1] == ".")
+        ):
+            # A single ``.`` is a fraction; ``..`` is the range operator and
+            # must not be absorbed into the token before it, or the walk would
+            # be left sitting on the second dot.
             k = j + 1
             while k < n and _is_ascii_digit(masked[k]):
                 k += 1

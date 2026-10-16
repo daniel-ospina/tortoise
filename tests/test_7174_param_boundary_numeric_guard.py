@@ -396,6 +396,11 @@ def test_the_raw_execute_command_channel_refuses_a_literal():
     "RETURN 1.5, 2, [1, 2, 3], 1e10",
     "MATCH (n) RETURN n LIMIT 10000",
     "MATCH (n) RETURN n SKIP 5 LIMIT 5",
+    "RETURN x[0..5]",
+    "RETURN x[1..2]",
+    "RETURN x[0..9223372036854775807]",
+    "RETURN x[0.5..1]",
+    "RETURN [1, 2, 3][0..1]",
 ])
 def test_the_literal_scan_reads_CODE_and_not_data(statement):
     """Anti-overfix guard: the scan cannot refuse what is not a number literal.
@@ -455,7 +460,12 @@ def test_the_literal_frontier_is_the_stores_limit_not_a_digit_count():
     for out_of_domain in (INT64_BEYOND, -(INT64_BEYOND + 1)):
         with pytest.raises(UnrepresentableNumberError):
             g.query(f"CREATE (n:X {{v: {out_of_domain}}})")
-    assert len(handle.calls) == 2, "only the two representable literals may be sent"
+    # The SAME frontier on a ``..`` slice bound: the shape the pre-fix walk
+    # walked past by dropping its first digit.
+    assert g.query(f"RETURN x[0..{INT64_MAX}]") == "SENTINEL-REACHED-HANDLE"
+    with pytest.raises(UnrepresentableNumberError):
+        g.query(f"RETURN x[0..{INT64_BEYOND}]")
+    assert len(handle.calls) == 3, "only the representable literals may be sent"
 
 
 def test_a_literal_that_leaves_the_double_domain_is_refused():
@@ -543,6 +553,48 @@ def test_a_long_leading_zero_integer_is_judged_by_domain_not_length():
     with pytest.raises(UnrepresentableNumberError):
         g.query(f"RETURN {zeros}{INT64_BEYOND}")
     assert len(handle.calls) == 2, "only the two representable literals may be sent"
+
+
+def test_a_slice_bound_out_of_domain_is_refused():
+    """Falsifier: a ``..`` bound is its OWN number, not the fraction of ``0.``.
+
+    openCypher writes the slice/range operator as ``x[0..N]``. The scan absorbed
+    the second dot into the token before it (``0.``) and then skipped a single
+    character on re-entry, so the FIRST digit of ``N`` was dropped and the rest
+    read as a shorter number: ``x[0..9223372036854775808]`` (INT64_MAX + 1) was
+    ADMITTED, ``x[0..9999999999999999999]`` dropped its leading ``9`` and was
+    admitted too, and ``x[0..1.0e400]`` was re-read as ``.0e400`` -> ``0.0``
+    (P2, review 2026-10-16). A ``..`` bound must be scanned like any other
+    literal. Value that makes it fail: any bound here; the handle must stay
+    EMPTY — pre-fix it records the call.
+    """
+    g, handle = _guarded()
+    for bound in (
+        "9223372036854775808",
+        "9999999999999999999",
+        "1180591620717411303424",
+        "1.0e400",
+    ):
+        with pytest.raises(UnrepresentableNumberError):
+            g.query(f"RETURN x[0..{bound}]")
+    assert handle.calls == [], "an out-of-domain slice bound reached the handle"
+
+
+def test_a_name_digit_run_is_consumed_whole_not_one_char_at_a_time():
+    """Falsifier: a digit run belonging to a NAME is skipped in full.
+
+    The walk skipped exactly one character when a digit continued a name, so a
+    multi-digit name tail was re-entered at its SECOND digit: ``$p12`` read as
+    the number ``2``, and a name whose tail is out of domain after that dropped
+    digit (``$p19223372036854775808`` -> ``9223372036854775808``) would refuse a
+    legal query (P2, review 2026-10-16). Value that makes it fail: the long name
+    below, which must reach the handle unchanged.
+    """
+    g, handle = _guarded()
+    name = "$p19223372036854775808"
+    assert g.query(f"RETURN {name}") == "SENTINEL-REACHED-HANDLE"
+    assert g.query("MATCH (n:Point2) RETURN n.v2") == "SENTINEL-REACHED-HANDLE"
+    assert len(handle.calls) == 2, "a name's digits were read as a number"
 
 
 def test_the_replay_exemption_covers_the_statement_text_too():
