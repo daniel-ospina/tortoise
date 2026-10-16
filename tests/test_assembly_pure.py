@@ -5066,11 +5066,11 @@ def test_class_vocabulary_falls_back_to_the_complement_of_a_generic_head():
 
     # SUBJECT: a generic head falls back to what follows the preposition
     assert _class_tokens("the events at the jazz festival") == \
-        ("jazz", "festiv")
+        ("jazz", "festival")
     w = resolve_class_window(
         "What is the order of the events at the jazz festival I attended "
         "in the past two months?", "2026-09-10")
-    assert w is not None and w.tokens == ("jazz", "festiv")
+    assert w is not None and w.tokens == ("jazz", "festival")
     # the class row IS selected...
     assert _class_owns_row(
         {"content": "went to the jazz festival opening night"}, w.tokens)
@@ -5093,12 +5093,12 @@ def test_class_vocabulary_drops_a_relative_clause_before_the_adjunct():
     control = resolve_class_window(
         "What is the order of the events at the jazz festival I attended in "
         "the past two months?", "2026-09-10")
-    assert control is not None and control.tokens == ("jazz", "festiv")
+    assert control is not None and control.tokens == ("jazz", "festival")
 
     w = resolve_class_window(
         "What is the order of the events that took place at the jazz "
         "festival I attended in the past two months?", "2026-09-10")
-    assert w is not None and w.tokens == ("jazz", "festiv"), w.tokens
+    assert w is not None and w.tokens == ("jazz", "festival"), w.tokens
     # the class row IS selected...
     assert _class_owns_row(
         {"content": "went to the jazz festival opening night"}, w.tokens)
@@ -5141,7 +5141,24 @@ def test_class_vocabulary_excludes_clauses_appositives_and_postmodifiers():
     # a complement that is itself a PP keeps its OWN head, not the final
     # adjunct
     assert _class_tokens("the events at the jazz festival in the park") == \
-        ("jazz", "festiv")
+        ("jazz", "festival")
+    # a DISCRIMINATOR after a generic head REPLACES it — "the events and the
+    # jazz festival" is the jazz festival's class, not the whole window
+    # (#8779 F15)
+    assert _class_tokens("the events and the jazz festival") == \
+        ("jazz", "festival")
+    assert _class_tokens("the events and conferences") == ("conference",)
+    # ... while the POST-MODIFIER rule above still holds, so the head noun is
+    # kept when what follows it is a participle
+    assert _class_tokens("the concerts held at the jazz festival") == \
+        ("concert",)
+    # the adjectival stem is a BOUNDED alias, so `formal` no longer collapses
+    # onto `form` and admits a form-filling row (#8779 F16)
+    formal = _class_tokens("the formal events")
+    assert formal == ("formal",)
+    assert not _class_owns_row(
+        {"content": "filled out the form for the insurance"}, formal)
+    assert _class_tokens("my musical gigs") == ("music", "gig")
 
 
 def test_class_order_instruction_is_terminal_not_a_class_prefix():

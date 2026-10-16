@@ -790,6 +790,13 @@ def _date_lookup_surface(question: str, residual: str, spans) -> bool:
             # ("… in the past two months on Christmas?") is not a DAY
             # lookup: the anchor is adjunct and the shape's own window is
             # the relative one — the classifier body below decides it.
+            # ⛔ and the body ABSTAINS on that question (#8779 F17), so it
+            # returns NO shape where `origin/main` returned
+            # `relative-date-lookup`: the day-scoped answer is LOST for the
+            # named-holiday forms and the caller falls through to legacy.
+            # A ROUTING loss, never a wrong answer — recorded in the plan's
+            # §6 rather than hidden here. Handing the question back to this
+            # surface once the body declines is the follow-up fix.
             or _RE_CLASS_PLURAL.match(question)):
         return False
     # #2652 split the pre-merge `_RE_AGO` guard into THREE parts -- the
@@ -3374,6 +3381,14 @@ _CLASS_PARTICIPLE = frozenset({
 })
 
 
+#: adjective → noun, ONLY where the pair is a MEASURED class word. A bare
+#: `-al` strip is not safe: it turned `formal` into `form` (#8779 F16) and
+#: enumerated a "filled out the FORM" row as a *formal event*. Deliberately
+#: NOT a general stemmer: every rule beyond these widens the match surface
+#: without a measured row asking for it.
+_CLASS_ADJ_NOUN = {"musical": "music"}
+
+
 def _class_stem(tok: str) -> str:
     """Deterministic class-token stem — ONE function for BOTH the question's
     class span and a row's own text, so the two sides can never drift.
@@ -3382,19 +3397,24 @@ def _class_stem(tok: str) -> str:
 
     * plural ``ies`` → ``y`` (activities ≡ activity);
     * a trailing plural ``s`` (not ``ss``);
-    * the ADJECTIVAL ``al`` → ``musical`` ≡ ``music``, so a class named with
-      the adjective matches a row named with the noun and vice versa.
+    * a bounded ADJECTIVE→NOUN alias (``musical`` ≡ ``music``), so a class
+      named with the adjective matches a row named with the noun.
 
-    Deliberately NOT a general stemmer: every rule beyond these widens the
-    match surface without a measured row asking for it.
+    ⛔ NOT a bare adjectival ``-al`` strip (#8779 F16). Stripping the suffix
+    from ANY ``-al`` word turned `formal` into `form`, so a row reading
+    "filled out the FORM for the insurance" was enumerated as a *formal
+    event* — a FALSE INCLUDE, the direction this design does not accept. The
+    mapping is a bounded list of measured pairs instead: a pair that is not
+    listed costs RECALL (the adjective fails to match its noun) and never
+    precision.
     """
     t = tok.lower()
+    if t in _CLASS_ADJ_NOUN:
+        return _CLASS_ADJ_NOUN[t]
     if t.endswith("ies") and len(t) > 4:
         t = t[:-3] + "y"
     elif t.endswith("s") and not t.endswith("ss") and len(t) > 3:
         t = t[:-1]
-    if t.endswith("al") and len(t) > 4:
-        t = t[:-2]
     return t
 
 
@@ -3594,10 +3614,29 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     # actually named the class (#8779 F13). Irregular participles have no
     # suffix to test, so POSITION decides: nothing between the head noun and
     # the boundary is class vocabulary.
-    last_generic = max((i for i, w in enumerate(run)
+    # ... and a DISCRIMINATOR after a generic head REPLACES it (#8779 F15):
+    # §2 drops the generic head whenever a discriminator exists, so
+    # "the events and the jazz festival" is the jazz festival's class.
+    # Truncating AT the head left the near-universal `event` alone, which
+    # selected a "security event" row and DROPPED the jazz-festival row — the
+    # same wrong answer, inverted. What separates a discriminator from a
+    # post-modifier is the test the participle rule below already uses: a
+    # trailing participle at a boundary is a reduced relative, not a class
+    # word.
+    head = [w for w in run if w not in _CLASS_STOPWORDS]
+    last_generic = max((i for i, w in enumerate(head)
                         if _class_stem(w) in _CLASS_GENERIC), default=-1)
     if last_generic >= 0:
-        run = run[:last_generic + 1]
+        after = head[last_generic + 1:]
+        if after and not any(_class_stem(w) in _CLASS_GENERIC
+                             for w in after):
+            if cut < len(words) and (
+                    after[-1].endswith(("ed", "ing"))
+                    or after[-1] in _CLASS_PARTICIPLE):
+                after = after[:-1]
+            run = after or head[:last_generic + 1]
+        else:
+            run = head[:last_generic + 1]
     out = _stems(run)
     # a PARTICIPLE immediately before the boundary is a reduced relative, not a
     # class word — dropped only when a DISCRIMINATOR would survive it. A bare

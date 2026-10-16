@@ -296,13 +296,22 @@ probe can separate linear from quadratic.
 
 ## 6. Residuals (recorded, not hidden)
 
-- **Two `main`-routed constructs now land on `None` (safe direction).** The
+- **Three `main`-routed constructs now land on `None` (safe direction).** The
   class-plural branch is entered before the rest of `classify_question`, so
   `"… in the past two months, most recently?"` (main: `AGO_RELATIVE`) and
   `"… in the past two months last Saturday?"` (main: `RELATIVE_DATE`) are
-  rejected by the branch's own guards. Neither fires `CLASS_PLURAL`, and
-  legacy answers — the safe direction — but this is a routing change, not
-  "still rejected"; it is pinned in the classifier comment.
+  rejected by the branch's own guards. **Measured, not assumed — a third form
+  was claimed unaffected and is not (#8779 F17):** a NAMED-HOLIDAY
+  class-plural question (`"… in the past two months on Christmas?"`; also
+  `on Halloween`, `on Valentine's day`) is exempted from the day-lookup
+  surface so this branch can decide it, and the branch then ABSTAINS on
+  `_named_fixed_date_anchor` — so the question reaches NEITHER shape and
+  `classify_question` returns `None` where `main` returned
+  `relative-date-lookup`. Neither fires `CLASS_PLURAL`, and legacy answers —
+  the safe direction — but this is a routing change, not "still rejected".
+  Handing the question back to the day-lookup surface once the body declines
+  is the follow-up fix, and both the classifier comment and the earlier
+  version of this bullet that claimed the lookup was kept are corrected here.
 
 - **The class filter runs after the fetch cap.** `port.window_rows` fetches
   `cap` points + `cap` events (cap = `PER_ENTITY_FANOUT_CAP` = 200) newest-first
@@ -314,8 +323,13 @@ probe can separate linear from quadratic.
   question's class phrase is not selected (recall loss, never a false include
   beyond the token match). The fail-closed fall-through keeps this from
   *degrading* the answer — legacy simply answers. The stemmer is deliberately
-  three rules (`ies→y`, trailing `s`, adjectival `al`); a class/row spelled in
-  forms it does not reconcile (`box` vs `boxes`) loses recall, not precision.
+  three rules (`ies→y`, trailing `s`, a BOUNDED adjective→noun alias such as
+  `musical`≡`music`); a class/row spelled in forms it does not reconcile
+  (`box` vs `boxes`) loses recall, not precision. The bare adjectival `-al`
+  strip this originally used is **removed** (#8779 F16) because it was NOT
+  recall-only: it turned `formal` into `form` and enumerated "filled out the
+  FORM for the insurance" as a *formal event* — a false include, which this
+  design does not accept. A pair outside the alias list costs recall only.
 - **The docker-lane end-to-end pin is not added** (no docker in this lane). The
   hermetic `_assemble_connected` tests drive the same orchestration, and
   `tests/test_assembly_sdk.py` passes unchanged, but the docker/SDK golden for
