@@ -132,7 +132,7 @@ def test_missing_run_under_automatic_token_escalates_to_the_local_fallback(monke
     """GITHUB_TOKEN cannot create a workflow run, so reopen must NOT be attempted."""
     opened = []
     monkeypatch.setattr(R, "_reopen", lambda *a: opened.append(a) or True)
-    monkeypatch.setattr(R, "_rerun", lambda *a, **k: True)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "rerun")
     plan = _plan(absent=["ai-review-gate"], missing_run=["ai-review-gate"])
     code, recs = R.report([plan], apply=True, trigger_ok=False, repo="o/r", cooldown_min=60)
     assert code == 1
@@ -145,7 +145,7 @@ def test_missing_run_with_a_user_credential_reopens_and_does_not_also_rerun(monk
     """The reopen subsumes every rerun — doing both is pure churn."""
     opened, rerun = [], []
     monkeypatch.setattr(R, "_reopen", lambda *a, **k: opened.append(a) or "reopened")
-    monkeypatch.setattr(R, "_rerun", lambda repo, r: rerun.append(r) or True)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: rerun.append(a[1]) or "rerun")
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
     plan = _plan(absent=["docs", "ai-review-gate"], missing_run=["ai-review-gate"],
                  rerun=[run(42, "ci.yml", "completed", "failure")])
@@ -156,7 +156,7 @@ def test_missing_run_with_a_user_credential_reopens_and_does_not_also_rerun(monk
 
 def test_rerun_only_path_reports_success(monkeypatch):
     rerun = []
-    monkeypatch.setattr(R, "_rerun", lambda repo, r: rerun.append(r.id) or True)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: rerun.append(a[1].id) or "rerun")
     plan = _plan(absent=["docs"], rerun=[run(42, "ci.yml", "completed", "failure")])
     code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     assert code == 0 and rerun == [42]
@@ -164,10 +164,65 @@ def test_rerun_only_path_reports_success(monkeypatch):
 
 
 def test_failed_rerun_escalates(monkeypatch):
-    monkeypatch.setattr(R, "_rerun", lambda repo, r: False)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "failed")
     plan = _plan(absent=["docs"], rerun=[run(42, "ci.yml", "completed", "failure")])
     code, _ = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
     assert code == 1
+
+
+def test_rerun_skips_when_the_head_cannot_be_re_read(monkeypatch):
+    """An unverifiable head is a skip, never a guessed rerun (mirrors `_reopen`)."""
+    def boom(*a, **k):
+        raise R.MeasureError("unreadable")
+
+    monkeypatch.setattr(R, "gh_json", boom)
+    called = []
+    monkeypatch.setattr(R, "_run", lambda *a, **k: called.append(a))
+    assert R._rerun("o/r", run(42, "ci.yml", "completed", "failure"), 1,
+                    expected_head="a" * 40) == "failed"
+    assert called == [], "nothing may be re-run when the head is unknown"
+
+
+def test_rerun_reports_head_moved_without_acting(monkeypatch):
+    """TOCTOU: a pass takes minutes, so a rerun on a replaced head burns CI."""
+    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "c" * 40})
+    called = []
+    monkeypatch.setattr(R, "_run", lambda *a, **k: called.append(a))
+    assert R._rerun("o/r", run(42, "ci.yml", "completed", "failure"), 1,
+                    expected_head="a" * 40) == "head_moved"
+    assert called == [], "a superseded head must not be re-run"
+
+
+def test_rerun_acts_when_the_head_still_matches(monkeypatch):
+    """The positive pole: an unchanged head re-runs at the same sha."""
+    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "a" * 40})
+    calls = []
+
+    class _Done:
+        returncode = 0
+
+    monkeypatch.setattr(R, "_run", lambda *a, **k: calls.append(a) or _Done())
+    assert R._rerun("o/r", run(42, "ci.yml", "completed", "failure"), 1,
+                    expected_head="a" * 40) == "rerun"
+    assert len(calls) == 1 and calls[0][0][-1].endswith("/rerun")
+
+
+def test_a_rerun_that_moved_the_head_is_a_skip_not_an_escalation(monkeypatch):
+    """The report half of the rerun TOCTOU guard: a replaced head is a skip — the
+    new head's own CI is the repair — so it must not produce a false exit 1."""
+    seen = {}
+
+    def fake(repo, run_, number, expected_head=""):
+        seen["run"], seen["head"] = run_.id, expected_head
+        return "head_moved"
+
+    monkeypatch.setattr(R, "_rerun", fake)
+    plan = _plan(absent=["docs"], rerun=[run(42, "ci.yml", "completed", "failure")])
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert seen == {"run": 42, "head": "b" * 40}, "the expected head must be passed through"
+    assert recs[0]["rerun"][0]["head_moved"] is True
+    assert recs[0]["rerun"][0]["ok"] is False
+    assert code == 0, "a moved head is a skip, not a failure"
 
 
 def test_reopen_cooldown_blocks_a_duplicate_and_is_not_an_escalation(monkeypatch):
@@ -233,7 +288,7 @@ def test_exit_zero_never_hides_an_unhandled_repair(monkeypatch):
     """
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))
     monkeypatch.setattr(R, "_reopen", lambda *a, **k: "reopened")
-    monkeypatch.setattr(R, "_rerun", lambda repo, r: True)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "rerun")
     dirty = [_plan(number=1, absent=["docs"],
                    rerun=[run(1, "ci.yml", "completed", "failure")]),
              _plan(number=2, absent=["ai-review-gate"], missing_run=["ai-review-gate"]),
@@ -644,32 +699,60 @@ def test_installer_dry_run_touches_nothing(tmp_path):
     """
     repo = Path(__file__).resolve().parents[1]
     agents = tmp_path / "LaunchAgents"
-    env = {**os.environ, "AGENTS_DIR": str(agents),
-           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1", "TORTOISE_REPO": str(repo),
-           # The installer deliberately re-points an install at the MAIN checkout
-           # (a linked worktree is reaped when its PR merges), and in the test repo
-           # main legitimately does not have these files yet. The hatch is exactly
-           # for that case.
-           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1"}
     r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
-                        "--dry-run"], capture_output=True, text=True, env=env, timeout=120)
+                        "--dry-run"], capture_output=True, text=True,
+                       env=_installer_env(tmp_path), timeout=120)
     assert r.returncode == 0, r.stderr
     assert "<key>ProgramArguments</key>" in r.stdout, "dry-run renders the real plist"
     assert "DRY RUN" in r.stderr
     assert not agents.exists(), "--dry-run wrote to the launchd dir"
 
 
+def _installer_env(tmp_path, agents=None):
+    """An env for executing the installer with the HOST's `uname` hidden.
+
+    The installer refuses a non-Darwin host at its launchd gate (launchd is
+    macOS-only, and the refusal names the cron route), so every test that
+    EXECUTES it must pin the platform it reports — exactly as
+    tests/test_install_reaper_schedule.py and
+    tests/test_install_queue_reconcile_schedule.py do with their `_sandbox`.
+    Without the stub the suite passes on the macOS dev box and fails on the
+    Linux runner, which is the only platform CI runs: a real portability gap
+    hidden by the host (#8392 review). `launchctl`/`plutil` are shadowed too, so
+    an accidental install path can never reach the live launchd domain.
+
+    Only `uname`/`launchctl`/`plutil` are stubbed; `git`, `gh` and `python3`
+    fall through to the host, which the installer's preflight needs.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for name, body in (
+        ("uname", "#!/usr/bin/env bash\necho Darwin\n"),
+        ("launchctl", "#!/usr/bin/env bash\nexit 0\n"),
+        ("plutil", "#!/usr/bin/env bash\nexit 0\n"),
+    ):
+        stub = bindir / name
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(0o755)
+    env = {**os.environ,
+           "AGENTS_DIR": str(agents or (tmp_path / "LaunchAgents")),
+           "TORTOISE_REPO": str(repo),
+           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
+           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1",
+           # Prepend (not replace): the installer's preflight still needs the
+           # host's git/gh/python3, while the stubs win every lookup they own.
+           "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    return env
+
+
 def _render_plist(tmp_path, *args):
     """Render the installer's plist without touching launchd, and parse it."""
     import plistlib
     repo = Path(__file__).resolve().parents[1]
-    agents = tmp_path / "LaunchAgents"
-    env = {**os.environ, "AGENTS_DIR": str(agents), "TORTOISE_REPO": str(repo),
-           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
-           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1"}
     r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
-                        "--dry-run", *args], capture_output=True, text=True, env=env,
-                       timeout=120)
+                        "--dry-run", *args], capture_output=True, text=True,
+                       env=_installer_env(tmp_path), timeout=120)
     assert r.returncode == 0, r.stderr
     return plistlib.loads(r.stdout.encode())
 
@@ -864,9 +947,7 @@ def test_uninstall_under_dry_run_is_refused_not_executed(tmp_path):
     agents.mkdir()
     stale = agents / "com.tortoise.ci-check-repair.plist"
     stale.write_text("<plist/>")
-    env = {**os.environ, "AGENTS_DIR": str(agents), "TORTOISE_REPO": str(repo),
-           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
-           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1"}
+    env = _installer_env(tmp_path, agents=agents)
     for order in (["--dry-run", "--uninstall"], ["--uninstall", "--dry-run"]):
         r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
                             *order], capture_output=True, text=True, env=env, timeout=120)
@@ -973,9 +1054,7 @@ def test_installer_refuses_an_unknown_argument_and_dry_run_wins_by_order(tmp_pat
     """Only `$1` used to be read, so `--report-only --dry-run` INSTALLED."""
     repo = Path(__file__).resolve().parents[1]
     agents = tmp_path / "LaunchAgents"
-    env = {**os.environ, "AGENTS_DIR": str(agents), "TORTOISE_REPO": str(repo),
-           "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
-           "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1"}
+    env = _installer_env(tmp_path)
     r = subprocess.run(["bash", str(repo / "tools/install-ci-check-repair-schedule.sh"),
                         "--report-only", "--nonsense"],
                        capture_output=True, text=True, env=env, timeout=120)

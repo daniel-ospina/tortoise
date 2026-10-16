@@ -498,12 +498,30 @@ def _timeline_reopen_state(repo: str, number: int, cooldown_min: int,
     return recent, total
 
 
-def _rerun(repo: str, run: Run) -> bool:
+def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
+    """Re-run an EXISTING workflow run at the head it was measured at.
+
+    Returns 'rerun'|'head_moved'|'failed'. The head is re-read immediately before
+    acting, the SAME load-bearing precondition `_reopen` documents: a repair pass
+    over many PRs takes minutes, so a run whose head has already been replaced
+    would be re-run on a superseded sha and burn a CI cycle. If the head cannot be
+    re-read the action is SKIPPED, never guessed. 'head_moved' is a skip, not a
+    failure — the new head's own CI is the repair (mirrors `_reopen`).
+    """
+    if expected_head:
+        try:
+            now = gh_json(["pr", "view", str(number), "--repo", repo,
+                           "--json", "headRefOid"])
+        except (MeasureError, subprocess.TimeoutExpired):
+            return "failed"
+        if not isinstance(now, dict) or (now.get("headRefOid") or "") != expected_head:
+            return "head_moved"
     try:
-        return _run([GH_BIN, "api", "-X", "POST",
-                     f"repos/{repo}/actions/runs/{run.id}/rerun"]).returncode == 0
+        ok = _run([GH_BIN, "api", "-X", "POST",
+                   f"repos/{repo}/actions/runs/{run.id}/rerun"]).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return "failed"
+    return "rerun" if ok else "failed"
 
 
 def _reopen(repo: str, number: int, expected_head: str = "") -> str:
@@ -707,8 +725,14 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
         else:
             for run in p.rerun:
                 if apply:
+                    # The head is re-read before the rerun (see `_rerun`): acting on a
+                    # superseded sha burns a CI cycle. `head_moved` is a SKIP, not a
+                    # failure, so it does not escalate below (mirrors `_reopen`).
+                    state = _rerun(repo, run, p.number, expected_head=p.head)
                     rec["rerun"].append({"run": run.id, "attempt": run.run_attempt,
-                                         "workflow": run.name, "ok": _rerun(repo, run)})
+                                         "workflow": run.name, "ok": state == "rerun",
+                                         **({"head_moved": True}
+                                            if state == "head_moved" else {})})
                 else:
                     rec["rerun"].append({"run": run.id, "attempt": run.run_attempt,
                                          "workflow": run.name, "ok": None})
@@ -720,7 +744,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 rec["needs_user_actor"] = True
                 if apply:
                     escalations += 1
-            if any(r["ok"] is False for r in rec["rerun"]):
+            if any(r["ok"] is False and not r.get("head_moved") for r in rec["rerun"]):
                 escalations += 1
         records.append(rec)
     # exit 1 only when something needs acting on and we could not act.
