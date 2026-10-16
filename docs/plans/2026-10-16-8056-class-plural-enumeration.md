@@ -250,8 +250,8 @@ Implemented as planned. Measured results pinned in tests:
 
 - census class-plural family: **3/6 fire** (was 0/6); the 3 non-fires stay
   non-firing with their window family recorded.
-- precision sweep: **1,542** question strings scanned (tests + `tortoise/`
-  + the committed census; the derivation rule is at §«Status», the count moves
+- precision sweep: **1,542** question strings scanned (tests + `tortoise/` +
+  the committed census; the derivation rule is at §«Status», the count moves
   with the tree) ⇒ **no question that fires a shape at HEAD matches the new template**; the
   only template matches that are not `CLASS_PLURAL` are the shape's own
   deliberate R13 rejections (pinned negatives). The census run adds the third
