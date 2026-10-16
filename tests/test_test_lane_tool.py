@@ -1089,6 +1089,50 @@ def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatc
     assert kwargs.get("timeout") == tl.IMAGE_PULL_TIMEOUT
 
 
+#: #8071: the canonical SHARED docker-lane container's engine args (eldato
+#: ``operations/memory/docker-compose.yml``). Spelled out HERE rather than read
+#: back from ``tl.LANE_FALKORDB_ARGS`` — re-reading the module's own constant
+#: would pass for ANY value it was changed to, and parity with the shared
+#: service is the property being pinned.
+_CANONICAL_FALKORDB_ARGS = "THREAD_COUNT 8 TIMEOUT_MAX 30000"
+
+
+def test_start_passes_the_canonical_engine_args(lane, monkeypatch):
+    """#8071: the private lane is a DROP-IN for the shared instance, and a lane
+    that is merely ISOLATED is not one — its engine args are the shared compose
+    service's own value.
+
+    MEASURED (``falkordb/falkordb:latest``, 2026-10-16, ``GRAPH.CONFIG GET``,
+    same image started each way): with NO ``FALKORDB_ARGS`` the module's query
+    ``TIMEOUT`` is 1000 ms and a ~3.9 s query dies ``Query timed out``; with the
+    value pinned below ``TIMEOUT`` is 0 and the same query completes. So the
+    missing flag made the private lane STRICTER than the instance it replaces —
+    it refused queries the shared lane answered, which is what read as a
+    "wedged" lane under load.
+
+    ``FALKORDB_ARGS`` is asserted on the ARGV (the docker seam), not on the
+    constant: the failure this guards is the flag not reaching ``docker run``.
+    """
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16399)
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16400))
+    seen = []
+
+    def _fake(*args, **kwargs):
+        seen.append((args, kwargs))
+        return _R(0, "PONG")
+    monkeypatch.setattr(tl, "_docker", _fake)
+    tl.start()
+
+    runs = [argv for argv, _kw in seen if argv[:2] == ("run", "-d")]
+    assert runs, "`docker run` must have been invoked"
+    argv = runs[0]
+    assert f"FALKORDB_ARGS={_CANONICAL_FALKORDB_ARGS}" in argv, argv
+    # ... and the module must agree with the literal above, so a change to
+    # either side fails (the shared value is not a free parameter).
+    assert tl.LANE_FALKORDB_ARGS == _CANONICAL_FALKORDB_ARGS
+
+
 def test_start_rejects_an_invalid_port_before_touching_docker(lane, monkeypatch):
     """The ordering IS the guard: validation must precede `container_state` (a
     docker call) and the stale-container `docker rm`, or an invalid value still

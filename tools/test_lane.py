@@ -46,6 +46,42 @@ Isolation, NOT speed. The same single test on the docker lane took **90.59 s**
 on a private container versus **92.66 s** on the shared one — the wall time is
 dominated by per-session work (embedder load), not by the container's state.
 
+ENGINE PARITY — WHY THE ARGS ARE NOT COSMETIC (#8071)
+-----------------------------------------------------
+A private lane has to be a DROP-IN for the shared instance, not merely an
+isolated one. It therefore starts its container with the SAME engine args the
+canonical shared service uses (``LANE_FALKORDB_ARGS``, below: the value in
+eldato ``operations/memory/docker-compose.yml``, the compose file the docker
+lane's own docs name).
+
+MEASURED (``falkordb/falkordb:latest``, 2026-10-16, ``GRAPH.CONFIG GET`` on a
+container started each way, same image):
+
+  * no ``FALKORDB_ARGS``: ``TIMEOUT=1000``, ``THREAD_COUNT=5`` — and a query
+    taking ~3.9 s (``UNWIND range(1,200000000) AS x RETURN count(x)``) dies with
+    ``redis.exceptions.ResponseError: Query timed out`` after 1.07 s;
+  * ``FALKORDB_ARGS=THREAD_COUNT 8 TIMEOUT_MAX 30000``: ``TIMEOUT=0`` (no
+    default per-query timeout), ``THREAD_COUNT=8`` — the same query completes
+    in 3.87 s.
+
+Re-verified on ``falkordb/falkordb-server:v4.20.6`` — the engine CI pins —
+with the same three values, so the parity holds on both engines in play.
+
+The server-side 1000 ms default is the reported symptom: on a loaded host
+every index-birth query died as "timed out" while the CLIENT bound
+(``TORTOISE_DB_SOCKET_TIMEOUT``, raised to 600 s) had no effect at all.
+Without these args the private lane is STRICTER than the instance it replaces —
+it fails queries the shared lane answers, which reads as a wedged lane when it
+is only differently configured.
+
+Note what the parity buys and costs, measured above: ``TIMEOUT=0`` means no
+DEFAULT per-query timeout (the shared instance's own posture — this is not a
+relaxation invented here), while ``TIMEOUT_MAX=30000`` still caps a timeout a
+query explicitly requests. There is deliberately no env seam for it (unlike
+``TORTOISE_TEST_LANE_IMAGE``): the args ARE the parity contract, and a per-lane
+override is exactly how the private lane stops being a drop-in. Pinned by
+``tests/test_test_lane_tool.py::test_start_passes_the_canonical_engine_args``.
+
 CONTRACT — THE TARGET IS NOT A PARAMETER
 ----------------------------------------
 The container this tool acts on is ALWAYS ``fdb-lane-<sha1(worktree)[:10]>``,
@@ -124,6 +160,13 @@ from pathlib import Path
 #: Overridable so CI can pin a digest/version; `latest` matches the existing
 #: in-repo precedent (scripts/restore-smoke.sh also runs falkordb/falkordb:latest).
 IMAGE = os.environ.get("TORTOISE_TEST_LANE_IMAGE", "falkordb/falkordb:latest")
+#: #8071: the engine args the canonical SHARED docker-lane container runs with
+#: (eldato ``operations/memory/docker-compose.yml`` -> ``FALKORDB_ARGS``). The
+#: private lane REPLACES that instance for a concurrent lane, so it must be
+#: configured like it — see "ENGINE PARITY" in the module docstring for the
+#: measurement (without these the module's query TIMEOUT stays at 1000 ms and
+#: the lane fails queries the shared instance answers).
+LANE_FALKORDB_ARGS = "THREAD_COUNT 8 TIMEOUT_MAX 30000"
 NAME_PREFIX = "fdb-lane-"
 
 #: NOTE (#8180 review): there is deliberately NO age backstop constant here.
@@ -600,6 +643,9 @@ def start(port: int | None = None) -> tuple[str, int]:
         "run", "-d", "--init", "--name", name,
         "-p", f"127.0.0.1:{chosen}:6379",
         "-e", "REDIS_ARGS=--appendonly no --save ''",
+        # #8071: engine parity with the SHARED instance (see the module
+        # docstring's ENGINE PARITY section).
+        "-e", f"FALKORDB_ARGS={LANE_FALKORDB_ARGS}",
         IMAGE,
         timeout=IMAGE_PULL_TIMEOUT,   # the image may need pulling first
     )
