@@ -361,11 +361,17 @@ def _answered(request: Any, response: Any) -> Any:
 def _already_read(response: Any) -> bool:
     """True when the body is available without consuming the caller's stream.
 
-    A response returned with ``stream=True`` has NOT been read yet, so reaching
-    for ``.text`` inside the seam would raise `httpx.ResponseNotRead` and break
-    the caller. Such a response is left untouched: the seam cannot inspect a
-    body it must not consume, and the contract's own comment names that limit.
-    The converted seams do not stream (no ``.stream(`` call site in them).
+    httpx leaves ``is_stream_consumed`` False until ``read()``/``aread()`` is
+    called, so a response returned with ``stream=True`` is still unread when it
+    reaches the seam; reaching for ``.text`` there would raise
+    `httpx.ResponseNotRead` and break the caller. Such a response is left
+    untouched — the seam cannot inspect a body it must not consume.
+
+    ⛔ This is a known limit, not coverage: a streamed refusal is not converted.
+    No converted seam streams (there is no ``.stream(`` call site in any of
+    them), and `test_the_verdict_client_seam_does_not_consume_a_streamed_response`
+    pins the pass-through so the limit stays visible rather than silently
+    widening.
     """
     return getattr(response, "is_stream_consumed", True) is not False
 

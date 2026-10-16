@@ -926,7 +926,10 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
     # +1: the pin's control client (above).
     "tests/test_writer_inventory.py": (1, frozenset({"client"})),
     # +1: the #3246 capture-retry helper's client, deliberately left plain — it
-    # must OBSERVE the 504 to re-issue the request (test_hosted_api.py:6486).
+    # must OBSERVE the 504 to re-issue the request. Built by
+    # `TestSessionActorStamp2600._setup` and fed to
+    # `_post_capture_allowing_transport_retry`; named by symbol, not by line, in
+    # a 12k-line file.
     # +1: this file's own pin control, which must stay plain to observe the 504.
     "tests/test_hosted_api.py": (2, frozenset({"_verdict_client"})),
 }
