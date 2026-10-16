@@ -39,6 +39,15 @@ from tortoise.sdk import SESSION_READ_FIELDS, TortoiseSDK
 
 from tests._verdict import require_answered, verdict_client
 
+# The autouse ``_reset_health_probe`` fixture replaces
+# ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
+# test in this module (so the background refresher cannot overwrite a test's
+# patched verdict). Clamp assertions must use the REAL resolver, captured here
+# before any fixture runs.
+import tortoise.hosted_api as _ha_mod
+
+_REAL_HEALTH_PROBE_INTERVAL = _ha_mod._health_probe_interval
+
 
 def _verdict_client(asgi_app, **kwargs):
     """#8582: the client-construction seam for this module.
@@ -49,20 +58,13 @@ def _verdict_client(asgi_app, **kwargs):
     FAIL a loaded box produced (measured 2026-10-13: 4 failed / 428 passed on
     `tests/test_hosted_api.py`, all four on `POST /v1/sessions`).
 
-    The single exception is the #3246 capture-retry helper's client
-    (`TestSessionActorStamp2600._setup`, below): it must OBSERVE the 504 to
-    re-issue the request, so it stays a plain `TestClient` by design.
+    TWO clients stay plain, both declared in
+    `test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS` for this file:
+    the #3246 capture-retry helper's client (`TestSessionActorStamp2600._setup`),
+    which must OBSERVE the 504 to re-issue the request; and the refusal pin's
+    own control, which must observe the 504 to prove the refusal is real.
     """
     return verdict_client(asgi_app, **kwargs)
-
-# The autouse ``_reset_health_probe`` fixture replaces
-# ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
-# test in this module (so the background refresher cannot overwrite a test's
-# patched verdict). Clamp assertions must use the REAL resolver, captured here
-# before any fixture runs.
-import tortoise.hosted_api as _ha_mod
-
-_REAL_HEALTH_PROBE_INTERVAL = _ha_mod._health_probe_interval
 
 
 # ── Test constants ───────────────────────────────────────────────────────────
@@ -1802,7 +1804,6 @@ class TestTeamInfo:
         headers for the request origin — cross-origin clients otherwise read
         it as a misleading 'CORS blocked' (unhandled 500s bubble OUTSIDE the
         CORS middleware)."""
-        from starlette.testclient import TestClient
 
         @app.get("/__test_boom")
         async def _boom():
@@ -4131,8 +4132,6 @@ def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
     TORTOISE_DB_PATH → the register handler constructs embedded; a temp
     journal env makes the membership assertion exact. No docker needed."""
     import os as _os
-
-    from fastapi.testclient import TestClient
 
     from tests._embedded import _read_journal_file
     from tortoise.hosted_api import app
@@ -7591,7 +7590,6 @@ class TestProvisioningService:
             # hosted_api imported get_control_plane from supabase_control
             # lazily per call — the module-level monkeypatch above covers
             # it; also patch ha_mod's reference if any.
-            from fastapi.testclient import TestClient
 
             import tortoise.hosted_api as ha_mod
             with _verdict_client(ha_mod.app) as tc:
@@ -11850,9 +11848,8 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
     with TestClient(app) as raw:
         assert raw.post("/v1/sessions", json={}).status_code == 504
-    with _verdict_client(app) as tc:
-        with pytest.raises(pytest.skip.Exception) as excinfo:
-            tc.post("/v1/sessions", json={})
+    with _verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/sessions", json={})
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/sessions answered" in message

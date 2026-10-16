@@ -32,7 +32,6 @@ from datetime import datetime, timedelta, timezone
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1400,9 +1399,8 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
     with TestClient(app) as raw:
         assert raw.post("/v1/invites", json={}).status_code == 504
-    with verdict_client(app) as tc:
-        with pytest.raises(pytest.skip.Exception) as excinfo:
-            tc.post("/v1/invites", json={})
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/invites", json={})
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/invites answered" in message

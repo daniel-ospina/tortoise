@@ -46,6 +46,18 @@ import pytest
 
 from tests._verdict import require_answered, verdict_async_client
 
+# Hosted-surface tests reuse test_hosted_api's authenticated TestClient
+# fixture (temp-DB SDK patching + the session-recording consent seed), which
+# also installs the module-level env (pepper/encryption key) on import.
+from tests.test_hosted_api import (
+    TEST_ORG_ID,
+    TEST_TEAM,
+)
+from tests.test_hosted_api import (
+    client as client,
+)
+from tortoise.sdk import TortoiseSDK
+
 
 def _verdict_async_client(app, **kwargs):
     """#8582: the async client seam for this module.
@@ -60,17 +72,6 @@ def _verdict_async_client(app, **kwargs):
     """
     return verdict_async_client(app, **kwargs)
 
-# Hosted-surface tests reuse test_hosted_api's authenticated TestClient
-# fixture (temp-DB SDK patching + the session-recording consent seed), which
-# also installs the module-level env (pepper/encryption key) on import.
-from tests.test_hosted_api import (
-    TEST_ORG_ID,
-    TEST_TEAM,
-)
-from tests.test_hosted_api import (
-    client as client,
-)
-from tortoise.sdk import TortoiseSDK
 
 # A stall long enough to be unambiguous, short enough to keep CI quick.
 STALL_S = 4.0

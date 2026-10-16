@@ -25,7 +25,6 @@ import os
 import tempfile
 
 import pytest
-from fastapi.testclient import TestClient
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")

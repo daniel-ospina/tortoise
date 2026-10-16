@@ -3488,9 +3488,8 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     # `assert 504 == 200` shape this seam exists to remove. Non-vacuity.
     with TestClient(ha_mod.app) as raw:
         assert raw.get("/backups", headers=INTERNAL_HEADERS).status_code == 504
-    with verdict_client(ha_mod.app) as tc:
-        with pytest.raises(pytest.skip.Exception) as excinfo:
-            tc.get("/backups", headers=INTERNAL_HEADERS)
+    with verdict_client(ha_mod.app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get("/backups", headers=INTERNAL_HEADERS)
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "GET /backups answered" in message

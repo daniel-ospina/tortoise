@@ -157,9 +157,8 @@ def _seam_app():
 
 
 def test_the_verdict_client_seam_converts_the_refusal_and_names_the_request():
-    with verdict_client(_seam_app()) as tc:
-        with pytest.raises(pytest.skip.Exception) as excinfo:
-            tc.get("/refused")
+    with verdict_client(_seam_app()) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get("/refused")
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "GET /refused answered" in message, "the refused request must be named"
@@ -845,36 +844,51 @@ def _functions_calling(source: str, name: str) -> set[str]:
     return found
 
 
+#: The class NAMES a converted file must not construct directly. Matching on the
+#: final name — bare or attribute-qualified — is deliberate: an aliased or
+#: module-qualified construction (`from httpx import AsyncClient; AsyncClient(...)`
+#: or `client_mod.TestClient(...)`) is the SAME un-converted site, and matching
+#: only the two spellings this repo happens to use today is how the reversion
+#: this registry exists to catch would slip through.
+_PLAIN_CLIENT_NAMES = frozenset({"TestClient", "AsyncClient"})
+
+
 def _plain_client_constructions(source: str) -> int:
-    """Count `TestClient(...)` / `httpx.AsyncClient(...)` CALLS.
+    """Count direct `TestClient(...)` / `AsyncClient(...)` CALLS.
 
     AST, not substring: prose that merely names the class (a docstring, a
     comment such as test_capture_loop_responsiveness.py's note about the shape
     of the `client` fixture) is not a client construction and must not be
-    counted as one.
+    counted as one. The seam's own factories are `verdict_client` /
+    `verdict_async_client`, so they never match.
     """
     count = 0
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Name) and func.id == "TestClient":
-            count += 1
-        elif (isinstance(func, ast.Attribute) and func.attr == "AsyncClient"
-              and isinstance(func.value, ast.Name)
-              and func.value.id == "httpx"):
+        name = (
+            func.id if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute)
+            else None
+        )
+        if name in _PLAIN_CLIENT_NAMES:
             count += 1
     return count
 
 
-def test_the_plain_client_counter_ignores_prose():
-    """Non-vacuity control: a comment is not a construction."""
+def test_the_plain_client_counter_ignores_prose_and_sees_aliases():
+    """Non-vacuity control: a comment is not a construction, an alias is one."""
     assert _plain_client_constructions("x = TestClient(app)\n") == 1
     assert _plain_client_constructions(
         "x = httpx.AsyncClient(transport=t)\n") == 1
     assert _plain_client_constructions(
+        "x = AsyncClient(transport=t)\n") == 1
+    assert _plain_client_constructions("x = client_mod.TestClient(app)\n") == 1
+    assert _plain_client_constructions(
         "# wraps the app in `TestClient(app)`\n") == 0
     assert _plain_client_constructions("x = _verdict_client(app)\n") == 0
+    assert _plain_client_constructions("x = verdict_async_client(app)\n") == 0
 
 
 def test_the_wiring_checker_discriminates():
@@ -888,14 +902,16 @@ def test_the_wiring_checker_discriminates():
     assert _functions_calling(without_call, "verdict_client") == set()
     with_async_seam = "def a():\n    return verdict_async_client(app)\n"
     assert _functions_calling(with_async_seam, "verdict_async_client") == {"a"}
+    assert _functions_calling(without_call, "verdict_async_client") == set()
 
 
-#: The #8582 CLIENT seam, which the registry above cannot see: a converted file
-#: leaves no `require_answered(` call behind — the call lives in the seam the
-#: file calls — so a construction reverting to the plain class is invisible to
-#: `_CONVERTED_SITES`. Each entry is ``(plain constructions allowed, seam
-#: functions that must call `verdict_client`)``. The allowed count is a
-#: DECLARED exception, never slack: any other plain construction in the file has
+#: The #8582 CLIENT seam. `_CONVERTED_SITES` cannot be the home for it: that
+#: registry identifies a converted site by a `require_answered(` call IN the
+#: file, and a client-seam conversion need not leave one (and where a file also
+#: carries #8579-era call sites, one may remain and is then covered by the seam
+#: as well). Each entry is ``(plain constructions allowed, seam functions that
+#: must call a verdict-client factory)``. The allowed count is a DECLARED
+#: exception, never slack: any other plain construction in the file has
 #: re-opened the class for that file, because the reads it binds go back to
 #: reading a refusal as a FAIL. This is the checkable restatement of #8582's
 #: Indicator (1), which a plain `grep` cannot discharge for a seam conversion.
