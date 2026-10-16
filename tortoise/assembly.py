@@ -138,7 +138,7 @@ import re
 from enum import StrEnum
 
 from tortoise.calendar_anchors import (  # #2655 calendar-anchor resolution
-    find_anchor_spans, resolve_calendar_anchor)
+    CalendarAnchorKind, find_anchor_spans, resolve_calendar_anchor)
 from tortoise.entity_identity import (  # #3633 route-then-refuse
     display_holder_ids, record_non_folded)
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
@@ -972,7 +972,10 @@ def classify_question(question: str) -> AssemblyShape | None:
     # last Saturday?" (RELATIVE_DATE) — now land on `None` here, because the
     # branch is entered first and its `_relative_match`/`_RE_AGO_OTHER` guard
     # fires. That is the SAFE direction (legacy answers), but it is a routing
-    # change, and it is recorded rather than implied.
+    # change, and it is recorded rather than implied. The NAMED-HOLIDAY forms
+    # are NOT in that list: they are rejected here too (the anchor clause
+    # below), so "… in the past two months on Christmas?" keeps the day-scoped
+    # lookup `main` gave it instead of dropping the named day (#8779 F12).
     #
     # A binary `first … or …` ordering question is DIFFERENT: it names two
     # subjects, so the shape ("names NO subjects") must not claim it — but at
@@ -1005,7 +1008,14 @@ def classify_question(question: str) -> AssemblyShape | None:
         # count-less `last <unit>` arm of the template was dead for
         # week/month/year while the grammar advertised it (#8779 E4/F2).
         residual = q[:m_cls.start("window")] + " " + q[m_cls.end("window"):]
-        if (_RE_AGO_OTHER.search(residual) or _RE_FREQUENCY.search(q)
+        if (_RE_AGO_OTHER.search(residual)
+                # ⛔ the SAME surface as `_RE_AGO_OTHER`, for the anchors that
+                # regex does not hold: a weekday/weekend/`valentine` anchor
+                # already rejects above, and any OTHER named holiday must
+                # reject here too — the case split by which vocabulary a
+                # question happens to use is the defect, not the rule.
+                or _named_fixed_date_anchor(residual)
+                or _RE_FREQUENCY.search(q)
                 or _RE_ADVICE.search(q) or _RE_OR_CHAIN.search(q)
                 or _RE_DURATION.search(q)
                 or _relative_match(q) is not None
@@ -3296,6 +3306,19 @@ _CLASS_LEAD_COUNT = re.compile(r"^(?:" + _CLASS_COUNT_RX + r")\s+",
 #: a letter, so digits and punctuation are separators.
 _CLASS_WORD = re.compile(r"[a-z][a-z'-]*")
 #: function words and number words — no class meaning.
+#: the recency/ordinal DIRECTION vocabulary as a CLASS stoplist (#8779 F12).
+#: These words carry the ordering INSTRUCTION (`_class_order_newest_first`,
+#: whose `_CLASS_DIR_RECENT`/`_CLASS_DIR_OLD` alternations below declare the
+#: same vocabulary for the direction read) and are never a class's own
+#: content: left in, a bare attributive form survives into the token set and
+#: `_class_owns_row` ORs ANY shared token, so `the last five concerts` kept
+#: `last` and admitted `read the last news about the election` as a concert —
+#: a FALSE INCLUDE. `most` is here for the `most recent` bigram, which the
+#: recent alternation matches as one unit.
+_CLASS_DIRECTION_WORDS = frozenset({
+    "reverse", "latest", "newest", "recent", "last", "most",
+    "earliest", "oldest", "first",
+})
 _CLASS_STOPWORDS = frozenset({
     "a", "an", "and", "at", "by", "couple", "during", "few", "for",
     "from", "his", "her", "i", "in", "is", "it", "its", "many", "me",
@@ -3304,7 +3327,7 @@ _CLASS_STOPWORDS = frozenset({
     "your",
     "one", "two", "three", "four", "five", "six", "seven", "eight",
     "nine", "ten", "eleven", "twelve",
-})
+}) | _CLASS_DIRECTION_WORDS
 #: the CLASS-GENERIC head nouns. A class naming BOTH a discriminative token
 #: and a generic one ("concerts and musical events") filters on the
 #: discriminative tokens ONLY: `event` alone matches almost any narrative row,
@@ -3329,6 +3352,14 @@ _CLASS_ADJUNCT_PREP = frozenset({
     "for", "from", "in", "into", "near", "of", "on", "over", "through",
     "to", "under", "with", "within",
 })
+#: relative markers — they OPEN A CLAUSE, so the class noun phrase ends there.
+_CLASS_RELATIVE = frozenset({"that", "which", "who", "whom", "whose",
+                             "where", "when"})
+#: clause SUBJECTS. A pronoun inside a prepositional span means the preposition
+#: opened a clause ("after I graduated"), not a noun complement — that span
+#: names no class, so it must not become the vocabulary.
+_CLASS_PRONOUN = frozenset({"i", "we", "you", "he", "she", "it", "they",
+                            "me", "us", "him", "her", "them"})
 
 
 def _class_stem(tok: str) -> str:
@@ -3434,6 +3465,22 @@ _RE_CLASS_ORDER_INSTRUCTION = re.compile(
     re.IGNORECASE)
 
 
+def _named_fixed_date_anchor(text: str) -> bool:
+    """Does ``text`` name a FIXED-DATE holiday (Christmas, Halloween, …)?
+
+    #8779 F12: `_RE_AGO_OTHER`'s calendar surface carries the WEEKDAY/WEEKEND
+    forms and `valentine` only, so a class-plural question naming any OTHER
+    holiday — "… in the past two months on Christmas?" — was claimed by this
+    shape and the named day was silently dropped, where `main` routed it to
+    the day-scoped lookup. The vocabulary lives in ONE place
+    (``calendar_anchors.FIXED_DATE_HOLIDAYS``, read through the shared
+    ``find_anchor_spans``), so this asks the owner instead of keeping a second
+    copy of the table that could drift from it.
+    """
+    return any(span.kind == CalendarAnchorKind.FIXED_DATE
+               for span in find_anchor_spans(text))
+
+
 def _class_order_newest_first(question: str) -> bool:
     """Does the question's ordering instruction ask for the NEWEST first?
 
@@ -3506,13 +3553,33 @@ def _class_tokens(span: str) -> tuple[str, ...]:
                 acc.append(stem)
         return acc
 
-    words = _CLASS_WORD.findall(t.lower())
+    # ⛔ the vocabulary is the class NOUN PHRASE — a CLAUSE, an APPOSITIVE or a
+    # POST-MODIFIER is not part of it, and every one of them leaks a token
+    # that then acts as an alternative SELECTOR, because `_class_owns_row` ORs
+    # ANY shared token (#8779 F12):
+    #   * a comma opens an appositive — "the concerts, the BIGGEST events of
+    #     the year" left `biggest`, and a "biggest sale of the year" row was
+    #     enumerated as a concert;
+    #   * a relative marker opens a clause — "the events THAT TOOK PLACE" left
+    #     the verb `took`, which matches almost every narrative row;
+    #   * a participle in post-modifier position IS a reduced relative —
+    #     "the concerts ORGANIZED by the club" left `organized`.
+    # The span regex cannot see clause structure, so the boundary is drawn on
+    # the token stream, at the FIRST of {comma, relative marker, preposition}.
+    words = _CLASS_WORD.findall(t.split(",")[0].lower())
     cut = len(words)
     for i, raw in enumerate(words):
-        if raw in _CLASS_ADJUNCT_PREP:
+        if raw in _CLASS_ADJUNCT_PREP or raw in _CLASS_RELATIVE:
             cut = i
             break
     out = _stems(words[:cut])
+    # a PARTICIPLE immediately before the boundary is a reduced relative, not a
+    # class word — dropped only when a DISCRIMINATOR would survive it. A bare
+    # one-word class ("the wedding") is never trimmed, and a word is only a
+    # post-modifier when something follows it (a boundary was found).
+    if cut < len(words) and len(out) > 1 and out[-1].endswith(("ed", "ing")) \
+            and any(x not in _CLASS_GENERIC for x in out[:-1]):
+        out = out[:-1]
     # ⛔ the cut above is only correct while the HEAD noun phrase still carries
     # a DISCRIMINATIVE token. When it does not -- "the events AT THE JAZZ
     # FESTIVAL", whose head `event` is generic -- cutting leaves the
@@ -3520,23 +3587,26 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     # security event, say) and MISSES the jazz-festival row: a WRONG answer
     # rather than an abstention, i.e. the same defect the cut exists to fix,
     # inverted (#8779 F5). A generic head is identified by its own complement,
-    # so fall back to the tokens after the preposition when that is all there
-    # is. `the concerts in Central Park` (a DISCRIMINATIVE head) keeps the cut
-    # and drops the locative, as before.
-    # ...and the fallback is also required when the head phrase is a RELATIVE
-    # CLAUSE rather than a noun phrase: "the events THAT TOOK PLACE at the jazz
-    # festival I attended" keeps `took`/`place` as its head, and a verb is not
-    # generic, so without this the vocabulary became ('took','place') -- a verb
-    # selects almost any narrative row (a FALSE INCLUDE) while the real class
-    # words are discarded (#8779 F10). A relative marker before the
-    # preposition means the tokens before it belong to the clause, not to the
-    # class.
-    if cut < len(words) and (
-            any(w in ("that", "which") for w in words[:cut])
-            or not [x for x in out if x not in _CLASS_GENERIC]):
-        complement = _stems(words[cut + 1:])
-        if complement:
-            out = complement
+    # so fall back to the tokens after the boundary when that is all there is.
+    # `the concerts in Central Park` (a DISCRIMINATIVE head) keeps the cut and
+    # drops the locative, as before.
+    #
+    # ⛔ and the fallback must NEVER overwrite a DISCRIMINATIVE head: "the jazz
+    # concerts that took place at the event" once became `('event',)` — the
+    # class was replaced by the generic noun of its own clause and both concert
+    # rows were dropped (#8779 F12). It is also skipped when the complement
+    # carries a PRONOUN, because that means the span opened a CLAUSE ("the
+    # events that took place AFTER I GRADUATED") which names no class — there
+    # the generic head is kept as a WEAK filter rather than a wrong one.
+    if cut < len(words) and not [x for x in out if x not in _CLASS_GENERIC]:
+        rest = words[cut + 1:]
+        inner = next((j for j, w in enumerate(rest)
+                      if w in _CLASS_ADJUNCT_PREP), None)
+        cand = rest[inner + 1:] if inner is not None else rest
+        if not any(w in _CLASS_PRONOUN for w in cand):
+            complement = _stems(cand)
+            if complement:
+                out = complement
     discriminative = [tok for tok in out if tok not in _CLASS_GENERIC]
     return tuple(discriminative or out)
 

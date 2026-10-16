@@ -5103,13 +5103,44 @@ def test_class_vocabulary_drops_a_relative_clause_before_the_adjunct():
         {"content": "took a walk in the park with a friend"}, w.tokens)
 
 
+def test_class_vocabulary_excludes_clauses_appositives_and_postmodifiers():
+    """#8779 F12: the vocabulary is the class NOUN PHRASE. A clause, an
+    appositive and a reduced relative are none of it, and each leaks a token
+    that `_class_owns_row` then ORs as an alternative SELECTOR.
+
+    The CONTROL (a plain noun phrase) is asserted FIRST, so the subject
+    assertions cannot pass because the tokenizer collapsed everything.
+    """
+    assert _class_tokens("the jazz concerts") == ("jazz", "concert")
+
+    # a relative clause's VERB must not enter (`took`/`place` matched almost
+    # every narrative row)
+    assert _class_tokens("the concerts that took place here") == ("concert",)
+    # a reduced relative (participle in post-modifier position) likewise
+    assert _class_tokens("the concerts organized by the club") == ("concert",)
+    # a comma opens an APPOSITIVE, which is not the class
+    assert _class_tokens("the concerts, the biggest events of the year") == \
+        ("concert",)
+    # and a DISCRIMINATIVE head is never replaced by its clause's generic noun
+    assert _class_tokens(
+        "the jazz concerts that took place at the event") == \
+        ("jazz", "concert")
+    # a preposition that opens a CLAUSE names no class: the generic head stays
+    # a weak filter rather than becoming the clause's verb
+    assert _class_tokens("the events that took place after I graduated") == \
+        ("event",)
+
+
 def test_class_order_instruction_is_terminal_not_a_class_prefix():
     """#8779 F11: ``X first`` is the TERMINAL order instruction. Read loosely it
     matched a direction word merely PRECEDING a compound class word, so "the
     latest first-aid training sessions" was reversed AND scrubbed of its
     ``first-aid`` ("the -aid training sessions").
 
-    The CONTROL (the same class with no direction word) is asserted FIRST.
+    #8779 F12: ``latest`` is a direction word, so it is ALSO not class content
+    (``_CLASS_DIRECTION_WORDS``): the class here is the first-aid training
+    sessions, and the token set is that class's own words. The CONTROL (the
+    same class with no direction word) is asserted FIRST.
     """
     control = resolve_class_window(
         "What is the order of the first-aid training sessions I attended in "
@@ -5122,8 +5153,84 @@ def test_class_order_instruction_is_terminal_not_a_class_prefix():
         "attended in the past two months?", "2026-09-10")
     assert w is not None
     assert w.newest_first is False, "a class prefix is not an instruction"
-    assert w.tokens == ("latest", "first-aid", "training", "session"), \
-        w.tokens
+    assert w.tokens == ("first-aid", "training", "session"), w.tokens
+
+
+def test_class_direction_adjective_is_not_a_class_selector():
+    """#8779 F12: a recency/ordinal adjective inside the class span must not
+    become a CLASS SELECTOR. ``_class_owns_row`` ORs ANY shared token, so a
+    surviving ``last`` is near-universal -- `the last five concerts`
+    (tokens ``('last','concert')``) enumerated `read the last news about the
+    election` as a concert under a CLASS ORDER header. That is the FALSE
+    INCLUDE direction: a wrong answer, not an abstention.
+
+    The window is unchanged and ``class_phrase`` still names what the question
+    named (the phrase is the display surface, the tokens are the selector).
+    """
+    for question in (
+            "What is the order of the last five concerts I attended in the "
+            "past two months?",
+            "What is the order of the most recent concerts I attended in the "
+            "past two months?",
+            "What is the order of the first concerts I attended in the past "
+            "two months?"):
+        w = resolve_class_window(question, "2026-09-10")
+        assert w is not None, question
+        assert w.tokens == ("concert",), (question, w.tokens)
+        for not_the_class in ("read the last news about the election",
+                              "checked the most recent update",
+                              "this is the first time I tried it"):
+            assert _class_owns_row({"content": not_the_class},
+                                   w.tokens) is False, (question, not_the_class)
+        # ...and the real class row is still selected (the filter is not a
+        # no-op in the other direction either).
+        assert _class_owns_row({"content": "saw a concert in the park"},
+                               w.tokens) is True, question
+
+
+def test_class_direction_vocabulary_is_a_stoplist():
+    """#8779 F12: the direction vocabulary is declared TWICE -- as the
+    ``_CLASS_DIR_RECENT``/``_CLASS_DIR_OLD`` alternations (the ordering
+    INSTRUCTION read) and as class-token stopwords (so it can never become a
+    class selector). A word added to one side and not the other is the drift
+    this pins; ``most`` belongs to the stoplist through the ``most recent``
+    BIGRAM, which the recent alternation matches as one unit.
+    """
+    import re
+
+    import tortoise.assembly as amod
+
+    singles = ("reverse", "latest", "newest", "recent", "last",
+               "earliest", "oldest", "first")
+    for word in singles:
+        assert word in amod._CLASS_STOPWORDS, word
+        assert re.fullmatch(amod._CLASS_DIR_WORD, word, re.IGNORECASE), word
+    assert "most" in amod._CLASS_STOPWORDS
+    assert re.fullmatch(amod._CLASS_DIR_WORD, "most recent", re.IGNORECASE)
+
+
+def test_class_plural_abstains_on_a_named_holiday_anchor():
+    """#8779 F12: a question that ALSO names a calendar day is the day-scoped
+    lookup `main` routed (``relative-date-lookup``), not a class enumeration —
+    the shape must not claim it and drop the named day.
+
+    A weekday/weekend/``valentine`` anchor already abstained through
+    ``_RE_AGO_OTHER``; the OTHER holidays (Christmas, Halloween, New Year's
+    day, the fourth of July, …) did not, so the disposition depended purely on
+    which vocabulary the regex happened to hold. The shared calendar-anchor
+    finder now owns the whole table, so every holiday agrees with
+    ``last Saturday`` and with the plain class question (the control).
+    """
+    for anchor in ("Christmas", "New Year's day", "Halloween",
+                   "Valentine's day", "the fourth of July", "last Saturday"):
+        q = ("What is the order of the concerts I attended in the past two "
+             f"months on {anchor}?")
+        assert classify_question(q) is None, (anchor, classify_question(q))
+    # the control: the SAME question with no second anchor still fires
+    plain = ("What is the order of the concerts I attended in the past two "
+             "months?")
+    assert classify_question(plain) is AssemblyShape.CLASS_PLURAL, \
+        classify_question(plain)
 
 
 def test_class_owns_row_matches_content_and_search_keys():
