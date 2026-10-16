@@ -260,7 +260,7 @@ raw fact (Postgres — immutable text. Carries NO status. Ever.)
 
 | type | how it reaches raw | mechanism | measured |
 |---|---|---|---|
-| **`Point`** | **directly** | `(Point)-[:extractedFrom]->(Source)` | **14,567 — the only edge type with instances that lands on a `Source`; `aboutSource` (`Point\|Document\|Event`→`Source`) is registered in `session_link.ENTITY_LINKED_TRIPLES` but has no instances** |
+| **`Point`** | **directly** | `(Point)-[:extractedFrom]->(Source)` | **14,567 — the only edge type with instances that lands on a `Source`; `aboutSource` (`Point\|Event`→`Source`) is registered in `session_link.ENTITY_LINKED_TRIPLES` but has no instances** |
 | **`Object`** | **only through a `Point`** | `(Point)-[:aboutObject]->(Object)` | 27,310 inbound |
 | **`Event`** | through a `Source` | `(Source)-[:references]->(Event)` | 2,190 |
 | **`Subject`** | through an `Event` | `(Subject)-[:performs/participatesIn]->(Event)` → `Source` | 16 |
@@ -273,7 +273,7 @@ raw fact (Postgres — immutable text. Carries NO status. Ever.)
 **Why the span still rides `Point` even though other edges can reach a `Source`:** the carrier is
 the node that makes a *deformable claim* — a `Point` is the propositional unit whose truth is
 re-ranked by EP, so it is the thing whose support has to be re-fetchable at answer time. `Object`
-and `Subject` are referents, and `aboutSource` — registered for `Point`, `Document` and `Event`
+and `Subject` are referents, and `aboutSource` — registered for `Point` and `Event`
 sources alike (`session_link.ENTITY_LINKED_TRIPLES`, mirrored in `projection/entities.py`) — has no
 instances in the live graph, so no non-`Point` node reaches a `Source` today.
 *(The carrier choice rests on the argument above, not on the edge census: "the only edge on a `Source`"
@@ -1334,7 +1334,7 @@ reached, and of the review cycles that followed, is in
 | # | ✅ ANSWER | what changes in THIS document |
 |---|---|---|
 | **O1** | **Durability and rebuildability are two different questions and both hold: DURABILITY = the store's backup; REBUILDABILITY = the journal.** | *The journal is the derived layer's rebuild source; it is not a durability mechanism.* ⚠️ **`rebuild_all` treats an incomplete log as the authority — that is a defect.** |
-| **O2** | ⛔ **No volume target.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. ⚠️ **This constrains *volume targets* only, not §4.2's ordering objective.** §4.2 states its own objective at `:702`: *"The rule is NOT 'cheapest first' — it is **cost per unit of SAFE rejection**"* (§4.2 heading, `:684`). |
+| **O2** | ⛔ **No volume target.** *"we're not optimising stupidly for a number… this is not a corporate OKR setting exercise. We need to balance multiple things at each step of the pipeline and on each architecture decision."* | **No volume target, no recall floor, no node budget anywhere in this document.** The objective is **great recall and reasoning at an affordable cost**; the method is **manual, step-by-step review** until a calibration set exists. ⚠️ **This constrains *volume targets* only, not §4.2's ordering objective.** §4.2 states its own objective at `:706`: *"The rule is NOT 'cheapest first' — it is **cost per unit of SAFE rejection**"* (§4.2 heading, `:688`). |
 | **O3** | ✅ **Emit the DECLARED outcome word (`DISCARD`), matching the engine's existing classifier.** | S2.2's outputs use the declared vocabulary. |
 | **O4** | ✅ **Merge IS authorised — with Jev as arbiter over the claim plus narrative/raw data.** *This supersedes the `OVERRIDES:` ruling on `#4899` ("never merging two claims into one"); the later owner ruling replaces the earlier one, which is the only valid way to reverse a recorded decision.* | The admissible set is **`KEEP` / `NOOP` / `DISCARD` / `MERGE`** (MERGE bounded below). ⚠️ **`FUSE` — combining two distinct claims into one new claim — is FORBIDDEN.** |
 | **O5** | ✅ **Draft and iterate:** *"we draft something (a prompt, a step of the extraction workflow, etc) and run it and see the result then refine and run again, until good."* | **The working method for every step in §4.1: draft → run → look → refine → repeat.** |

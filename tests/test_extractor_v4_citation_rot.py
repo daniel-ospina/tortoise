@@ -311,8 +311,8 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     ),
     (
         STORAGE,
-        "STORAGE states the `#5422` ownership gap",
-        "ownership `#5422`; its acceptance is **A2 of `#5038`**",
+        "STORAGE states the re-inference engine as open with its acceptance criterion",
+        "**Open — the re-inference engine**: its acceptance is **A2 of `#5038`**",
     ),
 )
 
