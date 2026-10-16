@@ -148,11 +148,17 @@ class TestIngestAutoPreservesDecideBaseline:
         """#1088 (review P1): ingest must NOT inject a status into a no-status
         DECIDE-PART item under auto — an injected status sets explicit_status
         in create_point and silently disables the #2199 system-default
-        baseline. A non-decide-part no-status item gets no injected status
-        either, and is born live under the #1088 owner ruling.
+        baseline. The non-decide-part item is the operator connection's
+        SOURCE, so it gets no injected status either and is born live under
+        the #1088 owner ruling.
 
-        MUTATION THAT REDS THIS TEST: inject a status into a decide-part item
-        (which would set explicit_status and drop the system-default
+        MUTATION THAT REDS THIS TEST: dropping the
+        ``DECIDE_PART_KINDS | GOAL_KINDS`` exemption from the auto
+        target-draft branch. The operator connection below makes ``opt`` an
+        ``_auto_target``, so the exemption is the ONLY thing keeping it out
+        of the injected-draft arm — without it ``opt`` reads draft and gets
+        no baseline (the injected status sets explicit_status in
+        create_point, which silently disables the #2199 system-default
         baseline).
         """
         bundle = {
@@ -161,17 +167,23 @@ class TestIngestAutoPreservesDecideBaseline:
                 {"ref": "plain", "kind": "statement",
                  "content": "a plain no-status claim"},
             ],
+            # The connection is what makes `opt` an `_auto_target`; with no
+            # connection the exemption branch is never reached and the
+            # mutation above survives (issue #7981 row 1).
+            "connections": [
+                {"from": "plain", "to": "opt", "operator": "IMPL"},
+            ],
         }
         res = sdk.ingest(bundle, promotion_policy="auto")
         opt_id, plain_id = res["ids"]["points"]
         opt = sdk.get_point(opt_id)
-        assert opt["status"] == "live"
+        assert opt["status"] == "live", "a decide-part target is exempt (#7856)"
         assert opt["baseline_set"] is True
         assert opt["ep_alpha"] == 3
         assert opt["ep_beta"] == 1
         assert opt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
-        # The non-decide-part item is not a connection source and gets no
-        # injected status under auto — born live per the #1088 ruling.
+        # The non-decide-part item is the connection SOURCE, so under auto
+        # it gets no injected status — born live per the #1088 ruling.
         assert sdk.get_point(plain_id)["status"] == "live"
 
 
