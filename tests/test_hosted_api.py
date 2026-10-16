@@ -37,7 +37,23 @@ from tortoise.hosted_api import (  # noqa: I001
 )
 from tortoise.sdk import SESSION_READ_FIELDS, TortoiseSDK
 
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_client
+
+
+def _verdict_client(asgi_app, **kwargs):
+    """#8582: the client-construction seam for this module.
+
+    Every client this module builds goes through here, so a transport
+    wait-bound refusal (#3834) reaching ANY read bound from one is a NON-ANSWER
+    — an INCONCLUSIVE skip naming the bound — instead of the `assert 504 == 200`
+    FAIL a loaded box produced (measured 2026-10-13: 4 failed / 428 passed on
+    `tests/test_hosted_api.py`, all four on `POST /v1/sessions`).
+
+    The single exception is the #3246 capture-retry helper's client
+    (`TestSessionActorStamp2600._setup`, below): it must OBSERVE the 504 to
+    re-issue the request, so it stays a plain `TestClient` by design.
+    """
+    return verdict_client(asgi_app, **kwargs)
 
 # The autouse ``_reset_health_probe`` fixture replaces
 # ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
@@ -253,7 +269,7 @@ def client():
             "consent seed not visible to the gate read"
 
         try:
-            with TestClient(app) as tc:
+            with _verdict_client(app) as tc:
                 yield tc
         finally:
             os.environ.pop("TORTOISE_DB_PATH", None)
@@ -274,7 +290,7 @@ def unauth_client():
         _orig_init = _patch_tortoise_sdk_init(db_path)
 
         try:
-            with TestClient(app) as tc:
+            with _verdict_client(app) as tc:
                 yield tc
         finally:
             _restore_tortoise_sdk_init(_orig_init)
@@ -1794,7 +1810,7 @@ class TestTeamInfo:
 
         # A fresh client WITHOUT raise_server_exceptions — the handler's
         # 500 response (with the CORS headers) is what we're asserting.
-        with TestClient(app, raise_server_exceptions=False) as tc:
+        with _verdict_client(app, raise_server_exceptions=False) as tc:
             r = tc.get("/__test_boom",
                        headers={"Origin": "https://app.premiselabs.co"})
         assert r.status_code == 500
@@ -4100,7 +4116,7 @@ def internal_client():
         )
 
         try:
-            with TestClient(app) as tc:
+            with _verdict_client(app) as tc:
                 yield tc
         finally:
             _restore_tortoise_sdk_init(_orig_init)
@@ -4127,7 +4143,7 @@ def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
     monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
-    with TestClient(app) as tc:
+    with _verdict_client(app) as tc:
         r = tc.post("/v1/register", json={
             "email": "journal-owner@example.com",
             "password": "supersecret1",
@@ -5657,7 +5673,7 @@ class TestProxyProtoRedirect:
         X-Forwarded-Proto: https must survive into the 307 Location — the
         client never sees an http downgrade, so POST is preserved end to end."""
         monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
-        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+        with _verdict_client(self._mini_mcp_app(), follow_redirects=False) as tc:
             r = tc.post("/mcp", headers={"X-Forwarded-Proto": "https"})
         assert r.status_code == 307
         assert r.headers["location"].startswith("https://"), r.headers["location"]
@@ -5668,7 +5684,7 @@ class TestProxyProtoRedirect:
         redirect stays http (unchanged scope), exactly as before #985."""
         monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
         monkeypatch.delenv("TORTOISE_TRUST_X_FORWARDED_PROTO", raising=False)
-        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+        with _verdict_client(self._mini_mcp_app(), follow_redirects=False) as tc:
             r = tc.post("/mcp", headers={"X-Forwarded-Proto": "https"})
         assert r.status_code == 307
         assert r.headers["location"].startswith("http://"), r.headers["location"]
@@ -5681,7 +5697,7 @@ class TestProxyProtoRedirect:
         set, non-overridable Fly-Forwarded-Proto (https) — the Location
         stays https."""
         monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
-        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+        with _verdict_client(self._mini_mcp_app(), follow_redirects=False) as tc:
             r = tc.post(
                 "/mcp",
                 headers={
@@ -5697,7 +5713,7 @@ class TestProxyProtoRedirect:
         alone (no Fly flag) must honor X-Forwarded-Proto: https."""
         monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
         monkeypatch.setenv("TORTOISE_TRUST_X_FORWARDED_PROTO", "1")
-        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+        with _verdict_client(self._mini_mcp_app(), follow_redirects=False) as tc:
             r = tc.post("/mcp", headers={"X-Forwarded-Proto": "https"})
         assert r.status_code == 307
         assert r.headers["location"].startswith("https://"), r.headers["location"]
@@ -5705,7 +5721,7 @@ class TestProxyProtoRedirect:
     def test_post_mcp_redirect_http_stays_http(self, monkeypatch):
         """X-Forwarded-Proto: http behind the proxy → Location stays http."""
         monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
-        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+        with _verdict_client(self._mini_mcp_app(), follow_redirects=False) as tc:
             r = tc.post("/mcp", headers={"X-Forwarded-Proto": "http"})
         assert r.status_code == 307
         assert r.headers["location"].startswith("http://"), r.headers["location"]
@@ -7222,7 +7238,7 @@ class TestProvisioningService:
         tid = f"team-{tier}-{abs(hash(tier)) % 100000}"
         _seed_team_graphs(sdk, tid, tier, max_graphs, max_api_keys)
         try:
-            with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+            with _verdict_client(ha_mod.app, raise_server_exceptions=False) as tc:
                 yield sdk, tid, tc
         finally:
             os.environ.pop("TORTOISE_DB_PATH", None)
@@ -7578,7 +7594,7 @@ class TestProvisioningService:
             from fastapi.testclient import TestClient
 
             import tortoise.hosted_api as ha_mod
-            with TestClient(ha_mod.app) as tc:
+            with _verdict_client(ha_mod.app) as tc:
                 r = tc.post("/v1/session/login", json={"api_key": token})
             assert r.status_code == 403, r.text
             assert r.json()["detail"]["error_code"] == \
@@ -7957,7 +7973,7 @@ class TestC3KeyLifecycle:
         tid = f"team-c3-{abs(hash(tmp_path.name)) % 100000}"
         _seed_team_graphs(sdk, tid, "pro", None, max_api_keys=max_api_keys)
         try:
-            with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+            with _verdict_client(ha_mod.app, raise_server_exceptions=False) as tc:
                 yield sdk, tid, tc
         finally:
             os.environ.pop("TORTOISE_DB_PATH", None)
@@ -9315,7 +9331,7 @@ class TestSessionActorReadPath2600:
         _seed_team_graphs(sdk, tid, "pro", None)
         proj = self._data_sdk(tid)._get_proj()
         try:
-            with TestClient(ha_mod.app,
+            with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
                 yield sdk, tid, tc, proj
         finally:
@@ -9736,7 +9752,7 @@ class TestRestAttributionE2E2600:
         try:
             keyA = sdk.apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {keyA['api_key']}"}
-            with TestClient(ha_mod.app,
+            with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
                 r = tc.post("/v1/points", headers=h, json={
                     "content": "b2 registry attributed point"})
@@ -9805,7 +9821,7 @@ class TestRestAttributionE2E2600:
         }])
         monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
         try:
-            with TestClient(ha_mod.app,
+            with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
                 h = {"Authorization": f"Bearer {token}"}
                 r = tc.post("/v1/points", headers=h, json={
@@ -9843,7 +9859,7 @@ class TestRestAttributionE2E2600:
         try:
             keyA = sdk.apikey_create(tid, _2600_UUID_A)
             h = {"Authorization": f"Bearer {keyA['api_key']}"}
-            with TestClient(ha_mod.app,
+            with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
                 # pre-revocation write → PointAdded with actor
                 r = tc.post("/v1/points", headers=h, json={
@@ -9897,7 +9913,7 @@ class TestE2E5TwoActorDedup2600:
         tid = f"team-2600-e25-{tag}"
         _seed_team_graphs(sdk, tid, "pro", None)
         try:
-            with TestClient(ha_mod.app,
+            with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
                 yield sdk, tid, tc
         finally:
@@ -10025,7 +10041,7 @@ class TestE2E10ReadPathDisplaySupabase2600:
         }])
         monkeypatch.setattr(sc_mod, "get_control_plane", lambda: fake)
         try:
-            with TestClient(ha_mod.app,
+            with _verdict_client(ha_mod.app,
                             raise_server_exceptions=False) as tc:
                 yield org_id, token, tc
         finally:
@@ -11812,3 +11828,31 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         source scan of the call sites, so pin the runtime default."""
         import tortoise.hosted_api as ha
         assert "support@premiselabs.co" in ha._key_limit_refusal()["message"]
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8582: the deterministic refusal pin for this module's client seam.
+
+    ``POST /v1/sessions`` is the route the 2026-10-13 full-file run failed on
+    (4 failed / 428 passed, every one ``assert 504 == 200``), and it is not
+    exempt from the bound. No load and no wall-clock wait are involved: the
+    bound is forced to 0 s, so the refusal is produced by the REAL
+    ``WaitBoundMiddleware`` the production request meets. The plain-client
+    control is the non-vacuity leg — it would pass unchanged if the route were
+    ever exempted, turning this pin red instead of letting the conversion
+    silently become dead code.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    assert ("POST", "/v1/sessions") not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post("/v1/sessions", json={}).status_code == 504
+    with _verdict_client(app) as tc:
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            tc.post("/v1/sessions", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/sessions answered" in message
