@@ -2591,6 +2591,27 @@ def _synthesize_ago_hits(slices: AssemblySlices,
     return hits
 
 
+def _class_header_line(window: ClassWindow, rendered: int,
+                       qd: _date) -> str:
+    """#8056 CLASS ORDER header — ONE builder, TWO call sites.
+
+    ``_synthesize_class_hits`` renders it against the selected row count, and
+    ``_assemble_class_plural`` RE-derives it after the shared cap tail
+    (``_assemble_under_caps`` -> ``assemble_context``), whose skip-not-starve
+    drop can remove later position/row hits the renderer never saw. One
+    builder is what keeps the header's claimed membership equal to the rows
+    the block actually lists (#8779 F1).
+    """
+    count = window.count or 1
+    unit = window.unit or ""
+    return (
+        f"CLASS ORDER ({window.class_phrase}): {rendered} dated "
+        f"event{'s' if rendered != 1 else ''} in "
+        f"{_fmt_date(window.window_lo)} -> {_fmt_date(window.window_hi)} "
+        f"({count} {unit}{'s' if count != 1 else ''} before "
+        f"{_fmt_date(qd)}), earliest first")
+
+
 def _synthesize_class_hits(slices: AssemblySlices, window: ClassWindow,
                            question_date: str | None) -> list[dict]:
     """#8056 CLASS_PLURAL render: ONE header naming the class and the window,
@@ -2619,8 +2640,10 @@ def _synthesize_class_hits(slices: AssemblySlices, window: ClassWindow,
                    if isinstance(r.get("date"), _date)),
                   key=lambda r: (r["date"], _as_str(r.get("id"))))
     # dedupe BEFORE the header is built, so the count it names is the count
-    # it renders (the collector already dedupes its own fetch; a hand-built
-    # AssemblySlices may not have)
+    # this renderer INTENDS to list (the collector already dedupes its own
+    # fetch; a hand-built AssemblySlices may not have). The FIRED path
+    # re-derives the count from the surviving rows after the cap tail — see
+    # ``_assemble_class_plural`` (#8779 F1).
     seen: set[str] = set()
     dated: list[dict] = []
     for r in rows:
@@ -2633,15 +2656,8 @@ def _synthesize_class_hits(slices: AssemblySlices, window: ClassWindow,
         dated.append(r)
     if not dated:
         return []
-    count = window.count or 1
-    unit = window.unit or ""
     hits: list[dict] = [{
-        "content": (
-            f"CLASS ORDER ({window.class_phrase}): {len(dated)} dated "
-            f"events in {_fmt_date(window.window_lo)} -> "
-            f"{_fmt_date(window.window_hi)} ({count} {unit}"
-            f"{'s' if count != 1 else ''} before {_fmt_date(qd)}), "
-            f"earliest first"),
+        "content": _class_header_line(window, len(dated), qd),
         "kind": "class-window"}]
     position = 1
     previous: _date | None = None
@@ -3679,6 +3695,22 @@ def _assemble_class_plural(sdk, question: str, *, question_date: str | None,
         # P1-1: a class block whose rows all fall outside the caps would
         # replace a working legacy pool with a header — fall through.
         return _empty_block()
+    # #8779 F1: the header is rendered BEFORE this cap tail, whose
+    # skip-not-starve drop can remove later position/row hits — so re-derive
+    # the member count the header names from what actually SURVIVED. A
+    # truncated block then never claims a membership it does not list, and a
+    # block whose rows were ALL cut falls through under the same P1-1 rule
+    # (a header-only block is a content-less replacement). The header is the
+    # pool's first hit and always admitted, so its kind anchors the rewrite.
+    rendered_rows = sum(1 for h in selected
+                        if h.get("kind") == "class-order")
+    if not rendered_rows:
+        return _empty_block()
+    for h in selected:
+        if h.get("kind") == "class-window":
+            h["content"] = _class_header_line(
+                window, rendered_rows, _norm_date(question_date))
+            break
     # the (window ∩ class) IS the scope: no resolved subject rides on the
     # block.
     return _AssembledBlock(

@@ -3929,12 +3929,13 @@ class _FakeAskSDK:
         raise RuntimeError("no graph in this hermetic test")
 
 
-def _drive_connected(monkeypatch, port, question, *, question_date):
+def _drive_connected(monkeypatch, port, question, *, question_date,
+                     caps=None):
     import tortoise.assembly as amod
     monkeypatch.setattr(amod, "docker_walker_port", lambda sdk: port)
     from tortoise.assembly import _assemble_connected
     return _assemble_connected(_FakeAskSDK(), question,
-                               question_date=question_date)
+                               question_date=question_date, caps=caps)
 
 
 def test_connected_fires_on_the_resolved_day_hermetically(monkeypatch):
@@ -4808,8 +4809,39 @@ def test_class_render_header_count_matches_the_rendered_rows():
     slices = AssemblySlices(timeline_rows=(dup, dict(dup)))
     hits = synthesize_hits(slices, shape=AssemblyShape.CLASS_PLURAL,
                            question_date="2026-09-10", anchor=window)
-    assert "1 dated events in" in hits[0]["content"]
+    # a ONE-row class reads in the singular — "1 dated events" is a wrong
+    # claim about the block it heads (#8779 F1, minor)
+    assert "1 dated event in" in hits[0]["content"]
+    assert "1 dated events" not in hits[0]["content"]
     assert len([h for h in hits if h["kind"] == "class-order"]) == 1
+
+
+def test_class_header_count_survives_the_cap_tail(monkeypatch):
+    """#8779 F1: the header names the count the block RENDERS even after the
+    shared cap tail drops later position/row hits (skip-not-starve).
+
+    PRE-FIX this fails: the header is built from the pre-cap row count (6),
+    while the item cap admits only the header plus two position/row pairs —
+    the block asserts a six-member order and lists two. Non-vacuous by
+    construction: the pre-cap count (6) and the post-cap count (2) DIFFER."""
+    rows = [_day_row(f"p-{i}", created_at=f"2026-08-{i + 1:02d}",
+                     content=f"concert number {i}")
+            for i in range(6)]
+    caps = {"context_item_cap": 5, "context_token_cap": 16000,
+            "context_byte_cap": 128000, "limit": 5}
+    block = _drive_connected(monkeypatch, _class_port(rows), _CLASS_PLURAL_Q,
+                             question_date="2026-09-10", caps=caps)
+    assert block.fired is True
+    rendered_rows = [h for h in block.post_cap_lines
+                     if h.get("kind") == "class-order"]
+    # header + (position, row) x 2 fills the 5-item cap
+    assert len(rendered_rows) == 2, [h.get("content") for h in
+                                     block.post_cap_lines]
+    header = block.post_cap_lines[0]["content"]
+    assert "2 dated events in" in header
+    assert "6 dated events" not in header
+    # the count the header names IS the number of rendered position lines
+    assert header.count("dated event") == 1
 
 
 def test_class_render_empty_returns_nothing():
