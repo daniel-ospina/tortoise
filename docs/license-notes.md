@@ -306,3 +306,40 @@ MIT skills/installer. It is a *contractually binding* page, so it is the
 highest-consequence version of the defect #4399 fixed on `/license`, and no
 issue covered it. Filed as **#4442**; any edit there must keep the `legal-e2e`
 constraints (`business source license` present; exactly one `$N` figure).
+
+### 7.1 Ownership — which repo a contributor edits for which artifact (#4643)
+
+The paragraph above states the *intent* ("the intended source of truth is the
+public MIT repo"); it left the **rule** unstated, and the two channels then
+disagreed in prose: the served installer's own header claimed the canonical
+skills lived in `daniel-ospina/tortoise` (`skills/`, `tortoise/onboarding/`)
+while the MIT repo's header claimed the MIT repo — which is how the same three
+skills came to be authored twice (#4358). The rule, now stated in both repos
+and asserted by `tests/test_served_skills_parity.py`:
+
+| Artifact | Authored in | Enforced by |
+|---|---|---|
+| `how-to-use-tortoise`, `tortoise-decide`, `tortoise-file-finding` | **`daniel-ospina/tortoise-skills-and-integrations`** (MIT, public) | the served copy in `website/apps/dashboard/public/skills/` is DERIVED. Pin: `config/served-skills-upstream.yml`. Gate: `tools/served_skills_parity.py --check` — offline served↔pin in the per-PR suite, plus pin↔upstream-HEAD at the dashboard deploy (`deploy-pages.yml`) and on `skills-parity.yml`'s schedule. Derive: `--sync` |
+| `install-tortoise-skills.sh` | **`daniel-ospina/tortoise`** → `website/apps/dashboard/public/install-tortoise-skills.sh` | #3324 moved its source of truth here deliberately (the MIT repo's copy had gone stale). The MIT repo's remaining `install-tortoise-skills.sh` is a stale v1 duplicate — tracked by **#8747** |
+| `tortoise-onboarding` | **`daniel-ospina/tortoise`** → `tortoise/onboarding/SKILL.md` | byte-identity with its served mirror by `tests/test_onboarding_variants.py::test_m8_deploy_mirror_matches_canonical` + `cmp` in `deploy-pages.yml` (#3673) |
+
+**Why the pin is not vacuous.** A pin-only gate would be satisfied by pinning
+any historical commit, so `--check` also re-fetches the pinned commit's bytes
+and asserts upstream `main` has not moved past it. Both directions are
+mutation-measured (`tests/test_served_skills_parity.py`): a served copy edited
+in place reds the offline arm; an upstream push past the pin reds the currency
+arm; a hand-fabricated pin reds the honesty arm.
+
+**Trigger, and its honest limit.** `deploy-pages.yml` and `skills-parity.yml`
+accept a `repository_dispatch` of type `skills-updated`, so an upstream push
+CAN start the gate. Nothing can send it yet: a workflow in the MIT repo cannot
+authenticate with its own `GITHUB_TOKEN`, so the dispatch needs a narrowly
+scoped credential stored there — **filed as #8748** rather than minted in this
+lane. Until it exists the schedule is the backstop: `skills-parity.yml` runs
+daily and auto-files a deduped issue on drift (the shared `auto-file-issue.sh`
+substrate, #3907), so staleness is bounded at 24 h and never silent.
+
+**Not covered here, deliberately:** `tortoise-onboarding` is not part of the
+pin (it is served but has no upstream counterpart; whether it belongs in a
+public skills repo is still open on #4366's step 5 and #4365), and the
+installer is not mirrored (the two-repo duplicate *is* the defect — #8747).

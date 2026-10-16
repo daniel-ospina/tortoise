@@ -300,6 +300,17 @@ SOURCE_PATTERNS = {
                    # not in `tier1` — the #1349/#3332/#3616 silent-drop class.
                    "website/apps/dashboard/public/skills/",
                    "website/apps/dashboard/public/install-tortoise-skills.sh",
+                   # #4643: the served-skill mirror AND its gate. `tools/` is in
+                   # NON_PYTHON_PREFIXES, so without this entry a
+                   # `served_skills_parity.py`-only change (which is exactly how
+                   # the gate gets weakened) selected NO surface and the gate
+                   # never ran on the edit that can neuter it — the same
+                   # #1349/#2938/#3332 silent-drop class as the served-skill
+                   # entries above. The pin
+                   # (`config/served-skills-upstream.yml`) needs no entry here:
+                   # config/ falls through to `core`, where the gate is also
+                   # registered.
+                   "tools/served_skills_parity.py",
                    # #3517: the capture disclosure's single source of truth and
                    # the non-LLM renderer. Both own guards registered below
                    # (`test_capture_disclosure_template.py`,

@@ -1015,6 +1015,14 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #4643: the served-skill mirror's parity gate. The pin
+  # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
+  # through to `core` — without this registration a pin-only change ran no
+  # parity gate at all (the #1349/#2938/#3332 silent-drop class). The file is
+  # DUAL-REGISTERED with `onboarding` (a served-skill edit selects that surface;
+  # a SOURCE_PATTERNS match REPLACES the `core` fallback in select()) and with
+  # `tier1` (fast, no-DB — so a docs-only PR still grades it).
+  - test_served_skills_parity.py
   - test_2350_validity_precision.py
   # #5142: the ONTOLOGY record of the D10 code half — the `format` markers vs
   # `_SOURCE_HANDLED`, the deferred document/corpus-source node collapse, and
@@ -3079,6 +3087,15 @@ surfaces:
   # `core` would not reach a `public/skills/`-only diff (a SOURCE_PATTERNS match
   # replaces the `core` fallback in select()).
   - test_served_skills.py
+  # #4643: the parity gate for the three skills that are AUTHORED in the MIT
+  # repo `daniel-ospina/tortoise-skills-and-integrations` and served as a DERIVED
+  # mirror here. `website/apps/dashboard/public/skills/` is a SOURCE_PATTERN for
+  # THIS surface, so a served-skill edit selects it; DUAL-REGISTERED with `core`
+  # because the pin (`config/served-skills-upstream.yml`) is a config/ path,
+  # which falls through to `core` — without that arm a pin-only change would
+  # skip the gate that holds it (the #1349/#2938/#3332 silent-drop class).
+  # Also in `tier1`: it is a fast, no-DB file read, so a docs-only PR runs it.
+  - test_served_skills_parity.py
   # `test_dashboard_client_paths_resolve.py` is DUAL-REGISTERED (#4446): a change to
   # `website/apps/dashboard/src/` selects THIS surface and not `api`, and that is the
   # half of the invariant a client edit breaks — registering it only under `api` would
@@ -3698,6 +3715,12 @@ tier1:
 - test_mcp_server_auth_modes.py
 - test_onboard_prompt_ref.py
 - test_onboarding_variants.py
+# #4643: the served-skill mirror vs its MIT-repo author. A fast, no-DB file
+# read (four files + one small YAML pin) with NO network in this arm — the
+# currency half is monkeypatched, and the live call belongs to
+# `deploy-pages.yml` / `skills-parity.yml`. It is exactly the `tier1` shape:
+# a docs-only PR still grades a mirror that can drift on its own.
+- test_served_skills_parity.py
 - test_quota.py
 - test_ranking.py
 - test_ranking_w4b.py
@@ -4239,6 +4262,7 @@ durations:
   test_5048_retract_instant_recorded.py: 2.0  # #5048: same #3400 flat default as the row above and for the same reason — the file is new, so no CI junit measurement exists for it yet (a file that never ran cannot appear in an artifact). Refresh from the first post-merge run that includes it. Its registration is load-bearing for the durations half as well as the surface half: an unregistered new test file reds `integrity_problems`, which is how this row was found (#4348 trap — do not drop it without re-deriving the 90% floor at that head).
   test_7174_param_boundary_numeric_guard.py: 2.0  # #7174: same #3400 flat default as the row above — a new file has no CI junit measurement. MEASURED this turn: WITHOUT this row the durations coverage falls below the 90% floor and `tools/ci_selection.py --integrity` reds; the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_session_capture_status.py: 2.0  # #3520: same #3400 flat default — a file that never ran cannot appear in a junit artifact, so this is NOT a measurement. Required for the durations half as well as the surface half (#4348 trap): an unregistered new test file reds `integrity_problems`. Refresh from the first post-merge main run that includes it.
+  test_served_skills_parity.py: 2.0  # unmeasured — new in #4643; no sweep has collected it, so it carries the flat default exactly as an absent key would (the #3419/#2788 rule). A local timing is deliberately NOT substituted: the weight is a SHARD-LAYOUT input, so only a measured CI junit value for the leg that carries the file models it. Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 0.3
   test_7818_plan_record_5362.py: 2.0  # #7818/#5362: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Hermetic (one plan-doc read, no fixture/DB); refresh from the first post-merge run that includes it. Required for the durations half as well as the surface half (#4348 trap): without this row the durations coverage fell to 89.9% and `tools/ci_selection.py --integrity` red, which is how this row was found.
   test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it, and the file itself is DB-free pure-function work (<0.01s per test; the local session total is conftest/DB setup). Refresh from the first post-merge run that includes it.
