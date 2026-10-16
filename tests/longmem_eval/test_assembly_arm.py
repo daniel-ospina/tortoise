@@ -51,7 +51,7 @@ from tortoise.sdk import TortoiseSDK
 
 _URI = os.environ.get(
     "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
