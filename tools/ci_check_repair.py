@@ -128,7 +128,7 @@ REPO_DEFAULT = "daniel-ospina/tortoise"
 # protection. The live↔record pin is `tools/mergify_config_guard.py` (clause I1,
 # the `live_observed_contexts` half of the record) — NOT
 # `.github/scripts/check-required-set.py`, which is a different instrument: it
-# compares live against `.mergify.yml` and the settings declaration and never
+# compares live against `.mergify.yml` and the repo's settings declaration and never
 # reads this record. Read here as the FALLBACK for when live branch protection is
 # unreadable, which is the normal case inside Actions, where the automatic token
 # has no admin scope.
@@ -301,8 +301,8 @@ def resolve_required(repo: str, record_path: Path, live: bool = True) -> list[st
     the record is the normal Actions path. When BOTH are readable and DISAGREE the
     tool refuses (exit 2). The live↔record pin is `tools/mergify_config_guard.py`
     (clause I1) rather than `.github/scripts/check-required-set.py`, which checks
-    the live set against `.mergify.yml` and the settings declaration instead. Two
-    consequences are recorded rather than hidden:
+    the live set against `.mergify.yml` and the repo's settings declaration instead.
+    Two consequences are recorded rather than hidden:
 
       * the pin is re-read on a QUARTERLY, MANUALLY-OWNED cadence (plan D14), so
         in the window right after a required context is added the record can lag

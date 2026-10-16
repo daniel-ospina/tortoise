@@ -44,15 +44,18 @@ from __future__ import annotations
 
 import sys
 
-# #5128 (same class as tools/ci_check_repair.py): refuse a <3.12 interpreter
-# HERE, before the rest of the imports, so a stale local `python3` fails LOUDLY
-# with a remedy instead of with whichever 3.12-only construct happens to trip
-# first. launchd starts the checkout's PINNED interpreter, but a human running
-# this file by hand can hit the ambient 3.9 that the repo's own tools refuse.
+# #5128 (same class as tools/ci_check_repair.py): refuse a <3.12 interpreter HERE,
+# before the rest of the imports, so a stale ambient `python3` fails LOUDLY with a
+# remedy instead of with an unattributed error. launchd starts the checkout's own
+# pinned interpreter, but a human running this by hand can still hit the host's
+# `/usr/bin/python3` (3.9), and the repo contract is a class-level invariant so one
+# tool cannot regress guard-by-guard. Exit 2, not 1: 1 is reserved for "a PR still
+# needs a repair" — refusing to run is a measurement failure.
 if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
     print(f"tools/ci_check_repair_launchd.py requires Python >= 3.12 (got "
           f"{sys.version_info[0]}.{sys.version_info[1]}) -- run it as "
-          f"`uv run python tools/ci_check_repair_launchd.py`", file=sys.stderr)
+          f"`uv run python tools/ci_check_repair_launchd.py` or point "
+          f"CI_REPAIR_PYTHON at a >= 3.12 interpreter", file=sys.stderr)
     raise SystemExit(2)
 
 import os
