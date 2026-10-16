@@ -40,7 +40,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tortoise.backup import restore  # noqa: I001
+from tortoise.backup import _destination_lock, restore  # noqa: I001
 from tortoise.projection.nonfolded import NonFoldedEventsError
 
 
@@ -379,3 +379,37 @@ def test_different_stores_still_serialise_on_a_shared_journal(
         "the shared journal does not hold restore B's committed result")
     assert store_b.exists(), "restore B's store is missing"
     assert _asides(tmp_path) == [], "rollback asides were left behind"
+
+
+# ── the journal lock is not skipped when the journal IS the store ────────
+
+
+def test_the_journal_lock_is_taken_even_when_the_journal_names_the_store(
+        tmp_path):
+    """#7935 (review P3): FAILS IF: `_destination_lock` skips the JOURNAL lock
+    when `events_path` resolves to `db_path` — the pre-fix condition compared
+    the two RESOURCE paths, but the two locks are DIFFERENT FILES
+    (`<store>.tortoise-construct.lock` vs `<events>.restore.lock`), so no
+    self-deadlock was possible and the only effect of the skip was to drop the
+    journal lock in the one case it fired: a peer restoring into a DIFFERENT
+    store that names this path as its journal is then not excluded.
+    REACHABLE: `_destination_lock` is the seam every restore enters; the test
+    enters it directly with `events_path == db_path` and probes BOTH lock files
+    from fresh fds (`flock` belongs to the file description, so a peer fd in
+    the same process conflicts). Pre-fix the store file is held and the journal
+    file is not; post-fix both are, and both are released at the block's end.
+    """
+    from tortoise.embedded_lifecycle import _construct_lock_path
+
+    store = os.path.realpath(str(tmp_path / "tortoise.db"))
+    store_lock = Path(_construct_lock_path(store))
+    journal_lock = Path(store + ".restore.lock")
+
+    with _destination_lock(store, store):
+        with pytest.raises(BlockingIOError):
+            _flock_probe(store_lock)
+        with pytest.raises(BlockingIOError):
+            _flock_probe(journal_lock)
+
+    _flock_probe(store_lock)      # both released at the block's end
+    _flock_probe(journal_lock)

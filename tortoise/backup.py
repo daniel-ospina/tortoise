@@ -288,16 +288,45 @@ def _destination_lock(db_path: str | None, events_path: str | None = None):
     """
     store_key = _destination_lock_key(db_path)
     journal_key = _journal_lock_key(events_path)
-    from tortoise.embedded_lifecycle import _construction_lock
+    from tortoise.embedded_lifecycle import _construct_lock_path, _construction_lock
+    store_lock_file = (_construct_lock_path(store_key)
+                       if store_key is not None else None)
     with contextlib.ExitStack() as stack:
         if store_key is not None:
             stack.enter_context(_construction_lock(store_key))
-        # Skip the journal lock when it names the SAME lock file as the store
-        # (an `events_path` equal to `db_path`): taking one file's flock twice
-        # on a second fd self-deadlocks.
-        if journal_key is not None and journal_key != store_key:
+        # Compare the LOCK FILES, never the resource paths. The store lock opens
+        # `<store>.tortoise-construct.lock` (or the relocated `:memory:` sidecar)
+        # and the journal lock opens `<journal>.restore.lock`, so the two files
+        # are distinct BY CONSTRUCTION even when `events_path` and `db_path` name
+        # one resource — the only condition under which taking both self-
+        # deadlocks is the same lock FILE twice, which the differing suffixes
+        # make impossible. An earlier revision skipped on `journal_key !=
+        # store_key` (a RESOURCE comparison) and justified it with a shared-lock-
+        # file self-deadlock the suffixes cannot produce, which silently dropped
+        # the journal lock in the one case it fires: `events_path == db_path`,
+        # where a peer restoring into a DIFFERENT store that names that path as
+        # its journal is no longer excluded (#7935's journal axis).
+        if (journal_key is not None
+                and _journal_lock_file(events_path) != store_lock_file):
             stack.enter_context(_journal_lock(events_path))
         yield
+
+
+#: The sidecar suffix `_journal_lock` takes beside the destination journal.
+#: Deliberately distinct from `embedded_lifecycle`'s `.tortoise-construct.lock`
+#: so the store lock and the journal lock can never be one file — which is what
+#: makes `_destination_lock`'s same-file skip a real, checkable condition.
+_JOURNAL_LOCK_SUFFIX = ".restore.lock"
+
+
+def _journal_lock_file(events_path: str) -> str:
+    """The lock FILE `_journal_lock` opens for ``events_path``.
+
+    One derivation, shared by the opener and by `_destination_lock`'s same-file
+    comparison, so the two cannot drift into disagreeing about which file is
+    held.
+    """
+    return os.path.realpath(str(events_path)) + _JOURNAL_LOCK_SUFFIX
 
 
 def _journal_lock_key(events_path: str | None) -> str | None:
@@ -346,7 +375,7 @@ def _journal_lock(events_path: str | None):
         yield
         return
     from tortoise.embedded_lifecycle import _construction_lock
-    with _construction_lock(key, sidecar=key + ".restore.lock"):
+    with _construction_lock(key, sidecar=_journal_lock_file(events_path)):
         yield
 
 

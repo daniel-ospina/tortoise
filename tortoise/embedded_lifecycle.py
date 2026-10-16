@@ -1020,6 +1020,25 @@ def _memory_construct_lock_path() -> str:
                         f"tortoise-memory-construct-{digest}.lock")
 
 
+def _construct_lock_path(key: str) -> str:
+    """The flock file `_open_construct_lock` takes for `key` when no `sidecar`
+    is given.
+
+    One derivation, so a caller that needs to know WHICH file a construction
+    locks (rather than to take it) cannot disagree with the opener: #7935's
+    `_destination_lock` compares this path against the journal lock's file to
+    decide whether taking both would self-deadlock on one file, and a second
+    spelling of the suffix here would make that comparison lie.
+
+    `:memory:` is the one key that is not a filesystem path, so it resolves to
+    the relocated sidecar (see `_memory_construct_lock_path`) rather than
+    littering `<cwd>/:memory:.tortoise-construct.lock`.
+    """
+    if key == _MEMORY_DB_KEY:
+        return _memory_construct_lock_path()
+    return key + ".tortoise-construct.lock"
+
+
 def _open_construct_lock(key: str, *, sidecar: str | None = None) -> int:
     """Open + LOCK_EX the lock file for `key`, or -1 when no lock can be taken.
 
@@ -1056,12 +1075,7 @@ def _open_construct_lock(key: str, *, sidecar: str | None = None) -> int:
     A failure to FLOCK closes the just-opened fd before propagating — the fd
     would otherwise leak on every construction of that key.
     """
-    if sidecar is not None:
-        path = sidecar
-    elif key == _MEMORY_DB_KEY:
-        path = _memory_construct_lock_path()
-    else:
-        path = key + ".tortoise-construct.lock"
+    path = sidecar if sidecar is not None else _construct_lock_path(key)
     try:
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     except FileNotFoundError:
