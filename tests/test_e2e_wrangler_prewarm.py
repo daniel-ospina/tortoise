@@ -72,10 +72,10 @@ _CONTINUATION = re.compile(r"\\\n")
 #: below — the safe direction. Dropping the line instead is what hid a real
 #: invocation from the third review round.
 
-#: ── The pin is read as a WORD ────────────────────────────────────────────────
-#: `wrangler@<spec>` is a pin when it is written as its own word — not preceded by
-#: a word character, `@`, `.` or `-` (so `xwrangler@4` is not a pin: bash would
-#: run a command of that name, not `wrangler@4`) — anywhere in the step.
+#: ── The pin is read as a LITERAL OCCURRENCE ─────────────────────────────────
+#: Every `wrangler@<spec>` in the step is read. There is no lookbehind, no
+#: command-word test, no position test and no line filter: the text is not
+#: interpreted at all.
 #:
 #: This replaced a hand-written shell lexer that STRIPPED comments before reading
 #: the token. Every shell form that lexer had not modelled — `<<'EOF'`, `<<\EOF`,
@@ -84,24 +84,24 @@ _CONTINUATION = re.compile(r"\\\n")
 #: check, i.e. report a green step while shell ran a float. The arms below pin
 #: them.
 #:
-#: The one thing removed from the text is the two characters shell itself removes:
-#: a backslash and the newline after it. Nothing else is dropped, no line is
-#: filtered, and no construct is interpreted, so no construct can suppress a
-#: report — a suppression would need the token not to be a word, and a token that
-#: is not a word is not a `wrangler@` command. What the rule CAN do is over-report,
-#: and each over-report is declared and pinned with the arms.
-#:
-#: WHY NOT "the INVOCATION, not the mention": two earlier drafts tried to require
-#: a command word (`npx …`) or a command POSITION, enumerating `;` `&&` `|` `(`
-#: and then the reserved words. Review rounds 1 and 2 found real invocations they
-#: did not report — `bun x wrangler@4 pages dev`, then `wrangler@4` after `then`,
-#: `do`, `else`, `{`, `time`, `-exec` and the like — every one a false PASS of the
-#: kind this guard exists to prevent. Enumerating where shell may start a command
-#: is a losing game, so the rule no longer enumerates. Review round 3 found the
-#: last instance of the same class in this file: filtering comment LINES hid a pin
-#: inside a here-doc body. Nothing is filtered any more.
-_WORD_START = r"(?<![\w@.\-])"
-_INVOCATION = re.compile(_WORD_START + r"wrangler@")
+#: WHY THIS IS THE FLOOR. Each earlier draft added a rule to tell a pin from a
+#: mention, and every rule could be defeated by text shell interprets but the
+#: rule does not:
+#:   - round 1 — a command word or an enumerated command position: missed
+#:     `bun x wrangler@4 pages dev`, then `wrangler@4` after `then`/`do`/`{`/
+#:     `time`/`-exec` (11 spellings, all of them run by bash);
+#:   - round 3 — a whole-line comment filter: a `#` line inside a here-doc body
+#:     or a multi-line quoted string is DATA, and shell substitutes into it, so
+#:     `cat <<EOF` / `# $(npx --yes wrangler@4 --version)` / `EOF` ran the npx
+#:     while the filter dropped the line;
+#:   - round 4 — a word-boundary lookbehind: `$@wrangler@4` runs `wrangler@4`
+#:     (bash removes an empty `$@`), and the lookbehind read it as mid-word.
+#: A substring search cannot be defeated by any of them, because it does not care
+#: what the text means. What it can do is over-report — a mention in prose, a
+#: quoted string, a commented-out line, a longer word containing the token — and
+#: every over-report is declared and pinned with the arms, because refusing a
+#: correct step is recoverable and passing a floating one is not.
+_INVOCATION = re.compile(r"wrangler@")
 
 #: The spec that follows — or `""` when it is INDIRECT: no literal at all
 #: (`wrangler@$V`, `wrangler@"${V}"`) or a literal cut short by an interpolation
@@ -114,9 +114,9 @@ _INDIRECT_AFTER = ("$", "{")
 
 
 def _wrangler_invocations(run: str) -> set[str]:
-    """Every `wrangler@<spec>` pinned as a word in `run`."""
-    # Shell removes a backslash-newline pair; nothing else is removed, and no line
-    # is filtered — a pin inside a here-doc body or a quoted string is still read.
+    """Every `wrangler@<spec>` written in `run`, as a plain substring."""
+    # Shell removes a backslash-newline pair; nothing else is removed and no line
+    # is filtered — a pin inside a here-doc body or a quoted string is read too.
     text = _CONTINUATION.sub("", run)
     specs: set[str] = set()
     for at in _INVOCATION.finditer(text):
@@ -339,33 +339,33 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     # A shell CONTINUATION makes the two lines one command line.
     assert _floating_wranglers("npx --yes \\\n  wrangler@4 --version") == {"4"}
 
-    # REGRESSION ARMS — A1–A3, A5 and A6 each HID a real float on at least one
-    # revision of the shell lexer this matcher replaced: a quoting or string form
-    # it had not modelled left its state open, so the later `npx` line read as a
-    # comment while bash ran it, and the guard passed. A2 and A3 were still hidden
-    # at the head that merged (#8743, 9378ba130) — the two the merge shipped. A4,
-    # A7 and A8 never hid on any revision and stand as coverage only.
+    # REGRESSION ARMS — inputs where a previous draft of this matcher, or the
+    # shell lexer it replaced, reported nothing while bash executed a floating
+    # `wrangler@4`. (The per-revision history of which draft hid which is NOT
+    # asserted here: it was measured inconsistently across review rounds, so the
+    # arms pin the input, not the provenance.)
     for run in (
         "cat <<'EOF'\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A1
         "cat <<\\EOF\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A2
         "cat <<'A' <<'B'\nA\nDon't\nB\necho 'see #1' && npx --yes wrangler@4 --version",  # A3
-        "cat <<'1'\nDon't\n1\nnpx --yes wrangler@4 --version",  # A4 (coverage)
+        "cat <<'1'\nDon't\n1\nnpx --yes wrangler@4 --version",  # A4
         "echo \"escaped \\\" # note\" && npx --yes wrangler@4 --version",  # A5
         "echo a\\;# x && npx --yes wrangler@4 --version",  # A6
-        "cat <<< word\n# was wrangler@4\nnpx --yes wrangler@4 --version",  # A7 (coverage)
-        "echo x $(cat <<\\EOF\nDont\nEOF\n) && npx --yes wrangler@4 --version",  # A8 (coverage)
-        # The forms that hid a real float from the same lexer on an EARLIER
-        # revision, and were unpinned until review round 3 — each measured to run
-        # the npx under bash:
-        "echo $'x' # note\nnpx --yes wrangler@4 --version",  # A9  ANSI-C then `#`
-        "echo a ;# note && npx --yes wrangler@4 --version",  # A10 plain `;#`
+        "cat <<< word\n# was wrangler@4\nnpx --yes wrangler@4 --version",  # A7
+        "echo x $(cat <<\\EOF\nDont\nEOF\n) && npx --yes wrangler@4 --version",  # A8
+        "echo $'x' # note\nnpx --yes wrangler@4 --version",  # A9  ANSI-C, then `#`
+        "echo a;# (note)\nnpx --yes wrangler@4 --version",  # A10 `;#`, npx on the NEXT line
         'echo "refs \\\n#8743" && npx --yes wrangler@4 --version',  # A11 quote over a continuation
-        # And the round-3 class: a `#` line inside a here-doc body or a quoted
-        # string, which a COMMENT FILTER silently dropped while shell ran it.
+        # The round-3 class: a `#` line inside a here-doc body or a quoted string,
+        # which a COMMENT FILTER dropped while shell substituted into it.
         'echo "prewarm\n# $(npx --yes wrangler@4 --version)\ndone"',  # A12 multi-line double quote
         "cat <<EOF\n# $(npx --yes wrangler@4 --version)\nEOF",  # A13 unquoted here-doc body
         "cat <<EOF\n\t# $(npx --yes wrangler@4 --version)\nEOF",  # A14 tab-indented
         'echo "a\n# `npx --yes wrangler@4 --version`\nb"',  # A15 backticks in a quoted body
+        # The round-4 class: the token was preceded by something a lookbehind read
+        # as "mid-word", but bash removes it and runs `wrangler@4`. `$@` is empty
+        # in a step (bash is invoked with no arguments), so this really runs.
+        "$@wrangler@4 --version",  # A16
     ):
         assert _floating_wranglers(run) == {"4"}, run
 
@@ -402,14 +402,17 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
 
     # DECLARED OVER-REPORT (fail-closed, the safe direction): text that merely
     # NAMES a pin is reported as well as a pin that runs — a TRAILING comment, a
-    # quoted mention, a here-doc body. Refusing a correct step is recoverable by
-    # rewording it; hiding a real invocation from a required check is not, and
-    # the old lexer's attempt to tell the two apart is what produced A1–A6.
+    # quoted string, a here-doc body, and a longer word CONTAINING the token
+    # (`xwrangler@4`, where bash runs a command of that name, not `wrangler@4`).
+    # Refusing a correct step is recoverable by rewording it; hiding a real
+    # invocation from a required check is not, and every draft that tried to tell
+    # the two apart was defeated by a form shell runs and the rule did not.
     assert _floating_wranglers(
         "npx --yes wrangler@4.127.0 --version  # was: npx --yes wrangler@4 --version") == {"4"}
     assert _floating_wranglers("echo wrangler@4 --version") == {"4"}
     assert _floating_wranglers('echo "npx --yes wrangler@4 --version"') == {"4"}
     assert _floating_wranglers("cat <<'EOF'\nnpx --yes wrangler@4 --version\nEOF") == {"4"}
+    assert _floating_wranglers("xwrangler@4 pages dev") == {"4"}
 
     # An INDIRECT spec is floating, never exact — including a literal CUT SHORT by
     # an interpolation, which must not be read as the pin `4.127.`:
