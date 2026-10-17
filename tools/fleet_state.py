@@ -86,8 +86,19 @@ the list WAS read and the lane's workspace is absent, the lane is **terminal**:
   * ``RETIRED``     — no session file resolves; never nudge, never dispatch,
     never route.
 
-A terminal lane is reported (never silently dropped) and is NOT live, NOT free
-and NOT dispatchable. Polarity is fail-OPEN with provenance: an unreadable
+A terminal lane is reported and is NOT live, NOT free and NOT dispatchable.
+"Reported" means never SILENTLY dropped, and it is a statement about ORPHANS: a
+registry row that is not a lane record (#8845) leaves `rows`, but every dropped
+row is published as an orphan of kind `registry-stale` saying which arm dropped
+it — deleting the roster line is a human's call, not this module's. Three arms
+drop and they are NOT one rule: a row whose (label, workspace) repeats one
+already SEEN — kept, or already dropped by another arm — is a DUPLICATE,
+de-duplicated even when the cmux list could not be read (both rows name one
+workspace, so no verdict moves); a row whose workspace is absent from a MEASURED
+list while another row for the label binds evidence is dropped as stale; and a
+second UNBOUND row for a label is dropped so the label is not enumerated twice —
+that one also requires a MEASURED list (it is a retirement, not a de-duplication).
+Polarity is fail-OPEN with provenance: an unreadable
 workspace list retires NOTHING, and ``reconciliation.workspaces_measured`` says
 so — a cmux outage must never hide a real lane, and a fail-open path must not be
 silent.
@@ -1282,7 +1293,183 @@ def build_state(
         p = by_sid.get(sid)
         return Path(p) if p else None
 
-    rows: list[tuple[str, str]] = [(lbl, ws) for lbl, ws, _ in registry]
+    # ---- which registry rows ARE lane records (#8845) ----
+    # A registry row can outlive the cmux workspace behind it. When the row's
+    # workspace is ABSENT from a MEASURED live list and the row binds no evidence
+    # of its own — no pane binding, no session record yielding a LIVE pid — then it
+    # says nothing:
+    # it cannot answer whether the lane stopped, started or was never there.
+    # Emitting it anyway makes ONE label enumerate TWO lane records, and the claim
+    # gate reads a duplicated label as unreadable by construction
+    # (`collision_preflight._holders_from_board` -> HOLDER_UNMEASURED, which is
+    # INCOMPLETE/exit 2 fleet-wide). That is a stale roster row tightening a
+    # fail-closed gate over a lane that is in fact perfectly readable.
+    #
+    # ⛔ So such a row is not a lane record — but only while the SAME label already
+    # has a row that DOES bind evidence of its own. A row that is its label's ONLY
+    # record is KEPT even when unbound: #7738 publishes exactly that lane as
+    # RECOVERABLE/RETIRED, because a gone workspace says nothing about whether a pi
+    # process outlived it. Dropping it would erase the lane #7738 exists to report.
+    #
+    # ⛔ And a drop requires a MEASURED live list: an unreadable cmux list says
+    # nothing about whether the workspace still exists, so it retires NOTHING — the
+    # same fail-open posture `workspace_terminal` takes (#7738).
+    #
+    # ⛔ `overrides` is deliberately NOT consulted here, and this is the trap the
+    # rule has to avoid: it is keyed by LABEL while this question is per ROW, so
+    # `overrides.get(label)` answers identically for every row sharing that label —
+    # once ANY override existed, the stale row would "bind evidence" too, nothing
+    # would be dropped, and the duplicate (and the exit-2 gate) would come straight
+    # back. The override keeps its own meaning elsewhere: it re-binds a ghost's
+    # session on disk, and a label whose only row is unbound is kept anyway.
+    #
+    # ⛔ And the session arm needs a READING, not a stored ROW. `cmux sessions list
+    # --all` is a durable HISTORY: it keeps records whose session has ENDED — which
+    # is exactly why the liveness read below (`running`, `alive_pids`) filters the
+    # same records instead of trusting them. So the mere EXISTENCE of a record for
+    # this workspace proves nothing; only a record whose pid is alive right now is
+    # the "pid reading" this arm claims to be. Accepting a finished record kept the
+    # duplicate — and the exit-2 gate it causes — alive for precisely the #7738
+    # ghost shape this rule exists to remove (review of #8849).
+    #
+    # Every dropped row is REPORTED through `orphans` below (kind `registry-stale`),
+    # never silently erased: deleting the roster line is a human's call, not ours.
+    def usable_pid_record(rec: Any) -> bool:
+        """A stored session row that yields a USABLE reading: its pid is alive NOW."""
+        if not isinstance(rec, dict):
+            return False
+        try:
+            pid = int(rec.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        # `agent_lifecycle` is deliberately NOT required to say "running": a
+        # workspace holds several records (a stale lifecycle field, a respawn, a
+        # child) and a live lane must not read dead because of one of them (#8). The
+        # alive pid IS the reading; a dead or absent one is not.
+        return pid_alive(pid)
+
+    def row_binds_evidence(ws: str) -> bool:
+        """Does this registry ROW bind evidence of its own? (ROW-keyed — see above.)"""
+        if ws.upper() in workspaces:
+            return True                      # the workspace itself is live
+        if (bindings.get(ws.upper()) or "").strip():
+            return True                      # a pane resume binding exists
+        # a session record -> a pid reading, but ONLY while that pid is alive
+        return any(usable_pid_record(r) for r in live.get(ws.upper(), []))
+
+    bound_rows_by_label: dict[str, int] = {}
+    issue_label_by_label: dict[str, str] = {}
+    for label, ws, issue_label in registry:
+        if row_binds_evidence(ws):
+            bound_rows_by_label[label] = bound_rows_by_label.get(label, 0) + 1
+        # `issue_label` is the ONLY column two rows identical under
+        # (label, workspace) can differ in, so it is the one place "last-wins" is
+        # observable. The LAST non-empty value wins: a registrar that appends a
+        # corrected line leaves the correction at the END, and first-wins would
+        # publish the stale label and then tell the human to delete the row that
+        # carries the corrected one (review of #8849, cycle 3).
+        if issue_label:
+            issue_label_by_label[label] = issue_label
+        # Exact duplicates are the ONE place last-wins applies, and it has to be
+        # applied to the KEPT tuple: a registrar that appends a corrected line
+        # leaves the correction at the end, and first-wins would publish the stale
+        # label and then tell the human to delete the row carrying the correction.
+
+    kept: list[tuple[str, str, str]] = []
+    stale_rows: list[dict[str, Any]] = []
+    unbound_kept: set[str] = set()
+    seen_rows: set[tuple[str, str]] = set()
+    kept_keys: set[tuple[str, str]] = set()
+    kept_pos: dict[tuple[str, str], int] = {}
+    for label, ws, issue_label in registry:
+        evidence = row_binds_evidence(ws)
+        # (0) THE SAME (label, workspace) TWICE IS ONE LANE WRITTEN TWICE — a
+        # duplicated roster line, or a registrar re-run appending instead of
+        # replacing. Both copies bind identical evidence (they name the same
+        # workspace), so they produce IDENTICAL records: last-wins is lossless and
+        # arm (a)'s justification ("two BOUND records can disagree about
+        # liveness") does not apply, because they cannot disagree. Without this,
+        # arm (a) refuses to dedupe exactly the case it must, the label still
+        # enumerates two lane records, and the claim gate returns
+        # HOLDER_UNMEASURED -> exit 2 on a perfectly readable lane — the failure
+        # #8845 exists to remove (review of #8849).
+        if (label, ws.upper()) in seen_rows:
+            # LAST-WINS for the one column two duplicate rows can differ in (see the
+            # comment in the loop above): adopt this row's non-empty `lane:` label on
+            # the copy that was kept, then report the dropped line.
+            _pos = kept_pos.get((label, ws.upper()))
+            if issue_label and _pos is not None:
+                kept[_pos] = (label, ws, issue_label)
+            stale_rows.append({
+                "lane": label, "workspace": ws, "issue_label": issue_label,
+                "arm": "duplicate",
+                "carries": issue_label,
+                # ⛔ THE TWIN MAY ALREADY HAVE BEEN DROPPED by arm (a) — `seen_rows`
+                # is populated before the arm decision, so a ghost row and its
+                # literal copy can take DIFFERENT arms. The sentence therefore must
+                # not assert "one lane record remains" unless one actually does
+                # (review of #8849, cycle 3).
+                "twin_kept": (label, ws.upper()) in kept_keys,
+                "why": "it repeats this label's row for the same workspace",
+            })
+            continue
+        seen_rows.add((label, ws.upper()))
+        if workspaces_measured and not evidence:
+            # (a) ANOTHER row for this label binds evidence on its own, so dropping
+            # this one cannot erase the lane from the board.
+            if bound_rows_by_label.get(label, 0) > 0:
+                stale_rows.append({
+                    "lane": label, "workspace": ws, "issue_label": issue_label,
+                    "arm": "other-row-binds",
+                    "why": "another row for this label does bind evidence",
+                })
+                continue
+            # (b) TWO UNBOUND ROWS FOR ONE LABEL ARE ONE LANE ENUMERATED TWICE — the
+            # same duplicated-label defect by a second route. Keep the first (a lone
+            # ghost row must stay published, #7738) and report the rest. Both rows are
+            # empty shells by construction here (not live, no pane binding, no session
+            # record), so nothing is lost by keeping one.
+            #
+            # ⚠️ PRECONDITION, the same one arm (a) has: this runs only when the live
+            # list was READ. With an unreadable cmux list nothing is retired, so both
+            # rows survive and the claim gate reports the label as duplicated — which
+            # is the honest reading of a board that could not be built, not a state
+            # this filter is able to improve on.
+            if label in unbound_kept:
+                stale_rows.append({
+                    "lane": label, "workspace": ws, "issue_label": issue_label,
+                    "arm": "second-unbound",
+                    "why": "it is a second unbound row for the same label",
+                })
+                continue
+            unbound_kept.add(label)
+        kept.append((label, ws, issue_label))
+        kept_keys.add((label, ws.upper()))
+        kept_pos[(label, ws.upper())] = len(kept) - 1
+    # A dropped row may be the only one carrying the label's `lane:` label; the
+    # surviving row inherits it rather than losing it — but ONLY when the survivor
+    # has none of its own. The survivor's own value always wins: otherwise a row the
+    # board has just classified as "not a lane record", for a DIFFERENT workspace,
+    # would author the surviving lane's label and then the orphan would tell the
+    # human to delete that very row — following the instruction would silently
+    # change the published label (review of #8849, cycle 4).
+    # ⛔ CAPTURE OWNERSHIP BEFORE THE FOLD. After it, a row's `lane:` value may be an
+    # INHERITED one, so a set built from the folded list answers "did this label end up
+    # with any value" — not "does a surviving row OWN one". Building it after the fold
+    # made the revert warning unreachable and brought back a real revert (review of
+    # #8849, cycle 10): with `[(L, STALE, lane:anc), (L, LIVE, ""), (L, STALE,
+    # lane:anc2)]` — or `[(L, STALE, ""), (L, LIVE, ""), (L, STALE, lane:x)]` — the
+    # board published a dropped line's value while the orphan said "delete the duplicate
+    # roster line", and deleting it reverted the label.
+    labels_owning_own_label: set[str] = {
+        label for label, _ws, issue_label in kept if issue_label
+    }
+    kept = [
+        (label, ws, issue_label or issue_label_by_label.get(label, ""))
+        for label, ws, issue_label in kept
+    ]
+
+    rows: list[tuple[str, str]] = [(lbl, ws) for lbl, ws, _ in kept]
 
     # ---- disk candidates: ONLY for lanes the pane/override rules did not bind.
     # The identity scan reads the first user message of every file in a lane's
@@ -1348,7 +1535,7 @@ def build_state(
     owner_of_pr: dict[int, str | None] = {}
     issue_owner: dict[int, list[str]] = {}
 
-    for label, ws, issue_label in registry:
+    for label, ws, issue_label in kept:
         wsinfo = workspaces.get(ws.upper(), {}) or {}
         cwd = wsinfo.get("cwd") or ""
         wt = wts.get(cwd, {}) or {}
@@ -1357,7 +1544,9 @@ def build_state(
         res = resolutions.get(label, SessionResolution(None, SOURCE_UNKNOWN, None, "not in registry"))
         # #7738: a lane whose cmux workspace no longer exists cannot keep a live
         # verdict. The verdict is terminal — RECOVERABLE (a session survives on
-        # disk) or RETIRED — and is reported, never silently dropped.
+        # disk) or RETIRED — and is reported. A row dropped as a lane record above
+        # (#8845) never reaches this function at all; that is why "reported, never
+        # silently dropped" is a statement about ORPHANS, not about `rows`.
         terminal = workspace_terminal(ws, workspaces, workspaces_measured, res)
 
         # live process: a lane is alive if ANY recorded pi pid for its workspace is
@@ -1563,6 +1752,179 @@ def build_state(
                 "workspace": lane_["identity"]["workspace"],
                 "reason": "live pi session has NO pane resume binding — recovery destroyed attributability (#7750 D2)",
             })
+    # a third orphan class (#8845): a registry row that is NOT a lane record. It can
+    # be one of two things — a row whose workspace is gone for a label another row
+    # already answers, or a second unbound row repeating a label — and it is still
+    # VISIBLE here either way: the roster line is stale, and clearing it is a human's
+    # call.
+    # ⛔ THE PUBLISHED VALUE MUST COME FROM THE FINAL BOARD, not from the running
+    # tuple. `kept[_pos]` is overwritten by every later duplicate that carries a
+    # value, so a message that names "the published value" from the state at its own
+    # point in the loop is FALSE at three or more copies — measured: `[lane:a, "",
+    # lane:b]` publishes `lane:b` while the middle row's orphan said `lane:a` "is what
+    # the board publishes" (review of #8849, cycle 8). `kept` is already the
+    # post-rebuild list here, so this map IS the answer, for any number of copies.
+    published_by_ws: dict[tuple[str, str], str] = {
+        (lbl, ws.upper()): ilbl for lbl, ws, ilbl in kept
+    }
+    # Labels where a SURVIVING row OWNS a `lane:` value — captured BEFORE the
+    # inheritance fold (see there). Inheritance is own-wins, so a dropped row's value
+    # is irrelevant to such a label; warning about a revert there would tell the human
+    # to keep a row the board has already classified as not a lane record.
+    def sole_carrier_value(row: dict[str, Any]) -> str:
+        """
+        The `lane:` value this row is the SOLE CARRIER of, or ``""`` if none.
+
+        ⛔ EVERY arm needs this test, not just `duplicate`. A dropped row can be the
+        label's sole carrier of the `lane:` value: the surviving row inherits it, so the
+        board PUBLISHES a value that lived only on the line the human is told to delete
+        — and obeying that instruction silently reverts the label (review of #8849).
+
+        Two conditions, and both are needed:
+        * OWNERSHIP — no surviving row owns a value, so the label's value can only come
+          from a dropped line (own-wins would otherwise make this row's value moot);
+        * EQUALITY with the value that inheritance would publish (`issue_label_by_label`
+          is last-non-empty-wins across the registry). With three or more dropped
+          carriers they disagree, and naming one the board does NOT publish would send
+          the human to move a value that changes the label.
+        `published_by_ws` cannot answer this: in the `twin_kept=False` path that
+        workspace has no kept row, so its lookup is always `""`.
+        """
+        own = row.get("issue_label") or ""
+        if (
+            own
+            and row["lane"] not in labels_owning_own_label
+            and own == issue_label_by_label.get(row["lane"])
+        ):
+            return own
+        return ""
+
+    def delete_advice(row: dict[str, Any]) -> str:
+        """The per-row delete instruction, with the revert warning when it is owed.
+
+        Used by the two non-duplicate arms; `duplicate` branches on the same predicate
+        but keeps its own (longer) sentence.
+        """
+        value = sole_carrier_value(row)
+        if value:
+            return (
+                f"⛔ The board publishes `{value}` for this label only because this "
+                "dropped line carries it — the surviving row inherits it. Keep this "
+                "line, or move that value onto the surviving row BEFORE deleting it, "
+                "or the label reverts"
+            )
+        return "Delete the stale roster row"
+    for row in stale_rows:
+        ws_gone = f"workspace {row['workspace'][:8]}…" if row["workspace"] else "its workspace"
+        arm = row.get("arm")
+        # ⛔ THE SENTENCE MUST BE BUILT PER ARM. The three arms drop for different
+        # reasons, and one template told all of them the same story: that the
+        # workspace is NOT in the live cmux list and the row binds NO evidence. For
+        # arm `duplicate` both clauses are FALSE — that row's workspace IS live (it
+        # is the same live row, written twice), so a human was told to delete a
+        # roster line because its workspace was dead while the board showed it alive
+        # (review of #8849).
+        if arm == "duplicate":
+            _carries = row.get("carries") or ""
+            _published = published_by_ws.get(
+                (row["lane"], (row.get("workspace") or "").upper()), ""
+            )
+            if row.get("twin_kept"):
+                # ⛔ BRANCH ON THE FINAL PUBLISHED VALUE, not on the reported row's
+                # value alone (which said "Neither line carries a `lane:` value"
+                # when the KEPT line carried it) and not on the running tuple
+                # (which is stale at 3+ copies). Both faults printed a value the
+                # board does not publish (review of #8849, cycles 7 and 8).
+                if _carries and _published == _carries:
+                    _advice = (
+                        f"This line carries `{_carries}`, which IS the value the "
+                        "board publishes. Keep a line carrying that value — this "
+                        "one — and delete the other copy"
+                    )
+                elif _carries:
+                    _advice = (
+                        f"This line carries `{_carries}`, but the board publishes "
+                        f"`{_published}` (from another line for this (label, "
+                        "workspace)). Delete this line — or, if that value is the "
+                        f"intended one, put `{_carries}` on the line you keep"
+                    )
+                elif _published:
+                    _advice = (
+                        "This line carries no `lane:` value; the board publishes "
+                        f"`{_published}` from another line for this (label, "
+                        "workspace). Delete THIS line"
+                    )
+                else:
+                    _advice = (
+                        "Neither this line nor the one the board uses carries a "
+                        "`lane:` value, so either may be deleted"
+                    )
+                reason = (
+                    f"registry row for '{row['lane']}' repeats {ws_gone} — the same "
+                    "(label, workspace) written twice is ONE lane, not two; the "
+                    "duplicate is not a second lane record and NO verdict changes "
+                    "(only the repeated line goes away, not a lane). This is a "
+                    "de-duplication, not a retirement: it holds even when the cmux "
+                    "list could not be read, because both rows name one workspace. "
+                    f"{_advice}"
+                )
+            else:
+                # The twin was dropped by another arm, so this drop is NOT a plain
+                # de-duplication — say so, and do not claim a record survives.
+                # ⛔ AND THIS ROW MAY BE THE ONLY CARRIER of the label's `lane:`
+                # value, which the board publishes via inheritance: a bare "delete
+                # the duplicate roster line" would revert the label, the very
+                # failure the sibling branch is written to prevent (cycle 6).
+                # ⛔ AND THIS ROW MAY BE THE ONE THE PUBLISHED VALUE COMES FROM. The
+                # gate is OWNERSHIP plus the published value: if no surviving row owns a
+                # `lane:` value, the published one comes from a dropped line like this
+                # and deleting it reverts the label. Testing the published value ALONE is
+                # wrong (it matches when a survivor OWNS that value too, and
+                # `published_by_ws` is always "" here — there is no kept row for this
+                # workspace), and reading the owner set AFTER the inheritance fold is
+                # wrong too — it then contains the inherited value and the gate never
+                # fires (review of #8849, cycles 8 and 10).
+                if sole_carrier_value(row):
+                    reason = (
+                        f"registry row for '{row['lane']}' repeats {ws_gone}, "
+                        "and the copy of this row was ALREADY dropped above for its "
+                        "own reason — read that entry, which is the one that explains "
+                        "why this workspace is no longer a lane record. ⛔ The board "
+                        f"publishes `{_carries}` only because this dropped line "
+                        "carries it — keep this line, or move that value onto the "
+                        "surviving row BEFORE deleting it, or the label reverts"
+                    )
+                else:
+                    reason = (
+                        f"registry row for '{row['lane']}' repeats {ws_gone}, "
+                        "and the copy of this row was ALREADY dropped above for its "
+                        "own reason — read that entry, which is the one that explains "
+                        "why this workspace is no longer a lane record. Delete the "
+                        "duplicate roster line"
+                    )
+        elif arm == "second-unbound":
+            reason = (
+                f"registry row for '{row['lane']}' names {ws_gone}, which is NOT in "
+                "the live cmux list and binds no pane binding or session record with "
+                "a LIVE pid, so it is not a lane record; it repeats a label that "
+                "already has one such row kept, and two unbound rows for one label "
+                "are one lane enumerated twice. "
+                f"{delete_advice(row)}"
+            )
+        else:
+            reason = (
+                f"registry row for '{row['lane']}' names {ws_gone}, which is NOT in "
+                "the live cmux list, and the row binds NO pane binding or session "
+                "record with a LIVE pid of its own — it is not a lane record "
+                f"({row.get('why') or 'a row for this label does bind evidence'}); "
+                f"{delete_advice(row)}"
+            )
+        orphans.append({
+            "kind": "registry-stale",
+            "lane": row["lane"],
+            "workspace": row["workspace"],
+            "reason": reason,
+        })
 
     # index for `who`
     index: dict[str, dict[str, Any]] = {"prs": {}, "issues": {}}
@@ -1630,6 +1992,7 @@ def build_state(
             "free_lanes": free_lanes,
             "violations": len(violations),
             "orphans": len(orphans),
+            "stale_registry": len(stale_rows),
             "conflicts": len(conflicts),
             "terminal": len(terminal_lanes),
             "recoverable": sum(1 for t in terminal_lanes if t["state"] == "RECOVERABLE"),
@@ -2226,6 +2589,22 @@ def cmd_conflicts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stale_registry_match(state: Mapping[str, Any], needle: str) -> dict[str, Any] | None:
+    """The `registry-stale` orphan row matching `needle` (lane label or workspace).
+
+    Tolerates a state written before #8845 (no such rows) and a malformed
+    `orphans` value: an unreadable entry is not a match.
+    """
+    n = needle.lower().strip()
+    orphans = state.get("orphans")
+    for o in orphans if isinstance(orphans, (list, tuple)) else ():
+        if not isinstance(o, dict) or o.get("kind") != "registry-stale":
+            continue
+        if str(o.get("lane") or "").lower() == n or str(o.get("workspace") or "").lower() == n:
+            return o
+    return None
+
+
 def _find_lane(state: Mapping[str, Any], needle: str) -> dict[str, Any] | None:
     n = needle.lower().strip()
     for lane_ in state["lanes"]:
@@ -2249,6 +2628,25 @@ def cmd_lane(args: argparse.Namespace) -> int:
         return 2
     lane = _find_lane(state, args.lane)
     if lane is None:
+        # A stale roster row is NOT a lane (#8845) — say so, rather than manufacturing
+        # the same "no lane matching" answer an unknown name gets. The two are
+        # different facts: one name EXISTS in the roster and has nothing behind it.
+        stale = _stale_registry_match(state, args.lane)
+        if stale:
+            # `workspace` is read through `.get`: `_stale_registry_match` tolerates a
+            # malformed entry (a hand-edited or corrupt cached state), so its only
+            # consumer must not be the one place that raises `KeyError` on one.
+            stale_ws = str(stale.get("workspace") or "")
+            where = f"workspace {stale_ws[:8]}…" if stale_ws else "the workspace it names"
+            print(
+                f"{args.lane!r} is a STALE REGISTRY ROW, not a lane: {where} "
+                "is absent from the live cmux list and the row "
+                "binds no pane binding or session record with a LIVE pid of its own "
+                "(#8845) — delete the roster row; "
+                "`python tools/fleet_state.py orphans` lists it",
+                file=sys.stderr,
+            )
+            return 1
         print(f"no lane matching {args.lane!r}", file=sys.stderr)
         return 1
     # `lane`'s identity/session/liveness sections are lane-derived and valid whatever
@@ -2364,10 +2762,23 @@ def cmd_orphans(args: argparse.Namespace) -> int:
 
 def cmd_violations(args: argparse.Namespace) -> int:
     state = _load_or_build(args)
-    # `violations` comes from `resolve_sessions(rows, ...)`, where `rows` is exactly
-    # `load_registry()`'s output: an unreadable registry yields zero rows, hence zero
-    # claimed sessions, hence zero violations — the old code printed `none` on rc=0,
-    # byte-identical to a measured, genuinely-clean roster (PR #8594 review P2).
+    # `violations` comes from `resolve_sessions(rows, ...)`, and `rows` is the rows
+    # that SURVIVED the #8845 filter — NOT `load_registry()`'s output any more.
+    # (It was that before #8845; a comment claiming it still is would tell a reader
+    # that no roster row can be missing, which is false.) What survives is:
+    # kept ⊆ registry, and EVERY arm leaves at least one row per label, so the label
+    # set that `violations` keys on is preserved. The guarantee is not a
+    # monotonicity claim — the duplicate arm can REMOVE a violation (two identical
+    # rows for one workspace made `resolve_sessions` report a bogus
+    # "one session, many lanes" against the label itself), which is the right
+    # behaviour but is still a reduction, not an increase. What holds is narrower and
+    # is what matters: no arm can HIDE a genuine break. The other inputs are not
+    # label-keyed — `disk_by_label` is built AFTER the filter from the surviving rows
+    # and is derived per WORKSPACE, `pane_sid_by_ws` is workspace-keyed too, and only
+    # `override_sid_by_label` is label-keyed. An unreadable registry still yields zero
+    # rows, hence zero claimed sessions, hence zero violations — the old code printed
+    # `none` on rc=0, byte-identical to a measured, genuinely-clean roster (PR #8594
+    # review P2).
     if not _registry_readable(state, "violations", "cannot detect session-partition breaks"):
         return 2
     print(json.dumps(state["violations"], indent=2) if args.json else "\n".join(

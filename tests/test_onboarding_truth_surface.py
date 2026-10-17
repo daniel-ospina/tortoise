@@ -45,6 +45,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tortoise import hosted_api as ha
 from tortoise.hosted_api import (
     app,
@@ -131,7 +132,7 @@ class TestCheckpointStepRequiresAgentCredential:
         monkeypatch.setattr(ha._os, "write_completed_step", _writer)
         _set_dependency(credential)
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 r = tc.post(_resolved_path("onboarding_checkpoint"),
                             json={"step": step})
         finally:
@@ -228,7 +229,7 @@ class TestCheckpointStepRequiresAgentCredential:
             ha._os, "clear_fork_unsure_at", lambda proj, oid: None)
         _set_dependency(_SESSION)
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 r = tc.post(_resolved_path("onboarding_checkpoint"),
                             json={"fork": "self"})
         finally:
@@ -371,7 +372,7 @@ class TestPatchRefusesFabricatedReceipt:
         monkeypatch.setattr(ha, "_org_email", lambda oid: None)
         _set_dependency(credential)
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 r = tc.patch(_resolved_path("patch_onboarding_state"),
                              json={field: "2026-01-01T00:00:00Z"})
         finally:
@@ -390,7 +391,7 @@ class TestPatchRefusesFabricatedReceipt:
         monkeypatch.setattr(ha, "_org_email", lambda oid: None)
         _set_dependency(_AGENT)
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 r = tc.patch(_resolved_path("patch_onboarding_state"),
                              json={"prompt_pasted": True})
         finally:
@@ -457,7 +458,7 @@ class TestCaptureReceiptHarnessResolution:
                 lambda: dict(holder["org"]))
             monkeypatch.setattr(ha, "_update_onboarding_state", _spy)
             try:
-                with TestClient(app) as tc:
+                with verdict_client(app) as tc:
                     yield tc, holder, seen
             finally:
                 # never leak the auth override into the next test (the
@@ -882,7 +883,7 @@ def _post_point_request(credential):
     """POST /v1/points under the given credential, clearing the override."""
     _set_dependency(credential)
     try:
-        with TestClient(app) as tc:
+        with verdict_client(app) as tc:
             return tc.post(_resolved_path("create_point"),
                            json={"content": "first memory",
                                  "kind": "statement"})
@@ -1105,3 +1106,35 @@ def test_install_probe_server_owned_keys_are_derived_from_the_registry():
         "the derivation changed more than the newly registered probe: "
         f"{sorted(extended - ha._CAPTURE_SERVER_OWNED_KEYS)}")
     assert probes <= ha._PATCH_SERVER_OWNED_KEYS
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seam.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. The conversion is on the client
+    CONSTRUCTION, not on one route, so the seam covers every read this file
+    binds from it — ``POST /v1/onboarding/state/checkpoint`` (two sites, via
+    ``_resolved_path("onboarding_checkpoint")``), ``PATCH /v1/onboarding/state``
+    (two, via ``_resolved_path("patch_onboarding_state")``),
+    ``POST /v1/sessions`` (``TestCaptureReceiptHarnessResolution.env``, via
+    ``_resolved_path("capture_session")``) and ``POST /v1/points`` (the
+    ``_post_point_request`` helper) — and none of them is exempt from the bound. The plain-client control is the non-vacuity leg: it
+    is the exact ``assert 504 == 200`` shape this conversion removes, and it
+    goes RED if the route is ever exempted (the middleware stops refusing, so
+    the control's 504 assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/onboarding/state/checkpoint")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/onboarding/state/checkpoint answered" in message

@@ -14,8 +14,12 @@ cd "$SCRIPT_DIR"
 if [ ! -d node_modules ]; then npm ci; fi
 npm run build
 # #8816: the version has ONE home. The path climbs from the dashboard app to the
-# repo root, and we ASSERT what npm resolved: a declared "4" resolves to 4.151.1
-# and fails, where a bare `npx wrangler` would silently deploy whatever is latest.
+# repo root, and we ASSERT what npm resolved: a declared "4" fails the comparison
+# whatever the npm cache holds (`wrangler --version` never prints a bare "4"). What
+# this line CANNOT see is a float SPELLING on the command line (`npx wrangler@4`):
+# a warm cache can serve the pinned tarball for it and print the pin itself, so the
+# guard's text arms — not this line — forbid that spelling, where a bare `npx
+# wrangler` would silently deploy whatever is latest.
 WRANGLER_VERSION="$(cat "$SCRIPT_DIR/../../../config/wrangler-version")"
 : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
 got="$(npx --yes "wrangler@${WRANGLER_VERSION:?}" --version | tr -d '[:space:]')"
