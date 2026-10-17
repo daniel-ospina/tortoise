@@ -4611,10 +4611,11 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
   test_collision_preflight.py: 3.6
-  # #8051: 98 tests. 330.0 is from LOCAL readings on this
+  # #8051: 101 tests. 330.0 is from LOCAL readings on this
   # fleet-loaded host (subprocess + real-git harness): 173s / 182s at 61 tests
   # (head 876dabfe), 187s at 69, 192s at 76, 198s at 79, 223s at 82, 241s at 83,
-  # 250s at 83, 227s at 87, 323s at 90, 273s at 92, 234s at 94. The weight this
+  # 250s at 83, 227s at 87, 323s at 90, 273s at 92, 234s at 94, 288s / 295s at 98,
+  # 318s at 101. The weight this
   # replaces — 160.0, published with an "88-169s" range — sat BELOW every one of
   # those readings; each superseded weight (185.0 / 250.0 / 260.0) was overtaken by
   # a later reading (worst 323s at 90 tests), so 330.0 is above every reading and

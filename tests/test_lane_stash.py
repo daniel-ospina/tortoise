@@ -716,6 +716,70 @@ def test_prune_reclaims_this_lanes_own_popped_entries(repo):
     assert "SAFE" in check.stdout
 
 
+def test_prune_names_the_exact_peer_handle_it_leaves_behind(repo):
+    """The `remove` line must name a ref that EXISTS and a `pop` id that works.
+
+    The first version printed a literal ``<n>`` placeholder and advised a bare
+    `lane_stash pop` — which restores ``entries[-1]``, not the entry the line is
+    about. A peer holding TWO pins therefore got advice that restored the other
+    entry: the same "advice that can only resolve to a different entry" defect
+    this PR fixes in `recover`, reintroduced in a new message (#8822 review P2).
+    """
+    repo.dirty(repo.b, "f.txt", "base\nb-one\n")
+    assert repo.lane(repo.b, "push", "-m", "B one").returncode == 0
+    repo.dirty(repo.b, "f.txt", "base\nb-two\n")
+    assert repo.lane(repo.b, "push", "-m", "B two").returncode == 0
+    pins = repo.stash_pins()
+    assert len(pins) == 2, pins
+    key_b = next(iter(pins)).split("/")[2]
+    assert key_b.startswith("wtB-"), key_b
+
+    cp = repo.lane(repo.a, "prune", "--apply")
+    assert cp.returncode == 0, _fail(cp)
+    lines = [ln for ln in cp.stdout.splitlines() if ln.startswith("  remove ")]
+    assert len(lines) == 2, cp.stdout
+    for ref in pins:
+        n = ref.rsplit("/", 1)[1]
+        named = [ln for ln in lines if ref in ln]
+        assert len(named) == 1, (ref, cp.stdout)
+        assert f"`lane_stash pop {n}`" in named[0], named[0]
+    assert "stash/<n>" not in cp.stdout, cp.stdout
+    # nothing was lost, and the printed ids really restore those very entries
+    assert sorted(repo.stash_pins()) == sorted(pins), repo.lane_refs()
+    assert repo.lane(repo.b, "pop", "2").returncode == 0
+    assert "b-two" in (repo.b / "f.txt").read_text()
+
+
+def test_prune_says_a_peer_applied_record_already_restored_the_work(repo):
+    """A peer's APPLIED record is not a pin — do not tell the reader to `pop` it.
+
+    `_foreign_pin_owners` returns any lane-owned ref, and
+    ``refs/lane/<key>/applied/<sha>`` is one. The first version then promised
+    "refs/lane/<key>/stash/<n>" (a ref that does not exist) and "that lane's
+    `lane_stash pop` restores it", but that lane has no pin, so `pop` exits 2 —
+    a wrong instruction for a state this tool's own `recover` can no longer create
+    but older worktrees still hold (#8822 review P2).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nb-legacy\n")
+    repo.git("stash", "push", "-q", "-m", "B bare", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    key_a, key_b = mod.lane_key(repo.a), mod.lane_key(repo.b)
+    # the legacy double-claim: A's pin makes the row reclaimable, B's only handle is
+    # the applied record `pop` writes — no pin of B's exists anywhere.
+    repo.git("update-ref", f"refs/lane/{key_a}/stash/9", sha)
+    repo.git("update-ref", f"refs/lane/{key_b}/applied/{sha}", sha)
+    assert repo.lane(repo.b, "pop").returncode == 2, "precondition: B has no pin to pop"
+
+    cp = repo.lane(repo.a, "prune", "--apply")
+    assert cp.returncode == 0, _fail(cp)
+    assert f"refs/lane/{key_b}/applied/{sha}" in cp.stdout, cp.stdout
+    assert "already restored" in cp.stdout, cp.stdout
+    assert "stash/<n>" not in cp.stdout, cp.stdout
+    assert "lane_stash pop" not in cp.stdout, cp.stdout
+
+
 def test_prune_output_names_the_foreign_lane_that_still_holds_the_entry(repo):
     """Reclaiming a row pinned by a PEER must say where the work still lives.
 
@@ -1772,6 +1836,43 @@ def test_recover_refuses_a_peer_marker_after_its_pin_is_released(repo):
     assert "refusing to recover" in cp.stderr, cp.stderr
     assert repo.lane_refs() == {}, "the refusal must not pin a peer-marked entry"
     assert repo.stash_shas() == [sha_b], "the register must be untouched"
+
+
+def test_check_and_recover_refuse_a_peer_ref_on_a_marker_less_entry(repo):
+    """A foreign lane REF must outrank a local pin even with NO message marker.
+
+    `_entry_ownership` step 1 says a foreign lane ref is decisive — but every other
+    test for that precedence uses an entry that ALSO carries a peer `[<lane-key>]`
+    marker, so the MARKER branch answered and the REF branch could be deleted with
+    the whole file still green (#8822 review: a mutation of `_foreign_owner`'s
+    `if foreign:` left 98 passed). The ref branch is load-bearing exactly for a
+    peer's BARE `git stash push` — marker-less by construction — pinned by two
+    lanes: the state a cross-lane `recover` used to mint, i.e. the #8773 P1 harm.
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nb-secret\n")
+    repo.git("stash", "push", "-q", "-m", "B bare", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    subject = repo.git("log", "-1", "--format=%s", sha).stdout.strip()
+    assert "[wt" not in subject, f"precondition: marker-less, got {subject!r}"
+    key_a, key_b = mod.lane_key(repo.a), mod.lane_key(repo.b)
+    # the legacy double-pin: B's own ref AND A's, no lane marker anywhere
+    repo.git("update-ref", f"refs/lane/{key_a}/stash/9", sha)
+    repo.git("update-ref", f"refs/lane/{key_b}/stash/9", sha)
+    before = repo.lane_refs()
+
+    check = repo.lane(repo.a, "check")
+    assert check.returncode == 1, _fail(check)
+    assert "SAFE" not in check.stdout, check.stdout
+    assert "another lane's ref" in check.stdout, check.stdout
+    assert key_b in check.stdout, check.stdout
+
+    cp = repo.lane(repo.a, "recover", sha)
+    assert cp.returncode == 2, _fail(cp)
+    assert "another lane's ref" in cp.stderr, cp.stderr
+    assert repo.lane_refs() == before, "the refusal must not mint anything"
+    assert repo.stash_shas() == [sha], repo.stash_shas()
 
 
 def test_check_fails_closed_when_a_local_pin_claims_a_peer_marked_entry(repo):

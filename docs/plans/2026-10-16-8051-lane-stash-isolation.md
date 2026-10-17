@@ -201,9 +201,9 @@ One primitive, in `tools/lane_stash.py`:
   register, which releases **only its own** guard because a foreign guard for the same sha may belong
   to a concurrent prune that is still deleting positions, and "in the register" is exactly the
   transient state a guard exists for; and by a later `prune --apply`, which reaps a guard whose OWNER
-  WORKTREE is gone **and** whose object is named by the register, or by a DURABLE ref — a lane pin
-  or applied record; never `refs/stash` (moved by any later `stash store`) and never another prune
-  guard (its owner may release it at will). Before
+  WORKTREE is gone **and** whose object is named by the register, or by any other ref that is neither
+  `refs/stash` (moved by any later `stash store`) nor another prune guard (its owner may release it
+  at will) — a lane pin, an applied record, a branch, a tag. Before
   that reap, no routine command released such a guard — `prune`'s `finally` releases only the guards
   it created, and `recover` frees them only for the sha it adopts — so a guard for an entry nobody
   adopts blocked gc forever, which is what the reap exists to fix. The reap is suspended entirely

@@ -697,10 +697,17 @@ def _guard_refs() -> list[tuple[str, str, str]]:
 def _guard_release_all(sha: str) -> None:
     """Drop every prune guard for ``sha``, under ANY lane key.
 
-    A guard is created by whichever lane ran the prune, but the rescued entry may
-    be recovered from a DIFFERENT worktree — and once some ref names the object
-    the guard is redundant wherever it lives. Unpinning only the current lane's
-    guard leaked the other lane's forever (#8773 review P2).
+    :func:`cmd_recover` is the ONLY caller, and it has just given the object a
+    durable lane pin (:func:`_pin_or_report`) — THAT pin is what makes every guard
+    for the sha redundant, wherever it lives. Unpinning only the current lane's
+    guard left a foreign guard unreachable through ``recover`` for good (#8773
+    review P2).
+
+    ⛔ ``prune``'s ``finally`` must NEVER call this. A foreign guard for the same
+    sha may belong to a CONCURRENT prune that is still deleting positions, and
+    "the sha is back in the register" is exactly the transient state a guard exists
+    for (see :func:`_guard_pin` and ``cmd_prune``'s finaliser). "Some ref names the
+    object" is NOT on its own a licence to drop every guard (#8822 review P2).
     """
     cp = _git("for-each-ref", "--format=%(refname)", f"{GUARD_NS}/*/{sha}", check=False)
     if cp.returncode != 0:
@@ -796,7 +803,11 @@ def _reap_stale_guards() -> None:
 
     Both conditions are required: a LIVE owner key may be a prune in flight, whose
     guard is its only protection during a positional delete; a DEAD owner's guard
-    for an object no other ref names is the LAST handle on that object.
+    for an object nothing else handles is the LAST handle on that object. "Nothing
+    else handles it" is the predicate the body applies — the shared register does
+    not enumerate it AND :func:`_refs_pointing_at` returns no other durable
+    non-guard ref — never "no other ref names it" alone: a guard whose object the
+    register still enumerates is redundant, and this reap releases it.
 
     Residual windows (documented, not closable with git's ref API): every input is
     a snapshot. The evidence read (the register when it names the object, else
@@ -914,6 +925,51 @@ def _foreign_pin_owners(sha: str, key: str) -> list[str]:
         if (owner := _lane_key_of_ref(ref)) is not None and owner != key
     }
     return sorted(owners)
+
+
+def _reclaim_handle_note(row: dict, key: str) -> str:
+    """Where a reclaimed register row's object still lives — for the `remove` line.
+
+    A row reclaimed because ANOTHER lane's ref names it is lossless, but that ref is
+    the peer's — invisible to `lane_stash list` here once the register row is gone
+    — so the line that removes it must point at where the object still lives.
+    Otherwise the only instruction this output gives cannot show the work it just
+    reclaimed (#8773 review P2).
+
+    The ref it names must be one that EXISTS, and the instruction must work for THIS
+    entry. Two ways the first version was wrong, both reachable (#8822 review P2):
+    it printed a literal ``<n>`` placeholder, and `lane_stash pop` with no id
+    restores ``entries[-1]`` — so for a peer holding two pins the advice restored
+    a DIFFERENT entry (the exact defect class this PR fixes elsewhere); and a
+    ``refs/lane/<key>/applied/<sha>`` record also makes a lane a
+    :func:`_foreign_pin_owners` owner, where no pin exists to pop at all.
+    """
+    sha = row["sha"]
+    refs = _refs_pointing_at(sha)
+    notes: list[str] = []
+    for owner in _foreign_pin_owners(sha, key):
+        pins = sorted(r for r in refs if _lane_key_of_ref(r) == owner and "/stash/" in r)
+        applied = sorted(
+            r for r in refs if _lane_key_of_ref(r) == owner and "/applied/" in r
+        )
+        if pins:
+            notes.append(
+                f"{', '.join(pins)} — lane {owner}: `lane_stash pop "
+                f"{pins[0].rsplit('/', 1)[1]}` there restores it"
+            )
+        elif applied:
+            notes.append(
+                f"{', '.join(applied)} — lane {owner} already restored this work (its "
+                "applied record names it)"
+            )
+        else:
+            notes.append(f"a ref of lane {owner}")
+    if notes:
+        return ("  (still durable under " + "; ".join(notes)
+                + "; `list` here cannot show it)")
+    if row["pinned"]:
+        return "  (still durable under this lane's ref)"
+    return "  (applied by this lane; the applied-record named it)"
 
 
 def _foreign_owner(row: dict, key: str) -> tuple[str, str] | None:
@@ -1067,12 +1123,13 @@ def cmd_list(args: argparse.Namespace) -> int:
                 if r is top and not top_own else "")
         print(f"  {r['pos']:<11} {r['sha'][:12]}  {mark}  {r['subject']}{star}")
 
+    register_shas = {r["sha"] for r in rows}
     guards = _guard_refs()
     if guards:
-        print(f"prune guards held ({len(guards)} — each keeps its object gc-safe while no "
-              "other ref names it; free one by recovering it, or drop the ref once you "
-              "know the work is safe). A guard outlives the worktree that made it, so "
-              "FOREIGN lanes are listed here too")
+        print(f"prune guards held ({len(guards)} — each keeps its object gc-safe while "
+              "nothing else handles it; free one by recovering it, or drop the ref once "
+              "you know the work is safe). A guard outlives the worktree that made it, "
+              "so FOREIGN lanes are listed here too")
         for ref, sha, owner in guards:
             others = _refs_pointing_at(sha) - {ref}
             peer_guards = sorted(r for r in others if r.startswith(GUARD_NS + "/"))
@@ -1089,8 +1146,16 @@ def cmd_list(args: argparse.Namespace) -> int:
             elif "refs/stash" in others:
                 note = ("  (refs/stash names it too, but that is NOT durable — a later "
                         "`stash store` moves it; this guard is the handle)")
+            elif sha in register_shas:
+                # The SAME retention decision `prune --apply` makes: a guard whose
+                # object the shared register still enumerates is redundant, so
+                # calling it the handle here contradicted the reap that releases
+                # it (#8822 review P2).
+                note = ("  (the shared register still enumerates it, so this guard is "
+                        "redundant once its owner is gone — `prune --apply` reaps it)")
             else:
-                note = "  (no other ref names it)"
+                note = ("  (no other ref names it and the register does not enumerate "
+                        "it — this guard is the handle)")
             foreign = "" if owner == key else f"  [lane {owner} — not this lane]"
             print(f"  {sha[:12]}  {ref}{foreign}{note}")
 
@@ -1522,23 +1587,8 @@ def cmd_prune(args: argparse.Namespace) -> int:
           f"{len(doomed)} removable (a lane ref pins it, or this lane recorded it "
           f"applied), {len(kept)} unpinned (refused)")
     for r in doomed:
-        # Name the handle that survives. A row reclaimed because ANOTHER lane's ref
-        # pins it is lossless, but the pin is that lane's — invisible to
-        # `lane_stash list` after the register row is gone — so the line that
-        # removes it must point at where the object still lives. Otherwise the
-        # only instruction this output gives (`lane_stash list`) cannot show the
-        # work it just reclaimed (#8773 review P2).
-        foreign = _foreign_pin_owners(r["sha"], key)
-        if foreign:
-            where = ("  (still durable under "
-                     + ", ".join(f"refs/lane/{k}/stash/<n>" for k in foreign)
-                     + f" — lane {', '.join(foreign)}; that lane's `lane_stash pop` "
-                       "restores it, `list` here cannot show it)")
-        elif r["pinned"]:
-            where = "  (still durable under this lane's ref)"
-        else:
-            where = "  (applied by this lane; the applied-record named it)"
-        print(f"  remove {r['pos']} {r['sha'][:12]}  {r['subject']}{where}")
+        print(f"  remove {r['pos']} {r['sha'][:12]}  {r['subject']}"
+              f"{_reclaim_handle_note(r, key)}")
     for r in kept:
         print(f"  keep   {r['pos']} {r['sha'][:12]}  {r['subject']}  (no lane ref pins it)")
     if orphan:
