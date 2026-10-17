@@ -3074,9 +3074,7 @@ def _raise_update_point_status_error(proj, id: str, *,
     the guarded ``SET`` — and that case is only an idempotent success when the
     caller asked for NOTHING BUT the status (``status_only``). With other props
     the promote matched nothing and nothing was applied, so returning silently
-    would report a landed write that did not happen: measured,
-    ``update_point(status='live', confidence=0.42)`` returned success, left the
-    confidence unset, and emitted ``PointRevised`` carrying it.
+    would report a landed write that did not happen.
 
     ``present`` lets a caller that ALREADY read the node say so, so this
     diagnostic cannot probe a second time and claim ``No point`` for a node the
@@ -5552,11 +5550,15 @@ class TortoiseSDK:
         caller-visible bound is one window x the number of sites that branch
         reaches. ``update_point`` is the widest, and the count is MEASURED
         rather than enumerated by hand (#8854 review P2 — the earlier "up to
-        three" omitted ``_mark_dirty``, which it always runs): THREE to FOUR
-        for ``update_point(confidence=...)``; FOUR to FIVE for
+        three" omitted ``_mark_dirty``, which it always runs). On a ``:Point``:
+        THREE to FOUR for ``update_point(confidence=...)``; FOUR to FIVE for
         ``update_point(tags=[...])``; FIVE to SIX for
-        ``update_point(content=..., tags=[...])``. The low end is a LIVE point;
-        the high end adds ``_mark_dirty``'s TERMINAL branch
+        ``update_point(content=..., tags=[...])``. A ``:Point:Object`` node
+        reaches ONE FEWER on the LAST shape (measured 4 LIVE) because its single
+        ``update_point SET (Object)`` arm replaces the ``:Point`` arm's pair
+        (per-key + embedding); the first two shapes are the same on both. The
+        low end is a LIVE point; the high end adds ``_mark_dirty``'s TERMINAL
+        branch
         (``_mark_dirty terminal ep_dirty clear SET``), which runs when the
         caller updates a terminal point. At 7-14 s per window that is roughly
         21-84 s, not 21-42 s. The
@@ -10442,7 +10444,9 @@ class TortoiseSDK:
             _raise_update_point_status_error(
                 proj, id, status_only=len(_props_param) == 1,
                 present=True)
-            return False  # pragma: no cover — the helper always raises
+            return False  # pragma: no cover — only a terminal→live flip between
+            # the witness's status read and this diagnostic's own read reaches
+            # here; a retry is then the safe outcome.
 
         if has_object:
             if 'status' in props:
