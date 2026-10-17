@@ -1039,6 +1039,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_5509_name_keyed_identity_reads.py
   # #4643: the served-skill mirror's parity gate. The pin
   # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
   # through to `core` — without this registration a pin-only change ran no
@@ -1267,6 +1268,19 @@ surfaces:
   # without the `sdk` arm (#2938 class; `tortoise/sdk.py` itself is a
   # SHARED_MODULE, so an sdk.py diff selects the full matrix anyway).
   - test_7936_stable_stub_ids.py
+  # #7936: the REFERENCE FOLD's graph index is `(label, id)`, not `:Point`.
+  # Pins the false-GREEN half of the issue's own root: a graph-only
+  # `:Object`/`:Subject`/`:Event` node — or a belief/`status` write on one with
+  # no journal record — left `db_hash` unmoved (`ok=True, divergence=None`) while
+  # the SAME mutation on a `:Point` was `unrecorded-mutation`. `core` alone: it
+  # drives `tortoise/consistency.py` (no named SOURCE_PATTERN, so a
+  # consistency-only change selects `core`) through `check_consistency`, and the
+  # `format_version` bump it pins lives in that same module. Its journal fixtures
+  # carry no Points, so `tortoise/projection/entities.py` and `tortoise/ids.py`
+  # are reached only for the name-stub half — the `sdk` registration of
+  # `test_7936_stable_stub_ids.py` (above) is the arm that covers an
+  # `ids.py`-only change.
+  - test_7936_reference_fold_label_rekey.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
@@ -1522,12 +1536,19 @@ surfaces:
   - test_subject_binding_1370.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
-  # #8743: the e2e `Pre-warm wrangler toolchain` steps in `.github/workflows/
-  # ci.yml` (welcome-e2e / legal-e2e / dashboard-e2e). `core`-like the other
-  # CI-wiring guards above — it reads the workflow and needs no DB, so the
-  # default surface is where it runs when nothing else matched. It pins the
-  # retry that the 2026-10-15 npm-registry ECONNRESET on the required legal-e2e
-  # check made necessary.
+  # #8743/#8816: the wrangler pin's shape in `.github/workflows/ci.yml` and
+  # `deploy-pages.yml`, plus `website/apps/dashboard/deploy.sh` (the documented
+  # manual deploy): one artefact (`config/wrangler-version`); every spec the
+  # asserted `${WRANGLER_VERSION:?}` form; no spec-LESS invocation anywhere
+  # outside the five declared boot steps and the `--version` probe; an
+  # install-and-VERIFY step per e2e job that keeps its three-attempt registry
+  # retry (and precedes the boot); a spec-free boot that keeps its two-attempt
+  # retry; every deploy step asserting before it uploads; and node 22 wherever
+  # wrangler runs. The manual deploy is EXECUTED from a scratch tree, from both
+  # documented invocations, because a text pin of the version path could not see
+  # a path that does not resolve. `core`-like the other CI-wiring guards above —
+  # it reads workflows and needs no DB, so the default surface is where it runs
+  # when nothing else matched.
   - test_e2e_wrangler_prewarm.py
   # #3470: the pytest-attribution reporter (`.github/scripts/pytest-attribution.sh`,
   # called from python-ci.yml). It reads the workflow, the reporter script and the
@@ -4564,7 +4585,7 @@ durations:
   test_2296_document_created_journal.py: 27.0  # unmeasured by the refresher — #2296: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only). Measured on this host 2026-10-14 on a private `tools/test_lane.py` docker container reached via TORTOISE_DB_URI: pytest session total 26.49s (that reading was the file's original 7 tests; the file now collects 8 and a later re-measure on a loaded host read 24.9s). WHAT THE NUMBER IS: the pytest session total, NOT what the refresher computes — it reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
   test_3311_multilabel_status_vocab.py: 15.3  # unmeasured — #3311: locally re-measured 2026-10-10 on this host (load ~80-84, 10 CPUs), 14 tests as the file collects now. HOW: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_3311_multilabel_status_vocab.py -q --durations=0` — live FalkorDB on the shared docker lane, reached through the projection's TEST_MODE redirect (under pytest an explicit db_path is rewritten onto TORTOISE_DB_URI; the `env` fixture's tmp_path .db is only the redirect key). Verified this turn: the per-path graph `test_ml3311_<hash12>` is on the shared container WHILE the file runs (polled `redis-cli GRAPH.LIST` mid-run) — and do NOT use the container's `total_commands_processed` delta as evidence for this, the container is shared with other lanes and that number is not reproducible. WHAT THE NUMBER IS: pytest's own session total, "14 passed in 15.31s". It is NOT what this map's own refresher computes: `tools/ci_timing.py --refresh-durations` reads the TEXTUAL `--durations=` block out of the CI log (python-ci.yml runs `--durations=15`, so only those printed lines are summed, per `parse_log`) and never reads junit — so a CI reading is a LOWER bound on this figure (measured while correcting this note: 11.57 s parsed vs 12.14 s session, and 9.92 s vs 10.41 s). Session totals across runs were 13.6 / 15.3 / 17.1 s and the enclosing process wall was 17.2-20.7 s including uv startup; 15.3 s is committed at the map's one-decimal precision. THE 188.0 THIS ROW USED TO CARRY IS CORRECTED, not merely updated: it was a two-run local reading, and it is not reproducible here — 188.0 s is 12x the measured cost, and the same measurement at the pre-fix projection (9dd52f717, which collected 11 tests) was still only 17.5 s wall, so the drop is not the #3311 projection fix. The old note's "10 tests" was wrong even for that state (11 collected before the three rebuild tests, 14 now). Kept in this map rather than left to the sweep because `--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time. Refresh from the first post-merge run that includes it, via `tools/ci_timing.py --refresh-durations`.
   test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
-  test_e2e_wrangler_prewarm.py: 5.5  # #8743: locally measured on this host (8 in-memory assertions, each over one `yaml.safe_load` of `.github/workflows/ci.yml` — no DB, no fixture; pytest session totals 5.5-6.1s across two runs at PR time, ~3.4s of it the shared conftest import; a 2026-10-16 re-measure on an idle host read 1.6s). Hand-added for the same reason the test_8474_ontology_record.py entry below gives: `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from the first post-merge run that includes it.
+  test_e2e_wrangler_prewarm.py: 4.0  # #8743/#8816: locally measured on this host (20 assertions — 18 in-memory, each over one `yaml.safe_load` of the workflow files, plus two parametrized arms that EXECUTE `website/apps/dashboard/deploy.sh` against a scratch tree with stubbed npm/npx — no DB, no fixture; the in-memory arms complete in well under a second of assertion time, the executed pair adds ~0.1 s of bash, and the pytest session adds the shared conftest import, which dominates). PR #8852 review: this note used to say 11, which was wrong even for the 12-arm file it described — re-counted from the file. Hand-added for the same reason the test_8474_ontology_record.py entry below gives: `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from the first post-merge run that includes it.
   test_8474_ontology_record.py: 4.0  # #8474/#8736: locally measured (1 hermetic doc-read test — reads docs/ONTOLOGY.md only, no DB, no fixture; pytest session total 1.1s on an idle host, 3.1-4.2s on a loaded one, 2026-10-16 re-measure — the earlier 16.0 was taken on a private tools/test_lane.py container and included container lifecycle, not the pytest session). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7

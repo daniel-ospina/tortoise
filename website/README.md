@@ -26,7 +26,10 @@ rsync -a --exclude='/apps/' --exclude='/migrations/' \
   --exclude='node_modules/' --exclude='/.wranglerignore' --exclude='*.md' \
   website/ "$STAGE/"
 # wrangler resolves `functions/` from the CWD, so run FROM the upload root.
-cd "$STAGE" && npx --yes wrangler@4 pages deploy "$STAGE" \
+# #8816: the version has ONE home and is asserted. Read it BEFORE the `cd`, then
+# deploy with the asserted spec — `wrangler@4` would ship whatever npm serves.
+WRANGLER_VERSION="$(cat config/wrangler-version)"
+cd "$STAGE" && npx --yes "wrangler@${WRANGLER_VERSION:?}" pages deploy "$STAGE" \
   --project-name=premise-labs --branch=main
 ```
 
@@ -209,7 +212,9 @@ always-on layers.
 **Local probe** (see the ops step below for why the first response is a 503):
 
 ```bash
-cd website && npx wrangler@4 pages dev . --port 8788 --ip 127.0.0.1
+# #8816: assert the version this dev server runs; `wrangler@4` floats.
+WRANGLER_VERSION="$(cat config/wrangler-version)"
+cd website && npx --yes "wrangler@${WRANGLER_VERSION:?}" pages dev . --port 8788 --ip 127.0.0.1
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/contact/submit \
   -H 'Content-Type: application/json' \
   -d '{"name":"Ada","email":"ada@example.com","message":"hello"}'   # → 503

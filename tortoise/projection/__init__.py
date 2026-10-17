@@ -6367,17 +6367,12 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     ``fold`` is deliberately UNCHANGED: it keeps the public ``{id: point}``
     contract every existing caller depends on (``ingest``, ``sdk``, ``api``,
     ``m0``, ``embeddings`` all index it by POINT id), and this companion
-    carries the rest of the fold instead of re-keying them. The remaining
-    durable step — one ``(label, id)`` index deriving ``log_points`` /
-    ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
-    stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
-    digest would move ``content_hash`` for every existing baseline, which
-    entails a ``format_version`` bump — and since #8268/#7936 that is no longer
-    a dead end. A predecessor format appended to
-    ``consistency._PROJECTION_STATE_FORMAT_HISTORY`` is MIGRATED: the next
-    healthy recording run re-baselines at the current format and reports
-    ``state_superseded_format``. Only an UNKNOWN or FUTURE ``format_version``
-    stays untrusted and is never re-recorded.
+    carries the rest of the fold instead of re-keying them. The `(label, id)`
+    re-key of the graph-side index landed separately in
+    ``consistency._graph_view`` (with the ``format_version`` bump the widened
+    digest needs); what remains open on #7936 is unifying THESE two folds and
+    ``_compare_views`` into the same ``(label, id)`` shape, which would change
+    the published meaning of ``log_points``/``db_points`` (point counts).
 
     ``entities`` is a BATCH/replay view: it is built from the journal's ordered
     existence boundary, which the one-record incremental path does not have.
@@ -6450,9 +6445,11 @@ class InMemoryProjection:
         # reference-fold label an unknown id is — ``_apply_one`` surfaces the
         # drop rather than guessing, and never manufactures a ``non-folded``
         # record the batch path would not. ``rebuild`` is the path that holds
-        # the non-Point belief; the durable ``(label, id)`` re-key that would
-        # let the incremental path fold the non-Point CREATION records too
-        # stays open on #7936.
+        # the non-Point belief; folding the non-Point CREATION records into the
+        # incremental path would need this class's own ``{id: point}`` index
+        # re-keyed to ``(label, id)`` (the CHANGE its consumers were re-keyed
+        # for in #7936 shipped in ``consistency._graph_view``; this fold's
+        # index is deliberately unchanged, so ``apply`` stays bounded).
         _apply_one(self.points, event, entities=self.entities)
 
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:

@@ -65,6 +65,14 @@ logger = logging.getLogger(__name__)
 #: ``resolve_structural_target``'s runtime label defense).
 _IDENTITY_LABELS = ("Object", "Subject")
 
+#: The properties a name coordinate may be matched against. ``name`` is the
+#: canonical natural key; ``canonical_name`` is the SECOND spelling an Object
+#: may be addressed by (``mining``'s reification writes it, ``belief_timeline``
+#: reads it). Both are mutable strings — neither is an identity, so both are
+#: resolved by the SAME holder-count discipline. A property outside this set is
+#: refused (it is interpolated into the statement).
+_NAME_PROPERTIES = ("name", "canonical_name")
+
 #: The labels an id-typed edge endpoint is resolved over by the write path
 #: (``projection.__init__``'s ``_RESOLVE_BRANCHES``). A resolved id's
 #: uniqueness is checked in the CALLER's space: ``create_edge`` resolves by
@@ -185,7 +193,8 @@ def _refuse(label: str, name: str, candidate_ids, *,
 
 
 def live_name_holder_ids(g, label: str, name: str, *,
-                         case_insensitive: bool = False) -> list:
+                         case_insensitive: bool = False,
+                         name_props: tuple = ("name",)) -> list:
     """Every LIVE holder of ``name`` for ``label``, by ``n.id`` (raw).
 
     The list is **row-per-holder**, so an id-less legacy/hosted-stub holder
@@ -204,30 +213,51 @@ def live_name_holder_ids(g, label: str, name: str, *,
     batch probe that must keep ``id``/``name`` matching apart).
     """
     return _name_holder_ids(g, label, name,
-                            case_insensitive=case_insensitive, live_only=True)
+                            case_insensitive=case_insensitive, live_only=True,
+                            name_props=name_props)
 
 
-def _name_predicate(case_insensitive: bool) -> str:
+def _require_name_properties(name_props: tuple) -> tuple:
+    """The name properties a coordinate may be matched against, validated."""
+    props = tuple(name_props)
+    if not props or any(p not in _NAME_PROPERTIES for p in props):
+        raise RuntimeError(
+            f"entity identity: unsafe name property {name_props!r} "
+            f"({'/'.join(_NAME_PROPERTIES)} only)")
+    return props
+
+
+def _name_predicate(case_insensitive: bool,
+                    name_props: tuple = ("name",)) -> str:
     """The name-match predicate — ONE copy, shared by every holder probe.
 
     A second copy is a drift site: the live probe and the all-status probe
     must compare names identically or a name can be live-looking to one and
     terminal-looking to the other.
+
+    ``name_props`` widens the match to every name spelling a caller accepts
+    (``{"name", "canonical_name"}`` for ``belief_timeline``). The disjunction
+    is PARENTHESISED: it is composed with ``AND`` by every caller, and an
+    unparenthesised ``a = $x OR b = $x AND <live>`` would let the status
+    predicate bind to the second arm only.
     """
-    name_pred = ("toLower(n.name) = toLower($name)" if case_insensitive
-                 else "n.name = $name")
-    return name_pred
+    props = _require_name_properties(name_props)
+    arms = [f"toLower(n.{p}) = toLower($name)" if case_insensitive
+            else f"n.{p} = $name" for p in props]
+    name_pred = " OR ".join(arms)
+    return f"({name_pred})" if len(arms) > 1 else name_pred
 
 
 def _name_holder_ids(g, label: str, name: str, *,
                      case_insensitive: bool,
-                     live_only: bool) -> list:
+                     live_only: bool,
+                     name_props: tuple = ("name",)) -> list:
     """Raw holder ids for ``name``; ``live_only`` applies D2's predicate."""
     _require_identity_label(label)
     live_pred = f"AND {_terminal_excluded('n.status')} " if live_only else ""
     rows = g.query(
         f"MATCH (n:{label}) "
-        f"WHERE {_name_predicate(case_insensitive)} "
+        f"WHERE {_name_predicate(case_insensitive, name_props)} "
         f"{live_pred}"
         "RETURN n.id",
         params={"name": name}).result_set
@@ -235,7 +265,8 @@ def _name_holder_ids(g, label: str, name: str, *,
 
 
 def all_name_holder_ids(g, label: str, name: str, *,
-                        case_insensitive: bool = False) -> list:
+                        case_insensitive: bool = False,
+                        name_props: tuple = ("name",)) -> list:
     """Every holder of ``name`` for ``label`` — ANY status (raw ids).
 
     The complement of :func:`live_name_holder_ids`: used ONLY to tell a
@@ -245,7 +276,8 @@ def all_name_holder_ids(g, label: str, name: str, *,
     (#3633 §B.1 "refuse + record").
     """
     return _name_holder_ids(g, label, name,
-                            case_insensitive=case_insensitive, live_only=False)
+                            case_insensitive=case_insensitive, live_only=False,
+                            name_props=name_props)
 
 
 def _endpoint_idents(g, value: str, *, include_url: bool) -> set:
@@ -353,7 +385,8 @@ def _record_unaddressable(label: str, name: str) -> None:
 
 def _record_if_any_holder(g, label: str, value: str,
                           case_insensitive_name: bool,
-                          *, predicate: str | None = None) -> None:
+                          *, predicate: str | None = None,
+                          name_props: tuple = ("name",)) -> None:
     """Record a ``no-live-holder`` refusal iff ``value`` has ANY holder.
 
     Called only on the resolver's "no live holder" path: a name with at least
@@ -361,12 +394,13 @@ def _record_if_any_holder(g, label: str, value: str,
     a name with NO holder is simply absent and must NOT be recorded.
     """
     if predicate is None:
-        holders = all_name_holder_ids(g, label, value,
-                                      case_insensitive=case_insensitive_name)
+        holders = all_name_holder_ids(
+            g, label, value, case_insensitive=case_insensitive_name,
+            name_props=name_props)
     else:
         holders = [r[0] for r in g.query(
             f"MATCH (n) WHERE {predicate} "
-            f"AND {_name_predicate(case_insensitive_name)} "
+            f"AND {_name_predicate(case_insensitive_name, name_props)} "
             "RETURN n.id",
             params={"name": value}).result_set]
     if holders:
@@ -376,7 +410,8 @@ def _record_if_any_holder(g, label: str, value: str,
 
 def resolve_entity_id(g, label: str, value: str | None, *,
                       case_insensitive_name: bool = False,
-                      addressing: str | None = None) -> str | None:
+                      addressing: str | None = None,
+                      name_props: tuple = ("name",)) -> str | None:
     """Route-then-refuse: the single live id for an id-or-name coordinate.
 
     Exact id match wins (returned regardless of status — an id is unambiguous
@@ -391,6 +426,12 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     ``addressing`` (``ADDRESSING_SOURCE`` / ``ADDRESSING_TARGET``) makes the
     uniqueness check cover the CALLER's full endpoint-resolution space (see
     :func:`_endpoint_idents`).
+
+    ``name_props`` names the properties the NAME arm matches (default
+    ``("name",)``). A caller whose coordinate may be spelled by a deprecated
+    alias (``belief_timeline``'s ``canonical_name``) passes the wider set so the
+    holder count — and therefore the refusal — is taken over the SAME key space
+    the read used to union, instead of re-implementing a second resolution.
     """
     if value is None:
         return None
@@ -408,7 +449,8 @@ def resolve_entity_id(g, label: str, value: str | None, *,
                                       addressing=addressing)
         return id_hits[0]
     by_name = live_name_holder_ids(g, label, value,
-                                  case_insensitive=case_insensitive_name)
+                                  case_insensitive=case_insensitive_name,
+                                  name_props=name_props)
     if len(by_name) > 1:
         _refuse(label, value, display_holder_ids(by_name))
     if by_name:
@@ -419,7 +461,8 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     # a terminal-only reference (a resolver must never hand a caller a terminal
     # id). Record it so "the holder is terminal" is distinguishable from "no
     # such name" — both return None, but only one is a refusal (#3633 §B.1).
-    _record_if_any_holder(g, label, value, case_insensitive_name)
+    _record_if_any_holder(g, label, value, case_insensitive_name,
+                          name_props=name_props)
     return None
 
 

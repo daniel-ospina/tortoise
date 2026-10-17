@@ -74,7 +74,8 @@ from .live import direction_flows  # #7852 (source→target, target→source) fl
 from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
-    ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
+    ADDRESSING_SOURCE, UnaddressableEntityName, resolve_document_target_id,
+    resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -11798,10 +11799,67 @@ class TortoiseSDK:
         ``limit`` is a NEWEST-END window: it returns at most the newest
         ``limit`` entries of the chain — the current belief is the last of
         them — never the oldest (#7293).
+
+        ``topic`` is an id or a NAME coordinate, resolved through
+        ``entity_identity.resolve_entity_id`` (#5509). A name is a mutable
+        natural key: under #3590 D2 two live Objects may hold it, so the read
+        must resolve to EXACTLY ONE live Object and never union both carriers'
+        decision Points into one chain (measured: renaming an unrelated
+        company to a topic's name appended its decisions to that topic's
+        timeline). Two or more live carriers REFUSES
+        (:class:`AmbiguousEntityName`, the non-folded entry already recorded by
+        the resolver); no live holder (absent, or held only by terminal
+        carriers — D2's ``single_terminal_holder_reference``) yields ``[]`` and
+        records the refusal, so it is distinguishable from a union.
+
+        ``canonical_name`` is matched by the resolver's name arm, not by this
+        read: it is a second spelling of the same natural key, so it takes the
+        same holder-count discipline instead of widening the union.
+
+        A single live holder that carries NO ``id`` (a raw/legacy producer
+        wrote it — ``hosted_api``'s capture wiring mints such a stub before its
+        entity step adopts it) is NOT refused here: the identity question is
+        already answered (exactly one live candidate) and the chain is
+        traversed through the ``aboutObject`` edges, so only the id-keyed
+        ADDRESS is missing, not the answer. That one case reads the holder by
+        its (unique, live) name — it cannot fold two carriers, because the
+        resolver just proved there is only one.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
+        # ROUTE-THEN-REFUSE (#5509, plan §B.1). The old read was
+        # `... -[:aboutObject]->(o:Object) WHERE o.name = $topic OR
+        # o.canonical_name = $topic`, i.e. a NAME-keyed match over every
+        # carrier. Two live same-name Objects are legal, so that read folded
+        # two identities' beliefs into one chain — and a name held only by a
+        # TERMINAL Object still resolved (D2 refuses that). Resolve the
+        # coordinate to one live id and match the id: the identity decision
+        # lives in the resolver, not here.
+        try:
+            entity_id = resolve_entity_id(
+                proj.g, "Object", topic, name_props=("name", "canonical_name"))
+            unaddressable = False
+        except UnaddressableEntityName:
+            # EXACTLY ONE live holder, and it carries no `id` property. The
+            # resolver refused it because an ID-KEYED WRITE could not address
+            # it; this read only needs to reach it, and the holder set is
+            # already proven unique — so the name below is unambiguous. The
+            # live predicate is what keeps the read from touching a terminal
+            # carrier, and it is the ONLY name-keyed branch left here.
+            entity_id = None
+            unaddressable = True
+        if entity_id is None and not unaddressable:
+            # No live holder: an absent name, or one held ONLY by terminal
+            # carriers (refused and recorded by the resolver above — D2 never
+            # hands a caller a terminal id). Nothing live to build a chain on.
+            return []
+        if unaddressable:
+            entity_predicate = (
+                "(o.name = $topic OR o.canonical_name = $topic) "
+                f"AND {_terminal_excluded('o.status')}")
+        else:
+            entity_predicate = "o.id = $oid"
         # The DB window MUST be taken from the NEWEST end (#7293). The former
         # `ORDER BY p.validFrom LIMIT` was ASCENDING, so it truncated to the
         # OLDEST rows and the `entries[-limit:]` tail below could only re-take
@@ -11818,10 +11876,10 @@ class TortoiseSDK:
             "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
             "(o:Object) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
-            "AND (o.name = $topic OR o.canonical_name = $topic) "
+            f"AND {entity_predicate} "
             "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
             "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit",
-            params={"topic": topic, "limit": limit},
+            params={"oid": entity_id, "topic": topic, "limit": limit},
         ).result_set
         entries = [list(r) for r in rows]
         # Superseded priors dropped out of the topic query (supersede_point
@@ -25647,20 +25705,17 @@ class TortoiseSDK:
                 id=event["id"],
                 **_journal_record_payload(event),
             )
-        # #452: Subject/Object MERGE by name (content-hash dedup).
-        # When the name already exists, the fresh id_val never lands on the
-        # node (ON CREATE never fires).  Re-fetch the canonical id from the
-        # graph so callers get a usable return value — matching create_point
-        # dedup behavior which returns the existing point id.
+        # #452: Subject/Object MERGE by name (content-hash dedup) — the fresh
+        # id_val never lands on a pre-existing node via ON CREATE, but the
+        # MERGE's ON MATCH clause writes it anyway (`o.id=coalesce($id, o.id)` /
+        # `s.id=coalesce($id, s.id)`), so the id this call returns is DERIVED
+        # from the write, not re-read from the graph. The re-fetch that used to
+        # live here (`MATCH (n:{label} {name:$name}) RETURN n.id` →
+        # `result_set[0][0]`) resolved identity by NAME: with two same-name
+        # carriers it returned an ARBITRARY row (backend order), i.e. possibly
+        # a node this call did not write. Deleted per #5509 (plan §A/§B P1-A
+        # "the ninth-cycle seed").
         canonical_id = id_val
-        if label in ("Subject", "Object") and "name" in event:
-            name = event["name"]
-            r = proj.g.query(
-                f"MATCH (n:{label} {{name: $name}}) RETURN n.id",
-                params={"name": name},
-            )
-            if r.result_set and r.result_set[0]:
-                canonical_id = r.result_set[0][0]
         # Wire edges after entity exists in graph (use canonical id)
         if props.get("authoredBy"):
             proj.create_authored_by(canonical_id, props["authoredBy"])

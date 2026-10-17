@@ -7806,3 +7806,23 @@ def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)
         assert "test_journal_growth.py" in r["test_files"], (changed, r)
+
+
+def test_dashboard_deploy_script_change_selects_core_not_tier1():
+    # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the documented
+    # manual deploy, and the #8816 guard (`tests/test_e2e_wrangler_prewarm.py`,
+    # registered `core`) both READS it and EXECUTES it from a scratch tree — the
+    # arms that catch a version path which does not resolve. `website/` is a flat
+    # NON_PYTHON_PREFIXES entry and the script matches no SOURCE_PATTERNS row, so
+    # a deploy.sh-only diff was filtered out BEFORE the "not matched -> core"
+    # fallback, took the docs-only early return and fell back to tier-1 smoke,
+    # where that guard is NOT selected — the guard never ran on the only PR that
+    # can break it (the #1349/#3332/#3616 silent-drop class).
+    #
+    # Measured before the CORE_ALSO entry: `_sel([...])` -> surfaces=[],
+    # full=False, 46 test files, test_e2e_wrangler_prewarm.py absent.
+    # Mutation check: removing the CORE_ALSO entry fails every assert below.
+    r = _sel(["website/apps/dashboard/deploy.sh"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_e2e_wrangler_prewarm.py" in r["test_files"], r
