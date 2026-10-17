@@ -105,12 +105,10 @@ person managing their own account).
 **40 methods** against **150** today. **MCP: 26 tools** — every row except the tenancy block (28–39), `write_knowledge_batch`
 (builder-only, 13) and the constructor/`close` (1–2) — **plus row 30**, `update_memory_graph`,
 which is inside the tenancy block but is the one tenancy method with an MCP twin, because the
-owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26.
-
-> **Current target: 27.** The arithmetic above is the 2026-09-21 derivation and stays as written.
-> #3540 (2026-10-17) added `tortoise_manage_sources`, which was never on this list — the two
-> switches it retires were not target tools — so the **target** is 26 + 1 = **27**, while the
-> **served** surface moved **82 → 81**. The two move in opposite directions in the same change.
+owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26. That
+arithmetic is the 2026-09-21 derivation and stays as written; the CURRENT target is **27**, because
+#3540 (2026-10-17) added `tortoise_manage_sources`, which was never on this list — the two switches
+it retires were not target tools. The **served** surface moved the other way, **82 → 81**.
 
 > **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the
 > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `tortoise_manage_sources`) have a prefixed equivalent. So it is **27 of 27 by name**, or **22 of 27** if you normalise the prefix.

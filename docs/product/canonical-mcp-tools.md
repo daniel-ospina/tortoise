@@ -77,15 +77,11 @@ the description text, and hence the handler digest, changes. status: approved ·
 daniel-ospina · PR #8563 · date: 2026-10-14.
 
 **Amended 2026-10-17** (owner ruling on **#3540**, **PR #8863**): **one tool is added and two
-are retired — a net REDUCTION of one**, which is the ruling's own requirement.
-
-> **The TARGET count moves the other way: 26 → 27.** The two retired switches were never ON
-> this target list, so the merged list gains `tortoise_manage_sources` while the SERVED
-> surface loses one net — **82 → 81 served**, the numbers this record exists to hold. Both pairs
-> are stated because they move in opposite directions, and a generated table that prints "27"
-> must not be read as contradicting this record.
->
-> Owner's words:
+are retired — a net REDUCTION of one**, which is the ruling's own requirement. The TARGET count
+moves the other way, 26 → 27, because the two retired switches were never ON this target list: the
+merged list gains `tortoise_manage_sources` while the SERVED surface loses one net (**82 → 81**).
+Both pairs are stated because they move in opposite directions, and a generated table that prints
+"27" must not be read as contradicting this record. Owner's words:
 *"b sounds good because we enable agents to configure the system (assuming they have
 permission) and that's better UX than clicking on the UI"* (2026-10-12).
 
