@@ -20,8 +20,8 @@ the one thing the old T was really protecting:
   * a coverage-loop FLOOD — many restatements of ONE fact occupying the
     reader window (§1 of the wave doc: *"the coverage loop merged 79 points
     into one question's 40-item window"*), and
-  * the pre-#2978 composition — #2978's title, *"content-less operator
-    points consume 61% of the reader's context slots"*.
+  * the pre-#2978 composition — #2978's title names it *"…content-less
+    operator points consume 61% of the reader's context slots…"*.
 
 Three arms on the SAME C2-shaped pool (item-bound 40, the wave's window):
 
@@ -42,12 +42,14 @@ WHAT IT IS NOT
 reader and no judge here: it measures the *window composition* (which facts get
 slots), never an answer quality number. The end-to-end ON/OFF reader run stays
 owed and is re-homed onto the next end-to-end run (see
-``docs/runbook/8043-slice-a-t-gate.md`` §4 and the ``not_run`` block of the
-receipt).
+``docs/runbook/8043-slice-a-t-gate.md`` §4 and the ``why_no_reader`` block of
+the receipt).
 
-⛔ The pool is a **constructed C2 shape** (§1's two measured facts scaled to one
-window), not the frozen 50-Q slice. Its numbers characterise the mechanism, not
-the corpus.
+⛔ The pool is a **constructed C2 shape** — wave §1's duplicate flood plus
+#2978's content-less class, scaled to one 40-item window — not the frozen 50-Q
+slice. (§1 records TWO phenomena: the coverage loop's flood and the
+evidence-boost re-rank of 11 items. The second is **not** modelled here.) Its
+numbers characterise the mechanism, not the corpus.
 
 SCOPE NOTE (must travel with every number)
 -------------------------------------------
@@ -191,7 +193,7 @@ _CHUNK_FILLERS = (
     "armchair",
 )
 
-#: #2978: *"admitted item slots: 168, of which EMPTY: 103 = 61.3%"* — the
+#: #2978's census — 168 admitted item slots, 103 EMPTY = 61.3% — is the
 #: measured class this fixture reproduces. THIS fixture's share is its own:
 #: 24 of the C2 window's 40 slots = 60.0% (the receipt's
 #: `pre_2978.contentless_slot_share`), not the issue's 61.3%.
@@ -298,12 +300,15 @@ def _operator(oid: str, op_type: str, *, index: int) -> dict[str, Any]:
 
 
 def build_c2_pool() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """The C2-shaped pool (§1's two measured phenomena in ONE 40-item window).
+    """The C2-shaped pool — wave §1's duplicate flood + #2978's content-less
+    class, in ONE 40-item window.
 
     Rank order is the C2 shape: the coverage loop's duplicate flood and the
     content-less operator nodes occupy the top of the pool (that is what the
     loop did — it MERGED duplicates into the window, ahead of the other facts);
-    the value-critical and unrelated evidence sits below them. The construction
+    the value-critical and unrelated evidence sits below them. §1's OTHER
+    recorded phenomenon — the evidence-boost re-rank of 11 items — is not
+    modelled here. The construction
     is deterministic, so the receipt is reproducible byte-for-byte.
     """
     pool: list[dict[str, Any]] = []

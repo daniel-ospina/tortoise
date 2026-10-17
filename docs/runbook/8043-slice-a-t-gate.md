@@ -36,7 +36,7 @@ instrument; `tests/longmem_eval/test_slice_a_flood_bound.py` fails on any diff).
 | **Paid calls** | **0**. No reader, no judge, no graph, no network. |
 | **Reader** | **none** — and none may be substituted: wave §3 freezes GPT-4o + the official judge for every product measurement. |
 | **Answer quality** | **NOT measured.** No accuracy number exists here and none may be inferred from it (receipt `instrument.caveat`). |
-| **Population** | a **constructed C2 shape** (wave §1's two recorded facts in one 40-item window), **not** the frozen 50-Q slice. |
+| **Population** | a **constructed C2 shape** (wave §1's duplicate flood + #2978's content-less class, in one 40-item window), **not** the frozen 50-Q slice. §1's other recorded phenomenon — the evidence-boost re-rank of 11 items — is **not** modelled. |
 | **Boundary of the numbers** | they hold for hits carrying `quote` / `source_turn_id` (the eval lane). The product ask-lane shape is measured **separately** — the `provenance_free_assembly` arm — because there the fields are absent and the leg is inert (**#8658**). |
 
 The two arms are the A6 switches (`TORTOISE_LME_EVIDENCE_ASSEMBLY`, eval) and
