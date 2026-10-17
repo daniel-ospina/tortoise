@@ -21347,6 +21347,17 @@ class TortoiseSDK:
         # for a store that is merely down (§17.3's S5 failure mode).
         _residency: _ResidencyDeclaration | None = None
 
+        # #7983 (§17.4.4): the READ LEDGER — the instrument the hot fraction `f`
+        # has never had. ONE product read = ONE funnel (`tortoise_fts_query`),
+        # so this is the one seam that can say WHICH keys a read returned.
+        # OFF by default: when the flag is false nothing below runs, no key is
+        # extracted and the response is byte-identical (#4097 truthy contract).
+        # The module is stdlib-only at import and resolved lazily so a default
+        # deployment pays one boolean.
+        from . import read_ledger as _read_ledger
+
+        _record_reads = _read_ledger.enabled()
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -21375,6 +21386,12 @@ class TortoiseSDK:
                 read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
+            if _record_reads and rows:
+                # The ledger never changes the answer: it records the
+                # `(label, key)` of every row this read returned, and a ledger
+                # failure is swallowed inside the module (a measurement may not
+                # break the thing it measures).
+                _read_ledger.record_rows(label, rows)
             return rows
 
         try:

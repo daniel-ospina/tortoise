@@ -1,0 +1,629 @@
+"""The read ledger — the instrument `f` (the hot fraction) has never had (#7983).
+
+`docs/architecture/STORAGE-ARCHITECTURE.md` §17.4 closes the two-store
+arithmetic and leaves **two magnitudes unmeasured**, `f` and `rho`. This module
+is the instrument for the FIRST of them, and it exists because a census of the
+tree found nothing that could answer the question:
+
+* `GRAPH.MEMORY USAGE` is a graph-level sampling estimate; FalkorDB exposes **no
+  per-node access statistics** and we persist none;
+* the *residency declaration* (`tortoise/residency.py`) is a fact about the
+  **projection's own write work** — `declare_residency` is called only by
+  `cache_projection` — so it can say *"did we materialize this node"* and can
+  never say *"was it read"*;
+* `read_status.hit_count` is **in flight and per request**: it is discarded when
+  the response is built;
+* the per-org retrieval meter (`metering_records.retrieval_*`, #4489) counts
+  **how many** reads an org made, never **which bytes** they touched, and is a
+  no-op unless a tally is armed (the hosted path).
+
+So `f` is a **policy** variable today — `§2.0`'s *"keep the limit in falkor
+high"* sets it to 1 — rather than a measured one. The ledger is the smallest
+persisted fact that turns it into a division:
+
+    f = bytes read at least once in the window ÷ stock bytes
+
+**THE ZERO-READ MASS IS THE CLAIM.** The split's entire saving is
+`(1 − f) × cache`, i.e. *"bytes that are never read again stop renting RAM"*.
+The ledger's other half — every registered key with `read_count == 0` — IS
+"never read again", in bytes.
+
+⚠️ **WHAT THIS DOES NOT DO, AND MUST NEVER APPEAR TO DO.** It measures from the
+moment it is switched on. A freshly-enabled ledger on a long-lived graph reports
+`f = 0` because nothing has been *observed* yet, not because nothing was read —
+that is a **measurement window**, not a finding, and the report says so
+(`window_started` / `observed_reads`). Do not quote the first report of a new
+ledger as `f`; quote it with its window, its sample and its date, which is what
+§17.4.6 requires of every figure in that table.
+
+**The coordinate is the record's own `(label, key)` contract**, never a bare id:
+`Point → id`, `Event → eventId`, `Subject`/`Object → name`, `Source → url`
+(`public.node_identity.key_property`, generated from the label; the same set
+`cache_projection.KEY_PROPERTY` derives from the placement doc — a test pins the
+two together so this map cannot drift). The label is part of the coordinate
+because `Subject` and `Object` share `name`: a key-only ledger would collapse
+`(Object, "acme")` and `(Subject, "acme")` into one row.
+
+**Fail direction.** A measurement must never break the product. A ledger write
+that raises is swallowed and logged once — a read never fails because the ledger
+did. But a ledger that has stopped recording must not read as complete: the
+append is size-bounded (`TORTOISE_READ_LEDGER_MAX_BYTES`, default 64 MiB) and on
+the bound it writes ONE `capped` line and stops, which `report` surfaces as
+`capped: true` for the rest of that file's life.
+
+**Off by default.** `TORTOISE_READ_LEDGER` unset/`0` means the read funnel does
+not call this module at all, so a default deployment is byte-identical and pays
+nothing (the #4097 truthy contract). `TORTOISE_READ_LEDGER_PATH` chooses the
+file; the default sits next to the embedded store (`resolve_db_path()`'s
+directory) so one instance's ledger cannot be confused with another's.
+
+Format: JSONL, one line per event, appended with a single `O_APPEND` write and
+kept under 4 KiB per line, so several processes may append to one ledger without
+interleaving.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Iterable, Mapping  # noqa: UP035
+
+from .env_truthy import is_truthy
+
+logger = logging.getLogger(__name__)
+
+#: The env flag that makes the read funnel RECORD (the #4097 truthy contract).
+LEDGER_FLAG_ENV = "TORTOISE_READ_LEDGER"
+
+#: The ledger file. Default: beside the embedded store.
+LEDGER_PATH_ENV = "TORTOISE_READ_LEDGER_PATH"
+
+#: The tenancy partition a row belongs to. Unset = the ledger's own single
+#: namespace (`None` in the fold), which is what a self-hosted single-tenant
+#: instance has.
+LEDGER_TENANT_ENV = "TORTOISE_READ_LEDGER_TENANT"
+
+#: The size bound. On the bound the ledger writes one `capped` line and stops.
+LEDGER_MAX_BYTES_ENV = "TORTOISE_READ_LEDGER_MAX_BYTES"
+DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+
+EVENT_READ = "read"
+EVENT_STOCK = "stock"
+EVENT_CAPPED = "capped"
+#: A returned row the ledger could not ADDRESS (no key at all). Written as its
+#: own event because a read the ledger cannot key is a HOLE in both the
+#: numerator and the denominator — dropping it silently would make the report
+#: claim a completeness it never had.
+EVENT_UNRESOLVED = "unresolved"
+
+#: The record's key columns, per label — `public.node_identity.key_property`
+#: generated from the label (#7955's identity contract). The RECORD is the
+#: authority; `tests/test_read_ledger.py` pins this map against the migration.
+KEY_FIELDS: dict[str, str] = {
+    "Point": "id",
+    "Event": "eventId",
+    "Subject": "name",
+    "Object": "name",
+    "Source": "url",
+    "Session": "id",
+}
+
+#: A line longer than this could interleave with a concurrent appender.
+MAX_LINE_BYTES = 4096
+
+_warned: set[str] = set()
+
+#: Ledger files this PROCESS has already capped. Once a file is capped it stays
+#: capped: re-writing the marker on every later event would grow the file past
+#: the very bound it is meant to hold.
+_capped: set[str] = set()
+
+
+def _tail_is_capped(target: Path) -> bool:
+    """Does the file already END with a `capped` marker? (another process's)"""
+    try:
+        with open(target, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 256))
+            tail = fh.read().decode("utf-8", "replace").strip().splitlines()
+        return bool(tail) and json.loads(tail[-1]).get("event") == EVENT_CAPPED
+    except (OSError, ValueError):
+        return False
+
+
+def enabled() -> bool:
+    """Is the read funnel recording? (default off)"""
+    return is_truthy(os.environ.get(LEDGER_FLAG_ENV))
+
+
+def tenant() -> str | None:
+    """The tenant partition, or `None` for one unpartitioned ledger."""
+    return os.environ.get(LEDGER_TENANT_ENV) or None
+
+
+def ledger_path() -> Path:
+    """The ledger file: the env override, else beside the embedded store."""
+    explicit = os.environ.get(LEDGER_PATH_ENV)
+    if explicit:
+        return Path(explicit).expanduser()
+    from .config import resolve_db_path
+
+    return Path(resolve_db_path()).expanduser().parent / "read_ledger.jsonl"
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _max_bytes() -> int:
+    raw = os.environ.get(LEDGER_MAX_BYTES_ENV)
+    try:
+        return int(raw) if raw else DEFAULT_MAX_BYTES
+    except ValueError:
+        return DEFAULT_MAX_BYTES
+
+
+def _warn_once(key: str, msg: str, *args: object) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    logger.warning(msg, *args)
+
+
+def _append(record: Mapping[str, Any], *, path: Path | None = None) -> bool:
+    """Append ONE event. Returns False when nothing was written.
+
+    The failure direction is deliberate: a ledger write never raises into the
+    read path (`f` is a measurement, and a measurement may not break the thing
+    it measures). Every failure is warned about ONCE — a silently dead ledger is
+    indistinguishable from a store nobody reads, which is exactly the reading
+    this instrument exists to prevent.
+    """
+    line = json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+    if len(line.encode()) > MAX_LINE_BYTES:
+        _warn_once(
+            "long-line",
+            "read ledger: dropping an over-long %s events line "
+            "(a line over %d B can interleave with a concurrent "
+            "appender)",
+            record.get("event"),
+            MAX_LINE_BYTES,
+        )
+        return False
+    target = path or ledger_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cap = _max_bytes()
+        # `getsize`, not `fh.tell()`: a handle opened in APPEND mode reports a
+        # file position that CPython does not guarantee to be the end of file,
+        # so a size bound read from `tell()` silently never fires.
+        size = target.stat().st_size if target.exists() else 0
+        key = str(target)
+        if size >= cap or key in _capped:
+            if key not in _capped and not _tail_is_capped(target):
+                with open(target, "ab") as fh:
+                    fh.write(
+                        (
+                            json.dumps(
+                                {"at": _now(), "event": EVENT_CAPPED, "max_bytes": cap},
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            )
+                            + "\n"
+                        ).encode()
+                    )
+            _capped.add(key)
+            _warn_once(
+                "capped",
+                "read ledger %s: reached its %d B bound — no "
+                "further events are recorded (rotate it or raise "
+                "%s)",
+                target,
+                cap,
+                LEDGER_MAX_BYTES_ENV,
+            )
+            return False
+        with open(target, "ab") as fh:
+            fh.write(line.encode())
+        return True
+    except OSError as e:  # pragma: no cover — a broken filesystem
+        _warn_once(
+            "oserror",
+            "read ledger: append to %s failed (%s) — the read path "
+            "is unaffected, but the measurement is now incomplete",
+            target,
+            e,
+        )
+        return False
+
+
+def record_stock(
+    label: str,
+    key: str,
+    *,
+    nbytes: int | None = None,
+    at: str | None = None,
+    path: Path | None = None,
+    tenant_id: str | None = None,
+) -> bool:
+    """Register ONE key as part of the tenant's STOCK (i.e. it exists to read).
+
+    `nbytes` is the bytes the key costs in the store being measured — the
+    cache's share of RAM, or the record's row width. `None` is allowed and is
+    NOT zero: a stock whose bytes are unknown still has a *key* denominator, so
+    `f` falls back to the key fraction and the report says the byte fraction is
+    unavailable rather than computing it over a pretend zero.
+    """
+    if not key:
+        return False
+    return _append(
+        {
+            "at": at or _now(),
+            "event": EVENT_STOCK,
+            "label": label,
+            "key": key,
+            "bytes": nbytes,
+            "tenant": tenant_id if tenant_id is not None else tenant(),
+        },
+        path=path,
+    )
+
+
+def record_read(
+    label: str,
+    key: str,
+    *,
+    at: str | None = None,
+    path: Path | None = None,
+    tenant_id: str | None = None,
+) -> bool:
+    """Record ONE key as READ. One line per key per read — reads are the point."""
+    if not key:
+        return False
+    return _append(
+        {
+            "at": at or _now(),
+            "event": EVENT_READ,
+            "label": label,
+            "key": key,
+            "tenant": tenant_id if tenant_id is not None else tenant(),
+        },
+        path=path,
+    )
+
+
+def row_key(label: str, row: Mapping[str, Any]) -> str | None:
+    """The `(label, key)` coordinate of ONE returned row, or `None`.
+
+    `label` is already half the coordinate, so a name-shaped fallback cannot
+    collide across labels: `Subject.name` and `Object.name` stay distinct rows.
+    `None` means the row carried no key at all — counted as an UNRESOLVED read
+    by the report rather than dropped silently, because a read the ledger cannot
+    address is a hole in the denominator as well as in the numerator.
+    """
+    field_name = KEY_FIELDS.get(label)
+    if field_name and row.get(field_name):
+        return str(row[field_name])
+    for alt in ("id", "eventId", "name", "url"):
+        if row.get(alt):
+            return str(row[alt])
+    return None
+
+
+def record_rows(
+    label: str,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    path: Path | None = None,
+    tenant_id: str | None = None,
+    at: str | None = None,
+) -> int:
+    """Record a whole returned batch. Returns the number of keys recorded.
+
+    Called by the read funnel ONLY when `enabled()` — the funnel checks first, so
+    a default deployment never imports or calls into this module.
+    """
+    n = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            _append(
+                {
+                    "at": at or _now(),
+                    "event": EVENT_UNRESOLVED,
+                    "label": label,
+                    "tenant": tenant_id if tenant_id is not None else tenant(),
+                },
+                path=path,
+            )
+            continue
+        key = row_key(label, row)
+        if key is None:
+            _append(
+                {
+                    "at": at or _now(),
+                    "event": EVENT_UNRESOLVED,
+                    "label": label,
+                    "tenant": tenant_id if tenant_id is not None else tenant(),
+                },
+                path=path,
+            )
+            continue
+        if record_read(label, key, at=at, path=path, tenant_id=tenant_id):
+            n += 1
+    return n
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# The fold — the ledger is EVENTS, `f` is a reading of them
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class StockRow:
+    """One `(label, key)` of the stock, with what the ledger observed about it."""
+
+    label: str
+    key: str
+    nbytes: int | None = None
+    first_written_at: str | None = None
+    read_count: int = 0
+    last_read_at: str | None = None
+
+    @property
+    def read(self) -> bool:
+        return self.read_count > 0
+
+
+@dataclass
+class LedgerFold:
+    """The ledger, folded to one row per stock key."""
+
+    rows: dict[tuple[str | None, str, str], StockRow] = field(default_factory=dict)
+    #: Reads whose `(label, key)` was never registered as stock — the ledger saw
+    #: a read of a key whose bytes are outside the denominator.
+    unregistered_reads: int = 0
+    unresolved_reads: int = 0
+    window_started: str | None = None
+    window_ended: str | None = None
+    capped: bool = False
+    lines_read: int = 0
+    lines_skipped: int = 0
+
+    @property
+    def stock_keys(self) -> int:
+        return len(self.rows)
+
+
+def fold(
+    path: Path | str | None = None, *, window_days: float | None = None, now: datetime | None = None
+) -> LedgerFold:
+    """Read the ledger and fold it.
+
+    `window_days` bounds the READS considered (`at >= now - window`); the STOCK is
+    always everything the ledger has ever been told exists, because a key written
+    before the window is still stock the cache is renting RAM for. A window that
+    silently shrank the denominator would report a hot fraction that rises as the
+    window shortens — the denominator error §17.4.2 records three times.
+    """
+    target = Path(path) if path is not None else ledger_path()
+    out = LedgerFold()
+    if not target.exists():
+        return out
+    cutoff = None
+    if window_days is not None:
+        ref = now or datetime.now(UTC)
+        cutoff = (ref - timedelta(days=window_days)).isoformat(timespec="seconds")
+        out.window_started = cutoff
+        out.window_ended = ref.isoformat(timespec="seconds")
+    with open(target, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            out.lines_read += 1
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                out.lines_skipped += 1
+                continue
+            kind = ev.get("event")
+            if kind == EVENT_CAPPED:
+                out.capped = True
+                continue
+            if kind == EVENT_UNRESOLVED:
+                at = ev.get("at")
+                if cutoff is not None and isinstance(at, str) and at < cutoff:
+                    continue
+                out.unresolved_reads += 1
+                continue
+            label, key = ev.get("label"), ev.get("key")
+            if not isinstance(label, str) or not isinstance(key, str):
+                out.lines_skipped += 1
+                continue
+            ident = (ev.get("tenant"), label, key)
+            if kind == EVENT_STOCK:
+                row = out.rows.get(ident)
+                if row is None:
+                    row = out.rows[ident] = StockRow(label=label, key=key)
+                if ev.get("bytes") is not None:
+                    row.nbytes = int(ev["bytes"])
+                at = ev.get("at")
+                if at and (row.first_written_at is None or at < row.first_written_at):
+                    row.first_written_at = at
+            elif kind == EVENT_READ:
+                at = ev.get("at")
+                if cutoff is not None and isinstance(at, str) and at < cutoff:
+                    continue
+                row = out.rows.get(ident)
+                if row is None:
+                    out.unregistered_reads += 1
+                    continue
+                row.read_count += 1
+                if at and (row.last_read_at is None or at > row.last_read_at):
+                    row.last_read_at = at
+            else:
+                out.lines_skipped += 1
+    return out
+
+
+@dataclass
+class HotFraction:
+    """`f`, with its base, its denominator and its coverage. Never a bare ratio.
+
+    `f_keys`        read keys ÷ stock keys — always available.
+    `f_bytes`       read BYTES ÷ stock BYTES — only over keys whose `bytes` the
+                    ledger knows, and `None` when no key carries bytes, because
+                    a byte fraction over a pretend-zero denominator is not a
+                    measurement (`bytes_known_fraction` states the coverage).
+    """
+
+    stock_keys: int
+    read_keys: int
+    stock_bytes: int
+    read_bytes: int
+    bytes_known_stock_keys: int
+    bytes_known_read_keys: int
+    unregistered_reads: int
+    unresolved_reads: int
+    window_started: str | None
+    window_ended: str | None
+    capped: bool
+
+    @property
+    def f_keys(self) -> float | None:
+        if not self.stock_keys:
+            return None
+        return self.read_keys / self.stock_keys
+
+    @property
+    def f_bytes(self) -> float | None:
+        if not self.stock_bytes:
+            return None
+        return self.read_bytes / self.stock_bytes
+
+    @property
+    def bytes_known_fraction(self) -> float | None:
+        if not self.stock_keys:
+            return None
+        return self.bytes_known_stock_keys / self.stock_keys
+
+    @property
+    def zero_read_keys(self) -> int:
+        return self.stock_keys - self.read_keys
+
+    @property
+    def zero_read_bytes(self) -> int:
+        return self.stock_bytes - self.read_bytes
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "f_keys": self.f_keys,
+            "f_bytes": self.f_bytes,
+            "stock_keys": self.stock_keys,
+            "read_keys": self.read_keys,
+            "zero_read_keys": self.zero_read_keys,
+            "stock_bytes": self.stock_bytes,
+            "read_bytes": self.read_bytes,
+            "zero_read_bytes": self.zero_read_bytes,
+            "bytes_known_fraction": self.bytes_known_fraction,
+            "bytes_known_stock_keys": self.bytes_known_stock_keys,
+            "bytes_known_read_keys": self.bytes_known_read_keys,
+            "unregistered_reads": self.unregistered_reads,
+            "unresolved_reads": self.unresolved_reads,
+            "window_started": self.window_started,
+            "window_ended": self.window_ended,
+            "capped": self.capped,
+        }
+
+
+def hot_fraction(folded: LedgerFold) -> HotFraction:
+    """Reduce a fold to `f` — the ONE place the division happens."""
+    stock_bytes = read_bytes = 0
+    bytes_known = bytes_known_read = 0
+    read_keys = 0
+    for row in folded.rows.values():
+        if row.read:
+            read_keys += 1
+        if row.nbytes is not None:
+            bytes_known += 1
+            stock_bytes += row.nbytes
+            if row.read:
+                bytes_known_read += 1
+                read_bytes += row.nbytes
+    return HotFraction(
+        stock_keys=folded.stock_keys,
+        read_keys=read_keys,
+        stock_bytes=stock_bytes,
+        read_bytes=read_bytes,
+        bytes_known_stock_keys=bytes_known,
+        bytes_known_read_keys=bytes_known_read,
+        unregistered_reads=folded.unregistered_reads,
+        unresolved_reads=folded.unresolved_reads,
+        window_started=folded.window_started,
+        window_ended=folded.window_ended,
+        capped=folded.capped,
+    )
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="python -m tortoise.read_ledger",
+        description="Read the read ledger and report f (the hot fraction) with "
+        "its base, its denominator and its window.",
+    )
+    ap.add_argument("--ledger", default=None, help="ledger file (default: the env path)")
+    ap.add_argument(
+        "--window-days",
+        type=float,
+        default=None,
+        help="count only reads inside this trailing window",
+    )
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+
+    f = hot_fraction(fold(a.ledger, window_days=a.window_days))
+    if a.json:
+        print(json.dumps(f.as_dict(), indent=2))
+        return 0
+    print(f"ledger           : {a.ledger or ledger_path()}")
+    print(
+        f"window           : {f.window_started or '(all recorded events)'}"
+        + (f" → {f.window_ended}" if f.window_ended else "")
+    )
+    print(
+        f"stock            : {f.stock_keys:,} keys · "
+        f"{f.stock_bytes:,} B over {f.bytes_known_stock_keys:,} keys with bytes"
+    )
+    print(f"read at least once: {f.read_keys:,} keys · {f.read_bytes:,} B")
+    print(f"NEVER read       : {f.zero_read_keys:,} keys · {f.zero_read_bytes:,} B")
+    fk = f.f_keys
+    print(
+        f"f (keys)         : {fk:.4f}" if fk is not None else "f (keys)         : n/a — empty stock"
+    )
+    fb = f.f_bytes
+    print(
+        f"f (bytes)        : {fb:.4f}"
+        if fb is not None
+        else "f (bytes)        : n/a — no key in the ledger carries bytes"
+    )
+    if f.unregistered_reads or f.unresolved_reads:
+        print(
+            f"⚠️ reads outside the denominator: {f.unregistered_reads} unregistered, "
+            f"{f.unresolved_reads} with no key — f undercounts the numerator by these"
+        )
+    if f.capped:
+        print(
+            "⛔ the ledger reached its size bound and stopped recording — this "
+            "window is truncated, not quiet"
+        )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())

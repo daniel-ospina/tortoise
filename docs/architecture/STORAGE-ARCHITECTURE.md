@@ -432,7 +432,7 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 
 | lever | magnitude | owner |
 |---|---|---|
-| **disk-resident storage** (this document) | **584× on the RATE line · 778.7× per tenant** (the extra factor is the 75% density headroom). ⚠️ The blended *total-cost* figure is **now a closed form — §17.4.4: `1 / (f + (1 + ρ) / ratio)`** — where `f` is the hot fraction and `ρ` the record's non-storage lines relative to its disk line. **Both are unmeasured**, so §17.4 prices every line and states the condition rather than a point estimate — **and at today's `f = 1` policy the split is NET-NEGATIVE** | `#4333` · **`#7954`** |
+| **disk-resident storage** (this document) | **584× on the RATE line · 778.7× per tenant** (the extra factor is the 75% density headroom). ⚠️ The blended *total-cost* figure is **now a closed form — §17.4.4: `1 / (f + (1 + ρ) / ratio)`** — where `f` is the hot fraction and `ρ` the record's non-storage lines relative to its disk line. **`ρ`'s unit costs are measured and `f` has an instrument as of 2026-10-17 (§17.4.6); `f` itself is still unmeasured, so §17.4.4 still states the condition rather than a point estimate — and at today's `f = 1` policy the split is NET-NEGATIVE (0.996× at the measured `ρ` = 2.50; 0.92× at 40 tenants per project, where `ρ` = 62.5)** | `#4333` · **`#7954`** · **`#7983`** |
 | **writing less** — the selection gate | **~10×** ⚠️ see §6.1 | `#4894` / extraction |
 
 **Neither alone reaches 100×, and the two multiply.** A storage migration presented as a 100× fix would still be comparing one cost line to another.
@@ -1404,6 +1404,8 @@ follows is the evidence each ruling rests on, which is design.
 | **M5** | ⭐ **Where should the vector index live?** — our query latency with the index resident, against a real `GRAPH.MEMORY USAGE` read | **decides V1 (§12.1c) — the first cache-tier question (§14.2)** |
 | **M6** | ⭐ **How many durable claims did we keep?** — the share of the candidate facts the pipeline saw that survived as claims | **The guard §6.1 requires: without it, a volume objective can be satisfied by writing nothing.** The owner re-affirmed **2026-09-30** that this measurement is wanted (§14.1 **O2**, AMENDED) — **only the goal is deferred.** |
 | **M7** | ✅ **How fast does the journal actually grow?** — bytes per record class and per operation, on the real record shapes | **MEASURED 2026-10-17 (§5.2, `#5612`)** by `tools/journal_growth.py`, which also measures a LIVE journal base dir (`<base>/<graph>/events.jsonl`): a creating record is **9,176 B** (92% the embedding's decimal text) vs **196 B** for a revision ⇒ **≈8.8 MB per 1,000 point creates**, growth tracking creates. ⚠️ **What it does NOT answer: the retention window.** Choosing one needs the checkpoint/truncate semantics §3's bound requires, and that is a durability-posture ruling for the owner — the measurement is its input, not its substitute. |
+| **M8** | **What is the HOT FRACTION `f`?** — the share of a tenant's stock the cache actually holds, over a stated window | **`#7983`. It is the split's ENTIRE saving (`(1 − f) × cache`) and it gated §17.4's point estimate.** ✅ **The INSTRUMENT now exists (§17.4.6, 2026-10-17)**: `tortoise/read_ledger.py`, one row per `(tenant, label, key)` with bytes / first-written / read_count / last-read, fed by the one read funnel, read back by `python -m tortoise.read_ledger`. ⚠️ **The measurement is not taken and cannot be, today:** it needs a window over a tenant's real query mix and no tenant serves one (hosted capture off by owner ruling 2026-10-14). **What is NOT acceptable in its place: a fresh ledger's first report.** |
+| **M9** | **What is `ρ` — the record's non-storage lines relative to its disk line?** — compute tier + IOPS + egress, per tenant | **`#7983`.** ⚠️ **Half-measured 2026-10-17 (§17.4.6)**, and the halves are named rather than blurred: **MEASURED** — record footprint **0.2721 GB/tenant** (3,034 B/node on disk), **4 logical blocks** and **1,656 B** per keyed miss, **35,402 blocks / 288–483 ms** per full-scope rebuild, on the committed record schema. **NOT MEASURED** — the miss RATE, and therefore the compute tier the read path needs; the provisioned-IOPS line is a STEP ($0 below 18.8 cold misses/s/tenant) and the egress line is inside its allowance (58 misses/s). ⇒ **`ρ` = 2.50 at the doc's 1,000-tenant density and 62.5 at its 40-tenant cache density: the term that decides it is TENANT DENSITY, not any per-read cost.** |
 
 **Not worth measuring (recorded so they are not re-invented):** the cold-index p95/p99 study (**premise was vendor marketing**), the quantization-recall study (**no engine to apply it to**), the 1,000-partition planning study (**§12.1a answers it: the PARTIAL-index form degrades — 83 ms at T=500 — while declarative `PARTITION BY` is flat to T=500; neither is the decision, which is the size-earned conditional index**), and the narrative-vs-raw A/B (**`#3011` is already pre-registered; do not duplicate it**).
 
@@ -1634,6 +1636,8 @@ For the record, since two members of the design rest on it:
 
 **The sweep that decides the split** — measured footprint, 1 GB STARTUP, 5 tenants, Medium compute and the plan ÷ 1,000 tenants:
 
+> ⚠️ **THIS IS STILL A SWEEP, NOT A POINT ESTIMATE (`#7983`, 2026-10-17).** `f` has never been observed on a tenant, and the instrument that would observe it did not exist until this row's own measurement — see **§17.4.6**, which records the census (nothing persisted *which* bytes were read), the **read ledger** that now does, and the one live reading of it. **A measured `rho` RAISES the hybrid's multiplier — the correction makes the split harder, never easier.** At the record's measured disk line `rho` is **2.50** at 1,000 tenants per project and **62.5** at 40, which moves the break-even `f` from **99.29%** to **99.55%** (1,000) or **91.85%** (40), and at `f = 1` the hybrid is **0.996×** / **0.92×** rather than 0.99×. **The finding does not move: at today's policy the split is a strict net cost.**
+
 | hot fraction `f` | cache RAM | record disk | record compute + plan | IOPS | hybrid total | single store | multiplier |
 |---|---|---|---|---|---|---|---|
 | **1.00** (today — *"keep the limit in falkor high"*) | $14.60 | $0.019 | $0.085 | ⚠️ unmeasured | **≥ $14.70** | $14.60 | **0.99×** ⛔ |
@@ -1671,18 +1675,18 @@ break-even hot fraction       = 1 − (1 + ρ) / ratio
 
 **⚠️ `ratio` is 778.7× here, not the `~580×` §6 quotes — the difference is the 75% density headroom**, i.e. the cache pays for RAM it may not fill. **Both are correct on their own bases: quote `584×` as a RATE ratio and `778.7×` as a PER-TENANT one.**
 
-| `ρ` — record non-storage ÷ disk line | what it represents | break-even `f` | ceiling at `f` = 0 |
-|---|---|---|---|
-| 0 | disk only — no compute or IOPS anywhere | **99.87%** | **778.7×** |
-| 4.5 | Medium compute + plan ÷ 1,000 tenants (`$0.085 ÷ $0.0187`) | **99.29%** | 141× |
-| 10 | compute + IOPS dominating the record line | 98.59% | 70.8× |
+| `ρ` — record non-storage ÷ disk line | what it represents | break-even `f` | ceiling at `f` = 0 | measured / bounded (2026-10-17, `#7983`) |
+|---|---|---|---|---|
+| 0 | disk only — no compute or IOPS anywhere | **99.87%** | **778.7×** | the floor: it is the disk line alone, and the disk line is now **measured** (`$0.0340`/tenant at **0.2721 GB**) |
+| 4.5 | Medium compute + plan ÷ 1,000 tenants (`$0.085 ÷ $0.0187`) | **99.29%** | 141× | ⛔ **superseded as an assumption, not refuted as a case** — recomputed over the MEASURED disk line it is **2.50** (§17.4.6), because the divisor was understated 1.81× |
+| 10 | compute + IOPS dominating the record line | 98.59% | 70.8× | ⚠️ **IOPS is now measured per miss (4 blocks) and is a STEP, not a slope** — the provisioned line is $0 until **18.8 cold misses/s/tenant** at the 40-tenant density (§17.4.6). **Measured `ρ` reaches this row (and beyond) through the compute tier's DENSITY, not through per-read cost**: 2.50 at 1,000 tenants/project, 62.5 at 40 |
 
 **⇒ The blended total becomes a NUMBER as soon as two magnitudes are measured, and neither is measured:**
 
 1. **`f` — the hot fraction.** **Not measured anywhere.** §2.1's *"we choose what the cache holds"* is the lever, and this is its decision variable.
 2. **`ρ` — the record's non-storage lines per tenant:** which compute tier the read path actually needs, and **how many IOPS a cache-miss storm costs** (§5.1's own warning: *"the cost moves from storage to requests"*). ⚠️ **The IOPS line is PRICED ($0.024/IOPS/month) but its MAGNITUDE is unmeasured — which is why every hybrid total above is a `≥`.**
 
-**⇒ Both magnitudes are the model's open inputs** — *the model is complete; two of its inputs are not.* **Until they are measured, no blended figure may be quoted as a point estimate.**
+**⇒ Both magnitudes are the model's open inputs** — *the model is complete; two of its inputs are not.* **Until they are measured, no blended figure may be quoted as a point estimate.** **✅ 2026-10-17 (`#7983`): `ρ`'s UNIT COSTS are now measured and `f` now has an instrument — §17.4.6 records both, the census behind the gap, and the one thing still missing (a tenant whose misses can be observed).**
 
 **⚠️ And this is why §6's `~10×` and this `~580×` must not be multiplied into a headline.** The storage-line win is real and large; the **total-cost** win is `1 / (f + (1 + ρ) / ratio)`, and **every non-storage dollar the record adds shrinks it toward 1**. *"A storage-cost win is not a total-cost win"* is §6's sentence — **this is the number that says by how much.**
 
@@ -1706,6 +1710,72 @@ rho        = (0.060 + 0.025) / 0.0187         = 4.5
 ratio      = (73 / 0.75) / 0.125              = 778.7
 multiplier = 1 / (f + (1 + rho) / 778.7)      -> 0.99x at f = 1.00, 4.83x at f = 0.20
 ```
+
+**Reproduce the two MEASURED magnitudes (§17.4.6)** — both are scripts in `docs/evidence/7983-cost-magnitudes/probes/`, and neither needs anything but Docker:
+
+```bash
+# rho: the record's per-read cost, on the COMMITTED record schema
+uv run --with psycopg2-binary python \
+  docs/evidence/7983-cost-magnitudes/probes/record_read_cost.py
+
+# f: the read ledger, exercised end-to-end on the live self-hosted graph
+uv run python docs/evidence/7983-cost-magnitudes/probes/ledger_probe.py --queries 200
+python -m tortoise.read_ledger --window-days 30      # f, with its window and base
+
+# the dogfood shape the bench plants (content width, vector share) — read-only
+uv run python docs/evidence/7983-cost-magnitudes/probes/graph_content_census.py
+```
+
+### 17.4.6 What is measured now — and what still is not (`#7983`, measured 2026-10-17)
+
+**The two empty inputs were attacked by measurement, and the honest result is SPLIT: `ρ`'s unit costs are now measured; `f` still has no point estimate — but it has an INSTRUMENT, where before it had none.** Every figure below carries its base, its sample and its date; the census and both probes are in `docs/evidence/7983-cost-magnitudes/`.
+
+**The census first — what the tree held at `459f22912`, before this lane** (`census-7983.log`, greps uncapped, the lane's own file excluded by construction):
+
+| question | measured answer |
+|---|---|
+| is there a persisted per-key read fact? | **no** — the only `hit_count` is `read_status`'s in-flight, per-request count (discarded when the response is built); `tools/longmem_eval/retrieve.py`'s `last_reads` is a local retry variable |
+| is there a query-log / read-ledger TABLE? | **none** — `grep -rniE 'query_log\|query_telemetry\|read_ledger\|access_log\|node_read\|last_read\|read_count' supabase/migrations` → 0 |
+| is the RESIDENCY declaration a read fact? | **no** — its only writer is `cache_projection.declare_residency`, i.e. it records what the projection WROTE. `f` cannot be derived from it: *materialized* is not *read* |
+| is there a read-VOLUME meter? | **yes, and it is the wrong shape** — `metering_records.retrieval_*` (`#4489`) counts HOW MANY reads an org made, never WHICH keys they touched, and on self-hosted it is a no-op unless a tally is armed |
+
+**⇒ `f` was a POLICY variable — §2.0's *"keep the limit in falkor high"* IS `f = 1` — and never a measured one. That is why the sweep above is a sweep.**
+
+**What now exists: the READ LEDGER (`tortoise/read_ledger.py`).** One persisted row per `(tenant, label, key)` carrying `bytes`, `first_written_at`, `read_count`, `last_read_at`; appended from the ONE product read funnel (`sdk.tortoise_fts_query`, the same funnel `read_status` and the residency marker ride), keyed on the record's own identity contract (`Point→id`, `Event→eventId`, `Subject`/`Object→name`, `Source→url`) so the LABEL is part of the coordinate and `Subject.name` can never collapse into `Object.name`. **Its zero-read mass IS the claim**: every registered key with `read_count = 0` is a byte that rented RAM and was never read in the window. `python -m tortoise.read_ledger` reports `f` with its base, its denominator, its byte coverage and its window. Off by default (`TORTOISE_READ_LEDGER`), bounded in bytes, and a ledger that caps or fails says so — a truncated window is never reported as a quiet one.
+
+**`f` — still no point estimate for a tenant, and exactly what is missing.** The ledger measures from the moment it is enabled, so `f` needs a WINDOW over a tenant's REAL query mix. Neither exists today: **hosted capture is deliberately off** (owner, 2026-10-14) and no self-hosted tenant serves a workload. Quoting a fresh ledger's first report would report *"nobody has read anything since we started watching"* as *"nothing is read"* — the measurement-window trap, which is the reason this section reports an instrument exercise instead of an `f`.
+
+**The instrument's own exercise** — live self-hosted graph `tortoise` (`localhost:16379`), measured 2026-10-17 (`ledger-probe.json`): stock **10,435 keys / 21,065 nodes** (record labels only: Point 10,374 · Source 60 · Event 1); **200 queries × 10 results = 2,000 read events**; **216 distinct keys read at least once ⇒ `f` = 2.07%**, leaving **10,219 keys = 17.09 MB never read** (bytes attributed at §17.4.2's measured **1,672 B per resident node**; FalkorDB exposes no per-key byte figure — the named gap at the end of this section). ⚠️ **THIS IS NOT `f` FOR THE COST MODEL.** The query mix is a **PROXY** built from the graph's own `Point` contents — one graph, one date, one window. It says the instrument works and what a reading looks like; it says nothing about what a tenant reads.
+
+**`ρ` — three of its four components are now measured; the fourth is a RATE no tenant exists to provide.** Bench: a throwaway `postgres:16` carrying the **committed** record migrations (`2026101200000{1..4}_record_*.sql` + `20261014000001`), **TWO tenants** planted at §17.4.2's stock (**89,701 nodes each**, so the per-tenant figure below is the measured total ÷ 2 and not an extrapolation), with the content width and vector share taken from the dogfood graph — `graph-content-census.json`, measured 2026-10-17 at this same commit: `avg(size(content))` = **1,121.4 B**, max 19,061 B, and **4,145 / 10,374 = 39.96%** of Points carry a vector. Reads measured with `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`; **blocks are exact**, milliseconds are a range over two runs on a shared-CPU container with default settings (this is an accounting bench, not a vendor benchmark):
+
+| `ρ`'s line | measured | base / denominator |
+|---|---|---|
+| **record row width** | **1,633–1,639 B median, 2,296–2,304 B mean** | n = 2,000 rows per run, two runs; the vector written as the schema's own `embedding jsonb` |
+| **record footprint per tenant** | **272,125,952 B = 0.2721 GB** | 89,701 nodes ⇒ **3,034 B per node on disk** (heap + indexes + TOAST) |
+| **keyed miss fetch (IOPS)** | **4 logical blocks = 32 KiB** | `WHERE org_id, graph_id, node_key` — the record's own PK probe · 200 samples |
+| **keyed miss fetch (bytes out)** | **1,656 B returned** | `pg_column_size` of the fetched row |
+| **keyed miss fetch (CPU)** | **0.0625–0.085 ms** | same probe, two runs |
+| **full-scope read (rebuild)** | **35,402 blocks = 290 MB logical · 288–483 ms** | `read_record_view`'s own query shape, 89,701 rows, two runs |
+
+**⇒ `ρ` recomputed over the MEASURED disk line, at the doc's own density assumption:**
+
+```text
+disk      = $0.125 × 0.2721 GB                 = $0.0340 /tenant/month   (MEASURED)
+compute   = $60 ÷ 1,000 tenants                = $0.060                  (density assumption)
+plan      = $25 ÷ 1,000 tenants                = $0.025                  (density assumption)
+IOPS      = $0    below the 3,000-included step: 4 blocks/miss ⇒ the step is at 18.8 cold misses/s/tenant
+egress    = $0    below the 250 GB allowance:  1,656 B/miss  ⇒ the allowance is 151M misses/month (58/s)
+rho       = (0.060 + 0.025 + 0 + 0) ÷ 0.0340   = 2.50
+```
+
+**⇒ `ρ` = 2.50, not 4.5 — the doc's `ρ` was CONSERVATIVE, and correcting it makes the split HARDER, never easier:** the break-even hot fraction moves **99.29% → 99.55%**, and `f = 1` becomes **0.996×** rather than 0.99×. **The finding stands: at today's policy the split is a strict net cost.** The whole difference is the disk line, and the reason for it is worth knowing: **the record's footprint is 1.81× the cache's 143 MiB for the SAME 89,701 nodes** (0.2721 GB against 0.1499 GB), because the record stores the 384-d vector as `jsonb` decimal text where the cache stores `vecf32` — the same encoding gap §5.2 measured on the journal (~4×), now measured on the record. ⚠️ **And the vector here was written at 6 decimal places (~9.5 chars/float) where §5.2 measured the journal's real encoding at 21.9 chars/float, so 0.2721 GB is a LOWER BOUND at that column type** — a higher disk line lowers `ρ` further, in the same direction.
+
+**⚠️ AND THE DOMINANT TERM IS TENANT DENSITY, NOT ANY PER-READ COST.** At §17.4.3's **40-tenant** 8 GB PRO density BOTH density-scaled lines move — compute `$60 ÷ 40 = $1.50` and the plan `$25 ÷ 40 = $0.625` — so **`ρ` = (1.50 + 0.625) ÷ 0.0340 = 62.5** ⇒ break-even **`f` = 91.85%**. ⚠️ **The basis must be the same on both lines**: dividing compute by 40 and the plan by 1,000 mixes two densities and yields a number that belongs to neither. The two coherent figures differ by **25×**, and neither is a per-read measurement: `ρ` is a claim about **how many tenants share a project**, the same unmeasured density §17.4.3 already flags for the cache (*"the achieved density is unmeasured"*). **Both are shown; neither is chosen.** No per-read cost can resolve it — 4 blocks and 60–85 µs per miss do not make a compute tier.
+
+**What would close the last input.** A tenant serving real misses against a deployed record, for a window, with the ledger and the retrieval meter on: then `f` is a division over that window's mix, the **miss RATE** is read rather than assumed, and the compute line is sized from `misses × 6.25e-5–8.5e-5 CPU-s` and `rebuilds × 0.29–0.48 CPU-s` instead of a density guess. **Until then §17.4.4's rule stands unchanged: no blended figure may be quoted as a point estimate.**
+
+**Process weight — one line, twice.** The **ledger is kept because of a failure that already happened**: the split was decided on an unmeasured assumption and measured at **0.99× at `f = 1`**; delete the ledger and the product claim (*"bytes never read again stop renting RAM"*) is uncheckable again — **product**. The **two probes are the reproduction recipe** for every number above, which §17.4's own "Reproduce" block requires of an input — **process, and cheap**: no schema, no config entry, no SDK surface, no MCP tool, and nothing runs on a default deployment. **The seam deliberately NOT added:** per-key `bytes` are not yet registered from the record's row widths, so the ledger's byte denominator is §17.4.2's measured unit rather than each key's own figure — named here rather than papered over, because the alternative (a per-key byte column) is a schema change this issue is not.
 
 ### 17.5 A field-level placement table — 9 derived/volatile property names on the sampled surface
 

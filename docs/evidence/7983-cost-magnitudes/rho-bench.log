@@ -1,0 +1,62 @@
+planted tenant rho7983-org-0: 89701 points (40% with a 384-d vector)
+planted tenant rho7983-org-1: 89701 points (40% with a 384-d vector)
+
+── measured ────────────────────────────────────────────────
+record row width                : 1633 B median, 2296 B mean (n=2000 rows, 40% with a 384-d vector)
+record footprint per tenant     : 272,125,952 B = 0.2721 GB (2 tenants, 89,701 nodes each)
+  by table (all tenants)        : node_identity 36,044,800 B, point 508,157,952 B, relation 49,152 B
+  per node on disk              : 3,034 B (heap + indexes + TOAST) — against §17.4.2's 1,672 B per RESIDENT node in the CACHE
+keyed miss fetch                : 4 blocks (32 KiB logical) · 0.085 ms · 1656 B returned
+full-scope read (rebuild)       : 35,402 blocks (290.0 MB logical) · 287.58 ms · 89,701 rows
+
+── the disk line (rho's denominator) ───────────────────────
+disk per tenant per month       : $0.0340 (0.2721 GB x $0.125/GB)
+⚠️ the $8 GB-project allowance means the MARGINAL cost is $0 until a project's record exceeds 8 GB (29 tenants at this stock)
+
+── the IOPS line (provisioned: peak, not total) ────────────
+1 cache miss                    : 4 IOPS if the page must be read
+3,000 included IOPS shared by 40 tenants (the §17.4.3 8 GB PRO density) = 75 IOPS/tenant
+=> IOPS saturates at            : 18.8 cold misses/second/tenant = 67,500/hour
+=> at $0.024/IOPS/month, 1 extra provisioned IOPS costs $0.024/mo REGARDLESS of how many reads use it — the line is a step, so rho_IOPS is $0 below the step
+
+── the egress line ─────────────────────────────────────────
+1 cache miss returns            : 1656 B = $0.00000015 of egress
+250 GB included =               : 150,966,184 cold misses/month = 58/second before egress costs anything
+
+── the compute line ────────────────────────────────────────
+1 keyed miss                    : 0.085 ms
+1 full-scope rebuild            : 287.58 ms of one core (0.29 CPU-seconds)
+=> a DAILY rebuild/tenant       : 0.0024 CPU-hours/month
+
+──────────────────────────────────────────────────────────────────────
+RUN 2 of 2 — same container, same planted data (--skip-plant), re-run immediately after RUN 1.
+The range in the docs (CPU milliseconds only; BLOCKS are deterministic) is read from these two runs.
+──────────────────────────────────────────────────────────────────────
+record schema already present — migrations not re-applied
+
+── measured ────────────────────────────────────────────────
+record row width                : 1639 B median, 2304 B mean (n=2000 rows, 40% with a 384-d vector)
+record footprint per tenant     : 272,142,336 B = 0.2721 GB (2 tenants, 89,701 nodes each)
+  by table (all tenants)        : node_identity 36,052,992 B, point 508,182,528 B, relation 49,152 B
+  per node on disk              : 3,034 B (heap + indexes + TOAST) — against §17.4.2's 1,672 B per RESIDENT node in the CACHE
+keyed miss fetch                : 4 blocks (32 KiB logical) · 0.0625 ms · 1656 B returned
+full-scope read (rebuild)       : 35,402 blocks (290.0 MB logical) · 483.24 ms · 89,701 rows
+
+── the disk line (rho's denominator) ───────────────────────
+disk per tenant per month       : $0.0340 (0.2721 GB x $0.125/GB)
+⚠️ the $8 GB-project allowance means the MARGINAL cost is $0 until a project's record exceeds 8 GB (29 tenants at this stock)
+
+── the IOPS line (provisioned: peak, not total) ────────────
+1 cache miss                    : 4 IOPS if the page must be read
+3,000 included IOPS shared by 40 tenants (the §17.4.3 8 GB PRO density) = 75 IOPS/tenant
+=> IOPS saturates at            : 18.8 cold misses/second/tenant = 67,500/hour
+=> at $0.024/IOPS/month, 1 extra provisioned IOPS costs $0.024/mo REGARDLESS of how many reads use it — the line is a step, so rho_IOPS is $0 below the step
+
+── the egress line ─────────────────────────────────────────
+1 cache miss returns            : 1656 B = $0.00000015 of egress
+250 GB included =               : 150,966,184 cold misses/month = 58/second before egress costs anything
+
+── the compute line ────────────────────────────────────────
+1 keyed miss                    : 0.0625 ms
+1 full-scope rebuild            : 483.24 ms of one core (0.48 CPU-seconds)
+=> a DAILY rebuild/tenant       : 0.0040 CPU-hours/month
