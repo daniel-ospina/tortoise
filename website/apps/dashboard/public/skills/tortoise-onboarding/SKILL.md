@@ -734,17 +734,21 @@ GitHub's two sources are **separately enable-able** and share **one OAuth
 connect** — turning issues off never disconnects GitHub for documents (the
 `github_connected` key is the connection, never a per-source toggle).
 
-- **Ask, then honour the answer.** A "no" writes the OFF intent
-  (`tortoise_manage_sources(action="disable", source=…)`) — an UNSET key is not
-  off: it means the product default, which for these flags is **on** (the tool's
-  `enabled` and `default` fields say which), so writing nothing on a "no" would
-  leave the source ON; a "yes" writes the
-  per-source enable
-  intent through the same tool surface the hosted wizard uses
-  (`tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")` / the onboarding-state path) — one state path,
-  never a second copy of the flag. **Self-hosted: this tile's write lands
-  (#8686)** — the agent-session-recording toggle writes through the owned
-  onboarding-state node, so you may report the answer as applied.
+- **Ask, then honour the answer — per TILE, never one call for the section.**
+  Each tile in the table above has its own source, and writing one source never
+  writes another: `session_recording` → `source="agent_sessions"`,
+  `issues_enabled` → `source="github_issues"`, `docs_enabled` →
+  `source="github_documents"`. A "no" writes the OFF intent for THAT tile
+  (`tortoise_manage_sources(action="disable", source="<the tile's source>")`) —
+  an UNSET key is not off: it means the product default, which for these flags
+  is **on** (the tool's `enabled` and `default` fields say which), so writing
+  nothing on a "no" would leave the source ON. A "yes" writes the per-source
+  enable intent the same way:
+  `tortoise_manage_sources(action="enable", source="<the tile's source>")`,
+  through the same tool surface the hosted wizard uses — one state path, never a
+  second copy of the flag. **Self-hosted: the `agent_sessions` write lands (#8686)** — it goes
+  through the owned onboarding-state node, so you may report the answer as
+  applied; the two GitHub sources are hosted-only.
 - **An unbuilt integration is never faked.** Anything not in the inventory
   above is **coming soon**: say so plainly, honour a "yes" as interest rather
   than as a setup step, and **never** present it as available or connect it.
@@ -789,7 +793,8 @@ the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
   source) stays. The tool's own payload reports `enforcement: "intent-only"` —
   repeat that rather than telling a user the source has stopped.
 - **Agent-session recording** — `tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")`
-  (`enabled`); read it back from `tortoise_onboarding_state`, which reports the
+  (`enabled` in the tool's `list` payload, `session_recording` in
+  `tortoise_onboarding_state`); read it back from `tortoise_onboarding_state`, which reports the
   stored operational keys under `operational` (#8686). **Self-hosted this is the
   ONE connect-style leg that works** — both the write and the read-back land on
   the deployment's own node. Both were fixed by #8686; before it, the write

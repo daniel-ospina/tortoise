@@ -4801,16 +4801,22 @@ def _set_source_state(source: str, enable: bool) -> dict:
         return {"error": (
             "The team's onboarding state could not be read (graph "
             "unavailable), so nothing was changed.")}
-    if enable and current_on:
+    # `session_recording` defaults ON (#1927), so `current_on` alone does not say
+    # whether the CAPTURE DISCLOSURE was ever accepted — `capture_revised` does.
+    # Short-circuiting on `current_on` alone skipped the consent write on a fresh
+    # install, where the default is already on: the SKILL's yes-branch ("both
+    # write session_recording + capture_revised") silently became a no-op.
+    consent_recorded = _state_get(state, "capture_revised") is True
+    if enable and current_on and consent_recorded:
         _log_source_change(org_id, source, "enable", "already_on")
         return {
             "source": source,
             "scope": "source",
             **_source_payload(spec, "already_on"),
             "note": (
-                "Agent session recording is ON by default (#1927: an optional "
-                "off-switch, ToS-covered). Nothing to change; use action="
-                "\"disable\" to stop it."
+                "Agent session recording is ON (#1927: an optional off-switch, "
+                "ToS-covered) and the capture disclosure is already accepted. "
+                "Nothing to change; use action=\"disable\" to stop it."
             ),
         }
     if not enable and not current_on:
