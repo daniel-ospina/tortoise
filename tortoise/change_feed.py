@@ -76,7 +76,8 @@ event reports ``before`` when its predecessor is in the page (and no hard delete
 intervened), and NO ``before``
 when a page boundary falls between them or an intervening hard delete ended the
 incarnation; a client that pages therefore loses
-``before`` for exactly those claims whose events straddle a boundary. It is
+``before`` for those claims whose events straddle a boundary, and ANY client
+loses it for a claim that was hard-deleted and re-created inside the page. It is
 still never invented (an unobserved field is absent, never back-filled from a
 ``precondition``), but "the window observed no earlier value" and "the window
 started after the earlier value" are not distinguishable from the reply. A
