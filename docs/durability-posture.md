@@ -653,6 +653,19 @@ a written claim to the system it describes is **#5063**.
 - **#2296** — the class-wide durability contract. **Dormant/unowned.** Its
   indicators are contributed into *Authoritative node classes across a rebuild*
   above; it does not create a rival map.
+- **#4125** — the pre-#4005 basename-url session `:Source` migration. Its
+  durability is **re-derivation, not a record**: the journal is append-only, so
+  the migration cannot rewrite the pre-fix lines and no mapping for them exists
+  in the journal to fold. The four whole-journal replay engines therefore run
+  `tortoise.session_source_migration.reconcile_after_replay` at the end of their
+  trailing sweeps, re-deriving the migrated identity from the attribution the
+  journal DOES reproduce (a replayed Point's `session_id` + its `extractedFrom`
+  edge). Stated here because it is a durability claim: a rebuild of a pre-fix
+  journal converges on `session:<id>`. Known residual: the single-record
+  `apply()` path has no journal-wide view and does not run it, and on an
+  **unmigrated** graph the live store holds the legacy identity a replay would
+  converge — run `graph-scripts/4125_migrate_legacy_session_sources.py` (the
+  same function, idempotent) to make the two agree.
 
 - **#8544 — the self-hosted off-box copy has a DRIVER** (the residual closed for
   self-host, with one piece explicitly still owed). #2880 — the earlier "no
