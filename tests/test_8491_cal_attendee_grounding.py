@@ -30,10 +30,14 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "integrations" / "crm" / "twenty"))
+# Repo root on sys.path so `import integrations` works under any pytest
+# invocation (console script does not add CWD; `python -m pytest` does) — the
+# same construction as tests/test_bridge_mcp.py. Deliberately NOT inserting
+# `integrations/crm/twenty/` itself: that directory holds `review.py`, a name
+# generic enough to shadow another module for the rest of the session.
 sys.path.insert(0, str(REPO_ROOT))
 
-import bridge  # noqa: E402
+import integrations.crm.twenty.bridge as bridge  # noqa: E402
 
 # The contaminated artifact shape from the issue: one remote participant, a
 # state file left behind by a *different* call recorded the same week.
