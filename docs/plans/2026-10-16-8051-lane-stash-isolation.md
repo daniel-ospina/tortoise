@@ -131,11 +131,13 @@ One primitive, in `tools/lane_stash.py`:
   would refuse states that are genuinely safe. Safe to call from a pre-flight.
 - **`recover <sha>`** — the repair recipe from the incident: `git stash store -m "<original subject>"
   <sha>` **and** pin it, so the restored entry is retrievable by this lane. It REFUSES an entry that
-  another lane's ref or `[<lane-key>]` marker names, or one already ENUMERATED by the register that is
-  not provably this lane's (nothing was dropped, so `recover` would only mint ownership; `-m` asserts
-  it deliberately): pinning a peer's entry here would leave it claimed by both lanes and `check`
-  would then clear a bare pop on work that is not this lane's. A peer's entry is restored with bare
-  `git stash store`, or by that lane from its own worktree.
+  another lane's ref or `[<lane-key>]` marker names, or one that is not provably this lane's when
+  nothing was dropped — whether the register ENUMERATES it **or** `refs/stash` still NAMES it (an
+  emptied reflog) — since that only mints ownership; `-m` asserts it deliberately. Provenance is an
+  own pin/applied record or an own `[<lane-key>]` marker, so an OWN orphan is adopted without `-m`.
+  Pinning a peer's entry here would leave it claimed by both lanes and `check` would then clear a
+  bare pop on work that is not this lane's. A peer's entry is restored with bare `git stash store`,
+  or by that lane from its own worktree.
 - **`prune`** — explicit reclamation of the shared register: an entry is removed only when the
   delete cannot lose work — its object is **pinned by a lane ref**, or this lane left a durable
   **applied-record** at `refs/lane/<key>/applied/<sha>` (written atomically by `pop` on a

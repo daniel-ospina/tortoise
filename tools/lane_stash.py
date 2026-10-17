@@ -1557,8 +1557,9 @@ def cmd_prune(args: argparse.Namespace) -> int:
         )
     if args.apply:
         # Guards left by REMOVED worktrees are not released by any routine command:
-        # `prune` only unpins the guards it created, and `recover` reaches one only
-        # through the explicit `-m` assertion (#8822 review P2).
+        # `prune` only unpins the guards it created, and `recover` releases every
+        # guard for a sha when it ADOPTS that sha (`-m` or not — an own orphan needs
+        # no `-m`); a guard for an entry nobody adopts is never reached (#8822 P2).
         _reap_stale_guards()
     if not doomed:
         if not orphan:
