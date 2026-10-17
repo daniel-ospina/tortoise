@@ -5181,11 +5181,10 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
 
     Called from EVERY caller-facing row-returning read path that has a known
-    LABEL. The named set is carried by §17.4.6, not duplicated here — this
-    docstring previously named only `query()`, `paginated_query()` and
-    `query_points_by_tag()` and omitted `suggest_entry_points`, `issue_insight`,
-    `recall_state`, `recall_gaps`, `search_sessions` and `get_events`, all of
-    which call it in this file. An audit surface that under-reports its own call
+    LABEL. The named set is carried by §17.4.6, not duplicated here — a case
+    where it was duplicated: this docstring once named only `query()`,
+    `paginated_query()` and `query_points_by_tag()` while omitting six callers
+    that were already here. An audit surface that under-reports its own call
     sites invites a second hook at one of them, which would record a candidate
     POOL as read and bias `f` HIGH — the direction that HURTS the split, since
     the saving is `(1 - f) x cache` and a higher `f` removes it. (`f` divides
