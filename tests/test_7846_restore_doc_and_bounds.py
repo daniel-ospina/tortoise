@@ -100,3 +100,23 @@ def test_restore_bound_is_below_the_socket_timeout() -> None:
         f"client socket timeout ({restore._RESTORE_TIMEOUT_S}s), or the two "
         f"failure modes are indistinguishable"
     )
+
+
+def test_the_live_helper_does_not_claim_the_whole_sequence_is_bounded() -> None:
+    """#8827 review: ``bound_s`` bounds the RESTORE step, never ``DUMP``/``DEL``.
+
+    The helper's ``DUMP`` and ``DEL`` run inline on the caller's thread before the
+    driver starts its worker, so their only limit is the client's own socket timeout.
+    A docstring that reads "BOUNDED" for the whole ``DUMP`` → ``DEL`` → ``RESTORE``
+    sequence tells a caller it may pass an unbounded client — and then a hung ``DUMP``
+    reproduces criterion 1's "hangs with no error it can act on" outside any bound.
+    Pre-fix this fails: the docstring says "BOUNDED and WITNESSED" and never names
+    ``DUMP``/``DEL`` as excluded.
+    """
+    doc = restore._dump_delete_restore.__doc__ or ""
+    assert "does NOT cover ``DUMP`` or ``DEL``" in doc, (
+        "the helper no longer says which step the bound excludes"
+    )
+    assert "BOUNDED and WITNESSED" not in doc, (
+        "the helper claims the whole sequence is bounded"
+    )
