@@ -98,6 +98,7 @@ from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
     SHAPE_STATE_OP_MISS,
     classify_terminalizer_miss,
+    collect_identity_skips,
     collect_non_folded,
     record_non_folded,
     refused_events,
@@ -2539,6 +2540,19 @@ def recover_from_log(events_dir: str, projection) -> dict:
     the very destruction the refusal exists to prevent (the nodes present were
     not created by a declined replay, which is the only shape the rollback is
     sound for).
+
+    #8702 adds `identity_skipped` and its additive `reason` clause: the number
+    of records this replay DROPPED because the fold refused their identity
+    (``_writable_id``) instead of aborting. The #7406 skip is deliberate and is
+    KEPT — a corrupt identity must not make this gate un-runnable on every
+    retry — but a skipped record is not a replayed one. It is counted apart
+    from `applied` (it used to be counted AS applied, so a journal
+    `{healthy PointAdded, PointAdded with a NUL-bearing id}` reported
+    "replayed 2 events" over a graph holding one node) and apart from `torn`
+    (whose cause is crash damage), and the clause names the TRUE cause: an
+    identity that is PRESENT but unwritable, never "missing". `log_points`
+    still counts the records READ, so reads = applied + identity_skipped +
+    torn + refused reconciles.
     """
     import os
 
@@ -2934,6 +2948,18 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # number of links actually APPLIED so a dropped record is not counted as
     # replayed.
     applied = 0
+    # #8702: the SKIP is not `applied` and is not `torn`. #7406 made a record
+    # whose identity the store cannot take be DROPPED rather than raising (so a
+    # corrupt journal cannot make this gate un-runnable on every retry), but the
+    # loop still counted the normal return as a replay: a journal
+    # `{healthy PointAdded, PointAdded with a NUL-bearing id}` reported
+    # "replayed 2 events" over a graph holding ONE node, with the drop visible
+    # only in a log warning. The projection records each skip into the run's
+    # collector (`collect_identity_skips`), which is what makes it countable
+    # here. It keeps its OWN tally and its own clause: `torn` means crash
+    # damage, and reporting a deliberate degrade as damage is the confusion
+    # #7174 removed for the numeric-domain refusal.
+    identity_skipped = 0
     # #7174: a record the store's numeric domain would ALTER is not a TORN
     # record, so it gets its own tally and its own ADDITIVE clause in `reason`.
     # DEFENSIVE by construction: this function runs under the journal-path
@@ -2987,7 +3013,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # journal — reporting `recovered: True` there is the false PASS #3947's
     # guard exists to prevent, so the run fails loudly (recovered=False, with
     # the set named) and the caller refuses to open the DB.
-    with collect_non_folded() as _nf_entries:
+    # #8702: the identity-skip collector rides the SAME run boundary — a skip
+    # is recorded by the fold and counted below, so the two views of "this
+    # record was not folded" cannot drift apart.
+    with collect_non_folded() as _nf_entries, \
+            collect_identity_skips() as _id_skips:
         # #3305: the Point lifecycle terminalizers are folded by the SHARED
         # whole-journal plan, not by ``apply()``'s inline branch — that branch
         # folds every terminalizer, while ``rebuild_all`` deliberately drops the
@@ -3038,6 +3068,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 # raw-type guard would let a ``type``-in-``point`` terminalizer fall
                 # through to ``apply()``'s inline branch and its unshared selection
                 # (#325/#3722's raw-vs-normalized class).
+                # #8702: an identity skip is recorded BY the fold (deep inside
+                # `apply()`, where the `_writable_id` gate lives), so the
+                # record's outcome is read from the collector around its own
+                # fold — not from what `apply` returned, which is `None` for a
+                # drop and for a fold alike.
+                skips_before = len(_id_skips)
                 if seq in restamp_plan:
                     # #7719 (E7): the consumer's contract was validated ONCE
                     # before this loop, so a genuine fold failure inside this
@@ -3055,7 +3091,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     else:
                         with _replay_write_scope():
                             projection.apply(ev, **apply_kwargs)
-                applied += 1
+                dropped = len(_id_skips) - skips_before
+                if dropped:
+                    identity_skipped += dropped
+                else:
+                    applied += 1
             except UnrepresentableNumberError as exc:
                 refused += 1
                 if not first_refusal:
@@ -3083,6 +3123,10 @@ def recover_from_log(events_dir: str, projection) -> dict:
             except Exception:
                 torn += len(entity_link_events)
     after = _node_count()
+    # #8702: a skip recorded by a TRAILING sweep (after its own record's fold
+    # had already been counted) was not attributed above. It is still a dropped
+    # record, so the tally is the RUN's, never just the loop's.
+    identity_skipped = max(identity_skipped, len(_id_skips))
     nf_events = refused_events(_nf_entries)
     if nf_events:
         # #7929: the refused set is only knowable AFTER the replay, so this
@@ -3121,6 +3165,21 @@ def recover_from_log(events_dir: str, projection) -> dict:
     extra = f" ({torn} skipped)" if torn else ""
     if refused:
         extra += f" ({refused} refused by the numeric domain)"
+    if identity_skipped:
+        # #8702: the skip gets its OWN clause, never folded into `torn` (crash
+        # damage) and never counted as replayed. It names the TRUE cause: a
+        # present-but-unwritable id is not a missing one, and "missing point
+        # id" for a record that carries one sends the operator to the wrong
+        # place.
+        _named = "; ".join(s.describe() for s in _id_skips[:3])
+        _more = (f" (+{identity_skipped - 3} more)"
+                 if identity_skipped > 3 else "")
+        extra += (
+            f" ({identity_skipped} dropped — the fold SKIPPED "
+            f"{'a record' if identity_skipped == 1 else 'records'}"
+            f" rather than aborting the replay (#7406), so "
+            f"{'it is' if identity_skipped == 1 else 'they are'} NOT in this "
+            f"graph: {_named}{_more})")
     result = {"recovered": ok, "log_points": len(events),
               # #7929 review: `after` is `None` when the count could not be
               # taken — pass it through rather than flattening it to 0, so a
@@ -3140,6 +3199,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
                           f"the replayed state may remain"
                           if applied > 0 and after is None
                           else f"replay produced an empty graph{extra}"))}
+    if identity_skipped:
+        # #8702: the count as a FIELD, not only as prose — a caller branching on
+        # the returned dict must be able to see the drop without parsing
+        # `reason`. Additive, and present only when non-zero (the same shape as
+        # `onboarding_gap` / `team_meta_gap`).
+        result["identity_skipped"] = identity_skipped
     # #7929: `ok is False` is the other late verdict this replay can reach —
     # nothing applied yet the graph is non-empty (a deferred CORRECTS/link fold
     # landed) — and it must not leave that partial population behind either.

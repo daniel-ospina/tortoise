@@ -377,6 +377,97 @@ def refused_events(entries) -> list[NonFoldedEvent]:
     return [e for e in entries if not e.exempt]
 
 
+# ── The identity-skip collector (#8702) ───────────────────────────────────
+#
+# A SKIP is not a refusal. R8's set above records a record the fold could not
+# resolve to a node and FAILS the run; a skip is the #7406 boundary's deliberate
+# degrade — the fold drops a record whose identity the store cannot take (a NUL
+# or lone-surrogate-bearing id) rather than aborting a replay that has already
+# wiped the graph. That posture is correct and is NOT changed here: a corrupt
+# journal must not make the recovery gate un-runnable on every retry.
+#
+# What it needs is ACCOUNTING. Before this, the only trace of a skip was a log
+# line, so `recover_from_log`'s `applied += 1` counted a dropped record as
+# REPLAYED and reported a complete, faithful recovery over a journal from which
+# it had dropped a record (#8702). The same context-var shape as the R8
+# collector, for the same reason: a fold reached deep inside a run records here
+# without a signature change at every call site.
+
+#: The identity was ABSENT (``None``/``""``) — nothing to merge on.
+IDENTITY_ABSENT = "absent"
+#: The identity is PRESENT but the store cannot take it as a parameter
+#: (NUL / lone surrogate). The cause #8702 exists to name: it is not "missing".
+IDENTITY_UNWRITABLE = "present-but-unwritable"
+
+
+@dataclass(frozen=True)
+class IdentitySkip:
+    """One record the fold DROPPED because its identity was not writable.
+
+    ``state`` distinguishes the two causes so a report states the TRUE one —
+    #8702's second half is that "missing point id" was reported for an id that
+    is present, which sends an operator to look in the wrong place.
+    """
+
+    what: str
+    value: object = None
+    label: str = "identity"
+    event_id: str | None = None
+    where: str = ""
+
+    @property
+    def state(self) -> str:
+        return IDENTITY_UNWRITABLE if self.value else IDENTITY_ABSENT
+
+    def describe(self) -> str:
+        """The cause, in the record's own terms (never "missing" for a present id)."""
+        if self.value:
+            return (f"{self.what} carries a {self.label} {self.value!r} that "
+                    f"is PRESENT but not writable")
+        return f"{self.what} carries NO {self.label} at all"
+
+    def __str__(self) -> str:  # pragma: no cover - formatting only
+        where = f"{self.where}: " if self.where else ""
+        loc = f" (event_id={self.event_id!r})" if self.event_id else ""
+        return f"{where}{self.describe()}{loc}"
+
+
+_IDENTITY_SKIPS: ContextVar[list | None] = ContextVar(
+    "tortoise_identity_skip_set", default=None)
+
+
+@contextmanager
+def collect_identity_skips():
+    """Open an identity-skip run. Yields the (mutable) list to inspect.
+
+    Nested runs are independent, exactly like :func:`collect_non_folded`.
+    """
+    entries: list[IdentitySkip] = []
+    token = _IDENTITY_SKIPS.set(entries)
+    try:
+        yield entries
+    finally:
+        _IDENTITY_SKIPS.reset(token)
+
+
+def record_identity_skip(what: str, value, label: str = "identity", *,
+                         event_id: str | None = None,
+                         where: str = "") -> IdentitySkip:
+    """Record one identity skip into the active run (if any).
+
+    The LOG LINE is not the record (R8's rule, applied to skips): a caller that
+    must account for a dropped record reads the returned entry, never the log.
+    Outside a run this is a no-op and the call site's own warning remains the
+    only signal — a one-record ``apply()`` has no run boundary.
+    """
+    entry = IdentitySkip(what=str(what), value=value, label=label,
+                         event_id=event_id, where=where)
+    entries = _IDENTITY_SKIPS.get()
+    if entries is not None:
+        entries.append(entry)
+    return entry
+
+
 def assert_no_non_folded(entries, *, engine: str = "rebuild") -> None:
     """Fail closed: raise :class:`NonFoldedEventsError` if the run refused any.
 
