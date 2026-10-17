@@ -2194,6 +2194,74 @@ def test_reap_reports_and_retains_when_the_worktree_list_cannot_be_read(
     ).stdout.split()
 
 
+def test_lane_keys_survive_a_worktree_path_containing_a_newline(repo, monkeypatch):
+    """A newline in a worktree path must not truncate the live key."""
+    mod = _load_tool()
+    weird = repo.root.parent / "wt\nnl"
+    repo.git("worktree", "add", "-q", "-b", "feat/nl", str(weird))
+    monkeypatch.chdir(weird)
+    keys, stale, why = mod._live_lane_keys()
+    assert keys is not None, why
+    assert stale == [] and why == ""
+    assert mod.lane_key() in keys, (mod.lane_key(), sorted(keys))
+
+
+def test_lane_keys_fail_closed_on_an_unrecognised_field(monkeypatch):
+    """A field the parser does not know is UNDETERMINABLE, and the reason names it."""
+    mod = _load_tool()
+    real = mod._git
+
+    def fake(*args, **kwargs):
+        if tuple(args[:2]) == ("worktree", "list"):
+            return subprocess.CompletedProcess(args, 0, "worktree /x\0weird\0", "")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_git", fake)
+    keys, _stale, why = mod._live_lane_keys()
+    assert keys is None
+    assert "could not understand" in why, why
+
+
+def test_a_failed_guard_read_is_a_state_error_not_an_empty_namespace(repo, monkeypatch):
+    """`list` must fail closed when the guard refs cannot be read, not show none."""
+    mod = _load_tool()
+    real = mod._git
+
+    def fake(*args, **kwargs):
+        if args and args[0] == "for-each-ref" and str(args[-1]) == mod.GUARD_NS:
+            return subprocess.CompletedProcess(args, 1, "", "boom")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_git", fake)
+    monkeypatch.chdir(repo.a)
+    assert mod.main(["list"]) == 2
+    assert mod.main(["prune", "--apply"]) == 2
+
+
+def test_reap_reports_a_failed_register_read_and_releases_nothing(repo, monkeypatch, capsys):
+    """A register read failure is reported, never a silent retention."""
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-77777777/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    def boom():
+        raise mod.LaneStashError("register unreadable")
+
+    monkeypatch.setattr(mod, "_shared_register", boom)
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    out = capsys.readouterr().out
+    assert "could not be read" in out and "no further guard was checked" in out, out
+    assert dead in repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+
+
 def test_check_does_not_name_prune_as_reclaimable_on_a_diverged_register(repo):
     """`check` must not advertise `prune --apply` on a state prune refuses.
 

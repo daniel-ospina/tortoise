@@ -698,16 +698,17 @@ def _guard_release_all(sha: str) -> None:
         _guard_unpin(ref, sha)
 
 
-def _live_lane_keys() -> tuple[set[str], list[str]] | None:
-    """Live lane keys plus any STALE registration, or ``None`` if undeterminable.
+def _live_lane_keys() -> tuple[set[str] | None, list[str], str]:
+    """``(keys, stale, why)`` for every worktree git knows about.
 
-    ``None`` means `git worktree list` itself FAILED. A ``prunable`` registration
-    is reported as a non-empty ``stale`` list together with the keys; callers must
-    retain everything on ``None`` AND on a non-empty ``stale``. A worktree moved
-    with plain `mv` (or a directory removed without `git worktree prune`) leaves
-    its OLD path registered, so the key a LIVE worktree derives from
-    ``--show-toplevel`` would be absent from the live set and its guards would be
-    classified dead — the wrong direction.
+    ``keys is None`` means the live set could not be DETERMINED, and ``why`` says
+    which way: `git worktree list` FAILED (``why`` = "could not be read"), or it
+    returned something the parser does not understand (``why`` = "returned a field
+    it could not understand …"). Callers must retain everything when ``keys`` is
+    ``None`` AND when ``stale`` is non-empty — a worktree moved with plain `mv` (or
+    a directory removed without `git worktree prune`) leaves its OLD path
+    registered, so the key a LIVE worktree derives from ``--show-toplevel`` would
+    be absent and its guards would be classified dead: the wrong direction.
 
     A prune guard is created under the CREATING worktree's key and outlives that
     worktree; telling a live owner from a removed one is what makes it safe to
@@ -715,7 +716,7 @@ def _live_lane_keys() -> tuple[set[str], list[str]] | None:
     """
     cp = _git("worktree", "list", "--porcelain", "-z", check=False)
     if cp.returncode != 0:
-        return None
+        return None, [], "could not be read"
     keys: set[str] = set()
     stale: list[str] = []
     current: str | None = None
@@ -731,17 +732,46 @@ def _live_lane_keys() -> tuple[set[str], list[str]] | None:
             keys.add(lane_key(Path(current)))
         elif field.startswith("prunable"):
             if current is None:
-                return None  # a prunable field before any worktree: unparseable
+                return None, [], "returned a `prunable` field before any worktree"
             stale.append(current)
         elif field == "detached" or field.startswith(
             ("HEAD ", "branch ", "locked", "bare")
         ):
             continue
         else:
-            # An unrecognised field may be a fragment of an exotic path. Fail
-            # closed rather than derive keys from a broken parse.
-            return None
-    return keys, stale
+            # An unrecognised field may be a fragment of an exotic path, or a field
+            # a newer git added. Fail CLOSED, and name the parser — not git — as the
+            # thing that could not be understood.
+            return None, [], (
+                f"returned a field it could not understand ({field!r})"
+            )
+    return keys, stale, ""
+
+
+def _owner_may_be_live(owner: str, ref: str, sha: str) -> bool:
+    """Re-read liveness for ONE candidate; report and answer ``True`` if undecidable.
+
+    The reap's key set is a snapshot, and fleet worktree paths are REUSED: a
+    worktree created at a removed path derives the SAME lane key, so its in-flight
+    prune's guards would be judged dead. Re-reading narrows that window to a single
+    release; ``True`` means "keep", never "release".
+    """
+    keys, stale, why = _live_lane_keys()
+    if keys is None:
+        print(f"kept   {ref} for {sha[:12]} — `git worktree list` {why} on re-read, so "
+              "a live owner cannot be ruled out")
+        return True
+    if stale:
+        print(f"kept   {ref} for {sha[:12]} — a worktree registration became STALE "
+              f"({', '.join(stale)}); run `git worktree prune`, then re-run")
+        return True
+    return owner in keys
+
+
+def _release_stale_guard(ref: str, sha: str) -> None:
+    _guard_unpin(ref, sha)
+    print(f"released stale guard {ref} for {sha[:12]} — its worktree is gone "
+          "and the object is named elsewhere")
 
 
 def _reap_stale_guards() -> None:
@@ -757,24 +787,24 @@ def _reap_stale_guards() -> None:
     guard is its only protection during a positional delete; a DEAD owner's guard
     for an object no other ref names is the LAST handle on that object.
 
-    Residual windows (documented, not closable with git's ref API): the register
-    and the lane-key set are both snapshots. The register is re-read immediately
-    before EACH release, so a peer `stash clear` is at most one subprocess ahead of
-    the `update-ref -d`. Liveness is re-read for each CANDIDATE only (dead owner
-    and another handle), because fleet worktree paths are REUSED: a worktree
-    created at a removed path derives the SAME lane key, and without the re-read
-    its in-flight prune's guards would be judged dead here — the wider window.
+    Residual windows (documented, not closable with git's ref API): every input is
+    a snapshot. Whichever evidence is USED is the freshest read before the
+    `update-ref -d` — the register when it names the object, `_refs_pointing_at`
+    when it does not (it is therefore read only in that branch) — so a peer
+    `stash clear` is at most one subprocess ahead of the unpin. Liveness is
+    re-read for each CANDIDATE (dead owner and another handle), because fleet
+    worktree paths are REUSED: a worktree created at a removed path derives the
+    SAME lane key, and without the re-read its in-flight prune's guards would be
+    judged dead here.
     """
     guards = _guard_refs()
     if not guards:
         return
-    released = 0
-    live = _live_lane_keys()
-    if live is None:
-        print(f"kept   {len(guards)} prune guard(s) — `git worktree list` could not be read, "
-              "so a live owner cannot be ruled out")
+    keys, stale, why = _live_lane_keys()
+    if keys is None:
+        print(f"kept   {len(guards)} prune guard(s) — `git worktree list` {why}, so a "
+              "live owner cannot be ruled out")
         return
-    keys, stale = live
     if stale:
         # Reported, never silent: a stale registration disables the reap, and the
         # state that CREATES a dead-key guard (a worktree directory removed without
@@ -783,40 +813,37 @@ def _reap_stale_guards() -> None:
               f"({', '.join(stale)}); a stale path can hide a LIVE lane key, so run "
               "`git worktree prune` to enable reaping")
         return
-    for ref, sha, owner in guards:
+    for i, (ref, sha, owner) in enumerate(guards):
         if not owner or owner in keys:
             continue
-        # Compute the two frames FIRST, then take the register read and release
-        # immediately: `present` must be the LAST read before the `update-ref -d`,
-        # or the documented window is wider than one subprocess (#8822 review P2).
+        try:
+            # Read the register for EACH candidate, immediately before deciding. A
+            # peer `stash drop`/`clear` or a reflog expiry between the read and the
+            # unpin removes the entry, and deciding from an older read would make
+            # the guard we drop the object's LAST handle (#8822 review P1).
+            present = {r["sha"] for r in _shared_register()}
+        except LaneStashError:
+            print(f"kept   {len(guards) - i} prune guard(s) — the shared register "
+                  "could not be read, so no further guard was checked")
+            return
+        if sha in present:
+            # `present` is the freshest evidence: release on it directly.
+            if _owner_may_be_live(owner, ref, sha):
+                continue
+            _release_stale_guard(ref, sha)
+            continue
         others = {
             r for r in _refs_pointing_at(sha)
             # Neither a guard (releasable at its owner's will) nor `refs/stash`
             # (moved by any later `stash store`) is durable backing.
             if r != ref and r != "refs/stash" and not r.startswith(GUARD_NS + "/")
         }
-        live_now = _live_lane_keys()
-        if live_now is None:
+        if not others:
             continue
-        keys_now, stale_now = live_now
-        if stale_now or owner in keys_now:
+        # Here `_refs_pointing_at` is the freshest read, taken above.
+        if _owner_may_be_live(owner, ref, sha):
             continue
-        try:
-            # Read the register for EACH release, immediately before deciding. A
-            # peer `stash drop`/`clear` or a reflog expiry between the read and the
-            # unpin removes the entry, and deciding from an older read would make
-            # the guard we drop the object's LAST handle (#8822 review P1).
-            present = {r["sha"] for r in _shared_register()}
-        except LaneStashError:
-            print(f"kept   {len(guards) - released} prune guard(s) — the shared register "
-                  "could not be read, so no further guard was checked")
-            return
-        if not (sha in present or others):
-            continue
-        _guard_unpin(ref, sha)
-        released += 1
-        print(f"released stale guard {ref} for {sha[:12]} — its worktree is gone "
-              "and the object is named elsewhere")
+        _release_stale_guard(ref, sha)
 
 
 def _refs_pointing_at(sha: str) -> set[str]:
