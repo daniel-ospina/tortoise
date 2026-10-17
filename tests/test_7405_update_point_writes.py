@@ -253,6 +253,116 @@ def test_a_rebuild_abort_on_the_object_arm_set_is_retried(tmp_path):
 # ── 4. the TAGGED edges ``update_point`` shares with ``create_point`` ────
 
 
+class _DropOneTag(_AbortOnceGraph):
+    """Aborts the first TAGGED MERGE, then lets all but ONE tag land.
+
+    The landed-but-incomplete state the FULL-SET witness exists for: 'alpha'
+    reaches the graph, 'beta' does not. Redirecting the swallowed name to a
+    throwaway Tag models "this MERGE matched nothing" without inventing a fake
+    result object.
+    """
+
+    def __init__(self, real, needle: str, drop: str) -> None:
+        super().__init__(real, needle, present=True)
+        self._drop = drop
+
+    def query(self, cypher, params=None, timeout=None):
+        if (self._needle in cypher and isinstance(params, dict)
+                and params.get("tag") == self._drop):
+            params = {**params, "tag": self._drop + "__never_landed"}
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+class _CountSweeps(_AbortOnceGraph):
+    """Counts the orphan-``:Tag`` GC, so "this attempt paid the scan" is measured."""
+
+    def __init__(self, real, needle: str, *, aborts: int = 1) -> None:
+        super().__init__(real, needle, aborts=aborts, present=True)
+        self.sweeps = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if "WHERE NOT (t)<-[:TAGGED]" in cypher:
+            self.sweeps += 1
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+def test_a_half_landed_tag_sync_is_not_a_success(tmp_path):
+    """The witness must require the FULL set of wanted names, not "at least one".
+
+    A retry re-issues the whole reconciler; if it lands SOME of the requested
+    tags, the point's property and its derived edges still disagree — exactly
+    the state this PR exists to refuse. ``landed >= 1`` would call that good.
+    Pinned here because the empty-request test cannot reach the comparison (it
+    returns at the ``not _sync_wanted`` guard).
+    """
+    sdk = _sdk(tmp_path, "tagpartial")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _DropOneTag(proj.g, _TAGGED_NEEDLE, drop="7405partial")
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, tags=["7405alpha", "7405partial"])
+
+        assert proxy.matching >= 3, (
+            "fixture precondition: the aborted MERGE must have been re-issued")
+        proj.g = proxy._real
+        rows = proj.g.query(
+            "MATCH (:Point {id:$id})-[:TAGGED]->(t:Tag) RETURN t.name "
+            "ORDER BY t.name",
+            params={"id": pid}).result_set
+        landed = [r[0] for r in rows if not str(r[0]).endswith("__never_landed")]
+        assert landed == ["7405alpha"], (
+            f"fixture precondition: exactly one real tag landed, got {landed}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_orphan_sweep_is_a_retry_only_cost(tmp_path):
+    """``sweep_orphans=(_sync_attempts > 1)`` — pinned in BOTH directions.
+
+    The narrowing away from main's every-update scan was a deliberate #8854 P3
+    decision (a first attempt that drops no edge pays no graph-wide ``:Tag``
+    scan), and it was unguarded: reverting it to ``True`` left the suite green.
+    A first attempt that removes nothing must issue NO GC; a RETRIED attempt
+    must issue it even though its own re-read of ``stale`` finds nothing — that
+    second direction is the live-vs-replay divergence the parameter exists to
+    prevent.
+    """
+    sdk = _sdk(tmp_path, "sweep")
+    try:
+        proj = sdk._get_proj()
+
+        pid = _pid(sdk)
+        # aborts=0: a CLEAN first attempt. `_AbortOnceGraph` aborts by default,
+        # so leaving the default here would measure a retry and prove nothing
+        # about the first-attempt saving (caught while writing this test).
+        first = _CountSweeps(proj.g, _TAGGED_NEEDLE, aborts=0)
+        proj.g = first
+        sdk.update_point(pid, tags=["7405sweepone"])
+        proj.g = first._real
+        assert first.sweeps == 0, (
+            "a first attempt that removed no edge paid the graph-wide :Tag "
+            "scan — the #8854 P3 saving is gone")
+
+        pid2 = _pid(sdk)
+        retried = _CountSweeps(proj.g, _TAGGED_NEEDLE)
+        proj.g = retried
+        sdk.update_point(pid2, tags=["7405sweeptwo"])
+        proj.g = retried._real
+        assert retried.matching >= 2, (
+            "fixture precondition: the abort must have forced a retry")
+        assert retried.sweeps >= 1, (
+            "the RETRIED attempt skipped the orphan sweep — an orphan :Tag left "
+            "by an earlier attempt survives, so list_tags() reports a count: 0 "
+            "entry a rebuilt graph does not have (live != replay)")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_a_rebuild_abort_on_the_tag_sync_is_retried(tmp_path):
     """The tag half of an update is retried on the UPDATE door as well.
 
@@ -1406,9 +1516,12 @@ def test_clearing_tags_is_never_reported_as_a_non_landing(tmp_path):
     """The witness must not turn an EMPTY tag request into a failure.
 
     ``tags=[]`` asks for no edge, so a graph holding none is exactly what was
-    requested — ``landed == 0 == len(wanted)`` and the call returns. This pins
-    the FULL-SET rule against a future ``>= 1`` reading of it, which would red
-    an honest clear.
+    requested — ``landed == 0 == len(wanted)`` and the call returns.
+
+    ⛔ This does NOT pin the FULL-SET rule: an empty request returns at the
+    ``not _sync_wanted`` guard, so ``landed == len(wanted)`` is never evaluated
+    here (measured: mutating that comparison to ``>= 1`` left this test green).
+    ``test_a_half_landed_tag_sync_is_not_a_success`` is what pins it.
     """
     sdk = _sdk(tmp_path, "tagclear")
     try:

@@ -871,6 +871,14 @@ class _EdgeHandlers:
         already left the orphan this call must clear).
         ``create_point`` keeps the default: a fresh point has no stale edges, so
         the scan stays off its hot path.
+
+        ⛔ The limit of that saving, stated so nobody rediscovers it: an orphan
+        ``:Tag`` left by an EARLIER interrupted call is collected only by a
+        later call that removes an edge or retries — a plain tagged update on a
+        point that already held the tag does not scan. `list_tags` can therefore
+        show a ``count: 0`` entry that a rebuilt graph (which replays from a
+        clean state) does not have, until such a call happens. Pinned both ways
+        by ``test_the_orphan_sweep_is_a_retry_only_cost``.
         """
         if not isinstance(tags, (list, tuple)):
             return
