@@ -144,12 +144,22 @@ _INDIRECT_AFTER = ("$", "{")
 #: empty spec is floating) is the fail-closed direction. Two things must NOT trip
 #: it, because refusing a correct step is the one over-report this file treats as a
 #: defect: a FLAG (`--version`, `--flag=4`), and a SHELL operator whose operand is
-#: not a version (`>/dev/null`, `|| true`). So every operator needs a version-ish
-#: operand, `-` needs one across optional whitespace with an optional `v`, and the
-#: gap is [ \t] only, so a redirect on the FOLLOWING line cannot trip it.
+#: not a version (`>/dev/null`, `|| true`).
+#:
+#: The operand test allows an OPERATOR or WILDCARD as well as a digit, because an
+#: OR-range's right side usually opens with one: `4.127.0 || >=4.130.0` resolves to
+#: the newest 4.x and a digit-only test read `4.127.0` as the pin (measured). The
+#: gap is `\s*`, not `[ \t]*`: quoting is erased before the scan, so a newline is
+#: indistinguishable from a space and `"4.127.0\n|| >=4.130.0"` — ONE npm
+#: argument — was read as the pin when the gap excluded it. That the operand still
+#: has to be version-ish is what keeps a redirect on the following line
+#: (`\n> /tmp/log`) correct rather than refused.
+_RANGE_OPERAND = r"[ \t]*(?:[<>=^~*xX]|[vV]?\d)"
 _RANGE_CONTINUATION = re.compile(
-    r"[ \t]*(?:\|\|(?=[ \t]*[v\d])|[<>]=?(?=[ \t]*[v\d])|[\^~,](?=[ \t]*[v\d])"
-    r"|-(?=[ \t]*v?\d))")
+    r"\s*(?:\|\|" + r"(?=" + _RANGE_OPERAND + r")"
+    r"|[<>]=?(?=" + _RANGE_OPERAND + r")"
+    r"|[\^~,](?=" + _RANGE_OPERAND + r")"
+    r"|-(?=[ \t]*(?:[vV]?\d|[xX*])))")
 
 
 def _wrangler_invocations(run: str) -> set[str]:
@@ -295,16 +305,26 @@ def test_the_three_website_e2e_jobs_still_prewarm() -> None:
     """Deleting the step re-exposes the boot budget #2178 added it to protect."""
     steps = _prewarm_steps()
     assert {job for job, _ in steps} == PREWARM_JOBS
+    jobs = _jobs()
     for job, step in steps:
         assert _prewarm_is_unconditional(step), (
             f"{job}: pre-warm is gated by `if: {step.get('if')}` — a skipped step "
             f"warms nothing, which is deletion by another name")
-    # DECLARED RESIDUAL, pinned: only the STEP's own `if` is read. A job-level gate
-    # or a `continue-on-error` that swallows a failure is not (the file names the
-    # limit rather than implying coverage).
+        # The JOB may carry the path filter (`needs.changes.…`), which is why this
+        # is a constant-false test and not an unconditional one. `continue-on-error`
+        # is NOT read: it swallows a failure rather than skipping the step, so it is
+        # a limit of this check, named here rather than implied to be covered.
+        assert not _is_constant_false_gate(jobs[job].get("if")), (
+            f"{job}: job-level `if: {jobs[job].get('if')}` is constant false — the "
+            f"whole pre-warm never runs")
     assert not _prewarm_is_unconditional({"if": "${{ false }}"})
     assert _prewarm_is_unconditional({})
     assert _prewarm_is_unconditional({"if": "  "})
+    assert _is_constant_false_gate("${{ false }}")
+    assert _is_constant_false_gate("false")
+    assert _is_constant_false_gate(" 0 ")
+    assert not _is_constant_false_gate("needs.changes.outputs.website == 'true'")
+    assert not _is_constant_false_gate(None)
 
 
 def test_every_prewarm_pins_an_exact_wrangler_and_never_floats() -> None:
@@ -322,6 +342,17 @@ def test_every_prewarm_pins_an_exact_wrangler_and_never_floats() -> None:
 def _prewarm_is_unconditional(step: dict) -> bool:
     """A pre-warm step with an `if:` gate never runs — deletion by another name."""
     return not str(step.get("if") or "").strip()
+
+
+#: A gate that is CONSTANT false skips the step no matter what the workflow knows,
+#: which is deletion wearing a condition. A gate that reads `needs.changes` is not
+#: this: it is the path filter that keeps the e2e jobs off unrelated diffs, and the
+#: three pre-warm jobs use it deliberately.
+_CONSTANT_FALSE = re.compile(r"^\s*(?:\$\{\{\s*)?(?:false|0)\s*(?:\}\})?\s*$", re.I)
+
+
+def _is_constant_false_gate(expr: object) -> bool:
+    return bool(_CONSTANT_FALSE.match(str(expr or "")))
 
 
 def _has_retry_loop_in_code(run: str) -> bool:
@@ -568,13 +599,24 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     # run stopped at the space and called it the pin — a false PASS, reproduced
     # end to end on a real job body. The `v`-prefixed upper bound is the same class
     # and the worst case: `4.127.0 - v4` resolves to the newest 4.x (measured
-    # 4.151.1) — literally the `@4` float this file exists to stop.
+    # 4.151.1) — literally the `@4` float this file exists to stop. So is an OR
+    # whose right side opens with an operator or wildcard (`|| >=4.130.0`,
+    # `|| <4.130.0`, `|| *`), and a quoted spec whose continuation is on the next
+    # line — one argument to npm either way.
     for run in ('npx --yes wrangler@"4.127.0 || 4.130.0" --version',
                 "npx --yes wrangler@4.127.0 - 4.130.0 --version",
                 "npx --yes wrangler@4.127.0 - v4 --version",
                 "npx --yes wrangler@4.127.0 - v4.130.0 --version",
+                "npx --yes wrangler@4.127.0 - x --version",
                 "npx --yes wrangler@4.127.0||4.130.0 --version",
-                "npx --yes wrangler@4.127.0 >4.130.0 --version"):
+                "npx --yes wrangler@4.127.0 >4.130.0 --version",
+                "npx --yes wrangler@4.127.0 || >=4.130.0 --version",
+                "npx --yes wrangler@4.127.0 || <4.130.0 --version",
+                "npx --yes wrangler@4.127.0 || =4.127.0 --version",
+                "npx --yes wrangler@4.127.0 || ^4 --version",
+                "npx --yes wrangler@4.127.0 || x --version",
+                "npx --yes wrangler@4.127.0 || * --version",
+                'npx --yes wrangler@"4.127.0\n|| >=4.130.0" --version'):
         assert _exact_wranglers(run) == set(), run
         assert _floating_wranglers(run) == {""}, run
     # …while a FLAG and a SHELL operator with a NON-version operand are not range
@@ -582,6 +624,7 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     # this file treats as a defect — so they are pinned as still exact.
     for run in ("npx --yes wrangler@4.127.0 --version",
                 "npx --yes wrangler@4.127.0 --flag=4",
+                "npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1",
                 "npm install -g wrangler@4.127.0 >/dev/null",
                 "npx --yes wrangler@4.127.0 || true",
                 "npx --yes wrangler@4.127.0\n> /tmp/log 2>&1"):
