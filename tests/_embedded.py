@@ -406,6 +406,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # set in two homes (tests/test_ci_selection.py::
     # test_carve_out_mirrors_test_no_redirect_stems).
     "test_6871_operator_input_set",
+    # lane L5 (#5097) gate item 2: the fixture builds `TortoiseSDK(<tmpfile>)` and
+    # drives `proj.rebuild(...)`, so a URI-set lane would redirect the
+    # construction to the server and the embedded replay under test would be
+    # gone. Registered with the ``carve_out`` list in config/ci-surfaces.yml (the
+    # two are one set in two homes; tests/test_ci_selection.py pins the
+    # equality).
+    "test_5097_capture_source_replay",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",

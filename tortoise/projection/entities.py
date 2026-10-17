@@ -1321,6 +1321,17 @@ class _EntityHandlers:
         "domain", "summary", "topics", "status", "embedding", "about_entities",
         "document_kind", "documentKind", "session_id", "event_id",
         "source_path",
+        # Lane L5 (#5097): the session-capture writer's own spellings. It writes
+        # `sessionId`/`capturedAt`/`eventId` — camelCase, matching every reader
+        # and `_SOURCE_NODE_PROPS` (which has declared them since #1352) — and
+        # its journal carrier (`sdk._materialize_session_source`'s trailing
+        # `SourceCreated`) replays through THIS passthrough. Without them the
+        # replay would find the keys undeclared, DENY them, and rebuild the
+        # session `:Source` with the metadata the write had stored missing —
+        # the live!=replay divergence the carrier exists to close. They are
+        # the pairs of `session_id`/`event_id` above, so a `:Source` write
+        # cannot gain a second spelling of one fact through this door.
+        "sessionId", "capturedAt", "eventId",
     })
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",

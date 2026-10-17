@@ -9663,6 +9663,17 @@ class TortoiseSDK:
             "s.topics=$topics",
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             "s.ingestedAt=coalesce(s.ingestedAt, $now)",
+            # Lane L5 (#5097): the write DOES update the node, so it stamps the
+            # update instant. Without it the journal carrier below could not
+            # replay faithfully: `_upsert_source`'s ON MATCH/bump arm stamps
+            # `coalesce($updatedAt, $now)` whenever the hash differs (a
+            # stub-completion, exactly this write), so a replay produced an
+            # `updatedAt` the live node did not have — live `None` vs a rebuilt
+            # replay-clock instant, i.e. the same divergence the #5024
+            # recorded-instant work closed on the create arm. `coalesce` keeps
+            # the FIRST write's stamp on a re-capture, so the value the record
+            # carries is the one the replay reproduces.
+            "s.updatedAt=coalesce(s.updatedAt, $now)",
         ]
         if event_id:
             set_clauses.append("s.eventId=$eid")
@@ -9675,6 +9686,62 @@ class TortoiseSDK:
         if event_id:
             # Anchored ON CREATE by the shared derivation writer (#5199).
             proj.link_source_to_event(url, event_id)
+        # ⛔ THE RAW MERGE ABOVE NEEDS A JOURNAL CARRIER (lane L5 #5097, gate
+        # item 2). It is a raw graph SET on the capture path, and the rule for
+        # those is ALREADY recorded on this lane (`_write_capture_turns`'s
+        # `capture_redactions` note a few hundred lines up): a raw SET with no
+        # trailing record makes live and replay diverge, so a rebuild silently
+        # reverts what the write stored. Measured before this record existed
+        # (`capture_session` -> `rebuild()`): the session `:Source` came back
+        # with `summary`, `topics`, `sessionId`, `capturedAt`, `eventId`,
+        # `contentHash` and `_searchText` all GONE — every one of them derived
+        # from the #4911-redacted transcript, i.e. the lane's own sink losing
+        # its own output on the disaster-recovery path.
+        #
+        # `SourceCreated` is the carrier, not a new record type: the graph fold
+        # already replays it through `_upsert_source`, the existing producer
+        # (`create_source`) emits it for exactly this "same hash but new
+        # summary/topics" case (`_source_payload_is_noop`'s non-noop arm), and
+        # #5024 built its emission so the extras survive a rebuild. Emitting it
+        # here — rather than hand-rolling a shape — keeps ONE carrier for a
+        # `:Source` write.
+        #
+        # The payload carries THE VALUES THE WRITE STORED, never the caller's
+        # raw input (the `_journal_entity_mutation` `state` rule, and here it
+        # is also the #4911 rule: the redacted metadata is what must replay).
+        # `title` is passed explicitly as `None`: `_upsert_source` defaults a
+        # missing `title` to the MERGE key, which the live write never sets —
+        # omitting it would make the replayed Source gain a title live does not
+        # have. `validFrom` is deliberately absent: this writer mints no
+        # version window (the live node has none), and `_upsert_source`'s
+        # ON CREATE arm writes `$vf` (null ⇒ absent), which is the same state.
+        # `updatedAt` carries the instant the write stamped, so the fold's
+        # stub-completion arm reproduces it instead of the replay clock.
+        #
+        # ⚠️ `ingestedAt` is emitted too, but it is a KNOWN RESIDUAL and is not
+        # claimed as faithful: the stub this write completes is created by the
+        # M2 `_link_source` projection write, whose `ingestedAt` is minted from
+        # the clock at ITS write, and `_upsert_source`'s ON MATCH arm has no
+        # `ingestedAt` clause at all (only ON CREATE reads the recorded value).
+        # So a rebuilt session Source keeps a replay-clock ingest stamp. That
+        # is the same unjournaled-writer class one writer upstream, not
+        # something this record can fix; the recorded value is emitted anyway so
+        # the ON CREATE path (no stub) is faithful.
+        self._emit_event(
+            "SourceCreated", id=url,
+            url=url,
+            sourceKind="agentSession",
+            contentHash=content_hash,
+            title=None,
+            ingestedAt=now,
+            updatedAt=now,
+            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
+            sessionId=session_id,
+            capturedAt=now,
+            summary=summary,
+            topics=topics,
+            **(({"eventId": event_id}) if event_id else {}),
+        )
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
