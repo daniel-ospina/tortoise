@@ -267,14 +267,19 @@ class TestRestartPendingProjection:
     def _projection(self, monkeypatch, steps, *, node_present=True,
                     graph_down=False, namespace=True):
         monkeypatch.setattr(ha, "_get_onboarding_state", lambda oid: {})
-        monkeypatch.setattr(ha, "_graph_has_org_namespace",
-                            lambda oid: namespace)
+        # #4661: the projection samples the registry ONCE and derives the
+        # verdict from that snapshot, so the seam to stub is the probe itself
+        # (`_graph_has_org_namespace` is the verdict built FROM it).
+        monkeypatch.setattr(
+            ha, "_registry_existing_graphs",
+            lambda: {"org_org-3451"} if namespace else set())
         if graph_down:
-            def _boom(oid):
+            def _boom(oid, *, listed=None):
                 raise RuntimeError("graph down")
             monkeypatch.setattr(ha, "_open_org_graph_sdk", _boom)
         else:
-            monkeypatch.setattr(ha, "_open_org_graph_sdk", lambda oid: None)
+            monkeypatch.setattr(ha, "_open_org_graph_sdk",
+                                lambda oid, *, listed=None: None)
             monkeypatch.setattr(ha, "_make_sdk",
                                 lambda namespace=None: _FakeSDK(_FakeProj()))
             monkeypatch.setattr(

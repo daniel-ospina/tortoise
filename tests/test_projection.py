@@ -2793,8 +2793,13 @@ def test_5026_b6_retired_fields_do_not_survive_a_rebuild(tmp_path):
             state={"content": "FORGED BODY", "doc_status": "captured",
                    "docStatus": "captured", "objectKind": "document",
                    "object_kind": "document", "domain": "legal"})
-        sdk.close()
-
+        # ⛔ NO `sdk.close()` HERE (#8837). It shut the embedded store down, so the
+        # rebuild's pre-wipe episodic-roster read hit a dead socket and the rebuild
+        # refused — a test-SHAPE defect, not a product one, and the refusal was
+        # correct given a dead store. The journal does NOT need a close to be
+        # readable: `EventLog.append` opens, writes and closes the file per record
+        # (`tortoise/log.py`), so the bytes are on disk before this line. The
+        # `finally` below closes the SDK once, after the assertions.
         proj.rebuild_all(str(events), confirm_destructive=True)
 
         rows = proj.g.query(

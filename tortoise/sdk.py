@@ -74,7 +74,8 @@ from .live import direction_flows  # #7852 (source→target, target→source) fl
 from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
-    ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
+    ADDRESSING_SOURCE, UnaddressableEntityName, resolve_document_target_id,
+    resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -11798,10 +11799,67 @@ class TortoiseSDK:
         ``limit`` is a NEWEST-END window: it returns at most the newest
         ``limit`` entries of the chain — the current belief is the last of
         them — never the oldest (#7293).
+
+        ``topic`` is an id or a NAME coordinate, resolved through
+        ``entity_identity.resolve_entity_id`` (#5509). A name is a mutable
+        natural key: under #3590 D2 two live Objects may hold it, so the read
+        must resolve to EXACTLY ONE live Object and never union both carriers'
+        decision Points into one chain (measured: renaming an unrelated
+        company to a topic's name appended its decisions to that topic's
+        timeline). Two or more live carriers REFUSES
+        (:class:`AmbiguousEntityName`, the non-folded entry already recorded by
+        the resolver); no live holder (absent, or held only by terminal
+        carriers — D2's ``single_terminal_holder_reference``) yields ``[]`` and
+        records the refusal, so it is distinguishable from a union.
+
+        ``canonical_name`` is matched by the resolver's name arm, not by this
+        read: it is a second spelling of the same natural key, so it takes the
+        same holder-count discipline instead of widening the union.
+
+        A single live holder that carries NO ``id`` (a raw/legacy producer
+        wrote it — ``hosted_api``'s capture wiring mints such a stub before its
+        entity step adopts it) is NOT refused here: the identity question is
+        already answered (exactly one live candidate) and the chain is
+        traversed through the ``aboutObject`` edges, so only the id-keyed
+        ADDRESS is missing, not the answer. That one case reads the holder by
+        its (unique, live) name — it cannot fold two carriers, because the
+        resolver just proved there is only one.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
+        # ROUTE-THEN-REFUSE (#5509, plan §B.1). The old read was
+        # `... -[:aboutObject]->(o:Object) WHERE o.name = $topic OR
+        # o.canonical_name = $topic`, i.e. a NAME-keyed match over every
+        # carrier. Two live same-name Objects are legal, so that read folded
+        # two identities' beliefs into one chain — and a name held only by a
+        # TERMINAL Object still resolved (D2 refuses that). Resolve the
+        # coordinate to one live id and match the id: the identity decision
+        # lives in the resolver, not here.
+        try:
+            entity_id = resolve_entity_id(
+                proj.g, "Object", topic, name_props=("name", "canonical_name"))
+            unaddressable = False
+        except UnaddressableEntityName:
+            # EXACTLY ONE live holder, and it carries no `id` property. The
+            # resolver refused it because an ID-KEYED WRITE could not address
+            # it; this read only needs to reach it, and the holder set is
+            # already proven unique — so the name below is unambiguous. The
+            # live predicate is what keeps the read from touching a terminal
+            # carrier, and it is the ONLY name-keyed branch left here.
+            entity_id = None
+            unaddressable = True
+        if entity_id is None and not unaddressable:
+            # No live holder: an absent name, or one held ONLY by terminal
+            # carriers (refused and recorded by the resolver above — D2 never
+            # hands a caller a terminal id). Nothing live to build a chain on.
+            return []
+        if unaddressable:
+            entity_predicate = (
+                "(o.name = $topic OR o.canonical_name = $topic) "
+                f"AND {_terminal_excluded('o.status')}")
+        else:
+            entity_predicate = "o.id = $oid"
         # The DB window MUST be taken from the NEWEST end (#7293). The former
         # `ORDER BY p.validFrom LIMIT` was ASCENDING, so it truncated to the
         # OLDEST rows and the `entries[-limit:]` tail below could only re-take
@@ -11818,10 +11876,10 @@ class TortoiseSDK:
             "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
             "(o:Object) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
-            "AND (o.name = $topic OR o.canonical_name = $topic) "
+            f"AND {entity_predicate} "
             "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
             "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit",
-            params={"topic": topic, "limit": limit},
+            params={"oid": entity_id, "topic": topic, "limit": limit},
         ).result_set
         entries = [list(r) for r in rows]
         # Superseded priors dropped out of the topic query (supersede_point
@@ -13807,7 +13865,9 @@ class TortoiseSDK:
         rejection on IMPL/NAND; multi-target rejection on plain IMPL/NAND
         (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
         + route-scoped attribute rejection (cycle-13: relation carries
-        direction/confidence/weight; operator route carries confidence/weight).
+        direction/confidence/weight — plus ``mitigation`` since #5244, because
+        a structural edge has no operator bridge to damp; operator route
+        carries confidence/weight).
         """
         if not isinstance(conn, dict):
             return  # dict-ness already reported by check 1
@@ -13979,6 +14039,24 @@ class TortoiseSDK:
                                    f"edges) — it belongs on plain IMPL/NAND "
                                    f"direct edges",
                     })
+            # #5244: `mitigation` is an OPERATOR-route attribute (§2.1 — a
+            # mitigation damps the operator bridge it attacks, #4937). A
+            # structural edge has no operator to damp, so accepting the key
+            # here would be the same accept-and-drop defect the operator route
+            # carried: the value validated, the write succeeded, nothing
+            # stored. Refuse it and name the route that does honor it.
+            if "mitigation" in conn:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] mitigation is "
+                               f"not allowed on relation connections "
+                               f"(structural edges) — a mitigation damps an "
+                               f"operator bridge (ontology §3.9); express the "
+                               f"connection as `operator` + `mitigation`, or "
+                               f"create it and call sdk.mitigate_operator("
+                               f"id=<operator id>, reason=..., "
+                               f"strength=0.10..0.50)",
+                })
 
     def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
         """ONE batched query resolving external endpoint existence, label
@@ -14514,6 +14592,16 @@ class TortoiseSDK:
           operator-less — routed to a DIRECT edge (no operator node, see
           INGEST_CONTRACT.md §8). A connection carrying ``relation`` stays a
           PLAIN structural edge (structural edges never reify).
+        - ``mitigation: {reason, strength}`` on an operator connection is
+          APPLIED, not just an anchor (#5244): after the operator is created /
+          deduped / absorbed, the mitigation is written through
+          :meth:`mitigate_operator` — a mitigation Point plus the
+          ``(op)-[:mitigated_by]->(m)`` edge, stamped with the bundle's
+          batch_id. Re-submission updates it IN PLACE (never a duplicate) and
+          warns ``mitigation_strength_change`` when the reason/strength
+          actually changed (INGEST_CONTRACT §3.2 key 6). On a ``relation``
+          connection a mitigation is a Phase-1 violation: a structural edge
+          has no operator bridge to damp.
         - Endpoint typing (#2062): operator-ROUTED connections (reify:
           true/mitigation/part-whole → create_operator) accept Point OR Event
           endpoints (A1b #1272 parity — the dedup key in _find_operator
@@ -15103,6 +15191,22 @@ class TortoiseSDK:
                 # (g)): a retry's _find_operator dedup hit on a batch-less
                 # operator Point acquires the bundle's batch_id.
                 self._stamp_batch_id(oid, batch_id)
+                # #5244: APPLY the connection's `mitigation` to the operator
+                # this connection resolved to — created, deduped OR absorbed.
+                # Until this call existed the field was read for ROUTING
+                # (`_connection_route`), accepted and validated by
+                # `_check_connection`, and then dropped: the caller got a real
+                # operator, a success status, no mitigation Point, no
+                # `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`
+                # edge and no warning. Applied AFTER the operator write (the
+                # target id is only known here) and on EVERY submission, so a
+                # re-submission re-applies too — `mitigate_operator` is
+                # idempotent: it UPDATES the existing mitigation in place,
+                # never duplicates (INGEST_CONTRACT §3.2 key 6). The helper
+                # stamps the mitigation Point with this bundle's batch_id.
+                mitigation = conn.get("mitigation")
+                if isinstance(mitigation, dict):
+                    self._apply_ingest_mitigation(oid, mitigation, batch_id)
                 ids["connections"].append(oid)
             else:
                 rel = conn["relation"]
@@ -15771,6 +15875,64 @@ class TortoiseSDK:
             return {"kind": "decline",
                     "candidates": [r[0] for r in prows]}
         return None
+
+    def _apply_ingest_mitigation(self, operator_id: str, mitigation: dict,
+                                 batch_id: str) -> str:
+        """Apply an ingest connection's `mitigation` to its operator (#5244).
+
+        Phase 1 validates the shape (``_check_connection``: non-empty string
+        ``reason``, numeric ``strength`` in [0, 1]) and Phase 2 must therefore
+        HONOR it — a validated field that is not persisted is the one failure
+        mode a caller cannot detect. The write goes through
+        :meth:`mitigate_operator`, the single sanctioned mitigation writer
+        (ontology §3.9: ``mitigated_by`` can only originate from an
+        ``is_operator:true`` Point — a mitigation damps the operator bridge it
+        attacks, #4937), so the ingest path cannot drift from the direct-call
+        path.
+
+        Re-submission semantics (INGEST_CONTRACT §3.2 key 6):
+        ``mitigate_operator`` is idempotent — it updates the existing
+        mitigation's reason/strength IN PLACE (never a second Point) — and the
+        documented ``mitigation_strength_change`` warning is emitted when that
+        update actually changed something. An unchanged re-submission is
+        silent, as are incident retries (the crash-retry contract, §7).
+
+        The mitigation Point is stamped with the bundle's ``batch_id`` (§16:
+        "every **new** Point the bundle creates — plain points, operator
+        Points, mitigation Points"), carrying the two record fields
+        ``_stamp_batch_id`` reserves for exactly this write, so a
+        ``list_batch`` audit of the bundle includes the dampener the response
+        claimed to commit.
+
+        Returns the mitigation Point id.
+        """
+        reason = mitigation["reason"]
+        strength = mitigation["strength"]
+        # Read the mitigation this operator already carries BEFORE the write,
+        # so the in-place update is observable (§3.2 key 6). One query, only on
+        # a connection that declared a mitigation.
+        prior = self._get_proj().g.query(
+            "MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) "
+            "RETURN m.id, m.content, m.mitigation_strength",
+            params={"oid": operator_id},
+        ).result_set
+        mid = self.mitigate_operator(
+            operator_id, reason=reason, strength=strength)["id"]
+        if prior:
+            _old_id, _old_content, _old_strength = prior[0]
+            _old_reason = (_old_content or "").removeprefix("[MITIGATION] ")
+            try:
+                _same_strength = (_old_strength is not None
+                                  and float(_old_strength) == float(strength))
+            except (TypeError, ValueError):  # unrepresentable legacy value
+                _same_strength = False
+            if _old_reason != reason or not _same_strength:
+                self._append_warning(
+                    f"mitigation_strength_change:{operator_id}:{mid}:"
+                    f"{_old_strength}->{strength}")
+        self._stamp_batch_id(mid, batch_id, mitigates_operator_id=operator_id,
+                             mitigation_strength=strength)
+        return mid
 
     def _append_warning(self, entry: str) -> None:
         """Append to the current ingest's warnings accumulator (A3 cycle-23
@@ -25543,20 +25705,17 @@ class TortoiseSDK:
                 id=event["id"],
                 **_journal_record_payload(event),
             )
-        # #452: Subject/Object MERGE by name (content-hash dedup).
-        # When the name already exists, the fresh id_val never lands on the
-        # node (ON CREATE never fires).  Re-fetch the canonical id from the
-        # graph so callers get a usable return value — matching create_point
-        # dedup behavior which returns the existing point id.
+        # #452: Subject/Object MERGE by name (content-hash dedup) — the fresh
+        # id_val never lands on a pre-existing node via ON CREATE, but the
+        # MERGE's ON MATCH clause writes it anyway (`o.id=coalesce($id, o.id)` /
+        # `s.id=coalesce($id, s.id)`), so the id this call returns is DERIVED
+        # from the write, not re-read from the graph. The re-fetch that used to
+        # live here (`MATCH (n:{label} {name:$name}) RETURN n.id` →
+        # `result_set[0][0]`) resolved identity by NAME: with two same-name
+        # carriers it returned an ARBITRARY row (backend order), i.e. possibly
+        # a node this call did not write. Deleted per #5509 (plan §A/§B P1-A
+        # "the ninth-cycle seed").
         canonical_id = id_val
-        if label in ("Subject", "Object") and "name" in event:
-            name = event["name"]
-            r = proj.g.query(
-                f"MATCH (n:{label} {{name: $name}}) RETURN n.id",
-                params={"name": name},
-            )
-            if r.result_set and r.result_set[0]:
-                canonical_id = r.result_set[0][0]
         # Wire edges after entity exists in graph (use canonical id)
         if props.get("authoredBy"):
             proj.create_authored_by(canonical_id, props["authoredBy"])
