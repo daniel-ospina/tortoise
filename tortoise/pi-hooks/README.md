@@ -34,9 +34,12 @@ the extension *is* the opt-in — there is deliberately no `autoCapture`-style
 default-false flag — and it is the one IN-REPO capture seam that reads no
 `TORTOISE_CAPTURE`, unlike the in-repo Claude Code, Codex and Cursor hooks,
 which file nothing until the machine sets `TORTOISE_CAPTURE=1` (#3615). (The
-agent-infra `reflect-hook` is the other ungated producer and lives outside this
-repo — agent-infra#1117; the disposition of that copy, and the measured proof
-that it is **real code and not a symlink**, are in §Migration below.) The
+agent-infra `reflect-hook` is a **second producer** and lives outside this repo:
+until agent-infra `7e77470e4` (2026-10-16, #803) it uploaded on key presence
+alone, and it now shares `extensions/shared/capture-gate.ts` — an explicit
+`"cloud": true` opt-in *and* a key. The disposition of that copy, the measured
+proof that it is **real code and not a symlink**, and **every module that must
+move with the consolidation**, are in §Migration below.) The
 server can still refuse the capture POST with a
 409 while the organization has agent sessions switched off (Memory sources >
 Agent sessions; that toggle is default-ON, ToS-covered, and can only refuse —
@@ -75,18 +78,35 @@ The guard above covers **one** of the two producers agent-infra installs. The
 other is a **top-level file**, `~/.pi/agent/extensions/reflect-hook.ts` — a
 second, independent extension whose only handler is the `session_shutdown`
 (`quit`) capture: it writes a JSONL fallback into
-`~/.tortoise/session-events/` and POSTs the same `/v1/sessions` endpoint on
-**credential presence alone** (it reads no `TORTOISE_CAPTURE`). Measured
-2026-10-11 against `agent-infra@origin/main`, so that a lane does not have to
-trust a description:
+`~/.tortoise/session-events/` and POSTs the same `/v1/sessions` endpoint.
 
-| In `agent-infra` | Measured |
+**Its egress gate changed under this record.** Until agent-infra `7e77470e4`
+(2026-10-16, agent-infra #803 / #848) `reflect-hook` uploaded whenever the API
+key was present; it now shares `extensions/shared/capture-gate.ts` with the
+other recorder — an explicit `"cloud": true` in the operator config *and* a
+key, with env (`TORTOISE_CAPTURE_CLOUD=0`) and a repo-local
+`{"cloud": false}` able to **deny only**. Re-measured **2026-10-17** against
+`agent-infra@origin/main`, so that a lane does not have to trust a description:
+
+| In `agent-infra` | Measured 2026-10-17 |
 |---|---|
-| `extensions/tortoise-capture/index.ts` + `index.test.ts` | **real files** (26,864 B + 26,768 B) |
-| `extensions/reflect-hook.ts` + `reflect-hook.test.ts` | **real files** (12,330 B + 9,684 B) — **not** a symlink |
-| CI | `reflect-hook.test.ts` has its own step in agent-infra's `.github/workflows/ci-main.yml`; `tortoise-capture/index.test.ts` is executed by **no** agent-infra workflow — the extension glob is `extensions/*/test*.mjs`, which does not match a `.ts` file |
-| Ship-list | `manifest.json` lists **both** (`reflect-hook.ts`, `tortoise-capture/`), so `bin/agent-infra.js` materializes both on a farm machine |
+| `extensions/tortoise-capture/index.ts` + `index.test.ts` | **real files** (33,983 B + 39,290 B) — **not** a shim, **not** a symlink |
+| `extensions/reflect-hook.ts` + `reflect-hook.test.ts` | **real files** (16,758 B + 21,584 B) — **not** a symlink |
+| `extensions/shared/capture-gate.ts` | **added by #803** — the one egress gate both recorders now share; imported by the two recorders only |
 | `extensions/shared/capture-attribution.ts` | imported by the two recorders only — no other extension imports it |
+| CI | `reflect-hook.test.ts` has its own step in agent-infra's `.github/workflows/ci-main.yml` (`#611`), and both `shared/*.test.ts` suites run through that job's `extensions/shared/*.test.ts` glob; `tortoise-capture/index.test.ts` is executed by **no** agent-infra workflow — the extension glob is `extensions/*/test*.mjs`, which does not match a `.ts` file |
+| Ship-list | `manifest.json` lists **both** (`reflect-hook.ts`, `tortoise-capture/`), so `bin/agent-infra.js` materializes both on a farm machine |
+
+**What must move with the consolidation — the complete inventory, measured.**
+Both recorders import **both** shared modules: `extensions/tortoise-capture/index.ts`
+imports `../shared/capture-attribution.js` + `../shared/capture-gate.js`, and
+`extensions/reflect-hook.ts` imports `./shared/capture-attribution.js` +
+`./shared/capture-gate.js`; **no other agent-infra extension imports either**.
+A reducer who moves only `capture-attribution.ts` — the single module this
+record named before `7e77470e4` added the gate — leaves both recorders
+importing a module that is no longer beside them: exactly the "capture
+installed but unwired" window the PR ordering in
+`daniel-ospina/agent-infra#1671` exists to prevent.
 
 **The disposition (recorded decision for #3512):** the agent-infra copy is **kept
 as a shim** — it is reduced to a pointer at this directory and carries **no
@@ -96,6 +116,12 @@ its trigger is the first product release that ships this extension as the
 install source. The shim's "source of truth is `tortoise/pi-hooks/`" marker
 **cannot live in the shim itself** — a symlink has no content — so it belongs in
 a **sibling file** beside it.
+
+> **Current state: the shim is the TARGET, not a description of the repo.**
+> Measured 2026-10-17 (table above), **no copy is a shim yet** — both recorders
+> are real files that agent-infra still CI-tests. Reading "kept as a shim" as
+> already-done is how a lane skips the reduction and leaves two live producers;
+> the reduction itself is `daniel-ospina/agent-infra#1671`, and it is **open**.
 
 The cross-repo deliverable (the shim, the dev-machine repoint and the **PR
 ordering** so no window exists where capture is installed but unwired) is

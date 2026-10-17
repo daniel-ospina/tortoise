@@ -40,8 +40,13 @@
 // Installing this extension IS the opt-in, and it is the one IN-REPO capture
 // seam that reads no TORTOISE_CAPTURE — unlike the in-repo Claude Code, Codex
 // and Cursor hooks, which file nothing until the machine sets
-// TORTOISE_CAPTURE=1 (#3615). (The agent-infra `reflect-hook` is the other
-// ungated producer and lives outside this repo — agent-infra#1117.) There is
+// TORTOISE_CAPTURE=1 (#3615). (A second producer — agent-infra's `reflect-hook`
+// — lives outside this repo and is NOT shipped to users. It uploaded on key
+// presence alone until agent-infra `7e77470e4` (2026-10-16, #803), and now
+// shares `extensions/shared/capture-gate.ts` there: an explicit `"cloud": true`
+// opt-in *and* a key. The measured disposition, and every module that must move
+// when the two recorders consolidate, are in tortoise/pi-hooks/README.md
+// §Migration (#3512).) There is
 // deliberately NO `autoCapture`-style default-false flag, so the shipped
 // capture step can never silently do nothing. The server can still refuse the
 // capture POST with a 409 while the organization has agent sessions switched
