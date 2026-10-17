@@ -454,12 +454,21 @@ def restore_graph_key(
     if bound_s <= 0:
         raise ValueError(f"bound_s must be positive, got {bound_s!r}")
 
-    payload = dump()
-    payload_bytes = len(payload) if isinstance(payload, (bytes, bytearray, memoryview)) else 0
-    delete()
-
     witness = _Witness(ping, poll_interval_s)
     witness.start()
+    try:
+        # Sample BEFORE `dump()`. `DUMP` is O(N) serialisation on the SAME serving
+        # thread the issue is about, so a block that began during DUMP was
+        # previously unwitnessed and indistinguishable from a quiet instance — the
+        # PR's own thesis failing in its own first step (#8827 review).
+        payload = dump()
+        payload_bytes = (
+            len(payload) if isinstance(payload, (bytes, bytearray, memoryview)) else 0
+        )
+        delete()
+    except BaseException:
+        witness.finish(deadline_s=witness_join_s, recovery_s=0.0)
+        raise
 
     outcome: dict[str, Any] = {}
 
@@ -471,10 +480,22 @@ def restore_graph_key(
 
     started = time.perf_counter()
     worker = threading.Thread(target=_run_restore, daemon=True, name="graph-key-restore")
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        # If the thread cannot be created the witness must still be halted: it is a
+        # daemon PINGing the live instance every `poll_interval_s` for the rest of
+        # the process (#8827 review).
+        witness.finish(deadline_s=witness_join_s, recovery_s=0.0)
+        raise
     worker.join(bound_s)
     elapsed_s = time.perf_counter() - started
     completed = not worker.is_alive()
+    # Boundary in WITNESS time: the restore is over here, so samples taken after
+    # this point (the recovery probe) describe liveness, not attribution. Counting
+    # them made an instant restore followed by one slow PING report "BLOCKED the
+    # instance for 405 ms of its 0.00s" (#8827 review).
+    window_end_s = time.perf_counter() - witness.t0
 
     # `recovery_probe_s` only on the completed path: when the restore overran, the
     # instance is (by definition) not answering, and the liveness probe below is the
@@ -484,10 +505,13 @@ def restore_graph_key(
         recovery_s=recovery_probe_s if completed else 0.0,
     )
     silent_ms, silence_started_s, silence_ended_s = _longest_silence(samples)
-    failures = sum(1 for _offset, answered, _latency in samples if not answered)
+    # Attribution uses only samples inside the operation window; the recovery probe
+    # may still add samples afterwards, and those may not be blamed on the restore.
+    attributed = [s for s in samples if s[0] <= window_end_s]
+    failures = sum(1 for _offset, answered, _latency in attributed if not answered)
     # Only ANSWERED samples carry a latency: an unanswered one's latency is the
     # witness client's own socket timeout, not a measurement of the block.
-    answered_latencies = [lat for _o, answered, lat in samples if answered]
+    answered_latencies = [lat for _o, answered, lat in attributed if answered]
     max_latency_ms = max(answered_latencies) if answered_latencies else 0.0
     blocked = failures > 0 or max_latency_ms >= blocked_latency_ms
 
