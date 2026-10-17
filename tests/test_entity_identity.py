@@ -1009,7 +1009,13 @@ _ALLOWED_FSTRING = {
         # migration-gated (owner: S3). Replaces the retired
         # `RETURN e.name LIMIT 1` probe + the two by-name MERGEs it fed: the
         # write is now by the RESOLVED internal id (`WHERE ID(t)=$tid`).
-        'rows = self.g.query( f"MATCH (e:{label} {{name:$name}}) " "RETURN ID(e), coalesce(e.id, e.eventId, e.name) LIMIT 1", params={"name": target_name}, ).result_set': 1,
+        # `LIMIT` dropped entirely since the second #8398 review (P2-3): the
+        # probe must see EVERY same-name carrier — `LIMIT 1` pinned an arbitrary
+        # backend row order into an append-only journal, and `LIMIT 2` would
+        # still truncate at the third carrier. The coordinate text is updated,
+        # NOT the disposition — the read is still name-keyed, still one probe per
+        # cascade label, and still owned by S3.
+        'rows = self.g.query( f"MATCH (e:{label} {{name:$name}}) " "RETURN ID(e), coalesce(e.id, e.eventId, e.name)", params={"name": target_name}, ).result_set': 1,
     },
 }
 

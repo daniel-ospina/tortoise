@@ -6874,6 +6874,36 @@ def _merge_hard_delete(out, rid, seq, labels) -> None:
             by_label[label] = seq
 
 
+def _about_link_event_hard_deleted(hard_delete_seqs, seq, record) -> bool:
+    """True when the journal hard-DELETES the Event that owns this record's
+    #8398 ``about*`` links at a seq AFTER ``record``'s own (#8398 review P2-2).
+
+    A hard-deleted Event is not a LOST link: live does not have those edges
+    either — ``delete`` removes the node and its edges, and the replay's own
+    hard-delete pass removes it on the way in. Counting it inflates the
+    ``failed`` number the #8398 sweep advertises as the honest signal, and emits
+    the false warning "the live graph had these edges". Measured: create an
+    Event with ``aboutObject`` → ``delete(event_id)`` → ``rebuild_all`` reported
+    "1 journaled Event→entity about* link(s) could NOT be re-wired — the live
+    graph had these edges", neither half of which was true.
+
+    This is the SAME staleness rule the sibling sweep applies through
+    ``fold_deferred_entity_links(entity_link_events, hard_delete_seqs)``: state
+    it once here rather than re-deriving it per engine. The label is always
+    ``"Event"`` (the record type is ``EventRecorded``), and a later re-creation
+    of the same id is judged on its own seq — ``_hard_delete_suppresses`` is
+    strictly "a delete AFTER this record", so a re-created-and-relinked Event
+    survives.
+    """
+    if not isinstance(record, dict):
+        return False
+    inner = record.get("event")
+    if not isinstance(inner, dict):
+        inner = record
+    rid = inner.get("id") or inner.get("eventId")
+    return _hard_delete_suppresses(hard_delete_seqs, rid, "Event", seq)
+
+
 def _hard_delete_suppresses(hard_delete_seqs, endpoint_id, label,
                             seq) -> bool:
     """True when a recorded hard delete of ``(label, endpoint_id)`` lands AFTER
@@ -8748,6 +8778,15 @@ class FalkorProjection(
         # #8398: re-wire the journaled Event→entity about* links now that every
         # endpoint the journal can restore exists. Reported, never raised — the
         # graph was already wiped, so a failure must not abort the replay.
+        # #8398 review P2-2: drop the records whose EVENT the journal
+        # hard-deletes later — the sibling sweep above applies the same rule
+        # through ``fold_deferred_entity_links``, and without it this sweep
+        # accused the replay of a loss live never had (see
+        # ``_about_link_event_hard_deleted``).
+        about_link_events = [
+            (_al_s, _al_e) for _al_s, _al_e in about_link_events
+            if not _about_link_event_hard_deleted(
+                hard_delete_seqs, _al_s, _al_e)]
         if about_link_events:
             _wired = _failed = 0
             for _al_seq, _al_ev in about_link_events:
@@ -12671,11 +12710,19 @@ class FalkorProjection(
                     _em_ev.get("event_id"), _em_ev.get("src"),
                     _em_ev.get("tgt"), _em_ev.get("rel"))
 
-        # ── #8398 trailing sweep: re-wire the journaled Event→entity about*
+        # #8398 trailing sweep: re-wire the journaled Event→entity about*
         # links. Runs HERE, after every entity registration and after the
         # edge-message sweep, so a rotated journal whose registration landed in
         # a later file cannot lose the link. A link the sweep cannot re-wire is
         # REPORTED — an un-reported drop is the defect this fixes.
+        # #8398 review P2-2: a record whose EVENT the journal hard-deletes later
+        # is skipped, never counted as failed — the sibling
+        # ``fold_deferred_entity_links`` applies the same rule, and live has no
+        # such edges either (see ``_about_link_event_hard_deleted``).
+        about_link_events = [
+            (_al_s, _al_e) for _al_s, _al_e in about_link_events
+            if not _about_link_event_hard_deleted(
+                hard_delete_seqs, _al_s, _al_e)]
         if about_link_events:
             _about_wired = _about_failed = 0
             for _al_seq, _al_ev in about_link_events:

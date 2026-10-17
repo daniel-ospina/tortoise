@@ -26871,9 +26871,13 @@ class TortoiseSDK:
                     # resolves to nothing and is not handle-shaped → the name
                     # path (resolve-or-mint) is what will actually wire it.
                     # `resolve_about_link` is READ-ONLY: it returns the pinned
-                    # link AND the internal id the write must address, so the
+                    # link AND the internal id(s) the write must address, so the
                     # record and the edge come from ONE resolution instead of
-                    # two reads that could disagree.
+                    # two reads that could disagree. A LIST of ids because a
+                    # name may legally have several carriers — all of them are
+                    # journaled in `targets` and all of them are written, so an
+                    # arbitrary backend row order can never be pinned (review
+                    # P2-3 at 2b9626072).
                     _link, _internal = proj.resolve_about_link(_val)
                     if _link is not None:
                         about_links.append(_link)

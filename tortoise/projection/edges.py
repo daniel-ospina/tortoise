@@ -936,7 +936,8 @@ class _EdgeHandlers:
         ("Point", "aboutPoint"),
     )
 
-    def resolve_about_link(self, entity_name: str) -> tuple[dict | None, int | None]:
+    def resolve_about_link(self, entity_name: str
+                           ) -> tuple[dict | None, list[int] | None]:
         """RESOLVE — without writing — the link the cascading name path produces.
 
         #8398 (review P1-2): ``_create_about_edges`` is the rel-IGNORING
@@ -964,25 +965,30 @@ class _EdgeHandlers:
         * ``resolve_key`` — the natural key the live match used (``name``, or
           ``url`` for a document ``:Source``; ``stub_key``'s map, so live and
           replay agree on WHICH key identifies the label).
-        * ``mint_if_absent`` — may replay CREATE the endpoint? True only for
-          ``:Subject``, because the live construction is the ``_mint_subject_stub``
-          MERGE (matched → no-op, absent → the stub). Every other label is
-          resolve-only live, so minting one at replay would fabricate a node
-          live never had.
+        * ``mint_if_absent`` — may replay CREATE the endpoint? True only when
+          the endpoint live resolved IS the Subject stub (its id equals its
+          name — the ``ON CREATE SET s.id=$name`` construction), because that
+          is the one construction that may legitimately mint. A Subject live
+          merely MATCHED is not a mint (see ``_resolve_about_edge_target``), and
+          every other label is resolve-only live, so minting one at replay would
+          fabricate a node live never had.
 
-        ``target_internal_id`` — the FalkorDB internal id the LIVE write must
+        ``target_internal_ids`` — the FalkorDB internal ids the LIVE write must
         address, so the journal and the write come from ONE resolution rather
-        than two reads that could disagree. ``None`` for the stub fallback (no
-        node yet). ⛔ It MUST NEVER be journaled: internal ids die at rebuild.
+        than two reads that could disagree. A LIST because a name may legally
+        have several carriers and every one of them is journaled in
+        ``targets`` — live then writes what the record says instead of pinning
+        an arbitrary row. ``None`` for the stub fallback (no node yet). ⛔ It
+        MUST NEVER be journaled: internal ids die at rebuild.
 
         Returns ``(None, None)`` when the cascade wires nothing (an unwritable
         name — refused and logged, #7369).
         """
         for label, rel in self._ABOUT_NAME_CASCADE:
-            link, internal = self._resolve_about_edge_target(
+            link, internals = self._resolve_about_edge_target(
                 entity_name, label, rel)
             if link is not None:
-                return link, internal
+                return link, internals
         # Nothing matched — live defaults to a Subject stub (label-agnostic
         # source). #2489: the mint is routed through the SHARED helper
         # (_mint_subject_stub) so live wiring and rebuild replay mint
@@ -1003,7 +1009,8 @@ class _EdgeHandlers:
         }, None)
 
     def _resolve_about_edge_target(self, target_name: str, label: str,
-                                   rel: str) -> tuple[dict | None, int | None]:
+                                   rel: str
+                                   ) -> tuple[dict | None, list[int] | None]:
         """One cascade attempt: resolve a NAMED node of ``label``; never writes.
 
         D10 (ONTOLOGY v3.15 §4.4/§9.5 Q1): a document is a ``:Source``, so the
@@ -1015,6 +1022,12 @@ class _EdgeHandlers:
         is the node's ``url``, so replay's ``resolve_structural_target`` (which
         matches ``:Source {url}``, url-keyed since #2489) reaches the same node
         even when LIVE matched by title.
+
+        Returns ``(journal_link, internal_ids)``: ``internal_ids`` is EVERY
+        FalkorDB internal id this attempt resolved (a name with several legal
+        carriers resolves to all of them — see the ambiguity note in the
+        non-``Source`` arm), or ``None`` when nothing matched. ⛔ Internal ids
+        MUST NEVER be journaled: they die at rebuild.
         """
         # #7369: `target_name` rides as a READ parameter here, and the engine
         # parses every parameter regardless of clause — an unwritable one
@@ -1033,27 +1046,58 @@ class _EdgeHandlers:
             ).result_set
             if not rows:
                 return None, None
-            internal, key = rows[0]
+            _internal, key = rows[0]
             targets = [key] if key else []
+            # A ``:Source`` is never a mintable stub here (aboutDocument is
+            # resolve-only, D10 B1), so this link makes no mint claim.
+            mint = False
         else:
+            # ⛔ NEVER limit this probe (review at 2b9626072). A name is a
+            # mutable natural key (D2: two live carriers are legal), and the
+            # retired ``_try_about_edge`` MERGE'd the edge against EVERY
+            # same-name carrier. The probe here was ``LIMIT 1``: live wired one
+            # arbitrary carrier, that backend row-order pick was written into an
+            # append-only journal, and live and replay then ran OPPOSITE
+            # policies (live guessed; replay refused via
+            # ``_refuse_ambiguous_target``). It also cost every OTHER carrier an
+            # edge it used to get. ``LIMIT 2`` is not a fix either — it tells
+            # one from many but still truncates at the third carrier, so live
+            # would disagree with the retired behaviour AND with its own
+            # journal. So resolve ALL of them: every endpoint is journaled in
+            # ``targets`` (already a list, the id path journals several values
+            # the same way) and every one of them is written. Nothing is picked,
+            # so nothing arbitrary is pinned, and live writes exactly what the
+            # record says.
             rows = self.g.query(
                 f"MATCH (e:{label} {{name:$name}}) "
-                "RETURN ID(e), coalesce(e.id, e.eventId, e.name) LIMIT 1",
+                "RETURN ID(e), coalesce(e.id, e.eventId, e.name)",
                 params={"name": target_name},
             ).result_set
             if not rows:
                 return None, None
-            internal, ident = rows[0]
             key = target_name
-            targets = [ident] if ident else []
+            targets = [ident for _i, ident in rows if ident]
+            # ⛔ Mint ONLY when the endpoint live resolved IS the stub (review
+            # at 2b9626072): the stub construction is
+            # ``MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name``, so
+            # its id equals its name. Keying the claim on the LABEL alone
+            # claimed a mint for a Subject live merely MATCHED — measured: a
+            # link to the existing real Subject ``sub-6772…`` journaled
+            # ``mint_if_absent: true``, and a replay where that Subject was
+            # absent minted a duplicate same-name stub (``id == name``) and
+            # reported ``wired=1, failed=0``. That is
+            # ``derived == replay(journal)`` broken in the FABRICATION
+            # direction — the invariant this whole path exists to establish.
+            mint = label == "Subject" and any(
+                ident == target_name for _i, ident in rows)
         return ({
             "rel": rel,
             "how": "id",
             "targets": targets,
             "target_label": label,
             "resolve_key": key,
-            "mint_if_absent": label == "Subject",
-        }, internal)
+            "mint_if_absent": mint,
+        }, [row[0] for row in rows])
 
     def _create_about_edges(self, source_id: str, entity_name: str) -> dict | None:
         """Link entity (Point, Document, Event, or Object) to a named entity.
@@ -1069,21 +1113,24 @@ class _EdgeHandlers:
         carries the rel/label this cascade actually produced rather than the
         caller's request and a promise to re-run the cascade later.
         """
-        link, internal = self.resolve_about_link(entity_name)
+        link, internals = self.resolve_about_link(entity_name)
         if link is None:
             return None
-        self.wire_about_link(source_id, link, internal)
+        self.wire_about_link(source_id, link, internals)
         return link
 
     def wire_about_link(self, source_id: str, link: dict,
-                        target_internal: int | None) -> bool:
+                        target_internal: int | Sequence[int] | None) -> bool:
         """Write ONE resolved about link — the single construction for live.
 
-        ``target_internal`` is the id ``resolve_about_link`` resolved; ``None``
-        means the live path must mint the ``:Subject`` stub first (the cascade's
-        fallback). Writing by the RESOLVED internal id — rather than re-matching
-        the name inside the MERGE — is what makes the journaled link and the edge
-        the same decision, with no second read that could answer differently.
+        ``target_internal`` is the id (or, for a name with several legal
+        carriers, the ids) ``resolve_about_link`` resolved; ``None`` means the
+        live path must mint the ``:Subject`` stub first (the cascade's
+        fallback). Writing by the RESOLVED internal id — rather than
+        re-matching the name inside the MERGE — is what makes the journaled link
+        and the edge the same decision, with no second read that could answer
+        differently. Every resolved id is written, so the live edge set is
+        exactly the journaled ``targets`` set.
         """
         rel = link["rel"]
         if rel not in _ABOUT_REPLAY_RELS:
@@ -1097,15 +1144,22 @@ class _EdgeHandlers:
                 params={"name": link["resolve_key"]}).result_set
             if not rows:
                 return False
-            target_internal = rows[0][0]
+            internals: list[int] = [rows[0][0]]
+        elif isinstance(target_internal, int):
+            internals = [target_internal]
+        else:
+            internals = list(target_internal)
+        if not internals:
+            return False
         wrote = False
         for n in self._resolve_entity(source_id, by_id=True):
-            self.g.query(
-                f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (t) "
-                f"WHERE ID(t)=$tid MERGE (n)-[:{rel}]->(t)",
-                params={"sid": n["value"], "tid": target_internal},
-            )
-            wrote = True
+            for internal in internals:
+                self.g.query(
+                    f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (t) "
+                    f"WHERE ID(t)=$tid MERGE (n)-[:{rel}]->(t)",
+                    params={"sid": n["value"], "tid": internal},
+                )
+                wrote = True
         return wrote
 
     def create_about_edge(self, source_id: str, target_id: str, edge_type: str, *,
@@ -1251,7 +1305,17 @@ class _EdgeHandlers:
                     failed += 1
                     continue
                 ok = False
-                for value in (link.get("targets") or []):
+                # P2-8 (review at 2b9626072): a ``targets`` that is not a LIST
+                # is malformed, and iterating it as a sequence walks a STRING
+                # character by character — ``targets: "abcd"`` could WIRE to a
+                # node whose id is one character and then "repair" the rest via
+                # the key fallback, instead of counting the loss. Same
+                # validation the ``how:"id"`` arm below already applies.
+                targets = link.get("targets")
+                if not isinstance(targets, list):
+                    failed += 1
+                    continue
+                for value in targets:
                     if (isinstance(value, str) and value
                             and self.create_about_edge(
                                 source, value, rel, target_label=label)):
@@ -1324,10 +1388,15 @@ class _EdgeHandlers:
         Subject stub when nothing in the graph matches, so for any writable value
         a name link leaves an outgoing edge and ``failed`` is effectively
         unreachable — this count therefore does NOT detect a link that landed on
-        a stub of the wrong label instead of the real target. It detects the two
-        cases that are reachable: a cascade that produced no edge at all, and a
-        value the cascade could not use. That is weaker than "the right edge is
-        there", and it is what is available without the refused identity read.
+        a stub of the wrong label instead of the real target. On an Event that
+        carries NO other about* edge it detects the two cases that are
+        reachable: a cascade that produced no edge at all, and a value the
+        cascade could not use. (That precondition is load-bearing — the sentence
+        was unqualified before #8398's second review, and it is false on an
+        Event that already carries any about* edge: measured ``wired=1,
+        failed=0`` for a link nothing wired.) That is weaker than "the right edge
+        is there", and it is what is available without the refused identity
+        read.
         The direction of the error is OVER-counting ``wired``, never a false
         failure: a source that ALREADY carried another about* edge counts as
         wired even if this record's call was a no-op, so a no-op name link reads

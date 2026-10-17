@@ -12,10 +12,15 @@ this was never a general rebuild problem — the Event→entity link specificall
 was not journaled.
 
 Fix shape: the SDK classifies each about-link against the LIVE graph at write
-time (``id`` = it resolved to the rel's target label; ``name`` = it did not and
-will be resolve-or-minted by name) and journals that precise form on the
-``EventRecorded`` record; replay re-wires it with the same construction rather
-than re-deriving the decision. The record carries links as data, NOT as node
+time, then RESOLVES it read-only (``resolve_about_link``) and journals the
+precise decision the live write will carry: ``{"rel", "how": "id",
+"targets": [...]}`` for an id-resolved link, plus ``target_label`` /
+``resolve_key`` / ``mint_if_absent`` for a name-path one. Replay never re-runs
+the cascade — it repeats that decision: the endpoint by id when it resolves,
+else the same label/key live matched on, minting only when the live construction
+minted. ``how: "name"`` survives as a LEGACY-ONLY branch (records written before
+that fix, uncorrectable because the journal is append-only), matching
+``replay_about_links``'s docstring. The record carries links as data, NOT as node
 properties — an ``about*`` prop must never become a stored string property.
 
 Runnable with:
@@ -571,3 +576,222 @@ def test_a_LEGACY_name_link_record_still_replays(wired) -> None:
         "MATCH (e:Event {id:$id})-[r]->(t) RETURN type(r), labels(t), t.name",
         params={"id": ev}).result_set == [["aboutSubject", ["Subject"], "Legacy"]], (
         "the legacy name link did not replay through the cascade")
+
+
+# ── Round 3 (second independent review at 2b9626072) ─────────────────────────
+
+
+def test_a_name_link_to_an_EXISTING_Subject_never_mints_at_replay(wired) -> None:
+    """P2-1: ``mint_if_absent`` is a claim about the CONSTRUCTION, not the label.
+
+    The stub construction is ``MERGE (s:Subject {name:$name}) ON CREATE SET
+    s.id=$name``, so a stub's id EQUALS its name. Keying the journal claim on
+    ``label == "Subject"`` alone claimed a mint for a Subject that live merely
+    MATCHED — measured at 2b9626072: a link to the existing real Subject
+    ``sub-6772…`` journaled ``mint_if_absent: true``, and a replay where that
+    Subject was absent minted a duplicate same-name stub (``id == name``) and
+    reported ``wired=1, failed=0``. That is ``derived == replay(journal)`` broken
+    in the FABRICATION direction — the invariant this PR exists to establish.
+
+    ``test_a_name_link_to_an_EXISTING_node_replays_onto_that_node`` is the
+    sibling for ``Object``, where ``mint_if_absent`` was already ``False``: a
+    mint on a non-stubbable label is a no-op, so that test cannot see this.
+    """
+    sdk, proj, _events, journal = wired
+    subj = _nid(sdk.create_subject("Acme"))
+    sdk.create_event("s", "event", aboutObject="Acme")
+
+    record = _event_records(journal, "s")[0]
+    link = record["aboutLinks"][0]
+    assert (link["rel"], link["target_label"]) == ("aboutSubject", "Subject"), (
+        f"the cascade did not resolve the existing Subject: {link!r}")
+    assert link["targets"] == [subj], (
+        f"the record must carry the endpoint live resolved: {link!r}")
+    assert link["mint_if_absent"] is False, (
+        "the record claims a mint for a Subject that live merely MATCHED — a "
+        f"replay would fabricate a node live never had: {link!r}")
+
+    # Removed, not deleted through the journal: the Subject is ABSENT at replay
+    # (a lost/rotated ``SubjectAdded`` line, or a delete the journal cannot
+    # rebuild it from). Live created nothing, so replay must create nothing.
+    proj.g.query("MATCH (s:Subject {id:$id}) DETACH DELETE s",
+                 params={"id": subj})
+    wired_n, failed_n = proj.replay_about_links(record)
+    assert (wired_n, failed_n) == (0, 1), (
+        "a link whose endpoint live RESOLVED must report an honest failure when "
+        f"that endpoint is gone — never a mintage: wired={wired_n} "
+        f"failed={failed_n}")
+    rows = proj.g.query(
+        "MATCH (s:Subject {name:'Acme'}) RETURN s.id, s.name").result_set
+    assert rows == [], (
+        f"the replay fabricated a Subject stub (id == name) live never had: {rows}")
+
+
+def test_a_hard_deleted_Event_is_not_a_LOST_about_link(wired, caplog) -> None:
+    """P2-2: a link the journal's own hard delete removed is not a replay loss.
+
+    Neither sweep filtered the records by the replay's hard-delete set, while the
+    sibling immediately above (``fold_deferred_entity_links(entity_link_events,
+    hard_delete_seqs)``) does. Measured at 2b9626072: create an Event with
+    ``aboutObject`` → ``delete(event_id)`` → ``rebuild_all`` warned *"1 journaled
+    Event→entity about* link(s) could NOT be re-wired — the live graph had these
+    edges"*, neither half of which is true (live had no such edge either). It
+    also inflated the ``failed`` count this PR advertises as the honest signal,
+    which trains readers to ignore the warning.
+    """
+    import logging
+
+    sdk, proj, events, journal = wired
+    obj = _nid(sdk.create_object("Gone"))
+    ev = _nid(sdk.create_event("gone", "event", aboutObject=obj))
+    assert _counts(proj)["aboutObject"] == 1, "live did not wire the link"
+    assert sdk.delete(ev) is True, "the Event was not deleted"
+    assert _counts(proj)["aboutObject"] == 0, (
+        "live kept the edge of a hard-deleted Event")
+
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _counts(proj)["aboutObject"] == 0, (
+        "rebuild_all resurrected the link of a hard-deleted Event")
+    assert "could NOT be re-wired" not in caplog.text, (
+        "the sweep reported a loss for a link the journal legitimately deleted "
+        f"— live never had it: {caplog.text[-2000:]}")
+
+    # The same in the single-file engine: both sweeps must apply the rule.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild(_DirLog(journal.parent), confirm_destructive=True)
+    assert _counts(proj)["aboutObject"] == 0, (
+        "rebuild resurrected the link of a hard-deleted Event")
+    assert "could NOT be re-wired" not in caplog.text, (
+        f"the EventLog sweep reported a phantom loss: {caplog.text[-2000:]}")
+
+
+def test_two_same_name_carriers_are_BOTH_journaled_and_BOTH_wired(wired) -> None:
+    """P2-3: never pin a ``LIMIT 1`` row-order pick into the journal.
+
+    A name is a mutable natural key (D2: two live carriers are legal). The probe
+    was ``… RETURN ID(e), … LIMIT 1``, so live wired ONE arbitrary carrier, that
+    pick was written into an append-only journal, and live and replay then ran
+    OPPOSITE policies — live guessed, replay refused via
+    ``_refuse_ambiguous_target``. The retired ``_try_about_edge`` probed
+    ``LIMIT 1`` but then ``MERGE``d the edge against EVERY same-name carrier:
+    this pins that behaviour as the CHOSEN one (nothing is picked, so nothing
+    arbitrary is pinned, and live writes exactly what the record says).
+
+    THREE same-name ``:Event`` carriers, because ``_upsert_event`` MERGEs on
+    ``eventId`` (not ``name``) — so all are reachable through a public door AND
+    all are journaled, which keeps the full ``rebuild_all`` comparison honest
+    instead of measuring an unjournaled producer (which no replay can restore).
+    Three, not two, deliberately: a bounded probe (``LIMIT 2``) tells "one" from
+    "many" but still TRUNCATES at the third carrier, so a two-carrier fixture
+    cannot see that defect at all.
+    """
+    sdk, proj, events, journal = wired
+    carriers = {_nid(sdk.create_event("Shared", "event")) for _ in range(3)}
+    assert len(carriers) == 3, f"the carriers collapsed: {carriers}"
+
+    sdk.create_event("dup", "event", aboutObject="Shared")
+
+    def edges() -> set:
+        return {
+            row[0] for row in proj.g.query(
+                "MATCH (e:Event {name:'dup'})-[:aboutEvent]->(t) "
+                "RETURN t.id").result_set
+        }
+
+    assert edges() == carriers, (
+        "live did not wire EVERY same-name carrier (the retired behaviour, and "
+        f"the only one that pins nothing arbitrary): {edges()}")
+
+    record = _event_records(journal, "dup")[0]
+    link = record["aboutLinks"][0]
+    assert link["rel"] == "aboutEvent", f"wrong rel: {link!r}"
+    assert sorted(link["targets"]) == sorted(carriers), (
+        "the record pinned a subset of the carriers live addressed: "
+        f"{link!r}")
+    assert link["mint_if_absent"] is False, (
+        f"an :Event was never mintable live: {link!r}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert edges() == carriers, (
+        f"replay did not reproduce every journaled endpoint: {edges()}")
+
+    # And the SINGLE-carrier case still journals one endpoint, not two: the
+    # probe must not turn every name into a list.
+    sdk.create_event("only", "event")
+    sdk.create_event("solo", "event", aboutObject="only")
+    solo = _event_records(journal, "solo")[0]["aboutLinks"][0]
+    assert len(solo["targets"]) == 1, (
+        f"a lone carrier must journal exactly one endpoint: {solo!r}")
+
+
+def test_a_non_list_targets_on_a_pinned_link_is_a_COUNTED_failure(
+        wired) -> None:
+    """P2-8: ``targets: "abcd"`` iterates CHARACTERS, it does not fail.
+
+    ``for value in (link.get("targets") or [])`` walks a string character by
+    character, so a malformed record can WIRE to a node whose id is a single
+    character and then "repair" itself through the key fallback — while the body
+    claims "a ``targets`` that is not a list … is a failure". Pinned with a
+    one-character-id carrier present, so the bad arm is reachable rather than
+    vacuously empty.
+    """
+    sdk, proj, _events, _journal = wired
+    sdk.create_subject("Onechar")
+    proj.g.query("MATCH (s:Subject {name:'Onechar'}) SET s.id='a'")
+    ev = _nid(sdk.create_event("malf", "event"))
+    for bad in ("abcd", {"a": 1}, 7):
+        payload = {"id": ev, "aboutLinks": [{
+            "rel": "aboutSubject", "how": "id", "targets": bad,
+            "target_label": "Subject", "resolve_key": "Onechar",
+            "mint_if_absent": False}]}
+        assert proj.replay_about_links(payload) == (0, 1), (
+            f"targets={bad!r} was not counted as exactly one loss")
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id})-[r]->() RETURN count(r)",
+        params={"id": ev}).result_set == [[0]], (
+        "the malformed record wired an edge from a single-character target")
+
+
+def test_the_EventRecorded_emit_is_ONE_bag_so_a_shared_key_cannot_collide(
+        wired, monkeypatch) -> None:
+    """P2-5: the MERGE (not the reserved-name strip) needs a test of its own.
+
+    Round 2 proved two named tests guard the ``aboutLinks`` reserved name, but
+    restoring the two ``**``-splats with that set intact leaves BOTH green: the
+    strip keeps ``aboutLinks`` out of the journaled payload, so the collision is
+    unreachable through a public door. Without this test the merge is
+    defence-in-depth with no evidence it is a merge.
+
+    So the collision is constructed directly: the journaled payload is made to
+    carry a key the write-time edge facts also carry — the exact overlap a
+    second ``**`` bag would turn into ``TypeError: got multiple values for
+    keyword argument 'aboutLinks'`` AFTER the live write and BEFORE the record,
+    leaving the Event live-only. Pinned: ONE call, ONE record, and the edge facts
+    win.
+    """
+    from tortoise import sdk as sdk_mod
+
+    sdk, _proj, _events, journal = wired
+    oid = _nid(sdk.create_object("Collide2"))
+    real = sdk_mod._journal_record_payload
+
+    def _colliding(event):
+        out = real(event)
+        out.setdefault("aboutLinks", ["forged-by-the-journaled-payload"])
+        return out
+
+    monkeypatch.setattr(sdk_mod, "_journal_record_payload", _colliding)
+    node = sdk.create_event("two-bags", "event", aboutObject=oid)
+    monkeypatch.undo()
+
+    assert _nid(node), f"create_event returned no node: {node!r}"
+    records = _event_records(journal, "two-bags")
+    assert len(records) == 1, (
+        "the emit raised on a key present in BOTH bags — the two `**`-splats "
+        f"are back: {[r.get('type') for r in _records(journal)]}")
+    assert records[0]["aboutLinks"] == [
+        {"rel": "aboutObject", "how": "id", "targets": [oid]}], (
+        "the write-time edge facts must stay authoritative over the journaled "
+        f"payload: {records[0]['aboutLinks']!r}")
