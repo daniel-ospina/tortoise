@@ -59,7 +59,7 @@ not achievable from the query surface; what was missing is a **persisted fact**,
 
 `probes/ledger_probe.py` (read-only; it asserts the graph's node count is unchanged afterwards):
 
-```
+```text
 graph            tortoise (self-hosted, docker://:@localhost:16379/tortoise)
 stock            10,457 keys / 21,110 nodes   (Point 10,396 · Source 60 · Event 1 · Subject/Object/Session 0)
 read events      2,000   (200 queries × 10 results — a PROXY mix, sampled at random from a 2,000-row pool)
@@ -102,7 +102,7 @@ would overstate the row by its dominant column.
 **Blocks are exact; milliseconds are a range over the two runs in `rho-bench.log` (shared-CPU
 container, default settings) — an accounting bench, not a vendor benchmark.**
 
-```
+```text
 disk      = $0.125 × 0.1916 GB               = $0.0240 /tenant/month   (MEASURED GB × the plan's AVERAGE rate; the plan includes 8 GB/project ≈ 41.8 tenants of this stock, so the MARGINAL byte is $0 until then — rho is an average-cost ratio. The doc used $0.0187 from the CACHE's 0.1499 GB)
 compute   = $60 ÷ 1,000                      = $0.060                  (density assumption)
 plan      = $25 ÷ 1,000                      = $0.025                  (density assumption)
