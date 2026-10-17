@@ -191,7 +191,10 @@ _CHUNK_FILLERS = (
     "armchair",
 )
 
-#: §1: *"61.3% of admitted slots were empty"* — 24 of the C2 window's 40 slots.
+#: #2978: *"admitted item slots: 168, of which EMPTY: 103 = 61.3%"* — the
+#: measured class this fixture reproduces. THIS fixture's share is its own:
+#: 24 of the C2 window's 40 slots = 60.0% (the receipt's
+#: `pre_2978.contentless_slot_share`), not the issue's 61.3%.
 _CONTENTLESS_HITS = 24
 
 #: §5 Slice A: *"a distilled point + its own source raw chunks + its turns"* —
