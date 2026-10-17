@@ -47,15 +47,15 @@ A8 (`TORTOISE_ASK_EVIDENCE_ASSEMBLY`, ask lane). The instrument exercises the
 
 ## 1. Provenance, RE-MEASURED (the body is provenance-stale by construction)
 
-| Claim (issue #8043 body) | Measured 2026-10-16 at this worktree | Evidence |
+| Claim, as the #8043 body puts it (verbatim only where quoted) | Measured 2026-10-16 at this worktree | Evidence |
 |---|---|---|
 | Slice A merged **2026-09-09** as `b3ed420d9` | **confirmed** — `2026-09-09 10:09:17 -0500`, ancestor of `main` | `git log -1 b3ed420d9` |
 | PR #3000 fixed #2978 on **2026-09-12** | **confirmed, and it is `c01d9c468`** — `2026-09-11 23:00:02 -0500` (**2026-09-12Z**); `#2978` closed `2026-09-12T04:00:04Z` | `git log -1 c01d9c468`; `gh issue view 2978` |
-| "no later commit, receipt or doc records a Run A/B/C result" | **confirmed** — `tools/longmem_eval/receipts/` does not exist; the wave doc's only post-§8 commit is a whitespace autofix (`a55c3a21d`) | `ls tools/longmem_eval/receipts`; `git log -- docs/scoping/2026-09-09-evidence-assembly-wave.md` |
-| "the A6/A8 arms are OFF by default and fail-safe" | **confirmed** — tri-state, only `1/true/yes/on` enables | `tools/longmem_eval/retrieve.py` (A6 seam); `tortoise/ask_lane.py` (`ask_env_bool("TORTOISE_ASK_EVIDENCE_ASSEMBLY", False)`) |
-| "#3011 does not own this verdict" | **confirmed** — #3011 measures arms A/B/C/D context at matched budgets, not the A6 assembly switch; **it has not run** either (no receipt; its `docs/experiments/artifacts/` holds only the gold-evidence claim artifact) | `gh issue view 3011`; `ls docs/experiments/artifacts/2026-09-11-abc-context-assembly/` |
-| "the #5064 registry might already cover the assembly as a mechanism" | **NO** — `config/v4-mechanisms.yml` is the **v4 WRITE-path** declared set (vet, source_dedup, near_dup_merge, span_link, embed_gate, sufficiency_router, fanout_cap), a **closed tuple** pinned by `tests/test_v4_declared_mechanisms.py`. Read-side package assembly is not a row and cannot be added by this lane without editing another issue's closed declared set | `config/v4-mechanisms.yml`; `tests/test_v4_declared_mechanisms.py::DECLARED_IDS` |
-| "the same frozen judge is no longer assured" | **confirmed as a documented substitute** — the successor pre-registration records the official `gpt-4o-2024-08-06` judge routing through an exhausted OpenRouter key, with a deterministic containment judge as the labelled substitute | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` (Judge note / §4) |
+| "No later commit, receipt or doc records a Run A/B/C result" | **confirmed** — `tools/longmem_eval/receipts/` does not exist; the wave doc's only post-§8 commit is a whitespace autofix (`a55c3a21d`) | `ls tools/longmem_eval/receipts`; `git log -- docs/scoping/2026-09-09-evidence-assembly-wave.md` |
+| the A6/A8 arms are OFF by default and fail-safe | **confirmed** — tri-state, only `1/true/yes/on` enables | `tools/longmem_eval/retrieve.py` (A6 seam); `tortoise/ask_lane.py` (`ask_env_bool("TORTOISE_ASK_EVIDENCE_ASSEMBLY", False)`) |
+| #3011 does not own this verdict | **confirmed** — #3011 measures arms A/B/C/D context at matched budgets, not the A6 assembly switch; **it has not run** either (no receipt; its `docs/experiments/artifacts/` holds only the gold-evidence claim artifact) | `gh issue view 3011`; `ls docs/experiments/artifacts/2026-09-11-abc-context-assembly/` |
+| the #5064 registry might already cover the assembly as a mechanism | **NO** — `config/v4-mechanisms.yml` is the **v4 WRITE-path** declared set (vet, source_dedup, near_dup_merge, span_link, embed_gate, sufficiency_router, fanout_cap), a **closed tuple** pinned by `tests/test_v4_declared_mechanisms.py`. Read-side package assembly is not a row and cannot be added by this lane without editing another issue's closed declared set | `config/v4-mechanisms.yml`; `tests/test_v4_declared_mechanisms.py::DECLARED_IDS` |
+| the same frozen judge is no longer assured | **confirmed as a documented substitute** — the successor pre-registration records the official `gpt-4o-2024-08-06` judge routing through an exhausted OpenRouter key, with a deterministic containment judge as the labelled substitute | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` (Judge note / §4) |
 
 **Therefore:** the re-specification is not a convenience call — the object the
 old T named (the pre-#2978 window) no longer exists, and the frozen-reader/
@@ -84,7 +84,7 @@ forced True, which removes exactly the one `continue` #2978 added).
 | `post_2978_assembly_value_marked` | 14 | 0 | 2 | 4/4 (value-first: 4 packages) |
 | `provenance_free_assembly` (**#8658** shape) | 24 | 0 | **12** | 4/4 |
 
-Controls: a duplicate-free, provenance-bearing pool of 8 facts comes back
+Control: a duplicate-free, provenance-bearing pool of 8 facts comes back
 **byte-identical** from the arm (0 collapsed, same ids, same order) — the
 no-regression leg.
 
@@ -110,7 +110,7 @@ no-regression leg.
    flood. **#8658** is that state on the product ask lane.
 
 > ⚠️ **The number this is NOT.** `2 vs 100%` is a *window composition* result,
-> not a QA result. The old T wanted "the 2 C2 regressions recover" — an
+> not a QA result. The old T wanted "the 2 C2 flooding regressions recover" — an
 > **answer-accuracy** delta under a frozen reader. Nothing here substitutes for
 > it, and no reader/judge number may be derived from this receipt.
 
@@ -130,7 +130,7 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/longmem_eval/test_sli
 The instrument is deterministic (no clock, no path, no RNG in the receipt), so
 regenerating it is a **no-diff** operation; any diff is a real change in the
 window's behaviour and reds the guard. The receipt is a function of the shipped
-code — the #5064 "design generated from the registry" shape, applied here to a
+code — the #5064 "design generated from it" shape, applied here to a
 measurement.
 
 ---
@@ -201,7 +201,7 @@ reads), stating the exact obligation:
 * **0 extra ingest** — the arm is not fingerprinted (§4.3).
 
 Until that runs, `#2683`'s T is **owned, not silent** — which is #8043's target
-2 ("a declared acceptance gate has neither an owner nor a run").
+2 ("declared acceptance gate has neither an owner nor a run").
 
 ---
 

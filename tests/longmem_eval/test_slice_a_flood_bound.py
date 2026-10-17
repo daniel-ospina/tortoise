@@ -197,7 +197,10 @@ def test_pool_is_the_documented_c2_shape(receipt: dict) -> None:
 #: than a generic ``[a-z_]+`` sweep: a generic sweep flags ordinary identifiers
 #: (``build_c2_pool``) and the guard would be silenced instead of obeyed.
 _ARMISH = re.compile(
-    r"\b(?:pre_2978(?:_[a-z_]+)?|post_2978(?:_[a-z_]+)?|provenance_free(?:_[a-z_]+)?)\b"
+    # `[a-z0-9_]+`, not `[a-z_]+`: a suffix may carry a digit, and a
+    # digit-bearing token (`…_assembly_v2`) would otherwise slip past this
+    # guard without a trailing word boundary.
+    r"\b(?:pre_2978(?:_[a-z0-9_]+)?|post_2978(?:_[a-z0-9_]+)?|provenance_free(?:_[a-z0-9_]+)?)\b"
 )
 
 

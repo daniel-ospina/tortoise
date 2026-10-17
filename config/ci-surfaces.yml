@@ -5190,7 +5190,7 @@ durations:
   longmem_eval/test_ingest_stall_guard.py: 2.0
   # #8043: new file in this pool, never sampled by a CI run, so it takes the
   # flat 2.0s default under the #3400/#4221 convention (a local timing is not
-  # the input). Measured locally at ~3s wall for the whole file (11 tests; the
+  # the input). Measured locally at ~3s wall for the whole file (12 tests; the
   # module-scoped `measure()` fixture is the only cost) — refresh from the
   # first post-merge main run. The entry is the file's declared cost, NOT a
   # gate requirement: measured on this head (2026-10-17, this worktree) with

@@ -494,8 +494,10 @@ def _slot_census(admitted: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def measure() -> dict[str, Any]:
-    """Run the three primary arms + two variant arms + the two controls over the
-    C2-shaped pool."""
+    """Run the three primary arms + two variant arms + the duplicate-free
+    control over the C2-shaped pool. The provenance-free pool is recorded as
+    the ``provenance_free_assembly`` ARM — it measures a scope limit, not a
+    no-regression control — so ``controls`` holds exactly one entry."""
     pool, pool_census = build_c2_pool()
 
     with _pre_2978_predicate():
@@ -533,10 +535,10 @@ def measure() -> dict[str, Any]:
         question_date=QUESTION_DATE,
     )
 
-    # Control 1 — the OFF-parity / no-regression leg: a duplicate-free,
-    # provenance-bearing pool must come back BYTE-IDENTICAL (same ids, same
-    # order) from the arm, so flipping it ON cannot regress a single-evidence
-    # question.
+    # The control — the only entry under ``controls`` — is the OFF-parity /
+    # no-regression leg: a duplicate-free, provenance-bearing pool must come
+    # back BYTE-IDENTICAL (same ids, same order) from the arm, so flipping it
+    # ON cannot regress a single-evidence question.
     clean = [
         _point(
             f"c{i}",
@@ -551,9 +553,10 @@ def measure() -> dict[str, Any]:
     ]
     clean_packaged, clean_stats = package_evidence_pool(clean)
 
-    # Control 2 — the provenance-free pool (the PRODUCT ask-lane shape today,
-    # #8658): with no ``quote``/``source_turn_id`` the own-source leg is inert
-    # and the flood is NOT bounded by pass 2. Measured, not assumed.
+    # The provenance-free pool (the PRODUCT ask-lane shape today, #8658) —
+    # recorded under ``arms.provenance_free_assembly``, not under ``controls``:
+    # with no ``quote``/``source_turn_id`` the own-source leg is inert and the
+    # flood is NOT bounded by pass 2. Measured, not assumed.
     bare = [{k: v for k, v in h.items() if k not in ("quote", "source_turn_id")} for h in pool]
     bare_packaged, bare_stats = package_evidence_pool(bare)
     bare_assembly = assemble_context(
