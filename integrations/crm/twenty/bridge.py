@@ -347,12 +347,14 @@ def _as_calendar_day(value) -> _date | None:
 
 # ``cal-trigger.py::start_recording`` stores ``event.get("title", "Meeting")[:50]``,
 # so a state's ``event_title`` is capped there — and when the calendar title is
-# longer than the cap it is a hard-truncated PREFIX of it. Only that truncation
-# can make the STORED title a strict prefix of a LONGER artifact title, so only
-# that shape may be read as agreement. Any other nesting is not the cap's doing
-# and is UNDETERMINED (a series variant, "Weekly Standup" vs "Weekly Standup
-# (Engineering)", and a legitimately shortened artifact title are the same
-# shape), so the stored title stays silent and the day arm decides.
+# longer than the cap, the stored title is a hard-truncated PREFIX of it. That
+# truncation is the only ACCEPTABLE nesting: it makes the stored title a strict
+# prefix of a longer artifact title AND leaves it exactly at the cap, which is
+# what `_title_relation` requires. Any other nesting is not the cap's doing and
+# is UNDETERMINED (a series variant, "Weekly Standup" vs "Weekly Standup
+# (Engineering)", produces the same prefix shape at a shorter stored length; a
+# legitimately shortened artifact title produces the mirror one), so the stored
+# title stays silent and the day arm decides.
 _TITLE_WRITER_CAP = 50
 
 
