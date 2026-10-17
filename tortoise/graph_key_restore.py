@@ -161,6 +161,22 @@ def tcp_is_listening(host: str, port: int, *, timeout_s: float = 1.0) -> bool | 
         return None
 
 
+#: Exception types that mean "the instance did not answer" rather than "the witness
+#: could not ask". Anything else (WRONGPASS, gaierror, a probe bug) is the instrument
+#: failing, and an outage measured that way cannot be attributed to the engine.
+_WITNESS_TRANSPORT_ERRORS = frozenset(
+    {
+        "TimeoutError",
+        "OSError",
+        "ConnectionError",
+        "ConnectionAbortedError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "BrokenPipeError",
+    }
+)
+
+
 @dataclass(frozen=True)
 class RestoreObservation:
     """What ``restore_graph_key`` measured, including the parts that are not its own.
@@ -179,6 +195,10 @@ class RestoreObservation:
     payload_bytes: int
     witness_samples: int
     witness_failures: int
+    #: Distinct exception types the WITNESS raised while sampling. Non-empty with a
+    #: non-socket type means the measurement failed on the caller's side and the
+    #: outage cannot be attributed to the engine.
+    witness_errors: tuple[str, ...]
     silent_ms: float
     silence_started_s: float | None
     silence_ended_s: float | None
@@ -218,6 +238,7 @@ class RestoreObservation:
             "payload_bytes": self.payload_bytes,
             "witness_samples": self.witness_samples,
             "witness_failures": self.witness_failures,
+            "witness_errors": list(self.witness_errors),
             "silent_ms": round(self.silent_ms, 1),
             "witness_max_latency_ms": round(self.witness_max_latency_ms, 1),
             "blocked_ms": round(self.blocked_ms, 1),
@@ -345,6 +366,11 @@ class _Witness(threading.Thread):
         self._recovered = threading.Event()
         self.t0 = time.perf_counter()
         self.samples: list[tuple[float, bool, float]] = []
+        #: Distinct exception TYPE names raised by the witness's own PING. A
+        #: `WRONGPASS`, a DNS `gaierror`, or a bug in the probe is the WITNESS
+        #: failing — not the engine staying silent — and must never be reported as
+        #: the #7846 block (#8827 review).
+        self.unanswered_errors: set[str] = set()
 
     def run(self) -> None:
         while not self._halt.is_set():
@@ -353,8 +379,11 @@ class _Witness(threading.Thread):
             try:
                 self._ping()
                 answered = True
-            except Exception:  # "did not answer" IS the measurement
+            except Exception as exc:  # "did not answer" IS the measurement
                 answered = False
+                # Keep WHICH failure: discarding it made the driver report "It is a
+                # BLOCKED server … Do not retry" for an authentication error.
+                self.unanswered_errors.add(type(exc).__name__)
             if answered:
                 if self.samples and not self.samples[-1][1]:
                     self._recovered.set()
@@ -514,6 +543,16 @@ def restore_graph_key(
     answered_latencies = [lat for _o, answered, lat in attributed if answered]
     max_latency_ms = max(answered_latencies) if answered_latencies else 0.0
     blocked = failures > 0 or max_latency_ms >= blocked_latency_ms
+    # A witness failure that is NOT transport-level is the instrument's own fault
+    # (auth, DNS, a probe bug). Reporting that as "It is a BLOCKED server … Do not
+    # retry" told the operator to act on a fabricated engine verdict, so the outage
+    # is refused rather than blamed on the engine (#8827 review).
+    witness_errors = tuple(sorted(witness.unanswered_errors))
+    witness_fault = bool(witness_errors) and not (
+        set(witness_errors) & _WITNESS_TRANSPORT_ERRORS
+    )
+    if witness_fault:
+        blocked = False
 
     error = outcome.get("error")
     if completed:
@@ -525,6 +564,7 @@ def restore_graph_key(
             payload_bytes=payload_bytes,
             witness_samples=len(samples),
             witness_failures=failures,
+            witness_errors=witness_errors,
             silent_ms=silent_ms,
             silence_started_s=silence_started_s,
             silence_ended_s=silence_ended_s,
@@ -574,6 +614,7 @@ def restore_graph_key(
         payload_bytes=payload_bytes,
         witness_samples=len(samples),
         witness_failures=failures,
+        witness_errors=witness_errors,
         silent_ms=silent_ms,
         silence_started_s=silence_started_s,
         silence_ended_s=silence_ended_s,
