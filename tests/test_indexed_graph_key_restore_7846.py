@@ -320,7 +320,8 @@ def _vector(i: int, dim: int) -> list[float]:
 
 
 def _dump_delete_restore(client, graph: str) -> RestoreObservation:
-    """``DUMP`` → ``DEL`` → ``RESTORE ... REPLACE``, BOUNDED and WITNESSED.
+    """``DUMP`` → ``DEL`` → ``RESTORE ... REPLACE``: WITNESSED throughout, with the
+    RESTORE step BOUNDED (``_RESTORE_BOUND_S``) — and only that step.
 
     Delegates to ``tortoise.graph_key_restore.restore_graph_key`` (#7846 criterion 5):
     the restore runs on a worker thread while a witness on its OWN connection polls
@@ -330,6 +331,14 @@ def _dump_delete_restore(client, graph: str) -> RestoreObservation:
     or ``GraphRestoreLostError`` (port refused → the process died), each carrying the
     measurement and a recovery instruction — the actionable replacement for the bare
     ``redis.exceptions.TimeoutError`` this helper used to surface.
+
+    ⛔ ``_RESTORE_BOUND_S`` does NOT cover ``DUMP`` or ``DEL``: they run inline on this
+    thread before the driver's worker starts (#8827 review), so their only limit is
+    ``client``'s own socket timeout — ``_RESTORE_TIMEOUT_S`` (120 s), deliberately
+    above the 90 s restore bound (`test_7846_restore_doc_and_bounds.py` pins that
+    ordering). A caller wiring this into product code must give ITS client a socket
+    timeout of its own; the driver reports the two durations separately
+    (``elapsed_s`` = the whole sequence, ``restore_s`` = the bounded step).
 
     ``REPLACE`` is not optional: the engine keeps the graph in its module registry
     after the Redis key is deleted, so a bare ``RESTORE`` fails ``BUSYKEY`` — the

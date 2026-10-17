@@ -1,4 +1,5 @@
-"""A bounded, OBSERVED graph-key ``DUMP`` -> ``DEL`` -> ``RESTORE`` (#7846).
+"""A graph-key ``DUMP`` -> ``DEL`` -> ``RESTORE``, bounded at the RESTORE step and
+OBSERVED throughout (#7846).
 
 WHY THIS EXISTS. A graph-key ``RESTORE`` of a graph that carries an in-graph VECTOR
 INDEX takes the whole FalkorDB instance off the air for the duration of the index
@@ -25,10 +26,21 @@ the evidence doc's criteria table states. Nothing here makes a blocked instance 
 WHAT IT DOES FIX (criterion 5 at our boundary, and criterion 1's "or fails with an
 explicit error the caller can act on"). ``restore_graph_key``:
 
-1. **Bounds the operation.** ``bound_s`` is a hard caller-side read bound. If the
-   restore has not returned by then, the caller gets an error instead of a hang; the
-   worker is a daemon and is abandoned (never joined to completion), so a blocked
-   restore can never block the caller past its own bound.
+1. **Bounds the RESTORE step — and says so**, because the difference is a caller-side
+   hazard (#8827 review). ``bound_s`` is a hard caller-side read bound on the
+   ``restore`` call only. If the restore has not returned by then, the caller gets an
+   error instead of a hang; the worker is a daemon and is abandoned (never joined to
+   completion), so a blocked restore can never block the caller past its own bound.
+   ``dump`` and ``delete`` run INLINE on the caller's thread *before* the worker is
+   started, so ``bound_s`` does NOT cover them: their only limit is whatever socket
+   timeout the caller's own client carries. Give that client a socket timeout below
+   ``bound_s`` (the live test's 120 s against a 90 s bound is the shape) — a hung
+   ``DUMP`` otherwise reproduces criterion 1's "the caller hangs with no error it can
+   act on" OUTSIDE the advertised bound. The driver reports the split so the seam is
+   visible in the data and not only in this paragraph: ``elapsed_s`` is how long the
+   caller was held by the whole sequence, ``restore_s`` is the bounded step. The
+   witness samples from BEFORE ``dump()`` for exactly that reason (a block that begins
+   in ``DUMP`` is still measured, and the measured window spans the whole sequence).
 2. **Watches the instance from a SECOND connection throughout** — a witness thread
    polls ``ping`` while the restore runs — so the silence is *measured* rather than
    inferred from the operation's duration.
@@ -37,7 +49,8 @@ explicit error the caller can act on"). ``restore_graph_key``:
    ======================  =============================================  =====================
    state                   evidence                                       what it means
    ======================  =============================================  =====================
-   ``SERVED``              restore returned, every witness PING answered  load, if anything
+   ``SERVED``              restore returned; at least one witness PING   load, if anything
+                           was SAMPLED and every one answered
    ``BLOCKED``             restore returned with witness evidence: >=1    the instance was off
                            PING unanswered, or an ANSWERED PING took      the air for the
                            >= ``blocked_latency_ms`` (queued behind the   restore only
@@ -50,7 +63,18 @@ explicit error the caller can act on"). ``restore_graph_key``:
    ``CALLER_STALL``        restore overran ``bound_s`` but EVERY PING      the caller is stuck,
                            answered — the serving thread cannot be        not the engine
                            inside a rebuild while that is true
+   ``UNMEASURED``          the witness produced nothing it can trust:     nothing is known about
+                           zero samples inside the window, or a           the instance — this is
+                           NON-transport witness failure (WRONGPASS,       NOT a green, and not
+                           a DNS error, a probe bug)                      a block verdict either
    ======================  =============================================  =====================
+
+   ``UNMEASURED`` exists because a verdict that was never measured must not be
+   published as one (#8827 review): the completed path used to answer ``SERVED`` when
+   the witness had recorded nothing at all (its PING outliving the window) or had
+   failed for its OWN reasons, and a caller switching on ``status`` read that green on
+   a run where nothing answered. ``SERVED`` now requires a measured negative;
+   ``observation.measured`` says whether the verdict rests on any measurement.
 
    ``BLOCKED`` is not a failure — it is the measured fact criterion 2 records as
    unmet, reported instead of hidden. Two signals make it measurable at any scale: an
@@ -59,9 +83,11 @@ explicit error the caller can act on"). ``restore_graph_key``:
    thread). The second is why a 0.27 s block at 3 000 nodes is still reported rather
    than greened by a 1 s witness timeout. The three overrun states raise
    ``GraphRestoreSilentError`` / ``GraphRestoreLostError`` / ``GraphRestoreStalledError``
-   respectively, whose messages carry the measurement and the recovery instruction.
-   They are deliberately DIFFERENT errors: one restarts nothing and waits, one needs a
-   restart, and one is not the engine's fault at all.
+   respectively, whose messages carry the measurement and the recovery instruction;
+   ``UNMEASURED`` raises ``GraphRestoreSilentError`` too (the caller still must not be
+   left hanging) but its message says the reading is unusable rather than serving a
+   verdict. The three are deliberately DIFFERENT errors: one restarts nothing and waits,
+   one needs a restart, and one is not the engine's fault at all.
 
 THE TRANSPORT PROBE IS THE DISCRIMINATOR, and it is deliberately transport-level. A
 server blocked on its serving thread still accepts connections (the kernel completes
@@ -117,6 +143,16 @@ CALLER_STALL = "caller-stall"
 #: The restore call itself raised — its own error is re-raised (this status only
 #: describes the observation attached to it as a note).
 FAILED = "failed"
+#: The witness recorded nothing a verdict may rest on: no samples inside the measured
+#: window (its own PING outlived the whole operation), or a witness failure that is
+#: NOT transport-level (``WRONGPASS``, a DNS error, a probe bug). Neither a green nor
+#: the #7846 block — the outage is unattributable (#8827 review).
+UNMEASURED = "unmeasured"
+
+#: The statuses that mean "the caller gave up rather than the restore returning".
+#: ``diagnosis()`` words its account around this, so a status and its message cannot
+#: disagree.
+_OVERRUN_STATUSES = frozenset({ALIVE_BUT_SILENT, INSTANCE_GONE, CALLER_STALL, UNMEASURED})
 
 #: Default witness poll interval. Cheap enough not to load the instance, fine enough
 #: to bound the measured silence to ±this plus the witness client's own timeout.
@@ -191,8 +227,18 @@ class RestoreObservation:
     graph: str
     status: str
     bound_s: float
+    #: How long the CALLER was held by the whole sequence — ``dump`` -> ``delete`` ->
+    #: ``restore``. ``bound_s`` covers the RESTORE step only (``dump``/``delete`` run
+    #: inline on the caller's thread before the worker starts), so this number and
+    #: ``restore_s`` are reported separately rather than one standing for both
+    #: (#8827 review).
     elapsed_s: float
+    #: How long the RESTORE step itself took — the step ``bound_s`` bounds.
+    restore_s: float
     payload_bytes: int
+    #: Witness PINGs sampled INSIDE the measured window (from before ``dump()`` to the
+    #: restore's return). Samples taken afterwards — the recovery probe — describe
+    #: liveness, not attribution, so they are deliberately not counted here.
     witness_samples: int
     witness_failures: int
     #: Distinct exception types the WITNESS raised while sampling. Non-empty with a
@@ -220,6 +266,29 @@ class RestoreObservation:
         return self.witness_failures > 0
 
     @property
+    def witness_fault(self) -> bool:
+        """True when the witness failed for its OWN reasons, so its silence measures nothing.
+
+        A transport error (timeout, reset, refused) is the instance not answering. Anything
+        else — ``WRONGPASS``, a DNS ``gaierror``, a bug in the probe — is the INSTRUMENT
+        failing, and an outage measured that way cannot be attributed to the engine.
+        """
+        return bool(self.witness_errors) and not (
+            set(self.witness_errors) & _WITNESS_TRANSPORT_ERRORS
+        )
+
+    @property
+    def measured(self) -> bool:
+        """True when this verdict rests on a witness sample that actually answered or timed out.
+
+        ``False`` means the observation carries no usable measurement: zero in-window
+        samples, or an instrument fault. A caller that switches on ``status`` alone must
+        never see this as a green — which is why such a run is ``UNMEASURED`` and not
+        ``SERVED`` (#8827 review).
+        """
+        return self.witness_samples > 0 and not self.witness_fault
+
+    @property
     def blocked_ms(self) -> float:
         """How long the instance was off the air, by the better of the two signals.
 
@@ -235,10 +304,12 @@ class RestoreObservation:
             "status": self.status,
             "bound_s": self.bound_s,
             "elapsed_s": round(self.elapsed_s, 3),
+            "restore_s": round(self.restore_s, 3),
             "payload_bytes": self.payload_bytes,
             "witness_samples": self.witness_samples,
             "witness_failures": self.witness_failures,
             "witness_errors": list(self.witness_errors),
+            "measured": self.measured,
             "silent_ms": round(self.silent_ms, 1),
             "witness_max_latency_ms": round(self.witness_max_latency_ms, 1),
             "blocked_ms": round(self.blocked_ms, 1),
@@ -252,61 +323,118 @@ class RestoreObservation:
         """One line, for a log record or an exception note."""
         return (
             f"graph-key RESTORE of {self.graph!r}: status={self.status}, "
-            f"restore {self.elapsed_s:.2f}s of a {self.bound_s:g}s bound, "
-            f"{self.payload_bytes} payload bytes, witness: "
+            f"caller held {self.elapsed_s:.2f}s (RESTORE step {self.restore_s:.2f}s of "
+            f"a {self.bound_s:g}s bound), {self.payload_bytes} payload bytes, witness: "
             f"{self.witness_failures}/{self.witness_samples} PINGs unanswered, "
             f"slowest answered PING {self.witness_max_latency_ms:.0f} ms, "
             f"longest silence {self.silent_ms:.0f} ms, "
             f"port listening={self.instance_listening}"
         )
 
+    def _verdict_line(self) -> str:
+        """The measurement every diagnosis opens with — never a claim of its own."""
+        if self.witness_samples == 0:
+            gave_up = (
+                f"did not return within the {self.bound_s:g}s caller-side bound"
+                if self.status in _OVERRUN_STATUSES
+                else f"returned after {self.restore_s:.2f}s"
+            )
+            return (
+                f"graph-key RESTORE of {self.graph!r} {gave_up}, and the witness took NO "
+                f"samples inside the window: nothing was measured, so nothing here is "
+                f"evidence about the instance in either direction."
+            )
+        if self.status in _OVERRUN_STATUSES:
+            return (
+                f"graph-key RESTORE of {self.graph!r} did not return within the "
+                f"{self.bound_s:g}s caller-side bound, and the instance did not serve "
+                f"during it: {self.witness_failures} of {self.witness_samples} witness "
+                f"PINGs on a separate connection went unanswered (longest silence "
+                f"{self.silent_ms:.0f} ms)."
+            )
+        return (
+            f"graph-key RESTORE of {self.graph!r} returned after {self.restore_s:.2f}s "
+            f"(bound {self.bound_s:g}s) with {self.witness_failures} of "
+            f"{self.witness_samples} witness PINGs unanswered (slowest answered PING "
+            f"{self.witness_max_latency_ms:.0f} ms)."
+        )
+
     def diagnosis(self) -> str:
-        """The actionable, multi-sentence account used as the exception message."""
-        if not self.witness_failures:
+        """The actionable, multi-sentence account used as the exception message.
+
+        Keyed on ``status`` FIRST and the witness counts SECOND. Branching on
+        ``witness_failures`` alone was free to assert the OPPOSITE of the verdict the
+        driver had just decided (#8827 review), in three reachable states: zero samples
+        with an overrun (``witness_failures == 0`` made an unmeasured run read "every
+        one of the 0 witness PINGs ANSWERED … Check the CALLER"), zero samples with a
+        REFUSED port (the death branch sat below the now-truthy "the instance was
+        serving" text, so ``GraphRestoreLostError`` told the operator to check the
+        caller while the process was gone), and an instrument fault (``witness_fault``
+        recorded the truth in ``error`` and then never read it, so the raised message
+        still said "It is a BLOCKED server … Do not retry"). All three are fixed by the
+        same ordering: the status selects the account, and ``self.error`` is rendered
+        rather than left in a field nobody reads.
+        """
+        verdict = self._verdict_line()
+        if self.status == CALLER_STALL:
             # Every witness PING answered: the instance WAS serving, so the story is
             # not "blocked engine" and saying it was would send the operator to the
             # wrong place. (A caller-side stall — a client stuck on the payload, or a
             # socket write that never completed — reads exactly like this.)
             return (
-                f"graph-key RESTORE of {self.graph!r} did not return within the "
-                f"{self.bound_s:g}s caller-side bound, but every one of the "
-                f"{self.witness_samples} witness PINGs on a separate connection "
-                f"ANSWERED (slowest {self.witness_max_latency_ms:.0f} ms). The "
-                f"instance was serving, so this is NOT the #7846 blocked-engine "
+                f"{verdict} Every one of the {self.witness_samples} witness PINGs on a "
+                f"separate connection ANSWERED (slowest {self.witness_max_latency_ms:.0f} "
+                f"ms). The instance was serving, so this is NOT the #7846 blocked-engine "
                 f"signature: the restore itself is stuck. Check the CALLER — the "
-                f"client's own socket/serialization, the payload, and the key's "
-                f"state (`BUSYKEY`-class refusals) — before suspecting the engine."
+                f"client's own socket/serialization, the payload, and the key's state "
+                f"(`BUSYKEY`-class refusals) — before suspecting the engine."
             )
-        header = (
-            f"graph-key RESTORE of {self.graph!r} did not return within the "
-            f"{self.bound_s:g}s caller-side bound, and the instance did not serve "
-            f"during it: {self.witness_failures} of {self.witness_samples} witness "
-            f"PINGs on a separate connection went unanswered (longest silence "
-            f"{self.silent_ms:.0f} ms)."
-        )
         if self.status == INSTANCE_GONE:
+            # Before the witness counts: a refused port is evidence in its own right, and
+            # it may coexist with an empty sample list.
             return (
-                f"{header} The port REFUSED a TCP connection, so the server process "
+                f"{verdict} The port REFUSED a TCP connection, so the server process "
                 f"is gone — it died during the restore. That is the #8270 class "
                 f"(SIGSEGV in Index_SetLanguage on falkordb-server v4.20.x when an "
                 f"indexed payload is restored under a new key while the source still "
                 f"exists); every graph in that instance went with it. Restart the "
                 f"instance and do NOT repeat this restore — same-name only."
             )
-        liveness = (
-            "The port still ACCEPTS a TCP connection, so the server process is alive and listening"
-            if self.instance_listening
-            else "Liveness could NOT be measured (no probe supplied, or the probe "
-            "did not complete — a connect timeout is NOT a refusal)"
-        )
+        if self.status == UNMEASURED or self.witness_fault or not self.witness_samples:
+            # The instrument failed, or it never got a reading. Neither is the block, and
+            # neither is a green — the ONLY safe instruction is to fix the witness.
+            reason = self.error or "the witness produced no reading the driver can use"
+            return (
+                f"{verdict} {reason}. This is an INSTRUMENT FAULT, not an engine "
+                f"verdict: do NOT read it as the #7846 block, and do not restart the "
+                f"instance on it. A witness PING whose own socket timeout is longer "
+                f"than ``bound_s + witness_join_s`` never returns a sample at all, so "
+                f"give the witness client a short timeout (below ``bound_s``), fix its "
+                f"credentials/route if the failure above names them, then re-probe the "
+                f"instance with a PING on a separate connection."
+            )
+        if self.witness_failures:
+            liveness = (
+                "The port still ACCEPTS a TCP connection, so the server process is "
+                "alive and listening"
+                if self.instance_listening
+                else "Liveness could NOT be measured (no probe supplied, or the probe "
+                "did not complete — a connect timeout is NOT a refusal)"
+            )
+            return (
+                f"{verdict} {liveness}: this is not a crash and not load — a loaded "
+                f"server still answers, only slower. It is a BLOCKED server, the #7846 "
+                f"signature (the vector index is rebuilt on the serving thread, so the "
+                f"whole instance is off the air for the rebuild). Do not retry: a retry "
+                f"re-blocks the instance for another full rebuild. The abandoned restore "
+                f"may still complete — check with a PING on a separate connection before "
+                f"restarting anything."
+            )
+        # Measured, every PING answered, no slow one: nothing was wrong with the instance.
         return (
-            f"{header} {liveness}: this is not a crash and not load — a loaded server "
-            f"still answers, only slower. It is a BLOCKED server, the #7846 signature "
-            f"(the vector index is rebuilt on the serving thread, so the whole "
-            f"instance is off the air for the rebuild). Do not retry: a retry "
-            f"re-blocks the instance for another full rebuild. The abandoned restore "
-            f"may still complete — check with a PING on a separate connection before "
-            f"restarting anything."
+            f"{verdict} Every witness PING answered and none was slow enough to be the "
+            f"#7846 block (threshold {self.blocked_latency_ms:.0f} ms), so the instance "
+            f"served through the restore."
         )
 
 
@@ -413,19 +541,16 @@ class _Witness(threading.Thread):
         return self.samples
 
 
-def _longest_silence(
+def _longest_unanswered_run(
     samples: list[tuple[float, bool, float]],
-) -> tuple[float, float | None, float | None]:
-    """``(silent_ms, started_s, ended_s)`` of the longest run of unanswered pings.
+) -> tuple[int, int] | None:
+    """``(first_index, last_index)`` of the longest run of unanswered PINGs, or ``None``.
 
-    ``ended_s`` is the timestamp of the first ANSWERED sample after the run — i.e.
-    when the instance came back — or ``None`` when it had not come back by the last
-    sample. That is what lets a caller check the silence ENDS with the restore
-    (attributable) rather than outlasting it (a different fault, or a wedge).
+    The run is described by INDEXES into ``samples`` so its end edge can be followed into
+    the samples that come after the window (§``_longest_silence``).
     """
-    best_ms = 0.0
-    best_start: float | None = None
-    best_end: float | None = None
+    best: tuple[int, int] | None = None
+    best_span_s = 0.0
     i = 0
     while i < len(samples):
         if samples[i][1]:
@@ -434,14 +559,54 @@ def _longest_silence(
         j = i
         while j + 1 < len(samples) and not samples[j + 1][1]:
             j += 1
-        start = samples[i][0]
-        end = samples[j + 1][0] if j + 1 < len(samples) else None
-        last_attempt = samples[j][0] + samples[j][2] / 1000.0
-        span_ms = ((end if end is not None else last_attempt) - start) * 1000.0
-        if span_ms > best_ms:
-            best_ms, best_start, best_end = span_ms, start, end
+        # The run lasts until its last sample either answered (its latency) or timed out
+        # (its latency is the attempt), so this is a span the driver measured.
+        span_s = samples[j][0] + samples[j][2] / 1000.0 - samples[i][0]
+        if span_s > best_span_s:
+            best_span_s, best = span_s, (i, j)
         i = j + 1
-    return best_ms, best_start, best_end
+    return best
+
+
+def _longest_silence(
+    window: list[tuple[float, bool, float]],
+    samples: list[tuple[float, bool, float]],
+) -> tuple[float, float | None, float | None]:
+    """``(silent_ms, started_s, ended_s)`` of the longest unanswered run INSIDE ``window``.
+
+    ALL THREE numbers describe ONE run, and that is the point (#8827 review): the previous
+    version took the magnitude from the in-window list and the end edge from a SECOND
+    maximum over the full list, so a longer POST-window silence donated its end to the
+    in-window run — publishing a "50 ms" silence that started at 0.10 s and ended at
+    2.00 s, a triple no consumer can reconcile.
+
+    ``window`` must be a PREFIX of ``samples`` (the in-operation samples, followed by any
+    post-operation recovery-probe ones). ``silent_ms`` stays inside the window, because it
+    is the magnitude ATTRIBUTED to the operation (a silence that outlasts the restore is
+    not the index rebuild and must not inflate ``blocked_ms``); only ``ended_s`` reaches
+    past the window, and only along the run it already identified: ``ended_s`` is the
+    first ANSWERED sample after that run — when the instance came back — or ``None`` if it
+    had not come back by the last sample.
+    """
+    run = _longest_unanswered_run(window)
+    if run is None:
+        return 0.0, None, None
+    start_index, last_index = run
+    start = samples[start_index][0]
+    # Follow THIS run forward through the full list for its recovery edge.
+    end_index = last_index + 1
+    while end_index < len(samples) and not samples[end_index][1]:
+        end_index += 1
+    end = samples[end_index][0] if end_index < len(samples) else None
+    if end_index < len(window):
+        # The run recovered inside the window: the span ends where the instance answered.
+        span_ms = (samples[end_index][0] - start) * 1000.0
+    else:
+        # It had not recovered before the window closed: the span is the measured silence
+        # up to the last attempt inside the window.
+        tail = samples[len(window) - 1]
+        span_ms = (tail[0] + tail[2] / 1000.0 - start) * 1000.0
+    return span_ms, start, end
 
 
 def restore_graph_key(
@@ -458,9 +623,17 @@ def restore_graph_key(
     recovery_probe_s: float = 1.0,
     blocked_latency_ms: float = DEFAULT_BLOCKED_LATENCY_MS,
 ) -> RestoreObservation:
-    """``DUMP`` -> ``DEL`` -> ``RESTORE``, bounded and witnessed.
+    """``DUMP`` -> ``DEL`` -> ``RESTORE``, bounded AT THE RESTORE STEP, and witnessed.
 
-    Returns a :class:`RestoreObservation` for ``SERVED`` / ``BLOCKED``.
+    Returns a :class:`RestoreObservation` for ``SERVED`` / ``BLOCKED`` / ``UNMEASURED``
+    (see the module docstring's table; ``UNMEASURED`` is not a green — it says the
+    witness produced no reading a verdict may rest on).
+
+    ``bound_s`` bounds the ``restore`` call, NOT ``dump``/``delete``: those two run
+    inline on the caller's thread here, before the worker starts, so their only limit
+    is the caller's own client socket timeout — give it one below ``bound_s``. The
+    split is reported rather than hidden (``elapsed_s`` = caller-held time for the whole
+    sequence, ``restore_s`` = the bounded step).
 
     Raises:
         GraphRestoreSilentError: the restore overran ``bound_s`` and the instance
@@ -486,6 +659,10 @@ def restore_graph_key(
 
     witness = _Witness(ping, poll_interval_s)
     witness.start()
+    # The caller's own clock starts BEFORE `dump()`: `elapsed_s` is how long the caller
+    # was held by the whole sequence, which is strictly more than `bound_s` covers
+    # (see the docstring). `restore_s` below is the bounded step.
+    op_started = time.perf_counter()
     try:
         # Sample BEFORE `dump()`. `DUMP` is O(N) serialisation on the SAME serving
         # thread the issue is about, so a block that began during DUMP was
@@ -519,7 +696,8 @@ def restore_graph_key(
         witness.finish(deadline_s=witness_join_s, recovery_s=0.0)
         raise
     worker.join(bound_s)
-    elapsed_s = time.perf_counter() - started
+    restore_s = time.perf_counter() - started
+    elapsed_s = time.perf_counter() - op_started
     completed = not worker.is_alive()
     # Boundary in WITNESS time: the restore is over here, so samples taken after
     # this point (the recovery probe) describe liveness, not attribution. Counting
@@ -540,10 +718,12 @@ def restore_graph_key(
     # The BLOCK MAGNITUDE must come from the window too: `blocked_ms` is
     # `max(silent_ms, witness_max_latency_ms)`, so a silence that began after the
     # restore returned was still published as "BLOCKED the instance for 1006 ms of
-    # its 0.15s" (#8827 review cycle 2). `silence_ended_s` stays on the full list
-    # because the recovery edge is legitimately post-window.
-    silent_ms, silence_started_s, _ = _longest_silence(attributed)
-    _unused_silent, _unused_start, silence_ended_s = _longest_silence(samples)
+    # its 0.15s" (#8827 review cycle 2). The END EDGE is allowed to be post-window
+    # (the recovery probe is what measures it), but it is now derived from the SAME
+    # silence run as the magnitude — a second independent maximum over the full list
+    # let a longer post-window run donate its end to the in-window one, publishing a
+    # "50 ms" silence that started at 0.10 s and ended at 2.00 s (#8827 review).
+    silent_ms, silence_started_s, silence_ended_s = _longest_silence(attributed, samples)
     failures = sum(1 for _offset, answered, _latency in attributed if not answered)
     # Only ANSWERED samples carry a latency: an unanswered one's latency is the
     # witness client's own socket timeout, not a measurement of the block.
@@ -558,18 +738,46 @@ def restore_graph_key(
     witness_fault = bool(witness_errors) and not (
         set(witness_errors) & _WITNESS_TRANSPORT_ERRORS
     )
+    # A witness fault is not a block, and a run with no reading is not a green either.
     if witness_fault:
         blocked = False
+    # `SERVED` is reserved for a MEASURED negative: a verdict that was never measured
+    # must not be published as one (#8827 review). Both guards are here rather than in
+    # the status expressions so the completed and overrun paths cannot drift apart.
+    measured = bool(attributed) and not witness_fault
+    unmeasured_reason: str | None = None
+    if witness_fault:
+        unmeasured_reason = (
+            "the WITNESS failed on a NON-transport error "
+            f"({', '.join(witness_errors)}), so its silence measures the instrument, "
+            "not the engine — this is NOT evidence of the #7846 blocked-engine "
+            "signature"
+        )
+    elif not attributed:
+        unmeasured_reason = (
+            "the witness recorded NO samples inside the window (its own PING outlived "
+            "the whole operation, which a socket timeout longer than "
+            "``bound_s + witness_join_s`` does), so nothing was measured"
+        )
 
     error = outcome.get("error")
     if completed:
+        if error is not None:
+            status = FAILED
+        elif not measured:
+            status = UNMEASURED
+        elif blocked:
+            status = BLOCKED
+        else:
+            status = SERVED
         observation = RestoreObservation(
             graph=graph,
-            status=FAILED if error is not None else (BLOCKED if blocked else SERVED),
+            status=status,
             bound_s=bound_s,
             elapsed_s=elapsed_s,
+            restore_s=restore_s,
             payload_bytes=payload_bytes,
-            witness_samples=len(samples),
+            witness_samples=len(attributed),
             witness_failures=failures,
             witness_errors=witness_errors,
             silent_ms=silent_ms,
@@ -578,7 +786,11 @@ def restore_graph_key(
             witness_max_latency_ms=max_latency_ms,
             blocked_latency_ms=blocked_latency_ms,
             instance_listening=None,
-            error=None if error is None else f"{type(error).__name__}: {error}",
+            error=(
+                f"{type(error).__name__}: {error}"
+                if error is not None
+                else unmeasured_reason
+            ),
         )
         logger.info("graph-key restore finished: %s", observation.sentence())
         if error is not None:
@@ -586,6 +798,12 @@ def restore_graph_key(
             with contextlib.suppress(AttributeError):
                 error.add_note(observation.sentence())
             raise error
+        if observation.status == UNMEASURED:
+            logger.warning(
+                "graph-key restore could NOT be measured (#7846 criterion 5 is not "
+                "answered by this run): %s",
+                observation.sentence(),
+            )
         if observation.status == BLOCKED:
             logger.warning(
                 "graph-key restore BLOCKED the instance for %.0f ms of its %.2fs "
@@ -608,25 +826,31 @@ def restore_graph_key(
     else:
         probe = listening()
         instance_listening = probe if probe is None else bool(probe)
-    if not failures and samples:
+    if not failures and attributed:
         # Every sample ANSWERED, so the instance was serving and the overrun is the
         # CALLER's. Both conditions are required: with zero samples `not failures`
         # is vacuously true, and "every one of the 0 witness PINGs ANSWERED" is the
         # pre-fix false reading delivered in a confident voice (#8827 review).
         status = CALLER_STALL
     elif instance_listening is False:
+        # The refused port is a measurement in its own right, so this stays above the
+        # unmeasured branch — and its message must say the process is GONE, never
+        # "check the caller" (#8827 review).
         status = INSTANCE_GONE
+    elif not measured:
+        # The instrument faulted, or the witness never got a reading: nothing can be
+        # attributed, and neither is the block.
+        status = UNMEASURED
     else:
-        # Includes the zero-sample case: nothing was measured, so the instrument
-        # reports silence it cannot attribute rather than claiming the CALLER.
         status = ALIVE_BUT_SILENT
     observation = RestoreObservation(
         graph=graph,
         status=status,
         bound_s=bound_s,
         elapsed_s=elapsed_s,
+        restore_s=restore_s,
         payload_bytes=payload_bytes,
-        witness_samples=len(samples),
+        witness_samples=len(attributed),
         witness_failures=failures,
         witness_errors=witness_errors,
         silent_ms=silent_ms,
@@ -636,10 +860,8 @@ def restore_graph_key(
         blocked_latency_ms=blocked_latency_ms,
         instance_listening=instance_listening,
         error=(
-            "restore did not return within the bound; the WITNESS could not "
-            f"measure it ({', '.join(witness_errors)}), so this is NOT evidence "
-            "of the #7846 blocked-engine signature"
-            if witness_fault
+            f"restore did not return within the bound; {unmeasured_reason}"
+            if unmeasured_reason is not None and instance_listening is not False
             else "restore did not return within the bound"
         ),
     )

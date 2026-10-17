@@ -29,16 +29,19 @@ import time
 
 import pytest
 
+import tortoise.graph_key_restore
 from tortoise.graph_key_restore import (
     ALIVE_BUT_SILENT,
     BLOCKED,
     CALLER_STALL,
     INSTANCE_GONE,
     SERVED,
+    UNMEASURED,
     GraphRestoreLostError,
     GraphRestoreSilentError,
     GraphRestoreStalledError,
     RestoreObservation,
+    _longest_silence,
     restore_graph_key,
     tcp_is_listening,
 )
@@ -340,9 +343,326 @@ def test_tcp_is_listening_measures_the_port_not_the_server() -> None:
     # `socket.timeout` is an `OSError`, so the two-valued probe reported a blocked
     # instance with a full accept backlog (which DROPS SYNs) as "the port REFUSED …
     # the process is gone … restart the instance" — the exact case it exists for.
-    assert tcp_is_listening("10.255.255.1", 6379, timeout_s=0.2) is None, (
+    # Exercised by monkeypatching the syscall, not by dialling an address that happens
+    # to be unroutable HERE: this file runs on every `core` selection, so its PASS may
+    # not depend on the runner's routing table (§`test_a_connect_timeout_is_…`).
+
+
+def test_a_connect_timeout_is_unmeasurable_not_a_refusal(monkeypatch) -> None:
+    """#8827 review: the timeout arm must be pinned where the code decides it.
+
+    The previous assertion dialled ``10.255.255.1:6379`` and expected ``None``, which
+    holds only where that private-range address DROPS the SYN. On a runner with 10/8
+    routed — the common cluster/VPN case — the far side RSTs (``False``, i.e. "the
+    process is gone") or something actually answers (``True``), and this file, which is
+    registered on the ``core`` surface, went red on a correct tree.
+    """
+
+    def times_out(*_args, **_kwargs):
+        # `socket.timeout` IS `TimeoutError` on py3.12, and it is an `OSError` — which is
+        # what the probe has to tell apart from an active refusal.
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(socket, "create_connection", times_out)
+    assert tcp_is_listening("192.0.2.1", 6379, timeout_s=0.2) is None, (
         "an unmeasurable connect read as a refusal — a healthy but blocked instance "
         "would be reported as gone, and the operator told to restart it"
+    )
+
+
+def test_only_an_active_refusal_reads_as_the_process_being_gone(monkeypatch) -> None:
+    """The other half of the tri-state: RST is the ONLY death signal."""
+
+    def refused(*_args, **_kwargs):
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(socket, "create_connection", refused)
+    assert tcp_is_listening("192.0.2.1", 6379, timeout_s=0.2) is False, (
+        "an actively refused connect must stay distinguishable from an unmeasurable "
+        "one, or `INSTANCE_GONE` becomes unreachable"
+    )
+
+
+def test_a_zero_sample_overrun_never_claims_the_CALLER_stalled() -> None:
+    """F1(a), #8827 review: zero samples + overrun must not manufacture a verdict.
+
+    The first witness PING is still in flight at the bound (its socket timeout outlives
+    ``bound_s + witness_join_s``), so no sample is ever recorded. The status was already
+    guarded against this; the MESSAGE was not — it read "every one of the 0 witness
+    PINGs on a separate connection ANSWERED … Check the CALLER", which is the opposite
+    of what was measured. Pre-fix this test fails on the status (ALIVE_BUT_SILENT) and
+    on both message assertions.
+    """
+    instance = _FakeInstance()
+
+    def ping_far_too_slow() -> None:
+        time.sleep(1.0)  # longer than bound_s + witness_join_s: no sample is recorded
+
+    def never_returns(_payload):
+        time.sleep(1.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreSilentError) as raised:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=ping_far_too_slow,
+            bound_s=0.2,
+            witness_join_s=0.1,
+            poll_interval_s=_POLL_S,
+            listening=lambda: True,
+        )
+
+    observation = raised.value.observation
+    assert observation.witness_samples == 0
+    assert observation.measured is False
+    assert observation.status == UNMEASURED, (
+        f"nothing was measured, yet the run was given the verdict {observation.status!r}"
+    )
+    message = str(raised.value)
+    assert "ANSWERED" not in message, (
+        f"the message claims the witness answered when it recorded nothing: {message}"
+    )
+    assert "Check the CALLER" not in message
+    assert "NO samples" in message or "INSTRUMENT FAULT" in message, (
+        f"the message does not say that nothing was measured: {message}"
+    )
+    assert instance.pings == 0
+
+
+def test_a_refused_port_with_zero_samples_is_still_reported_as_a_death() -> None:
+    """F1(b), #8827 review: the death branch must not sit below a caller-stall text.
+
+    ``INSTANCE_GONE`` with an empty sample list used to carry "The instance was serving …
+    Check the CALLER" — telling the operator to look at their own client while the
+    server process was gone. Pre-fix this fails on both message assertions (the status
+    was already right, which is exactly why the test pins the message).
+    """
+
+    def ping_far_too_slow() -> None:
+        time.sleep(1.0)
+
+    def never_returns(_payload):
+        time.sleep(1.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreLostError) as raised:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=ping_far_too_slow,
+            bound_s=0.2,
+            witness_join_s=0.1,
+            poll_interval_s=_POLL_S,
+            listening=lambda: False,
+        )
+
+    assert raised.value.observation.status == INSTANCE_GONE
+    message = str(raised.value)
+    assert "died during the restore" in message, (
+        f"a refused port must report a death, not a stall: {message}"
+    )
+    assert "Check the CALLER" not in message, (
+        f"the death message sends the operator to the caller: {message}"
+    )
+    assert "Restart the instance" in message
+
+
+def test_a_witness_fault_on_the_overrun_path_does_not_assert_the_block() -> None:
+    """F1(c), #8827 review: an instrument fault must not be delivered as an engine verdict.
+
+    ``WRONGPASS`` is the witness failing, not the instance staying silent, and
+    ``witness_fault`` already recorded that in ``observation.error`` — which nothing
+    read. Pre-fix the raised message still said "It is a BLOCKED server, the #7846
+    signature … Do not retry", on the exact channel an operator acts on.
+    """
+
+    def wrongpass() -> None:
+        raise PermissionError("WRONGPASS invalid username-password pair")
+
+    def never_returns(_payload):
+        time.sleep(1.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreSilentError) as raised:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=wrongpass,
+            bound_s=0.2,
+            poll_interval_s=_POLL_S,
+            listening=lambda: True,
+        )
+
+    observation = raised.value.observation
+    assert observation.witness_errors == ("PermissionError",)
+    assert observation.witness_fault is True
+    assert observation.status == UNMEASURED
+    message = str(raised.value)
+    assert "It is a BLOCKED server" not in message, (
+        f"the instrument's own failure was reported as the engine's block: {message}"
+    )
+    assert "INSTRUMENT FAULT" in message
+    assert "PermissionError" in message, "the message does not name the witness failure"
+
+
+def test_a_witness_fault_on_the_completed_path_is_not_a_green_SERVED() -> None:
+    """F2(b), #8827 review: silence the block flag by all means — but not into a green.
+
+    A restore that returned while every witness PING failed on ``WRONGPASS`` returned
+    ``SERVED`` (``blocked`` forced ``False``), i.e. a caller switching on ``status`` read
+    the vacuous green this driver exists to remove. Pre-fix this fails: status is SERVED.
+    """
+
+    def wrongpass() -> None:
+        raise PermissionError("WRONGPASS invalid username-password pair")
+
+    def returns_shortly(_payload):
+        time.sleep(0.05)  # long enough for the witness to record several samples
+        return "OK"
+
+    observation = restore_graph_key(
+        **_call(),
+        restore=returns_shortly,
+        ping=wrongpass,
+        bound_s=5.0,
+        poll_interval_s=_POLL_S,
+    )
+
+    assert observation.witness_samples > 0, "no sample was attributed — wrong window"
+    assert observation.witness_fault is True
+    assert observation.status == UNMEASURED, (
+        f"nothing was measured, yet the run was published as {observation.status!r}"
+    )
+    assert observation.measured is False
+    assert observation.error is not None and "PermissionError" in observation.error
+    assert observation.as_dict()["measured"] is False
+    assert "It is a BLOCKED server" not in observation.diagnosis()
+
+
+def test_a_zero_sample_completed_restore_is_not_a_green_SERVED() -> None:
+    """F2(a), #8827 review: the completed path had no ``and samples`` guard.
+
+    The witness PING outlives the whole operation, so the window contains nothing; the
+    status was ``SERVED`` with ``silent_ms == 0`` — a restore that could have blocked the
+    instance for its entire duration read GREEN. Pre-fix this fails: status is SERVED.
+    """
+
+    def ping_far_too_slow() -> None:
+        time.sleep(1.0)
+
+    observation = restore_graph_key(
+        **_call(),
+        restore=lambda _payload: "OK",
+        ping=ping_far_too_slow,
+        bound_s=5.0,
+        witness_join_s=0.05,  # shorter than the PING: the sample never lands
+        poll_interval_s=_POLL_S,
+    )
+
+    assert observation.witness_samples == 0
+    assert observation.status == UNMEASURED, (
+        f"a restore nothing was measured for was published as {observation.status!r}"
+    )
+    assert observation.measured is False
+    assert observation.error is not None and "NO samples" in observation.error
+
+
+def test_the_three_silence_fields_describe_ONE_run() -> None:
+    """F3, #8827 review: one run, three numbers — never a second independent maximum.
+
+    The in-window silence (0.10 s → 0.15 s, 50 ms) is followed, AFTER the window closed,
+    by a much longer one (1.00 s → 2.00 s). Taking the end edge from a second maximum
+    over the full list published ``silent_ms=50``, ``started=0.10``, ``ended=2.00``: a
+    triple that describes no run at all, and that the live test asserts on.
+    """
+    samples = [
+        (0.00, True, 1.0),
+        (0.10, False, 50.0),
+        (0.15, True, 1.0),  # the instance came back: the in-window run ended HERE
+        (1.00, False, 900.0),  # post-window, much longer, and irrelevant to attribution
+        (2.00, True, 1.0),
+    ]
+    window = samples[:3]
+
+    silent_ms, started, ended = _longest_silence(window, samples)
+
+    assert (started, ended) == (0.10, 0.15), (
+        f"the end edge ({ended}) was taken from a different run than the start ({started})"
+    )
+    assert silent_ms == pytest.approx(50.0, abs=1.0)
+    assert ended is not None and started is not None
+    assert (ended - started) * 1000 == pytest.approx(silent_ms, abs=1.0), (
+        "the three fields do not describe one silence"
+    )
+
+    # A run that only recovers AFTER the window keeps its own end edge — that recovery
+    # probe is what makes the silence attributable — without letting the magnitude run on
+    # to the recovery edge (it would then inflate `blocked_ms` past the operation).
+    clipped = [
+        (0.00, True, 1.0),
+        (0.10, False, 900.0),
+        (1.00, False, 900.0),
+        (5.00, True, 1.0),  # the instance came back long after the operation ended
+    ]
+    silent_ms, started, ended = _longest_silence(clipped[:3], clipped)
+    assert (started, ended) == (0.10, 5.00), (
+        "the recovery edge is post-window and must still be reported as the end"
+    )
+    assert silent_ms < (ended - started) * 1000, (
+        "the magnitude ran to the recovery edge instead of stopping inside the window"
+    )
+    assert silent_ms == pytest.approx(1800.0, abs=1.0), (
+        "the magnitude must be the in-window silence (to the last in-flight attempt), "
+        f"not the recovery edge: got {silent_ms:.0f} ms"
+    )
+
+
+def test_the_bound_covers_the_RESTORE_step_and_the_split_is_visible() -> None:
+    """F4, #8827 review: `bound_s` bounds the RESTORE call, not ``dump``/``delete``.
+
+    The previous title and docstring item 1 read as a bound on the whole sequence, so a
+    caller could pass an unbounded client and be held by a hung ``DUMP`` outside any
+    bound at all. The seam is now documented AND reported: a 0.2 s ``dump`` is caller-held
+    time (``elapsed_s``) that is not restore time (``restore_s``). Pre-fix this fails on
+    both — ``restore_s`` does not exist, and ``elapsed_s`` excluded the dump.
+    """
+    instance = _FakeInstance()
+
+    def slow_dump() -> bytes:
+        time.sleep(0.2)
+        return b"x" * 32
+
+    observation = restore_graph_key(
+        graph="i7846",
+        dump=slow_dump,
+        delete=lambda: None,
+        restore=lambda _payload: "OK",
+        ping=instance.ping,
+        bound_s=5.0,
+        poll_interval_s=_POLL_S,
+    )
+
+    assert observation.restore_s < 0.05, (
+        f"the 0.2 s DUMP was counted as restore time ({observation.restore_s:.3f}s)"
+    )
+    assert observation.elapsed_s >= 0.2, (
+        f"the caller held the DUMP for 0.2 s, but elapsed_s says {observation.elapsed_s:.3f}s"
+    )
+    assert observation.as_dict()["restore_s"] < 0.05
+    assert "RESTORE step" in observation.sentence()
+
+
+def test_the_module_states_the_bound_seam_exactly() -> None:
+    """F4's documentation half: the seam must be stated where a caller reads it."""
+    module = tortoise.graph_key_restore
+    title = (module.__doc__ or "").split("\n\n")[0]
+    assert "bounded at the RESTORE step" in title, (
+        f"the module title still reads as a bound on the whole sequence: {title!r}"
+    )
+    driver_doc = restore_graph_key.__doc__ or ""
+    assert "NOT ``dump``/``delete``" in driver_doc, (
+        "restore_graph_key no longer says that bound_s excludes dump/delete"
     )
 
 
