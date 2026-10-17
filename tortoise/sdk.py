@@ -10372,15 +10372,21 @@ class TortoiseSDK:
 
             ``update_point(status='live')`` refuses in the statement's own
             WHERE guard, so a zero-row re-issue is legitimate whenever the
-            node EXISTS and is no longer promotable. Treating every zero-row
-            re-issue as "the rebuild has not replayed it" replaced the
-            documented ``ValueError`` (No point / Illegal status transition)
-            with the abort — naming a cause that did not occur. This delegates
-            to the same diagnostic the first-attempt path uses, so the contract
-            is identical whether a retry happened or not.
+            node EXISTS and is no longer promotable. The diagnostic below
+            separates that from "the rebuild has not replayed the node yet":
+            an ABSENT node returns False, so the sentinel keeps retrying and the
+            graph abort surfaces — raising ``_raise_update_point_status_error``
+            on absence would instead raise ``ValueError('No point …')``, which
+            is predicate-FALSE and abandons the 7-14 s window after ONE
+            re-issue (#8854 review round 4 P1).
             """
             if result.result_set:
                 return True
+            present = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+            ).result_set[0][0]
+            if not present:
+                return False
             _raise_update_point_status_error(proj, id)
             return False  # pragma: no cover — the helper always raises
 
@@ -10541,16 +10547,59 @@ class TortoiseSDK:
             # deliberately avoid. The counter is the attempt number: `fn` is
             # invoked once per attempt by `_graph_write_with_retry`.
             _sync_attempts = 0
+            # WITNESS (#8854 review round 5, P1). This arm rode the retry with
+            # `_sync_tags` returning None, so there was nothing to testify
+            # with — and a re-issue that lands NOTHING reported success.
+            # Measured pre-fix with the Point absent from the replayed graph:
+            # `update_point(id, tags=[a, b])` returned normally while the graph
+            # held ZERO TAGGED edges and no Point at all. The retry exists for
+            # the rebuild window, and in that window the not-yet-replayed Point
+            # is exactly the case it must NOT swallow: a MERGE against a
+            # missing anchor matches nothing, succeeds, and looks like a write.
+            #
+            # `_sync` now returns the number of TAGGED edges the Point really
+            # carries for the REQUESTED names, and the witness requires the
+            # FULL set. "At least one" would call a half-landed sync good, and
+            # on an absent Point it would still be zero — the defect itself.
+            # The COUNT is read back from the graph rather than returned by
+            # `_sync_tags`, because the reconciler is the projection's (shared
+            # with replay, #2897) and its return value is not a landing proof:
+            # a `MERGE` that matches nothing is not an error.
+            #
+            # The requested names are DEDUPED for the count only; the value
+            # handed to `_sync_tags` is the caller's own, unchanged. A
+            # NON-ARRAY value (a number/dict, outside the public signature but
+            # tolerated and pinned by
+            # `test_update_non_list_tags_no_crash`) derives no edges BY DESIGN
+            # (#8333 owns that), so it must not be witnessed against a count —
+            # `None` makes the witness vacuous there instead of inventing a
+            # non-landing on a write that was never asked to make edges.
+            _sync_raw_tags = props["tags"] or []
+            _sync_wanted = (list(dict.fromkeys(_sync_raw_tags))
+                            if isinstance(_sync_raw_tags, (list, tuple))
+                            else None)
 
-            def _sync() -> None:
+            def _sync() -> int:
                 nonlocal _sync_attempts
                 _sync_attempts += 1
                 self._sync_tags(
-                    proj, id, props["tags"] or [],
+                    proj, id, _sync_raw_tags,
                     sweep_orphans=_sync_attempts > 1)
+                if not _sync_wanted:
+                    # An empty request asks for no edge, so the graph cannot be
+                    # missing one: it lands vacuously (and `landed == 0` agrees).
+                    return 0
+                rows = proj.g.query(
+                    "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "
+                    "WHERE t.name IN $names RETURN count(t)",
+                    params={"pid": id, "names": _sync_wanted},
+                ).result_set
+                return int(rows[0][0]) if rows else 0
 
             self._graph_write_with_retry(
-                _sync, what="update_point TAGGED edges")
+                _sync, what="update_point TAGGED edges",
+                witness=lambda landed: (_sync_wanted is None
+                                        or landed == len(_sync_wanted)))
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         result = self.get_point(id)
@@ -11713,14 +11762,19 @@ class TortoiseSDK:
             """
             if result.result_set:
                 return True
-            state = proj.g.query(
+            rows = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
                 params={"id": id},
             ).result_set
-            if state:
-                # Present but excluded by the CAS's own terminal guard.
-                raise ValueError(
-                    f"Point {id!r} is already terminal — retraction is terminal")
+            if rows:
+                status, outdated = rows[0]
+                # PRESENCE alone is not terminality (#8854 review round 4 P2):
+                # the rebuild's replay can land the node live between the CAS
+                # and this read, and claiming "already terminal" for a live
+                # point is the exact failure this PR closes.
+                if status in TERMINAL_EXCLUDED_STATUSES or outdated:
+                    raise ValueError(
+                        f"Point {id!r} is already terminal — retraction is terminal")
             return False
         r = self._graph_write_with_retry(
             lambda: proj.g.query(

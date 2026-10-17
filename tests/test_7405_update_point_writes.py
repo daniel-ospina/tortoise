@@ -628,7 +628,7 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
                         "update_point SET (embedding)",
                         "update_point TAGGED edges",
                         _ADVANCE, _DIRTY], seen
-        assert len(seen) == 5, "the docstring's worst case is FIVE windows"
+        assert len(seen) == 5, "a LIVE content+tags update is FIVE windows"
 
         seen.clear()
         sdk.annotate_operator(op, bias=0.2, precision=0.8,
@@ -642,6 +642,16 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
         sdk.update_point(src, confidence=0.3)
         assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY,
                         "_mark_dirty terminal ep_dirty clear SET"], seen
+
+        # The documented UPPER bound: a TERMINAL point with content AND tags.
+        seen.clear()
+        sdk.update_point(src, content="terminal revision", tags=["b"])
+        assert seen == ["update_point SET (per-key)",
+                        "update_point SET (embedding)",
+                        "update_point TAGGED edges",
+                        _ADVANCE, _DIRTY,
+                        "_mark_dirty terminal ep_dirty clear SET"], seen
+        assert len(seen) == 6, "a TERMINAL content+tags update is SIX windows"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -944,6 +954,71 @@ def test_retract_that_lost_the_race_still_raises_already_terminal(
             sdk.close()
 
 
+class _AbortOnceThenSetStatus(_AbortOnceThenTerminalise):
+    """Abort once AND set every point's status — the competing writer's win."""
+
+    def __init__(self, real, needle: str, *, status: str = "live") -> None:
+        super().__init__(real, needle)
+        self._status = status
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query(
+                    "MATCH (n:Point) SET n.status = $s",
+                    params={"s": self._status})
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+
+def test_a_promote_refused_after_a_retry_keeps_its_illegal_transition(
+        tmp_path, monkeypatch):
+    """A present-but-not-draft node keeps the documented ValueError."""
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "promoterace")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenSetStatus(proj.g, _POINT_PROMOTE_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="Illegal status transition"):
+            sdk.update_point(pid, status="live")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_promote_on_an_absent_node_still_surfaces_the_abort(
+        tmp_path, monkeypatch):
+    """An absent node must NOT become `ValueError('No point')` (#8854 r4 P1).
+
+    ``ValueError`` is predicate-FALSE, so raising it after ONE re-issue would
+    abandon the 7-14 s window #7405 exists to heal. Absent → keep retrying;
+    exhausted → the graph abort, unchanged in type.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "promoteabsent")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenEmptyGraph(proj.g, _POINT_PROMOTE_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, status="live")
+        assert proxy.matching >= 3, (
+            "an absent node must keep retrying, not raise after one re-issue")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_a_deleted_graph_abort_on_the_property_set_stays_loud(tmp_path):
     """The retry must not MASK a deletion — the #7685 guarantee, extended.
 
@@ -966,6 +1041,119 @@ def test_a_deleted_graph_abort_on_the_property_set_stays_loud(tmp_path):
         assert proxy.applied == 0, (
             "a deleted graph must not be re-issued into — nothing may be "
             "reported as applied")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 9. the tag sync's LANDING WITNESS (#8854 review round 5, P1) ────────
+
+# The stale-edge DELETE the reconciler issues for a tag the caller dropped.
+_TAG_DELETE_NEEDLE = "-[r:TAGGED]->(t:Tag {name:$tag}) DELETE r"
+
+
+class _AbortThenUnreplay(_AbortOnceGraph):
+    """Abort the first matching statement, then delete its anchor Point.
+
+    Models the window the retry exists for, in the form that USED to be
+    swallowed: the abort is a rebuild's, and the statement it aborts is the one
+    that would write the derived half — so on the re-issue the anchor Point is
+    still not there. A ``MERGE`` against a missing anchor matches nothing and
+    returns normally, so without a witness the caller is told the tag write
+    landed while the graph holds no edge at all.
+
+    ``present=True`` keeps the graph KEY present, which is what authorises the
+    retry: the abort is indistinguishable from a plain deletion except by that
+    probe.
+    """
+
+    def __init__(self, real, needle: str, *, victim: str) -> None:
+        super().__init__(real, needle, present=True)
+        self._victim = victim
+        self.vanished = False
+
+    def query(self, cypher, params=None, timeout=None):
+        try:
+            return super().query(cypher, params=params, timeout=timeout)
+        except redis_exc.ResponseError:
+            # The rebuild replaced the graph mid-statement; its replay has not
+            # reached this Point yet. One deletion is enough — a second would
+            # race the assertions below.
+            if not self.vanished:
+                self.vanished = True
+                self._real.query(
+                    "MATCH (p:Point {id:$id}) DETACH DELETE p",
+                    params={"id": self._victim})
+            raise
+
+
+def test_a_retried_tag_sync_that_lands_nothing_does_not_report_success(
+        tmp_path):
+    """A re-issued tag sync against an unreplayed Point is NOT a success.
+
+    Measured pre-fix: ``update_point(pid, tags=[a, b])`` returned a point dict
+    while the graph held ZERO ``TAGGED`` edges and no ``Point`` at all — the
+    success report the whole retry exists to avoid (#6666 class). The tag arm
+    rode ``_graph_write_with_retry`` WITHOUT a witness, so nothing asked the
+    graph whether the re-issue had landed.
+
+    The abort therefore surfaces unchanged, exactly as it does on the property
+    arm — one behaviour for the whole mutation, not one per statement.
+    """
+    sdk = _sdk(tmp_path, "tagwitness")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _TAGGED_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, tags=["7405ghost", "7405spectre"])
+
+        proj.g = proxy._real
+        assert proxy.vanished, (
+            "fixture precondition: the Point must be gone — an unresolvable "
+            "anchor is the window under test")
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id})-[:TAGGED]->(t:Tag) RETURN count(t)",
+            params={"id": pid}).result_set
+        assert rows[0][0] == 0, (
+            "fixture precondition: the re-issue must land NO edge, or the "
+            "witness was never the thing that refused the call")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_clearing_tags_is_never_reported_as_a_non_landing(tmp_path):
+    """The witness must not turn an EMPTY tag request into a failure.
+
+    ``tags=[]`` asks for no edge, so a graph holding none is exactly what was
+    requested — ``landed == 0 == len(wanted)`` and the call returns. This pins
+    the FULL-SET rule against a future ``>= 1`` reading of it, which would red
+    an honest clear.
+    """
+    sdk = _sdk(tmp_path, "tagclear")
+    try:
+        pid = _pid(sdk)
+        sdk.update_point(pid, tags=["7405gone"])
+        proj = sdk._get_proj()
+        # Abort the stale-edge DELETE, so the retry re-issues the whole
+        # reconciler with the latch armed — the state in which the witness is
+        # actually consulted.
+        proxy = _AbortOnceGraph(proj.g, _TAG_DELETE_NEEDLE, present=True)
+        proj.g = proxy
+
+        sdk.update_point(pid, tags=[])  # returns; must NOT raise
+
+        assert proxy.matching >= 2, (
+            "the aborted stale DELETE was never re-issued — the witness was "
+            "never consulted, so this test would prove nothing")
+        proj.g = proxy._real
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id})-[:TAGGED]->(t:Tag) RETURN count(t)",
+            params={"id": pid}).result_set
+        assert rows[0][0] == 0, "the clear must have landed"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
