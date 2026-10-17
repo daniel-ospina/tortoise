@@ -925,20 +925,25 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
     "tests/test_agent_signup_idempotency.py": (1, frozenset({"client"})),
     # +2: the mount-only MCP parent (`_mounted_test_client` — a local
     # `Mount("/mcp", ...)` Starlette carrying NO `WaitBoundMiddleware`) and the
-    # pin's control.
+    # pin's control. That parent cannot see the REST 504 arm, so it is out of
+    # THIS sweep's class; the MCP seam's own refusal is a **200** with an error
+    # envelope (`mcp_server._await_under_mcp_wait_bound`), which a bare
+    # `assert status_code == 200` PASSES on — the false-PASS arm, #8763's
+    # subject, not this one. This file makes no `tools/call` request at all.
     "tests/test_auth_flip.py": (2, frozenset({"rest_client"})),
     "tests/test_billing.py": (1, frozenset({"billing_client", "env", "sb"})),
     "tests/test_claim_endpoints.py": (1, frozenset({"client"})),
     # +2: the R-13 rate-limit test's `TestClient(mini)` (a `mini` Starlette with
-    # only `RateLimitMiddleware` — no bound, so none of its reads can be a
-    # refusal) and the pin's control.
+    # only `RateLimitMiddleware` — no bound at either seam, so none of its reads
+    # can be a refusal) and the pin's control.
     "tests/test_commit_endpoint.py": (2, frozenset({"client", "client_no_auth"})),
     "tests/test_dashboard_login.py": (1, frozenset({"client"})),
     "tests/test_data_source_capture.py": (1, frozenset({"client"})),
     "tests/test_delivery_tenancy.py": (1, frozenset({"_sb_env", "_spine_env"})),
     "tests/test_invite_fusion_http.py": (1, frozenset({"client"})),
-    # +2: `_mounted_test_client`'s mount-only parent (as in test_auth_flip) and
-    # the pin's control.
+    # +2: `_mounted_test_client`'s mount-only parent (as in test_auth_flip —
+    # no REST 504 arm reaches it; the file's single `tools/call` read carries a
+    # `require_answered` call in its own body) and the pin's control.
     "tests/test_oauth_mcp.py": (2, frozenset({"api_client"})),
     "tests/test_onboarding_endpoints.py": (1, frozenset({"client",
                                                          "unauth_client"})),
