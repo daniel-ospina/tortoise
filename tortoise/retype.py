@@ -78,14 +78,20 @@ job is the layer relocation the other one cannot do.
    mechanics do not have. A name is also **unique among the nodes that end the
    plan** in a name-MERGEed layer (``:Object``/``:Subject``, #7369): two nodes
    sharing one name are ONE identity to the write path — which is why the
-   collision is refused even when neither node is moved by the plan.
+   collision is refused even when neither node is moved by the plan, and for a
+   multi-label node under EVERY label it keeps (a ``keep`` preserves the label
+   set verbatim, so a ``:Point:Object`` node the plan cannot move is still an
+   ``:Object`` afterwards).
 7. **Counts reconcile, against a BOUND snapshot.** Nodes and edges in == out;
-   the moves and the keeps sum to the node count; every edge endpoint is proved
-   to exist in the output (``edges_preserved`` is asserted, not restated). And
-   the plan carries a fingerprint of the dump it was validated against
-   (``RetypePlan.dump_sha256``: each node's ``dump_id`` + identity + labels +
-   kind), which ``apply_plan`` recomputes and refuses on mismatch, while
-   matching moves by *identity* and not only by position. ``dump_id`` is the
+   the output's id set is compared against the ids the PLAN declares (the moves'
+   ``dump_id``s plus the ids ``keeps`` names), not against the input it was
+   built from; the moves and the keeps sum to the node count; every edge
+   endpoint is proved to exist in the output (``edges_preserved`` is asserted,
+   not restated). And the plan carries a fingerprint of the dump it was
+   validated against (``RetypePlan.dump_sha256``: each node's ``dump_id`` +
+   identity + labels + kind + ``name`` + ``is_operator``), which ``apply_plan``
+   recomputes and refuses on mismatch, while matching moves by *identity* and
+   not only by position. ``dump_id`` is the
    store's INTERNAL id — positional and reused after deletions — so a refreshed
    snapshot of the same size maps the same ids onto different nodes; without the
    binding the run would apply A's kinds and names onto B's nodes and still
@@ -314,7 +320,7 @@ def node_key(node: Mapping[str, Any]) -> str:
 
 
 def _dump_fingerprint(dump: Mapping[str, Any]) -> str:
-    """sha256 over each node's ``(dump_id, identity, labels, kind)``.
+    """sha256 over each node's identity AND the props the invariants decide from.
 
     ``dump_id`` is the store's INTERNAL id (``hosted_backup.dump_graph`` emits
     ``int(internal_id)``), i.e. POSITIONAL and reused after deletions. Bound
@@ -322,6 +328,14 @@ def _dump_fingerprint(dump: Mapping[str, Any]) -> str:
     snapshot of the same size that names different nodes — it would write A's
     kinds and NAMES onto B's nodes and every count would reconcile. Pairing the
     id with the node's own identity makes that rotation a mismatch instead.
+
+    The identity is not enough on its own: ``node_key`` returns ``props['id']``
+    whenever a node has one, so a normal ``:Object``'s ``name`` and any node's
+    ``is_operator`` never reach the identity — yet invariant 5 is decided from
+    ``is_operator`` at build time and invariant 8's uniqueness from a KEPT
+    node's ``name``. Both are hashed explicitly, so a refreshed dump that
+    differs ONLY in one of them is a mismatch rather than a stale plan applied
+    to a node that has become an operator (or has taken a name a move claims).
     """
     nodes = dump.get("nodes")
     rows: list[list[str]] = []
@@ -337,6 +351,8 @@ def _dump_fingerprint(dump: Mapping[str, Any]) -> str:
                     node_key(node),
                     ",".join(sorted(_labels(node))),
                     *(str(props.get(prop) or "") for prop in KIND_PROP.values()),
+                    str(props.get("name") or ""),
+                    str(props.get("is_operator") or ""),
                 ]
             )
     rows.sort()
@@ -610,21 +626,27 @@ def _name_collision_problems(index: Mapping[str, dict], moves: Sequence[Move]) -
     because ``:Object``/``:Subject`` MERGE on it (#7369) — two nodes sharing a
     name are ONE identity to the write path, not two rows. The collision can be
     with a node the plan never touches (a curated graph routinely already holds
-    a same-named Object), so kept nodes are grouped in too.
+    a same-named Object), so kept nodes are grouped in too — under EVERY
+    ``:Object``/``:Subject`` label they keep, not under "the single epistemic
+    label". A multi-label node cannot be moved (invariant 3) and a keep
+    preserves its label set verbatim, so a ``:Point:Object`` node IS still an
+    ``:Object`` after the plan; grouping by ``_current_label(node)[0]`` — which
+    is ``None`` for a multi-label node — dropped exactly those from the check.
     """
     by_move = {move.key: move for move in moves}
     by_name: dict[tuple[str, str], list[str]] = {}
     for key, node in index.items():
         move = by_move.get(key)
         if move is not None:
-            label, name = move.dst_label, move.name
+            labels: set[str] = {move.dst_label}
+            name = move.name
         else:
-            label, name = _current_label(node)[0], _props(node).get("name")
-        if label not in NAME_MERGE_TARGETS:
-            continue
+            labels = set(_labels(node))
+            name = _props(node).get("name")
         if not (isinstance(name, str) and name.strip()):
             continue
-        by_name.setdefault((str(label), name.strip()), []).append(key)
+        for label in sorted(labels & NAME_MERGE_TARGETS):
+            by_name.setdefault((label, name.strip()), []).append(key)
     problems: list[str] = []
     for (label, name), keys in sorted(by_name.items()):
         if len(keys) < 2:
@@ -929,13 +951,20 @@ def apply_plan(
             f"plan does not apply to this dump: {len(plan.moves)} move(s), "
             f"{len(moved_ids)} node id(s) matched"
         )
-    # A list built by appending one row per input row cannot change length, so a
-    # bare len(out) == len(in) compares the input with itself. The ID SET is the
-    # claim: every input id is present exactly once in the output.
-    if len(out_nodes) != len(nodes_in) or set(out_ids) != set(identity_by_id):
+    # The output carries one row per input row and ``identity_by_id`` is a map
+    # over that same input, so comparing the output id set with
+    # ``set(identity_by_id)`` compares the input WITH ITSELF — it cannot
+    # disagree. The comparison that can is against the ids the PLAN declares:
+    # the moves' dump_ids plus the ids of the nodes ``plan.keeps`` names. Those
+    # are frozen into the plan, so a plan that does not describe this dump's
+    # output is refused here even if the counts happen to line up.
+    keep_ids = {dump_id for dump_id, key in identity_by_id.items() if key in set(plan.keeps)}
+    planned_ids = {move.dump_id for move in plan.moves} | keep_ids
+    if len(out_nodes) != len(nodes_in) or set(out_ids) != planned_ids:
         problems.append(
-            f"node set changed: {len(nodes_in)} id(s) in, {len(out_nodes)} node(s) "
-            f"out ({len(set(out_ids))} distinct id(s))"
+            f"node set changed: the plan declares {len(planned_ids)} id(s), this "
+            f"dump has {len(nodes_in)} node(s) and the output carries "
+            f"{len(out_nodes)} row(s) / {len(set(out_ids))} distinct id(s)"
         )
     if len(plan.moves) + len(plan.keeps) != len(nodes_in):
         problems.append(

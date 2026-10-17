@@ -715,6 +715,36 @@ def test_a_plan_is_bound_to_the_nodes_it_KEEPS_too():
     assert any("different snapshot" in p for p in exc.value.problems)
 
 
+def test_the_snapshot_binding_covers_the_is_operator_prop():
+    """Invariant 5 (an operator stays ``:Point``) is decided from
+    ``props['is_operator']`` at build time and never re-read, so the fingerprint
+    has to carry it: a refreshed dump in which a node the plan moves has become
+    an operator otherwise fingerprints identically and the stale plan moves it
+    off ``:Point`` — the exact state invariant 5 refuses."""
+    dump = _dump()
+    plan = build_plan(dump, _all_keep(dump, overrides={"pt-goal-1": GOAL_MOVE}))
+    refreshed = copy.deepcopy(dump)
+    refreshed["nodes"][0]["props"]["is_operator"] = True  # pt-goal-1 is now an operator
+    with pytest.raises(RetypeError) as exc:
+        apply_plan(refreshed, plan)
+    assert any("different snapshot" in p for p in exc.value.problems), exc.value.problems
+
+
+def test_the_snapshot_binding_covers_a_kept_nodes_name():
+    """Invariant 8's uniqueness is decided from a KEPT node's ``name``, which
+    ``node_key`` never exposes for a node that carries an ``id`` — so a renamed
+    kept ``:Object`` fingerprints identically and a plan whose move claims that
+    name applies into a duplicate-name pair."""
+    dump = _dump()
+    plan = build_plan(dump, _all_keep(dump, overrides={"pt-goal-1": GOAL_MOVE}))
+    refreshed = copy.deepcopy(dump)
+    obj = next(n for n in refreshed["nodes"] if n["props"]["id"] == "obj-1")
+    obj["props"]["name"] = "Renamed Alpha"
+    with pytest.raises(RetypeError) as exc:
+        apply_plan(refreshed, plan)
+    assert any("different snapshot" in p for p in exc.value.problems), exc.value.problems
+
+
 def test_a_keep_that_names_no_node_in_this_dump_is_refused():
     """The partition must close against THIS dump's identities, not just the
     count: a keep naming a node this dump does not carry is a plan for another
@@ -725,6 +755,24 @@ def test_a_keep_that_names_no_node_in_this_dump_is_refused():
     with pytest.raises(RetypeError) as exc:
         apply_plan(dump, ghosted)
     assert any("pt-ghost" in p for p in exc.value.problems)
+
+
+def test_the_output_id_set_is_verified_against_the_PLAN_not_the_input():
+    """``out_nodes`` is built by appending one row per input row and
+    ``identity_by_id`` is a map over that same input, so comparing the output's
+    id set with ``set(identity_by_id)`` compares the input with itself and can
+    never disagree. The only comparison that CAN disagree is against the ids the
+    PLAN declares — the moves' ``dump_id``s plus the ids of the nodes
+    ``plan.keeps`` names. A plan declaring no ids at all while the dump carries
+    nodes is refused with that mismatch named."""
+    dump = _dump()
+    plan = build_plan(dump, _all_keep(dump, overrides={"pt-goal-1": GOAL_MOVE}))
+    declares_nothing = dataclasses.replace(plan, moves=(), keeps=())
+    with pytest.raises(RetypeError) as exc:
+        apply_plan(dump, declares_nothing)
+    joined = " ".join(exc.value.problems)
+    assert "node set changed" in joined, exc.value.problems
+    assert "declares 0 id(s)" in joined, exc.value.problems
 
 
 def test_edges_preserved_is_verified_not_assumed():
@@ -773,6 +821,31 @@ def test_a_move_whose_name_collides_with_a_kept_object_is_refused():
         )
     joined = " ".join(exc.value.problems)
     assert "pt-goal-1" in joined and "obj-1" in joined
+
+
+def test_a_KEPT_multi_label_object_is_checked_for_a_name_collision():
+    """Invariant 3 forbids MOVING a multi-label node, so ``keep`` is its only
+    legal decision — and a keep preserves the label set verbatim, so a
+    ``["Point", "Object"]`` node is STILL an ``:Object`` after the plan and the
+    write path still MERGEs on its name (#7369). Grouping kept nodes by "the
+    single epistemic label" took ``_current_label(node)[0]``, which is ``None``
+    for a multi-label node, so exactly the nodes invariant 3 forces us to keep
+    were dropped from the collision check."""
+    dump = _dump()
+    multi = dump["nodes"][7]
+    assert multi["labels"] == ["Point", "Object"] and multi["props"]["id"] == "pt-multi-1"
+    multi["props"]["name"] = "Multi Alpha"
+    with pytest.raises(RetypeError) as exc:
+        build_plan(
+            dump,
+            _all_keep(
+                dump,
+                overrides={"pt-goal-1": {"label": "Object", "kind": "goal", "name": "Multi Alpha"}},
+            ),
+        )
+    joined = " ".join(exc.value.problems)
+    assert "pt-multi-1" in joined and "pt-goal-1" in joined
+    assert "MERGEs on its name" in joined
 
 
 def test_two_kept_objects_sharing_a_name_are_refused():
