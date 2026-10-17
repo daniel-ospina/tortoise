@@ -538,7 +538,7 @@ export const SKILLS_INSTALL_URL =
   'https://app.premiselabs.co/install-tortoise-skills.sh'
 
 // #4365: the shipped skill set, stated ONCE. Every surface in THIS module that
-// enumerates it interpolates these — SKILL_INSTALL, the HARNESS_SKILLS block,
+// enumerates it interpolates these — the HARNESS_SKILLS block,
 // and the HARNESS_STEPS.cursor label — so the copy cannot drift from the
 // installer's own `SKILLS=(...)` array (pinned by test on both sides). The
 // four LIVE dashboard wizard prompts interpolate SKILLS_LIST too — from
@@ -720,10 +720,11 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 //   level 2 — the SURFACE you connect (only when there is a real choice):
 //             Claude → Code, Desktop, Web;  Codex → CLI, Desktop
 //
-// `surface.id` is the existing HARNESS_ORDER/`wizardHarness` LEAF id, so every
-// per-harness payload (UNIVERSAL_COMMAND, wizardPromptText, HARNESS_NAMES,
-// capture support) stays keyed exactly as before — this is a UI grouping, not
-// a vocabulary change (DE2E-5's 7-harness contract is untouched).
+// `surface.id` is the existing HARNESS_ORDER/`wizardHarness` LEAF id, so the
+// per-harness payloads (wizardPromptText, HARNESS_NAMES, capture support) stay
+// keyed exactly as before — this is a UI grouping, not a vocabulary change
+// (DE2E-5's 7-harness contract is untouched). CODEX_DESKTOP_COMMAND is a bare
+// function, not a per-harness map: it serves the one manual leaf (#3430).
 // ChatGPT stays out: it has no Claude/Codex-style surface split and its
 // Developer-mode path is not reachable from the dashboard chooser (#2698).
 // #2865: Claude's Desktop/Web surfaces ARE key-less OAuth (HARNESS_OAUTH) and
@@ -823,32 +824,36 @@ export function analyticsHarnessOf(leaf) {
     : leaf
 }
 
-// ── #1998 (W2): universal setup command (epic #1976 I-3, surface 5) ────────
-// The connect step's ONE command per harness — all 7 covered, 4 self-install
-// (config-write) + 3 teach-human (desktop/web/chatgpt — web/chatgpt have no
-// local shell, so the human completes the steps). HARNESS_NAMES/HARNESS_ORDER
-// stay the single 7-harness vocabulary; the harness table in the SERVED
-// onboarding instructions (#4365: an instruction document, not an installed
-// skill) is the agent-side self-adjudication source (the chooser's
-// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the live chooser
-// cannot select it: #2698 deleted its dashboard tab and #2912's 4-family
-// HARNESS_FAMILIES excludes it. (The archived #1643 render at the bottom of this
-// block maps the full HARNESS_ORDER, chatgpt included, but it is gated on
-// `LEGACY_WIZARD_ARCHIVED && welcomeOriented` — both false.) Its LIVE carrier is
-// the public setup docs page (#4836): website/docs.html#chatgpt names the
-// Developer-mode path, the canonical connector URL and the onboarding
-// instructions URL. The block below embeds the workflows prompt; the page hands
-// over the onboarding document. This block's `chatgpt` copy must omit
-// `tortoise_health` — it verifies in the chat instead (pinned in
-// harnesses.test.js).
+// ── #1998 (W2) / #3430: the ONE rendered connect block (epic #1976 I-3) ────
+// #3430 DELETED the per-harness "universal setup command" that used to live
+// here: one paste-able block per harness, of which only Codex Desktop was ever
+// rendered. The rest reached no user while DE2E-5 asserted their exact strings,
+// so the suite could keep passing on copy the product had stopped serving.
+// Do NOT re-add a block without rendering it in main.jsx first.
 //
-// Contract (DE2E-5): every harness reaches a connected state verifiable via
-// tortoise_health; the served onboarding instructions take over from the
-// command (verify → harness-connected checkpoint). The command NEVER embeds the API
-// key in a project-scoped/committable config (env-var indirection); CLI
-// one-liners carry the key in the shell call only. These exports are
-// ADDITIVE — the legacy HARNESS_* exports stay (the ARCHIVED #1643 wizard
-// render + Memory-sources capture rows depend on them; A0 rollback path).
+// The live connect copy is `wizardPromptText` (agent-driven harnesses: the human
+// hands the agent the prompt and the AGENT does the mechanics — which `mcp add`
+// subcommand, which config file, #3232) plus the Claude connector JSX in
+// main.jsx (#2865). HARNESS_NAMES/HARNESS_ORDER remain the single 7-harness
+// vocabulary; the harness table in the SERVED onboarding instructions (#4365:
+// an instruction document, not an installed skill) is the agent-side
+// self-adjudication source.
+//
+// chatgpt is key-less/OAuth (HARNESS_OAUTH) and has NO dashboard surface:
+// #2698 deleted its tab and #2912's families exclude it. Its live carrier is
+// the public setup docs page (#4836): website/docs.html#chatgpt.
+//
+// Contract (DE2E-5), and where each clause is now pinned:
+//   • every harness reaching a connected state verifiable via tortoise_health —
+//     pinned on the RENDERED step-2 prompt for all six non-chatgpt harnesses
+//     (harnesses.test.js; the workflows prompt is asserted too, but it embeds
+//     that same step-2 text, so it is a restatement, not second coverage);
+//   • the key never lands in a project-scoped/committable config (env-var
+//     indirection) — pinned on the rendered prompt, never on a literal (the
+//     test key is itself `tt_`-prefixed, so "contains tt_" proves nothing).
+// These exports are ADDITIVE — the legacy HARNESS_* exports stay (the ARCHIVED
+// #1643 wizard render + Memory-sources capture rows depend on them; A0 rollback
+// path).
 export const HARNESS_SELF_INSTALL = ['claude', 'codex', 'cursor', 'pi']
 
 export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web', 'chatgpt']
@@ -861,42 +866,18 @@ export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web', 'chatgpt']
 // branches on it directly (main.jsx), so a change here must be mirrored there.
 export const HARNESS_OAUTH = ['claude-desktop', 'claude-web', 'chatgpt']
 
-// The skill installer line every config-writing harness command appends.
-// #4365: it names the THREE capabilities the installer actually ships (v3) —
-// onboarding is not among them. Onboarding is the instructions the agent
-// reads at ONBOARDING_INSTRUCTIONS_URL, plus the MCP config in the block above.
-const SKILL_INSTALL = (harness) =>
-  `# ${SKILLS_CLAIM}:\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}\n\n# Onboarding is NOT a skill — it is the instructions below plus the config above.\n# Read and follow them here: ${ONBOARDING_INSTRUCTIONS_URL}`
-
-// One copyable block per harness. The wizard renders + copies exactly this.
-export const UNIVERSAL_COMMAND = {
-  claude: (key) =>
-    `# Tortoise — universal setup command (Claude Code)\n# Works with every supported agent — your agent figures out which one it is\n# during setup. You can re-run this in any new project folder.\nexport TORTOISE_API_KEY=${key}\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${'${TORTOISE_API_KEY}'}"\n\n${SKILL_INSTALL('claude')}\n\n# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health\n# and reports the harness-connected checkpoint.`,
-  codex: (key) =>
-    `# Tortoise — universal setup command (Codex CLI)
-export TORTOISE_API_KEY=${key}
-codex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY
-
-${SKILL_INSTALL('codex')}
-
-# Run from your project root — the installer writes skills to .agents/skills
-# here (Codex's project skill root) and AGENTS.md for this repo.
-# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health
-# and reports the harness-connected checkpoint.
-# First-time calls may prompt for approval in Codex — tortoise_health and the
-# read-only tools are safe to allow (granular auto-approve for read tools).
-# On Codex Desktop (no terminal)? Use the Desktop variant on the dashboard
-# tab instead — it configures ~/.codex/config.toml with no shell.`,
-  // #2328/#2329/#2330: Codex Desktop (the GUI app) has NO terminal and does
-  // not inherit shell exports — `codex mcp add` is a CLI subcommand it cannot
-  // run. Desktop shares ~/.codex/config.toml with the CLI, so the terminal-
-  // less path is a config-file block: bearer_token_env_var (with the var
-  // placed into the app's environment via launchctl/setx) OR the literal
-  // http_headers fallback (private file, chmod 600 — never committed).
-  // Skills live in .agents/skills (Codex's documented skill root, #2329) and
-  // load when the project folder is open — the Desktop flow defers the
-  // installer to a one-time terminal (or the agent itself inside the project).
-  codexDesktop: (key) =>
+// The ONE config-writing leaf still rendered as a single paste-able block.
+// Codex Desktop has no terminal (#2827) and no agent-facing verify to order
+// against a restart, so the human pastes a config.toml block themselves.
+//
+// Every other harness is agent-driven: the dashboard hands the human a prompt
+// for their agent (`wizardPromptText`) and the AGENT works out the mechanics,
+// so the per-harness "universal command" copy that used to live here reached no
+// user while `DE2E-5` asserted against it (#3430). It is DELETED, not parked:
+// a constant nobody renders is a claim the suite can keep passing while the
+// product says something else. The install facts it asserted are now pinned on
+// the surfaces that DO render (see harnesses.test.js).
+export const CODEX_DESKTOP_COMMAND = (key) =>
     `# Tortoise — Codex Desktop (no terminal needed)
 # Codex Desktop shares ~/.codex/config.toml with the CLI. Add this block to
 # that file (create it if missing — never put the key in a committed file):
@@ -929,50 +910,4 @@ bearer_token_env_var = "TORTOISE_API_KEY"
 
 # Then say "Set up Tortoise" in Codex Desktop — it verifies with
 # tortoise_health and reports the checkpoint. First-time MCP calls may prompt
-# for approval — tortoise_health and the read-only tools are safe to allow.`,
-  cursor: () =>
-    `# Tortoise — universal setup command (Cursor)\n# 1. Export the key — add this line to your shell profile so it persists:\nexport TORTOISE_API_KEY=<your-tortoise-api-key>\n# 2. Create .cursor/mcp.json in this project with:\n${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}\n# 3. Install the Tortoise skills (run in a terminal):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor\n# 4. Restart Cursor, then tell your agent: "Set up Tortoise" — it verifies\n#    with tortoise_health and reports the harness-connected checkpoint.\n#    Onboarding is NOT a skill (it is not installed) — the instructions your\n#    agent follows are at ${ONBOARDING_INSTRUCTIONS_URL}.\n#    (The config references the env var, never the key.)`,
-  pi: (key) =>
-    `Set up Tortoise for this project (universal setup command — Pi):
-1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).
-2. Create or merge .mcp.json in this project with (the file references the
-   env var, never the key):
-${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
-3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
-   (Onboarding is NOT a skill — it is not installed. Your agent follows the
-   instructions at ${ONBOARDING_INSTRUCTIONS_URL}.)
-4. Restart Pi from a NEW terminal (quit Pi fully, open a new terminal
-   window, and start Pi there). A \"/reload\" is NOT enough — Pi reads the
-   key from the environment of the shell that launched it, so a reload
-   keeps the stale or empty value. ('/reload' re-scans configs, skills, and
-   MCP registrations, and tortoise connects eagerly at startup — the config
-   doesn't mark it lazy — so no separate connect step is needed.)
-   Then call tortoise_health — when it passes, tell me "Tortoise is
-   connected".`,
-  // #2865: key-less OAuth. `key` is accepted (one signature for every harness)
-  // but deliberately unused — neither of these surfaces takes a credential.
-  'claude-desktop': () =>
-    `# Tortoise — universal setup command (Claude Desktop — OAuth, no API key)
-# Claude Desktop is filesystem-less for remote MCP: use the Connectors UI, NOT
-# claude_desktop_config.json (that file only accepts local stdio servers, so an
-# mcpServers block with a type/headers remote shape silently does nothing).
-# YOU complete these steps, then the agent verifies:
-1. Open Claude Desktop → Settings → Connectors → Add custom connector.
-2. Connector name: Tortoise
-3. Server URL:   ${CANONICAL_MCP_URL}
-4. Leave Request headers empty — no API key is needed. On the first
-   connection Claude opens Tortoise's sign-in page: sign in, click Authorize,
-   then pick the Organization you're onboarding.
-5. Start a new chat, paste the Tortoise workflows prompt, then say "Set up
-   Tortoise" — the agent calls tortoise_health to verify. Click "I've connected
-   it — Continue" in the dashboard connect step when it passes (the click only
-   advances — the agent's first successful write is what confirms it).
-   No local skills here — your agent follows the onboarding instructions at
-   ${ONBOARDING_INSTRUCTIONS_URL}.`,
-  'claude-web': () =>
-    `Tortoise — universal setup command (Claude Web — OAuth, no API key)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${CANONICAL_MCP_URL}\n3. Leave Request headers empty — no API key is needed. On the first connection\n   Claude opens Tortoise's sign-in page: sign in, click Authorize, then pick the\n   Organization you're onboarding.\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've connected it — Continue" in the dashboard connect\n   step (the click only advances — the agent's first successful write is what\n   confirms it).\n   No local skills here — your agent follows the onboarding instructions at\n   ${ONBOARDING_INSTRUCTIONS_URL}.`,
-  chatgpt: () =>
-    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools. The dashboard connect\nstep has no ChatGPT option to pick (#2698 deleted its tab; #2912's chooser has\nno chatgpt family), so the agent's first successful write is what confirms the\nconnection.\nNo local skills here — your agent's onboarding instructions are the document at\n${ONBOARDING_INSTRUCTIONS_URL}.`,
-}
-
-export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER
+# for approval — tortoise_health and the read-only tools are safe to allow.`

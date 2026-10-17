@@ -226,9 +226,14 @@ jobs:
           # deploy. tests/test_pages_bindings.py pins this cwd by execution.
           cd "$STAGE"
           # #8816: ASSERTED against what npm resolved, not just declared. A declared
-          # "4" resolves to 4.151.1 and fails here; `:?` refuses an empty value
-          # instead of letting `wrangler@` float to latest. The verify and the
-          # deploy share this one shell, so the value proved is the value used.
+          # "4" fails here whatever the npm cache holds — `wrangler --version`
+          # never prints a bare "4", so the comparison cannot accept one. What this
+          # line CANNOT see is a float SPELLING on the command line (`npx
+          # wrangler@4`): a warm cache can serve the pinned tarball for it and print
+          # the pin itself, so the guard's text arms, not this line, are what forbid
+          # that spelling; `:?` refuses an empty value instead of letting
+          # `wrangler@` float to latest. The verify and the deploy share this one
+          # shell, so the value proved is the value used.
           got="$(npx --yes "wrangler@${WRANGLER_VERSION:?}" --version | tr -d '[:space:]')"
           if [ "$got" != "$WRANGLER_VERSION" ]; then
             echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"
@@ -682,10 +687,12 @@ jobs:
       # mirror, so a parity failure must fail THIS job. The two jobs carry no
       # `needs:` between them, so this placement is what keeps a mirror break
       # from blocking the unrelated marketing deploy (premiselabs.co) — and
-      # what makes it gate the surface that actually ships the mirror. It is
-      # local (`test`/`cmp` on tracked files) and needs no network and no setup
-      # step, so it is placed ahead of the bindings preflight's retry loop and
-      # ahead of the build that stages `public/` into `dist/`.
+      # what makes it gate the surface that actually ships the mirror. The
+      # #2691 check ITSELF is local (`test`/`cmp` on tracked files) and needs no
+      # network and no setup step, so it is placed ahead of the bindings
+      # preflight's retry loop and ahead of the build that stages `public/` into
+      # `dist/`. (The #4643 sibling two steps below is NOT local — it reads
+      # upstream — and carries its own setup + token.)
       - name: Onboarding instructions are staged for the dashboard deploy
         # #1998 (W2, M8): the OLD prompt-staging pipeline (the
         # archived prompt + harness variants -> deployed .md copies via the
@@ -703,6 +710,37 @@ jobs:
           cmp tortoise/onboarding/SKILL.md \
             website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md
           test -f website/apps/dashboard/public/install-tortoise-skills.sh
+      # #4643 (P1): the served MIRROR of the three MIT-authored skills is not
+      # merely derived from a pin in this repo — the pin is checked against the
+      # repo that AUTHORS it, here, before `public/` is staged into `dist/`.
+      # Without this step both arms lived in this repo, so an in-place edit of a
+      # served copy plus a hand-cut `sha256:` in the pin passed every test and
+      # deployed green.
+      # `--check-upstream` also enumerates upstream `skills/`, so a skill ADDED
+      # there is reported instead of being invisible to a pin-keyed loop, and it
+      # prints drift and "could not verify" as separate reasons — both exit
+      # non-zero (a network blip must never pass this step, and must never be
+      # reported as a drift someone would chase).
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          version: '0.12.3'
+      - name: Served-skill mirror is current with the MIT repo that authors it (#4643)
+        # `--no-project --with pyyaml` (review finding, P2): a bare `uv run` syncs
+        # the WHOLE project env — runtime deps plus the `dev` group (jax,
+        # scikit-learn, playwright, pytest…) — to run a script whose only
+        # third-party import is pyyaml. That put a cold 1-3 min PyPI sync on the
+        # critical path of every dashboard deploy (including hotfix/rollback),
+        # and it inherited the stale-`.venv` runner-image failure mode (#1917)
+        # that python-ci.yml pre-empts with `rm -rf .venv`. Same shape as
+        # deploy-hosted.yml's `uv run --no-project --with pyyaml python3 …`:
+        # the gate is identical and the sync is gone.
+        run: uv run --no-project --with pyyaml==6.0.3 python3 tools/served_skills_parity.py --check-upstream
+        env:
+          # Raises the GitHub API rate limit for the upstream `skills/` listing
+          # (60/hour unauthenticated, 5000/hour with a token). The tool uses it
+          # only as an Authorization header on that one request.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # #4054: the BFF moved onto `tortoise-dashboard`, which when the move
       # landed had 0 env vars and 0 D1 bindings — every /auth/* and /api/*
       # request would have 503'd on a green deploy. The same #3616 gate that

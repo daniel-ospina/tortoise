@@ -1550,6 +1550,35 @@ def test_supabase_control_change_selects_the_org_purge_rpc_guard():
     assert "test_7968_org_purge_rpc.py" in r["test_files"], r
 
 
+def test_socket_bound_2969_guard_runs_on_every_spread_site():
+    # PR #8856 review P2: `tests/test_socket_bound_not_multiplied_2969.py`
+    # guards the `retry=` key that `_bounded_server_socket_kwargs()` returns and
+    # that FOUR other modules spread. Its registration was `core`-only — and
+    # `core` is added only when nothing else matched — but `tortoise/__main__.py`
+    # (the doctor probe) and `tortoise/acl_graph_users.py` (the ACL admin client)
+    # are BOTH exact SOURCE_PATTERNS["api"] entries. A diff touching either one
+    # alone therefore selected `api`, REPLACED the `core` fallback, and never
+    # collected this file: the one-attempt/wall-clock measurement simply did not
+    # run on a change to a site it pins (the #2938/#3154/#4367 silent-drop class
+    # `#3261` removed the false claim about). Registration is DUAL for that
+    # reason; `session_indexer.py` / `backup.py` match no named pattern, so they
+    # really do fall through to `core` and rely on its own entry.
+    # Mutation check: deleting the `api` arm fails the first loop; deleting the
+    # `core` arm fails the second.
+    for api_source in ("tortoise/__main__.py", "tortoise/acl_graph_users.py"):
+        r = _sel([api_source])
+        assert r["full"] is False, (api_source, r)
+        assert r["surfaces"] == ["api"], (api_source, r)
+        assert "test_socket_bound_not_multiplied_2969.py" in r["test_files"], (
+            api_source, r)
+    for core_source in ("tortoise/session_indexer.py", "tortoise/backup.py"):
+        r = _sel([core_source])
+        assert r["full"] is False, (core_source, r)
+        assert r["surfaces"] == ["core"], (core_source, r)
+        assert "test_socket_bound_not_multiplied_2969.py" in r["test_files"], (
+            core_source, r)
+
+
 def test_record_schema_pin_runs_on_migration_or_doc_change():
     # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
     # the record migrations against the placement table in
