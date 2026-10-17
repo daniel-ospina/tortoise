@@ -317,11 +317,16 @@ test('the RENDERED wizard prompts never inline a Bearer header or a project conf
   // returns false for exactly the form the product ships.
   assert.ok(!/Authorization["\s:=]*Bearer/i.test(piPrompt), 'pi prompt never inlines a Bearer header')
   assert.ok(!piPrompt.includes('.mcp.json'), 'pi prompt names no project config file — the agent writes it')
-  // Scope: the WIZARD PROMPTS (agent-driven harnesses). The Codex Desktop block is
-  // deliberately out of scope — it offers `Authorization = "Bearer ${key}"` as the
-  // documented no-shell fallback, in a private file the copy tells the human to
-  // chmod 600. That is a designed exception, not an oversight.
-  for (const h of HARNESS_SELF_INSTALL) {
+  // Scope: EVERY wizard prompt — all six harnesses that render one, not just the
+  // four self-install leaves. `HARNESS_SELF_INSTALL` alone left the two connector
+  // leaves (claude-desktop/claude-web) uncovered here, while the title named the
+  // whole population (review cycle 3). The Codex Desktop block is deliberately
+  // OUT of scope: it offers `Authorization = "Bearer ${key}"` as the documented
+  // no-shell fallback, in a private file the copy tells the human to chmod 600 —
+  // a designed exception, not an oversight.
+  const withPrompts = HARNESS_ORDER.filter((h) => h !== 'chatgpt')
+  assert.equal(withPrompts.length, 6, 'six harnesses render a wizard prompt')
+  for (const h of withPrompts) {
     for (const step of [1, 2]) {
       const text = wizardPromptText(h, step, KEY, 'included') || ''
       assert.ok(!/Authorization["\s:=]*Bearer/i.test(text),
