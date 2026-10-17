@@ -1694,6 +1694,29 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_retype_snapshot_tool_change_selects_core_not_tier1():
+    # #8882 review P1: tools/retype_snapshot.py is the CLI for the offline
+    # re-typing mechanics and owns tests/test_retype_8882.py, registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a CLI-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface and the
+    # file's own CLI-contract cases (`--decisions requires --out`, the propose →
+    # apply round trip, the exit codes) never ran on the PR editing the CLI.
+    # Registering the test under `core` does not help — a name in a surface's
+    # test_files only runs when that surface is already selected.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["tools/retype_snapshot.py"])`
+    # -> surfaces=[], full=False, test_retype_8882.py absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic and DB-free, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/retype_snapshot.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_retype_8882.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_orchestrator_harness_change_selects_core_not_tier1():
     # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
     # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's

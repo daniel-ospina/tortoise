@@ -639,6 +639,11 @@ surfaces:
   # class: a `__main__.py`-only change that selected `api` alone would skip a
   # core-only registration). Dual-registered with `core`.
   - test_secret_not_printed_5109.py
+  # #5109 (read side): the same `api` exposure as the entry above — this file
+  # pins `tortoise/__main__.py`'s credential resolver, so a `__main__.py`-only
+  # diff selects `api` and would otherwise skip it (the #2938 silent-drop
+  # class). Dual-registered with `core`.
+  - test_credential_store_mode_5109.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
@@ -1304,8 +1309,21 @@ surfaces:
   # emits it yet (`#7970` is the consumer), so `core` alone is correct.
   - test_residency_router.py
   - test_secret_not_printed_5109.py
+  # #5109 (read side): a store whose mode drifted open must warn on READ —
+  # nothing verified on read what every writer pins shut. Pins
+  # `tortoise/__main__.py::_resolve_config_path` + the `st_` token reader.
+  - test_credential_store_mode_5109.py
   - test_sdk_retirement.py
   - test_record_schema_placement.py
+  # #8882 (Phase 2 mechanics): the OFFLINE re-typing of a logical dump —
+  # `tortoise/retype.py` matches no SOURCE_PATTERN, so a module-only change
+  # falls through to `core` and this guard runs with it. DB-free by
+  # construction: the subject IS a `tortoise-logical-dump-v1` dict, so both
+  # modes are pure functions and the file needs no graph, no URI and no
+  # carve-out registration. Its loop back to the Phase-4 loader is asserted
+  # against `hosted_backup`'s OWN primitives (`DUMP_FORMAT`,
+  # `_sanitize_label`), which keeps that half honest without a DB.
+  - test_retype_8882.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
   # inputs it reads select `core`: `tortoise/record_projection.py` matches no
@@ -5592,6 +5610,7 @@ durations:
   test_ci_verdict.py: 0.2
   test_compute_attribution.py: 0.6
   test_connector_scope.py: 0.9
+  test_credential_store_mode_5109.py: 2.2  # #5109 (read side): 16 tests, local wall 2.16 s (measured at the #5109 lane head, 2026-10-12) — no DB, no network, every test a tmp-dir store plus a capsys read. A NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact), so this is the pre-merge estimate; refresh it from the first post-merge run that includes the file.
   # #4685: a NEW file has no CI junit measurement (a file that never ran cannot
   # appear in an artifact), so this is the pre-merge estimate: the four tests'
   # CALL times summed to ~1.7 s locally (0.70 + 0.53 + 0.14 + 0.04). The
