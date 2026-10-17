@@ -344,30 +344,40 @@ _DB_TIMEOUT_MIN_S = 0.05
 #: own typo contract (a silent clamp would hide the typo that caused it).
 _DB_TIMEOUT_MAX_PER_LANE_S = 600.0
 
-#: #3350: explicit, bounded retry policy for the EMBEDDED client.
+#: #3350: explicit, bounded retry policy for EVERY product DB client.
 #:
-#: redis-py 8's client DEFAULT is ``Retry(ExponentialWithJitterBackoff(
-#: base=DEFAULT_RETRY_BASE, cap=DEFAULT_RETRY_CAP), retries=10)`` — TEN
-#: retries after the first attempt. Two consequences, both bad here:
+#: The client DEFAULT is a FUNCTION-SIGNATURE value nobody at a call site
+#: chooses, and on this dependency it has already moved once: at #3350 the
+#: pin was ``redis 8.1.0``, whose
+#: ``Retry(ExponentialWithJitterBackoff(base=DEFAULT_RETRY_BASE,
+#: cap=DEFAULT_RETRY_CAP), retries=10)`` was TEN retries after the first
+#: attempt; the current pin (``redis>=7.1,<8``, locked 7.4.1) is THREE. Two
+#: consequences, both bad here:
 #:
-#:  * a read timeout costs ``11 x socket_timeout`` PLUS up to ~75s of
-#:    exponential jitter backoff, so ONE wedged embedded daemon parks
-#:    whatever thread is running the query for ~59s (measured, SIGSTOPped
-#:    daemon, before this constant existed) — and after
-#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` was wired in (#3350) the
-#:    DEFAULT 10s read timeout would have made that ~115s;
+#:  * a read timeout costs ``(1 + retries) x socket_timeout`` PLUS
+#:    exponential jitter backoff, so ONE wedged embedded daemon parked
+#:    whatever thread was running the query for ~59s (measured, SIGSTOPped
+#:    daemon, on the then-pinned 10-retry client, before this constant
+#:    existed) — and after ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` was wired
+#:    in (#3350) the DEFAULT 10s read timeout would have made that ~115s. On
+#:    today's 3-retry pin the same shape is a 4x multiplier, measured on the
+#:    HOST lane as 7.57s for a 1s bound (#2969);
 #:  * it makes the bound UN-KNOWABLE from outside: setting
-#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=t`` still waited ~11t, so the
-#:    knob an operator lowers to tighten the loop-stall ceiling did not
-#:    tighten what actually parked the thread.
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=t`` still waited ``(1 +
+#:    retries) t``, so the knob an operator lowers to tighten the loop-stall
+#:    ceiling did not tighten what actually parked the thread.
 #:
 #: ONE retry keeps the transient-blip recovery (a single reconnect) while
-#: capping the multiplier at 2, so the embedded lane's worst case is
-#: statically ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff``
-#: rather than a dependency default that can change under us. That is the
-#: property ``monitoring``'s layered-timeout doctrine needs ("make the inner
-#: call bounded so the worker frees itself"). The HOST branch is deliberately
-#: untouched — its retry policy is not what #3350 is about.
+#: capping the multiplier at 2, so a lane's worst case is statically
+#: ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff`` rather than a
+#: dependency default that can change under us. That is the property
+#: ``monitoring``'s layered-timeout doctrine needs ("make the inner call
+#: bounded so the worker frees itself"). The policy is NOT embedded-only —
+#: the name is history: #2969 installed this SAME count on the HOST lane via
+#: ``_bounded_server_socket_kwargs()``, whose five consumers spread it,
+#: because that lane carried the identical multiplier. So raising this
+#: constant raises BOTH lanes, and adding a second host-specific policy is
+#: exactly the drift #2969 removed. See ``_embedded_retry()``.
 _EMBEDDED_RETRY_COUNT = 1
 _EMBEDDED_RETRY_BASE = 0.1
 _EMBEDDED_RETRY_CAP = 1.0
