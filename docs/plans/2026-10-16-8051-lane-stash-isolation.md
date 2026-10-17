@@ -200,9 +200,9 @@ One primitive, in `tools/lane_stash.py`:
   to a concurrent prune that is still deleting positions, and "in the register" is exactly the
   transient state a guard exists for; and by a later `prune --apply`, which reaps a guard whose OWNER
   WORKTREE is gone **and** whose object is named by the register or another non-guard ref — no
-  ROUTINE command releases that one (`recover` reaches it only through the explicit `-m` assertion,
-  which releases every guard for the sha), and left alone it blocks gc forever. The reap is suspended
-  entirely
+  ROUTINE command releases that one (`recover` releases every guard for a sha only when it ADOPTS
+  that sha; a guard for an entry nobody adopts is never reached), and left alone it blocks gc
+  forever. The reap is suspended entirely
   — and says so — while `git worktree list` reports any `prunable` registration (a worktree moved
   with plain `mv` leaves its OLD path registered, so a stale entry could hide a LIVE key), and it
   reports a failed register read instead of retaining silently, and its lane-key parse uses

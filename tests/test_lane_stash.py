@@ -2262,6 +2262,77 @@ def test_reap_reports_a_failed_register_read_and_releases_nothing(repo, monkeypa
     ).stdout.split()
 
 
+def test_recover_accepts_an_own_orphan_the_ref_still_names(repo):
+    """The emptied-reflog door refuses STRANGERS, not this lane's own pinned entry.
+
+    Demanding `-m` for an own pin asks the operator to assert ownership the tool
+    already holds (and the refusal text would be false: the marker and ref exist)
+    (#8822 review P2).
+    """
+    repo.dirty(repo.a, "f.txt", "base\nmine\n")
+    assert repo.lane(repo.a, "push", "-m", "mine").returncode == 0
+    sha = repo.stash_sha()
+    assert sha
+    # an emptied reflog: the register lists nothing, refs/stash still names it
+    repo.git("reflog", "expire", "--expire=now", "--all")
+    assert repo.stash_shas() == []
+    assert repo.stash_sha() == sha
+
+    rec = repo.lane(repo.a, "recover", sha)
+    assert rec.returncode == 0, _fail(rec)
+    check = repo.lane(repo.a, "check")
+    assert check.returncode == 0, _fail(check)
+
+
+def test_reap_failure_message_counts_the_guards_actually_kept(repo, monkeypatch, capsys):
+    """The abort message must report HELD guards, not merely unexamined ones.
+
+    One live-owner guard is skipped (still held), one is released, then the register
+    read fails. `kept 2` is the truth; counting loop indices would say `kept 1`
+    (#8822 review P2).
+    """
+    mod = _load_tool()
+    # a LIVE third worktree whose key sorts FIRST, so its guard is skipped first
+    live_wt = repo.root.parent / "aaa-live"
+    repo.git("worktree", "add", "-q", "-b", "feat/live", str(live_wt))
+    live_key = mod.lane_key(live_wt)
+
+    repo.dirty(repo.b, "f.txt", "base\none\n")
+    repo.git("stash", "push", "-q", "-m", "one", cwd=repo.b)
+    sha_one = repo.stash_sha()
+    repo.dirty(repo.b, "f.txt", "base\ntwo\n")
+    repo.git("stash", "push", "-q", "-m", "two", cwd=repo.b)
+    sha_two = repo.stash_sha()
+    assert sha_one and sha_two
+    live_guard = f"refs/pi-lane-prune-guard/{live_key}/{sha_one}"
+    dead_one = f"refs/pi-lane-prune-guard/deadlane-55555550/{sha_one}"
+    dead_two = f"refs/pi-lane-prune-guard/deadlane-55555551/{sha_two}"
+    for g, sha in ((live_guard, sha_one), (dead_one, sha_one), (dead_two, sha_two)):
+        repo.git("update-ref", g, sha)
+
+    monkeypatch.chdir(repo.a)
+    rows = mod._shared_register()
+    calls = {"n": 0}
+
+    def scripted():
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the read fails on the SECOND dead-owner candidate
+            raise mod.LaneStashError("register unreadable")
+        return list(rows)
+
+    monkeypatch.setattr(mod, "_shared_register", scripted)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    out = capsys.readouterr().out
+    assert "kept   2 prune guard(s)" in out, out
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert live_guard in refs, refs
+    assert dead_one not in refs, refs
+    assert dead_two in refs, refs
+
+
 def test_check_does_not_name_prune_as_reclaimable_on_a_diverged_register(repo):
     """`check` must not advertise `prune --apply` on a state prune refuses.
 

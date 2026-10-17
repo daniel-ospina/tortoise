@@ -779,10 +779,10 @@ def _reap_stale_guards() -> None:
     """Release guards whose OWNER WORKTREE is gone and whose object has another handle.
 
     A guard left by a removed worktree is not released by any ROUTINE command:
-    `prune` only unpins the guards IT created, and `recover` reaches one only via
-    the explicit `-m` assertion (which releases every guard for that sha). Once
-    its object is named by the register or a lane ref the guard is redundant, and
-    left alone it blocks gc forever (#8822 review P2).
+    `prune` only unpins the guards IT created, and `recover` releases every guard
+    for a sha only when it ADOPTS that sha — so a guard for an entry nobody adopts
+    is never reached. Once its object is named by the register or a lane ref the
+    guard is redundant, and left alone it blocks gc forever (#8822 review P2).
 
     Both conditions are required: a LIVE owner key may be a prune in flight, whose
     guard is its only protection during a positional delete; a DEAD owner's guard
@@ -1401,8 +1401,12 @@ def cmd_recover(args: argparse.Namespace) -> int:
     # repair are unaffected: own entries are `own`, and those repairs are not
     # enumerated. `-m` is the explicit human assertion that overrides it, as it
     # already is for a subject that does not look like a stash (#8773 P1).
+    # Provenance oracle shared by both refusal doors: an own pin/applied record, or
+    # an own `[<lane-key>]` marker. Computed once, ABOVE the doors, so the
+    # `refs/stash`-still-NAMES door can tell an own entry from a stranger's (#8822
+    # review P2).
+    own_shas = {e["sha"] for e in _parse_entries(key)} | _applied_shas(key)
     if not args.message:
-        own_shas = {e["sha"] for e in _parse_entries(key)} | _applied_shas(key)
         for row in _shared_register():
             if row["sha"] != args.sha:
                 continue
@@ -1426,8 +1430,18 @@ def cmd_recover(args: argparse.Namespace) -> int:
     # is: `recover` would MINT this lane's ownership and `check` would then clear
     # a bare `git stash pop` on a peer's work — the same #8051 harm the ENUMERATED
     # guard above closes, reached through the other door. Recovery there is an
-    # ASSERTION of ownership, so it requires `-m` (#8773 review P1).
-    if not args.message and _stash_head() == args.sha and not _register_contains(args.sha):
+    # ASSERTION of ownership, so it requires `-m` (#8773 review P1) — but only for
+    # an entry that is NOT already provably this lane's: demanding `-m` for an own
+    # pin or an own marker asks the operator to assert ownership the tool already
+    # holds, and the refusal text ("no lane marker and no lane ref") would be
+    # false about that entry (#8822 review P2).
+    provably_own = args.sha in own_shas or _subject_lane_key(commit_subject) == key
+    if (
+        not args.message
+        and not provably_own
+        and _stash_head() == args.sha
+        and not _register_contains(args.sha)
+    ):
         raise LaneStashError(
             f"refusing to recover {args.sha[:12]}: `refs/stash` still NAMES it, so nothing "
             "was dropped — and it carries no lane marker and no lane ref, so it cannot be "
