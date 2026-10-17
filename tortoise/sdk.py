@@ -21350,13 +21350,13 @@ class TortoiseSDK:
         # #7983 (§17.4.4): the READ LEDGER — the instrument the hot fraction `f`
         # has never had. ONE product read = ONE funnel (`tortoise_fts_query`),
         # so this is the one seam that can say WHICH keys a read returned.
-        # OFF by default: when the flag is false nothing below runs, no key is
-        # extracted and the response is byte-identical (#4097 truthy contract).
-        # The module is stdlib-only at import and resolved lazily so a default
-        # deployment pays one boolean.
-        from . import read_ledger as _read_ledger
-
-        _record_reads = _read_ledger.enabled()
+        # OFF by default, and "off" means NOT IMPORTED: the flag is read FIRST,
+        # so a default deployment pays one env lookup, never loads the module,
+        # extracts no key and returns a byte-identical response (#4097's truthy
+        # contract, the one every other boolean env read in the tree uses).
+        _read_ledger = None
+        if is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
+            from . import read_ledger as _read_ledger
 
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
@@ -21386,7 +21386,7 @@ class TortoiseSDK:
                 read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
-            if _record_reads and rows:
+            if _read_ledger is not None and rows:
                 # The ledger never changes the answer: it records the
                 # `(label, key)` of every row this read returned, and a ledger
                 # failure is swallowed inside the module (a measurement may not

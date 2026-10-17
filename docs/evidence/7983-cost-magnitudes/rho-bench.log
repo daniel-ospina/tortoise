@@ -2,61 +2,67 @@ planted tenant rho7983-org-0: 89701 points (40% with a 384-d vector)
 planted tenant rho7983-org-1: 89701 points (40% with a 384-d vector)
 
 ── measured ────────────────────────────────────────────────
-record row width                : 1633 B median, 2296 B mean (n=2000 rows, 40% with a 384-d vector)
-record footprint per tenant     : 272,125,952 B = 0.2721 GB (2 tenants, 89,701 nodes each)
-  by table (all tenants)        : node_identity 36,044,800 B, point 508,157,952 B, relation 49,152 B
-  per node on disk              : 3,034 B (heap + indexes + TOAST) — against §17.4.2's 1,672 B per RESIDENT node in the CACHE
-keyed miss fetch                : 4 blocks (32 KiB logical) · 0.085 ms · 1656 B returned
-full-scope read (rebuild)       : 35,402 blocks (290.0 MB logical) · 287.58 ms · 89,701 rows
+planted content width          : 1133 B mean, 1233 B max (the dogfood MEAN 1,121.4 B; the 19,061 B TAIL is NOT planted)
+record row width                : 1320 B median, 2053 B mean (n=2000 rows, 40% with a 384-d vector)
+record footprint per tenant     : 248,127,488 B = 0.2481 GB (2 tenants, 89,701 nodes each)
+  by table (all tenants)        : node_identity 36,044,800 B, point 460,161,024 B, relation 49,152 B
+  per node on disk              : 2,766 B (heap + indexes + TOAST) — against §17.4.2's 1,672 B per RESIDENT node in the CACHE
+keyed miss fetch                : 4 blocks (32 KiB logical) · 0.076 ms · 1322 B returned
+full-scope read (rebuild)       : 29,568 blocks (242.2 MB logical) · 111.33 ms · 89,701 rows
 
 ── the disk line (rho's denominator) ───────────────────────
-disk per tenant per month       : $0.0340 (0.2721 GB x $0.125/GB)
-⚠️ the $8 GB-project allowance means the MARGINAL cost is $0 until a project's record exceeds 8 GB (29 tenants at this stock)
+disk per tenant per month       : $0.0310 (0.2481 GB x $0.125/GB)
+⚠️ the $8 GB-project allowance means the MARGINAL cost is $0 until a project's record exceeds 8 GB (32 tenants at this stock)
 
 ── the IOPS line (provisioned: peak, not total) ────────────
 1 cache miss                    : 4 IOPS if the page must be read
-3,000 included IOPS shared by 40 tenants (the §17.4.3 8 GB PRO density) = 75 IOPS/tenant
-=> IOPS saturates at            : 18.8 cold misses/second/tenant = 67,500/hour
+3,000 included IOPS / 40 tenants = 75.00 IOPS/tenant => 18.75 cold misses/s/tenant (67,500/hour)
+3,000 included IOPS / 1,000 tenants = 3.00 IOPS/tenant => 0.75 cold misses/s/tenant (2,700/hour)
 => at $0.024/IOPS/month, 1 extra provisioned IOPS costs $0.024/mo REGARDLESS of how many reads use it — the line is a step, so rho_IOPS is $0 below the step
 
 ── the egress line ─────────────────────────────────────────
-1 cache miss returns            : 1656 B = $0.00000015 of egress
-250 GB included =               : 150,966,184 cold misses/month = 58/second before egress costs anything
+1 cache miss returns            : 1322 B = $0.00000012 of egress
+250 GB included =               : 189,035,917 cold misses/month PROJECT-WIDE — the allowance is not per tenant
+  ⇒ per tenant at 40 tenants  : 4,725,898 misses/month = 1.823/s — the FIRST line to leave $0; each miss above it adds $1.2e-07
+  ⇒ per tenant at 1,000 tenants  : 189,036 misses/month = 0.073/s — the FIRST line to leave $0; each miss above it adds $1.2e-07
 
 ── the compute line ────────────────────────────────────────
-1 keyed miss                    : 0.085 ms
-1 full-scope rebuild            : 287.58 ms of one core (0.29 CPU-seconds)
-=> a DAILY rebuild/tenant       : 0.0024 CPU-hours/month
+1 keyed miss                    : 0.076 ms
+1 full-scope rebuild            : 111.33 ms of one core (0.11 CPU-seconds)
+=> a DAILY rebuild/tenant       : 0.0009 CPU-hours/month
 
 ──────────────────────────────────────────────────────────────────────
-RUN 2 of 2 — same container, same planted data (--skip-plant), re-run immediately after RUN 1.
-The range in the docs (CPU milliseconds only; BLOCKS are deterministic) is read from these two runs.
+RUN 2 — same container, same planted data (--skip-plant). Millisecond RANGES in
+the docs are read from these two runs; BLOCKS are deterministic across both.
 ──────────────────────────────────────────────────────────────────────
 record schema already present — migrations not re-applied
 
 ── measured ────────────────────────────────────────────────
-record row width                : 1639 B median, 2304 B mean (n=2000 rows, 40% with a 384-d vector)
-record footprint per tenant     : 272,142,336 B = 0.2721 GB (2 tenants, 89,701 nodes each)
-  by table (all tenants)        : node_identity 36,052,992 B, point 508,182,528 B, relation 49,152 B
-  per node on disk              : 3,034 B (heap + indexes + TOAST) — against §17.4.2's 1,672 B per RESIDENT node in the CACHE
-keyed miss fetch                : 4 blocks (32 KiB logical) · 0.0625 ms · 1656 B returned
-full-scope read (rebuild)       : 35,402 blocks (290.0 MB logical) · 483.24 ms · 89,701 rows
+planted content width          : 1133 B mean, 1233 B max (the dogfood MEAN 1,121.4 B; the 19,061 B TAIL is NOT planted)
+record row width                : 1323 B median, 2056 B mean (n=2000 rows, 40% with a 384-d vector)
+record footprint per tenant     : 248,127,488 B = 0.2481 GB (2 tenants, 89,701 nodes each)
+  by table (all tenants)        : node_identity 36,044,800 B, point 460,161,024 B, relation 49,152 B
+  per node on disk              : 2,766 B (heap + indexes + TOAST) — against §17.4.2's 1,672 B per RESIDENT node in the CACHE
+keyed miss fetch                : 4 blocks (32 KiB logical) · 0.03 ms · 1322 B returned
+full-scope read (rebuild)       : 29,568 blocks (242.2 MB logical) · 94.16 ms · 89,701 rows
 
 ── the disk line (rho's denominator) ───────────────────────
-disk per tenant per month       : $0.0340 (0.2721 GB x $0.125/GB)
-⚠️ the $8 GB-project allowance means the MARGINAL cost is $0 until a project's record exceeds 8 GB (29 tenants at this stock)
+disk per tenant per month       : $0.0310 (0.2481 GB x $0.125/GB)
+⚠️ the $8 GB-project allowance means the MARGINAL cost is $0 until a project's record exceeds 8 GB (32 tenants at this stock)
 
 ── the IOPS line (provisioned: peak, not total) ────────────
 1 cache miss                    : 4 IOPS if the page must be read
-3,000 included IOPS shared by 40 tenants (the §17.4.3 8 GB PRO density) = 75 IOPS/tenant
-=> IOPS saturates at            : 18.8 cold misses/second/tenant = 67,500/hour
+3,000 included IOPS / 40 tenants = 75.00 IOPS/tenant => 18.75 cold misses/s/tenant (67,500/hour)
+3,000 included IOPS / 1,000 tenants = 3.00 IOPS/tenant => 0.75 cold misses/s/tenant (2,700/hour)
 => at $0.024/IOPS/month, 1 extra provisioned IOPS costs $0.024/mo REGARDLESS of how many reads use it — the line is a step, so rho_IOPS is $0 below the step
 
 ── the egress line ─────────────────────────────────────────
-1 cache miss returns            : 1656 B = $0.00000015 of egress
-250 GB included =               : 150,966,184 cold misses/month = 58/second before egress costs anything
+1 cache miss returns            : 1322 B = $0.00000012 of egress
+250 GB included =               : 189,035,917 cold misses/month PROJECT-WIDE — the allowance is not per tenant
+  ⇒ per tenant at 40 tenants  : 4,725,898 misses/month = 1.823/s — the FIRST line to leave $0; each miss above it adds $1.2e-07
+  ⇒ per tenant at 1,000 tenants  : 189,036 misses/month = 0.073/s — the FIRST line to leave $0; each miss above it adds $1.2e-07
 
 ── the compute line ────────────────────────────────────────
-1 keyed miss                    : 0.0625 ms
-1 full-scope rebuild            : 483.24 ms of one core (0.48 CPU-seconds)
-=> a DAILY rebuild/tenant       : 0.0040 CPU-hours/month
+1 keyed miss                    : 0.03 ms
+1 full-scope rebuild            : 94.16 ms of one core (0.09 CPU-seconds)
+=> a DAILY rebuild/tenant       : 0.0008 CPU-hours/month

@@ -162,7 +162,11 @@ def test_a_key_without_bytes_does_not_enter_the_byte_fraction(ledger):
     assert f.bytes_known_fraction == pytest.approx(0.5)
     assert f.stock_bytes == 900  # only the sized key
     assert f.read_bytes == 0  # the read key has no byte figure
-    assert f.f_bytes == 0.0  # honest over its own sub-population
+    # `f_bytes` is 0.0 over its own sub-population — and it is NOT a reading of
+    # the reads, because the one key that WAS read carries no bytes. The flag is
+    # what stops that 0.0 being quoted as `f`.
+    assert f.f_bytes == 0.0
+    assert f.f_bytes_qualified is False
 
     # …and with NO sized key at all there is no byte fraction to quote — a
     # distinct ledger, because a byte fraction is a property of its own keys.
@@ -174,6 +178,72 @@ def test_a_key_without_bytes_does_not_enter_the_byte_fraction(ledger):
 
 
 # ── the coordinate ─────────────────────────────────────────────────────────
+
+
+def test_a_read_recorded_before_its_stock_still_counts(ledger):
+    """File order must not decide the answer.
+
+    Reads accumulate from the moment the flag is set while a stock census is a
+    separate, later step — so the natural order is read-first. A single-pass fold
+    would drop that read and report the key as "never read", moving `f` in the
+    FLATTERING direction (more zero-read mass = a bigger claimed saving).
+    """
+    record_read("Point", "p1", at="2026-10-17T00:00:01+00:00")
+    record_stock("Point", "p1", nbytes=1000, at="2026-10-17T00:00:02+00:00")
+
+    folded = fold(ledger)
+    assert folded.rows[(None, "Point", "p1")].read_count == 1
+    f = hot_fraction(folded)
+    assert f.f_keys == 1.0 and f.zero_read_bytes == 0
+    assert f.unregistered_reads == 0
+
+
+def test_a_read_for_a_key_never_registered_still_reports_unregistered(ledger):
+    """The join is per ident — an absent stock row stays a hole, not a pass."""
+    record_read("Point", "ghost")
+    record_stock("Point", "real", nbytes=10)
+    folded = fold(ledger)
+    assert folded.unregistered_reads == 1
+    f = hot_fraction(folded)
+    assert f.read_keys == 0 and f.zero_read_keys == 1
+
+
+def test_a_subject_row_keyed_only_by_id_is_unresolved_not_mis_keyed(ledger):
+    """`Subject`/`Object` are keyed by `name` in the record; an `id`-only row is a HOLE.
+
+    Recording such a row under `id` would put it outside the stock coordinate
+    (registered by `name`) and leave the key at `read_count = 0` — silently
+    inflating the zero-read mass for exactly the labels the label coordinate
+    exists for. It is counted instead.
+    """
+    assert row_key("Subject", {"id": "abc", "content": "x"}) is None
+    assert row_key("Subject", {"name": "acme", "id": "abc"}) == "acme"
+    recorded = read_ledger.record_rows("Subject", [{"id": "abc", "content": "x"}])
+    assert recorded == 0
+    assert fold(ledger).unresolved_reads == 1
+
+
+def test_the_ledger_file_is_created_unreadable_to_others(ledger):
+    """It holds tenant identifiers — 0600 on create, not the umask's default."""
+    record_stock("Subject", "acme", nbytes=10)
+    assert (ledger.stat().st_mode & 0o777) == 0o600
+
+
+def test_a_batch_is_one_append(ledger, monkeypatch):
+    """The instrument may not slow the path it measures: ONE write per batch."""
+    writes: list[bytes] = []
+    real_write = read_ledger.os.write
+
+    def counting(fd, blob):
+        writes.append(blob)
+        return real_write(fd, blob)
+
+    monkeypatch.setattr(read_ledger.os, "write", counting)
+    read_ledger.record_rows("Point", [{"id": f"p{i}"} for i in range(200)])
+    assert len(writes) == 1
+    # All 200 lines landed in that one write; none of the keys was ever
+    # registered as stock, so every one is a reported hole.
+    assert fold(ledger).unregistered_reads == 200
 
 
 def test_label_is_part_of_the_coordinate(ledger):

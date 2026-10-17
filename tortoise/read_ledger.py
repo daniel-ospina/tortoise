@@ -51,15 +51,20 @@ append is size-bounded (`TORTOISE_READ_LEDGER_MAX_BYTES`, default 64 MiB) and on
 the bound it writes ONE `capped` line and stops, which `report` surfaces as
 `capped: true` for the rest of that file's life.
 
-**Off by default.** `TORTOISE_READ_LEDGER` unset/`0` means the read funnel does
-not call this module at all, so a default deployment is byte-identical and pays
-nothing (the #4097 truthy contract). `TORTOISE_READ_LEDGER_PATH` chooses the
+**Off by default, and off means NOT IMPORTED.** The funnel reads the flag first
+(`TORTOISE_READ_LEDGER`, the #4097 truthy contract) and imports this module only
+when it is truthy — so a default deployment pays one env lookup, never loads the
+module, and its response is byte-identical. `TORTOISE_READ_LEDGER_PATH` chooses the
 file; the default sits next to the embedded store (`resolve_db_path()`'s
 directory) so one instance's ledger cannot be confused with another's.
 
-Format: JSONL, one line per event, appended with a single `O_APPEND` write and
-kept under 4 KiB per line, so several processes may append to one ledger without
-interleaving.
+Format: JSONL, one line per event, appended with a single `O_APPEND` write **per
+BATCH** (the funnel hands over a whole returned row-set) and kept under 4 KiB per
+line, so several processes may append to one ledger without interleaving. One
+write per event was measured at ~610 µs (open/write/close/mkdir/stat) — 5 ms on a
+10-row read — which is the instrument slowing the path it measures. Created
+`0600`: the ledger carries tenant identifiers (`Subject.name`, `Source.url`), so
+it must not be world-readable just because the umask says so.
 """
 
 from __future__ import annotations
@@ -174,35 +179,55 @@ def _warn_once(key: str, msg: str, *args: object) -> None:
     logger.warning(msg, *args)
 
 
-def _append(record: Mapping[str, Any], *, path: Path | None = None) -> bool:
-    """Append ONE event. Returns False when nothing was written.
+#: The funnel passes ONE path, so this holds one entry in production; the bound
+#: exists because the tests pass many, and a module-level set may not grow with
+#: the number of distinct paths a process ever sees.
+_dirs_made: set[str] = set()
+
+
+def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> int:
+    """Append a BATCH of events in ONE write. Returns how many were written.
+
+    One write per batch, not per event: the read funnel calls this once per
+    returned row-count, and a per-event `mkdir` + two `stat`s + open/write/close
+    was measured at ~610 µs per event — 5 ms on a 10-row read and seconds on a
+    large one, i.e. the instrument slowing the path it measures.
 
     The failure direction is deliberate: a ledger write never raises into the
-    read path (`f` is a measurement, and a measurement may not break the thing
-    it measures). Every failure is warned about ONCE — a silently dead ledger is
-    indistinguishable from a store nobody reads, which is exactly the reading
-    this instrument exists to prevent.
+    read path (a measurement may not break the thing it measures). Every failure
+    is warned about ONCE — a silently dead ledger is indistinguishable from a
+    store nobody reads, which is the reading this instrument exists to prevent.
     """
-    line = json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
-    if len(line.encode()) > MAX_LINE_BYTES:
-        _warn_once(
-            "long-line",
-            "read ledger: dropping an over-long %s events line "
-            "(a line over %d B can interleave with a concurrent "
-            "appender)",
-            record.get("event"),
-            MAX_LINE_BYTES,
-        )
-        return False
+    if not records:
+        return 0
+    lines: list[str] = []
+    for record in records:
+        line = json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+        if len(line.encode()) > MAX_LINE_BYTES:
+            _warn_once(
+                "long-line",
+                "read ledger: dropping an over-long %s events line "
+                "(a line over %d B can interleave with a concurrent "
+                "appender)",
+                record.get("event"),
+                MAX_LINE_BYTES,
+            )
+            continue
+        lines.append(line)
+    if not lines:
+        return 0
     target = path or ledger_path()
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        cap = _max_bytes()
-        # `getsize`, not `fh.tell()`: a handle opened in APPEND mode reports a
-        # file position that CPython does not guarantee to be the end of file,
-        # so a size bound read from `tell()` silently never fires.
-        size = target.stat().st_size if target.exists() else 0
         key = str(target)
+        if key not in _dirs_made:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if len(_dirs_made) < 64:
+                _dirs_made.add(key)
+        cap = _max_bytes()
+        # `st_size`, not `fh.tell()`: `tell()` reports THIS handle's position at
+        # open and cannot see another appender's bytes — the case a multi-process
+        # ledger exists for.
+        size = target.stat().st_size if target.exists() else 0
         if size >= cap or key in _capped:
             if key not in _capped and not _tail_is_capped(target):
                 with open(target, "ab") as fh:
@@ -226,10 +251,18 @@ def _append(record: Mapping[str, Any], *, path: Path | None = None) -> bool:
                 cap,
                 LEDGER_MAX_BYTES_ENV,
             )
-            return False
-        with open(target, "ab") as fh:
-            fh.write(line.encode())
-        return True
+            return 0
+        blob = "".join(lines).encode()
+        # 0600 on CREATE: the ledger holds tenant identifiers (`Subject.name`,
+        # `Object.name`, `Source.url`), so it must not be world-readable just
+        # because the umask says so. `os.open` is the only portable way to pass
+        # a creation mode through `O_APPEND`; an existing file keeps its mode.
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, blob)
+        finally:
+            os.close(fd)
+        return len(lines)
     except OSError as e:  # pragma: no cover — a broken filesystem
         _warn_once(
             "oserror",
@@ -238,7 +271,12 @@ def _append(record: Mapping[str, Any], *, path: Path | None = None) -> bool:
             target,
             e,
         )
-        return False
+        return 0
+
+
+def _append(record: Mapping[str, Any], *, path: Path | None = None) -> bool:
+    """Append ONE event. Returns False when nothing was written."""
+    return _append_many([dict(record)], path=path) == 1
 
 
 def record_stock(
@@ -306,8 +344,15 @@ def row_key(label: str, row: Mapping[str, Any]) -> str | None:
     address is a hole in the denominator as well as in the numerator.
     """
     field_name = KEY_FIELDS.get(label)
-    if field_name and row.get(field_name):
-        return str(row[field_name])
+    if field_name is not None:
+        # For a RECORD label the contract field is REQUIRED. Falling back to any
+        # other id-shaped field would record a coordinate the STOCK can never
+        # join on: `Subject`/`Object` carry BOTH `id` and `name`, and the
+        # contract key is `name`, so an `id`-keyed read row would silently sit
+        # outside the denominator and be reported as "never read" — the flattering
+        # direction. `None` here is counted, not dropped.
+        value = row.get(field_name)
+        return str(value) if value else None
     for alt in ("id", "eventId", "name", "url"):
         if row.get(alt):
             return str(row[alt])
@@ -322,39 +367,25 @@ def record_rows(
     tenant_id: str | None = None,
     at: str | None = None,
 ) -> int:
-    """Record a whole returned batch. Returns the number of keys recorded.
+    """Record a whole returned batch in ONE append. Returns keys recorded.
 
-    Called by the read funnel ONLY when `enabled()` — the funnel checks first, so
-    a default deployment never imports or calls into this module.
+    Called by the read funnel ONLY when `enabled()` — the funnel reads the flag
+    first, so a default deployment neither imports this module nor calls in.
     """
-    n = 0
+    stamp = at or _now()
+    who = tenant_id if tenant_id is not None else tenant()
+    events: list[dict[str, Any]] = []
+    recorded = 0
     for row in rows:
-        if not isinstance(row, Mapping):
-            _append(
-                {
-                    "at": at or _now(),
-                    "event": EVENT_UNRESOLVED,
-                    "label": label,
-                    "tenant": tenant_id if tenant_id is not None else tenant(),
-                },
-                path=path,
-            )
-            continue
-        key = row_key(label, row)
+        key = row_key(label, row) if isinstance(row, Mapping) else None
         if key is None:
-            _append(
-                {
-                    "at": at or _now(),
-                    "event": EVENT_UNRESOLVED,
-                    "label": label,
-                    "tenant": tenant_id if tenant_id is not None else tenant(),
-                },
-                path=path,
-            )
+            events.append({"at": stamp, "event": EVENT_UNRESOLVED, "label": label, "tenant": who})
             continue
-        if record_read(label, key, at=at, path=path, tenant_id=tenant_id):
-            n += 1
-    return n
+        events.append({"at": stamp, "event": EVENT_READ, "label": label, "key": key, "tenant": who})
+        recorded += 1
+    # A batch that wrote NOTHING recorded nothing: reporting the intended count
+    # would let a dead ledger read as a live one (the fail-loud rule).
+    return recorded if _append_many(events, path=path) else 0
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -413,6 +444,7 @@ def fold(
     out = LedgerFold()
     if not target.exists():
         return out
+    pending: dict[tuple[str | None, str, str], list[str | None]] = {}
     cutoff = None
     if window_days is not None:
         ref = now or datetime.now(UTC)
@@ -460,13 +492,31 @@ def fold(
                     continue
                 row = out.rows.get(ident)
                 if row is None:
-                    out.unregistered_reads += 1
+                    # NOT yet a hole: the stock line may appear LATER in the file
+                    # (reads accumulate from the moment the flag is set, while a
+                    # stock census is a separate, later step). Applying the join
+                    # only in file order would report an observed read as "never
+                    # read" — the flattering direction — so pending reads are
+                    # held and joined after the whole file is folded.
+                    pending.setdefault(ident, []).append(at)
                     continue
                 row.read_count += 1
                 if at and (row.last_read_at is None or at > row.last_read_at):
                     row.last_read_at = at
             else:
                 out.lines_skipped += 1
+    # The second half of the join: a read that preceded its stock registration is
+    # the SAME observation, so it is applied now. Reads for keys the ledger was
+    # never told about stay unregistered — a real hole, reported as one.
+    for ident, stamps in pending.items():
+        row = out.rows.get(ident)
+        if row is None:
+            out.unregistered_reads += len(stamps)
+            continue
+        row.read_count += len(stamps)
+        latest = max((s for s in stamps if isinstance(s, str)), default=None)
+        if latest and (row.last_read_at is None or latest > row.last_read_at):
+            row.last_read_at = latest
     return out
 
 
@@ -512,6 +562,17 @@ class HotFraction:
         return self.bytes_known_stock_keys / self.stock_keys
 
     @property
+    def f_bytes_qualified(self) -> bool:
+        """Is `f_bytes` a reading of the READS, or only of the sized subset?
+
+        False when any READ key carries no `bytes`: the ratio then omits hot
+        bytes it cannot see, which reads as "less was read" than the truth — the
+        flattering direction. The number is still reported (it is a lower bound),
+        and this flag is what stops it being quoted as `f`.
+        """
+        return self.bytes_known_read_keys == self.read_keys
+
+    @property
     def zero_read_keys(self) -> int:
         return self.stock_keys - self.read_keys
 
@@ -530,6 +591,7 @@ class HotFraction:
             "read_bytes": self.read_bytes,
             "zero_read_bytes": self.zero_read_bytes,
             "bytes_known_fraction": self.bytes_known_fraction,
+            "f_bytes_qualified": self.f_bytes_qualified,
             "bytes_known_stock_keys": self.bytes_known_stock_keys,
             "bytes_known_read_keys": self.bytes_known_read_keys,
             "unregistered_reads": self.unregistered_reads,
@@ -607,11 +669,18 @@ def _main(argv: list[str] | None = None) -> int:
         f"f (keys)         : {fk:.4f}" if fk is not None else "f (keys)         : n/a — empty stock"
     )
     fb = f.f_bytes
-    print(
-        f"f (bytes)        : {fb:.4f}"
-        if fb is not None
-        else "f (bytes)        : n/a — no key in the ledger carries bytes"
-    )
+    if fb is not None:
+        cov = f.bytes_known_fraction or 0.0
+        qualifier = (
+            "; ⚠️ NOT all READ keys carry bytes, so this is a LOWER BOUND"
+            if not f.f_bytes_qualified
+            else ""
+        )
+        print(
+            f"f (bytes)        : {fb:.4f}  (over {cov:.1%} of stock keys carrying bytes{qualifier})"
+        )
+    else:
+        print("f (bytes)        : n/a — no key in the ledger carries bytes")
     if f.unregistered_reads or f.unresolved_reads:
         print(
             f"⚠️ reads outside the denominator: {f.unregistered_reads} unregistered, "

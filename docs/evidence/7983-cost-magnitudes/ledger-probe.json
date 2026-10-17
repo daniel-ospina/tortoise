@@ -24,6 +24,7 @@
   "read_bytes": 361152,
   "zero_read_bytes": 17086168,
   "bytes_known_fraction": 1.0,
+  "f_bytes_qualified": true,
   "bytes_known_stock_keys": 10435,
   "bytes_known_read_keys": 216,
   "unregistered_reads": 0,

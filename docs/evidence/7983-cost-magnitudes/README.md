@@ -30,7 +30,7 @@ magnitudes, and this issue is those two magnitudes.
 | quantity | measurable at `459f22912`? | what this lane did | measured value |
 |---|---|---|---|
 | **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py` + the one-funnel hook) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 2.07%** over 200 proxy queries — **a proxy mix, not a tenant** |
-| **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 2.50** at the doc's 1,000-tenant density (**62.5** at its 40-tenant cache density) — the term that decides it is TENANT DENSITY, not any per-read cost |
+| **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 2.74** at the doc's 1,000-tenant density (**68.5** at its 40-tenant cache density) — the term that decides it is TENANT DENSITY, not any per-read cost |
 
 ---
 
@@ -84,37 +84,43 @@ extrapolation), with the content width and vector share taken from the dogfood g
 
 | measured | value | base |
 |---|---|---|
-| record row width | **1,633–1,639 B median / 2,296–2,304 B mean** | n = 2,000 rows per run, two runs |
-| record footprint per tenant | **272,125,952 B = 0.2721 GB** ⇒ **3,034 B/node on disk** | heap + indexes + TOAST |
-| keyed miss fetch | **4 logical blocks (32 KiB) · 1,656 B out · 0.0625–0.085 ms** | the record's own PK probe, 200 samples × two runs |
-| full-scope read (rebuild) | **35,402 blocks (290 MB logical) · 288–483 ms** | `read_record_view`'s query shape, 89,701 rows, two runs |
+| planted content width | **1,133 B mean · 1,233 B max** | calibrated to the dogfood mean (1,121.4 B) and measured back from the rows. ⚠️ The dogfood **19,061 B tail is NOT planted** (no TOAST regime) ⇒ the footprint is a **LOWER BOUND** for a tenant that hits it |
+| record row width | **1,320–1,323 B median / 2,053–2,056 B mean** | n = 2,000 rows per run, two runs |
+| record footprint per tenant | **248,127,488 B = 0.2481 GB** ⇒ **2,766 B/node on disk** | heap + indexes + TOAST |
+| keyed miss fetch | **4 logical blocks (32 KiB) · 1,322 B out · 0.030–0.076 ms** | the record's own PK probe, 200 samples × two runs |
+| full-scope read (rebuild) | **29,568 blocks (242.2 MB logical) · 94.2–111.3 ms** | `read_record_view`'s query shape, 89,701 rows, two runs |
 
 **Blocks are exact; milliseconds are a range over the two runs in `rho-bench.log` (shared-CPU
 container, default settings) — an accounting bench, not a vendor benchmark.**
 
 ```
-disk      = $0.125 × 0.2721 GB               = $0.0340 /tenant/month   (MEASURED; the doc used $0.0187 from the CACHE's 0.1499 GB)
+disk      = $0.125 × 0.2481 GB               = $0.0310 /tenant/month   (MEASURED; the doc used $0.0187 from the CACHE's 0.1499 GB)
 compute   = $60 ÷ 1,000                      = $0.060                  (density assumption)
 plan      = $25 ÷ 1,000                      = $0.025                  (density assumption)
-IOPS      = $0   (4 blocks/miss ⇒ the 3,000-included step is at 18.8 cold misses/s/tenant)
-egress    = $0   (1,656 B/miss ⇒ the 250 GB allowance is 151M misses/month = 58/s)
-rho       = (0.060 + 0.025) ÷ 0.0340         = 2.50
+IOPS      = $0   (4 blocks/miss ⇒ the step is 18.8 cold misses/s/tenant at 40 tenants, 0.75 at 1,000)
+egress    = $0   ONLY below the project's 250 GB allowance: 1,322 B/miss ⇒ 189,035,917 misses/month SHARED by the tenants
+                  ⇒ 1.8 misses/s/tenant at 40 tenants, 0.073 at 1,000 — the FIRST line to leave $0; each miss above it adds $1.2e-7
+                  of egress and RAISES rho ⇒ rho = 2.74 is a FLOOR
+rho       = (0.060 + 0.025) ÷ 0.0310         = 2.74
 ```
 
 **Two findings the model needs:**
 
-1. **The record's footprint is 1.81× the cache's for the SAME nodes** (0.2721 GB vs 0.1499 GB),
+1. **The record's footprint is 1.66× the cache's for the SAME nodes** (0.2481 GB vs 0.1499 GB),
    because the record stores the 384-d vector as `jsonb` decimal text where the cache stores
    `vecf32` — the encoding gap §5.2 measured on the journal (~4×), now measured on the record. The
    planted vector used 6 decimal places (~9.5 chars/float) where §5.2 measured the journal's real
-   encoding at 21.9 chars/float, so **0.2721 GB is a LOWER BOUND at that column type**.
+   encoding at 21.9 chars/float, so **0.2481 GB is a LOWER BOUND at that column type**.
 2. **`rho` is dominated by TENANT DENSITY, not by any per-read cost.** At §17.4.3's 40-tenant
    density BOTH density-scaled lines move — compute `$60 ÷ 40 = $1.50` and plan `$25 ÷ 40 = $0.625`
-   ⇒ **`rho` = (1.50 + 0.625) ÷ 0.0340 = 62.5** ⇒ break-even `f` **91.85%**; at 1,000 tenants the
-   same two lines give **2.50** ⇒ **99.55%**. ⚠️ **The basis must be the same on both lines** —
+   ⇒ **`rho` = (1.50 + 0.625) ÷ 0.0310 = 68.5** ⇒ break-even `f` **91.07%**; at 1,000 tenants the
+   same two lines give **2.74** ⇒ **99.52%**, and at `f = 1` the multiplier is **0.995×** at 1,000
+   tenants vs **0.918×** at 40. ⚠️ **The basis must be the same on both lines** —
    compute ÷ 40 with plan ÷ 1,000 mixes two densities and lands on a figure that belongs to neither.
-   The coherent pair is 25× apart, and no per-read measurement can resolve it: 4 blocks and 60 µs
-   per miss do not make a compute tier.
+   The coherent pair is 25× apart, and no per-read measurement can resolve it: 4 blocks and 30–76 µs
+   per miss do not make a compute tier. ⚠️ **The egress allowance is shared by the project**, so it holds only up to
+   1.8 misses/s/tenant at 40 tenants (0.073 at 1,000) — a real mix can exceed that, and every miss above it raises
+   `rho`; **2.74 / 68.5 are floors.**
 
 ## 4. What is still unmeasured, and the seam it needs
 
