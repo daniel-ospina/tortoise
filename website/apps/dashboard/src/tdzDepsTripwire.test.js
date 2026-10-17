@@ -19,6 +19,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+// #3726: the AST seam already exists in this repo (and says why: no hand-rolled
+// lexer). Reusing it keeps deps arrays out of the reach of comments and strings.
+import { parseModule } from './wizardRenderedCopy.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -64,53 +67,6 @@ export function declNames(line) {
 }
 
 /**
- * Walk `source` from the `(` at `open` to its matching `)`, skipping string and
- * template literals and comments, so a `)` inside copy cannot end it early.
- */
-function matchParen(source, open) {
-  let depth = 0
-  for (let i = open; i < source.length; i++) {
-    const ch = source[i]
-    const next = source[i + 1]
-    if (ch === '/' && next === '/') { i = source.indexOf('\n', i); if (i === -1) return -1; continue }
-    if (ch === '/' && next === '*') { i = source.indexOf('*/', i + 2); if (i === -1) return -1; i++; continue }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const quote = ch
-      i++
-      while (i < source.length && source[i] !== quote) { if (source[i] === '\\') i++; i++ }
-      continue
-    }
-    if (ch === '(' || ch === '[' || ch === '{') depth++
-    else if (ch === ')' || ch === ']' || ch === '}') { depth--; if (depth === 0) return i }
-  }
-  return -1
-}
-
-/** Top-level comma-separated argument spans of the call at `open`..`close`. */
-function topLevelArgs(source, open, close) {
-  const spans = []
-  let depth = 0
-  let start = open + 1
-  for (let i = open + 1; i < close; i++) {
-    const ch = source[i]
-    const next = source[i + 1]
-    if (ch === '/' && next === '/') { i = source.indexOf('\n', i); if (i === -1) break; continue }
-    if (ch === '/' && next === '*') { i = source.indexOf('*/', i + 2); if (i === -1) break; i++; continue }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const quote = ch
-      i++
-      while (i < close && source[i] !== quote) { if (source[i] === '\\') i++; i++ }
-      continue
-    }
-    if (ch === '(' || ch === '[' || ch === '{') depth++
-    else if (ch === ')' || ch === ']' || ch === '}') depth--
-    else if (ch === ',' && depth === 0) { spans.push([start, i]); start = i + 1 }
-  }
-  spans.push([start, close])
-  return spans
-}
-
-/**
  * #3726 defect 1: a deps array is the LAST argument of a HOOK call, located by
  * ARITY rather than by the punctuation that happens to precede it.
  *
@@ -119,33 +75,46 @@ function topLevelArgs(source, open, close) {
  * — measured on main.jsx: `useMemo(() => first(backupInfo && ...), [backupInfo])`
  * at L7652 was skipped. Widening the anchor to `)` would also match an ordinary
  * call taking an array literal (`foo(x, [a, b])`), which is not a deps array and
- * would raise a false violation, so the anchor is the hook name instead.
+ * would raise a false violation, so the anchor is the hook call itself.
  *
+ * It is read from the AST, not from text: `wizardRenderedCopy.js::parseModule`
+ * already exists for exactly this reason and states the rationale — a
+ * hand-rolled lexer has to re-implement strings, template interpolation, regex
+ * literals, comments and JSX text, and gets them wrong. A first revision here
+ * did exactly that and was measured losing deps arrays the OLD anchor caught
+ * (a `/\[/` regex inside a hook body desynchronised the paren walk) while
+ * inventing violations for a hook call written in a comment or a string.
  *
- * KNOWN LIMITATION (not fixed here, no live instance): the search runs over
- * text, so a COMMENT that illustrates a hook call with a deps array would be
- * analysed as code. Masking comments was tried and reverted — a character
- * scanner cannot lex JSX prose (an apostrophe desyncs it) and its regex-
- * literal blind spot blanked real code, which is a worse trade: it would miss
- * real deps arrays to suppress a hypothetical one.
- * @returns {Array<{start:number, inner:string}>}
+ * @returns {Array<{start:number, line:number, inner:string}>}
  */
 export function depsArrays(source) {
+  const HOOKS = new Set(['useMemo', 'useEffect', 'useLayoutEffect', 'useCallback'])
   const out = []
-  const hooks = /\b(?:useMemo|useEffect|useLayoutEffect|useCallback)\s*\(/g
-  let m
-  while ((m = hooks.exec(source)) !== null) {
-    const open = m.index + m[0].length - 1
-    const close = matchParen(source, open)
-    if (close === -1) continue
-    const spans = topLevelArgs(source, open, close)
-    const [a, b] = spans[spans.length - 1]
-    const raw = source.slice(a, b)
-    const arg = raw.trim()
-    if (arg === '' || arg[0] !== '[]'.charAt(0)) continue
-    out.push({ start: a + raw.indexOf('['), inner: arg.slice(1, -1) })
+  const stack = [parseModule(source)]
+  while (stack.length) {
+    const node = stack.pop()
+    if (Array.isArray(node)) { stack.push(...node); continue }
+    if (!node || typeof node !== 'object' || typeof node.type !== 'string') continue
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue
+      const value = node[key]
+      if (value && typeof value === 'object') stack.push(value)
+    }
+    if (node.type !== 'CallExpression') continue
+    const callee = node.callee
+    const name = callee?.type === 'Identifier' ? callee.name
+      : callee?.type === 'MemberExpression' && !callee.computed && callee.property?.type === 'Identifier' ? callee.property.name
+      : null
+    if (!name || !HOOKS.has(name)) continue
+    const last = node.arguments[node.arguments.length - 1]
+    if (!last || last.type !== 'ArrayExpression') continue
+    out.push({
+      start: last.start,
+      line: last.loc.start.line,
+      inner: source.slice(last.start + 1, last.end - 1),
+    })
   }
-  return out
+  return out.sort((a, b) => a.start - b.start)
 }
 
 /**
@@ -175,7 +144,7 @@ export function findTdzDeps(source) {
   }
 
   for (const deps of depsArrays(source)) {
-    const lineNo = source.slice(0, deps.start).split('\n').length
+    const lineNo = deps.line
     const names = deps.inner
       .split(',')
       .map((s) => s.trim())
@@ -293,15 +262,91 @@ test('#3726: a NON-hook call taking an array literal is not a deps array', () =>
     'a plain call with an array-literal argument is not a hook deps array')
 })
 
-test('#3726: the analyzer reaches every hook deps array in main.jsx', () => {
-  // Population pin: the scan must not silently shrink. 41 = the 40 the old
-  // anchor found plus the parenthesised form at L7652 (#3726). A drop means the
-  // analyzer stopped seeing arrays it used to see.
-  const found = depsArrays(mainJsx)
-  assert.ok(found.length >= 41,
-    `expected >= 41 hook deps arrays in main.jsx, found ${found.length}`)
-  assert.ok(found.some((d) => d.inner.includes('backupInfo')),
-    'the L7652 parenthesised-form deps array must be scanned')
+test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () => {
+  // An identity pin, not a count. A `>= N` pin is satisfiable by non-code (a
+  // comment or a string that looks like a hook call) and cannot see an
+  // invention masking a loss — measured: with `>= 41` the suite stayed green
+  // after the real L7652 `[backupInfo]` array was DELETED and two comment-only
+  // hook calls were added in its place. This list fails on a loss AND on an
+  // invention, so a change to the scan or to main.jsx must be deliberate.
+  const found = depsArrays(mainJsx).map((d) => d.inner.trim())
+  // The deps EXPRESSIONS, not their line numbers: a line number reddens this
+  // pin on any unrelated inserted line, which trains people to re-baseline it.
+  assert.deepEqual(found, [
+  "active, ms",
+  "text",
+  "text, onCopied",
+  "githubDisconnect.open, githubDisconnect.busy",
+  "deleteAccountOpen, deleteAccountBusy",
+  "apiKey",
+  "keysLoaded, keysLoadNonce",
+  "",
+  "",
+  "welcomeMode, authed",
+  "wizardStep, welcomeMode, authed",
+  "wizardStep, welcomeMode, authed, serverHarnessConnected",
+  "wizardStep",
+  "wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork, welcomeHasOrg",
+  "",
+  "tab",
+  "",
+  "tab, team, checking, authed, welcomeMode, deepLinkTick",
+  "reposLoaded, onboarding, reposList, currentOrgId, reposLoadFailed",
+  "accountMenuOpen",
+  "createTeamOpen",
+  "revealKey",
+  "authMode, sessionBooted",
+  "sessionBooted",
+  "team?.subscription_status",
+  "",
+  "welcomeMode, welcomeKey, wizardDurableKey",
+  "wizardStep, wizardForkChosen, onboarding && onboarding.fork",
+  "branchLists, docsScope",
+  "githubConnected, reposLoaded, reposLoadFailed, currentOrgId",
+  "onboarding, currentOrgId, reposLoadFailed",
+  "wizardStep",
+  "",
+  "",
+  "currentOrgId",
+  "overviewDataComplete, overviewAnnounced",
+  "tab, welcomeMode, team",
+  "overviewSkeletonLive, frameStale",
+  "keys",
+  "backupInfo",
+  "tab",
+  ])
+})
+
+test('#3726: a regex literal inside a hook body does not hide its deps array', () => {
+  // The regression a hand-rolled paren walk introduced: `/\[/` and `/\)/`
+  // desynchronised the depth counter, so the hook was dropped entirely and a
+  // TDZ violation in its deps array shipped silently. The AST cannot be
+  // confused by this.
+  for (const body of ['const m = /\\[/g; go(m)', 'const m = /\\)/g; go(m)', 'go(/[)]/)']) {
+    const source = [
+      'function App() {',
+      `  React.useEffect(() => { ${body} }, [lateVal])`,
+      '  const lateVal = 1',
+      '  return null',
+      '}',
+    ].join('\n')
+    assert.deepEqual(findTdzDeps(source).map((v) => v.name), ['lateVal'],
+      `a regex literal (${body}) must not hide the deps array`)
+  }
+})
+
+test('#3726: a hook call written in a comment, a string or JSX text is not code', () => {
+  // Scanning raw text reported these as violations — a false red that would
+  // red the suite for documenting the very rule this file enforces.
+  const source = [
+    'function App() {',
+    '  // do NOT write useMemo(() => x, [lateComment]) here',
+    '  const msg = "call useMemo(fn, [lateStr]) first"',
+    '  return <p>Use useMemo(fn, [lateJsx]) for that</p>',
+    '}',
+  ].join('\n')
+  assert.deepEqual(findTdzDeps(source), [],
+    'comments, string literals and JSX text are not hook calls')
 })
 
 // ── the real file ───────────────────────────────────────────────────────────

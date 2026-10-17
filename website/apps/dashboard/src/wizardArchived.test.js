@@ -51,11 +51,22 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   // `wizard-title` branch was merged AWAY by #2912 (it reintroduced the duplicate
   // stage label defect 5 reported); its org-holder invariant lives on through the
   // helper's `hasOrg` arm and the e2e's "never 'Create your Organization'" pin.
-  const h1Open = src.indexOf('<h1 className="welcome-title">')
+  // #3726: quote-agnostic AND anchored. `indexOf` returning -1 used to make
+  // `src.slice(-1, …)` a one-character window, so every assertion inside it
+  // passed vacuously — a re-quote turned these guards off instead of reddening.
+  const h1Open = src.search(/<h1 className=["']welcome-title["']>/)
+  assert.notEqual(h1Open, -1, 'the live wizard <h1> anchor must resolve')
   const h1 = src.slice(h1Open, src.indexOf('</h1>', h1Open))
   assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })'),
     'the live wizard <h1> names the stage through wizardStageLabel (the org-holding, paused, #3428 not-connected and cycle-4 build-fork overrides are pinned by the unit tests)')
-  assert.ok(!src.slice(src.indexOf('<div className="welcome-head">'), src.indexOf('LEGACY_WIZARD_ARCHIVED &&')).includes('className="wizard-title"'),
+  // #3726: the same `indexOf`-is--1 hazard on the NEGATIVE side is worse — a
+  // re-quote made the window empty, so this guard reported "no in-card label"
+  // while no longer looking at the card at all. Anchor first, then test.
+  const headOpen = src.search(/<div className=["']welcome-head["']>/)
+  assert.notEqual(headOpen, -1, 'the welcome-head card anchor must resolve (a negative pin over an empty window is a false green)')
+  const headEnd = src.indexOf('LEGACY_WIZARD_ARCHIVED &&', headOpen)
+  assert.notEqual(headEnd, -1, 'the archived-block boundary must resolve')
+  assert.ok(!/className=["']wizard-title["']/.test(src.slice(headOpen, headEnd)),
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // the archived block's title still reads wizardSteps (kept for rollback)
   assert.ok(/wizard-title">\{wizardSteps\[wizardStep\]\}/.test(src),
@@ -70,7 +81,7 @@ test('DE2E-2 copy sweep: org-create dialog + wizard copy say Organization', () =
   // name the Organization. #2487/#2547's lowercase fallback ('Your organization
   // is set up') lived in the <h1> this PR removed; the org name now renders in
   // the eyebrow, and the no-name case is covered by the stage label itself.
-  assert.ok(/You're set up in <strong>\{shownOrgName \|\| 'your organization'\}<\/strong>/.test(src),
+  assert.ok(/You're set up in <strong>\{shownOrgName \|\| ['"]your organization['"]\}<\/strong>/.test(src),
     'welcome ready copy names the user\'s Organization')
   assert.ok(src.includes('Creating your Organization and API key'), 'provisioning copy')
   assert.ok(src.includes('Your Organization and API key are live'), 're-entry + first-data cards')
