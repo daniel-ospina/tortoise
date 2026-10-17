@@ -1160,6 +1160,10 @@ class _EdgeHandlers:
         """
         rows = self.g.query(
             "MATCH (s:Event) WHERE s.id=$sv OR s.eventId=$sv "
+            # #6976: the predicate filters `s` and the next clause RE-BINDS it, so
+            # without this `WITH s` the engine drops the predicate and counts
+            # OTHER events' edges.
+            "WITH s "
             "MATCH (s)-[r:aboutSubject|aboutObject|aboutEvent|aboutPoint|aboutDocument]->() "
             "RETURN count(r)",
             params={"sv": source}).result_set
