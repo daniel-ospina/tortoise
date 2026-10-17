@@ -133,12 +133,26 @@ def test_assembly_bounds_one_fact_to_one_plus_max_verbatim(receipt: dict) -> Non
 
 
 def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
-    """300/400 (tea set) and 12/60 (mugs) never merge — the value-safety guard
-    — and both pairs are in the window once the flood is bounded."""
+    """300/400 (tea set) and 12/60 (mugs) never merge, and both pairs are in
+    the window once the flood is bounded.
+
+    On THIS fixture the refusal is structural, not the value guard: measured
+    normalised overlap is 0.80 and 0.60 against a 0.90 collapse threshold, and
+    all four turns are distinct, so the pairs are never collapse CANDIDATES.
+    Disabling `_pkg_differ_value_critical` leaves this receipt byte-identical
+    (verified) — which is why the verdict's `why` names the threshold and says
+    the guard is the product-side backstop, pinned by
+    `tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse`.
+    A docstring claiming the guard did the work here would credit a mechanism
+    this fixture never reaches.
+    """
     arm = receipt["arms"]["post_2978_assembly"]
     assert set(arm["value_claims_present"]) == {"v1", "v2", "v3", "v4"}
-    verdict = receipt["verdicts"]["value_safety"]["measured"]
-    assert "assembly=4/4" in verdict
+    assert arm["value_slots"] == 4
+    verdict = receipt["verdicts"]["value_safety"]
+    assert "assembly=4/4" in verdict["measured"]
+    assert "0.90 collapse threshold" in verdict["why"], verdict["why"]
+    assert "not exercised here" in verdict["why"], verdict["why"]
 
 
 def test_marked_arm_orders_the_value_claims_first(receipt: dict) -> None:

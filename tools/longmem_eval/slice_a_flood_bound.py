@@ -37,7 +37,7 @@ retention is measurable) and
                         receipt, which is gone).
   ``post_2978``         the shipped predicate. **The baseline the re-specifi-
                         cation must use.**
-  ``post_2978_assembly````assemble_context`` fed by
+  ``post_2978_assembly``  ``assemble_context`` fed by
                         ``package_evidence_pool`` (the A6 arm,
                         ``TORTOISE_LME_EVIDENCE_ASSEMBLY``).
 
@@ -691,9 +691,12 @@ def measure() -> dict[str, Any]:
                 f"assembly="
                 f"{len(arms['post_2978_assembly']['value_claims_present'])}/4"
             ),
-            "why": "the 300/400 and 12/60 pairs never collapse "
-            "(_pkg_differ_value_critical) and are admitted once the "
-            "flood is bounded",
+            "why": "the 300/400 (normalised overlap 0.80) and 12/60 (0.60) "
+            "pairs sit below the 0.90 collapse threshold and carry distinct "
+            "source turns, so they are never collapse CANDIDATES on this "
+            "fixture — the value guard (_pkg_differ_value_critical) is the "
+            "product-side backstop for pairs that DO overlap, and is pinned "
+            "by tests/test_evidence_assembly.py, not exercised here",
         },
         "provenance_leg_is_lane_scoped": {
             "measured": (
