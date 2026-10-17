@@ -105,82 +105,144 @@ _CONTINUATION = re.compile(r"\\\n")
 #: commented-out line, a longer word containing the token — and every over-report
 #: is declared and pinned with the arms, because refusing a correct step is
 #: recoverable and passing a floating one is not. Quoting that SPLITS the word is
-#: handled by `_UNQUOTE` below. What is left is an INTERPOLATION inside the word
+#: read by `_shell_word` below, which resolves quoting the way shell does. What is
+#: left is an INTERPOLATION inside the word
 #: — `$X`, `${X}`, `$(…)`, `` `…` `` — which no text scan can read; it is declared
 #: and pinned as MISSED at `_exact_wranglers`.
 #:
 #: Shell removes quoting and escapes BEFORE it runs a word, so a token spelled
 #: `wrangler\@4`, `wran\gler@4`, `wrangler'@'4` or `"wrangler"@4` executes
-#: `wrangler@4` while the literal text holds no `wrangler@` at all. Deleting those
-#: characters is sound in the fail-closed direction ONLY because `wrangler@`
-#: itself contains none of them: the deletion can JOIN two fragments into a token
-#: (an over-report, which this guard accepts) and can never split one apart.
-#: Order matters — the continuation fold runs FIRST, or deleting the backslash
-#: would leave `wrangler` and `@4` on two lines.
-#: DECLARED OVER-READ, stated rather than implied: shell does NOT remove a
-#: backslash before an ordinary character INSIDE double quotes, so
-#: `wrangler@"4.\127.0"` is the word `wrangler@4.\127.0` (which npm rejects) while
-#: this scan reads the pin `4.127.0`. Pinned with an arm. Telling the two apart
-#: needs the quote state the lexer this file replaced was removed for mis-tracking.
-_UNQUOTE = re.compile(r"[\\'\"`]")
-_INVOCATION = re.compile(r"wrangler@")
-
-#: The spec that follows — or `""` when it is INDIRECT: no literal at all
-#: (`wrangler@$V`, `wrangler@"${V}"`) or a literal cut short by an interpolation
-#: (`wrangler@4.127.${PATCH}` is not the pin `4.127.`). An empty spec is never
-#: exact, so it counts as FLOATING: whatever the variable holds, this token is not
-#: a pin. (The lexer this replaced could not match such a spec at all and so
+#: `wrangler@4` while the literal text holds no `wrangler@` at all. The WORD scan
+#: below resolves them the way shell does, which is what makes each of them a
+#: reported float rather than a residual.
+#:
+#: DECLARED RESIDUAL: an INTERPOLATION inside the word — `wrangler$X@4`,
+#: `wrangler${X}@4`, `wran$(echo gler)@4`, `` wran`echo gler`@4 `` — executes
+#: `wrangler@4` while no text scan can see a literal `wrangler@`. Closing that needs
+#: the shell's own evaluation, so the honest fix is at the lane: assert the wrangler
+#: version that actually resolved, rather than read it out of the script.
+#:
+#: The spec run that follows is for DIAGNOSTICS — the value a failure message
+#: names. It is not what decides exactness (the word is): a literal cut short by an
+#: interpolation (`wrangler@4.127.${PATCH}`) reports `4.127.`, which is never an
+#: exact pin, so it counts as FLOATING: whatever the variable holds, this token is
+#: not a pin. (The lexer this replaced could not match such a spec at all and so
 #: returned nothing, which read as no float at all.)
 _SPEC_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-_INDIRECT_AFTER = ("$", "{")
 
-#: A spec the shell passes as ONE word that CONTINUES past the literal run is not
-#: that literal: `wrangler@"4.127.0 || 4.130.0"` is one argument npm reads as a
-#: range and resolves to `4.130.0`, while the run stops at the space and read
-#: `4.127.0` as an exact pin — a false PASS, reproduced end to end. A spaced hyphen
-#: range behaves the same, INCLUDING with a `v`-prefixed upper bound: node-semver
-#: accepts `4.127.0 - v4` and resolves it to the NEWEST 4.x (measured: `4.151.1`),
-#: which is the `@4` float this file exists to stop. Refusing the whole spec (an
-#: empty spec is floating) is the fail-closed direction. Two things must NOT trip
-#: it, because refusing a correct step is the one over-report this file treats as a
-#: defect: a FLAG (`--version`, `--flag=4`), and a SHELL operator whose operand is
-#: not a version (`>/dev/null`, `|| true`).
+#: An UNQUOTED character that ends a shell word. Everything else — including a
+#: newline inside quotes — belongs to the same argument.
+_WORD_END = " \t\n|&;()<>"
+_DQUOTE_ESCAPES = '$`"\\\n'
+
+
+def _shell_words(text: str) -> list[str]:
+    """Every shell WORD in `text`, as shell would present each one.
+
+    A word ends at an unquoted blank or shell metacharacter; inside single or
+    double quotes it continues across both, so `"4.127.0 || 4.130.0"` is ONE
+    argument. Quoting characters are removed and a backslash escapes the next
+    character — except before an ordinary character inside double quotes, where
+    shell keeps it. Word boundaries and quoting are therefore decided together,
+    which is the whole point: deleting quotes FIRST (an earlier draft) threw away
+    the only signal that separates one argument from several.
+    """
+    words: list[str] = []
+    out: list[str] = []
+    quote = ""
+    comment = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        ended = False
+        if comment:
+            # A comment carries PROSE, so it has no quoting to track — an
+            # apostrophe in `boot loop's` would otherwise open a quote that spans
+            # the rest of the script and hide every pin in it. The tokens are still
+            # READ (a pin named in a comment is reported), just split on blanks.
+            if ch == "\n":
+                comment = False
+                ended = True
+            elif ch in " \t":
+                ended = True
+            else:
+                out.append(ch)
+        elif quote == "'":
+            if ch == "'":
+                quote = ""
+            else:
+                out.append(ch)
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+            elif ch == "\\" and i + 1 < len(text) and text[i + 1] in _DQUOTE_ESCAPES:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            else:
+                out.append(ch)
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            i += 2
+            continue
+        elif ch == "#" and not out:
+            comment = True
+        elif ch in _WORD_END:
+            ended = True
+        else:
+            out.append(ch)
+        if ended and out:
+            words.append("".join(out))
+            out = []
+        i += 1
+    if out:
+        words.append("".join(out))
+    return words
+
+#: THE WHOLE ARGUMENT IS THE SPEC — this is what closes the range class.
 #:
-#: The operand test allows an OPERATOR or WILDCARD as well as a digit, because an
-#: OR-range's right side usually opens with one: `4.127.0 || >=4.130.0` resolves to
-#: the newest 4.x and a digit-only test read `4.127.0` as the pin (measured). The
-#: gap is `\s*`, not `[ \t]*`: quoting is erased before the scan, so a newline is
-#: indistinguishable from a space and `"4.127.0\n|| >=4.130.0"` — ONE npm
-#: argument — was read as the pin when the gap excluded it. That the operand still
-#: has to be version-ish is what keeps a redirect on the following line
-#: (`\n> /tmp/log`) correct rather than refused.
-_RANGE_OPERAND = r"[ \t]*(?:[<>=^~*xX]|[vV]?\d)"
-_RANGE_CONTINUATION = re.compile(
-    r"\s*(?:\|\|" + r"(?=" + _RANGE_OPERAND + r")"
-    r"|[<>]=?(?=" + _RANGE_OPERAND + r")"
-    r"|[\^~,](?=" + _RANGE_OPERAND + r")"
-    r"|-(?=[ \t]*(?:[vV]?\d|[xX*])))")
+#: npm reads the WHOLE argument as a semver spec, so `"4.127.0 || 4.130.0"` is one
+#: argument containing a range and resolves to `4.130.0`, while a scan that stopped
+#: at the first literal run called `4.127.0` the pin. Four rounds widened a list of
+#: continuation operators to catch that, and each widening left its symmetric
+#: neighbour open — an empty operand after `||` (node-semver reads `*`), a newline
+#: on the operand side, a `v`-prefixed hyphen bound — seven false PASSes in one
+#: review, all in the same six lines. So the enumeration is GONE: the word is read
+#: as shell presents it (`_shell_word`), and the token is the pin only when that
+#: whole word IS `wrangler@X.Y.Z`. An unknown tail is then floating by
+#: construction, not by being on a list.
+#:
+#: The over-report a wrong reading would cost is gone too, because the word scan
+#: knows what the enumeration could not: an UNQUOTED `||`, `>`, `;` or blank is a
+#: shell separator, so `wrangler@4.127.0 || true`, `... >/dev/null` and
+#: `... pages dev` are the pin — while the same characters INSIDE quotes are one
+#: argument and are refused.
 
 
 def _wrangler_invocations(run: str) -> set[str]:
-    """Every `wrangler@<spec>` written in `run`, as a plain substring."""
-    # Order: fold a backslash-newline pair, THEN drop quotes and escapes (an
-    # over-read, declared above). No line is filtered — a pin inside a here-doc
-    # body or a quoted string is read too.
-    text = _UNQUOTE.sub("", _CONTINUATION.sub("", run))
+    """Every `wrangler@<spec>` INVOCATION in `run`, keyed by its whole word.
+
+    No line is filtered — a pin inside a here-doc body, a quoted string or a
+    trailing comment is read too, because refusing a correct step is recoverable
+    by rewording it and hiding a real invocation from a required check is not.
+    """
+    # The continuation fold runs FIRST: `wrangler@4.12\<newline>7.0` is one word.
+    text = _CONTINUATION.sub("", run)
     specs: set[str] = set()
-    for at in _INVOCATION.finditer(text):
-        literal = _SPEC_RUN.match(text, at.end())
-        # A TUPLE, not a string: `"" in "${"` is True, so an empty slice at the
-        # end of the text would read a real `wrangler@4.127.0` as indirect.
-        if (
-            literal is None
-            or text[literal.end():literal.end() + 1] in _INDIRECT_AFTER
-            or _RANGE_CONTINUATION.match(text, literal.end()) is not None
-        ):
-            specs.add("")
+    for word in _shell_words(text):
+        at = word.find("wrangler@")
+        if at < 0:
+            continue
+        literal = _SPEC_RUN.match(word, at + len("wrangler@"))
+        spec = literal.group(0) if literal else ""
+        if not _EXACT_SPEC.fullmatch(spec):
+            specs.add(spec)  # already inexact: a float, a dist-tag, an X-range…
+        elif word == "wrangler@" + spec:
+            specs.add(spec)  # the argument IS the pin
         else:
-            specs.add(literal.group(0))
+            specs.add("")  # the argument CONTINUES past it — a range, or unreadable
     return specs
 #: DECLARED RESIDUAL (review round 5; NARROWED by round 6; widened to the whole
 #: INTERPOLATION class by round 7): anything that puts a substitution INSIDE the
@@ -188,8 +250,8 @@ def _wrangler_invocations(run: str) -> set[str]:
 #: `` wran`echo gler`@4 `` — executes `wrangler@4` while no text scan can see a
 #: literal `wrangler@`. The quoting and escaping forms an earlier round also called
 #: residual (`wrangler\@4`, `wran\gler@4`, `wrangler'@'4`, `"wrangler"@4`) are NOT:
-#: `_UNQUOTE` deletes those characters before the scan, which turns each of them
-#: into a literal the guard reports (pinned by the arms in
+#: `_shell_word` resolves those characters the way shell does, which turns each of
+#: them into a literal the guard reports (pinned by the arms in
 #: `test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range`). Closing
 #: the interpolation class needs the shell's own evaluation, so the honest fix is
 #: at the lane: assert the wrangler version that actually resolved, rather than
@@ -323,6 +385,13 @@ def test_the_three_website_e2e_jobs_still_prewarm() -> None:
     assert _is_constant_false_gate("${{ false }}")
     assert _is_constant_false_gate("false")
     assert _is_constant_false_gate(" 0 ")
+    # YAML hands over a REAL boolean/int for `if: false` / `if: 0` — schema-legal
+    # spellings — so the value must be stringified as it is. `or ""` folds `False`
+    # to "", which reads a step that can never run as unconditional.
+    assert _is_constant_false_gate(False)
+    assert _is_constant_false_gate(0)
+    assert not _prewarm_is_unconditional({"if": False})
+    assert not _prewarm_is_unconditional({"if": 0})
     assert not _is_constant_false_gate("needs.changes.outputs.website == 'true'")
     assert not _is_constant_false_gate(None)
 
@@ -341,18 +410,21 @@ def test_every_prewarm_pins_an_exact_wrangler_and_never_floats() -> None:
 
 def _prewarm_is_unconditional(step: dict) -> bool:
     """A pre-warm step with an `if:` gate never runs — deletion by another name."""
-    return not str(step.get("if") or "").strip()
+    return not str(step.get("if") if step.get("if") is not None else "").strip()
 
 
 #: A gate that is CONSTANT false skips the step no matter what the workflow knows,
 #: which is deletion wearing a condition. A gate that reads `needs.changes` is not
 #: this: it is the path filter that keeps the e2e jobs off unrelated diffs, and the
-#: three pre-warm jobs use it deliberately.
-_CONSTANT_FALSE = re.compile(r"^\s*(?:\$\{\{\s*)?(?:false|0)\s*(?:\}\})?\s*$", re.I)
+#: three pre-warm jobs use it deliberately. YAML may hand over a real boolean
+#: (`if: false`) or an int (`if: 0`) — schema-legal spellings — so the value is
+#: stringified as it is, never with `or ""`, which folds `False` to "" and reads a
+#: step that can never run as unconditional.
+_CONSTANT_FALSE = re.compile(r"^\s*(?:\$\{\{\s*)?(?:false|0)\.?0*\s*(?:\}\})?\s*$", re.I)
 
 
 def _is_constant_false_gate(expr: object) -> bool:
-    return bool(_CONSTANT_FALSE.match(str(expr or "")))
+    return bool(_CONSTANT_FALSE.match(str(expr if expr is not None else "")))
 
 
 def _has_retry_loop_in_code(run: str) -> bool:
@@ -578,55 +650,62 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     assert _floating_wranglers("cat <<'EOF'\nnpx --yes wrangler@4 --version\nEOF") == {"4"}
     assert _floating_wranglers("xwrangler@4 pages dev") == {"4"}
 
-    # QUOTING INSIDE THE WORD is READ, not missed (round 6): shell removes these
-    # characters before it runs the word, so `_UNQUOTE` removes them before the
-    # scan and the token is reported as the float it is. Four forms that round 5
-    # had declared unreadable are caught here.
+    # QUOTING INSIDE THE WORD is READ, not missed: shell removes these characters
+    # before it runs the word, and `_shell_words` resolves them the same way, so
+    # the token is reported as the float it is. Four forms an earlier round had
+    # declared unreadable are caught here.
     for run in ("wrangler\\@4 --version", "wran\\gler@4 --version",
                 "wrangler'@'4 --version", '"wrangler"@4 --version'):
         assert _floating_wranglers(run) == {"4"}, run
-    # DECLARED OVER-READ (see `_UNQUOTE`): shell KEEPS a backslash before an
-    # ordinary character inside double quotes, so bash runs the invalid word
-    # `wrangler@4.\127.0` while this reads the pin. Pinned so the limit is stated.
-    assert _exact_wranglers('npx wrangler@"4.\\127.0" --version') == {"4.127.0"}
+    # A BACKSLASH BEFORE AN ORDINARY CHARACTER inside double quotes is KEPT by
+    # shell, so `wrangler@"4.\\127.0"` runs the invalid word `wrangler@4.\\127.0`
+    # (npm rejects it). Reading the quoting is what lets this be REFUSED rather
+    # than read as the pin `4.127.0`, which an earlier draft declared as its
+    # over-read.
+    assert _floating_wranglers('npx wrangler@"4.\\127.0" --version') == {"4."}
     # An X-RANGE is not an exact pin: npm resolves `4.127.x` to a moving window
     # (`>=4.127.0 <4.128.0-0`), so a dot-count classifier passed it as exact.
     for spec in ("4.127.x", "4.x.x", "4.127.X", "4.127.0-rc.1"):
         assert _floating_wranglers(f"npx --yes wrangler@{spec} --version") == {spec}, spec
         assert _exact_wranglers(f"npx --yes wrangler@{spec} --version") == set(), spec
-    # A spec that CONTINUES past the literal run is not that literal: npm reads
-    # `4.127.0 || 4.130.0` as ONE range argument and resolves `4.130.0`, while the
-    # run stopped at the space and called it the pin — a false PASS, reproduced
-    # end to end on a real job body. The `v`-prefixed upper bound is the same class
-    # and the worst case: `4.127.0 - v4` resolves to the newest 4.x (measured
-    # 4.151.1) — literally the `@4` float this file exists to stop. So is an OR
-    # whose right side opens with an operator or wildcard (`|| >=4.130.0`,
-    # `|| <4.130.0`, `|| *`), and a quoted spec whose continuation is on the next
-    # line — one argument to npm either way.
+    # THE ARGUMENT IS THE SPEC, so a range is a range however it is spaced — and
+    # quoting is what makes one argument out of it. Every one of these resolves to
+    # something other than the pin under npm's own semver: `||` with an operator or
+    # wildcard operand, an EMPTY operand (node-semver reads `*`), a newline on
+    # either side of the operator, and a `v`-prefixed hyphen bound (`- v4` is the
+    # newest 4.x). Each was read as the exact pin by a version of this scan.
     for run in ('npx --yes wrangler@"4.127.0 || 4.130.0" --version',
-                "npx --yes wrangler@4.127.0 - 4.130.0 --version",
-                "npx --yes wrangler@4.127.0 - v4 --version",
-                "npx --yes wrangler@4.127.0 - v4.130.0 --version",
-                "npx --yes wrangler@4.127.0 - x --version",
-                "npx --yes wrangler@4.127.0||4.130.0 --version",
-                "npx --yes wrangler@4.127.0 >4.130.0 --version",
-                "npx --yes wrangler@4.127.0 || >=4.130.0 --version",
-                "npx --yes wrangler@4.127.0 || <4.130.0 --version",
-                "npx --yes wrangler@4.127.0 || =4.127.0 --version",
-                "npx --yes wrangler@4.127.0 || ^4 --version",
-                "npx --yes wrangler@4.127.0 || x --version",
-                "npx --yes wrangler@4.127.0 || * --version",
-                'npx --yes wrangler@"4.127.0\n|| >=4.130.0" --version'):
+                'npx --yes wrangler@"4.127.0 ||" --version',
+                'npx --yes wrangler@"4.127.0 || " --version',
+                'npx --yes wrangler@"4.127.0 || >=4.130.0" --version',
+                'npx --yes wrangler@"4.127.0 || <4.130.0" --version',
+                'npx --yes wrangler@"4.127.0 || =4.127.0" --version',
+                'npx --yes wrangler@"4.127.0 || ^4" --version',
+                'npx --yes wrangler@"4.127.0 || x" --version',
+                'npx --yes wrangler@"4.127.0 || *" --version',
+                'npx --yes wrangler@"4.127.0 - 4.130.0" --version',
+                'npx --yes wrangler@"4.127.0 - v4" --version',
+                'npx --yes wrangler@"4.127.0 - v4.130.0" --version',
+                'npx --yes wrangler@"4.127.0 - x" --version',
+                'npx --yes wrangler@"4.127.0\n|| >=4.130.0" --version',
+                'npx --yes wrangler@"4.127.0 ||\n>=4.130.0" --version',
+                'npx --yes wrangler@"4.127.0 ||\n*" --version',
+                'npx --yes wrangler@"4.127.0 -\n4.130.0" --version',
+                'npx --yes wrangler@"4.127.0 - \nv4" --version'):
         assert _exact_wranglers(run) == set(), run
         assert _floating_wranglers(run) == {""}, run
-    # …while a FLAG and a SHELL operator with a NON-version operand are not range
-    # continuations. Those steps are CORRECT, and refusing them is the over-report
-    # this file treats as a defect — so they are pinned as still exact.
+    # …while the SAME characters UNQUOTED are shell separators, so the argument is
+    # the pin and the step is CORRECT. Refusing these was the over-report an
+    # operator list produced; the word scan tells them apart by construction.
     for run in ("npx --yes wrangler@4.127.0 --version",
                 "npx --yes wrangler@4.127.0 --flag=4",
                 "npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1",
                 "npm install -g wrangler@4.127.0 >/dev/null",
                 "npx --yes wrangler@4.127.0 || true",
+                "npx --yes wrangler@4.127.0||4.130.0 --version",
+                "npx --yes wrangler@4.127.0 >4.130.0 --version",
+                "npx --yes wrangler@4.127.0 - 4.130.0 --version",
+                "npx --yes wrangler@4.127.0; echo done",
                 "npx --yes wrangler@4.127.0\n> /tmp/log 2>&1"):
         assert _exact_wranglers(run) == {"4.127.0"}, run
 
@@ -656,7 +735,8 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     # an interpolation, which must not be read as the pin `4.127.`:
     assert _floating_wranglers("WRANGLER=latest\nnpx --yes wrangler@$WRANGLER --version") == {""}
     assert _floating_wranglers('npx --yes wrangler@"${WRANGLER}" --version') == {""}
-    assert _floating_wranglers("npx --yes wrangler@4.127.${PATCH} --version") == {""}
+    assert _floating_wranglers("npx --yes wrangler@4.127.${PATCH} --version") == {"4.127."}
+    assert _exact_wranglers("npx --yes wrangler@4.127.${PATCH} --version") == set()
     assert _floating_wranglers("npx --yes wrangler@4.127.0${SUFFIX} --version") == {""}
     assert _exact_wranglers("npm install -g wrangler@4.127.0") == {"4.127.0"}
 
