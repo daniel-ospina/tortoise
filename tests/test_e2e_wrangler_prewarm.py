@@ -386,13 +386,21 @@ def test_every_version_mention_is_a_read_or_an_asserted_spec() -> None:
     offenders = []
     for path in _workflow_paths():
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if "WRANGLER_VERSION" not in line:
+            # CODE only: a trailing comment that merely mentions the variable used
+            # to satisfy the read tokens, so `V="4.1"  # see $V` was green.
+            code = _cut_comment(line)
+            if "WRANGLER_VERSION" not in code:
                 continue
-            if DECLARATION in line:
+            if DECLARATION in code:
                 continue
-            if any(token in line for token in LEGAL_TOKENS):
+            # An ASSIGNMENT is the shape that gives the pin a second home, whatever
+            # else the line says — the read tokens below must not launder it.
+            if re.search(r"\bWRANGLER_VERSION\s*=", code):
+                offenders.append(f"{path.name}:{lineno}: {code.strip()}")
                 continue
-            offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+            if any(token in code for token in LEGAL_TOKENS):
+                continue
+            offenders.append(f"{path.name}:{lineno}: {code.strip()}")
     assert not offenders, "WRANGLER_VERSION used outside the declared shapes:\n" + "\n".join(
         offenders
     )
@@ -722,8 +730,10 @@ def test_no_step_invokes_wrangler_without_a_spec_outside_the_declared_boots() ->
     survived every arm. A bare `wrangler` is therefore legal in exactly one place:
     the five declared boot steps, which run the binary the verify step proved
     (`test_boot_steps_carry_no_spec_and_keep_their_retry` pins that there are
-    exactly five and that each carries no spec). Everything else — a new step, a
-    new job, a deploy line — is an offender.
+    exactly five and that each carries no spec), and in the verify step's own
+    DOUBLE-QUOTED `"$(wrangler --version …)"` probe — the same call unquoted is an
+    offender (measured). Everything else — a new step, a new job, a deploy line —
+    is an offender.
 
     The scan is quote- and comment-aware (`_strip_quoted` / `_cut_comment`), so a
     diagnostic that NAMES wrangler, or a commented-out old command, is not an
@@ -931,7 +941,7 @@ def test_no_document_shows_a_floating_wrangler_spec() -> None:
 
     `website/README.md` recommended `npx --yes wrangler@4 pages deploy` while the
     workflows pinned 4.127.0 — the exact drift this change removes, stated as
-    guidance, one line outside any fence. Every spec in these files must be the asserted form, and
+    copy-pasteable guidance in a fence. Every spec in these files must be the asserted form, and
     the version must come from the one artefact.
     """
 
