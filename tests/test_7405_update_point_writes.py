@@ -1571,11 +1571,9 @@ def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
 
     NOT pinned here: that the silent no-op also emits no ``PointRevised``. The
     emit is gated on ``res.result_set``, which is empty on this path, matching
-    the probe-path short-circuit (which writes nothing and emits nothing) — but
-    this fixture's SDK has no event store configured, so ``poll_events`` reports
-    zero `PointRevised` events even for a promote that DID land and open a
-    positive control. An assertion here would pass for the wrong reason; the
-    gate is therefore reasoned and stated, not claimed as covered.
+    the probe-path short-circuit (which writes nothing and emits nothing); the
+    gate itself is pinned by
+    ``test_a_live_status_only_promote_emits_no_point_revised``.
     """
     sdk = _sdk(tmp_path, "promoteidem")
     try:
@@ -1597,6 +1595,60 @@ def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
         assert row[1] is None, (
             "a status-only promote writes nothing else, so no other prop may "
             f"appear: saw {row[1]!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_live_status_only_promote_emits_no_point_revised(
+        tmp_path, monkeypatch):
+    """The `res.result_set` gate: nothing applied ⇒ no `PointRevised`.
+
+    The store half of `PointRevised` is the change-feed switch, which is read
+    from the environment AT CALL TIME — so the emit IS observable in this
+    fixture, and the positive control below is what makes the empty assertion
+    mean something (without the gate the no-op emits one).
+
+    Why it matters: the probe-path no-op for the same end state writes nothing
+    and emits nothing, so emitting here would journal a revision the graph never
+    made — and `poll_events` returns the payload verbatim, so a client would see
+    it.
+    """
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+
+    def revised(sdk) -> list:
+        return [e for e in sdk.poll_events()["events"]
+                if e["type"] == "PointRevised"]
+
+    # POSITIVE CONTROL: an ordinary promote that lands DOES emit.
+    sdk = _sdk(tmp_path, "emitctl")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        sdk.update_point(pid, status="live")
+        assert len(revised(sdk)) == 1, (
+            "reader precondition: a LANDED promote must emit a PointRevised, "
+            "or the assertion below proves nothing")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    # THE GATE: the live race applies nothing, so it must emit nothing.
+    sdk = _sdk(tmp_path, "emitgate")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
+        proj.g = proxy
+
+        sdk.update_point(pid, status="live")  # must not raise
+
+        proj.g = proxy._real
+        assert proxy.flipped, "fixture precondition: the node must have gone live"
+        assert revised(sdk) == [], (
+            "no write landed, so no revision may be journaled: "
+            f"{revised(sdk)}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
