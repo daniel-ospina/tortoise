@@ -781,7 +781,7 @@ class _EdgeHandlers:
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
 
-    def _sync_tags(self, point_id: str, tags) -> None:
+    def _sync_tags(self, point_id: str, tags, *, sweep_orphans: bool = False) -> None:
         """Reconcile `TAGGED` edges for a point against a tags value (#485).
 
         ONE routine for BOTH writers (#2897): the SDK live path
@@ -852,6 +852,20 @@ class _EdgeHandlers:
         `check_consistency` names `tags` in `uncarried_journal_fields` (see
         `consistency._uncarried`), so the check stays green on a byte-faithful
         replay without hiding that the property half was not carried.
+
+        ``sweep_orphans`` (#8854 review P3) forces the orphan-`:Tag` GC below to
+        run even when THIS invocation deleted no edge. It exists because this
+        routine is now retried as a whole (#7405): a first attempt can land the
+        `DELETE r` and then be ABORTED on the GC statement, and the retry's
+        re-read of `stale` then finds nothing left to delete — so a
+        per-invocation `removed` counter would skip the sweep and leave an
+        orphan `:Tag` that `list_tags` reports as a `count: 0` entry while a
+        rebuilt graph, which replays this routine from a clean state, has none
+        (live != replay). A caller that can DELETE edges on a RETRIED path —
+        `update_point`'s tag sync — passes ``True`` so the sweep is a function of
+        the caller's tag list rather than of an attempt-local counter.
+        ``create_point`` keeps the default: a fresh point has no stale edges, so
+        the scan stays off its hot path.
         """
         if not isinstance(tags, (list, tuple)):
             return
@@ -880,8 +894,9 @@ class _EdgeHandlers:
         # GC orphaned :Tag nodes when the sync actually removed edges — tag
         # removal can leave a Tag with no TAGGED referrers (#485). Skipped on
         # create_point (no stale edges there), so new-point creation never pays
-        # the scan.
-        if removed:
+        # the scan. `sweep_orphans` forces it on a RETRIED reconciler whose
+        # earlier attempt already landed the DELETEs (see the docstring).
+        if removed or sweep_orphans:
             self.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
     def _create_about_edges(self, source_id: str, entity_name: str) -> None:

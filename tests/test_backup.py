@@ -221,7 +221,20 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     # reached the snapshot path. The connect bound is therefore the product's
     # 2s (the value #2850 chose to beat a 5s health-check budget), and
     # ``test_bounded_raw_clients_3065.py`` pins the knob override end to end.
-    assert instances[0].kwargs == {
+    # #2969: the same resolver also pins the RETRY policy, so the configured
+    # read bound is not multiplied by redis-py's default (3 retries -> ~4x) on
+    # the one client that inherited it. ZERO is the policy: this client builds
+    # ``falkordb.FalkorDB``, whose own ``retry=None`` default already meant one
+    # attempt, and a single retry would double the snapshot's wait. Popped so
+    # the socket pair is pinned as an EXACT dict while the retry policy is
+    # asserted on its own (`_retries == 0` below): ``Retry`` and ``NoBackoff``
+    # DO compare by value on the pinned 7.4.1 (verified: `Retry(NoBackoff(), 0)
+    # == Retry(NoBackoff(), 0)` is True), but ``Retry.__eq__`` also spans the
+    # ``supported_errors`` set, so folding it into the dict would couple this
+    # pin to a vendor default that has nothing to do with #2969.
+    kwargs = dict(instances[0].kwargs)
+    retry = kwargs.pop("retry")
+    assert kwargs == {
         "host": "falkordb-cloud.example.com",
         "port": 6380,
         "username": None,
@@ -230,6 +243,13 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
         "socket_connect_timeout": 2.0,
         "socket_timeout": 10.0,
     }
+    assert retry._retries == 0, (
+        "the snapshot client must not multiply the configured bound — one "
+        "retry would hold a wedged BGSAVE for 2 x the bound instead of 1 x "
+        "(#2969)")
+    assert retry._backoff.__class__.__name__ == "NoBackoff", (
+        "the pin is the `Retry(NoBackoff(), 0)` idiom, not zero retries "
+        "with some other backoff (#2969)")
     assert instances[0].connection.commands == [("BGSAVE",)]
 
 
