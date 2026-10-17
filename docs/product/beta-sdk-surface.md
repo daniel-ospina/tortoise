@@ -178,6 +178,31 @@ description of the row. Both reads remain reachable at the REST endpoints above 
 is unchanged in `tortoise/tool_registry.py`), so no capability is deleted; what changes is *which
 surface* serves it.
 
+### Ruling B (2026-10-12) re-admits ONE consolidated source-management tool
+
+`tortoise_manage_sources(action="list"|"enable"|"disable", source=…)` puts team source
+configuration back on the MCP: it lists the three memory sources, and switches each on or off
+within the caller's own permission.
+
+> **OVERRIDES:** the general rule above (*"account tenancy is not on the MCP"*) and the read/write
+> principle that dropped `run_onboarding` — the owner ruled that agents should be able to configure
+> the system themselves *"assuming they have permission"* and chose **one** consolidated operation
+> over per-source tools (2026-10-12, on #3540). Approval is recorded in
+> `canonical-mcp-tools.md`.
+
+Three things keep this narrower than the dropped container, and the ruling does not change any of
+them: it is **`writes=True`**, so a read-only key is refused even for `action="list"`; it
+**never accepts a credential** (GitHub authorisation stays the separate
+`tortoise_onboarding_github_connect` handshake); and it **reverses no recorded default**
+(`agent_sessions` stays ON — the `#1927` optional off-switch).
+
+This tool has **no SDK twin** (`sdk_method=""`), so it is declared here rather than as a row in the
+method table. `tests/test_bridge_table.py` reads this table, so the two declarations cannot drift.
+
+| MCP-only addition (no SDK twin) | Authority |
+|---|---|
+| `manage_sources` | owner ruling B on #3540 (2026-10-12) |
+
 ## Provisioning: primitives, and the credential carries the tenant
 
 Two decisions, applied together.

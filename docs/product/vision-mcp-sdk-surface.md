@@ -75,15 +75,15 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **98** |
-| Absorbed into the 26 MCP targets | **84** |
+| Registry tools | **99** |
+| Absorbed into the 27 MCP targets | **87** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
-| Retired | **11** |
-| MCP target tools | **26** |
+| Retired | **9** |
+| MCP target tools | **27** |
 
-**The four bucket rows sum to 98.** (The last row is the target *surface*, not a bucket —
-26 targets received those 84 absorbed tools many-to-one, so it is not part of the sum.)
+**The four bucket rows sum to 99.** (The last row is the target *surface*, not a bucket —
+27 targets received those 87 absorbed tools many-to-one, so it is not part of the sum.)
 
 The three journal names (`checkpoint`, `diary_write`, `diary_read`) moved from the *Retired*
 bucket to the *Absorbed* bucket on the owner's 2026-10-09 ruling: the two owner-approved docs

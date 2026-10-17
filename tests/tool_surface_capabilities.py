@@ -207,6 +207,10 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_seed",
     "tortoise_onboarding_session_recording",
     "tortoise_onboarding_github_connect", "tortoise_onboarding_github_index",
+    # #3540 ruling B: the consolidated source-management operation — its write
+    # happens through hosted_api helpers (index job / onboarding state /
+    # connection teardown), so it is an empty-binding writer here.
+    "tortoise_manage_sources",
     # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
     "tortoise_pack_install",
     # #3904: handler-served writer (dispatches to sdk.mitigate_operator / sdk.annotate_operator)

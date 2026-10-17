@@ -1,0 +1,259 @@
+"""#3540 ruling B — the consolidated source-management operation.
+
+The ruling's conditions are behavioural, so they are pinned behaviourally:
+
+- the assistant **may request, never self-grant** — an unauthorised or
+  not-connected request is refused, and the refusal names the step that is
+  actually missing rather than failing opaquely;
+- **credentials never pass through the model** — asserted by INTROSPECTION on
+  the tool's signature, because a parameter added later is exactly how a token
+  would arrive;
+- the change is **attributable** — the log line is emitted for refusals too;
+- `list` reports **every** source's state and its default in one call, and
+  `agent_sessions` reports its real default (`on`, #1927) rather than a
+  deny-by-default story the product does not implement.
+
+`github_documents` is covered here because it is the gap the ruling closes: it
+had no tool at all, and it must now be settable through the SHARED operation
+without a per-source tool appearing.
+"""
+
+from __future__ import annotations
+
+import inspect
+
+import pytest
+
+import tortoise.mcp_server as m
+from tortoise import hosted_api as ha
+
+
+@pytest.fixture
+def ctx(monkeypatch):
+    """Org context + stubbed control-plane seams; nothing touches a real plane."""
+    m._current_org_id.set("org_test")
+    calls: dict = {"writes": [], "cleared": False, "logs": [], "jobs": []}
+
+    state = {"github_connected": True, "session_recording": True,
+             "issues_enabled": True, "docs_enabled": True}
+    monkeypatch.setattr(m, "_onboarding_state", lambda: dict(state))
+    # `**kw` keeps the harness tolerant of the pre-fix `connection_level=`
+    # keyword, so a regression shows up as a SEMANTIC assertion failure (the
+    # write / the projection) rather than a TypeError from this lambda.
+    monkeypatch.setattr(
+        m, "_log_source_change",
+        lambda org, src, act, out, scope="source", **kw:
+            calls["logs"].append((org, src, act, out, scope)),
+    )
+
+    def _update(org_id, **fields):
+        calls["writes"].append(fields)
+        state.update(fields)
+        return dict(state)
+
+    monkeypatch.setattr(ha, "_update_onboarding_state", _update)
+    monkeypatch.setattr(ha, "_github_credentials", lambda org_id: (None, None))
+    monkeypatch.setattr(ha, "_clear_github_credentials",
+                        lambda org_id: calls.update(cleared=True))
+    monkeypatch.setattr(ha, "_start_index_job",
+                        lambda org_id, kind: calls["jobs"].append(kind)
+                        or (f"job-{kind}", False))
+    calls["state"] = state
+    yield calls
+    m._current_org_id.set(None)
+
+
+# ── the signature: no credential can arrive through the model ───────────────
+def test_the_tool_takes_no_credential_parameter():
+    """Ruling B: "Credentials never pass through the model".
+
+    Introspection, not a call — the property is about the CONTRACT. A token,
+    code, or secret parameter appearing here is the failure, whatever the body
+    does with it.
+    """
+    params = set(inspect.signature(m.tortoise_manage_sources).parameters)
+    assert params == {"action", "source"}
+    forbidden = ("token", "secret", "password", "credential", "api_key",
+                 "code", "pat")
+    assert not [p for p in params for f in forbidden if f in p.lower()]
+
+
+# ── list ────────────────────────────────────────────────────────────────────
+def test_list_covers_all_three_sources_with_their_defaults(ctx):
+    out = m.tortoise_manage_sources("list")
+
+    assert set(out["sources"]) == {"github_issues", "github_documents",
+                                   "agent_sessions"}
+    assert out["sources"]["agent_sessions"]["default"] == "on"
+    assert out["sources"]["github_issues"]["default"] == "off"
+    # The raw projection rides along — the tool must not hide state behind its
+    # own interpretation of it.
+    assert "onboarding" in out
+
+
+def test_list_projects_each_github_source_from_its_own_intent_flag(ctx):
+    """#1924: the CONNECTION is shared, the enable INTENT is per source.
+
+    Projecting `enabled` from `github_connected` for both sources would show a
+    source as on after the team switched it off (and vice versa).
+    """
+    ctx["state"]["docs_enabled"] = False
+    out = m.tortoise_manage_sources("list")
+
+    assert out["sources"]["github_issues"]["enabled"] is True
+    assert out["sources"]["github_documents"]["enabled"] is False, (
+        "docs_enabled=False was ignored — `enabled` is being read off the "
+        "shared connection instead of the per-source intent flag (#1924)")
+    assert out["sources"]["github_documents"]["connection_connected"] is True, (
+        "the connection must be reported separately, never conflated "
+        "with the source's enable intent")
+    assert out["sources"]["github_documents"]["scope"] == "source"
+
+
+def test_list_reflects_the_session_recording_off_switch(ctx):
+    ctx["state"]["session_recording"] = False
+
+    assert m.tortoise_manage_sources("list")["sources"]["agent_sessions"][
+        "enabled"] is False
+
+
+# ── refusal, not self-grant ─────────────────────────────────────────────────
+def test_enabling_a_github_source_without_a_connection_is_refused(ctx):
+    out = m.tortoise_manage_sources("enable", "github_documents")
+
+    assert "error" in out
+    assert "tortoise_onboarding_github_connect" in out["error"]
+    assert ctx["writes"] == [], "a refusal must not write state"
+    assert ("org_test", "github_documents", "enable",
+            "refused_not_connected", "source") in ctx["logs"], (
+        "a refusal must be attributable too, not only the successes")
+
+
+def test_an_unknown_action_is_refused(ctx):
+    out = m.tortoise_manage_sources("toggle", "agent_sessions")
+    assert "error" in out and "list|enable|disable" in out["error"]
+    assert ctx["writes"] == []
+
+
+def test_an_unknown_source_is_refused_and_the_roster_is_named(ctx):
+    out = m.tortoise_manage_sources("enable", "ftp_shares")
+    assert "error" in out
+    assert "github_documents" in out["error"], "the refusal names valid sources"
+    assert ctx["writes"] == []
+
+
+# ── agent sessions: the #1927 default is honoured, not reversed ────────────
+def test_disabling_agent_sessions_writes_the_off_switch(ctx):
+    out = m.tortoise_manage_sources("disable", "agent_sessions")
+
+    assert out["status"] == "disabled"
+    assert ctx["writes"] == [{"session_recording": False,
+                              "capture_revised": True}]
+
+
+def test_enabling_agent_sessions_reports_already_on_without_writing(ctx):
+    """Ruling B says deny-by-default; #1927 says this source is default ON.
+
+    The ruling does not reverse a recorded default, so `enable` here reports the
+    truth and changes nothing — it does not flip the product's behaviour.
+    """
+    out = m.tortoise_manage_sources("enable", "agent_sessions")
+
+    assert out["status"] == "already_on"
+    assert out["default"] == "on"
+    assert "#1927" in out["note"]
+    assert ctx["writes"] == [], "no write when there is nothing to change"
+
+
+# ── GitHub disable is PER-SOURCE, never a disconnect (#1924) ───────────────
+#
+# The pre-fix behaviour cleared the stored credential and wrote
+# `github_connected=False`, i.e. a full disconnect that also killed the sibling
+# source and forced a fresh OAuth round-trip just to hide one source — exactly
+# what #1924 removed from the dashboard's off-toggle. These tests pin the
+# restored invariant from the TOOL's side, so the tool cannot re-introduce it.
+def test_disabling_github_issues_writes_only_its_intent_flag(ctx):
+    out = m.tortoise_manage_sources("disable", "github_issues")
+
+    assert out["status"] == "disabled"
+    assert out["scope"] == "source"
+    assert ctx["writes"] == [{"issues_enabled": False}], (
+        "disable wrote more than the source's own enable intent: "
+        f"{ctx['writes']}")
+    assert ctx["state"]["github_connected"] is True, (
+        "disabling one source disconnected GitHub (#1924 regression)")
+    assert ctx["state"]["docs_enabled"] is True, (
+        "disabling github_issues switched the sibling source off too")
+    assert ctx["cleared"] is False, (
+        "the stored credential was cleared — the connection was torn down")
+
+
+def test_disabling_github_documents_writes_its_own_flag(ctx):
+    """The flag must depend on WHICH source was named, not on a shared path."""
+    m.tortoise_manage_sources("disable", "github_documents")
+
+    assert ctx["writes"] == [{"docs_enabled": False}]
+    assert ctx["state"]["issues_enabled"] is True
+    assert ctx["state"]["github_connected"] is True
+
+
+def test_disable_names_the_enforcement_gap_instead_of_claiming_custody(ctx):
+    """The flag is intent-only today: the payload must SAY so.
+
+    Claiming a source is off while nothing server-side honours the flag would
+    make the tool lie about what it did — the same class of failure as the
+    connection-level teardown, one step quieter.
+    """
+    out = m.tortoise_manage_sources("disable", "github_documents")
+
+    assert out["enforcement"] == "intent-only"
+    assert "INTENT ONLY" in out["note"]
+    assert "not cancelled" in out["note"], (
+        "in-flight work must be named, not implied")
+    assert out["connection_untouched"] is True
+    assert out["sibling_untouched"] == "github_issues"
+
+
+def test_disabling_an_already_off_source_writes_nothing(ctx):
+    ctx["state"]["issues_enabled"] = False
+
+    out = m.tortoise_manage_sources("disable", "github_issues")
+
+    assert out["status"] == "already_off"
+    assert ctx["writes"] == [], "an idempotent disable must not write"
+
+
+def test_enable_dispatches_to_that_sources_own_index_job(ctx, monkeypatch):
+    """`enable` still replaces `tortoise_onboarding_github_index`.
+
+    The retired name points callers here (#3883), so this call must start the
+    source's index job — and the RIGHT one: docs for github_documents, github
+    for github_issues.
+    """
+    monkeypatch.setattr(ha, "_github_credentials",
+                        lambda org_id: ("enc-token", "acme"))
+    ctx["state"]["docs_enabled"] = False
+
+    docs = m.tortoise_manage_sources("enable", "github_documents")
+    issues = m.tortoise_manage_sources("enable", "github_issues")
+
+    assert ctx["jobs"] == ["docs", "github"]
+    assert docs["job_id"] == "job-docs" and issues["job_id"] == "job-github"
+    assert {"docs_enabled": True} in ctx["writes"], (
+        "enable must restore the source's enable intent, not only start a job")
+    assert "enc-token" not in str(docs) and "enc-token" not in str(issues), (
+        "the stored credential leaked into a tool response")
+
+
+# ── the retired names still answer (#3883) ─────────────────────────────────
+def test_the_retired_switches_point_at_this_call():
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+    by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+
+    for name, arg in (("tortoise_onboarding_github_index",
+                       'source="github_issues"'),
+                      ("tortoise_onboarding_session_recording",
+                       'source="agent_sessions"')):
+        pointer = by_name[name].retired_use_instead
+        assert "tortoise_manage_sources" in pointer
+        assert arg in pointer

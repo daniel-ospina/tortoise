@@ -941,6 +941,10 @@ surfaces:
   # `core` entry alone would never run on the handler change that can reorder
   # the positional columns. (The #2938/#3154 dual-registration convention.)
   - test_session_capture_status.py
+  # #3540 ruling B: the consolidated source-management tool's handlers live in
+  # `tortoise/mcp_server.py` + `tortoise/hosted_api.py`; the guard must run on
+  # the surface change it guards.
+  - test_manage_sources_3540.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the

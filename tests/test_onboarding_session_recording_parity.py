@@ -228,7 +228,7 @@ class TestPromptDashboardParity:
     def test_q3_decline_then_reenable_consents(self, org_lane):
         """A user who declined can re-enable through the tool.
 
-        `tortoise_onboarding_session_recording(enable=true)` re-sets the
+        `tortoise_manage_sources(action="enable", source="agent_sessions")` re-sets the
         setting REGARDLESS of `capture_revised` (epic #1714 §C — a
         stdio/self-hosted user has no other path, because the prompt ask
         never re-fires once revised). Mutation: short-circuit the write when
@@ -315,7 +315,7 @@ class TestTheDocumentedOrderIsTheSafeOrder:
         order = [
             "tortoise install <harness>",
             "tortoise session verify --harness <harness>",
-            "tortoise_onboarding_session_recording(enabled=true)",
+            'tortoise_manage_sources(action="enable", source="agent_sessions")',
             "tortoise session probe --harness <harness>",
             "tortoise session disclosure --harness <harness>",
         ]
@@ -354,7 +354,7 @@ class TestTheDocumentedOrderIsTheSafeOrder:
         start = text.index("### On NO")
         end = text.index("### The re-enable path is pinned")
         branch = text[start:end]
-        assert "tortoise_onboarding_session_recording(enabled=false)" in branch
+        assert 'tortoise_manage_sources(action="disable", source="agent_sessions")' in branch
         assert "Install nothing" in branch
         # it must not smuggle a second write path or a second key
         for forbidden in ("capture_opt_in", "consent_version",
@@ -387,9 +387,12 @@ class TestTheDataSourceSectionNamesTheRealToggle:
         """Mutation: replace the toggle with `tortoise_session_capture` and
         this reds — the agent would file/refuse instead of enabling."""
         section = self._data_sources_section()
-        assert "tortoise_onboarding_session_recording" in section, (
+        assert 'tortoise_manage_sources(action="enable"' in section, (
             "§6 does not name the tool that actually writes the per-source "
             "enable intent (the onboarding-state toggle)")
+        assert 'source="agent_sessions"' in section, (
+            "§6 names the toggle tool but not the source it switches — the "
+            "consolidated call is only an enable intent when the source is named")
         assert "tortoise_session_capture" not in section, (
             "§6 names the FILING tool — it returns 409 when capture is off, "
             "which is the opposite of writing an enable intent (#3513 review)")

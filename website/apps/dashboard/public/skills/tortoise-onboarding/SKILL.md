@@ -635,7 +635,7 @@ setting, even after an earlier decline (see the re-enable pin below).
 3. **Write the setting through the EXISTING tool.** The answer is wired to the
    tool the dashboard's own toggle writes through — there is exactly ONE state
    path, and a parallel setter is a defect:
-   - MCP-connected agent: `tortoise_onboarding_session_recording(enabled=true)`
+   - MCP-connected agent: `tortoise_manage_sources(action="enable", source="agent_sessions")`
    - CLI agent (no MCP tool listed yet): `PATCH /v1/onboarding/state` with
      `{"session_recording": true}`
    Both write `session_recording` + `capture_revised`, and nothing else.
@@ -663,7 +663,7 @@ setting, even after an earlier decline (see the re-enable pin below).
 1. **Install nothing.** No seam, no extension, no config write.
 2. **Write the same keys the dashboard's decline writes** — the no-branch
    mirrors the wizard/panel toggle so the two surfaces cannot diverge:
-   `tortoise_onboarding_session_recording(enabled=false)` (CLI:
+   `tortoise_manage_sources(action="disable", source="agent_sessions")` (CLI:
    `PATCH /v1/onboarding/state` with `{"session_recording": false}`). That is
    `session_recording=false` + `capture_revised=true`, exactly the yes-branch
    key set with the opposite value — never a different set of keys.
@@ -678,7 +678,7 @@ setting, even after an earlier decline (see the re-enable pin below).
 
 ### The re-enable path is pinned
 
-`tortoise_onboarding_session_recording(enabled=true)` **re-sets the setting
+`tortoise_manage_sources(action="enable", source="agent_sessions")` **re-sets the setting
 regardless of `capture_revised`** — a user who declined can re-enable at any
 time through the tool, through the dashboard toggle, or by answering this ask
 yes. An implementation that short-circuits on `capture_revised` would strand
@@ -734,7 +734,7 @@ connect** — turning issues off never disconnects GitHub for documents (the
 - **Ask, then honour the answer.** A "no" writes nothing (a source absent from
   the projection is off, not enabled); a "yes" writes the per-source enable
   intent through the same tool surface the hosted wizard uses
-  (`tortoise_onboarding_session_recording` / the onboarding-state path) — one state path,
+  (`tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")` / the onboarding-state path) — one state path,
   never a second copy of the flag. **Self-hosted: this tile's write lands
   (#8686)** — the agent-session-recording toggle writes through the owned
   onboarding-state node, so you may report the answer as applied.
@@ -772,9 +772,9 @@ serve the onboarding FLOW: read it with `tortoise_onboarding_state`, and file
 the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
 
 - **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
-  `tortoise_onboarding_github_index`; read `tortoise_onboarding_github_status`
+  `tortoise_manage_sources(action="enable", source="github_issues")`; read `tortoise_onboarding_github_status`
   (or `tortoise_onboarding_state`).
-- **Agent-session recording** — `tortoise_onboarding_session_recording`
+- **Agent-session recording** — `tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")`
   (`enabled`); read it back from `tortoise_onboarding_state`, which reports the
   stored operational keys under `operational` (#8686). **Self-hosted this is the
   ONE connect-style leg that works** — both the write and the read-back land on

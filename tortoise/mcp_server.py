@@ -4323,6 +4323,279 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     return {"onboarding": state}
 
 
+# ── #3540 ruling B — ONE consolidated source-management tool ─────────────
+# The roster is the product's MEMORY SOURCES (the places Tortoise reads from).
+# It is NOT the graph's `Source` nodes — those are provenance
+# (`tortoise_create_source`) and are a different concept that happens to share
+# the word. Retiring the wrong pair here would leave the real gap open.
+_SOURCE_ROSTER: dict[str, dict] = {
+    "github_issues": {
+        "label": "GitHub issues and pull requests",
+        "default": "off",
+        "connection": "github",
+        # #1924: the per-source OFF is an ENABLE-INTENT flag, NOT a disconnect.
+        # The connection is shared; the intent is per source.
+        "enable_flag": "issues_enabled",
+        # The flag is recorded but no server-side reader honours it yet — this
+        # tool must not claim a source stopped when nothing enforced it.
+        "enforcement": "intent-only",
+        "sibling": "github_documents",
+    },
+    "github_documents": {
+        "label": "GitHub documents",
+        "default": "off",
+        "connection": "github",
+        "enable_flag": "docs_enabled",
+        "enforcement": "intent-only",
+        "sibling": "github_issues",
+    },
+    "agent_sessions": {
+        # #1927: the OPTIONAL OFF-SWITCH — default ON, ToS-covered. Recorded
+        # here because ruling B's "deny-by-default" would otherwise read as
+        # authority to reverse that decision. It is not: the permission rule
+        # governs what the ASSISTANT may do, not what the PRODUCT already does.
+        # Reversing #1927 is a separate owner decision.
+        "label": "Agent session recordings",
+        "default": "on",
+        "connection": None,
+        "enable_flag": "session_recording",
+        "enforcement": "enforced",
+        "sibling": None,
+    },
+}
+
+
+def _flag_on(state: dict, key: str, default: bool = True) -> bool:
+    """Read an enable-intent flag, honouring its documented default."""
+    value = state.get(key)
+    return default if value is None else bool(value)
+
+
+def _log_source_change(org_id: str, source: str, action: str, outcome: str,
+                       scope: str = "source") -> None:
+    """Ruling B: "the change is attributable" — one line per attempt.
+
+    Logged BEFORE the effect is reported, and for refusals too, so an
+    unauthorised or not-connected attempt is visible after the fact rather than
+    only the successful ones.
+    """
+    _log.info(
+        "source-management org=%s source=%s action=%s outcome=%s scope=%s",
+        org_id, source, action, outcome, scope,
+    )
+
+
+def _sources_view() -> dict:
+    """Every source's state, in one call (ruling B: "lists").
+
+    `enabled` is the SOURCE's own enable intent (`issues_enabled` /
+    `docs_enabled` / `session_recording`), not the shared GitHub connection: a
+    team can keep the connection and have exactly one of the two GitHub sources
+    switched off (#1924). The connection rides alongside as
+    `connection_connected`, so the two facts are never conflated.
+    """
+    state = _onboarding_state()
+    if "error" in state:
+        return state
+    connected = bool(state.get("github_connected"))
+    return {
+        "sources": {
+            "github_issues": {
+                **_SOURCE_ROSTER["github_issues"],
+                "enabled": _flag_on(state, "issues_enabled"),
+                "connection_connected": connected,
+                "scope": "source",
+            },
+            "github_documents": {
+                **_SOURCE_ROSTER["github_documents"],
+                "enabled": _flag_on(state, "docs_enabled"),
+                "connection_connected": connected,
+                "indexed": bool(state.get("github_docs_indexed")),
+                "indexed_at": state.get("github_docs_indexed_at"),
+                "scope": "source",
+            },
+            "agent_sessions": {
+                **_SOURCE_ROSTER["agent_sessions"],
+                "enabled": _flag_on(state, "session_recording"),
+                "scope": "source",
+            },
+        },
+        # The raw projection rides along, so nothing about the team's state is
+        # hidden behind this tool's interpretation of it.
+        "onboarding": state,
+    }
+
+
+def _set_source_state(source: str, enable: bool) -> dict:
+    """Switch one source on or off, within the caller's own permission.
+
+    Permission itself is enforced ABOVE this function, at the tool boundary:
+    `_enforce_mcp_tool_scope` requires ``graphs:write`` for a ``writes=True``
+    tool and denies an unresolvable name (#4170). Nothing here can widen that,
+    and nothing here accepts a credential.
+    """
+    org_id = _current_org_id.get()
+    if org_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    import asyncio as _asyncio
+
+    from tortoise.hosted_api import (
+        _github_credentials,
+        _run_docs_indexing,
+        _run_indexing,
+        _start_index_job,
+        _update_onboarding_state,
+    )
+
+    spec = _SOURCE_ROSTER[source]
+    state = _onboarding_state()
+    if "error" in state:
+        return state
+
+    if spec["connection"] == "github":
+        # #1924: the two GitHub sources share ONE connection, but switching a
+        # source off is NOT a disconnect. The dashboard's own off-toggle writes
+        # the per-source ENABLE-INTENT flag (`issues_enabled` / `docs_enabled`)
+        # and never `github_connected` — a full disconnect would kill the
+        # sibling source and force a fresh OAuth round-trip just to hide one
+        # source. This tool writes the same key, so it cannot re-introduce the
+        # behaviour #1924 removed.
+        flag = spec["enable_flag"]
+        current_on = _flag_on(state, flag)
+        if not enable:
+            if not current_on:
+                _log_source_change(org_id, source, "disable", "already_off")
+                return {
+                    "status": "already_off",
+                    "source": source,
+                    "scope": "source",
+                    "enable_flag": flag,
+                }
+            _update_onboarding_state(org_id, **{flag: False})
+            _log_source_change(org_id, source, "disable", "ok")
+            return {
+                "status": "disabled",
+                "source": source,
+                "scope": "source",
+                "enable_flag": flag,
+                "enforcement": spec["enforcement"],
+                "connection_untouched": True,
+                "sibling_untouched": spec["sibling"],
+                "note": (
+                    "Switched off by recording the per-source enable intent "
+                    f"({flag}=false, #1924) — the GitHub CONNECTION and the "
+                    f"sibling source ({spec['sibling']}) are untouched, so "
+                    "re-enabling needs no re-authorisation. This flag is "
+                    "INTENT ONLY today: nothing server-side reads it yet, so an "
+                    "in-flight index job is not cancelled. For a real GitHub "
+                    "revocation use POST /v1/onboarding/github/disconnect "
+                    "(it disconnects BOTH sources)."
+                ),
+            }
+        encrypted, gh_org = _github_credentials(org_id)
+        if not encrypted:
+            _log_source_change(org_id, source, "enable",
+                               "refused_not_connected")
+            return {
+                "error": (
+                    "GitHub not connected. Authorise it first with "
+                    "tortoise_onboarding_github_connect — this tool never "
+                    "accepts credentials."
+                )
+            }
+        if not current_on:
+            _update_onboarding_state(org_id, **{flag: True})
+        kind = "docs" if source == "github_documents" else "github"
+        job_id, is_new = _start_index_job(org_id, kind=kind)
+        if is_new:
+            runner = _run_docs_indexing if kind == "docs" else _run_indexing
+            try:
+                _asyncio.get_event_loop().create_task(
+                    runner(job_id, org_id, gh_org, None))
+            except RuntimeError:
+                _log_source_change(org_id, source, "enable",
+                                   "error_no_event_loop")
+                return {"error": "No running event loop"}
+        _log_source_change(org_id, source, "enable", "ok")
+        return {
+            "status": "enabled",
+            "source": source,
+            "scope": "source",
+            "enable_flag": flag,
+            "job_id": job_id,
+            "started": is_new,
+        }
+
+    # agent_sessions — the #1927 optional off-switch (ENFORCED, unlike the
+    # GitHub intent flags: capture honours `session_recording`).
+    current_on = _flag_on(state, "session_recording")
+    if enable and current_on:
+        _log_source_change(org_id, source, "enable", "already_on")
+        return {
+            "status": "already_on",
+            "source": source,
+            "scope": "source",
+            "default": "on",
+            "note": (
+                "Agent session recording is ON by default (#1927: an optional "
+                "off-switch, ToS-covered). Nothing to change; use action="
+                "\"disable\" to stop it."
+            ),
+        }
+    _update_onboarding_state(org_id, session_recording=enable,
+                             capture_revised=True)
+    _log_source_change(org_id, source,
+                       "enable" if enable else "disable", "ok")
+    return {"status": "enabled" if enable else "disabled",
+            "source": source, "scope": "source"}
+
+
+def tortoise_manage_sources(action: str,
+                            source: str | None = None) -> dict:
+    """One consolidated operation over the team's memory sources (#3540).
+
+    Ruling B: the assistant may configure the system itself, assuming it has
+    permission. `action`: list | enable | disable. `source`: github_issues |
+    github_documents | agent_sessions (required for enable/disable).
+
+    - list      → every source with its state and its default, one call.
+    - enable    → start the source (GitHub: start that source's index job).
+    - disable   → switch that ONE source off. GitHub: records the per-source
+                  enable intent (`issues_enabled` / `docs_enabled`, #1924) and
+                  leaves the shared CONNECTION and the sibling source intact;
+                  the payload reports `enforcement: "intent-only"` because
+                  nothing server-side honours the flag yet. Agent sessions:
+                  the #1927 off-switch.
+
+    This REPLACES `tortoise_onboarding_github_index` and
+    `tortoise_onboarding_session_recording`, which are retired (#3883): they
+    still resolve and name this call. `tortoise_onboarding_github_connect` is
+    deliberately NOT folded in — it is the OAuth handshake, and credentials
+    must never pass through the model.
+    """
+    # C5 #2114 parity: this writes ORG-level state, so a graph-bound key is
+    # rejected rather than allowed to reconfigure the org from inside a graph.
+    _reject_graph_bound_mcp_org_surface("manage sources")
+    org_id = _current_org_id.get()
+    if org_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+
+    act = (action or "").strip().lower()
+    if act == "list":
+        return _sources_view()
+    if act not in ("enable", "disable"):
+        return {
+            "error": f"action must be one of list|enable|disable; got {action!r}"
+        }
+    if source not in _SOURCE_ROSTER:
+        return {
+            "error": (
+                f"source must be one of {sorted(_SOURCE_ROSTER)}; got {source!r}"
+            )
+        }
+    return _set_source_state(source, act == "enable")
+
+
 def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
     # #2300: initiates org-level GitHub OAuth + stores org CSRF/org state
