@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: e20de606be10fc9fda96729b6cfd6277ac3ad1ec
+cut_at_commit: aec067e969e6a189cc2ba1fb403dc1b320994f03
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -523,7 +523,7 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:7dc2585e3d3af508
+  served_from: tortoise/mcp_server.py:4d385cebbe4c5170
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1
