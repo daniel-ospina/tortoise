@@ -64,6 +64,7 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     assert_no_non_folded,
     classify_terminalizer_miss,
     collect_non_folded,
+    identity_absent,
     record_identity_skip,
     record_non_folded,
 )
@@ -4291,7 +4292,8 @@ def _writable_id(val) -> bool:
 
 def _log_identity_skip(what: str, value, label: str = "identity", *,
                        event_id: str | None = None, where: str = "",
-                       absent_is_ordinary: bool = True) -> None:
+                       absent_is_ordinary: bool = True,
+                       drops_record: bool = False) -> None:
     """REPORT and RECORD that an unwritable identity made a record be SKIPPED.
 
     The boundary change (#7369) turned what used to be a LOUD abort into a
@@ -4329,25 +4331,41 @@ def _log_identity_skip(what: str, value, label: str = "identity", *,
     site for which an absent identity IS malformed (a Point creation anchor)
     passes ``absent_is_ordinary=False`` to report — and record — it as its own
     distinct cause.
+
+    ⛔ ``drops_record`` is the GRANULARITY (#8840 review P1). This function has
+    ~20 call sites and MOST of them are nested inside a record that FOLDS
+    SUCCESSFULLY: ``_upsert`` writes the Point node first and wires its edges
+    after, so a refused ``aboutEntities``/``extractedFrom``/``contains_session``
+    identity loses an edge, not the record. Only the creation anchors — the
+    sites where the fold ``return``/``continue``s and the record is not written
+    at all — pass ``drops_record=True``. ``recover_from_log`` counts a DROPPED
+    RECORD from those entries only; reading *any* entry as a drop made
+    ``applied`` under-count, which flipped ``recovered`` to ``False`` and WIPED
+    a replay that had succeeded — the #7406 harm this work exists to preserve.
     """
-    if not value:
+    if identity_absent(value):
         if absent_is_ordinary:
             return
-        record_identity_skip(what, value, label, event_id=event_id,
-                             where=where)
+        entry = record_identity_skip(what, value, label, event_id=event_id,
+                                     where=where, drops_record=drops_record)
         logger.warning(
-            "%s#8702: skipping %s — the record carries NO %s (event_id=%s), "
+            "%s#8702: skipping %s — %s (event_id=%s), "
             "so there is no identity to fold; the record is dropped",
-            f"{where}: " if where else "", what, label, event_id,
+            f"{where}: " if where else "", what, entry.describe(), event_id,
         )
         return
-    record_identity_skip(what, value, label, event_id=event_id, where=where)
+    entry = record_identity_skip(what, value, label, event_id=event_id,
+                                 where=where, drops_record=drops_record)
+    # The cause comes from `IdentitySkip.describe()`, NOT a sentence written
+    # here: it names the refused SHAPE (a non-str / a NUL-bearing str / a
+    # lone-surrogate-bearing str), so the "true cause" claim holds for every
+    # value `_writable_id` refuses. Asserting "NUL/lone-surrogate bearing" for
+    # a non-str id was false for a live journal shape (#8840 review P3).
     logger.warning(
-        "%s#7369/#8702: skipping %s — %s %r is PRESENT but not a writable "
-        "identity (NUL/lone-surrogate bearing); the record is dropped rather "
+        "%s#7369/#8702: skipping %s — %s; the record is dropped rather "
         "than reaching FalkorDB and aborting a replay that has already wiped "
         "the graph%s",
-        f"{where}: " if where else "", what, label, value,
+        f"{where}: " if where else "", what, entry.describe(),
         f" (event_id={event_id})" if event_id else "",
     )
 
@@ -7957,11 +7975,16 @@ class FalkorProjection(
             # NUL/lone-surrogate-bearing one, and the two causes are reported
             # as themselves — "missing point id" was FALSE for a present id
             # once the guard changed, and misdirected the operator (#8702).
+            # #8840 review P1: `drops_record=True` — this `return` IS the drop
+            # (the record is not written at all), which is what the replay
+            # accounting counts. Every other `_log_identity_skip` site reports a
+            # NESTED identity of a record that still folds.
             if not _writable_id(p.get("id")):
                 _log_identity_skip(t, p.get("id"), "point id",
                                    event_id=ev.get("event_id"),
                                    where="FalkorProjection.apply",
-                                   absent_is_ordinary=False)
+                                   absent_is_ordinary=False,
+                                   drops_record=True)
                 return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -8059,7 +8082,16 @@ class FalkorProjection(
             elif isinstance(p, dict):
                 # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
                 # the skip must be observable (see `_log_identity_skip`).
-                _log_identity_skip("PointPromoted", p.get("id"), "id")
+                # #8840 review P3 (Issue 4): `absent_is_ordinary=False` +
+                # `drops_record=True` — this branch DROPS the record, so an
+                # absent id here is the record's death, not an ordinary empty
+                # entity name. Leaving it ordinary meant the replay counted it
+                # as `applied` with no trace at all.
+                _log_identity_skip("PointPromoted", p.get("id"), "id",
+                                   event_id=ev.get("event_id"),
+                                   where="FalkorProjection.apply",
+                                   absent_is_ordinary=False,
+                                   drops_record=True)
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point
@@ -9932,7 +9964,8 @@ class FalkorProjection(
                     _log_identity_skip(t, p.get("id"), "point id",
                                        event_id=ev.get("event_id"),
                                        where="rebuild",
-                                       absent_is_ordinary=False)
+                                       absent_is_ordinary=False,
+                                       drops_record=True)
                     continue
                 # #2488/#3299: record the id's LAST hoisted-creation journal
                 # seq — the cross-family survivor anchor (a re-created id's
@@ -10339,8 +10372,15 @@ class FalkorProjection(
                 elif isinstance(p, dict):
                     # #7369: a truthy-but-unwritable id is skipped, not folded
                     # — the skip must be observable (see `_log_identity_skip`).
+                    # #8840 review P3 (Issue 4): the pass-1b sibling of the
+                    # `apply()` anchor — a dropped record, and an absent id here
+                    # is malformed rather than an ordinary empty identity.
                     _log_identity_skip(
-                        "PointPromoted (rebuild)", p.get("id"), "id")
+                        "PointPromoted (rebuild)", p.get("id"), "id",
+                        event_id=ev.get("event_id"),
+                        where="rebuild",
+                        absent_is_ordinary=False,
+                        drops_record=True)
             elif t == "OperatorPromoted":
                 # #785/R16: fold/apply parity with the main handler
                 # (#2256 review P1): UPSERT the snapshot synthesized into
@@ -11923,7 +11963,8 @@ class FalkorProjection(
                                        "point id",
                                        event_id=ev.get("event_id"),
                                        where="rebuild edge wiring",
-                                       absent_is_ordinary=False)
+                                       absent_is_ordinary=False,
+                                       drops_record=True)
                     continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)

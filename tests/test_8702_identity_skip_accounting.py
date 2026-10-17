@@ -36,13 +36,25 @@ field ``identity_skipped``, and names the true cause in ``reason``.
 keep the recovery gate re-runnable on every retry — that is the whole point of
 #7406, and a fix that made the journal permanently un-openable would undo it.
 
+GRANULARITY (#8840 review P1). The collector sees every refused identity, and
+MOST of them are nested inside a record that folds (an ``aboutEntities`` /
+``extractedFrom`` / ``contains_session`` name refused while the node was already
+written). Only the creation anchors — the sites where the fold gives the record
+up — declare a RECORD drop (``IdentitySkip.drops_record``), so:
+
+  * a record that folded is ``applied`` even when a nested identity was
+    refused (counting it as dropped under-counted ``applied`` and, on a
+    single-record journal, WIPED a replay that had succeeded);
+  * ``identity_skipped`` counts records, never ``len(collector)``;
+  * nested skips are reported in their own clause, which never claims the
+    record is missing from the graph — because it is not.
+
 Run (embedded carve-out):
   TORTOISE_TEST_CARVE_OUT=1 python -m pytest \\
       tests/test_8702_identity_skip_accounting.py -q
 """
 from __future__ import annotations
 
-import json
 import logging
 import pathlib
 
@@ -77,7 +89,7 @@ _EMBEDDING = {
 }
 
 
-def _point_added(pid, content, event_id):
+def _point_added(pid, content, event_id, **extra):
     """An authentic ``PointAdded`` record (shape per a real SDK journal)."""
     point = {"content": content, "pointKind": "statement",
              "is_operator": False, "status": "live",
@@ -85,8 +97,20 @@ def _point_added(pid, content, event_id):
              "updatedAt": "2026-01-01T00:00:00+00:00", **_EMBEDDING}
     if pid is not None:
         point["id"] = pid
+    point.update(extra)
     return {"event_id": event_id, "ts": "2026-01-01T00:00:00+00:00",
             "type": "PointAdded", "initiated_by": "sdk",
+            "projection_version": 2, "point": point}
+
+
+def _promoted(pid, content, event_id):
+    """A ``PointPromoted`` record (its payload is the point snapshot)."""
+    point = {"content": content, "pointKind": "statement",
+             "is_operator": False, "status": "live", **_EMBEDDING}
+    if pid is not None:
+        point["id"] = pid
+    return {"event_id": event_id, "ts": "2026-01-01T00:00:00+00:00",
+            "type": "PointPromoted", "initiated_by": "sdk",
             "projection_version": 2, "point": point}
 
 
@@ -293,3 +317,162 @@ def test_no_skip_is_recorded_outside_a_run():
         record_identity_skip("PointAdded", CORRUPT_ID, "point id")
     assert len(recorded) == 1, recorded
     assert recorded[0].value == CORRUPT_ID
+
+
+# ── 4. GRANULARITY: a NESTED skip is not a dropped record (#8840 review P1) ──
+#
+# The collector sees every refused identity, and most of them are nested inside
+# a record that FOLDS: `_upsert` writes the Point node FIRST and wires its edges
+# after, so a refused `aboutEntities`/`extractedFrom`/`contains_session` name
+# loses an edge, not the record. Reading any entry as "this record was dropped"
+# made `applied` under-count — and on a single-record journal that flipped `ok`
+# to False, which WIPES the replay that had just succeeded.
+
+#: Two PRESENT-but-unwritable entity names — the nested case. Each one is
+#: refused by five `_try_about_edge` label attempts + one stub mint, so a
+#: per-ENTRY tally is drastically wrong (12 entries, ONE record).
+NESTED_BAD_ENTITIES = ["a\x00bad", "b\x00bad"]
+
+
+def test_a_nested_identity_skip_does_not_make_the_record_a_drop(tmp_path, proj):
+    """FALSIFIER (#8840 review P1): the record FOLDED — it must count as applied.
+
+    Pre-fix this journal (ONE record, healthy id, two refused `aboutEntities`)
+    returned ``recovered: False``, ``db_points: 0`` and ``replay_rolled_back``
+    over a graph whose node the fold had written — a destructive rollback of a
+    successful replay, reproduced on every retry, i.e. a permanently
+    un-openable store (the #7406 posture this fix must preserve).
+    """
+    events_dir = _journal(tmp_path,
+                          _point_added("p-ok", "a healthy claim", "ev-ok",
+                                       aboutEntities=list(NESTED_BAD_ENTITIES)))
+    _empty(proj)
+    result = recover_from_log(str(events_dir), proj)
+    nodes = proj.query("MATCH (n:Point) RETURN n.id").result_set
+
+    assert result["recovered"] is True, result
+    assert result.get("replay_rolled_back") is None, result
+    assert result["db_points"] == 1, result
+    assert [row[0] for row in nodes] == ["p-ok"], nodes
+    # The record was REPLAYED: one read = one applied, no dropped record.
+    assert "replayed 1 events" in result["reason"], result["reason"]
+    assert "identity_skipped" not in result, (
+        "a record that folded is being counted as a dropped one (the nested "
+        f"entity skips are not record drops): {result!r}")
+    # …and the nested skips are still EVIDENCE, reported as their own fact.
+    assert "refused INSIDE a record that still replayed" in result["reason"], (
+        result["reason"])
+    assert "NOT in this graph" not in result["reason"], (
+        "the report claims the record is missing from the graph, but its node "
+        f"IS there: {result['reason']!r}")
+
+
+def test_a_nested_skip_plus_a_real_drop_counts_only_the_drop(tmp_path, proj):
+    """Both directions in ONE journal: the nested skips must not inflate the
+    tally, and the genuine drop must still be counted (and only once).
+
+    Pre-fix: ``identity_skipped == 13`` (12 nested entries + 1 real drop) and
+    ``applied == 0`` → ``recovered: False`` with the graph wiped.
+    """
+    events_dir = _journal(
+        tmp_path,
+        _point_added("p-ok", "a healthy claim", "ev-ok",
+                     aboutEntities=list(NESTED_BAD_ENTITIES)),
+        _point_added(CORRUPT_ID, "a corrupt identity", "ev-bad"))
+    _empty(proj)
+    result = recover_from_log(str(events_dir), proj)
+    nodes = proj.query("MATCH (n:Point) RETURN n.id").result_set
+
+    assert result["recovered"] is True, result
+    assert [row[0] for row in nodes] == ["p-ok"], nodes
+    assert result["log_points"] == 2, result
+    assert result["identity_skipped"] == 1, (
+        "the tally must count DROPPED RECORDS, not refused identities: "
+        f"{result!r}")
+    assert "replayed 1 events" in result["reason"], result["reason"]
+    # The drop names the record that died, with its event_id…
+    assert "ev-bad" in result["reason"], result["reason"]
+    # …and the nested skips are a SEPARATE sentence that does not claim the
+    # healthy record is absent from the graph.
+    assert "refused INSIDE a record that still replayed" in result["reason"], (
+        result["reason"])
+
+
+def test_a_promoted_record_with_no_id_is_counted_as_dropped(tmp_path, proj):
+    """The complementary gap (#8840 review P3, Issue 4): a record the fold drops
+    SILENTLY was still counted as applied.
+
+    ``PointPromoted``'s anchor kept ``absent_is_ordinary=True``, so a promoted
+    snapshot with no id was dropped with no log, no entry and ``applied += 1``.
+    """
+    events_dir = _journal(tmp_path,
+                          _point_added("p-ok", "a healthy claim", "ev-ok"),
+                          _promoted(None, "a promote with no id", "ev-promo"))
+    _empty(proj)
+    result = recover_from_log(str(events_dir), proj)
+
+    assert result["recovered"] is True, result
+    assert result["identity_skipped"] == 1, (
+        f"the silently dropped promote is still counted as replayed: {result!r}")
+    assert "replayed 1 events" in result["reason"], result["reason"]
+    assert "carries NO id at all" in result["reason"], result["reason"]
+    assert "ev-promo" in result["reason"], result["reason"]
+
+
+# ── 5. the cause is TRUE for every value the gate refuses (#8840 P3) ────────
+
+def test_a_present_non_str_point_id_is_reported_by_its_shape(tmp_path, proj,
+                                                             caplog):
+    """FALSIFIER (#8840 review P3): the message claimed "NUL/lone-surrogate
+    bearing" for a value that carries neither.
+
+    ``_writable_id`` refuses every non-``str`` (``#331`` review r4 kept the
+    ``isinstance`` guard precisely because non-str ids are a live journal
+    shape), and the old sentence named a cause that was false for them.
+    """
+    events_dir = _journal(tmp_path,
+                          _point_added("p-ok", "a healthy claim", "ev-ok"),
+                          _point_added(123, "a numeric identity", "ev-num"))
+    _empty(proj)
+    with caplog.at_level(logging.WARNING, logger=_PROJECTION_LOGGER):
+        result = recover_from_log(str(events_dir), proj)
+
+    messages = " \n".join(r.getMessage() for r in caplog.records)
+    assert result["identity_skipped"] == 1, result
+    assert "123" in messages, messages
+    assert "not a str" in messages, (
+        f"the report does not name the actual refused shape: {messages!r}")
+    assert "NUL" not in messages and "surrogate" not in messages, (
+        f"the report blames a NUL/surrogate for a value carrying neither: "
+        f"{messages!r}")
+    assert "not a str" in result["reason"], result["reason"]
+
+
+def test_a_present_but_falsy_point_id_is_not_reported_as_absent(tmp_path, proj):
+    """FALSIFIER (#8840 review P3): presence was decided by TRUTHINESS.
+
+    ``if not value`` sent ``0`` down the ABSENT branch, so a record whose id IS
+    present was reported as "carries NO point id at all" — the same #8018 class
+    this work exists to close, one value later.
+    """
+    events_dir = _journal(tmp_path,
+                          _point_added("p-ok", "a healthy claim", "ev-ok"),
+                          _point_added(0, "a falsy identity", "ev-zero"))
+    _empty(proj)
+    result = recover_from_log(str(events_dir), proj)
+
+    assert result["identity_skipped"] == 1, result
+    assert "carries NO point id" not in result["reason"], (
+        f"a PRESENT id is reported as absent: {result['reason']!r}")
+    assert "PRESENT but not writable" in result["reason"], result["reason"]
+
+
+def test_a_nested_skip_does_not_claim_a_record_drop_on_the_entry():
+    """The granularity is on the ENTRY, so a caller can tell the two apart."""
+    with collect_identity_skips() as recorded:
+        record_identity_skip("aboutDocument edge", CORRUPT_ID,
+                             "name (read parameter)")
+        record_identity_skip("PointAdded", CORRUPT_ID, "point id",
+                             drops_record=True)
+    assert [e.drops_record for e in recorded] == [False, True], recorded
+    assert all(e.state == IDENTITY_UNWRITABLE for e in recorded), recorded
