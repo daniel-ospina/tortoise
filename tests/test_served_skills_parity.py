@@ -1332,16 +1332,16 @@ def _arm_steps(doc: dict) -> list[tuple[str, dict, dict]]:
             if _is_arm_step(step)]
 
 
-def _body_mentions_sync_on_the_tool(body: str) -> bool:
+def _body_mentions_sync_on_the_tool(body: str, env: dict | None = None) -> bool:
     """Fail-closed fallback for spellings the hermetic run cannot expand.
 
-    Text-only, so it must decide the way `_runs_sync` does — NOT by substring. A
-    substring test rejected honest jobs: an inline comment on the gate step
-    (`# never run --sync before this`) or a lookalike `scripts/…` script both
-    dropped a fully armed gate from the runner set, and the message blamed a
-    disarmed step (review finding, P2). Shell comments are stripped, the two
-    idioms that defeat expansion are substituted with the repo root, and only an
-    operand that RESOLVES to this tree's tool counts.
+    Must decide the way `_runs_sync` does — per COMMAND, after interpolation —
+    not by substring. Measured false rejects: an inline comment mentioning
+    `--sync`, and the tool's OWN remedy string (`… || { echo "re-derive with
+    --sync"; exit 1; }`) echoed by an honest gate, which drops a fully armed job
+    from the runner set and blames `continue-on-error` (review findings, P2).
+    Measured escapes: `${{ env.X }}` and unspaced `${{github.workspace}}` — bash
+    never expands either, so the executor records nothing at all.
     """
     lines = []
     for line in body.splitlines():
@@ -1349,13 +1349,21 @@ def _body_mentions_sync_on_the_tool(body: str) -> bool:
             continue
         lines.append(line.split(" #", 1)[0])
     text = "\n".join(lines)
-    for token in ("${{ github.workspace }}", "$GITHUB_WORKSPACE", "${PWD}", "$PWD"):
-        text = text.replace(token, str(REPO))
-    if "--sync" not in text:
-        return False
-    for word in text.replace("'", " ").replace('"', " ").split():
-        if word.endswith("served_skills_parity.py") and _resolves_to_the_tool(word):
-            return True
+    # Interpolate the GitHub contexts the shell never sees (whitespace-tolerant).
+    text = re.sub(r"\$\{\{\s*github\.workspace\s*\}\}", str(REPO), text)
+    for name, value in (env or {}).items():
+        text = re.sub(r"\$\{\{\s*env\." + re.escape(str(name)) + r"\s*\}\}",
+                      str(value), text)
+    text = (text.replace("$GITHUB_WORKSPACE", str(REPO))
+                .replace("${PWD}", str(REPO)).replace("$PWD", str(REPO)))
+    # Per COMMAND, like `_runs_sync`: `--sync` must belong to the same segment.
+    for segment in re.split(r"&&|\|\||;|\n", text):
+        words = segment.replace("'", " ").replace('"', " ").split()
+        for index, word in enumerate(words):
+            if (word.endswith("served_skills_parity.py")
+                    and _resolves_to_the_tool(word)
+                    and "--sync" in words[index + 1:]):
+                return True
     return False
 
 
@@ -1386,7 +1394,7 @@ def _job_syncs(job: dict, inherited_env: dict | None = None) -> bool:
         if any(_runs_sync(a) for a in calls):
             return True
         # Fail-closed text fallback for spellings the hermetic run cannot expand.
-        if _body_mentions_sync_on_the_tool(body):
+        if _body_mentions_sync_on_the_tool(body, merged):
             return True
     return False
 
@@ -1695,6 +1703,9 @@ def test_4643_a_sync_hidden_behind_env_or_pwd_still_disarms_the_job(tmp_path):
                '"$PWD/tools/served_skills_parity.py" --sync'),
         (None, "uv run --no-project --with pyyaml==6.0.3 python3 "
                '"${{ github.workspace }}/tools/served_skills_parity.py" --sync'),
+        # Unspaced: the regex must tolerate it, and bash expands neither form.
+        (None, "uv run --no-project --with pyyaml==6.0.3 python3 "
+               '"${{github.workspace}}/tools/served_skills_parity.py" --sync'),
     ]
     for env, run in spellings:
         workflows = tmp_path / f"wf-{abs(hash(run))}"
@@ -1740,7 +1751,8 @@ def test_4643_a_sync_hidden_in_job_or_workflow_env_still_disarms_the_job(tmp_pat
                      and "served_skills_parity" in s["run"])
         steps.insert(index, {
             "name": "Re-derive the mirror from upstream",
-            "run": 'uv run --no-project --with pyyaml==6.0.3 python3 "$PARITY_TOOL" --sync',
+            "run": 'uv run --no-project --with pyyaml==6.0.3 python3 '
+                   '"${{ env.PARITY_TOOL }}" --sync',
         })
         path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
         assert "deploy-pages.yml" not in _upstream_runners(workflows), (
@@ -1802,21 +1814,36 @@ def test_4643_the_daily_runner_keeps_its_red_run_evidence():
     assert armed, "the daily runner has no arm step"
     for job, step in armed:
         body = str(step.get("run") or "")
-        assert "--report" in body, (
-            "the daily runner must write the report its own comment promises")
-        report_path = body.split("--report", 1)[1].split()[0].strip("'\"")
+        # Derive the report path from what the step actually RUNS, not from its
+        # text: `--report` in a trailing comment writes no report, and a
+        # substring test on the upload path accepted `reports/…` for a file the
+        # tool writes at the repo root (review finding, P2).
+        _rc, calls = _execute_step(body, flags=_shell_flags(step))
+        report_paths = []
+        for argv in calls:
+            if "--report" in argv and _is_the_arm(argv):
+                index = argv.index("--report")
+                if index + 1 < len(argv):
+                    report_paths.append(argv[index + 1])
+        assert report_paths, (
+            "the daily runner must EXECUTE --report <file> — the report is the "
+            "red-run evidence its own comment promises (a `--report` in a "
+            "comment writes nothing)")
         uploads = [s for s in (job.get("steps") or [])
                    if isinstance(s, dict)
                    and str(s.get("uses") or "").startswith(
                        "actions/upload-artifact")]
         assert uploads, (
-            f"the report {report_path!r} must be uploaded, or no red run has "
-            f"its evidence")
-        paths = " ".join(str((u.get("with") or {}).get("path") or "")
-                         for u in uploads)
-        assert report_path in paths, (
-            f"the upload does not carry the report the gate writes "
-            f"({report_path!r} not in {paths!r})")
+            f"the report {report_paths[0]!r} must be uploaded, or no red run "
+            f"has its evidence")
+        for report_path in report_paths:
+            wanted = report_path.removeprefix("./")
+            assert any(
+                str((u.get("with") or {}).get("path") or "").removeprefix("./")
+                == wanted for u in uploads), (
+                f"no upload carries exactly the report the gate writes "
+                f"({wanted!r}); a substring match let `reports/{wanted}` pass "
+                f"while upload-artifact matched nothing")
 
 
 def test_4643_a_sync_step_is_not_a_gate(tmp_path):
