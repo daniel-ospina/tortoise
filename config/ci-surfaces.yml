@@ -4603,8 +4603,8 @@ durations:
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
-  test_write_session_and_turns_3551.py: 2.1  # #3551: locally measured (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
-  test_session_schema_3554.py: 3.9  # #3554: locally measured (42 hermetic tests, no graph lane) — refresh from CI junit
+  test_write_session_and_turns_3551.py: 2.1  # #3551 (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — NOW CI-MEASURED from run 39040632415 (was 70.8 locally measured; the local figure counted container lifecycle, not the pytest session)
+  test_session_schema_3554.py: 3.9  # #3554 (42 hermetic tests, no graph lane) — NOW CI-MEASURED from run 39040632415 (was 6.6 locally measured)
   test_battery_setup.py: 98.8
   test_graph_write_loop_responsiveness.py: 4.4
   test_read_routes_loop_responsiveness.py: 2.2
