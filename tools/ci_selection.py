@@ -991,6 +991,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_graph_write_repair_tool_change_selects_core_not_tier1.
              "tools/graph_write_repair.py",
              "tools/install-graph-write-repair-schedule.sh",
+             # #8882 review P1: tools/retype_snapshot.py is the CLI for the
+             # offline re-typing mechanics, and its guard
+             # (tests/test_retype_8882.py) is `core`-registered — but `tools/`
+             # is swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
+             # matches the tool, so a CLI-only change selected NO surface, took
+             # the docs-only early return and fell back to tier-1 smoke: the
+             # file's own CLI-contract cases (`--decisions requires --out`, the
+             # round trip) would never run on the PR editing the CLI. Same
+             # #1349/#3332/#3616 silent-drop class as tools/queue_resweep.py
+             # above. `tortoise/retype.py` needs no entry (it matches no
+             # SOURCE_PATTERN, so a module-only change already falls through to
+             # `core`). Pinned by
+             # tests/test_ci_selection.py::test_retype_snapshot_tool_change_selects_core_not_tier1.
+             "tools/retype_snapshot.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS

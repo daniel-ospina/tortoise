@@ -73,9 +73,38 @@
 #   already red when it runs. It also does not try to detect a stale build —
 #   that is a different finding with a different home.
 #
+# ── THE RESOLVE LEG (`--resolve`, #8841) ──────────────────────────────────
+#   Filing without closing is a ledger that can only grow. Measured: #7634 was
+#   filed 2026-10-07T20:11Z, **21 runs then SUCCEEDED** on that very key
+#   (2026-10-09T23:23Z … 2026-10-11T00:36Z) and ten days later it was still OPEN
+#   with 238 `Recurrence` comments — i.e. for that window the standing alert
+#   claimed a condition that was no longer true, and every later recurrence was
+#   indistinguishable noise. The body of this script always said "close this
+#   issue when the streak ends"; nothing mechanical ended it.
+#
+#   So the SAME per-step outcomes that attribute a failure now also RETIRE it:
+#   every step that reported `success` in this run resolves its own key, and the
+#   job-level fallback key (`… failed`, no step) resolves only when `--job-status`
+#   is `success` — i.e. when the whole job is green.
+#
+#   ⛔ IT RESOLVES ON EVIDENCE, NOT ON ELECTION. A step that is `skipped` or
+#   `failure` is never resolved (a run that dies early skips the later steps; a
+#   skipped step is not a passing one). Only the step's OWN `success` in THIS run
+#   closes its key, which is the same per-step attribution the alert path uses.
+#
+#   ⛔ IT NEVER FAILS THE RUN. This leg runs on the GREEN path (and on a red run
+#   whose earlier step recovered), so a bookkeeping failure must not turn a good
+#   deploy red — a red here would be a FALSE deploy failure, and the alert step's
+#   `--steps` list does not include this step, so the job-level fallback key would
+#   then file an alert claiming the deploy failed. Every failure in this mode is a
+#   `::warning::` with exit 0; ONLY a broken invocation (exit 2) is loud, because
+#   a permanently-wrong invocation must not silently never resolve.
+#
 # Usage:
 #   bash .github/scripts/deploy-api-alert.sh --job deploy-api \
 #     --steps "drift=failure verify-secrets=success …" [--drift-report <path>]
+#   bash .github/scripts/deploy-api-alert.sh --job deploy-api --resolve \
+#     --job-status <success|failure|cancelled> --steps "drift=success …"
 #
 # Env:  GH_TOKEN (or GITHUB_TOKEN) — MUST be the Actions token, see above
 #       GITHUB_REPOSITORY / GITHUB_RUN_ID / GITHUB_SERVER_URL / GITHUB_SHA
@@ -95,6 +124,12 @@ ALERT_LABEL="${DEPLOY_ALERT_LABEL:-bug}"
 # every other step is described by its name and the run link.
 DRIFT_REPORT_FILE="${DRIFT_REPORT_FILE:-}"
 DRIFT_STEP_ID="drift"
+# The resolve leg (#8841). RESOLVE_MODE=1 = retire the keys whose steps passed;
+# JOB_STATUS is the workflow's `${{ job.status }}`, the ONLY evidence that the
+# job as a whole is green (and therefore that the job-level fallback key may be
+# resolved).
+RESOLVE_MODE=0
+JOB_STATUS=""
 
 # The step ids the workflow passes, and the human labels they map to. The ids
 # are the KEY's per-step discriminator (they are ours, short and stable); the
@@ -179,9 +214,15 @@ alert_key() { # <job> <step-id>
 usage() {
   cat >&2 <<'USAGE'
 usage: deploy-api-alert.sh --job <job-name> --steps "id=outcome …" [--drift-report <path>]
+       deploy-api-alert.sh --job <job-name> --resolve --job-status <s> --steps "id=outcome …"
 
-  Files/updates ONE issue for the first step that failed in <job>, then pages
-  Telegram best-effort. Requires the GitHub Actions token (see the header).
+  Default: files/updates ONE issue for the first step that failed in <job>, then
+  pages Telegram best-effort. Requires the GitHub Actions token (see the header).
+
+  --resolve (#8841): closes the ledger issue of every step that reported
+  `success` in this run (plus the job-level key when --job-status is `success`),
+  so a recovered fault cannot leave a stale OPEN alert behind. Never fails the
+  run: every failure here is a warning, except a broken invocation (exit 2).
 USAGE
   return 2
 }
@@ -282,6 +323,60 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
   [ -s "$out" ] || { err "built an empty alert body — refusing to file"; return 1; }
 }
 
+# ── the resolve leg (#8841) ────────────────────────────────────────────────
+# Retire the ledger keys whose steps PASSED in this run. Reads the same
+# `id=outcome …` map the alert path reads, so a step can never be alerted on a
+# key it cannot also resolve.
+#
+# Returns 0 ALWAYS (except a caller mistakes it for the alert path): this runs on
+# the green path, and a bookkeeping failure must never redden a deploy that
+# actually shipped — see the header, "IT NEVER FAILS THE RUN". Failures are
+# surfaced as `::warning::` on every run, so a stuck resolver is visible in the
+# run annotations without ever being a false deploy failure.
+resolve_keys() { # <job> <job-status> <"id=outcome …">
+  local job="$1" status="$2" steps="$3" pair id outcome key why label
+  local resolved=0 failures=0 tried=0
+  AUTO_FILE_LIB_ONLY=1 . "${SCRIPT_DIR}/auto-file-issue.sh"
+  for pair in $steps; do
+    id="${pair%%=*}"; outcome="${pair#*=}"
+    # ONLY a step's own `success` in THIS run retires its key. `skipped` is not
+    # a pass (a run that fails early skips everything below it) and `failure`
+    # is the streak itself.
+    [ "$outcome" = "success" ] || continue
+    [ -n "$id" ] || continue
+    tried=$((tried + 1))
+    key="$(alert_key "$job" "$id")"
+    label="$(step_label "$id")"; [ -n "$label" ] || label="$id"
+    why="${label} (step id \`${id}\`) reported success in this run, so its failure streak has ended."
+    if af_resolve "$key" "$why"; then
+      resolved=$((resolved + 1))
+    else
+      failures=$((failures + 1))
+      warn "could NOT resolve '${key}' — the ledger issue stays OPEN (it will keep collecting Recurrence comments for a fault that is gone); see the substrate's error above"
+    fi
+  done
+  # The job-level fallback key (no step id) is the key used when no step id was
+  # reported, so it is only retired when the JOB ITSELF is green — a step's
+  # `success` says nothing about a job that later died.
+  if [ "$status" = "success" ]; then
+    tried=$((tried + 1))
+    key="$(alert_key "$job" "")"
+    why="The whole ${job} job reported success (\`job.status\`), so the job-level failure key has ended its streak."
+    if af_resolve "$key" "$why"; then
+      resolved=$((resolved + 1))
+    else
+      failures=$((failures + 1))
+      warn "could NOT resolve '${key}' — the ledger issue stays OPEN (see the substrate's error above)"
+    fi
+  fi
+  if [ "$failures" -gt 0 ]; then
+    warn "resolve leg: ${resolved}/${tried} ledger key(s) retired, ${failures} could NOT be — a stale OPEN alert outlives the fault it describes, and this leg deliberately does not fail the run"
+  else
+    note "resolve leg: ${resolved}/${tried} ledger key(s) retired for job '${job}' (job status: ${status:-unset})"
+  fi
+  return 0
+}
+
 main() {
   local job="" steps="" body_file="" key="" sid="" ledger_ok=0 page_text=""
   while [ $# -gt 0 ]; do
@@ -289,7 +384,7 @@ main() {
     # A bare `shift 2` fails under `set -e` and aborts with exit 1 and NO output,
     # before `usage` can run (round-5 review, P3-1).
     case "$1" in
-      --job|--steps|--drift-report)
+      --job|--steps|--drift-report|--job-status)
         if [ "$#" -lt 2 ]; then
           err "$1 needs a value"
           usage || true
@@ -300,11 +395,30 @@ main() {
       --job)          job="${2:-}"; shift 2 ;;
       --steps)        steps="${2:-}"; shift 2 ;;
       --drift-report) DRIFT_REPORT_FILE="${2:-}"; shift 2 ;;
+      --resolve)      RESOLVE_MODE=1; shift ;;
+      --job-status)   JOB_STATUS="${2:-}"; shift 2 ;;
       -h|--help)      usage || true; exit 0 ;;
       *) err "unknown argument: $1"; usage; return 2 ;;
     esac
   done
   [ -n "$job" ] || { err "--job is required (it is part of the dedupe key)"; usage; return 2; }
+
+  if [ "$RESOLVE_MODE" = "1" ]; then
+    case "$JOB_STATUS" in
+      ''|success|failure|cancelled) ;;
+      *) err "--job-status must be one of success|failure|cancelled (got '${JOB_STATUS}')"; usage; return 2 ;;
+    esac
+    if [ -z "$(printf '%s' "${GH_TOKEN:-${GITHUB_TOKEN:-}}")" ]; then
+      # Warn, never abort: this leg runs on the GREEN path, and a missing token
+      # must not be reported as a failed deploy (the alert path below keeps its
+      # hard refusal — a red run that cannot record its finding is a real defect).
+      warn "GH_TOKEN is not set — the resolve leg cannot retire any ledger key; a recovered fault's alert issue stays OPEN. Bind GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}."
+      return 0
+    fi
+    resolve_keys "$job" "$JOB_STATUS" "$steps"
+    return 0
+  fi
+  [ -z "$JOB_STATUS" ] || { err "--job-status is only meaningful with --resolve"; usage; return 2; }
 
   if [ -z "$(printf '%s' "${GH_TOKEN:-${GITHUB_TOKEN:-}}")" ]; then
     err "GH_TOKEN is not set — refusing to run an alert that cannot file or comment (a deaf alert is worse than none). Bind GH_TOKEN: \${{ secrets.GITHUB_TOKEN }} — NOT a PAT."
