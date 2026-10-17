@@ -1147,7 +1147,8 @@ def _shell_flags(step: object) -> tuple[str, ...]:
 
 
 def _execute_step(body: str, *, fail_arm: bool = False,
-                  flags: tuple[str, ...] = ("-e",)) -> tuple[int, list[list[str]]]:
+                  flags: tuple[str, ...] = ("-e",),
+                  extra_env: dict | None = None) -> tuple[int, list[list[str]]]:
     """RUN a step's real `run:` body; return (exit status, recorded argvs).
 
     `flags` must be the shell THIS step gets on the runner (`_shell_flags`), not
@@ -1176,6 +1177,12 @@ def _execute_step(body: str, *, fail_arm: bool = False,
             "PARITY_STUB_RECORD": str(record),
             "PARITY_STUB_FAIL_ARM": "1" if fail_arm else "0",
         }
+        # A step's own `env:` is part of what it RUNS: without it, a step that
+        # spells the tool `"$TOOL"` records an argv the guard cannot identify,
+        # and the `--sync` hazard walked straight through (review finding, P2).
+        for key, value in (extra_env or {}).items():
+            if isinstance(key, str) and isinstance(value, (str, int, float)):
+                env[key] = str(value)
         proc = subprocess.run(
             ["bash", *flags, str(script)],
             cwd=root, env=env, capture_output=True, text=True, timeout=60,
@@ -1298,12 +1305,21 @@ def _is_arm_step(step: object) -> bool:
 
 
 def _runs_sync(args: list[str]) -> bool:
-    """True iff this recorded command would run `--sync` on THIS tree's tool."""
-    operand = next((i for i, a in enumerate(args)
-                    if a.endswith("served_skills_parity.py")), None)
-    if operand is None or not _resolves_to_the_tool(args[operand]):
-        return False
-    return "--sync" in args[operand + 1:]
+    """True iff this recorded command would run `--sync` on THIS tree's tool.
+
+    Two spellings, because `-m` never names a file: the script operand resolves
+    to the shipped tool, or the interpreter was given the module path
+    `tools.served_skills_parity` (which IS this file — `python -m tools.…` is the
+    repo's own idiom for `tools/longmem_eval/*`).
+    """
+    for index, arg in enumerate(args):
+        if arg.endswith("served_skills_parity.py"):
+            if _resolves_to_the_tool(arg) and "--sync" in args[index + 1:]:
+                return True
+            continue
+        if arg.replace("/", ".").endswith("tools.served_skills_parity"):
+            return "--sync" in args[index + 1:]
+    return False
 
 
 def _arm_steps(doc: dict) -> list[tuple[str, dict, dict]]:
@@ -1329,10 +1345,22 @@ def _job_syncs(job: dict) -> bool:
         if not isinstance(step, dict):
             continue
         body = step.get("run")
-        if not isinstance(body, str) or "served_skills_parity" not in body:
+        if not isinstance(body, str):
             continue
-        _rc, calls = _execute_step(body, flags=_shell_flags(step))
+        # ⛔ NO text pre-filter here (review finding, P2). `_is_arm_step` may
+        # cheap-prefilter because a spelling it cannot see is fail-closed for the
+        # ARM (nothing is certified). For the SYNC hazard a hidden spelling is
+        # fail-OPEN: `env: {TOOL: tools/served_skills_parity.py}` with
+        # `run: … python3 "$TOOL" --sync` hides the name from any text test while
+        # GitHub runs it. So EVERY step is executed, with the step's own `env:`.
+        env = step.get("env") if isinstance(step.get("env"), dict) else None
+        _rc, calls = _execute_step(body, flags=_shell_flags(step), extra_env=env)
         if any(_runs_sync(a) for a in calls):
+            return True
+        # Fail-closed text fallback for spellings the hermetic run cannot expand
+        # (`$PWD/…`, `${{ github.workspace }}/…`): both name the tool AND ask for
+        # `--sync`. A false positive here only rejects a job — the safe side.
+        if "served_skills_parity" in body and "--sync" in body:
             return True
     return False
 
@@ -1604,6 +1632,58 @@ def test_4643_json_is_refused_with_sync_rather_than_silently_ignored(tmp_path, c
     assert "cannot be combined" in out.err or "cannot be combined" in out.out
     assert "would re-derive" not in out.out, (
         "the refusal must not print the human sync lines on stdout")
+
+    # `--report` is its sibling in the same branch and had the same defect: the
+    # sync branch returns before the report is written, so the operator got exit
+    # 0 and no file. Same refusal, and specifically NO file left behind.
+    report = tmp_path / "skills-parity-report.md"
+    with pytest.raises(SystemExit) as exc:
+        sp.main(["--sync", "--dry-run", "--report", str(report),
+                 "--root", str(tmp_path), "--manifest", str(MANIFEST)])
+    capsys.readouterr()
+    assert exc.value.code not in (0, None), (
+        "`--sync --report` must be refused, not silently ignored")
+    assert not report.exists(), (
+        "a refused `--sync --report` must not leave a report file")
+
+
+def test_4643_a_sync_hidden_behind_env_or_pwd_still_disarms_the_job(tmp_path):
+    """The sync guard must not be defeated by a spelling that hides the tool NAME
+    from a text test: `env: {TOOL: …}` with `"$TOOL" --sync` (expanded here
+    because the step's `env:` is passed into the hermetic run), `-m
+    tools.served_skills_parity`, `$PWD/…` and `${{ github.workspace }}/…` (not
+    expandable, caught by the fail-closed text fallback). Measured before this
+    fix: every one of them left the job certified and the suite fully green
+    (review finding, P2)."""
+    spellings = [
+        ({"TOOL": "tools/served_skills_parity.py"},
+         'uv run --no-project --with pyyaml==6.0.3 python3 "$TOOL" --sync'),
+        (None, "uv run --no-project --with pyyaml==6.0.3 python3 -m "
+               "tools.served_skills_parity --sync"),
+        (None, "uv run --no-project --with pyyaml==6.0.3 python3 "
+               '"$PWD/tools/served_skills_parity.py" --sync'),
+        (None, "uv run --no-project --with pyyaml==6.0.3 python3 "
+               '"${{ github.workspace }}/tools/served_skills_parity.py" --sync'),
+    ]
+    for env, run in spellings:
+        workflows = tmp_path / f"wf-{abs(hash(run))}"
+        workflows.mkdir()
+        for name in ("deploy-pages.yml", "skills-parity.yml"):
+            shutil.copyfile(WORKFLOWS / name, workflows / name)
+        path = workflows / "deploy-pages.yml"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        steps = doc["jobs"]["deploy-dashboard"]["steps"]
+        index = next(i for i, s in enumerate(steps)
+                     if isinstance(s.get("run"), str)
+                     and "served_skills_parity" in s["run"])
+        smuggled = {"name": "Re-derive the mirror from upstream", "run": run}
+        if env:
+            smuggled["env"] = env
+        steps.insert(index, smuggled)
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+            f"a job that runs --sync still certified itself as fail-closed for "
+            f"this spelling: {run!r}")
 
 
 def test_4643_a_sync_step_is_not_a_gate(tmp_path):

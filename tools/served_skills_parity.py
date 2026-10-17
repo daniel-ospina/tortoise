@@ -839,8 +839,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.sync:
         requested = [flag for flag, on in (("--check", args.check),
                                            ("--check-local", args.check_local),
-                                           ("--check-upstream", args.check_upstream),
-                                           ("--json", args.json))
+                                           ("--check-upstream", args.check_upstream))
                      if on]
         if requested:
             parser.error(
@@ -848,11 +847,20 @@ def main(argv: list[str] | None = None) -> int:
                 "RE-DERIVES the mirror and writes the pin, so a check in the same "
                 "invocation would grade bytes it just overwrote. Run --sync, "
                 "commit, then --check.")
-        # `--json` is refused too, and for its own reason: this branch returns
-        # BEFORE the JSON block below, so accepting the flag would print human
-        # lines and no document at all — `json.loads(stdout)` raises on a run
-        # that exited 0. A flag accepted and silently ignored is worse than a
-        # refusal (review finding, P2).
+        # Output-mode flags are refused too, for a DIFFERENT reason: this branch
+        # returns before the document/report is written, so accepting them prints
+        # human lines (or nothing) and exits 0 — `json.loads(stdout)` raises, and
+        # a monitor asking for a report is handed nothing. A flag accepted and
+        # silently ignored is worse than a refusal (review finding, P2).
+        ignored = [flag for flag, on in (("--json", args.json),
+                                         ("--report", args.report is not None))
+                   if on]
+        if ignored:
+            parser.error(
+                f"--sync cannot be combined with {' / '.join(ignored)}: this "
+                "branch returns BEFORE the document/report is written, so the "
+                "flag would be accepted, print nothing machine-readable, and "
+                "exit 0. Run --sync, then the check that writes the report.")
 
     root = Path(args.root).resolve()
     manifest_path = Path(args.manifest) if args.manifest else root / MANIFEST_REL
