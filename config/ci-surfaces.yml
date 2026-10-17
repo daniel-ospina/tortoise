@@ -1039,6 +1039,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_5509_name_keyed_identity_reads.py
   # #4643: the served-skill mirror's parity gate. The pin
   # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
   # through to `core` — without this registration a pin-only change ran no
@@ -2651,6 +2652,14 @@ surfaces:
   # run it. (The `core` registration is load-bearing, not redundant with the
   # `sdk` one: without it a retry.py-only diff runs neither.)
   - test_7405_remaining_writes.py
+  # #7405 (audit G8, increment 3): the point-MUTATION verbs on the bounded
+  # write retry — `update_point`'s property/promote arms, its per-key loop, its
+  # derived-embedding write and its `_sync_tags` call, plus `invalidate_point`'s
+  # terminal stamp and `CORRECTS` edge (`annotate_operator` is covered
+  # transitively). Same dual-registration reason as the file above:
+  # `tortoise/retry.py` matches no SOURCE_PATTERNS, so a retry.py-only diff
+  # falls through to this `core` fallback, and that file pins the retry wiring.
+  - test_7405_update_point_writes.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
   - test_6252_body_fence.py  # #6252: body-side sibling of #3844 — the block BODY is fenced so stored content cannot forge a block-scope line (hermetic, no DB); dual core+sdk because tortoise/retrieval.py is SOURCE_PATTERNS["sdk"]
@@ -3563,6 +3572,10 @@ surfaces:
   # drives the REAL capture with the extractor seam mocked (a live URI when
   # configured, embedded otherwise).
   - test_7405_remaining_writes.py
+  # #7405 (audit G8, increment 3): DUAL-REGISTERED with `core` above for the
+  # same reason — `tortoise/retry.py` matches no SOURCE_PATTERNS, so a
+  # retry.py-only diff must still run the file that pins the new wiring.
+  - test_7405_update_point_writes.py
   # #4520: DUAL-REGISTERED with `core` and `battery` — the seam covers the
   # SDK's vector writers (`tortoise/sdk.py`, `session_indexer.py`) and the
   # `tools/ask_spotcheck.py` spot-check write, so an sdk-surface change must
@@ -4524,6 +4537,7 @@ durations:
   test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it, and the file itself is DB-free pure-function work (<0.01s per test; the local session total is conftest/DB setup). Refresh from the first post-merge run that includes it.
   test_8066_served_skill_relay_ratchet.py: 3.5  # #8066 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 782/869 = 89.99% — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor. Locally measured (embedded carve-out lane, 2 tests): call 2.67s (the registration ratchet's 1097 `select()` calls) + 0.80s (the `tests/**` walk, after the necessary-condition fast path cut it from 16.0s); conftest/collection setup is the once-per-leg cost the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_7405_remaining_writes.py: 2.0  # #7405/#8698: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — merging origin/main is where the fast pool crossed the DURATION_COVERAGE_MIN floor, which is how this row was found. NO pool figure or percentage is restated here on purpose (each base merge re-stales it; see the #4387 row above). Do NOT drop the row without re-deriving the floor at that head. Refresh from the first post-merge run that includes it.
+  test_7405_update_point_writes.py: 2.0  # #7405/#8737: same #3400 flat default as the row above and for the same reason — a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
