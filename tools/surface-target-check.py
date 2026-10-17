@@ -21,9 +21,9 @@ WHY THIS IS NOT tools/surface-guard.py
 THE TARGET IS READ, NEVER TYPED HERE
     A target number USED AS THE TARGET in this file would be the SAME drift class that caused
     #4185: a number maintained beside the document that owns it. Both numbers are parsed out
-    of the two product docs at run time. (The mandated `OVERRIDES:` marker above quotes the
-    owner's `26/40` as the historical approval record — it is prose, never read as the
-    target.) If a doc's wording changes so the numbers can no
+    of the two product docs at run time — the `OVERRIDES:` marker above names the document
+    that owns them and deliberately carries no count, so it cannot drift from it.
+    If a doc's wording changes so the numbers can no
     longer be read, this tool REFUSES (non-zero) rather than guessing — a compliance
     check that cannot read the target must not report success.
 

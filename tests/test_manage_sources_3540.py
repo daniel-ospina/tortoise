@@ -576,6 +576,45 @@ def test_refusals_are_logged_too(ctx):
     assert "refused_source" in outcomes
 
 
+@pytest.mark.parametrize(
+    "source, initial, action, expected",
+    [
+        ("github_issues", True, "disable", "disabled"),
+        ("github_issues", False, "disable", "already_off"),
+        ("github_issues", False, "enable", "enabled"),
+        # `enable` on an already-on GitHub source RE-INDEXES, so it answers
+        # `enabled` — only agent_sessions has an `already_on` short-circuit.
+        ("github_issues", True, "enable", "enabled"),
+        ("agent_sessions", True, "disable", "disabled"),
+        ("agent_sessions", False, "disable", "already_off"),
+        ("agent_sessions", False, "enable", "enabled"),
+    ],
+)
+def test_every_state_change_payload_carries_the_same_fields(
+        ctx, monkeypatch, source, initial, action, expected):
+    """`_source_payload`'s contract: ONE key set, for every documented status.
+
+    The fields used to be assembled per branch, so `default` appeared on only
+    some responses and `enable_flag` could be deleted from the shared builder
+    with the whole suite still green. A caller branching on `enforcement` must
+    not meet a KeyError on one of the documented `status` values.
+    """
+    if source == "github_issues":
+        ctx["state"]["issues_enabled"] = initial
+    else:
+        ctx["state"]["session_recording"] = initial
+    if source == "github_issues" and action == "enable":
+        # Without a stored credential the tool REFUSES (an `{"error": ...}`
+        # payload with no `status`) — a different contract, tested elsewhere.
+        monkeypatch.setattr(ha, "_github_credentials",
+                            lambda org_id: ("enc-token", "acme"))
+
+    out = m.tortoise_manage_sources(action, source)
+
+    assert out.get("status") == expected, out
+    assert set(out) >= {"status", "enforcement", "default", "enable_flag"}, out
+
+
 def test_a_write_logs_the_attempt_before_the_write(ctx):
     """A crash inside the write must still leave the attempt on the record.
 
