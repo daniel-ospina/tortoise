@@ -1,14 +1,11 @@
 """Playwright E2E tests for the hosted onboarding welcome page (#541).
 
-Targets the LIVE welcome page on the APP origin
-(https://app.premiselabs.co/welcome — #8826, #4054). Whatever host
-`WELCOME_URL` names, `/welcome` leaves this Pages root on its FIRST hop:
-`website/_redirects` 301s `/welcome`, `/welcome/` and `/welcome.html` there
-UNCONDITIONALLY, and on premiselabs.co the middleware's APP_ONLY branch does the
-same (`_middleware.ts` -> APP_ORIGIN). `website/welcome.html` does not exist in
-this Pages root — the page lives in the separate dashboard project — so no
-`wrangler pages dev` preview can render it and there is no local target to point
-`WELCOME_URL` at.
+`/welcome` is not served by this Pages root (#8826, #4054): on every host this
+project serves, `website/_redirects` 301s `/welcome`, `/welcome/` and
+`/welcome.html` to the app origin, and on premiselabs.co the middleware's
+APP_ONLY branch does the same (`_middleware.ts` -> APP_ORIGIN).
+`website/welcome.html` does not exist here — the page lives in the dashboard
+Pages project — so no `wrangler pages dev` preview can render it.
 
 Two test groups:
 1. Static/live tests — no Supabase session needed:
@@ -281,13 +278,13 @@ def _handle_unobserved(
         return
     fail(message)
 
-# `/welcome` is NOT served by this Pages root on ANY host (#8826):
-# `website/_redirects` 301s `/welcome`, `/welcome/` and `/welcome.html` to the app
-# origin unconditionally, and on premiselabs.co the middleware's APP_ONLY branch
-# does the same (`_middleware.ts` -> APP_ORIGIN). `WELCOME_URL` therefore resolves
-# by one redirect hop to https://app.premiselabs.co/welcome, and THAT live page is
-# what these tests assert. (#4054 moved the page into the dashboard project; a
-# pre-#4054 comment here said the hop landed on the tortoise host, which is wrong.)
+# `/welcome` is not served by this Pages root (#8826): on every host this project
+# serves, `website/_redirects` 301s `/welcome`, `/welcome/` and `/welcome.html` to
+# the app origin, and on premiselabs.co the middleware's APP_ONLY branch does the
+# same (`_middleware.ts` -> APP_ORIGIN). So this URL resolves, by one redirect
+# hop, to https://app.premiselabs.co/welcome. (#4054 moved the page into the
+# dashboard project; a pre-#4054 comment here said the hop landed on the tortoise
+# host, which is wrong.)
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
 # The canonical onboarding artifact is the tortoise-onboarding instructions mirror
 # (app.premiselabs.co/skills/tortoise-onboarding/SKILL.md) — W2 #1998 archived
@@ -498,13 +495,7 @@ def _fake_user_id() -> str:
 def _seed_local_session(page: Page, user_id: str) -> None:
     """Seed a supabase-js session in localStorage under BOTH storage keys —
     the prod project ref (sb-ybetwichurajbfswfeqa) and the local CLI ref
-    (127.0.0.1 → sb-127).
-
-    The second key is INSURANCE, not a second target (#8826): a `/welcome` reached
-    on a loopback `WELCOME_URL` is 301'd to the app origin before it renders, so
-    the document these tests see is always app.premiselabs.co's and always carries
-    the prod ref. No `wrangler pages dev` preview can render this page — this Pages
-    root has no `website/welcome.html` to serve."""
+    (127.0.0.1 → sb-127)."""
     page.add_init_script(f"""
       const session = JSON.stringify({{ 
         access_token: "fake-access-token",
