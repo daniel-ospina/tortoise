@@ -1739,15 +1739,22 @@ uv run --with psycopg2-binary python \
 # or empty server the probe reports stock 0 and `f: null` — the instrument saying
 # "there is nothing to divide", not an instrument fault. So the probe reproduces
 # the MECHANISM; the READING is one graph on one date. To re-derive a comparable
-# figure, point it at a snapshot of that state (or seed one) with --graph.
+# figure, point it at a snapshot of that state (or seed one) — --uri selects that
+# server, --graph names the graph on it.
 # ⚠️ 127.0.0.1:16379 is this fleet's canonical map store, so a container cannot
 # bind there on this host (and on another host it would start EMPTY); use a free
 # port, e.g. `docker run -d --name falkordb-7983 -p 127.0.0.1:16479:6379 falkordb/falkordb`.
-# `--sample storage-order` reproduces the pre-fix draw (2.07%) beside the quoted one.
+# ⚠️ --uri selects the SERVER and --graph names a graph ON that server; they are
+# not interchangeable. --uri MUST be given explicitly: its default is 16379, this
+# fleet's canonical map store, so omitting it while starting a container on 16479
+# would read the POPULATED canonical instance and print a confident f for a server
+# the reader never chose. (At this PR's base commit the example port matched that
+# default, which is how the omission went unnoticed.)
 # --keep-ledger matters: without it the probe DELETES its own ledger on exit and
 # the CLI below would be reading a file that no longer exists (it now says so
 # instead of reporting an empty stock).
 uv run python docs/evidence/7983-cost-magnitudes/probes/ledger_probe.py \
+  --uri 'docker://:@localhost:16479/tortoise' \
   --queries 200 --keep-ledger \
   --out docs/evidence/7983-cost-magnitudes/ledger-probe.json
 python -m tortoise.read_ledger \

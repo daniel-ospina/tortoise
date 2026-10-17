@@ -1426,7 +1426,7 @@ class TestS3:
         this test red. Reachable: both calls below omit ``session_id``."""
         class StrictMockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
-                                   include_terminal=False, **_ignored):
+                                   include_terminal=False, _record_reads=True):
                 return []
 
         sdk = StrictMockSDK()

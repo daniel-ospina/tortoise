@@ -5186,8 +5186,11 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     `query_points_by_tag()` and omitted `suggest_entry_points`, `issue_insight`,
     `recall_state`, `recall_gaps`, `search_sessions` and `get_events`, all of
     which call it in this file. An audit surface that under-reports its own call
-    sites invites a second hook at one of them, which DOUBLE-COUNTS reads and
-    biases `f` HIGH (#8877's direction, and the one that flatters the split).
+    sites invites a second hook at one of them, which would record a candidate
+    POOL as read and bias `f` HIGH — the direction that HURTS the split, since
+    the saving is `(1 - f) x cache` and a higher `f` removes it. (`f` divides
+    distinct read KEYS, so a duplicate hook moves `read_count`, not `f`; the
+    mechanism is the pool, not the double count.)
     ⛔ NOT `get_point()` — it is the internal accessor the WRITE paths use
     (`_emit_event` and the dedupe/promote checks), so counting it would mark
     written-but-never-read nodes as read and bias `f` HIGH (#8877). The FTS
