@@ -19828,11 +19828,12 @@ async def _membership_role(user_id: str, org_id: str) -> str | None:
     untouched (a schema/dialect bug must stay loud, not masquerade as an
     outage).
 
-    The registry fallback reaches its read through `_graph_offload`, so a
-    graph-pool refusal or bound miss answers 503 `graph_unavailable` (that
-    helper's own body) rather than `control_plane_unavailable`. Both are 503,
-    so the #2380 polarity holds; only the error_code differs by which lane the
-    read took.
+    The registry fallback runs its read INLINE and is declared in the
+    loop-responsiveness residual (`_KNOWN_INLINE_HELPER_RESIDUAL`) beside
+    `_membership_org`, `_org_node` and `_require_owner_admin`. That is deliberate
+    tracked debt, not an oversight: off-loading this read moved it onto another
+    thread and changed behaviour observable from `/v1/organizations/{id}/members`
+    (see the note at the call site), so the offload is left to a deliberate fix.
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -19856,17 +19857,20 @@ async def _membership_role(user_id: str, org_id: str) -> str | None:
     # anchor is process-lifetime and sees them).
     sdk = _registry_anchor()
     try:
-        # #3718/#4660: the registry read is synchronous FalkorDB I/O, so it runs
-        # on the dedicated `graph` pool — an inline query here would block the
-        # event loop (the rule `test_read_routes_loop_responsiveness` enforces).
-        rows = await _graph_offload(
-            lambda: sdk._get_registry().query(
-                "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
-                "RETURN m.role",
-                params={"uid": user_id, "tid": org_id},
-            ).result_set,
-            op="membership_role_registry",
-        )
+        # #2446: this read stays INLINE, and is declared in
+        # `tests/test_read_routes_loop_responsiveness.py::_KNOWN_INLINE_HELPER_RESIDUAL`
+        # beside `_membership_org`, `_org_node` and `_require_owner_admin` — the
+        # same read this helper was extracted from. Off-loading it is NOT free:
+        # both `asyncio.to_thread` and `_graph_offload` made
+        # `test_invites_http.py::TestExpiredInviteReMint` see an EMPTY member
+        # list (measured on this branch; the inline form passes 4/4). An
+        # auth-path read whose result depends on which thread runs it is tracked
+        # debt, not a silent lock — fix it deliberately, not here.
+        rows = sdk._get_registry().query(
+            "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
+            "RETURN m.role",
+            params={"uid": user_id, "tid": org_id},
+        ).result_set
     except Exception as _exc:
         _raise_503_if_cp_outage(_exc)
         raise
