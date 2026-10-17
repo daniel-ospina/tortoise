@@ -42,9 +42,13 @@ def enumerate_keys(graph, label: str, key_prop: str, limit: int) -> list[str]:
     out: list[str] = []
     skip = 0
     while len(out) < limit:
+        # `DISTINCT` matters: the stock is a DENOMINATOR, and a paging walk
+        # without `ORDER BY` may repeat a row (the #5346 defect `paginated_query`
+        # documents). A repeated key folds once anyway; a DROPPED one would shrink
+        # the denominator invisibly — the failure this report exists to prevent.
         rows = graph.query(
             f"MATCH (n:`{label}`) WHERE n.`{key_prop}` IS NOT NULL "
-            f"RETURN n.`{key_prop}` SKIP {skip} LIMIT {PAGE}"
+            f"RETURN DISTINCT n.`{key_prop}` SKIP {skip} LIMIT {PAGE}"
         ).result_set
         if not rows:
             break

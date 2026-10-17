@@ -707,3 +707,69 @@ def test_the_mode_tightening_skips_a_directory(tmp_path, monkeypatch):
     victim.chmod(0o755)
     assert read_ledger.record_stock("Point", "p1", nbytes=10, path=victim) is False
     assert victim.stat().st_mode & 0o777 == 0o755, "someone else's directory, untouched"
+
+
+def test_a_json_line_that_is_not_an_object_is_skipped_not_fatal(ledger, capsys):
+    """`null`, `[1,2]` and `7` are valid JSON and not EVENTS.
+
+    A merged or hand-edited file can leave one; `.get` on it would raise straight
+    out of a read-only report (and, in the tail probe, out of the APPEND path).
+    """
+    read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger)
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write("null\n[1,2,3]\n7\n")
+    folded = fold(ledger)
+    assert folded.stock_keys == 1
+    assert folded.lines_skipped == 3
+    assert read_ledger._main(["--ledger", str(ledger)]) == 0
+    assert "unreadable line(s) skipped" in capsys.readouterr().out
+
+
+def test_an_unknown_tenant_is_not_an_empty_reading(ledger, capsys):
+    """A typo'd `--tenant` must not report "0 keys, f n/a" over someone's events."""
+    read_ledger.record_stock("Point", "p1", nbytes=10, tenant_id="real", path=ledger)
+    read_ledger.record_rows("Point", [{"id": "p1"}], tenant_id="real", path=ledger)
+    assert read_ledger._main(["--ledger", str(ledger), "--tenant", "typo"]) == 2
+    out = capsys.readouterr().out
+    assert "no events for tenant 'typo'" in out
+    assert "other tenant(s)" in out
+
+
+def test_a_short_write_reports_only_the_whole_lines(ledger, monkeypatch):
+    """A partial `os.write` must not be reported as a full batch.
+
+    The module's failure story is "a truncated window is never reported as
+    quiet": returning `len(lines)` for a batch whose tail never reached the file
+    is exactly that lie.
+    """
+    real_write = os.write
+    calls = {"n": 0}
+
+    def half_write(fd, data):  # write at most 20 B per call, then "fail"
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError(28, "No space left on device")
+        return real_write(fd, data[:20])
+
+    monkeypatch.setattr(read_ledger.os, "write", half_write)
+    written = read_ledger.record_rows("Point", [{"id": f"p{i}"} for i in range(10)], path=ledger)
+    assert written == 0, "20 B is a torn first line — no whole event was recorded"
+
+
+def test_an_over_long_line_is_dropped_loudly_and_not_counted(ledger):
+    """MAX_LINE_BYTES is a torn-record bound; a dropped line is not a written one."""
+    assert read_ledger.record_rows("Point", [{"id": "x" * 5000}], path=ledger) == 0
+    assert fold(ledger).stock_keys == 0
+
+
+def test_the_internal_scans_still_pass_record_reads_false():
+    """A structural guard on the three call sites, which no behaviour test drives.
+
+    Deleting the argument leaves every behavioural test green (the call sites are
+    population scans, not fixtures), so the argument's PRESENCE is what is pinned.
+    """
+    src = (Path(__file__).resolve().parents[1] / "tortoise" / "sdk.py").read_text()
+    # Count CALL SITES, not mentions: the helper's comment names the flag too, and
+    # a call site always has it alone at the start of its line.
+    sites = [ln for ln in src.splitlines() if ln.strip().startswith("_record_reads=False")]
+    assert len(sites) == 3, sites

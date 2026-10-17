@@ -21693,7 +21693,7 @@ class TortoiseSDK:
                                     # #7983: these hits are recorded ONCE, by
                                     # `_with_read_status` below — a second record
                                     # here inflates read_count for every fallback
-                                    # hit (and the scan itself is not a caller read).
+                                    # hit — and the scan itself is not a caller read.
                                     _record_reads=False)
                 if exclude_status and points:
                     # Same status exclusion as step 5d (#898 review round-2):

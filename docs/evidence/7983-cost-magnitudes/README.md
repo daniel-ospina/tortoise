@@ -129,7 +129,8 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
    input, not just a sanity check:** `ratio` = `C ÷ D` puts the 0.1499 GB mixed-label cache against
    the Points-only 0.1916 GB record, so this population mismatch is inside 609 / 365 and every
    break-even below. Direction unknown (a real mix adds cheaper `GraphEvent` nodes ⇒ smaller `D` ⇒
-   higher `ratio` ⇒ a LOWER, harder break-even; the vector lower bound pushes the other way). The
+   higher `ratio` ⇒ a HIGHER break-even, i.e. an EASIER bar; the vector lower bound pushes the other
+   way, and that is why the pair is called two-sided rather than directional). The
    planted vector used 6 decimal places (~9.5 chars/float) where §5.2 measured the journal's real
    encoding at 21.9 chars/float, so **0.1916 GB is a LOWER BOUND at that column type**.
 2. **`rho` is dominated by TENANT DENSITY, not by any per-read cost.** At §17.4.3's 40-tenant
@@ -164,16 +165,19 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
 - **stock registration by the product**: the ledger learns a key exists only when a caller says so
   (today, the census probe). Enabling `TORTOISE_READ_LEDGER` without a stock census makes every read
   `unregistered` and leaves `f` without a denominator.
-- **five read paths the ledger cannot count** (the same five §17.4.6 enumerates — this list is the
-  primary one, and the count there must match it): **`recall_subgraph`** (graph expansion: expander
-  nodes, not keyed lookups); **`list_sources`** (a caller-facing `:Source` reader returning `url` —
-  the one unhooked path whose rows WOULD resolve to a joinable coordinate); **the state and traversal
-  paths** (`traverse`, `recall_state`'s related-point/object readers, `get_historical_knowledge`); **the
-  FTS funnel's candidate POOL** (only the returned rows are counted); and **the `Subject`/`Object`/
-  `Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and carry
-  `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in a
-  joinable coordinate. The first four bias `f` **LOW** (flattering the split); the byte-unit hole
-  above is **TWO-SIDED**. All are **#8877**.
+- **read paths the ledger cannot count** — a NAMED set, deliberately not claimed exhaustive (an
+  exhaustive list would date the moment a reader is added): **`recall_subgraph`** (graph expansion:
+  expander nodes, not keyed lookups); **`list_sources`, `diary_read`, `session_context`,
+  `list_dedup_candidates`, `list_drafts`, `belief_timeline`, `get_org_structure`** (caller-facing
+  `RETURN properties(n)` readers, four of them MCP tools — and several of them return `Point.id`, so
+  their rows WOULD be joinable and only the missing hook excludes them); **the state and traversal
+  paths** (`traverse`, `recall_state`'s related-point/object readers, `get_historical_knowledge`);
+  **the FTS funnel's candidate POOL** (only the returned rows are counted); and **the
+  `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and
+  carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in
+  a joinable coordinate. **Every one of them leaves a read out of the numerator, so every one biases
+  `f` LOW — flattering the split**; the byte-unit hole above is the only **TWO-SIDED** one. All are
+  **#8877**.
 
 ---
 

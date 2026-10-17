@@ -39,8 +39,9 @@ ledger as `f`; quote it with its window, its sample and its date, which is what
 **The coordinate is the record's own `(label, key)` contract**, never a bare id:
 `Point → id`, `Event → eventId`, `Subject`/`Object → name`, `Source → url`
 (`public.node_identity.key_property`, generated from the label; the same set
-`cache_projection.KEY_PROPERTY` derives from the placement doc — a test pins the
-two together so this map cannot drift). The label is part of the coordinate
+`cache_projection.KEY_PROPERTY` derives from the placement doc). ⚠️ The map is
+pinned against the MIGRATION only — **not** against `KEY_PROPERTY`, so that pair
+can drift without a red test (see `KEY_FIELDS` below). The label is part of the coordinate
 because `Subject` and `Object` share `name`: a key-only ledger would collapse
 `(Object, "acme")` and `(Subject, "acme")` into one row.
 
@@ -161,7 +162,13 @@ def _tail_is_capped(target: Path) -> bool:
             fh.seek(0, os.SEEK_END)
             fh.seek(max(0, fh.tell() - 256))
             tail = fh.read().decode("utf-8", "replace").strip().splitlines()
-        return bool(tail) and json.loads(tail[-1]).get("event") == EVENT_CAPPED
+        if not tail:
+            return False
+        last = json.loads(tail[-1])
+        # A non-object tail (a torn merge) must read as "no marker" — NOT raise:
+        # this runs inside an append, where the contract is that nothing escapes
+        # into the read path.
+        return isinstance(last, dict) and last.get("event") == EVENT_CAPPED
     except (OSError, ValueError):
         return False
 
@@ -574,6 +581,12 @@ def fold(
             except ValueError:
                 out.lines_skipped += 1
                 continue
+            if not isinstance(ev, dict):
+                # JSON but not an EVENT (`null`, a number, a list) — a merged or
+                # hand-edited file can produce one, and `.get` on it would raise
+                # out of a READ-ONLY report.
+                out.lines_skipped += 1
+                continue
             at_any = ev.get("at")
             if isinstance(at_any, str) and (
                 out.first_event_at is None or at_any < out.first_event_at
@@ -800,6 +813,19 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"no ledger at {target} — nothing has been recorded there")
         return 2
     folded = fold(a.ledger, window_days=a.window_days, tenant=a.tenant)
+    if a.tenant is not None and folded.lines_read and not folded.rows:
+        # A typo'd `--tenant` is not an empty tenant: the file holds events for
+        # SOMEONE, and reporting "0 keys / f n/a" over them is the same
+        # typo-reads-as-a-zero-denominator failure the missing-file branch above
+        # refuses. The tenants that ARE in the file are named by count only — the
+        # identifiers stay out of a report that may be pasted into an issue.
+        seen = fold(a.ledger, window_days=a.window_days)
+        others = {t for (t, _l, _k) in seen.rows if t is not None}
+        print(
+            f"no events for tenant {a.tenant!r} — the ledger holds "
+            f"{len(seen.rows):,} key(s) under {len(others)} other tenant(s)"
+        )
+        return 2
     f = hot_fraction(folded)
     if a.json:
         # `lines_skipped` / `lines_read` are fold-level facts, not `f`'s: a torn
