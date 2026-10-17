@@ -1383,7 +1383,10 @@ def test_a_deleted_graph_is_not_issued_into_after_a_mixed_abort(
             proj.g, _POINT_PROP_SET_NEEDLE)
         proj.g = proxy
 
-        with pytest.raises(redis_exc.ResponseError):
+        # The FAMILY matters: after a write-slot abort, a guard that re-raised
+        # `last_abort` would tell the caller to "retry the query" against a
+        # graph that is gone (#8854 r7 P2). The latched GRAPH abort is raised.
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
             sdk.update_point(pid, confidence=0.9)
 
         assert proxy.applied == 0, (
@@ -1739,7 +1742,7 @@ def test_a_live_node_with_unwritten_props_is_not_a_silent_success(tmp_path):
         proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
         proj.g = proxy
 
-        with pytest.raises(ValueError, match="Illegal status transition"):
+        with pytest.raises(ValueError, match="already live"):
             sdk.update_point(pid, status="live", confidence=0.42)
 
         assert proxy.flipped, "fixture precondition: the node must have gone live"

@@ -3097,12 +3097,21 @@ def _raise_update_point_status_error(proj, id: str, *,
     # replay landed the node live between the abort and the re-issue, where
     # reporting an illegal transition would contradict the door's own contract
     # — but ONLY for a status-only promote (see `status_only` above).
-    if status_only:
-        status = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
-        ).result_set
-        if status and status[0][0] == 'live':
+    status = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
+    ).result_set
+    node_status = status[0][0] if status else None
+    if node_status == 'live':
+        if status_only:
             return
+        # A live node is not an ILLEGAL TRANSITION, and pointing the caller at
+        # retract_point()/supersede_point() would advise damaging a healthy
+        # point (#8854 r7 P2). Say what actually happened: the promote matched
+        # nothing, so the caller's other props were not applied.
+        raise ValueError(
+            f"Point {id!r} is already live — the promote matched nothing, so "
+            "the other properties were NOT applied; re-issue without "
+            "`status` to update them")
     raise ValueError(
         f"Illegal status transition — update_point only promotes draft→live; "  # noqa: F541
         f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
@@ -5644,6 +5653,7 @@ class TortoiseSDK:
         # witness that had been legitimately armed — and the next zero-row
         # re-issue reported success again. Once this call has seen a graph
         # replacement, the ambiguity is live for the rest of the call.
+        graph_abort: BaseException | None = None
         armed_abort: BaseException | None = None
 
         def _probe() -> bool:
@@ -5665,8 +5675,11 @@ class TortoiseSDK:
             nonlocal attempts
             attempts += 1
             if attempts > 1:
-                if state_gated and last_abort is not None and not _probe():
-                    raise last_abort
+                if state_gated and graph_abort is not None and not _probe():
+                    # Raise the LATCHED graph abort, not `last_abort`: after a
+                    # write-slot abort landed, `last_abort` is a message telling
+                    # the caller to retry a graph that is gone (#8854 r7 P2).
+                    raise graph_abort
                 # Count only a retry that is actually re-issued, so the eval's
                 # `ingest_retries` cannot over-report (review round 2).
                 self._graph_write_retry_count = getattr(
@@ -5691,7 +5704,7 @@ class TortoiseSDK:
             return result
 
         def _predicate(exc: BaseException) -> bool:
-            nonlocal last_abort, state_gated, armed_abort
+            nonlocal last_abort, state_gated, armed_abort, graph_abort
             if isinstance(exc, _WriteNotLanded):
                 # Nothing applied, so a re-issue is definitionally safe — and
                 # the graph-state question was already answered when the
@@ -5701,15 +5714,19 @@ class TortoiseSDK:
             keep = retryable_aborted_write(exc, graph_exists=_probe)
             if keep:
                 last_abort = exc
-                # LATCHED for the same reason `armed_abort` is: a later
-                # write-slot abort is state-INDEPENDENT and must not re-open
-                # issuing into a graph the rebuild deleted (the #7685
-                # empty-graph harm the pre-issue probe exists to refuse).
-                state_gated = state_gated or graph_abort_family(exc)
-                if witness is not None and armed_abort is None and state_gated:
-                    # Latch the first graph-replaced abort. `_WriteNotLanded`
-                    # is intentionally NOT latched here: it is arm-neutral.
-                    armed_abort = exc
+                # LATCH the graph-replaced abort OBJECT (not merely a flag):
+                # a later write-slot abort is state-INDEPENDENT and must not
+                # re-open issuing into a graph the rebuild deleted — nor
+                # rewrite the error the guard raises into a "retry the query"
+                # instruction for a graph that is gone (#8854 r7 P2).
+                if graph_abort_family(exc):
+                    if graph_abort is None:
+                        graph_abort = exc
+                    state_gated = True
+                    if witness is not None and armed_abort is None:
+                        # `_WriteNotLanded` is intentionally NOT latched here:
+                        # it is arm-neutral.
+                        armed_abort = exc
             return keep
 
         try:
