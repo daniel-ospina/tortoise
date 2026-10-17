@@ -1351,7 +1351,7 @@ def build_state(
         # label and then tell the human to delete the row carrying the correction.
 
     kept: list[tuple[str, str, str]] = []
-    stale_rows: list[dict[str, str]] = []
+    stale_rows: list[dict[str, Any]] = []
     unbound_kept: set[str] = set()
     seen_rows: set[tuple[str, str]] = set()
     kept_keys: set[tuple[str, str]] = set()
@@ -1428,6 +1428,14 @@ def build_state(
     # would author the surviving lane's label and then the orphan would tell the
     # human to delete that very row — following the instruction would silently
     # change the published label (review of #8849, cycle 4).
+    #
+    # ⛔ `labels_with_own_label` is computed HERE, on the PRE-inheritance list, and
+    # that placement is load-bearing: after the rebuild below EVERY kept row of an
+    # inheriting label carries a value, so an INHERITED one would count as "own" and
+    # the revert warning would never fire for the one label that needs it — measured
+    # on `[(L, stale, ""), (L, live, ""), (L, stale, "lane:x")]`, where the survivor
+    # publishes `lane:x` purely by inheritance (review of #8849).
+    labels_with_own_label: set[str] = {label for label, _ws, ilbl in kept if ilbl}
     kept = [
         (label, ws, issue_label or issue_label_by_label.get(label, ""))
         for label, ws, issue_label in kept
@@ -1731,11 +1739,48 @@ def build_state(
     published_by_ws: dict[tuple[str, str], str] = {
         (lbl, ws.upper()): ilbl for lbl, ws, ilbl in kept
     }
-    # Labels where a SURVIVING row owns a `lane:` value of its own. Inheritance is
-    # OWN-WINS, so a dropped row's value is irrelevant to such a label — warning
-    # about a revert there would tell the human to keep a row the board has already
-    # classified as not a lane record.
-    labels_with_own_label: set[str] = {lbl for lbl, _ws, ilbl in kept if ilbl}
+    # ⛔ `labels_with_own_label` was computed on the PRE-inheritance list (see the
+    # inheritance block above): a SURVIVING row that owns a `lane:` value of its own.
+    # Inheritance is OWN-WINS, so a dropped row's value is irrelevant to such a label —
+    # warning about a revert there would tell the human to keep a row the board has
+    # already classified as not a lane record, and moving its value over would CHANGE
+    # the published label.
+    def sole_carrier_value(row: dict[str, Any]) -> str:
+        """
+        The `lane:` value this row is the SOLE CARRIER of, or ``""`` if none.
+
+        ⛔ EVERY arm needs this test, not just `duplicate`. A dropped row can be the
+        label's sole carrier of the `lane:` value: the surviving row inherits it, so the
+        board PUBLISHES a value that lived only on the line the human is told to delete
+        — and obeying that instruction silently reverts the label (review of #8849).
+
+        It fires only when this row's value IS what the label publishes — i.e. the
+        survivor owns none, so the label inherited THIS value (`issue_label_by_label` is
+        last-non-empty-wins across the registry). A survivor owning a different value,
+        or another dropped carrier holding the last-wins value, makes this row's value
+        irrelevant, and telling the human to move it over would CHANGE the label.
+        """
+        own = row.get("issue_label") or ""
+        if (
+            own
+            and row["lane"] not in labels_with_own_label
+            and own == issue_label_by_label.get(row["lane"])
+        ):
+            return own
+        return ""
+
+    def delete_advice(row: dict[str, Any]) -> str:
+        """The per-row delete instruction, with the revert warning when it is owed."""
+        value = sole_carrier_value(row)
+        if value:
+            return (
+                f"⛔ The board publishes `{value}` for this label only because this "
+                "dropped line carries it — the surviving row inherits it. Keep this "
+                "line, or move that value onto the surviving row BEFORE deleting it, "
+                "or the label reverts"
+            )
+        return "Delete the stale roster row"
+
     for row in stale_rows:
         ws_gone = f"workspace {row['workspace'][:8]}…" if row["workspace"] else "its workspace"
         arm = row.get("arm")
@@ -1803,7 +1848,7 @@ def build_state(
                 # means this row's value is irrelevant and moving it over would
                 # CHANGE the published label — the opposite of the warning's advice
                 # (review of #8849, cycle 8).
-                if _carries and row["lane"] not in labels_with_own_label:
+                if sole_carrier_value(row):
                     reason = (
                         f"registry row for '{row['lane']}' repeats {ws_gone}, "
                         "and the copy of this row was ALREADY dropped above for its "
@@ -1827,7 +1872,7 @@ def build_state(
                 "the live cmux list and binds no pane binding or session record, so "
                 "it is not a lane record; it repeats a label that already has one "
                 "such row kept, and two unbound rows for one label are one lane "
-                "enumerated twice. Delete the stale roster row"
+                f"enumerated twice. {delete_advice(row)}"
             )
         else:
             reason = (
@@ -1835,7 +1880,7 @@ def build_state(
                 "the live cmux list, and the row binds NO pane binding or session "
                 "record of its own — it is not a lane record "
                 f"({row.get('why') or 'a row for this label does bind evidence'}); "
-                "delete the stale roster row"
+                f"{delete_advice(row)}"
             )
         orphans.append({
             "kind": "registry-stale",

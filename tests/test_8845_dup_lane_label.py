@@ -46,6 +46,14 @@ Each fact below fails under a NAMED mutation:
    applies ``override_sid_by_label`` over the rows that SURVIVE, so the surviving row
    inherits it. Pinned rather than asserted (see
    ``test_the_override_still_reaches_the_row_that_survives``).
+9. The orphan's delete advice must not revert the published ``lane:`` value — on ANY
+   arm, not just ``duplicate``. A dropped row can be the label's SOLE carrier of that
+   value (the survivor inherits it), so a flat "delete the stale roster row" tells the
+   human to undo what the board publishes. The ownership test that decides this runs
+   on the PRE-inheritance list, or an inherited value counts as the survivor's own and
+   the warning never fires.
+   Mutations: drop the ownership conjunct from the two non-duplicate arms -> red;
+   compute ``labels_with_own_label`` after the inheritance rebuild -> red.
 """
 
 from __future__ import annotations
@@ -706,6 +714,103 @@ def test_the_stale_reason_does_not_name_override_as_row_evidence(monkeypatch) ->
     st = _duplicate_pair(monkeypatch, overrides={LABEL: WS_STALE})
     (orphan,) = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
     assert "override" not in orphan["reason"], orphan["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 9. the delete advice must not revert the published `lane:` value — on ANY arm
+# ---------------------------------------------------------------------------
+
+
+def test_the_other_row_binds_reason_warns_when_it_is_the_only_carrier(monkeypatch) -> None:
+    """Arm `other-row-binds` publishes the dropped row's `lane:` value by inheritance.
+
+    Only the `duplicate` arm used to warn about that. Here the STALE row is the sole
+    carrier — the surviving row inherits `lane:2b-extractor` — so "delete the stale
+    roster row" instructs the human to revert the label the board publishes
+    (review of #8849).
+    """
+    st = _build(
+        monkeypatch,
+        registry=[(LABEL, WS_STALE, "lane:2b-extractor"), (LABEL, WS_LIVE, "")],
+        live={WS_LIVE: {"cwd": WT_1}},
+        worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
+    )
+    (lane,) = st["lanes"]
+    assert lane["claim"]["lane_label"] == "lane:2b-extractor"
+    (orphan,) = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
+    reason = orphan["reason"]
+    assert "another row for this label does bind evidence" in reason, reason
+    assert "`lane:2b-extractor`" in reason, reason
+    assert "the label reverts" in reason, reason
+
+
+def test_the_second_unbound_reason_warns_when_it_is_the_only_carrier(monkeypatch) -> None:
+    """Arm `second-unbound`, same hazard: the SECOND ghost carries the label."""
+    st = _build(
+        monkeypatch,
+        registry=[(LABEL, WS_STALE, ""), (LABEL, WS_LIVE_2, "lane:x")],
+        live={},
+    )
+    (lane,) = st["lanes"]
+    assert lane["claim"]["lane_label"] == "lane:x"
+    (orphan,) = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
+    reason = orphan["reason"]
+    assert "two unbound rows for one label are one lane" in reason, reason
+    assert "`lane:x`" in reason, reason
+    assert "the label reverts" in reason, reason
+
+
+def test_an_inherited_value_is_not_an_own_value(monkeypatch) -> None:
+    """The ownership test must run on the PRE-inheritance list.
+
+    `[(L, stale, ""), (L, live, ""), (L, stale, "lane:x")]`: the middle row survives
+    EMPTY and inherits `lane:x` from the third, which the duplicate arm drops with
+    "ALREADY dropped". Computed after the inheritance rebuild, that inherited value
+    counts as the survivor's OWN, so the revert warning never fires for the one label
+    that needs it and the orphan says only "Delete the duplicate roster line"
+    (review of #8849).
+    """
+    st = _build(
+        monkeypatch,
+        registry=[
+            (LABEL, WS_STALE, ""),
+            (LABEL, WS_LIVE, ""),
+            (LABEL, WS_STALE, "lane:x"),
+        ],
+        live={WS_LIVE: {"cwd": WT_1}},
+        worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
+    )
+    (lane,) = st["lanes"]
+    assert lane["claim"]["lane_label"] == "lane:x"
+    stale = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
+    dup = [o for o in stale if "ALREADY dropped" in o["reason"]]
+    assert len(dup) == 1, [o["reason"] for o in stale]
+    assert "`lane:x`" in dup[0]["reason"], dup[0]["reason"]
+    assert "the label reverts" in dup[0]["reason"], dup[0]["reason"]
+
+
+def test_a_dropped_carrier_is_not_warned_when_the_survivor_owns_a_value(
+    monkeypatch,
+) -> None:
+    """The warning must not over-fire: own-wins makes the dropped value irrelevant.
+
+    The survivor owns `lane:current`; the dropped row's `lane:ancient` happens to be
+    the LAST non-empty value in the registry, so a warning keyed on "this row carries
+    a value" alone would claim the board publishes it and tell the human to move it
+    over — CHANGING the published label (review of #8849).
+    """
+    st = _build(
+        monkeypatch,
+        registry=[(LABEL, WS_LIVE, "lane:current"), (LABEL, WS_STALE, "lane:ancient")],
+        live={WS_LIVE: {"cwd": WT_1}},
+        worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
+    )
+    (lane,) = st["lanes"]
+    assert lane["claim"]["lane_label"] == "lane:current"
+    (orphan,) = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
+    reason = orphan["reason"]
+    assert "reverts" not in reason, reason
+    assert "lane:ancient" not in reason, reason
 
 
 if __name__ == "__main__":  # pragma: no cover
