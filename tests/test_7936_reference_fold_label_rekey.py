@@ -217,8 +217,8 @@ def test_the_graph_view_label_set_has_one_home(monkeypatch):
     # Order, not just set membership: `Point` first (the lifecycle the Point
     # leg was built around) and the rest sorted, so the emitted predicate is
     # deterministic. `tuple(sorted(x))` was always truthy — a no-op assertion.
-    assert _GRAPH_VIEW_LABELS == ("Point", *sorted(
-        _REFERENCE_FOLD_ENTITY_LABELS)), _GRAPH_VIEW_LABELS
+    expected_labels = ("Point", *sorted(_REFERENCE_FOLD_ENTITY_LABELS))
+    assert expected_labels == _GRAPH_VIEW_LABELS, _GRAPH_VIEW_LABELS
     # A duplicate would emit a redundant `n:X OR n:X` predicate and hide an
     # accidental subtraction from the tuple.
     assert len(set(_GRAPH_VIEW_LABELS)) == len(_GRAPH_VIEW_LABELS)
@@ -232,7 +232,7 @@ def test_the_graph_view_label_set_has_one_home(monkeypatch):
         def __init__(self):
             self.cyphers: list[str] = []
 
-        def query(self, cypher, *args, **kwargs):  # noqa: ANN002, ANN003
+        def query(self, cypher, *args, **kwargs):
             self.cyphers.append(cypher)
             return SimpleNamespace(result_set=[])
 
@@ -272,7 +272,7 @@ def test_a_key_collision_is_resolved_deterministically():
         def __init__(self, rows):
             self.rows = rows
 
-        def query(self, cypher, *args, **kwargs):  # noqa: ANN002, ANN003
+        def query(self, cypher, *args, **kwargs):
             return SimpleNamespace(result_set=self.rows)
 
     def _row(props):
