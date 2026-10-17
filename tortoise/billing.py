@@ -37,6 +37,7 @@ import time
 
 __all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
+    "EnumerationUnavailable",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
     "subscription_period_bounds",
@@ -60,6 +61,22 @@ class BillingConfigError(BillingError):
 
 class StripeAPIError(BillingError):
     """A Stripe API call failed (network, auth, 4xx/5xx)."""
+
+
+class EnumerationUnavailable(RuntimeError):
+    """The fleet could not be enumerated COMPLETELY (#8878 review).
+
+    Deliberately NOT a ``BillingError``: the per-org fail-soft handlers catch
+    that base class, so inheriting from it would let a broken enumeration be
+    recorded as one failed org and the pass continue with zero candidates — a
+    clean-looking summary over a fleet nobody read. This escapes the pass, and
+    the endpoint maps it to a 5xx ``enumeration_unavailable`` so the driver's
+    failure line names the actual cause instead of a bare 500.
+
+    ``RuntimeError`` (not ``Exception``) because the seam it wraps
+    (``SupabaseControlPlane``) raises ``RuntimeError`` on an unreadable store,
+    and callers that already fail closed on that keep working unchanged.
+    """
 
 
 # ── Secret scrubbing (log hygiene, review fix 9) ────────────────────────────
@@ -875,8 +892,53 @@ def _notify_drift(org_id: str, from_tier: str | None, to_tier: str | None,
                         org_id, _scrub_secrets(str(e)))
 
 
-def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
-                            notifier=None) -> dict:
+def _enumerate_supabase_orgs(cp) -> list[dict]:
+    """EVERY live org row, or a raise — never a silent single page (#8878).
+
+    The Supabase lane's enumeration. ``SupabaseControlPlane.query`` is a ONE
+    page read that does not state a row total, so on a deployment whose fleet
+    exceeds PostgREST's ``max_rows`` (``supabase/config.toml`` → ``max_rows =
+    1000``) it returns a truncated list with a non-empty, plausible shape and
+    no error. A reconciler built on it reconciles the first page, reports
+    ``checked=1000 repaired=0`` and exits green while every org past the cap —
+    ordered by ``id``, i.e. the NEWEST orgs — is never compared against
+    Stripe. That is the #8878 harm surviving its own fix, and the pass would be
+    certifying it away.
+
+    ``query_all`` is the seam this repo already built for exactly this result
+    set (#4038/#5388): it walks keyset pages on ``id``, takes completeness from
+    the server's own ``Content-Range`` total (``Prefer: count=exact``), ends a
+    walk only on an EMPTY page, and returns ``(rows, complete)`` where
+    ``complete=False`` means the rows are a LOWER BOUND. ``complete=False`` —
+    and any control plane that cannot offer the seam at all — RAISES here: the
+    pass's contract is fail-CLOSED on enumeration, and "I could not confirm the
+    whole fleet" must never be reported as a clean pass.
+
+    ``deleted_at IS NULL`` is applied server-side because soft-delete is
+    two-phase (``organisations.deleted_at`` is stamped, then the row is purged
+    later): a soft-deleted org is still a row, so without the filter this pass
+    would make a live Stripe call for a cancelled org and PATCH ``tier`` + its
+    limits back onto a row awaiting hard delete.
+    """
+    walk = getattr(cp, "query_all", None)
+    if not callable(walk):
+        raise EnumerationUnavailable(
+            "billing reconcile: the control plane offers no ``query_all`` seam, "
+            "so the org enumeration cannot be certified complete — refusing to "
+            f"reconcile a partial fleet ({type(cp).__name__})")
+    rows, complete = walk(
+        "organizations", select=list(_IDENTITY_FIELDS),
+        filters=[("deleted_at", "is", None)], cursor="id")
+    if not complete:
+        raise EnumerationUnavailable(
+            "billing reconcile: the org enumeration could not be CONFIRMED "
+            f"complete ({len(rows)} row(s) received) — the orgs past the page "
+            "cap were never compared against Stripe, so a summary here would "
+            "report a clean pass over a partial fleet")
+    return [dict(r) for r in rows]
+
+
+def reconcile_subscriptions(sdk=None, *, notifier=None) -> dict:
     """The cadenced caller of ``reconcile_org`` (#8878): pull Stripe truth for
     EVERY org that carries a billing identity and repair the mirror.
 
@@ -884,10 +946,24 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
     caller, so a missed webhook delivery was permanent. This is the fleet-wide
     pass the ``effective_tier`` docstring promised and nothing ran.
 
-    Fail-soft PER ORG, fail-CLOSED on enumeration: one org's Stripe outage is
-    recorded in ``failed`` and the pass continues, but a broken enumeration
-    RAISES — a pass that reported "0 orgs checked" from a source that could not
-    be read would read as a clean pass (the NO_ORGS class #596 named).
+    Fail-soft PER ORG, fail-CLOSED on enumeration: one org's Stripe outage —
+    or one org's store READ failing on the post-repair verification — is
+    recorded in ``failed`` and the pass continues, but a broken OR INCOMPLETE
+    enumeration RAISES. Two distinct ways a clean-looking pass can lie, and
+    both are closed here:
+
+    * a source that cannot be READ would report "0 orgs checked" (the NO_ORGS
+      class #596 named);
+    * a source that is READ but TRUNCATED would report a plausible count while
+      the orgs past the page cap were never compared against Stripe at all —
+      the #8878 harm surviving the #8878 fix, silently and green.
+
+    The Supabase lane therefore walks the control plane's own
+    completeness-certifying seam (``query_all``, #4038/#5388) instead of a
+    single un-paginated page, applies the two-phase soft-delete filter
+    (``deleted_at IS NULL``: a soft-deleted org is still a row and must not be
+    reconciled), and raises when the walk cannot CONFIRM it saw the whole
+    fleet.
 
     Returns a summary dict:
 
@@ -902,7 +978,8 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
       up holding. This is the mutation guard made observable: a "reconciler"
       that only READS the price and writes nothing lands here instead of
       reporting success.
-    - ``failed`` — per-org errors (Stripe outage, unknown price, missing org)
+    - ``failed`` — per-org errors (Stripe outage, unknown price, missing org,
+      or a store read that failed while verifying a repair)
     - ``alerted`` — upward drifts that were paged (``notifier`` may replace
       the default ``notify.notify_billing_event``; ``notifier=False`` disables)
     """
@@ -911,15 +988,12 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
 
     if _supabase_mode():
         from tortoise.supabase_control import get_control_plane
-        rows = get_control_plane().query(
-            "organizations", select=list(_IDENTITY_FIELDS),
-            order="id", limit=limit)
-        candidates = [dict(r) for r in rows]
+        candidates = _enumerate_supabase_orgs(get_control_plane())
     else:
+        # The registry lane needs no completeness seam: a Cypher ``MATCH`` has
+        # no deployment row cap, so its result set IS the whole fleet.
         query = ("MATCH (t:Team) RETURN t.id, t.tier, t.subscription_id, "
                  "t.stripe_customer_id ORDER BY t.id")
-        if limit is not None:
-            query += f" LIMIT {int(limit)}"
         result = sdk._get_registry().query(query).result_set
         candidates = [dict(zip(_IDENTITY_FIELDS, r, strict=True)) for r in result]
 
@@ -949,7 +1023,21 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
             })
             continue
         expected_tier = outcome.get("tier")
-        after = org_billing_identity(sdk, org_id)
+        try:
+            after = org_billing_identity(sdk, org_id)
+        except (BillingError, RuntimeError) as e:
+            # The verification re-read is a STORE read and it is governed by the
+            # same per-org fail-soft contract as the reconcile above: its
+            # docstring raises on a store failure and hands the decision to the
+            # caller, so a single PostgREST 5xx / FalkorDB blip on org #37 must
+            # not throw away ``checked``/``repaired``/``drift``/``failed`` for
+            # the 36 orgs already processed. Recorded, then the pass continues.
+            summary["failed"].append({
+                "org_id": org_id,
+                "error": ("re-read failed: "
+                          f"{e.__class__.__name__}: {_scrub_secrets(str(e))}"),
+            })
+            continue
         after_tier = after.get("tier")
         if expected_tier is not None and after_tier != expected_tier:
             # A read-only/partial reconciler is a FAILED repair, not a silent
@@ -971,8 +1059,10 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
         event = {
             "org_id": org_id, "from_tier": before_tier, "to_tier": after_tier,
             "direction": direction,
-            "subscription_status": after.get("subscription_status")
-            or outcome.get("status"),
+            # ``_IDENTITY_FIELDS`` deliberately carries no
+            # ``subscription_status`` column, so ``after`` can never supply it —
+            # the reconciler's own Stripe read is the only source here.
+            "subscription_status": outcome.get("status"),
             "from_max_nodes": _paid_tier_floor(before_tier),
             "to_max_nodes": _paid_tier_floor(after_tier),
         }
@@ -981,6 +1071,15 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
             notifier(org_id, before_tier, after_tier,
                      event["subscription_status"])
             summary["alerted"] += 1
+
+    if not candidates:
+        # An enumeration that READ cleanly but returned nothing is not proof of
+        # an empty fleet (a renamed/wiped source looks identical to a fleet of
+        # zero orgs) — the workbook §4.2 names ``checked=0`` as its own symptom
+        # to check, and this line is what an operator greps for.
+        _logger.warning(
+            "billing reconcile: the enumeration returned NO orgs — checked=0 "
+            "is not proof of an empty fleet; verify the source")
 
     repaired_up = sum(1 for d in summary["drift"] if d["direction"] == "up")
     if summary["checked"]:

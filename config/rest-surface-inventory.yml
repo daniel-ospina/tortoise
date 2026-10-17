@@ -264,6 +264,15 @@ routes:
   - method: POST
     path: /v1/internal/backups/verify-lock
     class: control-plane
+  # #8878: the cadenced billing-mirror reconcile pass, behind `_check_internal`
+  # (FASTAPI_INTERNAL_KEY) and driven by `.github/workflows/
+  # billing-reconcile-cron.yml`. Control-plane because its JOB is the fleet: it
+  # enumerates EVERY live org and compares each one's stored tier/limits against
+  # live Stripe. A tenant key cannot do that, and it must never be reachable
+  # from a tenant credential.
+  - method: POST
+    path: /v1/internal/billing/reconcile
+    class: control-plane
   - method: POST
     path: /v1/internal/driver/heartbeat
     class: control-plane

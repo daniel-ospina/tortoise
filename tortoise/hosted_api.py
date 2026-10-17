@@ -36860,10 +36860,18 @@ async def billing_reconcile(request: Request):
     the payable-customer-under-delivered events, and each one is also paged
     through the existing billing notify channel by the reconciler itself.
     A concurrent run returns 202 ``already_running`` (the next scheduled run
-    retries; nothing queues).
+    retries; nothing queues) — the daily driver treats that as success, not a
+    failure to page on. A run that could not CONFIRM it enumerated the whole
+    live fleet returns 503 ``enumeration_unavailable`` rather than a 200 with a
+    short summary: reconciling a truncated fleet would leave the orgs past the
+    page cap silently un-repaired (the #8878 harm) while the summary read green.
     """
     _check_internal(request)
-    from tortoise.billing import reconcile_subscriptions
+    from tortoise.billing import (
+        EnumerationUnavailable,
+        _scrub_secrets,
+        reconcile_subscriptions,
+    )
 
     if _BILLING_RECONCILE_INFLIGHT.locked():
         return JSONResponse(status_code=202,
@@ -36877,15 +36885,31 @@ async def billing_reconcile(request: Request):
         # read the authoritative ``organizations`` row with ``sdk=None``.
         if is_supabase_enabled():
             sdk = None
-            result = await asyncio.to_thread(reconcile_subscriptions, None)
+            call = (reconcile_subscriptions, None)
         else:
             sdk = await asyncio.to_thread(_registry_sdk)
-            try:
-                # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
-                # rides a worker hand-off so it cannot hold the single uvicorn
-                # event loop (the #2988/#3498 class).
-                result = await asyncio.to_thread(reconcile_subscriptions, sdk)
-            finally:
+            call = (reconcile_subscriptions, sdk)
+        try:
+            # #3718: the whole pass is SYNC FalkorDB + Stripe work — it rides a
+            # worker hand-off so it cannot hold the single uvicorn event loop
+            # (the #2988/#3498 class).
+            result = await asyncio.to_thread(*call)
+        except EnumerationUnavailable as e:
+            # Fail-CLOSED, and legibly: a pass that could not CONFIRM it saw the
+            # whole live fleet must not answer 200 with a short summary (the
+            # orgs past the page cap would never be compared against Stripe,
+            # and the driver — which pages on the summary — would read a green
+            # run). A bare 500 would leave the cron's error line saying only
+            # "HTTP 500"; naming the cause tells the operator it is the
+            # ENUMERATION, not Stripe, and that the fleet size is the suspect.
+            _logger.error("billing reconcile: enumeration unavailable: %s",
+                          _scrub_secrets(str(e)))
+            return JSONResponse(status_code=503, content={
+                "status": "enumeration_unavailable",
+                "detail": _scrub_secrets(str(e)),
+            })
+        finally:
+            if sdk is not None:
                 with suppress(Exception):
                     sdk.close()
     return result

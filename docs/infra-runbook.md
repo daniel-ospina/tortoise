@@ -427,8 +427,8 @@ instrument that reports health still answers and only the writer fails. Their
 row IS the entitlement (`billing.effective_tier` never derives upward), and its
 ONLY writer is the Stripe webhook. One missed or failed
 `customer.subscription.*` delivery therefore capped the org permanently.
-`billing.reconcile_org` repairs one org but had no production caller until
-#8878, so nothing ever compared the store against Stripe.
+`billing.reconcile_org` repairs one org but had no production caller before
+this change (#8878), so nothing ever compared the store against Stripe.
 
 **Do NOT diagnose this from `/v1/team`'s `checkout_price_id`.** That field is
 the CATALOG's default CTA price (`_default_checkout_price_id()` → pro monthly
@@ -439,9 +439,16 @@ what the org pays. The only server-side evidence of the price is the org's
 **Repair a specific org now** (internal key required):
 
 ```bash
-curl -sS -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
+curl -sS --max-time 600 \
+  -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" | jq .
 ```
+
+`--max-time` is not decoration: `/v1/internal/` is exempt from the 10 s
+transport wait bound and has no server-side ceiling, so a hung pass would
+otherwise hang the operator's shell. A `202 {"status": "already_running"}`
+answer means a pass is already in flight — the next scheduled run retries and
+nothing queues, so it is NOT an error (the daily driver succeeds on it too).
 
 A pass returns `checked` / `repaired` / `unchanged` / `skipped` / `failed` /
 `unrepaired` and one `drift` row per repaired org, each with a `direction`:
@@ -453,6 +460,14 @@ A pass returns `checked` / `repaired` / `unchanged` / `skipped` / `failed` /
   the mirror late. Reported, never paged.
 - `unrepaired` — Stripe resolved a tier the store did NOT end up holding. That
   is a broken repair, not a clean pass; treat it as an incident.
+
+**`checked: 0` is itself a symptom, not a clean bill of health.** An empty or
+silently-short enumeration looks exactly like a fleet with nothing to
+reconcile. The reconciler therefore raises (HTTP 500) rather than returning a
+summary when it could not CONFIRM it enumerated the whole live fleet — it walks
+keyset pages and takes completeness from the server's own row count — and it
+logs `billing reconcile: the enumeration returned NO orgs` when a certified
+walk came back empty.
 
 **Cadence.** `.github/workflows/billing-reconcile-cron.yml` runs the pass daily
 (04:43 UTC) with `INTERNAL_API_URL` + `FASTAPI_INTERNAL_KEY`, and the run FAILS

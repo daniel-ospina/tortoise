@@ -20,7 +20,10 @@ name: billing-reconcile-cron
 # then fails loudly, which is the signal).
 #
 # WHAT COUNTS AS A FAILURE. The endpoint (POST /v1/internal/billing/reconcile)
-# answers 200 with a summary. This job fails the run — i.e. it PAGES — when:
+# answers 200 with a summary, or 202 `already_running` when a pass is already in
+# flight — 202 is BENIGN (the next scheduled run retries; nothing queues) and
+# this job succeeds on it with a notice, exactly as #596's registry driver treats
+# the sweep's `already_running`. This job fails the run — i.e. it PAGES — when:
 #   * the request itself fails (app down / internal key wrong), or
 #   * `failed` is non-empty (a billed org could not be reconciled: a pass that
 #     verified nothing must not read as a clean pass), or
@@ -55,57 +58,20 @@ jobs:
       INTERNAL_API_URL: ${{ secrets.INTERNAL_API_URL }}
       FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
     steps:
+      - uses: actions/checkout@v4
       - name: Run billing reconcile pass
-        # Secrets are bound in `env:` above and read QUOTED — never interpolated
-        # into the shell text (#4361: substitution happens before bash parses,
-        # so a secret is code there, not data).
-        run: |
-          set -euo pipefail
-          if [ -z "${INTERNAL_API_URL:-}" ] || [ -z "${FASTAPI_INTERNAL_KEY:-}" ]; then
-            echo "::error::INTERNAL_API_URL / FASTAPI_INTERNAL_KEY are unset — the billing reconciler cannot run."
-            exit 1
-          fi
-          out="$(mktemp)"
-          status="$(curl -sS -o "$out" -w '%{http_code}' \
-            -X POST "${INTERNAL_API_URL%/}/v1/internal/billing/reconcile" \
-            -H "Authorization: Bearer ${FASTAPI_INTERNAL_KEY}")"
-          echo "HTTP ${status}"
-          cat "$out"
-          echo
-          if [ "$status" != "200" ]; then
-            echo "::error::billing reconcile returned HTTP ${status}"
-            exit 1
-          fi
-          python3 - "$out" <<'PY'
-          import json, sys
-
-          data = json.load(open(sys.argv[1]))
-          drift_up = [d for d in data.get("drift", []) if d.get("direction") == "up"]
-          failed = data.get("failed", [])
-          unrepaired = data.get("unrepaired", [])
-          summary = (
-              f"checked={data.get('checked', 0)} repaired={data.get('repaired', 0)} "
-              f"up={len(drift_up)} unchanged={data.get('unchanged', 0)} "
-              f"skipped={data.get('skipped', 0)} failed={len(failed)} "
-              f"unrepaired={len(unrepaired)}"
-          )
-          print(summary)
-          problems = []
-          if failed:
-              problems.append(f"{len(failed)} org(s) FAILED to reconcile: {failed}")
-          if unrepaired:
-              problems.append(
-                  f"{len(unrepaired)} org(s) were NOT repaired (Stripe truth "
-                  f"did not reach the store): {unrepaired}")
-          if drift_up:
-              problems.append(
-                  f"{len(drift_up)} paying org(s) were being UNDER-DELIVERED "
-                  f"(repaired on this pass): {drift_up}")
-          if problems:
-              for p in problems:
-                  print(f"::error::{p}")
-              sys.exit(1)
-          PY
+        # The driver is a repo script, NOT an inline `run:` block: the same
+        # reason #2796/#2982 extracted theirs — a judgement that lives in YAML
+        # can only be exercised by the schedule, so a wrong one is discovered
+        # by paging a human. `.github/scripts/billing-reconcile-cron.sh` is
+        # driven by `.github/scripts/billing-reconcile-cron.test.sh` (job
+        # `backup-driver-scripts` in ci.yml) with a stubbed curl, covering the
+        # benign 202, the `-m 600` wait bound, and every paging condition.
+        #
+        # Secrets stay bound in `env:` above and are read QUOTED by the script
+        # — never interpolated into shell text (#4361: substitution happens
+        # before bash parses, so a secret is code there, not data).
+        run: bash .github/scripts/billing-reconcile-cron.sh
 
       - name: Summary
         if: always()

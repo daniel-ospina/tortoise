@@ -2108,7 +2108,7 @@ class TestReconcileSweep:
         from tortoise import billing as bl
 
         class _Broken:
-            def query(self, *a, **kw):
+            def query_all(self, *a, **kw):
                 raise RuntimeError("control plane down")
 
         monkeypatch.setattr(bl, "_supabase_mode", lambda: True)
@@ -2116,6 +2116,166 @@ class TestReconcileSweep:
         monkeypatch.setattr(sc, "get_control_plane", lambda: _Broken())
         with pytest.raises(RuntimeError):
             bl.reconcile_subscriptions(None, notifier=False)
+
+    def test_partial_enumeration_fails_closed(self, monkeypatch, billing_client):
+        """A TRUNCATED enumeration must raise, not certify a partial fleet.
+
+        The pre-fix pass read ONE ``query`` page and reported a clean pass over
+        it, so on any deployment whose fleet exceeds PostgREST's ``max_rows``
+        (``supabase/config.toml`` → 1000) the orgs past the cap — ordered by
+        ``id``, i.e. the newest ones — were never compared against Stripe while
+        the summary said ``checked=1000 repaired=0``. That is the #8878 harm
+        surviving its own fix, silently and green.
+
+        Discrimination: the stub offers BOTH seams, exactly as the real
+        ``SupabaseControlPlane`` does. A single-page reader (the pre-fix code)
+        gets 1000 plausible rows and RETURNS a summary, so ``pytest.raises``
+        fails; the completeness-aware walk gets ``complete=False`` and raises.
+        """
+        from tortoise import billing as bl
+        page = [{"id": f"org-{n}", "tier": "solo",
+                 "subscription_id": "sub_x", "stripe_customer_id": None}
+                for n in range(1000)]
+
+        class _Truncated:
+            def query(self, *a, **kw):
+                return page
+
+            def query_all(self, *a, **kw):
+                return page, False
+
+        monkeypatch.setattr(bl, "_supabase_mode", lambda: True)
+        import tortoise.supabase_control as sc
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Truncated())
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: pytest.fail(
+                                "a truncated enumeration must raise before any "
+                                "Stripe call"))
+        with pytest.raises(bl.EnumerationUnavailable) as exc:
+            bl.reconcile_subscriptions(None, notifier=False)
+        assert "CONFIRMED" in str(exc.value) and "1000" in str(exc.value)
+        # Deliberately NOT a ``BillingError``: the per-org fail-soft handlers
+        # catch that base class, so inheriting from it would turn a broken
+        # enumeration into "one failed org" and let the pass CONTINUE with zero
+        # candidates — a clean summary over a fleet nobody read.
+        assert not isinstance(exc.value, bl.BillingError)
+
+    def test_enumeration_is_soft_delete_filtered_and_fully_consumed(
+            self, monkeypatch, billing_client):
+        """The walk asks for LIVE rows only and consumes the WHOLE certified
+        result set.
+
+        Soft-delete is two-phase (``deleted_at`` is stamped, the row is purged
+        later), so without the filter the pass makes a live Stripe call for a
+        cancelled org and PATCHes ``tier`` + its limits back onto a row awaiting
+        hard delete. And a one-page read of a two-row fleet is not the fleet.
+        """
+        from tortoise import billing as bl
+        rows = [
+            {"id": "org-a", "tier": "solo", "subscription_id": None,
+             "stripe_customer_id": None},
+            {"id": "org-b", "tier": "pro", "subscription_id": None,
+             "stripe_customer_id": None},
+        ]
+        calls = []
+
+        class _CP:
+            def query(self, *a, **kw):
+                return rows[:1]   # the pre-fix, single-page shape
+
+            def query_all(self, *a, **kw):
+                calls.append((a, kw))
+                return rows, True
+
+        monkeypatch.setattr(bl, "_supabase_mode", lambda: True)
+        import tortoise.supabase_control as sc
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: pytest.fail(
+                                "an org with no Stripe identity must not be "
+                                "reconciled"))
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: pytest.fail(
+                                "an org with no Stripe identity must not be "
+                                "reconciled"))
+        summary = bl.reconcile_subscriptions(None, notifier=False)
+
+        assert calls, "the pass did not enumerate through the completeness seam"
+        _args, kwargs = calls[0]
+        assert ("deleted_at", "is", None) in kwargs["filters"], kwargs
+        assert kwargs["cursor"] == "id", kwargs
+        assert "id" in kwargs["select"]
+        assert summary["checked"] == 0
+        assert summary["skipped"] == 2, (
+            "the pass consumed a single page, not the certified fleet: "
+            f"{summary}")
+
+    def test_store_read_failure_verifying_a_repair_fails_soft(
+            self, monkeypatch, billing_client):
+        """One org's store READ failing must not abort the whole pass.
+
+        ``org_billing_identity`` raises on a store failure by contract and hands
+        the decision to its caller (a silent ``{}`` would read as "no such org"),
+        and the pass documents fail-soft PER ORG. A flaky PostgREST 5xx / 
+        FalkorDB blip on the post-repair verification therefore has to land in
+        ``failed`` — with the summary still returned — instead of escaping and
+        throwing away ``checked``/``repaired``/``drift`` for every org already
+        processed (the endpoint would 500 and the driver's error line would carry
+        no per-org detail at all).
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="solo", subscription_status="active",
+                   subscription_id="sub_8878r")
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878r", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        monkeypatch.setattr(
+            bl, "org_billing_identity",
+            lambda sdk_, oid: (_ for _ in ()).throw(
+                RuntimeError("control plane 503")))
+
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+
+        assert summary["checked"] == 1
+        assert summary["repaired"] == 0 and summary["unrepaired"] == []
+        assert len(summary["failed"]) == 1, summary
+        assert summary["failed"][0]["org_id"] == org_id
+        assert summary["failed"][0]["error"].startswith("re-read failed:"), \
+            summary["failed"][0]
+        assert "control plane 503" in summary["failed"][0]["error"]
+
+    def test_endpoint_answers_503_when_the_fleet_cannot_be_confirmed(
+            self, monkeypatch, billing_client):
+        """An unconfirmable fleet is a 5xx ``enumeration_unavailable``.
+
+        Not a 200 with a short summary: the summary is what the cron driver
+        judges, so an under-enumerated pass must not be able to look clean — and
+        not a bare 500 either, because the driver's error line then says only
+        "HTTP 500" and nothing tells the operator the ENUMERATION is the
+        suspect rather than Stripe.
+        """
+        from tortoise import billing as bl
+        monkeypatch.setattr(bl, "_supabase_mode", lambda: True)
+
+        class _Truncated:
+            def query_all(self, *a, **kw):
+                return [], False
+
+        import tortoise.supabase_control as sc
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Truncated())
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+
+        r = billing_client["client"].post(
+            "/v1/internal/billing/reconcile",
+            headers={"Authorization": "Bearer internal-test-key"})
+        assert r.status_code == 503, r.text
+        body = r.json()
+        assert body["status"] == "enumeration_unavailable", body
+        assert "CONFIRMED" in body["detail"]
 
     def test_internal_endpoint_repairs_a_drifted_org(
             self, monkeypatch, billing_client):

@@ -348,6 +348,12 @@ jobs:
               "driver_scripts": any_file(
                   startswith(".github/scripts/registry-cron"),
                   isfile(".github/workflows/registry-backup-cron.yml"),
+                  # #8878: the billing reconcile driver is the same shape (a
+                  # cron-fired curl whose JUDGEMENT must not be discovered by
+                  # paging a human), so its own harness rides this surface —
+                  # including the workflow that calls it.
+                  startswith(".github/scripts/billing-reconcile-cron"),
+                  isfile(".github/workflows/billing-reconcile-cron.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -1191,6 +1197,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Backup driver state taxonomy (#2796)
         run: bash .github/scripts/registry-cron.test.sh
+      - name: Billing reconcile driver (#8878)
+        # The billing reconcile cron's judgement (benign 202 `already_running`,
+        # the `-m 600` wait bound, and every paging condition) — stubs curl, no
+        # network, no secrets. Same reasoning as the backup driver above: a
+        # driver whose JUDGEMENT only the schedule can exercise pages a human
+        # when it is wrong.
+        run: bash .github/scripts/billing-reconcile-cron.test.sh
 
   ai-review-gate-tests:
     needs: changes
