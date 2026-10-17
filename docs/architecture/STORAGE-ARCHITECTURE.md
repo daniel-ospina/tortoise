@@ -309,7 +309,7 @@ The general rule:
 
 **⚠️ `projection/__init__.py:3342` STRIPS the embedding from the journal-derived snapshot with the comment *"the replay re-derives it"*. That is the defect.** A re-embed is a **re-run, not a replay** — a replay after a model-revision change would produce a **different graph**. Store `embedding` + `model_id` + `model_revision` + text-hash in the payload.
 
-**⚠️ And bound the growth — the cost model must carry it.** Naively, a Point revised N times produces **N full-payload events** and the journal grows without bound. The standard fix: **creation = full snapshot, mutation = DELTA** (`EntityMutated.state` already does this for entities), plus snapshotting/compaction and retention tiering. **The journal belongs in §5/§6.**
+**⚠️ And bound the growth — the cost model must carry it.** Naively, a Point revised N times produces **N full-payload events** and the journal grows without bound. The standard fix: **creation = full snapshot, mutation = DELTA** (`EntityMutated.state` already does this for entities), plus snapshotting/compaction and retention tiering. **The journal belongs in §5/§6** — ✅ **now measured there (§5.2, `#5612`, 2026-10-17): mutations already ARE deltas (196 B vs 8,877 B for a creating record), so the growth is snapshot/vector-dominated and the bound is still absent.**
 
 #### Divergence detection and repair
 
@@ -391,12 +391,29 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 
 | line | why it is missing and why it matters |
 |---|---|
-| **the journal** | §3 requires the journal to carry the **full derived payload** — creations as snapshots, mutations as deltas. **It grows at or near the rate of the derived layer**, and it is **not in this table at all.** ⚠️ **No measurement of the journal's growth exists yet (§15 lists none).** |
+| **the journal** | §3 requires the journal to carry the **full derived payload** — creations as snapshots, mutations as deltas. **It grows at or near the rate of the derived layer**, and it is **not in this table at all.** ✅ **Measured 2026-10-17 (#5612) — §5.2 below: a creating record is 8,877 B, 95% of it the embedding's decimal text; a revision is 196 B; ≈8.5 MB per 1,000 point creates (8.3 GB at 1,000,000).** ⚠️ **The journal still has NO bound** — measuring it is not bounding it, and the bound's shape is a durability-posture decision (checkpoint-then-truncate), not a housekeeping one (§5.2). |
 | **egress + IOPS** | a cold, disk-resident design **reads from disk on every cache miss.** The cost moves from *storage* to *requests* — and egress is the line that punishes a read-heavy pattern. **Not modelled.** ⚠️ **No measurement covers egress or IOPS yet (§15 lists none).** |
 
-✅ **Egress + IOPS are priced and carried as a row of the two-store table (§17.4): $0.09/GB (250 GB included) and $0.024/IOPS/month (3,000 included, General Purpose).** **The journal is neither priced nor a row** — its *growth* has **no measurement** and it is the one line §17.4 cannot price.
+✅ **Egress + IOPS are priced and carried as a row of the two-store table (§17.4): $0.09/GB (250 GB included) and $0.024/IOPS/month (3,000 included, General Purpose).** **The journal is neither priced nor a row** — its growth is now measured (§5.2) but it is still the one line §17.4 cannot price, because a *growth rate* is not a *total*.
 
 **⇒ The table answers *"what does the DATA cost?"*. It does not answer *"what does the SYSTEM cost?"* — and §6 is the section that says so. Do not quote this table as a total.**
+
+### 5.2 The journal's measured growth — measured 2026-10-17 (`#5612`)
+
+**The number §5.1 recorded as missing.** Per-op costs measured on the real record shapes (the committed 29-type corpus) with the pinned embedder's real vector width (384, `BAAI/bge-small-en-v1.5`) stamped through the writer's own seam (`embeddings.stamp_journal_embedding`). Fully reproducible: `tools/journal_growth.py` measures a live journal directory (or a file) and reports the embedding share record by record; the probe and its output are in `docs/evidence/5612-journal-growth/`.
+
+| record class | bytes on disk | what dominates |
+|---|---|---|
+| `PointAdded` (create, with `embedding`) | **8,877 B** | **8,414 B is the vector** — 384 floats written as JSON decimal text, **21.9 chars/float**, where the graph stores 4 B/float as `vecf32`. #5004's identity keys are the other ~217 B. |
+| `PointRevised` (content/metadata edit) | **196 B** | a delta; the vector it derives from `new_content` is stripped (#4208 — the replay re-encodes it), so only a CALLER-supplied vector rides this record |
+| `EntityLinked` | 242 B | a delta |
+| corpus `p50` / `p95` (vector-bearing) | 229 B / **8,877 B** | a 39× gap — **the tail IS the snapshot record**, so a bound argued from a mean plans for a record no journal contains |
+
+**⇒ Growth tracks CREATES, not writes: ≈8.5 MB per 1,000 point creates / capture turns; 10,000 ≈ 83 MB; 1,000,000 ≈ 8.3 GB.** Revisions are ~0.2 MB per 1,000 and do not move the number.
+
+**⚠️ A measurement is not a bound, and this section does not choose one.** The journal is the rebuild source (`derived = replay(journal)`, §3), so a retention window whose discarded prefix no snapshot has absorbed converts a *cost* problem into **silent state loss** on the next `rebuild_all` — and §5.2 shows those discarded records are precisely the ones carrying the state (the creates, with their vectors). The safe shape is **checkpoint-then-truncate** (fold the prefix into the record, verify the projection by replaying the retained suffix, then drop), and it requires checkpoint/truncate semantics that do not exist yet. `docs/durability-posture.md` is the recorded authority on what the journal promises, so the retention policy belongs there, with the owner — recorded on `#5612` (`#issuecomment-6008256611`).
+
+**One finding that is NOT a retention decision, and should precede one:** the vector's journal encoding (JSON list of float64 decimal reprs) costs ~2× more than the same information as base64 of the float32 the graph itself stores, and ~5× the raw 4 B/float — a ~4× reduction on the vector-dominated record with **no state discarded** and no change to what is journaled. It is a change to the journal *format* (replay must decode it), so it is deliberately not taken here; it needs its own decision and its own tests.
 
 ---
 
@@ -1386,6 +1403,7 @@ follows is the evidence each ruling rests on, which is design.
 | **M4** | **Does self-hosting beat Cloud at the CACHE tier's footprint?** — price a VM holding N tenants at ≤75% RAM | a **cache-tier ops** lever: it moves a cache, it does not move the record |
 | **M5** | ⭐ **Where should the vector index live?** — our query latency with the index resident, against a real `GRAPH.MEMORY USAGE` read | **decides V1 (§12.1c) — the first cache-tier question (§14.2)** |
 | **M6** | ⭐ **How many durable claims did we keep?** — the share of the candidate facts the pipeline saw that survived as claims | **The guard §6.1 requires: without it, a volume objective can be satisfied by writing nothing.** The owner re-affirmed **2026-09-30** that this measurement is wanted (§14.1 **O2**, AMENDED) — **only the goal is deferred.** |
+| **M7** | ✅ **How fast does the journal actually grow?** — bytes per record class and per operation, on the real record shapes | **MEASURED 2026-10-17 (§5.2, `#5612`)** by `tools/journal_growth.py`, which also measures a LIVE journal dir: a creating record is **8,877 B** (95% the embedding's decimal text) vs **196 B** for a revision ⇒ **≈8.5 MB per 1,000 point creates**, growth tracking creates. ⚠️ **What it does NOT answer: the retention window.** Choosing one needs the checkpoint/truncate semantics §3's bound requires, and that is a durability-posture ruling for the owner — the measurement is its input, not its substitute. |
 
 **Not worth measuring (recorded so they are not re-invented):** the cold-index p95/p99 study (**premise was vendor marketing**), the quantization-recall study (**no engine to apply it to**), the 1,000-partition planning study (**§12.1a answers it: the PARTIAL-index form degrades — 83 ms at T=500 — while declarative `PARTITION BY` is flat to T=500; neither is the decision, which is the size-earned conditional index**), and the narrative-vs-raw A/B (**`#3011` is already pre-registered; do not duplicate it**).
 

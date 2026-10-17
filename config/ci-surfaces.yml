@@ -1759,6 +1759,17 @@ surfaces:
   # network/Docker/FalkorDB), so it is deliberately NOT carve_out-registered:
   # it is DB-free and runs on any lane, not embedded-only.
   - test_lane_stash.py
+  # #5612: the hosted journal's growth MEASUREMENT (`tools/journal_growth.py`
+  # measures a live journal dir; the probe in
+  # `docs/evidence/5612-journal-growth/probes/` reports per-record cost on the
+  # real 29-type corpus). Both paths are flat NON_PYTHON_PREFIXES entries, so
+  # they need the `CORE_ALSO` entry in `tools/ci_selection.py` or the pins never
+  # run on the files they guard (the #1349/#3332/#3616 silent-drop class, the
+  # same shape as `test_lane_stash.py` above). Hermetic — temp dirs and the
+  # committed fixture only, no Docker/FalkorDB/network — so it is deliberately
+  # NOT carve_out-registered: it is DB-free and runs on any lane, and a
+  # measurement that only ran on one lane would stop being checkable.
+  - test_journal_growth.py
   - test_test_lane_tool.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -4670,6 +4681,9 @@ durations:
   # erring high is correct for sharding. Refresh from the first post-merge junit
   # artifact.
   test_lane_stash.py: 330.0
+  # #5612: 14 tests, 4.5 s on the local docker-lane run (temp-dir journals +
+  # the committed fixture; no DB). Measured, not a flat default.
+  test_journal_growth.py: 4.5
   test_who_is_on.py: 0.9  # #4256: analogue estimate (same subprocess harness as test_collision_preflight.py); refresh from the first post-merge junit artifact
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
   test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
