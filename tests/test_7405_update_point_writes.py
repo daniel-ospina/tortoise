@@ -2083,8 +2083,13 @@ def _object_point(sdk) -> str:
     return pid
 
 
-def test_the_object_arm_refuses_a_reissue_that_lands_nothing(tmp_path):
+def test_the_object_arm_refuses_a_reissue_that_lands_nothing(
+        tmp_path, monkeypatch):
     """`SET (Object)` returns `count(n)`; a zero count is a NON-landing."""
+    # Stub the backoff clock: these paths EXHAUST the retry budget, so
+    # a real sleep would add ~11 s each and make the result clock-dependent.
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "objlanding")
     try:
         pid = _object_point(sdk)
@@ -2126,8 +2131,17 @@ def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
 
 
 def test_the_derived_embedding_arm_refuses_a_reissue_that_lands_nothing(
-        tmp_path):
-    """The clear+set arm returns `n`; an empty row set is a NON-landing."""
+        tmp_path, monkeypatch):
+    """The clear+set arm returns `count(n)`; a ZERO count is a NON-landing.
+
+    Not "an empty row set": `count()` always yields its single row, so only the
+    VALUE can testify here — reading presence-of-row would call every re-issue a
+    landing and re-open the defect this test closes.
+    """
+    # Stub the backoff clock: these paths EXHAUST the retry budget, so
+    # a real sleep would add ~11 s each and make the result clock-dependent.
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "embedlanding")
     try:
         pid = _pid(sdk)
@@ -2144,8 +2158,17 @@ def test_the_derived_embedding_arm_refuses_a_reissue_that_lands_nothing(
             sdk.close()
 
 
-def test_the_corrects_edge_refuses_a_reissue_that_lands_nothing(tmp_path):
-    """`MERGE (a)-[:CORRECTS]->(b)` needs BOTH anchors; a lost `a` is a NON-landing."""
+def test_the_corrects_edge_refuses_a_reissue_that_lands_nothing(
+        tmp_path, monkeypatch):
+    """`MERGE (a)-[:CORRECTS]->(b) RETURN count(*)` needs BOTH anchors.
+
+    A lost `a` makes the match empty, so `count(*)` is ZERO — the non-landing,
+    in an always-present row.
+    """
+    # Stub the backoff clock: these paths EXHAUST the retry budget, so
+    # a real sleep would add ~11 s each and make the result clock-dependent.
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "correctslanding")
     try:
         old = _pid(sdk)
