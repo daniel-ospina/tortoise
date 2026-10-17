@@ -22,6 +22,8 @@ import json
 import os
 import sys
 import time
+from datetime import date as _date
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -325,16 +327,190 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         return {"status": "error", "reason": "tortoise_push_failed"}
 
 
-def get_calendar_attendees(meeting_date: str = None) -> list:  # noqa: RUF013
-    """Get attendees from the most recent cal-trigger state file."""
+def _as_calendar_day(value) -> _date | None:
+    """Calendar day of an ISO-8601-ish timestamp, or None when unparseable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, _date):
+        return value
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        try:
+            return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+
+# ``cal-trigger.py::start_recording`` stores ``event.get("title", "Meeting")[:50]``,
+# so a state's ``event_title`` is capped there — and when the calendar title is
+# longer than the cap, the stored title is a hard-truncated PREFIX of it. That
+# truncation is the only ACCEPTABLE nesting: it makes the stored title a strict
+# prefix of a longer artifact title AND leaves it exactly at the cap, which is
+# what `_title_relation` requires. Any other nesting is not the cap's doing and
+# is UNDETERMINED (a series variant, "Weekly Standup" vs "Weekly Standup
+# (Engineering)", produces the same prefix shape at a shorter stored length; a
+# legitimately shortened artifact title produces the mirror one), so the stored
+# title stays silent and the day arm decides.
+_TITLE_WRITER_CAP = 50
+
+# The title arm exists for ONE event recorded ACROSS MIDNIGHT: ``started_at`` is
+# the recording start and the artifact's ``date`` is the meeting's date, so the
+# state can only PREDATE the artifact, by one calendar day at most. It is bounded
+# in that direction only: a state dated AFTER the artifact is a LATER occurrence
+# of the same recurring title (today's call recorded while yesterday's
+# still-unprocessed artifact is being re-run — it is only skipped once a note
+# exists), never this meeting's recording. Same-day is the day arm's job. Left
+# unbounded, either mirror grounds on the title alone and promotes another
+# occurrence's calendar participants into this meeting's CRM at machine
+# confidence — #8491's stated harm, on the arm this grounding fix itself adds.
+# The bound is calendar-day granular, so it cannot tell an across-midnight
+# recording from a DAILY recurrence one day earlier; that residual is stated in
+# the contract docstring below rather than papered over.
+_TITLE_ARM_MAX_DAY_GAP = 1
+
+
+def _title_relation(want_title: str, have_title: str,
+                    have_raw_len: int) -> str | None:
+    """``"same"`` / ``"different"`` / ``None`` for two normalised titles.
+
+    ``have_raw_len`` is the stored ``event_title`` LENGTH BEFORE normalisation,
+    because the writer's cap counts raw characters: a title whose 50th character
+    is whitespace strips to 49 and would otherwise look un-truncated.
+
+    ``None`` is ABSENCE of evidence: a side is absent, or the two titles nest in
+    a way the writer's cap does not explain — on either side (the stored title
+    shorter than the artifact's, OR the artifact's shorter than the stored one),
+    or the stored title is LONGER than the cap, which a capped writer cannot
+    have produced. Those name neither this event nor a different one, so the day
+    arm decides. ``"different"`` (two titles that do not nest) always
+    disqualifies, whatever their length: it names another event.
+    """
+    if not want_title or not have_title:
+        return None
+    if want_title == have_title:
+        return "same"
+    short, long_ = sorted((want_title, have_title), key=len)
+    if long_.startswith(short):
+        # Agreement by TRUNCATION requires the stored side to sit EXACTLY at the
+        # writer's cap (it never stores more) with the artifact's title
+        # continuing past it. Anything else that nests cannot ground on its own —
+        # including a store longer than the cap, which the cap cannot have
+        # produced (a foreign/older writer), so it is not its truncation.
+        if (short == have_title and have_raw_len == _TITLE_WRITER_CAP
+                and len(long_) > len(short)):
+            return "same"
+        return None
+    return "different"
+
+
+def _title_arm_grounds(relation: str | None, want_day: _date | None,
+                       have_day: _date | None) -> bool:
+    """Whether the TITLE ALONE may ground the state for this meeting.
+
+    Requires BOTH calendar days to be known: the bound is the whole point of the
+    arm, and an unreadable ``started_at`` leaves the state's age unknowable —
+    refuse rather than guess, exactly as the no-evidence case does.
+
+    The gap must be non-negative and at most ``_TITLE_ARM_MAX_DAY_GAP``: the
+    state PREDATES the artifact (the across-midnight recording), never the other
+    way round, where the state belongs to a LATER occurrence than the artifact
+    under process.
+    """
+    if relation != "same":
+        return False
+    if not want_day or not have_day:
+        return False
+    gap = (want_day - have_day).days
+    return 0 <= gap <= _TITLE_ARM_MAX_DAY_GAP
+
+
+def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
+                           meeting_title: str = None) -> list:  # noqa: RUF013
+    """Calendar attendees for THE MEETING under process — never a neighbour's.
+
+    ``~/.minutes/cal-trigger-state.json`` is a SINGLE-VALUED store: cal-trigger.py
+    calls ``save_state()`` on every recording start, so the file describes the
+    MOST RECENT event only and carries no ``meeting_id``. Reading it unscoped
+    (what this function did before #8491) promoted *another* meeting's calendar
+    participants into this meeting's CRM — ``process_meeting`` auto-creates one
+    ``Person`` and one "First call" ``Opportunity`` per entry, so a re-run or a
+    ``--watch`` backfill over an older file seeded the CRM with people who were
+    never on that call, at machine confidence. That is the failure class of
+    #8491 (attendees promoted into a structured identity surface ungrounded
+    against evidence already in hand), on the read path its fix direction 3
+    names.
+
+    Grounding therefore comes from the artifact's OWN evidence, since the state
+    has no id to match on: the same ``event_title`` (compared on the writer's
+    50-character truncation, so a long calendar title can still match) recorded
+    no more than one calendar day EARLIER — the across-midnight case the arm
+    exists for, and never a LATER occurrence. The bound is calendar-day
+    granular, so an earlier occurrence MORE than a day before refuses, while one
+    exactly a day before cannot be told apart from an across-midnight recording
+    of a daily-recurring title (``_title_arm_grounds``) — or the same local
+    calendar day (state ``started_at`` vs the meeting ``date``).
+
+    A state whose title names a DIFFERENT event is DISQUALIFYING evidence — it
+    says the store describes another call — so the day arm cannot rescue it: a
+    same-day neighbour is exactly the residue a ``--watch`` pass or a retry
+    (``watchdog.sh`` re-enters on failure) meets, and it is the #8491 harm
+    narrowed, not removed. "Different" means two titles that do not nest, at any
+    length. The day arm therefore decides every case where the title cannot
+    SPEAK: no ``event_title`` at all, two titles that nest without the
+    writer's 50-character cap explaining it — the stored title shorter than the
+    artifact's (a series variant), or the artifact's shorter than the stored one
+    (a cut-short artifact title) (``_title_relation``) — or two EQUAL titles
+    whose state is not dated in the one calendar day BEFORE the meeting, which
+    is a later occurrence, or an earlier one more than a day before, rather than
+    this recording (``_title_arm_grounds``). Neither arm matches — or no evidence
+    was supplied — and this returns ``[]``: refuse rather than guess, so an
+    ungrounded attendee is never written as a contact.
+    """
     if not os.path.exists(CAL_STATE_FILE):
         return []
     try:
         with open(CAL_STATE_FILE) as f:
             state = json.load(f)
-        return state.get("attendees", [])
     except (json.JSONDecodeError, IOError):  # noqa: UP024
         return []
+    if not isinstance(state, dict):
+        return []
+
+    want_title = str(meeting_title).strip().casefold() if meeting_title else ""
+    raw_have_title = str(state.get("event_title") or "")
+    have_title = raw_have_title.strip().casefold()
+
+    # A CLEARED state is absence, not a mismatch: ``cal-trigger.py::stop_recording``
+    # writes ``{recording_pid: None, current_event_uid: None, started_at: None}``
+    # on every normal stop and ``watchdog.sh`` reads the file seconds later, so
+    # warning here would fire on every ordinary meeting and cost the warning
+    # below its signal. Still refuses — it just does so silently.
+    if not state.get("started_at") and not have_title:
+        return []
+
+    want_day = _as_calendar_day(meeting_date)
+    have_day = _as_calendar_day(state.get("started_at"))
+
+    relation = _title_relation(want_title, have_title, len(raw_have_title))
+    same_day = bool(want_day and have_day and want_day == have_day)
+    grounded = _title_arm_grounds(relation, want_day, have_day) or bool(
+        same_day and relation != "different")
+    if not grounded:
+        print(
+            "⚠️  cal-trigger state does not describe this meeting "
+            f"(state started_at={state.get('started_at')!r}, "
+            f"event_title={state.get('event_title')!r}; meeting "
+            f"date={meeting_date!r}, title={meeting_title!r}) — "
+            "skipping calendar attendees rather than attributing them to "
+            "this call (#8491)",
+            file=sys.stderr,
+        )
+        return []
+    return state.get("attendees", [])
 
 
 # --- Core Pipeline ---
@@ -373,8 +549,20 @@ def process_meeting(md_path: str) -> dict:
     if existing and "error" not in existing:
         return {"status": "skipped", "reason": "already_processed", "note_id": existing.get("id")}
 
-    # Auto-create contacts from calendar attendees AND create opportunities
-    cal_attendees = get_calendar_attendees()
+    # Auto-create contacts from calendar attendees AND create opportunities.
+    # Grounded on THIS meeting's own evidence — the cal-trigger state is
+    # single-valued (most recent recording), so an unqualified read would seed
+    # the CRM from a different call (#8491).
+    cal_attendees = get_calendar_attendees(
+        frontmatter.get("date"), frontmatter.get("title"))
+    # PyYAML parses an UNQUOTED ISO `date:` into a ``datetime``/``date``, which is
+    # not subscriptable — ``_as_calendar_day`` is the one place that shape is
+    # handled, so the opportunity label reuses it instead of slicing. An
+    # unparseable label still falls back to the old string prefix.
+    _raw_date = frontmatter.get("date")
+    _meeting_day = _as_calendar_day(_raw_date)
+    day_label = (_meeting_day.isoformat() if _meeting_day
+                 else str(_raw_date or "")[:10])
     for att in cal_attendees:
         email = att.get("email", "")
         name = att.get("name", "")
@@ -385,7 +573,9 @@ def process_meeting(md_path: str) -> dict:
                 # Auto-create opportunity at "Contacted" stage for new contacts
                 new_person = find_person_by_email(email)
                 if new_person and "error" not in new_person:
-                    create_opportunity(new_person["id"], f"{name} — First call {frontmatter.get('date','')[:10]}")
+                    create_opportunity(
+                        new_person["id"],
+                        f"{name} — First call {day_label}")
                 log(f"Auto-created contact: {name} <{email}>") if 'log' in dir() else None  # noqa: F821
 
     # Match speakers to contacts

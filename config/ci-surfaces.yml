@@ -620,6 +620,14 @@ surfaces:
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
+  # #2446 (phase 2 of #2427): the member OWN-KEY slice — atomic session-key
+  # replace (POST /v1/session/key replace_key_id) + enable/disable-own, and the
+  # non-own-key POLICY A 403 pins. Owned by `api` because every file it guards
+  # (`tortoise/hosted_api.py`, `tortoise/supabase_control.py`) is an EXACT `api`
+  # SOURCE_PATTERN match — a hosted_api.py-only diff REPLACES the `core`
+  # fallback in select(), so without this arm the whole authorization contract
+  # would run on no change that can break it.
+  - test_own_key_selfservice_2446.py
   - test_mcp_client.py
   - test_mcp_http.py
   - test_mcp_rename_table.py  # #4282: Phase 0.3 rename table — old name → new name, per tool
@@ -1021,6 +1029,15 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #4125: the migration of pre-#4005 basename-url session Sources onto the
+  # canonical `session:<id>` identity. Registered here because the new module
+  # (`tortoise/session_source_migration.py`) matches no named surface and so
+  # falls back to `core`: without this entry a change to the migration alone
+  # would select the module's surface with the guard absent. The file also pins
+  # the four whole-journal replay hooks (`tortoise/projection/__init__.py`,
+  # `tortoise/consistency.py`, `tortoise/backup.py`), which select the full
+  # matrix on their own — the registration is what covers the module-only diff.
+  - test_4125_legacy_session_source_migration.py
   - test_4932_per_pr_artifact_scope.py
   - test_2350_validity_precision.py
   # #5142: the ONTOLOGY record of the D10 code half — the `format` markers vs
@@ -3003,6 +3020,17 @@ surfaces:
   # is a SHARED_MODULE (full matrix), so the registration is what pins the file
   # to a surface at all — without it `--integrity` reds on an unclassified file.
   - test_5275_required_read_path.py
+  # #8491 (in-repo READ path). `integrations/crm/twenty/bridge.py` matched no
+  # SOURCE_PATTERNS entry AND `integrations/` is a flat NON_PYTHON_PREFIXES
+  # entry, so a bridge.py-only change was dropped before the fallback and
+  # selected NO surface at all (measured: `select(['integrations/crm/twenty/
+  # bridge.py'])` → surfaces=[], 45 tier-1 files) — the guard for the reader of
+  # `~/.minutes/cal-trigger-state.json` never ran on the PR that changes it, the
+  # #1349/#3332/#6138 silent-drop class. Registered here AND wired through the
+  # CORE_ALSO entry in tools/ci_selection.py (the documented remedy for this
+  # class). This file pins that calendar attendees are grounded on the meeting's
+  # OWN evidence before they become CRM contacts/opportunities.
+  - test_8491_cal_attendee_grounding.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -3424,6 +3452,15 @@ surfaces:
   # REPLACES the `core` fallback, so without this arm the guard would never run
   # on the exact change that can break it (#2938 class).
   - test_7936_stable_stub_ids.py
+  # #4125/#8229 review P2: DUAL-REGISTERED with `core` (below). This file pins
+  # `tortoise/ids.content_hash` as the ONE derivation of the pre-fix
+  # `hash(url)` placeholder that `is_pre_fix_url_hash` must refuse —
+  # `tortoise/ids.py` is an exact `sdk` SOURCE_PATTERN and is in neither
+  # SHARED_MODULES nor CORE_ALSO, so an ids.py-only diff selects `sdk` and
+  # REPLACES the `core` fallback: without this arm the guard that pins the
+  # refusal would not run on the one change that can break it (the
+  # #1349/#3332/#3673 silent-drop class, same shape as the #7936 entry above).
+  - test_4125_legacy_session_source_migration.py
   # #5346: a PAGED read must order by a TOTAL key, or its pages are not
   # adjacent. `paginated_query` — and therefore the MCP
   # `tortoise_query(offset=/page=)` / `tortoise_paginated_query` path — plus
@@ -4356,6 +4393,17 @@ durations:
   # post-merge run that includes it. Do NOT drop the row without re-deriving
   # the coverage floor at that head.
   test_5275_required_read_path.py: 20.0
+  # #8491: MEASURED locally at the head that ships it (24 tests;
+  # `TORTOISE_TEST_CARVE_OUT=1` embedded lane, hermetic — no server, no network;
+  # the wiring pin loads the ~5,500-line manifest and dominates, and the five
+  # `process_meeting` arms each parse YAML and drive the pipeline). Warm runs of
+  # the whole file spread 5.2-8.9s across two hosts under fleet load, so 9.0 is
+  # the observed MAXIMUM rounded up — the conservative side for the shard-balance
+  # veto, not a floor (a single reading was quoted here before and was below four
+  # of the observed runs). Refresh from the first post-merge run that includes
+  # it. Do NOT drop the row without re-deriving the 90% coverage floor at that
+  # head (#4348 trap — the surface entry alone does not cover it).
+  test_8491_cal_attendee_grounding.py: 9.0
   test_shared_state_concurrency.py: 0.2
   test_shared_state_events.py: 0.2
   test_shared_state_events_claim.py: 0.1
@@ -4613,13 +4661,17 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
   test_collision_preflight.py: 3.6
-  # #8051: 82 tests. 185.0 is from LOCAL readings on this
+  # #8051: 102 tests. 330.0 is from LOCAL readings on this
   # fleet-loaded host (subprocess + real-git harness): 173s / 182s at 61 tests
-  # (head 876dabfe), 187s at 69, 192s at 76. The weight this replaces — 160.0,
-  # published with an "88-169s" range — sat BELOW every one of those readings;
-  # erring high is correct for sharding. Refresh from the first post-merge
-  # junit artifact.
-  test_lane_stash.py: 185.0
+  # (head 876dabfe), 187s at 69, 192s at 76, 198s at 79, 223s at 82, 241s at 83,
+  # 250s at 83, 227s at 87, 323s at 90, 273s at 92, 234s at 94, 288s / 295s at 98,
+  # 318s at 101, 289s at 102. The weight this
+  # replaces — 160.0, published with an "88-169s" range — sat BELOW every one of
+  # those readings; each superseded weight (185.0 / 250.0 / 260.0) was overtaken by
+  # a later reading (worst 323s at 90 tests), so 330.0 is above every reading and
+  # erring high is correct for sharding. Refresh from the first post-merge junit
+  # artifact.
+  test_lane_stash.py: 330.0
   test_who_is_on.py: 0.9  # #4256: analogue estimate (same subprocess harness as test_collision_preflight.py); refresh from the first post-merge junit artifact
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
   test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
@@ -4767,6 +4819,7 @@ durations:
   test_hosted_auth.py: 1.8
   test_ingest_event_endpoint.py: 1.7
   test_session_key_recovery_gate.py: 3.3
+  test_own_key_selfservice_2446.py: 7.8
   test_topic_summarization.py: 1.6
   test_aggregative_facet_coverage.py: 1.4
   test_de2e5_instantiates_ranking.py: 1.1
@@ -5339,6 +5392,14 @@ durations:
   test_3982_date_only_utc.py: 0.1
   test_4041_breadcrumb_reader.py: 2.4
   test_4199_dense_scope_coverage.py: 0.6
+  # #4125: 28 tests (refreshed at the #8229 fix round — 5 of them pin the
+  # review's findings), embedded lane. Locally measured 181s this turn, of which
+  # ONE test carries ~134s: the first `create_point` in the file pays the
+  # process-wide embedder warmup (the same shape as
+  # `test_source_currency_5581.py`'s 133s note). The file's own work is ~45s —
+  # the number below is the measured FILE duration so the shard packer sees the
+  # real wall. Refresh from the first post-merge run that includes it.
+  test_4125_legacy_session_source_migration.py: 185.0
   test_4542_retract_fold_decay.py: 0.1
   test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2

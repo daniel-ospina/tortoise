@@ -379,6 +379,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    # #4125/#8229: the operator-CLI test forces the EMBEDDED lane deliberately —
+    # the target under test is a SCHEME-LESS `--db <path>` store, so the env
+    # control IS the test input (a URI-shaped value would send the fixture write
+    # through the #1647 test redirect to a server graph while the CLI reads the
+    # embedded file — the exact lane divergence this declaration documents).
+    # It is set BEFORE the fixture SDK is constructed, so both the write and the
+    # CLI read address the SAME embedded store in every lane; the fixture-param
+    # monkeypatch auto-restores at teardown (no lane leak).
+    "test_4125_legacy_session_source_migration.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*\w+\)'],
     "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      # the URI literal sits on the FOLLOWING line at
                                      # :251 (`setenv(` then the string), so the site's

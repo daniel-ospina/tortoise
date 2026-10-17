@@ -3122,6 +3122,17 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     entity_link_events, hard_delete_seqs)
             except Exception:
                 torn += len(entity_link_events)
+    # #4125: re-derive the migrated session-Source identity from the journal
+    # just replayed. The pre-#4005 basename node is re-materialised by the
+    # replay (its `SourceCreated` line, and `_link_source`'s stub mint from any
+    # PointAdded naming the bare basename) while the canonical `session:<id>`
+    # node is recreated beside it; this engine's trailing sweep is the only
+    # place that can converge them, exactly as `rebuild`/`rebuild_all` do.
+    # Deliberately OUTSIDE the non-folded collector above: this is a post-replay
+    # identity reconciliation, not a fold of any record, so it must not be
+    # counted as one. Never raises (post-wipe: #2943).
+    from tortoise.session_source_migration import reconcile_after_replay
+    reconcile_after_replay(projection, engine="recover_from_log")
     after = _node_count()
     # #8702: a skip recorded by a TRAILING sweep (after its own record's fold
     # had already been counted) was not attributed above. It is still a dropped

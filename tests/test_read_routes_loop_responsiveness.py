@@ -638,6 +638,16 @@ _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     "_require_owner_admin", "_require_owner", "_registry_mismatch_accept_v2",
     "_registry_accept_by_id", "_quarantine_import",
     "_run_indexing",
+    # #2446: the membership read the owner/admin gate has always performed,
+    # extracted into `_membership_role` by the own-key slice. Same read and same
+    # class as `_membership_org` / `_require_owner_admin` above, so it belongs
+    # here rather than in a new exemption. Off-loading it is measurably unsafe
+    # today: both `asyncio.to_thread` and `_graph_offload` made
+    # `test_invites_http.py::TestExpiredInviteReMint` see an EMPTY member list
+    # (the inline form passes 4/4), i.e. an auth-path read whose result depends on
+    # which thread runs it. Declared debt with that evidence attached beats a
+    # silent behaviour change on an authorization path.
+    "_membership_role",
     # #4660: the helper bodies the WIDENED scan newly sees. Same class as the
     # route block above — inline SDK construction that was invisible to the
     # graph-seam set.
