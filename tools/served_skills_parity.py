@@ -524,7 +524,23 @@ def _check_scope(manifest: dict, head: str, attempts: int,
 
     at_head = at_pin if head == pinned else set(
         list_upstream_skills(repo, head, attempts, backoff))
-    for name in sorted(at_head - expected):
+    # A directory in neither the pin nor `out_of_scope:` is red EITHER WAY, but
+    # the two cases must not be called the same thing: one really was added, the
+    # other has been sitting upstream since before the pin and was simply never
+    # declared. Reporting the second as "upstream added" sends the operator
+    # looking for an upstream commit that does not exist (review finding, P2).
+    undeclared = at_head - expected
+    since_pin = {name for name in undeclared if name in at_pin}
+    added = undeclared - since_pin
+    for name in sorted(since_pin):
+        problems.append(
+            f"upstream has '{UPSTREAM_SKILLS_DIR}/{name}' at {repo}@{branch} "
+            f"HEAD ({head[:12]}) AND at the pinned commit, but the pin neither "
+            f"serves nor declares it — this is not a new addition, it is an "
+            f"undeclared directory. Pin it (add it to the pin's `skills:` with "
+            f"its `upstream_path`/`served_path`) or record `{name}` under "
+            f"`out_of_scope:` if it is deliberately not served.")
+    for name in sorted(added):
         problems.append(
             f"upstream added '{UPSTREAM_SKILLS_DIR}/{name}' at {repo}@{branch} "
             f"HEAD ({head[:12]}) — pin it or record it as out of scope.\n"

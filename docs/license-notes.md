@@ -334,18 +334,23 @@ pin records under `out_of_scope:`), because both byte arms iterate the pin's
 own keys and would therefore never see an upstream skill we had never pinned.
 
 The currency arm compares **bytes, not the commit pointer**, so an upstream
-commit that changes no skill we serve — a README edit, CI config, an edit to a
-skill that is neither pinned nor listed under `out_of_scope:` — does not red
-the gate and does not file a drift issue: the pinned sha256 is re-computed over
-the bytes at HEAD, so an edit to a **pinned** skill still fails.
+commit that changes no skill we serve does not red the gate and does not file a
+drift issue. "No skill we serve" means exactly: a README edit, CI config, or an
+edit to a skill already recorded under `out_of_scope:` — the pinned sha256 is
+re-computed over the bytes at HEAD, so an edit to a **pinned** skill still
+fails. A directory that is neither pinned nor declared is **not** in this class:
+the scope arm reds on it whether its bytes changed or not (below).
 
 **Adding** an upstream skill is a different event, and it **is** red: a new
 `skills/<dir>/` that is neither pinned nor declared is reported by the scope arm
 as `upstream added '<dir>' … pin it or record it as out of scope`, and the gate
-exits non-zero. That is deliberate, not an oversight in the sentence above: both
-byte arms iterate the pin's own keys, so a skill nobody pinned is invisible to
-every comparison — and an upstream capability would silently never reach the
-served set. The remedy is to pin it (`--sync`) or record it under
+exits non-zero. A directory that has been upstream **since before the pin** and
+was simply never declared reds the same way but is reported as *not pinned or
+declared* rather than as an addition — there is no upstream commit to go and
+look at. Both are deliberate, not an oversight in the sentence above: the byte
+arms iterate the pin's own keys, so a skill nobody pinned is invisible to every
+comparison — and an upstream capability would silently never reach the served
+set. The remedy for either is to pin it (`--sync`) or record it under
 `out_of_scope:`.
 
 **Where it runs — two runners, both failing closed.** The upstream arm is
