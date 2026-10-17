@@ -1718,7 +1718,7 @@ ratio      = (73 / 0.75) / 0.125              = 778.7
 multiplier = 1 / (f + (1 + rho) / 778.7)      -> 0.99x at f = 1.00, 4.83x at f = 0.20
 ```
 
-**Reproduce the two MEASURED magnitudes (§17.4.6)** — both are scripts in `docs/evidence/7983-cost-magnitudes/probes/`, and neither needs anything but Docker **plus the two bootstrap steps below** (the record probe connects to a Postgres; it does not create one, and the ledger probe needs a reachable self-hosted graph):
+**Reproduce the two MEASURED magnitudes (§17.4.6)** — both are scripts in `docs/evidence/7983-cost-magnitudes/probes/`, and neither needs anything but Docker **plus the two bootstrap steps below** (the record probe connects to a Postgres; it does not create one; the ledger probe needs a self-hosted graph **in a known state**, not merely a reachable one — see the `f` block):
 
 ```bash
 # rho: the record's per-read cost, on the COMMITTED record schema.
@@ -1732,8 +1732,17 @@ uv run --with psycopg2-binary python \
 # a RE-RUN FROM A DIRTY CONTAINER IS INVALID: recreate it, then run twice
 # (run 1 plants, run 2 --skip-plant) — the docs' millisecond RANGES are those two.
 
-# f: the read ledger, exercised end-to-end on the live self-hosted graph
-# (`docker run -d --name falkordb-16379 -p 127.0.0.1:16379:6379 falkordb/falkordb`).
+# f: the read ledger, exercised end-to-end.
+# ⚠️ IT NEEDS A GRAPH IN A KNOWN STATE, NOT MERELY A REACHABLE ONE. The quoted
+# 8.64% / 2.07% were taken on graph `tortoise` at 10,457 keys / 21,110 nodes
+# (2026-10-17), and the raw ledger behind them is NOT committed. Against a fresh
+# or empty server the probe reports stock 0 and `f: null` — the instrument saying
+# "there is nothing to divide", not an instrument fault. So the probe reproduces
+# the MECHANISM; the READING is one graph on one date. To re-derive a comparable
+# figure, point it at a snapshot of that state (or seed one) with --graph.
+# ⚠️ 127.0.0.1:16379 is this fleet's canonical map store, so a container cannot
+# bind there on this host (and on another host it would start EMPTY); use a free
+# port, e.g. `docker run -d --name falkordb-7983 -p 127.0.0.1:16479:6379 falkordb/falkordb`.
 # `--sample storage-order` reproduces the pre-fix draw (2.07%) beside the quoted one.
 # --keep-ledger matters: without it the probe DELETES its own ledger on exit and
 # the CLI below would be reading a file that no longer exists (it now says so
@@ -1822,7 +1831,7 @@ rho       = (0.060 + 0.025 + 0 + 0) ÷ 0.023955 = 3.55   (N = 1,000 tenants/proj
 
 **What would close the last input.** A tenant serving real misses against a deployed record, for a window, with the ledger and the retrieval meter on: then `f` is a division over that window's mix, the **miss RATE** is read rather than assumed, and the compute line is sized from `misses × 4.8e-5–5.3e-5 CPU-s` (server) and `rebuilds × 2.6–2.7 CPU-s` instead of a density guess — the detoasting figures, since the heap-only plan undercounts a rebuild 14.5× in blocks and 18.5–80× in CPU. ⚠️ **And the miss RATE now has a threshold to beat, which is what makes it the missing input rather than a footnote:** the record's egress allowance holds only up to **1.04 misses/s/tenant** at 40-tenant density (**0.042/s at 1,000**), i.e. **3,755** and **150** misses/hour — low enough that a real mix can exceed them, and every miss above the allowance *adds* to `ρ`. ⚠️ **`ρ` is NOT a floor, and neither is it a ceiling: three of its inputs are still two-sided and none of the three is measured.** A `jsonb` vector at the journal's real 21.9 chars/float would RAISE the disk line and so LOWER `ρ`; a miss rate above the egress allowance would RAISE it; and the density `ρ` is divided by (40 tenants? 1,000?) moves it by **25×** in either direction. The figures above are what the measured lines give at the doc's own densities — quotable only with those bases attached, never as a point estimate of the blended cost.
 
-**Process weight — one line, twice.** The **ledger is kept because of a failure that already happened**: the split was decided on an unmeasured assumption and measured at **0.99× at `f = 1`**; delete the ledger and the product claim (*"bytes never read again stop renting RAM"*) is uncheckable again — **product**. The **two probes are the reproduction recipe** for every number above, which §17.4's own "Reproduce" block requires of an input — **process, and cheap**: no schema, no config entry, no SDK surface, no MCP tool, and nothing runs on a default deployment. **The three seams deliberately NOT added** — stock registration in the write path, per-key `bytes`, and the expansion path — are named rather than papered over, **because the right fix for each is a SEAM, not a guard**: a stock census belongs beside `cache_projection.declare_residency` (it already knows which keys the projection wrote) and a per-key byte figure belongs in the record's row shape, so adding a check here would only re-assert what neither exists to answer.
+**Process weight — one line, twice.** The **ledger is kept because of a failure that already happened**: the split was decided on an unmeasured assumption and measured at **0.99× at `f = 1`**; delete the ledger and the product claim (*"bytes never read again stop renting RAM"*) is uncheckable again — **product**. The two probes are the reproduction recipe for every **`rho`** number above; for `f`, `ledger_probe.py` reproduces the **mechanism** while the reading is one graph on one date, because the raw ledger is not committed — which §17.4's own "Reproduce" block requires of an input — **process, and cheap**: no schema, no config entry, no SDK surface, no MCP tool, and nothing runs on a default deployment. **The three seams deliberately NOT added** — stock registration in the write path, per-key `bytes`, and the expansion path — are named rather than papered over, **because the right fix for each is a SEAM, not a guard**: a stock census belongs beside `cache_projection.declare_residency` (it already knows which keys the projection wrote) and a per-key byte figure belongs in the record's row shape, so adding a check here would only re-assert what neither exists to answer.
 
 ### 17.5 A field-level placement table — 9 derived/volatile property names on the sampled surface
 

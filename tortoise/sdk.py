@@ -5180,15 +5180,23 @@ def _read_stored_number(value, default):
 def _ledger_record(label: str, rows: list[dict]) -> None:
     """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
 
-    Called by the caller-facing row-returning read paths that have a known
-    LABEL: `query()`, `paginated_query()` and `query_points_by_tag()`.
+    Called from EVERY caller-facing row-returning read path that has a known
+    LABEL. The named set is carried by §17.4.6, not duplicated here — this
+    docstring previously named only `query()`, `paginated_query()` and
+    `query_points_by_tag()` and omitted `suggest_entry_points`, `issue_insight`,
+    `recall_state`, `recall_gaps`, `search_sessions` and `get_events`, all of
+    which call it in this file. An audit surface that under-reports its own call
+    sites invites a second hook at one of them, which DOUBLE-COUNTS reads and
+    biases `f` HIGH (#8877's direction, and the one that flatters the split).
     ⛔ NOT `get_point()` — it is the internal accessor the WRITE paths use
     (`_emit_event` and the dedupe/promote checks), so counting it would mark
     written-but-never-read nodes as read and bias `f` HIGH (#8877). The FTS
     funnel records its rows through the same module INLINE (it resolves the
     label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path: `traverse`,
-    `recall_state`'s related readers and `get_historical_knowledge` read by
-    direct Cypher and call nothing here, and the FTS funnel records only its
+    `traverse` and `get_historical_knowledge` read by
+    direct Cypher and call nothing here (`recall_state`'s RELATED readers are
+    likewise unhooked — the method itself does record the rows it serves), and
+    the FTS funnel records only its
     RETURNED rows, not its candidate pool — so a deployment serving those paths
     reads an `f` that is too LOW (which flatters the split). #8877 carries the
     wiring; the coverage gaps are named in STORAGE-ARCHITECTURE.md §17.4.6.
