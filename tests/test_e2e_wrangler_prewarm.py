@@ -1,609 +1,219 @@
-"""The e2e `Pre-warm wrangler toolchain` steps stay pinned AND retry-protected.
+"""The wrangler pin is one artefact, ASSERTED against what actually resolved (#8816).
 
-WHY THIS EXISTS
----------------
-On 2026-10-15 the required `legal-e2e` check went red before it ran a single
-assertion: the pre-warm step's first `npx --yes wrangler@4 --version` died with
+The pin used to be a string repeated in twelve `run:` blocks, and the guard that
+"checked" it read that text. Reading text cannot see a spec written as
+`wran\\gler@4`, `"wrangler"@4` or `wrangler$X@4`, cannot see a bare `wrangler`,
+and never looked at `deploy-pages.yml` at all — where `wrangler@4` floated in
+production. Two measurements decided the replacement (bash 5, node 22):
 
-    npm error network Invalid response body while trying to fetch
-    https://registry.npmjs.org/wrangler: read ECONNRESET
+  * `wrangler --version` prints the bare resolved version on stdout;
+  * a float declaration can never equal its own resolution — `wrangler@4`
+    resolves to 4.151.1, so `[ "$got" = "$WRANGLER_VERSION" ]` fails.
 
-a transient npm-registry reset on a cold runner. The step had no retry, so the
-flakiest part of the job — a network fetch — was also its least protected, and
-the retry that DOES exist lives in the boot loop below, which the failed
-pre-warm never reached. A cold-runner fetch is exactly the thing a bounded retry
-is for, so the step now retries (3 attempts, best-effort: the boot loop is the
-real gate and surfaces wrangler's own log).
+So the version now lives in ONE file, `config/wrangler-version`, and the lane
+ASSERTS the version it got against it. That is exact for every spelling,
+including the ones no text scan can see, because it compares an observation to a
+declaration. The boot steps then run bare `wrangler`, so there is no spec at the
+call site to float, and the deploy steps assert before they upload.
 
-The pre-warm also drifted from what the boot fetched, in two shapes. In
-`welcome-e2e` the pre-warm floated `wrangler@4` while the boot step pinned
-`4.127.0`; in `dashboard-e2e` BOTH the pre-warm and its two boot steps floated
-`wrangler@4` (`legal-e2e` pinned `4.127.0` on both sides). Either shape warms a
-DIFFERENT tarball than the one the boot fetches — the agent-infra#414 drift
-class — and a range also made npm download the whole packument to resolve it.
-The two versions must agree.
+What is left for THIS file is the shape that keeps those properties true:
 
-WHAT THIS PINS (a gate is worth what its wiring is worth — the #4311 convention)
-  * every `Pre-warm wrangler toolchain` step pins an EXACT version
-    (`wrangler@X.Y.Z`), never a floating `wrangler@4`;
-  * the pinned version matches the version EVERY boot step of the SAME job
-    starts, so the warm-up warms the tarball that runs (`legal-e2e` and
-    `dashboard-e2e` each start TWO previews — a union lets a still-pinned
-    sibling mask a drifted one);
-  * the step is bounded-retry-protected (`for attempt in 1 2 3`);
-  * the three e2e jobs that serve `website/` still HAVE the step — deleting it
-    would silently push the cold fetch back onto the boot budget that #2178
-    added it to protect.
+  1. one artefact, full `X.Y.Z`, and no second copy of the value in any workflow;
+  2. no workflow declares the version in `env:` (the spelling that would shadow
+     nothing and let a consuming step act on a different version than the one
+     verified) and no inline assignment other than the file read;
+  3. every wrangler spec is the asserted `@${WRANGLER_VERSION:?...}` form;
+  4. every e2e job has an unconditional install-and-VERIFY step that runs BEFORE
+     its boot and keeps its three-attempt registry retry (a single npm
+     `ECONNRESET` reded the required `legal-e2e` check on 2026-10-15, and the
+     last attempt is the hard one now);
+  5. boot steps carry no spec and keep their two-attempt retry;
+  6. every deploy step asserts before it uploads;
+  7. every job that installs wrangler pins node 22 — `npm install` only WARNS
+     (`EBADENGINE`) on an engines mismatch, so a node-20 job would install
+     "successfully" and fail later, inside the readiness loop.
 
-This is parsed YAML, not a raw-text scan: the step's `run` string is read from
-the loaded document, so a commented-out or renamed step cannot satisfy it.
+A spec-LESS invocation is a second class, and it has no `wrangler@` token for the
+spec arm to read: `npx --yes wrangler pages deploy` resolves to the registry's
+latest without writing a spec down anywhere. Two arms cover it — one restricted
+to the deploy paths, where the assertion validates the declared spec rather than
+the spec on the upload line, and one over EVERY step: a bare `wrangler` is legal
+only in the five declared boot steps (which run the binary the verify step
+proved).
+
+The removed machinery is the point, not an accident: with no spec at the call
+site there is no shell word-splitting to model. The residual is stated rather
+than hidden — a NEW step can always be written with `wrangler@4`, and a version
+can reach npm through a spelling that never appears in these files at all (a
+shell alias, a function, or a wrapper script naming its own version), which no
+text scan over the workflows can see. The spec and invocation arms refuse the
+first in every workflow file, the executed harnesses in
+`tests/test_pages_bindings.py` prove the deploy step's assertion, and the arms
+below EXECUTE the manual deploy script rather than grepping its path.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+VERSION_FILE = REPO_ROOT / "config" / "wrangler-version"
+VERSION_SOURCE = "config/wrangler-version"
 
-PREWARM_STEP = "Pre-warm wrangler toolchain"
-
-# A token is classified by its SHAPE, never by a lookahead that backtracks
-# mid-token (a lookahead happily matched `4.12` inside `4.127.0`): an EXACT pin
-# is three numeric components and nothing else — `4.127.0`. Anything else is
-# floating: `4`, `4.127`, `latest`, `next`, the X-RANGES `4.127.x` / `4.x.x`
-# (npm reads those as a moving window, `>=4.127.0 <4.128.0-0`), and a
-# prerelease, which this rule refuses as an over-report rather than resolve.
-# A dist-tag is an OFFENDER, not a non-match: the numeric-only form of this
-# check could not see `wrangler@latest` at all, so such a step contributed
-# nothing to the float/parity checks and was invisible to them. (The rule itself
-# is `_EXACT_SPEC` below; this block is the POLICY note, not attribute docs.)
-
-
-#: A shell line CONTINUATION removes the backslash AND the newline, so the two
-#: lines are one command line: an invocation split across them is still one
-#: invocation and must be matched as one. The fold is UNCONDITIONAL, so inside
-#: single quotes — or a quoted here-doc body — it removes a pair shell keeps: the
-#: word then reads as the pin while bash passes `4.127.0\<newline>`, which npm
-#: rejects as a range (measured `null`). That is fail-LOUD — npx errors instead of
-#: installing something else, and the step cannot pass — so it is declared rather
-#: than tracked: the fold runs before quoting is known, and moving it inside
-#: `_shell_words` would put it after the token scan that depends on it.
-_CONTINUATION = re.compile(r"\\\n")
-
-#: A whole-line comment is not a command — but a `#` line INSIDE a here-doc body
-#: or a multi-line quoted string is DATA, and shell still runs command
-#: substitution in it (`cat <<EOF` / `# $(npx --yes wrangler@4 --version)` / `EOF`
-#: executes the npx). So there is NO comment filter: every line is read. A pin
-#: named in a comment is therefore reported, which is the declared over-report
-#: below — the safe direction. Dropping the line instead is what hid a real
-#: invocation from the third review round.
-
-#: ── The pin is read as a LITERAL OCCURRENCE ─────────────────────────────────
-#: Every `wrangler@<spec>` in the step is read. There is no lookbehind, no
-#: command-word test, no position test and no line filter: the text is not
-#: interpreted at all.
-#:
-#: This replaced a hand-written shell lexer that STRIPPED comments before reading
-#: the token, and whose here-doc model MISSED real invocations. Measured against
-#: `origin/main`'s copy, exactly two classes changed a verdict:
-#:   - `<<\EOF` and two here-docs on ONE line (A2, A3): NOTHING on `main`,
-#:     `{'4'}` here. Bash really RUNS that npx, so these are the fail-open fixes.
-#:   - a same-line `;#` / `&#` tail (the DELTA ARMS block below): NOTHING on
-#:     `main`, `{'4'}` here — an OVER-report, because shell also reads that `#`
-#:     as a comment to end of line. Fail-closed, this file's declared direction.
-#: Everything else below is a CONTRACT pin: it holds a reading that keeps an input
-#: reported, so dropping a modelled form fails an arm. No arm claims a fail-open
-#: fix it did not measure — the tail-cut spelling in particular is NOT one (the
-#: earlier "`main` missed a real float there" narrative was false, see the DELTA
-#: ARMS note).
-#:
-#: WHY THIS IS THE FLOOR. Each earlier draft added a rule to tell a pin from a
-#: mention, and every rule could be defeated by text shell interprets but the
-#: rule does not:
-#:   - round 1 — a command word or an enumerated command position: missed
-#:     `bun x wrangler@4 pages dev`, then `wrangler@4` after `then`/`do`/`{`/
-#:     `time`/`-exec` (11 spellings, all of them run by bash);
-#:   - round 3 — a whole-line comment filter: a `#` line inside a here-doc body
-#:     or a multi-line quoted string is DATA, and shell substitutes into it, so
-#:     `cat <<EOF` / `# $(npx --yes wrangler@4 --version)` / `EOF` ran the npx
-#:     while the filter dropped the line;
-#:   - round 4 — a word-boundary lookbehind: `$@wrangler@4` runs `wrangler@4`
-#:     (bash removes an empty `$@`), and the lookbehind read it as mid-word.
-#: A substring search cannot be defeated by any of THOSE, because none of them
-#: removes a character from the token itself (round 4's `$@` PREPENDS; it does not
-#: split). What it can do is over-report — a mention in prose, a quoted string, a
-#: commented-out line, a longer word containing the token — and every over-report
-#: is declared and pinned with the arms, because refusing a correct step is
-#: recoverable and passing a floating one is not. Quoting that SPLITS the word is
-#: read by `_shell_words` below, which resolves quoting the way shell does. What is
-#: left is an INTERPOLATION inside the word
-#: — `$X`, `${X}`, `$(…)`, `` `…` `` — which no text scan can read; it is declared
-#: and pinned as MISSED at `_exact_wranglers`.
-#:
-#: Shell removes quoting and escapes BEFORE it runs a word, so a token spelled
-#: `wrangler\@4`, `wran\gler@4`, `wrangler'@'4` or `"wrangler"@4` executes
-#: `wrangler@4` while the literal text holds no `wrangler@` at all. The WORD scan
-#: below resolves them the way shell does, which is what makes each of them a
-#: reported float rather than a residual. That includes the `$`-prefixed QUOTING
-#: forms — `$'…'` (ANSI-C, where `\'` is a literal quote) and `$"…"` (a double
-#: quote) — whose `$` belongs to the quoting and not to the word: `wrangler$'@'4`
-#: and `wrangler$"@"4.127.0` run `wrangler@4` / `wrangler@4.127.0`. Reading their
-#: `$` as a word character is a MISS (`wrangler$@4` holds no `wrangler@`), and in
-#: the ANSI-C case it also desynchronises the scan, so a `\'` opened a quote that
-#: swallowed every later pin.
-#:
-#: DECLARED RESIDUAL: an INTERPOLATION inside the word — `wrangler$X@4`,
-#: `wrangler${X}@4`, `wran$(echo gler)@4`, `` wran`echo gler`@4 `` — executes
-#: `wrangler@4` while no text scan can see a literal `wrangler@`. Closing that needs
-#: the shell's own evaluation, so the honest fix is at the lane: assert the wrangler
-#: version that actually resolved, rather than read it out of the script.
-#:
-#: The spec run that follows is for DIAGNOSTICS — the value a failure message
-#: names. It is not what decides exactness (the word is): a literal cut short by an
-#: interpolation (`wrangler@4.127.${PATCH}`) reports `4.127.`, which is never an
-#: exact pin, so it counts as FLOATING: whatever the variable holds, this token is
-#: not a pin. (The lexer this replaced could not match such a spec at all and so
-#: returned nothing, which read as no float at all.)
-_SPEC_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-
-#: An UNQUOTED character that ends a shell word. Everything else — including a
-#: newline inside quotes — belongs to the same argument.
-_WORD_END = " \t\n|&;()<>"
-_DQUOTE_ESCAPES = '$`"\\\n'
-
-#: ANSI-C (`$'…'`) escapes. The set is CLOSED — bash documents it — and it is
-#: TRANSLATED rather than skipped because an escape can spell the token's `@`:
-#: `wrangler$'\100'4` runs `wrangler@4`, so reading the escape as its letter (`1`)
-#: made a real float invisible to the guard while every check stayed green
-#: (measured end to end on a parsed job body). Every arity bash accepts is
-#: covered: `\nnn` is 1–3 OCTAL digits, `\xHH` 1–2 hex, and `\uHHHH`/`\UHHHHHHHH`
-#: 1–4 / 1–8 hex. A fixed arity matched only the LONG spellings, so `$'\u40'` fell
-#: through to a placeholder with the digits left behind — the token then vanished
-#: instead of being refused (measured on bash 5). The same table keeps a CORRECT pin
-#: correct: `wrangler@$'\064'.127.0` is `wrangler@4.127.0`.
-#:
-#: bash does THREE things with an escape, and all three are modelled (measured on
-#: bash 5.2 by running the word and reading argv): it TRANSLATES it to a character;
-#: it DROPS it when the character is NUL (`\0`, `\x00`, `\u0000`, `\c@`, and any
-#: `\U` at or above 0x80000000) — and a NUL TRUNCATES THE SEGMENT, so everything
-#: between it and the closing quote is discarded and the characters on either side
-#: of it are adjacent: `wran$'\0gler@4'` is `wrangler@4`; or it keeps it LITERAL
-#: (an unknown escape, a surrogate, an out-of-range `\u`/`\U`). Two classes bash
-#: keeps literal that this table TRANSLATES instead — `\u`/`\U` at or above 0x80,
-#: and `\c?` (bash 0x7F, here 0x1F) — can only over-report: neither produces a
-#: character a spec can hold, so the word stops being the pin either way.
-#: Writing anything OTHER than the drop into the word — a placeholder, a sentinel —
-#: splits the token and hides it, which is how a float went unreported while every
-#: check stayed green.
-_ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
-           "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\",
-           "'": "'", '"': '"', "?": "?"}
-_ANSI_OCTAL = re.compile(r"[0-7]{1,3}")
-_ANSI_HEX = re.compile(r"[0-9A-Fa-f]{1,2}")
-_ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{1,4}"), 8: re.compile(r"[0-9A-Fa-f]{1,8}")}
-
-
-def _ansi_translate(body: str) -> str:
-    r"""What bash puts in the word for a `$'…'` BODY.
-
-    A `$'…'` body is a C string, so a NUL TRUNCATES it: everything after the NUL is
-    discarded and the characters on either side of it are adjacent in the argument
-    (`$'a\0b'c` is `ac`). bash translates an escape, OMITS one whose character is
-    NUL — and any `\U` at or above 0x80000000, omitted WITHOUT cutting the body
-    because it is not a NUL — and keeps LITERAL the ones it does not know, an
-    out-of-range `\u`/`\U`, and a surrogate. Two classes bash keeps literal are
-    translated here instead (`\u`/`\U` at or above 0x80, and `\c?` — bash 0x7F,
-    here 0x1F), which can only over-report: neither yields a character a spec can
-    hold, so the word stops being the pin either way.
-    """
-    out: list[str] = []
-    i = 0
-    while i < len(body):
-        ch = body[i]
-        if ch != "\\" or i + 1 >= len(body):
-            out.append(ch)
-            i += 1
-            continue
-        nxt = body[i + 1]
-        octal = _ANSI_OCTAL.match(body, i + 1)
-        if octal:
-            code = int(octal.group(0), 8) & 0xFF
-            if code == 0:
-                return "".join(out)
-            out.append(chr(code))
-            i = octal.end()
-            continue
-        if nxt == "x":
-            m = _ANSI_HEX.match(body, i + 2)
-            if m:
-                code = int(m.group(0), 16)
-                if code == 0:
-                    return "".join(out)
-                out.append(chr(code))
-                i = m.end()
-                continue
-        elif nxt in ("u", "U"):
-            m = _ANSI_UNICODE[4 if nxt == "u" else 8].match(body, i + 2)
-            if m:
-                code = int(m.group(0), 16)
-                if code >= 0x80000000:
-                    i = m.end()  # omitted, and NOT a NUL: the body continues
-                    continue
-                if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
-                    out.append(body[i:m.end()])  # bash keeps it literal
-                elif code == 0:
-                    return "".join(out)
-                else:
-                    out.append(chr(code))
-                i = m.end()
-                continue
-        elif nxt == "c" and i + 2 < len(body):
-            code = ord(body[i + 2]) & 0x1F
-            if code == 0:
-                return "".join(out)
-            out.append(chr(code))
-            i += 3
-            continue
-        out.append(_ANSI_C[nxt] if nxt in _ANSI_C else "\\" + nxt)
-        i += 2
-    return "".join(out)
-
-
-def _shell_words(text: str) -> list[str]:
-    """Every shell WORD in `text`, as shell would present each one.
-
-    A word ends at an unquoted blank or shell metacharacter; inside single or
-    double quotes it continues across both, so `"4.127.0 || 4.130.0"` is ONE
-    argument. Quoting characters are removed and a backslash escapes the next
-    character — except before an ordinary character inside double quotes, where
-    shell keeps it. Word boundaries and quoting are therefore decided together,
-    which is the whole point: deleting quotes FIRST (an earlier draft) threw away
-    the only signal that separates one argument from several.
-
-    The `$`-prefixed quoting forms are quoting too, and reading them as an
-    ordinary `$` character followed by a quote DESYNCHRONISES the scan: in `$'…'`
-    a `\'` escapes the quote (so `echo $'\'' # note` reads as an OPEN quote and
-    swallows every pin after it), and in `$'@'` / `$"@"` the `$` is not part of
-    the word (so `wrangler$'@'4` runs `wrangler@4` while no `wrangler@` appears in
-    the text at all — a MISS, not an over-report). Both forms are therefore
-    modelled: `$'` opens an ANSI-C quote where a backslash escapes the next
-    character, and `$"` opens an ordinary double quote.
-    """
-    words: list[str] = []
-    out: list[str] = []
-    quote = ""
-    comment = False
-    # `started` is NOT `out`: an empty quoted word (`""#tok`) still STARTS a word,
-    # so shell reads `#tok` and not a comment. Using `out` let a `#` that shell
-    # keeps be dropped, and the pin read out of a word that is not the pin.
-    started = False
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        ended = False
-        if comment:
-            # A comment carries PROSE, so it has no quoting to track — an
-            # apostrophe in `boot loop's` would otherwise open a quote that spans
-            # the rest of the script and hide every pin in it. The tokens are still
-            # READ (a pin named in a comment is reported), just split on blanks.
-            if ch == "\n":
-                comment = False
-                ended = True
-            elif ch in " \t":
-                ended = True
-            else:
-                out.append(ch)
-        elif quote == "'":
-            if ch == "'":
-                quote = ""
-            else:
-                out.append(ch)
-        elif quote == '"':
-            if ch == '"':
-                quote = ""
-            elif ch == "\\" and i + 1 < len(text) and text[i + 1] in _DQUOTE_ESCAPES:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            else:
-                out.append(ch)
-        elif quote == "$'":
-            # The SEGMENT is found BEFORE it is translated: bash's boundary scan
-            # skips exactly one character after each backslash, and `\c` is no
-            # exception — no escape reaches past the quote that closes its segment.
-            # Doing both in one pass let an escape's ARITY decide where the quote
-            # was: `$'\c\\'` then swallowed the closing quote, left the scan in
-            # `$'…'` mode for the rest of the run, and a later `\0` truncated
-            # everything after it, so three spellings of a real `wrangler@4` were
-            # reported as nothing at all (measured against bash 5).
-            started = True
-            j = i
-            while j < len(text):
-                if text[j] == "\\":
-                    j += 2
-                elif text[j] == "'":
-                    break
-                else:
-                    j += 1
-            out.append(_ansi_translate(text[i:j]))
-            quote = ""
-            i = j + 1
-            continue
-        elif text.startswith("$'", i):
-            quote = "$'"
-            started = True
-            i += 2
-            continue
-        elif text.startswith('$"', i):
-            # `$"…"` is a double-quoted string (locale-translated by bash); the
-            # `$` is part of the QUOTING, never of the word.
-            quote = '"'
-            started = True
-            i += 2
-            continue
-        elif ch in "'\"":
-            quote = ch
-            started = True
-        elif ch == "\\" and i + 1 < len(text):
-            out.append(text[i + 1])
-            started = True
-            i += 2
-            continue
-        elif ch == "#" and not started:
-            comment = True
-        elif ch in _WORD_END:
-            ended = True
-        else:
-            out.append(ch)
-            started = True
-        if ended and out:
-            words.append("".join(out))
-            out = []
-        if ended:
-            started = False
-        i += 1
-    if out:
-        words.append("".join(out))
-    return words
-
-#: THE WHOLE ARGUMENT IS THE SPEC — this is what closes the range class.
-#:
-#: npm reads the WHOLE argument as a semver spec, so `"4.127.0 || 4.130.0"` is one
-#: argument containing a range and resolves to `4.130.0`, while a scan that stopped
-#: at the first literal run called `4.127.0` the pin. Four rounds widened a list of
-#: continuation operators to catch that, and each widening left its symmetric
-#: neighbour open — an empty operand after `||` (node-semver reads `*`), a newline
-#: on the operand side, a `v`-prefixed hyphen bound. So the enumeration is GONE:
-#: the word is read
-#: as shell presents it (`_shell_words`), and the token is the pin only when that
-#: whole word IS `wrangler@X.Y.Z`. An unknown tail is then floating by
-#: construction, not by being on a list.
-#:
-#: The over-report a wrong reading would cost is gone too, because the word scan
-#: knows what the enumeration could not: an UNQUOTED `||`, `>`, `;` or blank is a
-#: shell separator, so `wrangler@4.127.0 || true`, `... >/dev/null` and
-#: `... pages dev` are the pin — while the same characters INSIDE quotes are one
-#: argument and are refused.
-
-
-def _wrangler_invocations(run: str) -> set[str]:
-    """Every `wrangler@<spec>` INVOCATION in `run`, keyed by its whole word.
-
-    No line is filtered — a pin inside a here-doc body, a quoted string or a
-    trailing comment is read too, because refusing a correct step is recoverable
-    by rewording it and hiding a real invocation from a required check is not.
-    """
-    # The continuation fold runs FIRST: `wrangler@4.12\<newline>7.0` is one word.
-    text = _CONTINUATION.sub("", run)
-    specs: set[str] = set()
-    for word in _shell_words(text):
-        at = word.find("wrangler@")
-        if at < 0:
-            continue
-        literal = _SPEC_RUN.match(word, at + len("wrangler@"))
-        spec = literal.group(0) if literal else ""
-        if not _EXACT_SPEC.fullmatch(spec):
-            specs.add(spec)  # already inexact: a float, a dist-tag, an X-range…
-        elif word == "wrangler@" + spec:
-            specs.add(spec)  # the argument IS the pin
-        else:
-            specs.add("")  # the argument CONTINUES past it — a range, or unreadable
-    return specs
-#: DECLARED RESIDUAL (review round 5; NARROWED by round 6; widened to the whole
-#: INTERPOLATION class by round 7): anything that puts a substitution INSIDE the
-#: word — `wrangler$X@4`, `wrangler${X}@4`, `wran$(echo gler)@4`,
-#: `` wran`echo gler`@4 `` — executes `wrangler@4` while no text scan can see a
-#: literal `wrangler@`. The quoting and escaping forms an earlier round also called
-#: residual (`wrangler\@4`, `wran\gler@4`, `wrangler'@'4`, `"wrangler"@4`) are NOT:
-#: `_shell_words` resolves those characters the way shell does, which turns each of
-#: them into a literal the guard reports (pinned by the arms in
-#: `test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range`). Closing
-#: the interpolation class needs the shell's own evaluation, so the honest fix is
-#: at the lane: assert the wrangler version that actually resolved, rather than
-#: read it out of the script.
-#:
-#: DECLARED RESIDUAL (round 8): a step whose EXECUTED invocation carries NO spec at
-#: all — `npx --yes wrangler pages dev` — has no `wrangler@` token for a text check,
-#: so it reads as nothing. If a pin is named anywhere else in the same `run` (a
-#: comment, a note), the exact check AND parity are both satisfied while npm
-#: installs the `latest` tag (measured: 4.151.1). Treating a bare `wrangler` as an
-#: offender would refuse the CORRECT steps whose prose names it (`# wrangler pinned
-#: to 4.127.0`), the over-report this file treats as a defect, so the limit is
-#: declared and pinned as MISSED instead. Same honest fix as above: assert what
-#: the lane resolved.
-
-#: DECLARED RESIDUAL — what a text check cannot reach at all: two INDIRECT pins
-#: cannot be proved EQUAL to each other, so parity between a pre-warm and a boot
-#: step that both take their version from a variable is not checkable here. Each
-#: is reported as floating (an empty spec), so the pin is refused, not resolved:
-#: resolving it needs an install in the lane, not a regex.
-
-
-#: Three NUMERIC components and nothing else. A dot count alone is not enough:
-#: npm reads `4.127.x` / `4.x.x` / `4.127.X` as X-RANGES — node-semver resolves
-#: `4.127.x` to `>=4.127.0 <4.128.0-0`, a moving tarball — so a dot count called
-#: them EXACT and the guard passed a step whose fetch is not a pin at all.
-_EXACT_SPEC = re.compile(r"\d+\.\d+\.\d+")
-
-
-def _exact_wranglers(run: str) -> set[str]:
-    """An EXACT pin (`4.127.0`) — the version that actually boots."""
-    return {v for v in _wrangler_invocations(run) if _EXACT_SPEC.fullmatch(v)}
-
-
-def _floating_wranglers(run: str) -> set[str]:
-    """Everything that is not an exact pin: a range (`4`, `4.127`, `4.127.x`), a
-    dist-tag (`latest`), a prerelease, or an empty (indirect) spec."""
-    return {v for v in _wrangler_invocations(run) if not _EXACT_SPEC.fullmatch(v)}
-
-#: The e2e jobs that serve this repo's `website/` (marketing + dashboard) and so
-#: share the pre-warm. A rename shows up here as a failure, not as silent loss.
 PREWARM_JOBS = frozenset({"welcome-e2e", "legal-e2e", "dashboard-e2e"})
-
-
-#: The step that actually STARTS the preview server. The pre-warm exists to
-#: warm the tarball THIS step fetches, so parity is measured against it and
-#: nothing else. A union over every step in the job is NOT equivalent:
-#: `welcome-e2e` also runs `npm install -g wrangler@X`, so a union lets the
-#: pre-warm name a version that is installed but never booted. That is not a
-#: hypothetical — a boot step drifted to `4.130.0` while the pre-warm and the
-#: `npm install -g` step stayed on `4.127.0`, and the union comparison passed
-#: (the install step supplied `4.127.0` to the union).
+VERIFY_STEP = "Install and verify the wrangler toolchain (#8816)"
 BOOT_STEP_PREFIX = "Start wrangler pages dev preview"
+DEPLOY_STEP_PREFIX = "Deploy to Cloudflare Pages"
+
+EXACT_VERSION = re.compile(r"\d+\.\d+\.\d+")
+
+#: The only legal spelling of a wrangler spec: the declared variable, with `:?`
+#: so an empty declaration aborts instead of expanding to `wrangler@` (= latest).
+LEGAL_SPEC = re.compile(r"wrangler@\$\{WRANGLER_VERSION:\?")
+
+BARE_INVOCATION = re.compile(r"(?<![\w@$./-])wrangler(?![\w@])")
+
+#: A quoted LONE command word — `npx --yes "wrangler" pages deploy`. bash runs it as
+#: the binary, but ``_strip_quoted`` deletes whole quoted SEGMENTS (so a diagnostic
+#: is not an offence), and deleting the segment hid this spelling — one the module
+#: header names explicitly. A message is never a LONE ``wrangler`` token, so matching
+#: the quoted token itself cannot resurrect the diagnostic false positive.
+QUOTED_WRANGLER = re.compile(r"""(?<![\w@$-])["']wrangler["'](?![\w@])""")
+
+#: The only legal way the variable may be SET.
+DECLARATION = 'WRANGLER_VERSION="$(cat config/wrangler-version)"'
+
+#: Tokens that may legitimately accompany `${WRANGLER_VERSION…}` on a line: the
+#: `:?` guard, an equality comparison, or a diagnostic. Anything else — notably
+#: an inline `WRANGLER_VERSION="4.151.1"` — is an offender.
+LEGAL_TOKENS = (
+    "${WRANGLER_VERSION:?",
+    '= "$WRANGLER_VERSION"',
+    '!= "$WRANGLER_VERSION"',
+    "declared ${WRANGLER_VERSION}",
+    "wrangler ${WRANGLER_VERSION}",
+)
 
 
-def _jobs() -> dict:
-    return yaml.safe_load(CI.read_text())["jobs"]
+
+#: `if:` values that are false by construction: the boolean, the integer 0, and
+#: their `${{ }}` spellings. `str(gate)` alone cannot tell `0` from `"0"`.
+_CONSTANT_FALSE = re.compile(
+    r"^(?:\$\{\{\s*)?(?:false|0(?:\.0*)?)(?:\s*\}\})?$", re.IGNORECASE
+)
 
 
-def _steps_of(jobs: dict) -> list[tuple[str, dict]]:
-    return [(job, step)
-            for job, spec in jobs.items()
-            for step in (spec.get("steps") or [])]
+def _is_constant_false(gate: object) -> bool:
+    if isinstance(gate, bool):
+        return not gate
+    if isinstance(gate, (int, float)):
+        return not gate
+    return bool(_CONSTANT_FALSE.match(str(gate).strip()))
 
 
-def _steps() -> list[tuple[str, dict]]:
-    return _steps_of(_jobs())
+def _fenced_blocks(text: str) -> str:
+    """The contents of every ``` fence, joined — the parts a reader would PASTE."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out)
 
+def _workflow_paths() -> list:
+    """Every file that can carry a `run:` — workflows AND composite actions.
 
-def _prewarm_steps_of(jobs: dict) -> list[tuple[str, dict]]:
-    return [(job, step) for job, step in _steps_of(jobs)
-            if step.get("name") == PREWARM_STEP]
-
-
-def _prewarm_steps() -> list[tuple[str, dict]]:
-    return _prewarm_steps_of(_jobs())
-
-
-def _boot_steps_of(jobs: dict, job: str) -> list[dict]:
-    """The steps in `job` that actually START wrangler — the pre-warm's targets."""
-    return [step for other_job, step in _steps_of(jobs)
-            if other_job == job
-            and str(step.get("name") or "").startswith(BOOT_STEP_PREFIX)]
-
-
-def _parity_mismatches(jobs: dict) -> dict[str, tuple[set[str], set[str]]]:
-    """job → (pre-warm versions, offending boot-step versions) on any DISAGREE.
-
-    Scoped to the BOOT step(s) deliberately — see `BOOT_STEP_PREFIX`. EVERY
-    boot step must pin exactly what the pre-warm pins: a UNION over the job's
-    boot steps lets a still-pinned sibling supply the pre-warm's version and
-    mask a drifted one, and a step that pins nothing (bare `wrangler`, a
-    dist-tag) contributes the empty set to that union. An empty boot set is
-    itself a mismatch: the pre-warm pins something and nothing boots it.
+    A composite action is invoked from a workflow with `uses:`, so a spec inside
+    one reaches the lane exactly like a step's own: scanning only
+    `.github/workflows/` leaves the four actions under `.github/actions/`
+    unguarded.
     """
-    out: dict[str, tuple[set[str], set[str]]] = {}
-    for job, step in _prewarm_steps_of(jobs):
-        warm = _exact_wranglers(step.get("run") or "")
-        boots = _boot_steps_of(jobs, job)
-        offenders: set[str] = set()
-        mismatch = not boots
-        for boot in boots:
-            got = _exact_wranglers(boot.get("run") or "")
-            if got != warm:
-                mismatch = True
-                offenders.update(got)
-        if mismatch:
-            out[job] = (warm, offenders)
+    paths = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+    actions = REPO_ROOT / ".github" / "actions"
+    if actions.is_dir():
+        paths += sorted(actions.glob("*/action.yml")) + sorted(actions.glob("*/action.yaml"))
+    assert paths, "no workflows found — the repo root probe is wrong"
+    return paths
+
+
+#: Documents that show a copy-pasteable wrangler command. They are guidance, and
+#: guidance that floats teaches the drift this file exists to stop.
+COMMAND_DOCS = ("website/README.md",)
+
+
+def _load(path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _declared_version() -> str:
+    return VERSION_FILE.read_text(encoding="utf-8").strip()
+
+
+def _all_steps(jobs: dict) -> list[tuple[str, dict]]:
+    return [
+        (name, step)
+        for name, job in jobs.items()
+        for step in (job.get("steps") or [])
+    ]
+
+
+def _document_steps(doc: dict) -> list[tuple[str, dict]]:
+    """Steps from a WORKFLOW **or** a COMPOSITE ACTION.
+
+    A composite action declares `runs: steps:`, never `jobs:` — so reading only
+    `jobs:` yielded ZERO steps for every `.github/actions/*/action.yml`, and a
+    spec-less invocation inside one was invisible to every step arm while the
+    file was still in `_workflow_paths()` (the arm looked like it covered them).
+    """
+    steps = _all_steps(doc.get("jobs") or {})
+    runs = doc.get("runs") or {}
+    if isinstance(runs, dict) and runs.get("using") == "composite":
+        steps += [("<composite>", step) for step in (runs.get("steps") or [])]
+    return steps
+
+
+def _run(step: dict) -> str:
+    return step.get("run") or ""
+
+
+def _steps_named(name: str) -> list[tuple[str, dict]]:
+    out = []
+    for path in _workflow_paths():
+        for job_name, step in _all_steps(_load(path).get("jobs") or {}):
+            if (step.get("name") or "") == name:
+                out.append((job_name, step))
     return out
 
 
-def test_the_three_website_e2e_jobs_still_prewarm() -> None:
-    """Deleting the step re-exposes the boot budget #2178 added it to protect."""
-    steps = _prewarm_steps()
-    assert {job for job, _ in steps} == PREWARM_JOBS
-    jobs = _jobs()
-    for job, step in steps:
-        assert _prewarm_is_unconditional(step), (
-            f"{job}: pre-warm is gated by `if: {step.get('if')}` — a skipped step "
-            f"warms nothing, which is deletion by another name")
-        # The JOB may carry the path filter (`needs.changes.…`), which is why this
-        # is a constant-false test and not an unconditional one. `continue-on-error`
-        # is NOT read: it swallows a failure rather than skipping the step, so it is
-        # a limit of this check, named here rather than implied to be covered.
-        assert not _is_constant_false_gate(jobs[job].get("if")), (
-            f"{job}: job-level `if: {jobs[job].get('if')}` is constant false — the "
-            f"whole pre-warm never runs")
-    assert not _prewarm_is_unconditional({"if": "${{ false }}"})
-    assert _prewarm_is_unconditional({})
-    assert _prewarm_is_unconditional({"if": "  "})
-    assert _is_constant_false_gate("${{ false }}")
-    assert _is_constant_false_gate("false")
-    assert _is_constant_false_gate(" 0 ")
-    # YAML hands over a REAL boolean/int for `if: false` / `if: 0` — schema-legal
-    # spellings — so the value must be stringified as it is. `or ""` folds `False`
-    # to "", which reads a step that can never run as unconditional.
-    assert _is_constant_false_gate(False)
-    assert _is_constant_false_gate(0)
-    assert not _prewarm_is_unconditional({"if": False})
-    assert not _prewarm_is_unconditional({"if": 0})
-    assert not _is_constant_false_gate("needs.changes.outputs.website == 'true'")
-    assert not _is_constant_false_gate(None)
+def _deploy_steps() -> list[tuple[str, dict]]:
+    return [
+        (job, step)
+        for job, step in _all_steps(_load(WORKFLOWS / "deploy-pages.yml")["jobs"])
+        if (step.get("name") or "").startswith(DEPLOY_STEP_PREFIX)
+    ]
 
 
-def test_every_prewarm_pins_an_exact_wrangler_and_never_floats() -> None:
-    steps = _prewarm_steps()
-    assert steps, "no pre-warm step found — the guard has nothing to check"
-    for job, step in steps:
-        run = step.get("run") or ""
-        assert _exact_wranglers(run), (
-            f"{job}: pre-warm does not pin an exact `wrangler@X.Y.Z` — a "
-            f"floating range warms a different tarball than the boot step. run={run!r}")
-        assert not _floating_wranglers(run), (
-            f"{job}: pre-warm still floats a wrangler range — {sorted(_floating_wranglers(run))}")
-
-
-def _prewarm_is_unconditional(step: dict) -> bool:
-    """A pre-warm step with an `if:` gate never runs — deletion by another name."""
-    return not str(step.get("if") if step.get("if") is not None else "").strip()
-
-
-#: A gate that is CONSTANT false skips the step no matter what the workflow knows,
-#: which is deletion wearing a condition. A gate that reads `needs.changes` is not
-#: this: it is the path filter that keeps the e2e jobs off unrelated diffs, and the
-#: three pre-warm jobs use it deliberately. YAML may hand over a real boolean
-#: (`if: false`) or an int (`if: 0`) — schema-legal spellings — so the value is
-#: stringified as it is, never with `or ""`, which folds `False` to "" and reads a
-#: step that can never run as unconditional.
-_CONSTANT_FALSE = re.compile(r"^\s*(?:\$\{\{\s*)?(?:false|0)\.?0*\s*(?:\}\})?\s*$", re.I)
-
-
-def _is_constant_false_gate(expr: object) -> bool:
-    return bool(_CONSTANT_FALSE.match(str(expr if expr is not None else "")))
+# ------------------------------------------------- shell text, read honestly
 
 
 def _cut_comment(line: str) -> str:
-    """`line` with a COMMENT TAIL cut off — quoting honoured, so `\"a#b\"` is data.
+    """`line` with a COMMENT TAIL cut off — quoting honoured, so `"a#b"` is data.
 
     A `#` starts a comment only at the start of a word and outside quotes, which
-    is shell's own rule — and a word starts after a blank OR a metacharacter, so a
-    `;#` tail is a comment too. ANSI-C and `$"…"` quoting are NOT modelled here (this
-    keeps the CODE TEXT, not its words), so a `#` after a `\'` inside `$'…'` is cut
-    where bash would keep it: that direction only ever OVER-reports.
+    is shell's own rule, and a word starts after a blank OR a metacharacter — so a
+    `;#` tail is a comment too. This file's subject is prose ABOUT the code: a
+    comment that NAMES a retry loop on a step that has none must never satisfy the
+    check, and `ci.yml`'s boot steps carry exactly that kind of prose.
     """
     quote = ""
     at_word_start = True
@@ -627,9 +237,6 @@ def _cut_comment(line: str) -> str:
         elif ch == "#" and at_word_start:
             return line[:i]
         elif ch in " \t;&|()<>":
-            # A METACHARACTER also starts a word, so `;#` and `(#` are comments.
-            # Counting blanks alone left `npx … --version ;# for attempt in 1 2 3`
-            # reading as code and satisfied the retry check on a single fetch.
             at_word_start = True
         else:
             at_word_start = False
@@ -637,466 +244,613 @@ def _cut_comment(line: str) -> str:
     return line
 
 
-def _has_retry_loop_in_code(run: str) -> bool:
-    """Does the loop TEXT appear in CODE (not in a comment)?
+def _strip_quoted(line: str) -> str:
+    """`line` with quoted SEGMENTS removed — a diagnostic is not a command.
 
-    That is what this proves — not that the loop WRAPS the fetch. Comments are
-    cut, whole-line AND trailing: a step keeping `# old body used `for attempt in
-    1 2 3`` as a note while making a single fetch passed every invariant, and so
-    did the trailing spelling `npx … --version  # for attempt in 1 2 3` while the
-    filter dropped whole lines only. DECLARED RESIDUAL: a here-doc body, an
-    `echo`, or an empty loop (`for attempt in 1 2 3; do :; done`) still satisfies
-    the substring test; the arms below pin those misses so the limit is stated
-    rather than implied. The honest fix is at the lane: assert that the fetch
-    actually retried.
+    `::error::resolved wrangler ${got} != …` NAMES wrangler in a message, and a
+    `npx --yes "wrangler@${WRANGLER_VERSION:?}"` spec is judged by the spec arm
+    (which keeps quotes, or a literal spec inside one would vanish).
     """
-    lines = [_cut_comment(line) for line in str(run or "").splitlines()]
-    return any("for attempt in 1 2 3" in line for line in lines)
+    out = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+            elif ch == "\\" and i + 1 < len(line):
+                i += 1
+        elif ch in "'\"":
+            quote = ch
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
-def test_every_prewarm_retries_the_registry_fetch() -> None:
-    """A single ECONNRESET reded the required legal-e2e check (2026-10-15)."""
-    for job, step in _prewarm_steps():
-        run = step.get("run") or ""
-        assert _has_retry_loop_in_code(run), (
-            f"{job}: pre-warm is not bounded-retry-protected. run={run!r}")
+def _retry_loop_bodies(run: str, header: str) -> list[str]:
+    """The bodies of each `header` … `done` loop found in comment-stripped CODE."""
+    bodies: list[str] = []
+    current: list[str] | None = None
+    for raw in str(run or "").splitlines():
+        line = _cut_comment(raw)
+        if current is None:
+            if header in line:
+                current = []
+            continue
+        if line.strip() == "done":
+            bodies.append("\n".join(current))
+            current = None
+        else:
+            current.append(line)
+    return bodies
+
+
+def _bare_invocations(code: str) -> list[str]:
+    """Spec-less wrangler invocations — `npx wrangler`, `wrangler pages deploy`."""
+    offences = []
+    for lineno, line in enumerate(str(code or "").splitlines(), 1):
+        uncommented = _cut_comment(line)
+        if BARE_INVOCATION.search(_strip_quoted(uncommented)) or QUOTED_WRANGLER.search(
+            uncommented
+        ):
+            offences.append(f"line {lineno}: {line.strip()}")
+    return offences
+
+
+# ---------------------------------------------------------------- 1. one artefact
+
+
+def test_the_version_lives_in_one_artefact_and_is_a_full_version() -> None:
+    assert VERSION_FILE.is_file(), f"{VERSION_SOURCE} is missing — the pin has no home"
+    declared = _declared_version()
+    assert EXACT_VERSION.fullmatch(declared), (
+        f"{VERSION_SOURCE} holds {declared!r}, which is not a full X.Y.Z — a partial "
+        "version resolves to whatever npm serves, which is the drift this replaces"
+    )
+    for path in _workflow_paths():
+        text = path.read_text(encoding="utf-8")
+        assert declared not in text, (
+            f"{path.name} restates the pinned version verbatim ({declared}); it must read "
+            f"{VERSION_SOURCE} instead, or a bump edits one place and drifts in another"
+        )
+
+
+def test_no_workflow_declares_the_version_as_an_env_key() -> None:
+    """`env: {WRANGLER_VERSION: 4.151.1}` is the spelling a text scan cannot see."""
+
+    def walk(node, where):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "env" and isinstance(value, dict):
+                    assert "WRANGLER_VERSION" not in value, (
+                        f"{where}: `env` sets WRANGLER_VERSION={value['WRANGLER_VERSION']!r}. "
+                        "It must be read from "
+                        f"{VERSION_SOURCE} in the step that uses it — an env declaration "
+                        "lets a consuming step act on a different version than the one "
+                        "the verify step asserted"
+                    )
+                walk(value, f"{where}.{key}")
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                walk(item, f"{where}[{i}]")
+
+    for path in _workflow_paths():
+        walk(_load(path), path.name)
+
+
+def test_every_version_mention_is_a_read_or_an_asserted_spec() -> None:
+    offenders = []
+    for path in _workflow_paths():
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "WRANGLER_VERSION" not in line:
+                continue
+            if DECLARATION in line:
+                continue
+            if any(token in line for token in LEGAL_TOKENS):
+                continue
+            offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    assert not offenders, "WRANGLER_VERSION used outside the declared shapes:\n" + "\n".join(
+        offenders
+    )
+
+
+def test_every_wrangler_spec_is_the_asserted_form() -> None:
+    offenders = []
+    for path in _workflow_paths():
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            # `_cut_comment`, not a whole-line strip: a TRAILING comment naming a
+            # spec (`… --version  # was wrangler@4`) is prose too, and reading it
+            # as code makes this arm fail on a correct workflow.
+            code = _cut_comment(line)
+            for match in re.finditer(r"wrangler@\S*", code):
+                token = match.group(0)
+                if LEGAL_SPEC.match(token):
+                    continue
+                # A bare `wrangler@` followed by prose punctuation is a mention,
+                # not a spec — anything shaped like a spec (digit, letter, `^`,
+                # `~`, `$`, quote, backslash, `{`) is an offender.
+                if len(token) > len("wrangler@") and token[len("wrangler@")] in "`).,;:":
+                    continue
+                offenders.append(f"{path.name}:{lineno}: {token}")
+    assert not offenders, (
+        "wrangler spec is not the asserted variable form (a literal spec cannot be "
+        "verified against what resolved):\n" + "\n".join(offenders)
+    )
+
+
+def test_each_workflow_reads_the_version_at_least_once() -> None:
+    for path in _workflow_paths():
+        text = path.read_text(encoding="utf-8")
+        if "wrangler@" not in text:
+            continue
+        assert DECLARATION in text, (
+            f"{path.name} uses a wrangler spec but never reads {VERSION_SOURCE}"
+        )
+
+
+# ------------------------------------------------- 2. the lane asserts, per job
+
+
+def test_the_three_website_e2e_jobs_install_and_verify() -> None:
+    found = _steps_named(VERIFY_STEP)
+    jobs = {job for job, _step in found}
+    assert jobs >= PREWARM_JOBS, (
+        f"jobs without a {VERIFY_STEP!r} step: {sorted(PREWARM_JOBS - jobs)} — the pin is "
+        "unverified there, so any spec that resolves elsewhere runs unnoticed"
+    )
+    for job, step in found:
+        run = _run(step)
+        assert DECLARATION in run, f"{job}: the verify step does not read {VERSION_SOURCE}"
+        assert "npm install -g" in run, f"{job}: the verify step does not install"
+        assert "--version" in run, f"{job}: the verify step never asks what resolved"
+        assert '"$WRANGLER_VERSION"' in run, (
+            f"{job}: the verify step installs/comares something other than the declared value"
+        )
+        assert _retry_loop_bodies(run, "for attempt in 1 2 3;"), (
+            f"{job}: the install lost its three-attempt retry loop — one npm-registry "
+            "ECONNRESET (2026-10-15) reded the required legal-e2e check when the fetch "
+            "had none, and the last attempt is HARD now"
+        )
+        # The loop must END in a hard failure, or "three attempts" is prose: a
+        # `done` that falls through leaves the pin unverified on a persistent
+        # registry failure.
+        assert re.search(r"after 3 attempts", run), (
+            f"{job}: the install loop has no hard failure after the last attempt — "
+            "a persistent registry failure would leave the pin unverified"
+        )
+        for body in _retry_loop_bodies(run, "for attempt in 1 2 3;"):
+            assert "npm install -g" in body, (
+                f"{job}: the retry does not wrap the install, so the install itself is "
+                "still a single unprotected fetch"
+            )
+            assert re.search(r"sleep \$\(\(attempt \* 10\)\)", body), (
+                f"{job}: the retry carries no backoff — all three attempts would burn "
+                "inside the same second and fail together"
+            )
 
 
 def test_the_retry_check_ignores_a_commented_out_loop() -> None:
-    """A comment naming the loop must not satisfy the retry check.
+    """Prose about the loop must not satisfy the check — and a 2-attempt loop is not it."""
+    header = "for attempt in 1 2 3;"
+    assert _retry_loop_bodies(f"{header} do\n  npm install -g x\ndone", header)
+    assert not _retry_loop_bodies(
+        "# old body used `for attempt in 1 2 3;`\nnpm install -g x", header
+    )
+    assert not _retry_loop_bodies("npm install -g x  # for attempt in 1 2 3;", header)
+    assert not _retry_loop_bodies("for attempt in 1 2; do\nnpm install -g x\ndone", header)
+    assert not _retry_loop_bodies("npm install -g x", header)
 
-    Measured on an earlier draft: a step that kept "# old body used `for attempt
-    in 1 2 3`" but made a single fetch passed every invariant. That is a false
-    PASS of the exact protection the 2026-10-15 ECONNRESET motivated.
+
+def test_the_verify_step_precedes_every_boot_in_the_same_job() -> None:
+    """The boot must run the binary the verify step proved — asserted as an ORDER.
+
+    ``test_the_three_website_e2e_jobs_install_and_verify`` proves a verify step
+    EXISTS in each job, and ``test_boot_steps_carry_no_spec_and_keep_their_retry``
+    proves the boot carries no spec. Neither asserts that the verify runs FIRST:
+    with the order unasserted, moving the verify after the boot leaves the boot
+    running whatever global ``wrangler`` happens to be on PATH, unverified, while
+    every test in this file stays green.
     """
-    assert _has_retry_loop_in_code(
-        "for attempt in 1 2 3; do\n  npx --yes wrangler@4.127.0 --version\ndone")
-    assert not _has_retry_loop_in_code(
-        "# old body used `for attempt in 1 2 3`; now a single fetch\n"
-        "npx --yes wrangler@4.127.0 --version")
-    assert not _has_retry_loop_in_code("npx --yes wrangler@4.127.0 --version")
-    # …and a `#` after a METACHARACTER starts a comment like any other, or the loop
-    # text survives in `;# for attempt in 1 2 3` and satisfies the check on one fetch.
-    for run in ("npx --yes wrangler@4.127.0 --version ;# for attempt in 1 2 3",
-                "(# for attempt in 1 2 3\nnpx --yes wrangler@4.127.0 --version)"):
-        assert not _has_retry_loop_in_code(run), run
-    # A TRAILING comment is a comment too, and it was the surviving spelling while
-    # only whole lines were dropped: a single unprotected fetch with the loop text
-    # kept as a note passed every invariant.
-    assert not _has_retry_loop_in_code(
-        "npx --yes wrangler@4.127.0 --version  # for attempt in 1 2 3")
-    # …while quoting is honoured, so a `#` INSIDE a string is data. A cut at the
-    # first `#` on the line (the naive form) would drop the loop and fail here.
-    assert _has_retry_loop_in_code(
-        'x="a#b" && for attempt in 1 2 3; do :; done')
-    # DECLARED RESIDUAL, pinned: these still satisfy the substring test. Stated so
-    # the limit is not mistaken for coverage.
-    for run in ("cat <<'EOF'\nfor attempt in 1 2 3\nEOF\nnpx --yes wrangler@4.127.0 --version",
-                'echo "for attempt in 1 2 3; do"\nnpx --yes wrangler@4.127.0 --version',
-                "for attempt in 1 2 3; do :; done\nnpx --yes wrangler@4.127.0 --version"):
-        assert _has_retry_loop_in_code(run), run
+    verify_at: dict[str, list[int]] = {}
+    boot_at: dict[str, list[int]] = {}
+    steps = _all_steps(_load(WORKFLOWS / "ci.yml").get("jobs") or {})
+    for idx, (job, step) in enumerate(steps):
+        name = step.get("name") or ""
+        if name == VERIFY_STEP:
+            verify_at.setdefault(job, []).append(idx)
+        elif name.startswith(BOOT_STEP_PREFIX):
+            boot_at.setdefault(job, []).append(idx)
 
-
-def test_prewarm_pins_the_same_version_the_job_boots() -> None:
-    """Warming `@4` while booting `@4.127.0` misses the cold fetch entirely.
-
-    Compared against the step(s) that actually START wrangler, never the union
-    of every exact pin in the job — see `BOOT_STEP_PREFIX`.
-    """
-    mismatches = _parity_mismatches(_jobs())
-    assert not mismatches, "; ".join(
-        f"{job}: pre-warm pins {sorted(warm)} but the boot step(s) start {sorted(boots)}"
-        for job, (warm, boots) in sorted(mismatches.items()))
-
-
-def test_parity_scope_catches_boot_drift_a_job_union_missed() -> None:
-    """The drift that beat the pre-fix union scope, reproduced on the real job.
-
-    `welcome-e2e`'s boot step moves to `4.130.0` while BOTH the pre-warm and the
-    `npm install -g` step stay on `4.127.0`. A union over every other step in
-    the job still contains `4.127.0`, so the pre-fix `warm <= boots` comparison
-    reports no mismatch on a genuinely drifted job. The boot-only scope must.
-    """
-    jobs = _jobs()
-    steps = jobs["welcome-e2e"]["steps"]
-    boot = next(s for s in steps
-                if str(s.get("name") or "").startswith(BOOT_STEP_PREFIX))
-    assert _exact_wranglers(boot["run"]) == {"4.127.0"}, (
-        "ci.yml fixture drifted — update this pin to whatever the boot step now starts")
-    boot["run"] = boot["run"].replace("wrangler@4.127.0", "wrangler@4.130.0")
-
-    # The pre-fix scope: union every other step of the job. It still contains
-    # `4.127.0` (the pre-warm itself and the global install), so it passed.
-    union: set[str] = set()
-    for step in steps:
-        if step.get("name") != PREWARM_STEP:
-            union.update(_exact_wranglers(step.get("run") or ""))
-    assert "4.127.0" in union, "the pre-fix union scope would NOT have passed this drift"
-
-    assert set(_parity_mismatches(jobs)) == {"welcome-e2e"}
-
-
-def test_parity_catches_one_of_two_boot_steps_the_union_missed() -> None:
-    """`legal-e2e` / `dashboard-e2e` each start TWO wrangler previews.
-
-    A union over the job's boot steps lets the still-pinned sibling supply the
-    pre-warm's version and mask the drifted one — the same masking hole the
-    `welcome-e2e` pin closed, one level down. Reproduced on `dashboard-e2e`'s
-    second preview step: mutate it to a dist-tag (or drop the pin entirely),
-    and the pre-fix union still equals the pre-warm; the per-step scope does
-    not.
-    """
-    for drifted in ("wrangler@latest", "wrangler"):
-        jobs = _jobs()
-        steps = jobs["dashboard-e2e"]["steps"]
-        boots = [s for s in steps
-                 if str(s.get("name") or "").startswith(BOOT_STEP_PREFIX)]
-        assert len(boots) == 2, (
-            "ci.yml fixture drifted — dashboard-e2e must start two wrangler previews")
-        target = boots[-1]
-        assert _exact_wranglers(target["run"]) == {"4.127.0"}, (
-            "ci.yml fixture drifted — update this pin to whatever the boot step now starts")
-        target["run"] = target["run"].replace("wrangler@4.127.0", drifted)
-
-        # The pre-fix comparison: UNION every boot step of the job. The untouched
-        # sibling still supplies `4.127.0`, so the drifted step vanished.
-        union: set[str] = set()
-        for boot in boots:
-            union.update(_exact_wranglers(boot.get("run") or ""))
-        assert union == {"4.127.0"}, (
-            f"the pre-fix union scope would NOT have caught `{drifted}` drift")
-
-        assert set(_parity_mismatches(jobs)) == {"dashboard-e2e"}, drifted
-
-
-def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None:
-    """`wrangler@latest` is floating too, but the numeric-only token regex could
-    not see it at all — so `test_no_e2e_boot_step_floats…` passed on a dist-tag.
-    """
-    assert _floating_wranglers("npx --yes wrangler@latest pages dev") == {"latest"}
-    assert _floating_wranglers("npx --yes wrangler@next --version") == {"next"}
-    assert _floating_wranglers("npx --yes wrangler@4 --version") == {"4"}
-    assert _floating_wranglers("npx --yes wrangler@4.127 --version") == {"4.127"}
-    assert _floating_wranglers("npx --yes wrangler@4.127.0 --version") == set()
-    assert _floating_wranglers("wrangler@4 pages dev") == {"4"}
-
-    # There is NO comment filter, and that is deliberate. A `#` line inside a
-    # here-doc body or a multi-line quoted string is DATA, and shell still
-    # substitutes commands in it — review round 3 measured
-    # `cat <<EOF` / `# $(npx --yes wrangler@4 --version)` / `EOF` running the npx
-    # while a comment filter dropped the line. So a note naming a version is a
-    # DECLARED OVER-REPORT (both assertions below), and a floating boot is caught
-    # by the float check rather than by parity: an exact named in a note supplies
-    # an exact.
-    assert _floating_wranglers("# was: wrangler@4\nnpx --yes wrangler@4.127.0 --version") == {"4"}
-    assert _exact_wranglers("# was: wrangler@4.127.0\nnpx --yes wrangler@latest --version") == {"4.127.0"}
-    assert _floating_wranglers('echo "refs #8743" && npx --yes wrangler@4 --version') == {"4"}
-
-    # A shell CONTINUATION removes the backslash AND the newline, so the halves
-    # are ONE WORD: this token is split by the line break, not merely preceded by
-    # it, which is what makes the arm discriminate — dropping `_CONTINUATION`
-    # reads nothing here, so that removal is now caught.
-    assert _floating_wranglers("npx --yes \\\n  wrangler@4 --version") == {"4"}
-    assert _floating_wranglers("npx --yes wrangler\\\n@4 --version") == {"4"}
-
-    # ARMS — spellings this matcher must report, each of which really runs a
-    # floating `wrangler@4`. They pin the reading (drop a modelled form and the arm
-    # fails), NOT a history: the per-revision story was measured inconsistently
-    # across review rounds, so a PRE-FIX verdict is claimed only where it was
-    # measured against `origin/main`'s copy. Those are A2 and A3 — `<<\EOF` and two
-    # here-docs on ONE line both read NOTHING on the replaced lexer while bash really
-    # runs the npx. A10 is marked NOT a pre-fix miss on purpose: it keeps the npx on
-    # the NEXT line, so the tail cut still reported it, and claiming otherwise was
-    # the round-8 finding; the same-line tail spellings are pinned in the DELTA ARMS
-    # block below.
-    for run in (
-        "cat <<'EOF'\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A1
-        "cat <<\\EOF\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A2 pre-fix MISS
-        "cat <<'A' <<'B'\nA\nDon't\nB\necho 'see #1' && npx --yes wrangler@4 --version",  # A3 pre-fix MISS (one line)
-        "cat <<'1'\nDon't\n1\nnpx --yes wrangler@4 --version",  # A4
-        "echo \"escaped \\\" # note\" && npx --yes wrangler@4 --version",  # A5
-        "echo a\\;# x && npx --yes wrangler@4 --version",  # A6
-        "cat <<< word\nnpx --yes wrangler@4 --version",  # A7 `<<<` is a HERE-STRING, not a
-        #     here-doc: a draft that read it as `<<word` took the next line as body
-        #     and reported NOTHING. The comment-mention variant this replaces could
-        #     not fail — the head reports a mention, so either line supplied its
-        #     expected value.
-        "echo x $(cat <<\\EOF\nDont\nEOF\n) && npx --yes wrangler@4 --version",  # A8
-        "echo $'x' # note\nnpx --yes wrangler@4 --version",  # A9  ANSI-C, then `#`
-        "echo a;# (note)\nnpx --yes wrangler@4 --version",  # A10 `;#`, npx on the NEXT line —
-        #     NOT a pre-fix miss: the tail cut still saw the next line's npx. It pins
-        #     the SHAPE only; the real `;#` miss is pinned in the REGRESSION ARMS below.
-        'echo "refs \\\n#8743" && npx --yes wrangler@4 --version',  # A11 quote over a continuation
-        # The round-3 class: a `#` line inside a here-doc body or a quoted string,
-        # which a COMMENT FILTER dropped while shell substituted into it.
-        'echo "prewarm\n# $(npx --yes wrangler@4 --version)\ndone"',  # A12 multi-line double quote
-        "cat <<EOF\n# $(npx --yes wrangler@4 --version)\nEOF",  # A13 unquoted here-doc body
-        "cat <<EOF\n\t# $(npx --yes wrangler@4 --version)\nEOF",  # A14 tab-indented
-        'echo "a\n# `npx --yes wrangler@4 --version`\nb"',  # A15 backticks in a quoted body
-        # The round-4 class: the token was preceded by something a lookbehind read
-        # as "mid-word", but bash removes it and runs `wrangler@4`. `$@` is empty
-        # in a step (bash is invoked with no arguments), so this really runs.
-        "$@wrangler@4 --version",  # A16
-    ):
-        assert _floating_wranglers(run) == {"4"}, run
-
-    # DELTA ARMS — the spellings a reintroduced COMMENT-TAIL CUT would read as
-    # nothing. Measured against `origin/main`'s copy: each reads `set()` there and
-    # `{'4'}` here, so putting the tail cut back fails this block (A10 above does
-    # NOT discriminate — it keeps the npx on the next line — which is the round-8
-    # finding).
-    #
-    # DIRECTION, stated rather than implied: in both rows shell really DOES treat
-    # `#` as a comment to end of line, so bash runs no `wrangler` — the delta is an
-    # OVER-report here, which is this file's declared fail-closed direction, NOT a
-    # fix for a fail-open miss (`main`'s tail cut was correct on these two lines).
-    # The fail-OPEN class a comment filter CAN produce is the substituted/quoted
-    # bodies pinned as A12–A15 above, where shell DOES run the command (`main`'s
-    # copy already reports those, so they are contract pins, not deltas).
-    for run in (
-        "echo a;# x && npx --yes wrangler@4 --version",  # the docstring's tail-cut spelling
-        "echo a&# x && npx --yes wrangler@4 --version",
-    ):
-        assert _floating_wranglers(run) == {"4"}, run
-    # NON-VACUITY: the cut these arms forbid really changes the verdict — apply it
-    # by hand (the deleted lexer cut the tail at the `#`) and the float is gone.
-    for run in ("echo a;# x && npx --yes wrangler@4 --version",
-                "echo a&# x && npx --yes wrangler@4 --version"):
-        cut_at = min(i for i in (run.find(";#"), run.find("&#")) if i >= 0)
-        assert _floating_wranglers(run[:cut_at]) == set(), run
-
-    # REGRESSION ARMS from the review of an earlier draft of this matcher, which
-    # required a command word or an ENUMERATED command position and therefore
-    # missed every one of these: each really runs a float, and the lexer this
-    # replaced reported each. Enumerating where shell may start a command is what
-    # produced them, so the rule no longer enumerates (see `_wrangler_invocations`).
-    for run in (
-        "bun x wrangler@4 pages dev",
-        "pnpm dlx wrangler@4 pages dev",
-        "yarn dlx wrangler@4 pages dev",
-        "bunx wrangler@4 pages dev",
-        "npm exec -- wrangler@4 pages dev",
-        "echo hi; wrangler@4 pages dev",
-        "true && wrangler@4 pages dev",
-        "cat log | wrangler@4 pages dev",
-        "(wrangler@4 pages dev)",
-        "{ wrangler@4 pages dev; }",
-        "! wrangler@4 pages dev",
-        "time wrangler@4 pages dev",
-        "if true; then wrangler@4 pages dev; fi",
-        "if false; then :; else wrangler@4 pages dev; fi",
-        "for i in 1; do wrangler@4 pages dev; done",
-        "while true; do wrangler@4 pages dev; break; done",
-        "until false; do wrangler@4 pages dev; break; done",
-        "case x in x) wrangler@4 pages dev;; esac",
-        "find . -maxdepth 0 -exec wrangler@4 pages dev ';'",
-        "WRANGLER_VERSION=4 wrangler@4 pages dev",
-        "sh -c 'npx --yes wrangler@4 --version'",
-        "echo hi && \\\n  npx --yes wrangler@4 --version",
-    ):
-        assert _floating_wranglers(run) == {"4"}, run
-
-    # DECLARED OVER-REPORT (fail-closed, the safe direction): text that merely
-    # NAMES a pin is reported as well as a pin that runs — a TRAILING comment, a
-    # quoted string, a here-doc body, and a longer word CONTAINING the token
-    # (`xwrangler@4`, where bash runs a command of that name, not `wrangler@4`).
-    # Refusing a correct step is recoverable by rewording it; hiding a real
-    # invocation from a required check is not, and every draft that tried to tell
-    # the two apart was defeated by a form shell runs and the rule did not.
-    assert _floating_wranglers(
-        "npx --yes wrangler@4.127.0 --version  # was: npx --yes wrangler@4 --version") == {"4"}
-    assert _floating_wranglers("echo wrangler@4 --version") == {"4"}
-    assert _floating_wranglers('echo "npx --yes wrangler@4 --version"') == {"4"}
-    assert _floating_wranglers("cat <<'EOF'\nnpx --yes wrangler@4 --version\nEOF") == {"4"}
-    assert _floating_wranglers("xwrangler@4 pages dev") == {"4"}
-
-    # QUOTING INSIDE THE WORD is READ, not missed: shell removes these characters
-    # before it runs the word, and `_shell_words` resolves them the same way, so
-    # the token is reported as the float it is. Four forms an earlier round had
-    # declared unreadable are caught here.
-    for run in ("wrangler\\@4 --version", "wran\\gler@4 --version",
-                "wrangler'@'4 --version", '"wrangler"@4 --version'):
-        assert _floating_wranglers(run) == {"4"}, run
-    # …INCLUDING the `$`-prefixed quoting forms, where the `$` is part of the
-    # QUOTING and not of the word. Reading it as a word character MISSES the token
-    # entirely (`wrangler$@4` holds no `wrangler@`), which is a fail-open: bash runs
-    # `wrangler@4`. Both are floats and must be REPORTED.
-    assert _floating_wranglers("wrangler$'@'4 --version") == {"4"}
-    assert _floating_wranglers('wrangler$"@"4 --version') == {"4"}
-    assert _exact_wranglers('wrangler$"@"4.127.0 --version') == {"4.127.0"}
-    # In ANSI-C quoting `\'` is a LITERAL quote, so it does not open one: reading it
-    # as an ordinary single quote desynchronised the scan for the rest of the block
-    # and swallowed the following pin (main pinned this arm; it had been replaced
-    # by one whose expected value the npx line supplied either way).
-    _ansi = "echo $'\\'' # was wrangler@4\nnpx --yes wrangler@4.127.0 --version"
-    assert _exact_wranglers(_ansi) == {"4.127.0"}, _ansi
-    assert _floating_wranglers(_ansi) == {"4"}, _ansi  # the comment mention only
-    assert _floating_wranglers("echo $'\\' # c' && npx --yes wrangler@4 --version") == {"4"}
-    # An EMPTY quoted word still STARTS a word, so `""#tok` reaches bash as the word
-    # `#tok` — not a comment. Testing the buffer instead of "a word has started"
-    # dropped the `#` and read the pin out of a word that is not the pin.
-    for run in ('npx --yes ""#wrangler@4.127.0 --version',
-                "npx --yes ''#wrangler@4.127.0 --version"):
-        assert _exact_wranglers(run) == set(), run
-        assert _floating_wranglers(run) == {""}, run
-    # An ANSI-C escape can SPELL the token's `@`: `wrangler$'\100'4` is
-    # `wrangler@4`. Reading the escape as its letter made that float invisible.
-    for run in ("npx --yes wrangler$'\\100'4 --version",
-                "npx --yes wrangler$'\\x40'4 --version"):
-        assert _floating_wranglers(run) == {"4"}, run
-    # …and the same escapes can spell a CORRECT pin, which must stay exact.
-    assert _exact_wranglers("npx --yes wrangler@$'\\064'.127.0 --version") == {"4.127.0"}
-    # bash takes 1–4 (`\u`) and 1–8 (`\U`) hex digits, so the SHORT spellings must
-    # be translated too: with a fixed arity the escape left its digits behind, the
-    # word held no `wrangler@`, and the float was invisible (measured on bash 5).
-    for run in ("npx --yes wrangler$'\\u40'4 --version",
-                "npx --yes wrangler$'\\u040'4 --version",
-                "npx --yes wrangler$'\\U0040'4 --version"):
-        assert _floating_wranglers(run) == {"4"}, run
-    assert _exact_wranglers("npx --yes wrangler@4.1$'\\u32'7.0 --version") == {"4.127.0"}
-    # A DROPPED escape contributes NOTHING — bash removes a NUL from the word — so
-    # the fragments join. Writing a placeholder there split the token and hid a real
-    # float (`wran$'\0'gler@4` runs `wrangler@4`) while every check stayed green.
-    for run in ("npx --yes wran$'\\0'gler@4 --version",
-                "npx --yes wran$'\\000'gler@4 --version",
-                "npx --yes wran$'\\x00'gler@4 --version",
-                "npx --yes wran$'\\u0000'gler@4 --version",
-                "npx --yes wran$'\\c@'gler@4 --version"):
-        assert _floating_wranglers(run) == {"4"}, run
-    # A NUL also TRUNCATES the rest of its segment, so the tail is DISCARDED rather
-    # than kept: keeping it stitched a pin out of `4` + `.127.0` while bash ran
-    # `wrangler@4` (a moving window), and hid the spellings that split the token.
-    assert _floating_wranglers("npx --yes wrangler@4$'\\0.127.0' --version") == {"4"}
-    for run in ("npx --yes wran$'\\0abc'gler@4 --version",
-                "npx --yes wran$'\\0000'gler@4 --version",
-                "npx --yes wran$'\\x000'gler@4 --version",
-                "npx --yes wran$'\\u00000'gler@4 --version",
-                "npx --yes wran$'\\400abc'gler@4 --version"):
-        assert _floating_wranglers(run) == {"4"}, run
-    # A `\U` at or above 0x80000000 is OMITTED but does NOT cut the segment (it is
-    # not a NUL), so the letters on both sides stay and the word is no longer the
-    # token under bash either: nothing to report, nothing to refuse.
-    assert _wrangler_invocations("npx --yes wran$'\\UFFFFFFFFabc'gler@4 --version") == set()
-    # …and a truncated tail after a CORRECT pin leaves the pin exact, not a float.
-    assert _exact_wranglers("npx --yes wrangler@4.127.0$'\\0abc' --version") == {"4.127.0"}
-    # …and a `\U` at or above 0x80000000 is dropped too, so that word IS the pin.
-    assert _exact_wranglers("npx --yes wrangler@4.127.0$'\\UFFFFFFFF' --version") == {"4.127.0"}
-    # A surrogate or an out-of-range `\u`/`\U` is kept LITERAL by bash (never
-    # empty), so it cannot be the pin — and `chr` must not be asked, which raised.
-    for run in ("npx --yes wrangler@4.127.0$'\\uD800' --version",
-                "npx --yes wrangler@4.127.0$'\\U00110000' --version",
-                "npx --yes wrangler@4.127.0$'\\q' --version"):
-        assert _floating_wranglers(run) == {""}, run
-    # `\c` with nothing left inside its segment is kept LITERAL by bash and the
-    # quote closes it. Consuming that quote left the scan inside `$'…'` for the rest
-    # of the run, where a later `\0` swallowed everything after it — three spellings
-    # of a real `wrangler@4` then reported NOTHING.
-    assert _wrangler_invocations("npx --yes wrangler@4$'\\c' --version") == {"4"}
-    for run in ("echo $'\\c' \\0 ; npx --yes wrangler@4 --version",
-                "npx --yes $'\\c' ; wrangler\\@4 --version",
-                'npx --yes $\'\\c\' ; wrangler"@"4 --version'):
-        assert _floating_wranglers(run) == {"4"}, run
-    # …and a backslash inside a TRUNCATED segment still escapes, so `\'` does NOT
-    # close it: the discard runs to the real quote and `wran` joins `gler@4`, which
-    # is the float `wrangler@4` under bash (measured).
-    assert _wrangler_invocations("npx --yes wran$'\\0ab\\'cd'gler@4 --version") == {"4"}
-    # A translated escape that is not a spec character makes the argument continue
-    # past the pin, which is FLOATING — `\cA` is translated, not unreadable.
-    assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\cA' --version") == {""}
-    # A BACKSLASH BEFORE AN ORDINARY CHARACTER inside double quotes is KEPT by
-    # shell, so `wrangler@"4.\\127.0"` runs the invalid word `wrangler@4.\\127.0`
-    # (npm rejects it). Reading the quoting is what lets this be REFUSED rather
-    # than read as the pin `4.127.0`, which an earlier draft declared as its
-    # over-read.
-    assert _floating_wranglers('npx wrangler@"4.\\127.0" --version') == {"4."}
-    # An X-RANGE is not an exact pin: npm resolves `4.127.x` to a moving window
-    # (`>=4.127.0 <4.128.0-0`), so a dot-count classifier passed it as exact.
-    for spec in ("4.127.x", "4.x.x", "4.127.X", "4.127.0-rc.1"):
-        assert _floating_wranglers(f"npx --yes wrangler@{spec} --version") == {spec}, spec
-        assert _exact_wranglers(f"npx --yes wrangler@{spec} --version") == set(), spec
-    # THE ARGUMENT IS THE SPEC, so a range is a range however it is spaced — and
-    # quoting is what makes one argument out of it. Under npm's own semver these
-    # resolve away from the pin — `||` with an operator or wildcard operand, an
-    # EMPTY operand (node-semver reads `*` → the newest 4.x), a newline on either
-    # side of the operator, a `v`-prefixed hyphen bound (`- v4` → newest 4.x) —
-    # except `|| =4.127.0`, which resolves TO `4.127.0` and is refused anyway: the
-    # any-continuation rule does not read node-semver, so it over-reports an
-    # argument that happens to pin. Stated because the assertion above covers the
-    # value, not the reason.
-    for run in ('npx --yes wrangler@"4.127.0 || 4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 ||" --version',
-                'npx --yes wrangler@"4.127.0 || " --version',
-                'npx --yes wrangler@"4.127.0 || >=4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 || <4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 || =4.127.0" --version',  # over-report
-                'npx --yes wrangler@"4.127.0 || ^4" --version',
-                'npx --yes wrangler@"4.127.0 || x" --version',
-                'npx --yes wrangler@"4.127.0 || *" --version',
-                'npx --yes wrangler@"4.127.0 - 4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 - v4" --version',
-                'npx --yes wrangler@"4.127.0 - v4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 - x" --version',
-                'npx --yes wrangler@"4.127.0\n|| >=4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 ||\n>=4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 ||\n*" --version',
-                'npx --yes wrangler@"4.127.0 -\n4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 - \nv4" --version'):
-        assert _exact_wranglers(run) == set(), run
-        assert _floating_wranglers(run) == {""}, run
-    # …while the SAME characters UNQUOTED are shell separators, so the argument is
-    # the pin and the step is CORRECT. Refusing these was the over-report an
-    # operator list produced; the word scan tells them apart by construction.
-    for run in ("npx --yes wrangler@4.127.0 --version",
-                "npx --yes wrangler@4.127.0 --flag=4",
-                "npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1",
-                "npm install -g wrangler@4.127.0 >/dev/null",
-                "npx --yes wrangler@4.127.0 || true",
-                "npx --yes wrangler@4.127.0||4.130.0 --version",
-                "npx --yes wrangler@4.127.0 >4.130.0 --version",
-                "npx --yes wrangler@4.127.0 - 4.130.0 --version",
-                "npx --yes wrangler@4.127.0; echo done",
-                "npx --yes wrangler@4.127.0\n> /tmp/log 2>&1"):
-        assert _exact_wranglers(run) == {"4.127.0"}, run
-
-    # The residual class: an INTERPOLATION inside the word. bash runs
-    # `wrangler@4`; there is no literal to read, and no text scan can evaluate the
-    # substitution. Pinned as MISSED so the limit is stated, not hidden — see the
-    # residual note above `_exact_wranglers`.
-    for run in ("wrangler$X@4 --version", "wrangler${X}@4 --version",
-                "wran$(echo gler)@4 --version", "wran`echo gler`@4 --version"):
-        assert _wrangler_invocations(run) == set(), run
-    # DECLARED RESIDUAL: a step whose EXECUTED invocation carries NO spec at all
-    # (`npx --yes wrangler pages dev`) — a pin named in a note then satisfies the
-    # exact check and parity while npm installs the `latest` tag. Measured; see the
-    # residual note above `_exact_wranglers`. Pinned as MISSED so the limit is
-    # stated, not implied to be covered.
-    miss = ("# was: npx --yes wrangler@4.127.0 pages dev\n"
-            "npx --yes wrangler pages dev . --port 8788")
-    assert _exact_wranglers(miss) == {"4.127.0"}, miss
-    assert _floating_wranglers(miss) == set(), miss
-    # …and the EXACT side of an empty spec, so "an empty spec is never exact" is
-    # pinned from BOTH directions: mutating `_exact_wranglers` to accept "" fails.
-    for run in ("npx --yes wrangler@$WRANGLER --version",
-                "npx --yes wrangler@4.127.${PATCH} --version"):
-        assert _exact_wranglers(run) == set(), run
-
-    # An INDIRECT spec is floating, never exact — including a literal CUT SHORT by
-    # an interpolation, which must not be read as the pin `4.127.`:
-    assert _floating_wranglers("WRANGLER=latest\nnpx --yes wrangler@$WRANGLER --version") == {""}
-    assert _floating_wranglers('npx --yes wrangler@"${WRANGLER}" --version') == {""}
-    assert _floating_wranglers("npx --yes wrangler@4.127.${PATCH} --version") == {"4.127."}
-    assert _exact_wranglers("npx --yes wrangler@4.127.${PATCH} --version") == set()
-    assert _floating_wranglers("npx --yes wrangler@4.127.0${SUFFIX} --version") == {""}
-    assert _exact_wranglers("npm install -g wrangler@4.127.0") == {"4.127.0"}
-
-
-def test_no_e2e_boot_step_floats_the_wrangler_version() -> None:
-    """The dashboard boot steps floated `@4` — as did its pre-warm — the drift
-    class the parity check above exists to catch."""
     for job in sorted(PREWARM_JOBS):
-        for other_job, other in _steps():
-            if other_job != job:
+        verifies = verify_at.get(job) or []
+        assert verifies, f"{job}: no {VERIFY_STEP!r} step at all"
+        for boot in boot_at.get(job) or []:
+            assert any(v < boot for v in verifies), (
+                f"{job}: the boot at step {boot} runs BEFORE every verify step "
+                f"{verifies} — the boot would use whatever wrangler is on PATH, "
+                "which nothing asserted"
+            )
+
+
+def test_the_verify_step_is_unconditional() -> None:
+    for job, step in _steps_named(VERIFY_STEP):
+        assert "if" not in step, (
+            f"{job}: the install-and-verify step is gated by `if: {step['if']}` — a gate "
+            "that skips it leaves the pin unverified while the run is green"
+        )
+        job_cfg = _load(WORKFLOWS / "ci.yml")["jobs"][job]
+        gate = job_cfg.get("if")
+        if gate is not None:
+            assert not _is_constant_false(gate), (
+                f"{job}: job-level `if: {gate!r}` is constant-false — the whole job, "
+                "including the verify, can never run"
+            )
+
+
+def test_the_ci_yml_wrangler_wiring_is_exercised_by_an_ungated_job() -> None:
+    """`ci.yml` is in no `changes` gate, so one job must run it on EVERY PR.
+
+    `ci.yml` carries three of the five consumers and every assertion, and it is
+    deliberately absent from the `website`/`dashboard_e2e` gates (a workflow-only
+    change would otherwise run two full e2e suites). What makes that safe is
+    this: an UNGATED job installs, verifies and boots from the same wiring, so
+    the lane is executed on every PR that can change it.
+    """
+    ci_jobs = _load(WORKFLOWS / "ci.yml")["jobs"]
+    verified = {job for job, _step in _steps_named(VERIFY_STEP)} & set(ci_jobs)
+    assert verified, f"no job in ci.yml carries {VERIFY_STEP!r} — the probe is wrong"
+    ungated = {job for job in verified if ci_jobs[job].get("if") is None}
+    assert ungated, (
+        "every job carrying the wrangler wiring is gated by `changes`, and ci.yml is in "
+        f"no gate — a ci.yml-only wiring change would run none of them: gated={sorted(verified)}"
+    )
+
+
+def test_the_version_check_is_an_equality_against_the_declared_value() -> None:
+    """The assertion must compare, not merely print — a print cannot fail a job."""
+
+    for job, step in _steps_named(VERIFY_STEP):
+        run = _run(step)
+        assert re.search(r'\[ "\$got" = "\$WRANGLER_VERSION" \]', run), (
+            f"{job}: no `[ \"$got\" = \"$WRANGLER_VERSION\" ]` comparison — the resolved "
+            "version is not asserted"
+        )
+        assert "exit 1" in run, f"{job}: a mismatch would not fail the step"
+
+
+# ------------------------------------------------------ 3. boot and deploy shape
+
+
+def test_boot_steps_carry_no_spec_and_keep_their_retry() -> None:
+    boots = [
+        (job, step)
+        for job, step in _all_steps(_load(WORKFLOWS / "ci.yml")["jobs"])
+        if (step.get("name") or "").startswith(BOOT_STEP_PREFIX)
+    ]
+    assert len(boots) == 5, f"expected 5 boot steps, found {len(boots)}"
+    for job, step in boots:
+        run = _run(step)
+        assert "wrangler pages dev" in run, f"{job}: boot does not start wrangler"
+        assert "wrangler@" not in run, (
+            f"{job}: the boot carries a spec — it must run the binary the verify step "
+            "asserted, so that a spec has nowhere to float"
+        )
+        assert re.search(r"for attempt in 1 2;", run), (
+            f"{job}: the boot lost its two-attempt retry"
+        )
+
+
+def test_each_deploy_step_asserts_before_it_uploads() -> None:
+    deploys = [
+        (job, step)
+        for job, step in _all_steps(_load(WORKFLOWS / "deploy-pages.yml")["jobs"])
+        if (step.get("name") or "").startswith(DEPLOY_STEP_PREFIX)
+    ]
+    assert len(deploys) == 2, f"expected 2 deploy steps, found {len(deploys)}"
+    for job, step in deploys:
+        run = _run(step)
+        assert DECLARATION in run, f"{job}: the deploy step does not read {VERSION_SOURCE}"
+        assert "--version" in run, f"{job}: the deploy step never asserts what resolved"
+        assert run.index("--version") < run.index("pages deploy"), (
+            f"{job}: `pages deploy` runs before the version is asserted — the upload "
+            "would go out on an unverified spec"
+        )
+        assert '"$WRANGLER_VERSION"' in run, (
+            f"{job}: the assertion compares something other than the value being used"
+        )
+
+
+# ------------------------------------------- 4. no spec-LESS invocation on a deploy path
+
+
+def test_every_deploy_invocation_is_the_declared_spec() -> None:
+    """A spec-LESS invocation ships an UNDECLARED version past the assertion.
+
+    The runtime assertion validates the DECLARED spec, never the spec on the
+    upload line — so a deploy step copied as `npx --yes wrangler pages deploy`
+    would deploy an unverified version while every `wrangler@` arm stayed green
+    (a bare invocation has no `@` to match). Bare `wrangler` is legal only in the
+    boot steps, where the install-and-verify step already proved the binary.
+    """
+    deploys = _deploy_steps()
+    assert len(deploys) == 2, f"expected 2 deploy steps, found {len(deploys)}"
+    offenders = [
+        f"{job}: {hit}" for job, step in deploys for hit in _bare_invocations(_run(step))
+    ]
+    script = REPO_ROOT / "website" / "apps" / "dashboard" / "deploy.sh"
+    offenders += [f"deploy.sh: {hit}" for hit in _bare_invocations(script.read_text())]
+    assert not offenders, (
+        "a deploy path invokes wrangler without the declared spec, so the version it "
+        "uploads with is not the one that was asserted:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_bare_invocation_scan_ignores_messages_and_comments() -> None:
+    for code in (
+        'npx --yes wrangler pages deploy "$STAGE"',
+        "npx wrangler --version",
+        "wrangler pages deploy dist",
+        # A QUOTED lone command word is still a command: `_strip_quoted` removes
+        # quoted segments, so before #8852's review this spelling — named in the
+        # module header — passed the scan untouched.
+        'npx --yes "wrangler" pages deploy dist',
+        "npx --yes 'wrangler' pages deploy dist",
+    ):
+        assert _bare_invocations(code), code
+    for code in (
+        'got="$(npx --yes "wrangler@${WRANGLER_VERSION:?}" --version)"',
+        'echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"',
+        "# npx --yes wrangler pages deploy (the old float)",
+    ):
+        assert not _bare_invocations(code), code
+
+
+def test_no_step_invokes_wrangler_without_a_spec_outside_the_declared_boots() -> None:
+    """The deploy-path arm above is keyed on the TWO deploy steps; this one is not.
+
+    A spec-LESS invocation has no `wrangler@` token and, in a step that is not
+    named `Deploy to Cloudflare Pages…`, no arm read it either — measured on this
+    file's predecessor: a one-off `npx --yes wrangler pages deploy dist` inserted
+    into `welcome-e2e`, and a whole new job booting a bare `npx wrangler`, BOTH
+    survived every arm. A bare `wrangler` is therefore legal in exactly one place:
+    the five declared boot steps, which run the binary the verify step proved
+    (`test_boot_steps_carry_no_spec_and_keep_their_retry` pins that there are
+    exactly five and that each carries no spec). Everything else — a new step, a
+    new job, a deploy line — is an offender.
+
+    The scan is quote- and comment-aware (`_strip_quoted` / `_cut_comment`), so a
+    diagnostic that NAMES wrangler, or a commented-out old command, is not an
+    offence; the count assertion keeps the arm from passing vacuously.
+    """
+    offenders = []
+    boots = 0
+    for path in _workflow_paths():
+        for job, step in _document_steps(_load(path)):
+            name = step.get("name") or ""
+            hits = _bare_invocations(_run(step))
+            if name.startswith(BOOT_STEP_PREFIX):
+                assert hits, (
+                    f"{path.name}:{job}: {name!r} is a declared boot but invokes no "
+                    "wrangler — the probe is wrong"
+                )
+                boots += len(hits)
                 continue
-            floats = _floating_wranglers(other.get("run") or "")
-            assert not floats, (
-                f"{job}: step {other.get('name')!r} floats wrangler {sorted(floats)}")
+            offenders += [f"{path.name}:{job}: {name!r}: {hit}" for hit in hits]
+    assert boots == 5, f"expected 5 spec-free boot invocations, found {boots}"
+    assert not offenders, (
+        "wrangler invoked WITHOUT a spec outside the five declared boots — a bare "
+        "invocation resolves to whatever npm serves, which is the float this file "
+        "exists to kill:\n" + "\n".join(offenders)
+    )
+
+
+# ------------------------------------------------------------- 5. node floor, derived
+
+
+def test_every_job_that_installs_wrangler_pins_node_22() -> None:
+    """Derived, not a list: a new wrangler job joins the arm automatically."""
+
+    offenders = []
+    checked = 0
+    for path in _workflow_paths():
+        for job_name, job in (_load(path).get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            # A job "installs wrangler" if any step's CODE names the command —
+            # with a spec or without one. Keying on `wrangler@` alone let a new
+            # job that calls a bare `npx wrangler` escape this arm entirely (the
+            # reviewer measured exactly that mutation surviving every arm).
+            installs = any(
+                "wrangler@" in _run(step)
+                or "npm install -g wrangler" in _run(step)
+                or _bare_invocations(_run(step))
+                for step in steps
+            )
+            if not installs:
+                continue
+            checked += 1
+            node = None
+            for step in steps:
+                uses = step.get("uses") or ""
+                if uses.startswith("actions/setup-node"):
+                    node = str((step.get("with") or {}).get("node-version", ""))
+            # No `setup-node` at all is an offender, not a crash: the job would
+            # run whatever node the image ships, and `npm install` only WARNS on
+            # an engines mismatch.
+            if "22" not in (node or ""):
+                offenders.append(f"{path.name}:{job_name} node-version={node!r}")
+    assert checked >= 4, f"only {checked} wrangler-installing jobs found — the probe is wrong"
+    assert not offenders, (
+        "a job installs wrangler without node 22; `npm install` only WARNS on an engines "
+        "mismatch, so it would 'succeed' and break later in the readiness loop:\n"
+        + "\n".join(offenders)
+    )
+
+
+# ------------------------------------------------ 6. the manual deploy script
+
+
+def test_the_manual_deploy_script_pins_the_same_version() -> None:
+    """`website/apps/dashboard/deploy.sh` is the documented manual deploy.
+
+    It is outside the workflows, so no other arm reaches it — and a bare
+    `npx wrangler pages deploy` there ships whatever npm serves, with nothing
+    asserting what that was. It reads the same artefact.
+    """
+
+    script = REPO_ROOT / "website" / "apps" / "dashboard" / "deploy.sh"
+    assert script.is_file(), f"{script} is missing"
+    text = script.read_text(encoding="utf-8")
+    code = "\n".join(_cut_comment(ln) for ln in text.splitlines())
+    # The read must go through an ABSOLUTE script dir resolved BEFORE any `cd`.
+    # This arm used to pin the literal `cat "$(dirname "$0")/…config/wrangler-version"`,
+    # which pinned the BUG: after `cd "$(dirname "$0")"`, a RELATIVE `$0` makes that
+    # path double-apply the prefix, so the documented
+    # `bash website/apps/dashboard/deploy.sh` aborted with "No such file or
+    # directory" — and no arm could see it, because the arm asserted the broken
+    # text verbatim (#8816 review).
+    assert 'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"' in code, (
+        "the manual deploy does not resolve an ABSOLUTE script dir — a relative `$0` "
+        "re-derived after `cd` points at a path that does not exist"
+    )
+    assert 'cat "$SCRIPT_DIR/../../../config/wrangler-version"' in code, (
+        "the manual deploy does not read config/wrangler-version through SCRIPT_DIR — "
+        "it would deploy an unasserted wrangler"
+    )
+    assert 'cat "$(dirname "$0")/../../../config/wrangler-version"' not in code, (
+        "the relative-`$0` read is back: after `cd`, it double-applies the prefix and "
+        "the documented manual deploy aborts"
+    )
+    assert "--version" in code, "the manual deploy never asserts what resolved"
+    declared = VERSION_FILE.read_text(encoding="utf-8").strip()
+    assert declared not in code, (
+        f"the manual deploy restates the pinned version ({declared}); it must read "
+        f"{VERSION_SOURCE}, or a bump edits one place and drifts in another"
+    )
+    for match in re.finditer(r"wrangler@\S*", code):
+        assert LEGAL_SPEC.match(match.group(0)), (
+            f"manual deploy spec {match.group(0)!r} is not the asserted variable form"
+        )
+
+
+#: Stub `npm` for the executed arms: `npm ci` is skipped by a pre-existing
+#: node_modules and `npm run build` is not the subject.
+STUB_NPM = "#!/bin/sh\nexit 0\n"
+
+#: Stub `npx`: answers the `--version` probe with the declared value and records
+#: its argv, so the harness can prove WHICH spec the deploy would use.
+STUB_NPX_MANUAL = """#!/bin/bash
+printf '%s\\n' "$@" > "$STUB_DIR/npx_args"
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    cat "$STUB_DIR/config/wrangler-version"
+    break
+  fi
+done
+exit 0
+"""
+
+
+def _run_manual_deploy(tmp_path: Path, *, from_repo_root: bool):
+    """Execute the SHIPPED deploy.sh from a scratch tree, stubs on PATH.
+
+    The tree mirrors the checkout layout (`website/apps/dashboard/deploy.sh` +
+    `config/wrangler-version`), so the script's own path arithmetic is under test
+    rather than a string in a file.
+    """
+    dashboard = tmp_path / "website" / "apps" / "dashboard"
+    dashboard.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "website" / "apps" / "dashboard" / "deploy.sh",
+                 dashboard / "deploy.sh")
+    (dashboard / "node_modules").mkdir()  # skips `npm ci`
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "wrangler-version").write_text(
+        VERSION_FILE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("npm", STUB_NPM), ("npx", STUB_NPX_MANUAL)):
+        stub = bin_dir / name
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+    }
+    if from_repo_root:
+        # Exactly what docs/infra-runbook.md documents.
+        cwd, argv = tmp_path, "./website/apps/dashboard/deploy.sh"
+    else:
+        cwd, argv = dashboard, "./deploy.sh"
+    return subprocess.run(
+        ["bash", argv], cwd=str(cwd), capture_output=True, text=True, env=env
+    )
+
+
+@pytest.mark.parametrize("from_repo_root", [True, False])
+def test_the_manual_deploy_resolves_the_version_from_either_invocation(
+    tmp_path, from_repo_root: bool
+) -> None:
+    """EXECUTED, because a text pin cannot see a path that does not resolve.
+
+    The text arm above pins the shape. This one runs the shipped script the way
+    the runbook documents (`./website/apps/dashboard/deploy.sh` from the repo
+    root) AND from its own directory, and requires the deploy to carry the
+    declared version. On the pre-fix script (re-derived `$(dirname "$0")` after
+    the `cd`) the repo-root invocation aborts inside `cat` under `set -e` with
+    `…/website/apps/dashboard/../../../config/wrangler-version: No such file or
+    directory` — one of these two arms would have failed and the other passed,
+    which is exactly the blind spot the old single text pin had.
+    """
+    r = _run_manual_deploy(tmp_path, from_repo_root=from_repo_root)
+    out = r.stdout + r.stderr
+    where = "the repo root" if from_repo_root else "its own directory"
+    assert r.returncode == 0, f"deploy.sh failed when invoked from {where}:\n{out}"
+    args = (tmp_path / "npx_args").read_text(encoding="utf-8").splitlines()
+    declared = VERSION_FILE.read_text(encoding="utf-8").strip()
+    assert args[:2] == ["--yes", f"wrangler@{declared}"], (
+        f"the manual deploy ran {args!r} — it must carry the version it read"
+    )
+
+
+# ------------------------------------------- 6. the documentation that teaches it
+
+
+def test_no_document_shows_a_floating_wrangler_spec() -> None:
+    """A README example is a command someone will paste.
+
+    `website/README.md` showed `npx --yes wrangler@4 pages deploy` next to two
+    shipped steps that assert 4.127.0 — the exact drift this change removes,
+    stated as guidance. Every spec in these files must be the asserted form, and
+    the version must come from the one artefact.
+    """
+
+    for rel in COMMAND_DOCS:
+        path = REPO_ROOT / rel
+        assert path.is_file(), f"{rel} is missing"
+        text = path.read_text(encoding="utf-8")
+        # Only FENCED code, not prose: a doc may legitimately name the bad
+        # spelling while explaining why it is bad.
+        code = "\n".join(
+            line for line in _fenced_blocks(text).splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        offenders = [
+            token
+            for token in re.findall(r"wrangler@[^\s`\"')]+", code)
+            if not LEGAL_SPEC.match(token)
+        ]
+        assert not offenders, (
+            f"{rel} still shows a copy-pasteable wrangler spec that is not the "
+            f"asserted form ({offenders}) — it would ship whatever npm serves"
+        )
+        if "wrangler@" in code:
+            assert "config/wrangler-version" in text, (
+                f"{rel} shows a wrangler command without pointing at "
+                "config/wrangler-version — the version has one home"
+            )

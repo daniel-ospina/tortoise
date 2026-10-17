@@ -670,12 +670,15 @@ class ConversationMiner:
             canonical = _canonical_name(name)
             api.add_object(name, ent["objectKind"], id=self._object_id(name),
                            canonical_name=canonical, title=name)
-            # MERGE-by-name: re-fetch the canonical node id (a prior run's id
-            # wins — no duplicate Objects, DE2E-8 idempotency)
-            r = proj.g.query("MATCH (o:Object {name:$name}) RETURN o.id",
-                             params={"name": name})
-            oid = r.result_set[0][0] if r.result_set and r.result_set[0] \
-                else self._object_id(name)
+            # #5509: the canonical id is the one this write just supplied —
+            # `_upsert_object`'s ON MATCH writes `o.id=coalesce($id, o.id)`, so
+            # the node the name-MERGE matched carries it. The re-fetch that used
+            # to live here (`MATCH (o:Object {name:$name}) RETURN o.id` →
+            # `result_set[0][0]`) resolved identity by NAME and could hand back
+            # ANOTHER same-name carrier's id, wiring the mention's aboutObject
+            # edges onto a node this call did not write (DE2E-8's idempotency
+            # is an id fact, not a name read).
+            oid = self._object_id(name)
             # Point side: deterministic mention-based wiring
             for p in points:
                 content = p.get("content", "")

@@ -29,12 +29,18 @@ Event→Subject writer would be an un-gated one (the gated binder reads a Point'
 ``slots``, not an Event's ``about_entities``), so the attribution is
 intentionally not replaced. Recorded as a residual in the scoping doc.
 
-**Identity is name-keyed.** ``_resolve_target`` resolves a slot to an existing
-node by NAME (the same contract as ``_mint_subject_stub`` / ``_upsert_subject``),
-so a slot and its target cannot disagree on name. They CAN disagree on KIND: a
-slot whose declared kind differs from the resolved node's stored
-``subjectKind``/``objectKind`` is REFUSED fail-closed rather than bound to a
-node the read surface would then report with a contradicting kind.
+**Identity is resolved by the shared resolver.** A slot carries a NAME — a
+mutable natural key — so ``_resolve_target`` resolves it through
+``entity_identity.resolve_entity_id`` (#5509): exactly ONE **live** holder, or
+nothing. Two live same-name carriers is a REFUSAL (the resolver records the
+non-folded entry; the slot stays unbound), and a name held only by a TERMINAL
+carrier is refused too (D2 ``single_terminal_holder_reference``) — the binder
+used to hand ``link_entity`` a superseded node's id and attribute a fresh claim
+to a dead entity. The slot and its target still cannot disagree on NAME (the
+coordinate is the name); they CAN disagree on KIND: a slot whose declared kind
+differs from the resolved node's stored ``subjectKind``/``objectKind`` is
+REFUSED fail-closed rather than bound to a node the read surface would then
+report with a contradicting kind.
 
 **Malformed slots** (a non-dict/non-model entry, a blank name, a non-list role
 value) are refused with a warning and a journaled refusal record — never a
@@ -278,7 +284,7 @@ def _journal_refusal(sdk, *, point_id: str, role: str, name: str, kind: str,
 
 
 def _resolve_target(proj, label: str, name: str) -> tuple[str | None, str | None]:
-    """Resolve ``name`` to an existing ``:label`` node; return ``(id, kind)``.
+    """Resolve ``name`` to exactly one LIVE ``:label`` node; ``(id, kind)``.
 
     Never mints: an unresolved name is a refusal (D8 — the fail-open name-stub
     path is not reachable from the binder). The returned id is ONLY the
@@ -288,24 +294,45 @@ def _resolve_target(proj, label: str, name: str) -> tuple[str | None, str | None
     stored ``subjectKind`` (Subject) / ``objectKind`` (Object) when present and
     non-blank, else None — the binder compares it against the slot's declared
     kind fail-closed (F10).
+
+    ROUTE-THEN-REFUSE (#5509): the name is resolved by
+    ``entity_identity.resolve_entity_id``, the ONE place that answers "which
+    identity does this name mean". The former `LIMIT 2` probe had no status
+    predicate, so a name held by exactly ONE **terminal** carrier resolved to
+    that terminal node — measured: a fresh claim was bound to a ``superseded``
+    Subject. The resolver refuses that (D2) and records it, and refuses two live
+    same-name carriers instead of picking one. Both refusals surface here as
+    ``(None, None)`` → the caller's existing ``unresolved`` path (warned +
+    journaled), so a refusal is never a silent drop.
+
+    ``resolve_entity_id`` is an id-OR-name resolver (an exact id match wins —
+    the resolver's documented precedence). A slot name that happens to equal
+    another node's id therefore resolves to that id's node; that is the one
+    identity rule every surface uses, and re-deciding it here is the drift
+    #3633 exists to prevent.
     """
+    from tortoise.entity_identity import (
+        AmbiguousEntityName,
+        UnaddressableEntityName,
+        resolve_entity_id,
+    )
+
     kind_prop = "subjectKind" if label == "Subject" else "objectKind"
-    rows = proj.g.query(
-        f"MATCH (n:{label} {{name:$name}}) "
-        f"RETURN n.id, n.{kind_prop} LIMIT 2",
-        params={"name": name}).result_set
-    if len(rows) != 1:
+    try:
+        target_id = resolve_entity_id(proj.g, label, name)
+    except (AmbiguousEntityName, UnaddressableEntityName):
+        # Ambiguous (2+ live carriers) or a single id-less holder: both are
+        # refusals the resolver already recorded; the slot is unbound.
         return None, None
-    row = list(rows[0])
-    # G1: the returned id MUST be the ``{id:...}`` identity ``link_entity``
-    # (and the binder's F7 re-probe) matches on. A legacy stub carrying ONLY
-    # an ``eventId`` is NOT addressable — advertising it as a target made
-    # ``link_entity`` match nothing and (pre-G1) emit a phantom
-    # ``EntityLinked``. A non-addressable node is an unresolved target:
-    # refuse fail-closed rather than name an id nothing can link to.
-    target_id = (row[0] if row and isinstance(row[0], str)
-                 and row[0].strip() else None)
-    stored = row[1] if len(row) > 1 else None
+    if not target_id:
+        # Absent, or held only by terminal carriers (D2 — refused + recorded).
+        return None, None
+    # The kind is a PROPERTY read of the id the resolver chose — id-keyed, so
+    # it cannot re-introduce a name-keyed identity read.
+    kind_rows = proj.g.query(
+        f"MATCH (n:{label} {{id:$id}}) RETURN n.{kind_prop}",
+        params={"id": target_id}).result_set
+    stored = kind_rows[0][0] if kind_rows and kind_rows[0] else None
     return target_id, (stored if isinstance(stored, str) and stored.strip()
                        else None)
 

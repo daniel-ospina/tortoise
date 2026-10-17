@@ -13,6 +13,15 @@ on:
       # committed dist carried that signal under website/**; the artifact is
       # untracked now, so the input is named explicitly.
       - 'product/pricing.json'
+      # #8816: `config/wrangler-version` is an INPUT to BOTH deploy steps — each
+      # reads it and asserts the resolved wrangler against it. Before this entry
+      # the pin only moved when a wrangler bump edited this workflow (which
+      # self-deploys, #1118); after the pin moved to `config/`, a bump is a
+      # config-only change and would trigger NOTHING here, so the bump that may
+      # fix a `pages deploy` / Functions-bundling problem would not deploy until
+      # some unrelated `website/**` push. Same reasoning the `ci.yml` `changes`
+      # gates already applied to the same file.
+      - 'config/wrangler-version'
       # #1118: workflow changes must self-deploy — the #1113 merge (which
       # added the dashboard job) did NOT trigger this workflow because the
       # workflow file wasn't in its own paths filter; it required manual
@@ -181,6 +190,10 @@ jobs:
       # enumeration, so it cannot notice a nested file on its own.
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
+          # #8816: the wrangler version has ONE source, config/wrangler-version,
+          # read here — before any `cd` makes the relative path meaningless.
+          WRANGLER_VERSION="$(cat config/wrangler-version)"
+          : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
           # `${RUNNER_TEMP:?}` and not `$RUNNER_TEMP`: the next command is
           # `rm -rf "$STAGE"`, and an unset RUNNER_TEMP would make that a delete
           # of `/pages-upload`. Runners always set it; fail fast if one does not.
@@ -212,7 +225,16 @@ jobs:
           # every /auth/*, /api/*, /blog/* and /admin/* route 404s on a green
           # deploy. tests/test_pages_bindings.py pins this cwd by execution.
           cd "$STAGE"
-          npx --yes wrangler@4 pages deploy "$STAGE" --project-name=premise-labs --branch=main
+          # #8816: ASSERTED against what npm resolved, not just declared. A declared
+          # "4" resolves to 4.151.1 and fails here; `:?` refuses an empty value
+          # instead of letting `wrangler@` float to latest. The verify and the
+          # deploy share this one shell, so the value proved is the value used.
+          got="$(npx --yes "wrangler@${WRANGLER_VERSION:?}" --version | tr -d '[:space:]')"
+          if [ "$got" != "$WRANGLER_VERSION" ]; then
+            echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"
+            exit 1
+          fi
+          npx --yes "wrangler@${WRANGLER_VERSION:?}" pages deploy "$STAGE" --project-name=premise-labs --branch=main
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
@@ -790,8 +812,18 @@ jobs:
           echo "tortoise-dashboard project visible — deploying"
       - name: Deploy to Cloudflare Pages (tortoise-dashboard project)
         run: |
+          # #8816: the read is the FIRST statement so the relative path resolves
+          # against the workspace, before any `cd`; the spec and its assertion come
+          # from config/wrangler-version, and `:?` refuses an empty declaration.
+          WRANGLER_VERSION="$(cat config/wrangler-version)"
+          : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
+          got="$(npx --yes "wrangler@${WRANGLER_VERSION:?}" --version | tr -d '[:space:]')"
+          if [ "$got" != "$WRANGLER_VERSION" ]; then
+            echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"
+            exit 1
+          fi
           cd website/apps/dashboard
-          npx --yes wrangler@4 pages deploy dist --project-name=tortoise-dashboard --branch=main
+          npx --yes "wrangler@${WRANGLER_VERSION:?}" pages deploy dist --project-name=tortoise-dashboard --branch=main
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56

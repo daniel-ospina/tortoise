@@ -5,6 +5,7 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+from tortoise.entity_identity import display_holder_ids, record_non_folded
 from tortoise.live import epistemic_disjunction
 
 # #5048: the ONE home for the two mitigation predicates, shared with
@@ -187,8 +188,10 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
     if label == "Subject":
         _mint_subject_stub(g, key)
         rows = g.query(
-            "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 1",
+            "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2",
             params={"name": key}).result_set
+        if len(rows) > 1:
+            return _refuse_ambiguous_target("Subject", key, rows, rel)
         if not rows:
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
@@ -233,12 +236,43 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
         return {"internal": rows[0][0], "logical": rows[0][1]}
     # Non-stubbable labels — resolve-only (never mint). Event nodes match by
     # name (set by create_event).
+    #
+    # #5509: a NAME is a mutable natural key (D2: two live carriers are legal),
+    # so "the" target is not the backend's arbitrary first row. `LIMIT 1`
+    # silently picked one — a rebuilt edge could land on a different same-name
+    # carrier than the one live pointed at, i.e. replay was order-dependent —
+    # and the Object arm is exactly the identity read #5509 owns. Resolve
+    # EXACTLY ONE holder or refuse: two or more records the non-folded entry and
+    # skips the descriptor (the honest outcome for a name that does not name one
+    # identity). NO status filter here, deliberately: this is REPLAY resolution
+    # of an already-written edge, which must reach the node live addressed even
+    # when it has since gone terminal — routing it through the live resolver
+    # would make rebuild disagree with the graph it is rebuilding.
     q = (f"MATCH (x:{label} {{name:$key}}) "
-         f"RETURN ID(x), x.id LIMIT 1")
+         f"RETURN ID(x), x.id LIMIT 2")
     rows = g.query(q, params={"key": key}).result_set
+    if len(rows) > 1:
+        return _refuse_ambiguous_target(label, key, rows, rel)
     if not rows:
         return None
     return {"internal": rows[0][0], "logical": rows[0][1]}
+
+
+def _refuse_ambiguous_target(label: str, key: str, rows, rel: str):
+    """Record + report a name held by 2+ carriers; never pick one.
+
+    ``rows`` are the `(internal, logical)` pairs of every holder. Returns None
+    so the caller skips the structural edge: a name that does not name ONE
+    identity has no target, and picking an arbitrary holder is what #5509
+    removes. The entry (not the log line) is the record.
+    """
+    record_non_folded(label, key, display_holder_ids([r[1] for r in rows]))
+    logger.warning(
+        "structural edge %s: target %s %r has %d carriers %s — descriptor "
+        "skipped (never guess a name-keyed identity, #5509)",
+        rel, label, key, len(rows),
+        display_holder_ids([r[1] for r in rows]))
+    return None
 
 
 # Canonical structural-edge predicate vocabulary (ONTOLOGY §3.2/§3.3 + #391).
@@ -747,7 +781,7 @@ class _EdgeHandlers:
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
 
-    def _sync_tags(self, point_id: str, tags) -> None:
+    def _sync_tags(self, point_id: str, tags, *, sweep_orphans: bool = False) -> None:
         """Reconcile `TAGGED` edges for a point against a tags value (#485).
 
         ONE routine for BOTH writers (#2897): the SDK live path
@@ -818,6 +852,20 @@ class _EdgeHandlers:
         `check_consistency` names `tags` in `uncarried_journal_fields` (see
         `consistency._uncarried`), so the check stays green on a byte-faithful
         replay without hiding that the property half was not carried.
+
+        ``sweep_orphans`` (#8854 review P3) forces the orphan-`:Tag` GC below to
+        run even when THIS invocation deleted no edge. It exists because this
+        routine is now retried as a whole (#7405): a first attempt can land the
+        `DELETE r` and then be ABORTED on the GC statement, and the retry's
+        re-read of `stale` then finds nothing left to delete — so a
+        per-invocation `removed` counter would skip the sweep and leave an
+        orphan `:Tag` that `list_tags` reports as a `count: 0` entry while a
+        rebuilt graph, which replays this routine from a clean state, has none
+        (live != replay). A caller that can DELETE edges on a RETRIED path —
+        `update_point`'s tag sync — passes ``True`` so the sweep is a function of
+        the caller's tag list rather than of an attempt-local counter.
+        ``create_point`` keeps the default: a fresh point has no stale edges, so
+        the scan stays off its hot path.
         """
         if not isinstance(tags, (list, tuple)):
             return
@@ -846,8 +894,9 @@ class _EdgeHandlers:
         # GC orphaned :Tag nodes when the sync actually removed edges — tag
         # removal can leave a Tag with no TAGGED referrers (#485). Skipped on
         # create_point (no stale edges there), so new-point creation never pays
-        # the scan.
-        if removed:
+        # the scan. `sweep_orphans` forces it on a RETRIED reconciler whose
+        # earlier attempt already landed the DELETEs (see the docstring).
+        if removed or sweep_orphans:
             self.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
     def _create_about_edges(self, source_id: str, entity_name: str) -> None:

@@ -251,7 +251,22 @@ jobs:
                          "tests/test_blog_markdown.mjs",
                          "docs/blog-authoring.md",
                          # #8293: the SEO keyword + agent-limiter harness.
-                         "tests/test_blog_seo_meta.mjs", "tests/test_deck_view.mjs"),
+                         "tests/test_blog_seo_meta.mjs", "tests/test_deck_view.mjs",
+                         # #8816: the wrangler pin is an INPUT to this job — the
+                         # version file, the guard that pins its shape, and the
+                         # workflow that carries the DEPLOY assertions. Without
+                         # them a version-only (or guard-only) PR would not run the
+                         # job whose toolchain it changes.
+                         # This file (`ci.yml`) is deliberately NOT named here: it
+                         # carries three consumers, so naming it would run two full
+                         # e2e suites on every workflow edit. What makes that safe is
+                         # that `legal-e2e` is UNGATED — it installs, verifies and
+                         # boots from the same wiring on every PR, and the guard arm
+                         # `test_the_ci_yml_wrangler_wiring_is_exercised_by_an_ungated_job`
+                         # pins exactly that property.
+                         "config/wrangler-version",
+                         "tests/test_e2e_wrangler_prewarm.py",
+                         ".github/workflows/deploy-pages.yml"),
                   # #3501: the BFF auth suites live here and had NO path entry —
                   # a suite-only PR could not trigger the job that runs them.
                   startswith("tests/e2e/auth/"),
@@ -426,6 +441,12 @@ jobs:
               # dist rebuild ran against the previous bundle — is GONE: the job
               # builds before it boots.)
               "dashboard_e2e": any_file(
+                  # #8816: the wrangler inputs — the version file, and the guard
+                  # that pins the shape of the wiring this job's install/boot uses.
+                  # `ci.yml` itself is named at the END of this gate, so it is not
+                  # repeated here.
+                  isfile("config/wrangler-version",
+                         "tests/test_e2e_wrangler_prewarm.py"),
                   isfile("tests/e2e/test_keys_table_mixed.py"),
                   isfile("tests/e2e/test_graphs_management.py"),
                   # #4221: `test_session_login_flow.py` is the SHARED HARNESS
@@ -1603,51 +1624,42 @@ jobs:
       # legal-e2e job) instead of the LIVE page — the strict-validity gates,
       # the provision-401 clear→/auth path and the waitForSession validity
       # check land in this PR and only exist in the deployed page AFTER merge.
-      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
-      # clock starts — a fresh runner's npx fetch was eating most of the 120s
-      # boot budget (empty /tmp/wrangler.log = cold npx install never finished).
-      - name: Pre-warm wrangler toolchain
+      # The boot below runs the binary this step verified (#8816): the version
+      # comes from config/wrangler-version and is asserted against what npm
+      # resolved, before the boot clock starts (#2178: a cold fetch used to eat
+      # the readiness budget).
+      - name: Install and verify the wrangler toolchain (#8816)
         run: |
-          # Pin the SAME wrangler the boot step below starts: `@4` floats to the
-          # newest 4.x and so warms a DIFFERENT tarball than the pinned one the
-          # boot actually fetches — the cold fetch this step exists to absorb
-          # still landed at boot (the agent-infra#414 drift class), and resolving
-          # a range downloads the whole packument. Retry the fetch as well: one
-          # npm-registry ECONNRESET on a cold runner failed the required
-          # legal-e2e check outright (2026-10-15, `Invalid response body while
-          # trying to fetch https://registry.npmjs.org/wrangler: read
-          # ECONNRESET`) — before the boot loop's own 2x240s retry could start.
-          ok=0
+          # ONE source for the version: config/wrangler-version, read here and
+          # nowhere else in this file. The value is ASSERTED against the version
+          # npm actually resolved, so the check is exact for every spelling a
+          # text scan cannot see: a declared "4" resolves to 4.151.1 and fails,
+          # and so does an empty declaration. The boot steps below then run bare
+          # `wrangler` — no spec at the call site, so nothing can drift.
+          #
+          # This replaces the best-effort pre-warm (#2178/#8744): an assertion
+          # needs a resolved binary, so the last of the three attempts is hard.
+          # The readiness loop no longer has to absorb a cold fetch, so its
+          # 240s budget is a readiness budget again.
+          WRANGLER_VERSION="$(cat config/wrangler-version)"
+          : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
           for attempt in 1 2 3; do
-            if npx --yes wrangler@4.127.0 --version \
-               && npx --yes wrangler@4.127.0 pages dev --help >/dev/null; then
-              ok=1
-              break
+            if npm install -g "wrangler@${WRANGLER_VERSION:?}"; then
+              got="$(wrangler --version | tr -d '[:space:]')"
+              if [ "$got" = "$WRANGLER_VERSION" ]; then
+                echo "wrangler ${got} installed and verified"
+                exit 0
+              fi
+              # A mismatch is not transient: retrying would install the same
+              # wrong version. Fail now, loudly, with both values.
+              echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"
+              exit 1
             fi
-            echo "wrangler pre-warm attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
+            echo "wrangler install attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
             sleep $((attempt * 10))
           done
-          if [ "$ok" != 1 ]; then
-            # Best-effort by design: this step only warms caches. The boot step
-            # below is the real gate (it retries twice at 240s each and surfaces
-            # wrangler's own log), so a transient registry reset must not red
-            # the job here.
-            echo "::warning::wrangler pre-warm failed after 3 attempts - deferring to the boot retry"
-          fi
-      # #3501: the auth suites resolve wrangler via `shutil.which("wrangler")`
-      # and FAIL (not skip) when it is missing — `require_toolchain()` calls
-      # `pytest.fail()`, so a missing toolchain reds this job instead of
-      # reporting a green step that asserted nothing. An earlier draft of that
-      # helper SKIPPED, which is exactly the silent no-op this step exists to
-      # prevent: PATH had no wrangler, so the suite reported "33 skipped", exit
-      # 0, and asserted nothing. Verified with a wrangler-less PATH. Skipping is
-      # still reachable, but only via an explicit `AUTH_ALLOW_NO_TOOLCHAIN=1`
-      # opt-in that no workflow sets.
-      #
-      # The npx pre-warm above does NOT put wrangler on PATH; this does. Removing
-      # this step reds welcome-e2e — it is load-bearing, not belt-and-braces.
-      - name: Install wrangler on PATH (required by the #3501 auth suites)
-        run: npm install -g wrangler@4.127.0
+          echo "::error::could not install wrangler ${WRANGLER_VERSION} after 3 attempts"
+          exit 1
       # #4054: the auth suites serve the dashboard's BUILT `dist/` root
       # (tests/e2e/auth/conftest.py -> ensure_dashboard_dist()). Without a
       # lockfile-pinned install here, that helper's `npm run build` has no local
@@ -1665,7 +1677,7 @@ jobs:
         run: |
           cd website
           for attempt in 1 2; do
-            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
+            wrangler pages dev . --port 8788 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > /tmp/wrangler.log 2>&1 &
             echo $! > /tmp/wrangler.pid
@@ -1792,64 +1804,59 @@ jobs:
       # tortoise/__init__) + the e2e test extras (playwright, pytest-playwright).
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
-      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
-      # clock starts — a fresh runner's npx fetch was eating most of the 120s
-      # boot budget (empty /tmp/wrangler.log = cold npx install never finished;
-      # #2211 hit this 4x in a row 2026-09-04). --version is fast; the
-      # readiness loop below retries twice at 240s each.
-      #
-      # ⛔ PIN THE EXACT VERSION THE BOOT USES (4.127.0), not a floating `@4`.
-      # A floating pre-warm fetched a DIFFERENT wrangler (4.151.0 on
-      # 2026-10-15) and left the boot's pinned install un-warmed; that install
-      # failed on a runner and the npx shim emitted `sh: 1: wrangler: not
-      # found`, timing out both attempts on a PR that touched no website file
-      # (#8744). Warming the pinned version also lets the retry reuse a
-      # COMPLETE cache entry instead of a half-written one.
-      - name: Pre-warm wrangler toolchain
+      # The boot below runs the binary this step verified (#8816): the version
+      # comes from config/wrangler-version and is asserted against what npm
+      # resolved, before the boot clock starts (#2178: a cold fetch used to eat
+      # the readiness budget; #8744: a pre-warm that floated fetched a DIFFERENT
+      # wrangler than the boot used).
+      - name: Install and verify the wrangler toolchain (#8816)
         run: |
-          # Pin the SAME wrangler the boot step below starts: `@4` floats to the
-          # newest 4.x and so warms a DIFFERENT tarball than the pinned one the
-          # boot actually fetches — the cold fetch this step exists to absorb
-          # still landed at boot (the agent-infra#414 drift class), and resolving
-          # a range downloads the whole packument. Retry the fetch as well: one
-          # npm-registry ECONNRESET on a cold runner failed the required
-          # legal-e2e check outright (2026-10-15, `Invalid response body while
-          # trying to fetch https://registry.npmjs.org/wrangler: read
-          # ECONNRESET`) — before the boot loop's own 2x240s retry could start.
-          ok=0
+          # ONE source for the version: config/wrangler-version, read here and
+          # nowhere else in this file. The value is ASSERTED against the version
+          # npm actually resolved, so the check is exact for every spelling a
+          # text scan cannot see: a declared "4" resolves to 4.151.1 and fails,
+          # and so does an empty declaration. The boot steps below then run bare
+          # `wrangler` — no spec at the call site, so nothing can drift.
+          #
+          # This replaces the best-effort pre-warm (#2178/#8744): an assertion
+          # needs a resolved binary, so the last of the three attempts is hard.
+          # The readiness loop no longer has to absorb a cold fetch, so its
+          # 240s budget is a readiness budget again.
+          WRANGLER_VERSION="$(cat config/wrangler-version)"
+          : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
           for attempt in 1 2 3; do
-            if npx --yes wrangler@4.127.0 --version \
-               && npx --yes wrangler@4.127.0 pages dev --help >/dev/null; then
-              ok=1
-              break
+            if npm install -g "wrangler@${WRANGLER_VERSION:?}"; then
+              got="$(wrangler --version | tr -d '[:space:]')"
+              if [ "$got" = "$WRANGLER_VERSION" ]; then
+                echo "wrangler ${got} installed and verified"
+                exit 0
+              fi
+              # A mismatch is not transient: retrying would install the same
+              # wrong version. Fail now, loudly, with both values.
+              echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"
+              exit 1
             fi
-            echo "wrangler pre-warm attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
+            echo "wrangler install attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
             sleep $((attempt * 10))
           done
-          if [ "$ok" != 1 ]; then
-            # Best-effort by design: this step only warms caches. The boot step
-            # below is the real gate (it retries twice at 240s each and surfaces
-            # wrangler's own log), so a transient registry reset must not red
-            # the job here.
-            echo "::warning::wrangler pre-warm failed after 3 attempts - deferring to the boot retry"
-          fi
+          echo "::error::could not install wrangler ${WRANGLER_VERSION} after 3 attempts"
+          exit 1
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
-          # wrangler pinned to 4.127.0 (@4 floats to latest each run — same
-          # drift class as the ruff pin, agent-infra#414). 2026-09-04 ~04:00Z
-          # a runner-fleet cold-npx stall broke this boot on EVERY PR (the
-          # #2178/#2211 hardening class): /tmp/wrangler.log stayed EMPTY — the
-          # cold npx install never finished inside the 120s budget. 4.127.0 is
-          # the version verified to start (macOS in 5s, cold linux ~90s); the
-          # retry's 2nd attempt reuses the warm npm cache.
+          # The binary is the one the install step above verified against
+          # config/wrangler-version (#8816) — no spec here, so nothing can drift.
+          # 2026-09-04 ~04:00Z a runner-fleet cold-npx stall broke this boot on
+          # EVERY PR (#2178/#2211): /tmp/wrangler.log stayed EMPTY because a cold
+          # install never finished inside the readiness budget. That fetch now
+          # happens before the clock starts, and a failure to get it reds loudly.
           #
           # --compatibility-date pinned: wrangler defaults to "today", but the
           # bundled workerd lags a day behind (max date < today) → dev server
           # fails to start. Any stable date ≤ workerd's max works; the
           # middleware uses only stable APIs (next()/ASSETS.fetch).
           for attempt in 1 2; do
-            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
+            wrangler pages dev . --port 8788 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > /tmp/wrangler.log 2>&1 &
             echo $! > /tmp/wrangler.pid
@@ -1870,15 +1877,6 @@ jobs:
             # with > anyway, and deleting after the LAST attempt would remove
             # the only evidence before the final cat (review P1 — a double
             # failure must still surface wrangler's own diagnostics).
-            #
-            # #8744: an npx cache entry left half-written by a failed install
-            # cannot be recovered by REUSING it — the retry relaunched npx,
-            # the shim re-ran, and `sh: 1: wrangler: not found` repeated
-            # identically until the job reddened on a PR that touched no
-            # website file. Clear the npx cache so attempt 2 is a genuinely
-            # clean install (from the warm tarball cache), which is what the
-            # retry was always meant to be.
-            rm -rf "$(npm config get cache)/_npx"
             sleep 3
           done
           # Final cleanup: flush the log + free :8788 before surfacing it
@@ -1910,7 +1908,7 @@ jobs:
           # `sessions` table. Without the binding a request carrying a cookie
           # answers 503 ("store unreachable") instead of 401/200.
           for attempt in 1 2; do
-            npx --yes wrangler@4.127.0 pages dev dist --port 8790 --ip 127.0.0.1 \
+            wrangler pages dev dist --port 8790 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 --d1 SESSIONS \
               > /tmp/wrangler-app.log 2>&1 &
             echo $! > /tmp/wrangler-app.pid
@@ -2001,46 +1999,48 @@ jobs:
           cd website/apps/dashboard
           npm ci
           npm run build
-      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
-      # clock starts — a fresh runner's npx fetch was eating most of the 120s
-      # boot budget (first CI run died here with an empty log). --version is
-      # fast; the readiness loops below now retry twice at 240s each.
-      - name: Pre-warm wrangler toolchain
+      # The boot below runs the binary this step verified (#8816): the version
+      # comes from config/wrangler-version and is asserted against what npm
+      # resolved, before the boot clock starts (#2178: a cold fetch used to eat
+      # the readiness budget).
+      - name: Install and verify the wrangler toolchain (#8816)
         run: |
-          # Pin the SAME wrangler the boot step below starts: `@4` floats to the
-          # newest 4.x and so warms a DIFFERENT tarball than the pinned one the
-          # boot actually fetches — the cold fetch this step exists to absorb
-          # still landed at boot (the agent-infra#414 drift class), and resolving
-          # a range downloads the whole packument. Retry the fetch as well: one
-          # npm-registry ECONNRESET on a cold runner failed the required
-          # legal-e2e check outright (2026-10-15, `Invalid response body while
-          # trying to fetch https://registry.npmjs.org/wrangler: read
-          # ECONNRESET`) — before the boot loop's own 2x240s retry could start.
-          ok=0
+          # ONE source for the version: config/wrangler-version, read here and
+          # nowhere else in this file. The value is ASSERTED against the version
+          # npm actually resolved, so the check is exact for every spelling a
+          # text scan cannot see: a declared "4" resolves to 4.151.1 and fails,
+          # and so does an empty declaration. The boot steps below then run bare
+          # `wrangler` — no spec at the call site, so nothing can drift.
+          #
+          # This replaces the best-effort pre-warm (#2178/#8744): an assertion
+          # needs a resolved binary, so the last of the three attempts is hard.
+          # The readiness loop no longer has to absorb a cold fetch, so its
+          # 240s budget is a readiness budget again.
+          WRANGLER_VERSION="$(cat config/wrangler-version)"
+          : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
           for attempt in 1 2 3; do
-            if npx --yes wrangler@4.127.0 --version \
-               && npx --yes wrangler@4.127.0 pages dev --help >/dev/null; then
-              ok=1
-              break
+            if npm install -g "wrangler@${WRANGLER_VERSION:?}"; then
+              got="$(wrangler --version | tr -d '[:space:]')"
+              if [ "$got" = "$WRANGLER_VERSION" ]; then
+                echo "wrangler ${got} installed and verified"
+                exit 0
+              fi
+              # A mismatch is not transient: retrying would install the same
+              # wrong version. Fail now, loudly, with both values.
+              echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"
+              exit 1
             fi
-            echo "wrangler pre-warm attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
+            echo "wrangler install attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
             sleep $((attempt * 10))
           done
-          if [ "$ok" != 1 ]; then
-            # Best-effort by design: this step only warms caches. The boot step
-            # below is the real gate (it retries twice at 240s each and surfaces
-            # wrangler's own log), so a transient registry reset must not red
-            # the job here.
-            echo "::warning::wrangler pre-warm failed after 3 attempts - deferring to the boot retry"
-          fi
+          echo "::error::could not install wrangler ${WRANGLER_VERSION} after 3 attempts"
+          exit 1
       - name: Start wrangler pages dev preview (website/ = auth origin, :8788)
         run: |
           cd website
           for attempt in 1 2; do
-            # Pinned to the same 4.127.0 as welcome-e2e/legal-e2e and this
-            # job's pre-warm: `@4` floats to latest each run (agent-infra#414),
-            # warming a tarball the pre-warm never fetched.
-            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
+            # No spec: this is the binary the install step verified (#8816).
+            wrangler pages dev . --port 8788 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > /tmp/wrangler-auth.log 2>&1 &
             echo $! > /tmp/wrangler-auth.pid
@@ -2070,7 +2070,7 @@ jobs:
             # unreachable") instead of 200, so the suite's seeded-session
             # fixtures can never render the shell. The harness seeds the row it
             # reads (tests/e2e/test_session_login_flow.py).
-            npx --yes wrangler@4.127.0 pages dev dist --port 8790 --ip 127.0.0.1 \
+            wrangler pages dev dist --port 8790 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 --d1 SESSIONS \
               > /tmp/wrangler-dash.log 2>&1 &
             echo $! > /tmp/wrangler-dash.pid
