@@ -1980,3 +1980,98 @@ def test_the_terminal_diagnostic_does_not_claim_no_point_after_its_own_read(
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+# ── 10. every witnessed site must REFUSE a re-issue that lands nothing ──────
+#
+# A witness nobody reverts in a test is a witness nothing protects: delete it
+# and the suite stays green, while a landed-nothing write starts reporting
+# success again. These four arms each had a retry test but no LANDING test.
+
+
+def _object_point(sdk) -> str:
+    """A Point that also carries the `:Object` label (the entity arm)."""
+    pid = _pid(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
+    return pid
+
+
+def test_the_object_arm_refuses_a_reissue_that_lands_nothing(tmp_path):
+    """`SET (Object)` returns `count(n)`; a zero count is a NON-landing."""
+    sdk = _sdk(tmp_path, "objlanding")
+    try:
+        pid = _object_point(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _OBJECT_PROP_SET_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, confidence=0.31)
+
+        assert proxy.vanished, "fixture precondition: the Point must be gone"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
+        tmp_path, monkeypatch):
+    """`SET (Object promote)` returns `n`; an empty row set is a NON-landing."""
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "objpromotelanding")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _OBJECT_PROMOTE_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, status="live")
+
+        assert proxy.vanished, "fixture precondition: the Point must be gone"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_derived_embedding_arm_refuses_a_reissue_that_lands_nothing(
+        tmp_path):
+    """The clear+set arm returns `n`; an empty row set is a NON-landing."""
+    sdk = _sdk(tmp_path, "embedlanding")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _EMBEDDING_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, content=f"revised {uuid.uuid4().hex}")
+
+        assert proxy.vanished, "fixture precondition: the Point must be gone"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_corrects_edge_refuses_a_reissue_that_lands_nothing(tmp_path):
+    """`MERGE (a)-[:CORRECTS]->(b)` needs BOTH anchors; a lost `a` is a NON-landing."""
+    sdk = _sdk(tmp_path, "correctslanding")
+    try:
+        old = _pid(sdk)
+        new = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _INVALIDATE_CORRECTS_NEEDLE, victim=old)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.invalidate_point(old, new)
+
+        assert proxy.vanished, "fixture precondition: the old Point must be gone"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
