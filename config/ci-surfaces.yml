@@ -91,6 +91,12 @@ surfaces:
   # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
+  # #7951 (increment 2, the revision door): `update_point` appends its
+  # `PointRevised` record BEFORE the cache write. Same subjects as the
+  # create-side suite above (`tortoise/sdk.py`), so it is registered on the
+  # same surfaces — an `sdk.py` change selects the full matrix, and the
+  # narrower surfaces are what keep it from going silently green.
+  - test_7951_update_point_outbox.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #7968 / PR #8179 review P1: DUAL-REGISTERED with `core` below. The guard
   # pins `purge_org_control_plane` in `tortoise/supabase_control.py`, which IS a
@@ -1143,6 +1149,12 @@ surfaces:
   # full matrix, and a `projection/`-only change falls through to `core`.
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
+  # #7951 (increment 2, the revision door): `update_point` appends its
+  # `PointRevised` record BEFORE the cache write. Same subjects as the
+  # create-side suite above (`tortoise/sdk.py`), so it is registered on the
+  # same surfaces — an `sdk.py` change selects the full matrix, and the
+  # narrower surfaces are what keep it from going silently green.
+  - test_7951_update_point_outbox.py
   # #5141: `graph-scripts/backfill_references.py` matches no named surface and
   # falls through to `core`, so this arm is what runs the script's smoke test on
   # a graph-script-only diff. The pre-existing coverage could not see the
@@ -3000,6 +3012,12 @@ surfaces:
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
+  # #7951 (increment 2, the revision door): `update_point` appends its
+  # `PointRevised` record BEFORE the cache write. Same subjects as the
+  # create-side suite above (`tortoise/sdk.py`), so it is registered on the
+  # same surfaces — an `sdk.py` change selects the full matrix, and the
+  # narrower surfaces are what keep it from going silently green.
+  - test_7951_update_point_outbox.py
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
   # change. Dual-registered under `core` (above) for its
@@ -3124,6 +3142,12 @@ surfaces:
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
+  # #7951 (increment 2, the revision door): `update_point` appends its
+  # `PointRevised` record BEFORE the cache write. Same subjects as the
+  # create-side suite above (`tortoise/sdk.py`), so it is registered on the
+  # same surfaces — an `sdk.py` change selects the full matrix, and the
+  # narrower surfaces are what keep it from going silently green.
+  - test_7951_update_point_outbox.py
   - test_8686_selfhost_operational_state.py
   - test_served_skill_byte_parity.py
   # #3094: DUAL-REGISTERED with `core`/`eval`. The empty-means-unset URI-read
@@ -3385,6 +3409,12 @@ surfaces:
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
+  # #7951 (increment 2, the revision door): `update_point` appends its
+  # `PointRevised` record BEFORE the cache write. Same subjects as the
+  # create-side suite above (`tortoise/sdk.py`), so it is registered on the
+  # same surfaces — an `sdk.py` change selects the full matrix, and the
+  # narrower surfaces are what keep it from going silently green.
+  - test_7951_update_point_outbox.py
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
   # #7936: DUAL-REGISTERED with `core` (above). `tortoise/ids.py` is an exact
@@ -3616,6 +3646,12 @@ surfaces:
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
+  # #7951 (increment 2, the revision door): `update_point` appends its
+  # `PointRevised` record BEFORE the cache write. Same subjects as the
+  # create-side suite above (`tortoise/sdk.py`), so it is registered on the
+  # same surfaces — an `sdk.py` change selects the full matrix, and the
+  # narrower surfaces are what keep it from going silently green.
+  - test_7951_update_point_outbox.py
   # #7809: DUAL-REGISTERED with `api`/`core` — this guard pins
   # `tortoise/embeddings.py::_embedder_warmup_enabled` (the flag resolution the
   # hosted lifespan now calls), and that module is an EXACT
@@ -5403,6 +5439,7 @@ durations:
   test_5388_org_enumeration_completeness.py: 2.5
   test_7951_write_doors.py: 6.3
   test_7951_create_point_outbox.py: 3.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 772/858 = 89.98% — the same shape as the `test_7950_capstone_probe.py` row above. Local embedded-lane reading 3.2s (14 tests × ~0.23s). Refresh from the first post-merge run that includes it.
+  test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4
   test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
   test_env_contract_covers_supabase_config.py: 2.0  # #4030: appended by hand so the entry exists at all — main sat only just above the guard's floor (764/848 fast files = 90.09%), and this new fast file tipped `duration_coverage_issues()` below it (764/849 = 89.99%, formatted as the `90.0%` in that error). Local estimate: 3.24 s measured for this file plus its paired pin in test_ci_selection.py, most of it one conftest import. `tools/ci_timing.py --refresh-durations` replaces it with the CI-measured value.
