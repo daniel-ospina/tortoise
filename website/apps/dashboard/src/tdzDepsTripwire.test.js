@@ -26,6 +26,39 @@ import { parseModule } from './wizardRenderedCopy.js'
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
 
+/** `source` with comments removed, so a negative pin can be neither satisfied
+ *  nor defeated by prose. Block comments and full-line `//` comments (the shape
+ *  this file has always used). */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n')
+}
+
+/**
+ * The connect-step region of `source`: from the inline mint/paste affordance's
+ * declaration to the `{wizardStep === 3 && (` block that follows it, comment-
+ * stripped. BOTH markers are `-1`-checked.
+ *
+ * #3726 cycle 5: the END marker was the last unguarded `indexOf` in this file. An
+ * unresolved end makes `slice(start, -1)` the whole rest of the file, which still
+ * satisfies a `length > 1000` guard — so the pin silently watches a much larger
+ * region: it can red on an unrelated change far below, and it is no longer the
+ * connect step it names. The marker is a whitespace-tolerant pattern for the same
+ * reason the rest of this PR is quote-agnostic: an exact-text sentinel is a
+ * formatting dependency.
+ */
+function connectStepSlice(source) {
+  const live = stripComments(source)
+  const start = live.indexOf('const wizardPasteRow = (')
+  assert.notEqual(start, -1, 'the connect-step start marker must resolve (without it the slice is nothing)')
+  const end = /\{\s*wizardStep\s*===\s*3\s*&&\s*\(/.exec(live.slice(start))
+  assert.ok(end, 'the connect-step end marker must resolve (an unresolved end makes the slice the rest of the file)')
+  return live.slice(start, start + end.index)
+}
+
 const FN = /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/
 const ARROW = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\(([^)]*)\)|([A-Za-z_$][\w$]*))\s*=>/
 
@@ -85,7 +118,7 @@ export function declNames(line) {
  * (a `/\[/` regex inside a hook body desynchronised the paren walk) while
  * inventing violations for a hook call written in a comment or a string.
  *
- * @returns {Array<{start:number, line:number, inner:string, names:string[]}>}
+ * @returns {Array<{start:number, line:number, inner:string, expr:string, names:string[]}>}
  */
 export function depsArrays(source) {
   const out = []
@@ -111,16 +144,23 @@ export function depsArrays(source) {
     // The NAMES come from the elements, not from splitting the inner text: a
     // comment inside the array (`[a, // why\n lateB]`) swallowed the identifier
     // that followed it — the same hand-lexing hazard the AST seam removes.
+    // The deps EXPRESSION is the elements' own spans with whitespace collapsed,
+    // so `a.b` stays distinct from `a` (a named pin below keys on it) while a
+    // prettier reflow, a trailing comma or a comment BETWEEN elements is not a
+    // change — formatting is not a behaviour, which is this issue's own thesis.
     const names = []
+    const exprs = []
     for (const el of last.elements) {
       let n = el
       while (n && /^(Optional)?MemberExpression$/.test(n.type)) n = n.object
       if (n?.type === 'Identifier') names.push(n.name)
+      exprs.push(el ? source.slice(el.start, el.end).replace(/\s+/g, ' ').trim() : '')
     }
     out.push({
       start: last.start,
       line: last.loc.start.line,
       inner: source.slice(last.start + 1, last.end - 1),
+      expr: exprs.join(', '),
       names,
     })
   }
@@ -320,9 +360,14 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   // after the real L7652 `[backupInfo]` array was DELETED and two comment-only
   // hook calls were added in its place. This list fails on a loss AND on an
   // invention, so a change to the scan or to main.jsx must be deliberate.
-  const found = depsArrays(mainJsx).map((d) => d.inner.trim())
+  const found = depsArrays(mainJsx).map((d) => d.expr)
   // The deps EXPRESSIONS, not their line numbers: a line number reddens this
   // pin on any unrelated inserted line, which trains people to re-baseline it.
+  // They are the ELEMENTS' spans with whitespace collapsed (`expr`), not the
+  // array's raw inner text: `inner.trim()` reddened on a prettier reflow of an
+  // array or a trailing comma — formatting changes that alter no behaviour,
+  // which is this issue's own thesis — while still keying on content, so a
+  // deleted, changed or added deps ENTRY reddens (falsifiability test below).
   assert.deepEqual(found, [
   "active, ms",
   "text",
@@ -366,6 +411,38 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   "backupInfo",
   "tab",
   ])
+})
+
+test('#3726 falsifiability: the identity pin compares deps EXPRESSIONS, not their formatting', () => {
+  // The pin keys on CONTENT, so a reflow of an array (and a comment BETWEEN its
+  // elements) must be the same entry — a prettier pass is not a behaviour change,
+  // which is this issue's own thesis — while a changed, dropped or added entry
+  // must be a different one. The old key (the array's raw inner text) failed the
+  // first half: it reddened on formatting.
+  const reflowed = [
+    'const a = useMemo(',
+    '  () => pick(ready),',
+    '  [',
+    '    ready, // the ready flag',
+    '    lateB,',
+    '  ],',
+    ')',
+  ].join('\n')
+  assert.deepEqual(depsArrays(reflowed).map((d) => d.expr), ['ready, lateB'],
+    'a reflowed array with a comment between elements is the same deps expression')
+  assert.notEqual(depsArrays(reflowed)[0].inner.trim(), 'ready, lateB',
+    'the raw inner text IS formatting-sensitive — keying on it reddened on a prettier pass')
+  // Content moves the pin in all three directions.
+  assert.deepEqual(depsArrays('const a = useMemo(() => 1, [ready])').map((d) => d.expr), ['ready'],
+    'a dropped entry must redden the pin')
+  assert.deepEqual(depsArrays('const a = useMemo(() => 1, [ready, lateC])').map((d) => d.expr), ['ready, lateC'],
+    'a changed entry must redden the pin')
+  assert.deepEqual(depsArrays('const a = useMemo(() => 1, [ready, lateB, lateC])').map((d) => d.expr), ['ready, lateB, lateC'],
+    'an added entry must redden the pin')
+  // A member expression stays DISTINCT from its root, so `team?.status` cannot be
+  // mistaken for `team` (or vice versa) by the pin.
+  assert.deepEqual(depsArrays('const a = useMemo(() => 1, [team?.status])').map((d) => d.expr), ['team?.status'])
+  assert.deepEqual(depsArrays('const a = useMemo(() => 1, [team])').map((d) => d.expr), ['team'])
 })
 
 test('#3726: a regex literal inside a hook body does not hide its deps array', () => {
@@ -536,11 +613,7 @@ test('#2710: the connect-step auto-open effect is GONE (no queued-modal leak)', 
   // 8k-line file can be satisfied or defeated by a comment, and it only matches
   // one exact single-line formatting. Both negatives run on the stripped source
   // so only LIVE code can fail them.
-  const live = mainJsx
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .filter((line) => !line.trim().startsWith('//'))
-    .join('\n')
+  const live = stripComments(mainJsx)
   assert.doesNotMatch(
     live,
     /wizardStep === 2 && isOwnerAdmin && !harnessKey && !capNotice/,
@@ -553,11 +626,37 @@ test('#2710: the connect-step auto-open effect is GONE (no queued-modal leak)', 
   )
   // Structural companion: the whole wizard tree must contain no queue call at
   // all (the only live one is the keys tab's "+ New key", outside this slice).
-  const connect = live.slice(
-    live.indexOf('const wizardPasteRow = ('),
-    live.indexOf('{wizardStep === 3 && ('),
-  )
+  // #3726 cycle 5: the slice's END is guarded inside the helper — an unresolved
+  // end used to be silently `slice(start, -1)` = everything to EOF.
+  const connect = connectStepSlice(mainJsx)
   assert.ok(connect.length > 1000, 'the connect-step slice must resolve (markers moved?)')
   assert.doesNotMatch(connect, /setKeyModalOpen\(true\)/,
     'no wizard path may queue the shared key-create modal')
+})
+
+test('#2710 falsifiability: the connect-step slice is bounded at BOTH ends', () => {
+  // Reproduces the pre-fix reader's failure mode and pins the guarded one.
+  const build = (marker) => [
+    '  const wizardPasteRow = (',
+    '    <div id="wizard-paste-row">paste</div>',
+    '  )',
+    ...(marker ? [marker] : []),
+    '  go(setKeyModalOpen(true))',
+  ].join('\n')
+  // A reflowed end marker is the same marker, and the slice still CLOSES there.
+  const reflowed = build('  { wizardStep === 3 && (')
+  assert.ok(!connectStepSlice(reflowed).includes('setKeyModalOpen'),
+    'the slice must END at the marker — the code after it belongs to a different step')
+  // With the marker gone, the pre-fix `indexOf` returns -1 and `slice(start, -1)`
+  // is everything to EOF: it still satisfies `length > 1000` and silently watches
+  // `setKeyModalOpen(true)`, which is not the region the pin claims to watch.
+  const unmarked = [build(null), ...Array.from({ length: 40 }, (_, i) => `  const pad${i} = ${'0'.repeat(40)}`)].join('\n')
+  const preFixSlice = unmarked.slice(
+    unmarked.indexOf('const wizardPasteRow = ('),
+    unmarked.indexOf('{wizardStep === 3 && ('),
+  )
+  assert.ok(preFixSlice.length > 1000 && preFixSlice.includes('setKeyModalOpen'),
+    'the unguarded end watched the rest of the file — `length > 1000` passed while the window was not the connect step')
+  assert.throws(() => connectStepSlice(unmarked), /end marker must resolve/,
+    'an unresolved end must fail LOUD, not widen the window to EOF')
 })

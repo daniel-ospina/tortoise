@@ -20,6 +20,14 @@ import { parseModule } from './wizardRenderedCopy.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
+// #3726 cycle 5: main.jsx (12k lines) is parsed ONCE for every AST pin below, and
+// the live welcome card's window is derived once and shared. A pin that re-parsed
+// per assertion also re-DERIVED its window per assertion, which is how two pins end
+// up disagreeing about which region they watch.
+const SRC_AST = parseModule(src)
+const SRC_JSX = jsxElements(SRC_AST)
+/** `jsxElements` over a SOURCE string — the entry point for the synthetics below. */
+const jsxOf = (source) => jsxElements(parseModule(source))
 
 /** className of a JSX opening element in ANY spelling (`"x"`, `'x'`, `{"x"}`, `` {`x`} ``). */
 function classNameOf(opening) {
@@ -61,9 +69,9 @@ function hasClass(cls, name) {
  * `wizardRenderedCopy.js::staticClassName` states for the prose census — the
  * static case is pinned here, the rendered case there.
  */
-function jsxElements(source) {
+function jsxElements(ast) {
   const out = []
-  walkNodes(parseModule(source), (node) => {
+  walkNodes(ast, (node) => {
     if (node.type !== 'JSXElement') return
     const cls = classNameOf(node.openingElement)
     if (cls === null) return
@@ -77,18 +85,26 @@ function jsxElements(source) {
  * The legacy #1643 `wizardSteps` array read from the AST: `{ declarators, labels }`,
  * `labels` being the element strings (any quoting) or `null`.
  *
- * #3726 cycle 4 (P1): the label pin used to be a SUBSTRING match over
- * `src.replace(/\\'/g, "'")`. That normalisation is what made it vacuous for
- * `You're set`: the needle then matched the LIVE ready copy
- * (`You're set up in <strong>{shownOrgName || 'your organization'}</strong>`) and a
- * comment, so DELETING the label from the legacy array — precisely the
- * archived-not-deleted break this test exists for — left the suite green. The
- * array's own elements cannot be satisfied by copy rendered somewhere else.
+ * #3726 cycle 4 (P1): the label pin used to be a SUBSTRING match over the whole
+ * file, which is wrong in BOTH directions:
+ *
+ *  - FALSE RED (the direction main actually had): the needle was the ESCAPED
+ *    spelling (`You\\'re set`), so a pure re-quote of `wizardSteps` redded a pin
+ *    about copy that had not changed — measured in the cycle-5 falsifiability
+ *    test below, against the real string shapes.
+ *  - FALSE GREEN (the direction an obvious "fix" introduces): normalising the
+ *    escape before matching (`src.replace(/\\'/g, "'")`) makes the needle match
+ *    the LIVE ready copy (`You're set up in <strong>…</strong>`) and a comment, so
+ *    DELETING the label from the legacy array — precisely the archived-not-deleted
+ *    break this test exists for — leaves the suite green.
+ *
+ * The array's own elements are quote-agnostic AND cannot be satisfied by copy
+ * rendered somewhere else; the pin's `declarators` count makes a shadow loud.
  */
-function legacyWizardLabels(source) {
+function legacyWizardLabels(ast) {
   let declarators = 0
   let labels = null
-  walkNodes(parseModule(source), (node) => {
+  walkNodes(ast, (node) => {
     if (node.type !== 'VariableDeclarator' || node.id.type !== 'Identifier' || node.id.name !== 'wizardSteps') return
     declarators += 1
     if (!node.init || node.init.type !== 'ArrayExpression') return
@@ -161,9 +177,9 @@ function keyName(node) {
 }
 
 /** Every `step: <literal>` write in the source, whatever the key/value quoting. */
-function stepWrites(source) {
+function stepWrites(ast) {
   const out = []
-  walkNodes(parseModule(source), (node) => {
+  walkNodes(ast, (node) => {
     if (node.type === 'ObjectProperty' && keyName(node.key) === 'step') {
       const value = literalString(node.value)
       if (value !== null) out.push(value)
@@ -179,14 +195,93 @@ function stepWrites(source) {
 }
 
 /** Every `forkId !== <literal>` comparison, whatever the literal's quoting. */
-function forkIdComparisons(source) {
+function forkIdComparisons(ast) {
   const out = []
-  walkNodes(parseModule(source), (node) => {
+  walkNodes(ast, (node) => {
     if (node.type !== 'BinaryExpression') return
     if (!['!==', '!='].includes(node.operator)) return
     if (node.left.type !== 'Identifier' || node.left.name !== 'forkId') return
     const value = literalString(node.right)
     if (value !== null) out.push(value)
+  })
+  return out
+}
+
+/**
+ * Every `x || '<static>'` fallback in `ast`, with its span and its LEFT OPERAND,
+ * in file order. `left` is the left side's identifier name when it is a bare
+ * identifier, else `null` — which is what lets the ready-copy pin require the
+ * FALLBACK VARIABLE and not merely the fallback string.
+ */
+function orFallbacks(ast) {
+  const out = []
+  walkNodes(ast, (node) => {
+    if (node.type !== 'LogicalExpression' || node.operator !== '||') return
+    const value = literalString(node.right)
+    if (value === null) return
+    out.push({ value, start: node.start, left: node.left.type === 'Identifier' ? node.left.name : null })
+  })
+  return out.sort((a, b) => a.start - b.start)
+}
+
+/**
+ * The live welcome card's span in `source`: from its `div.welcome-head` element to
+ * the archived block that follows it. BOTH bounds are asserted here, once — an
+ * unresolved END is what turns a window into the rest of the file, and an
+ * unresolved START what turns it into an empty slice, and either way every pin
+ * that uses the window certifies a region it does not name.
+ */
+function welcomeCardWindow(source, ast) {
+  const heads = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
+  assert.equal(heads.length, 1,
+    'the welcome-head card must resolve exactly once (a pin over an empty or unbounded window is a false green)')
+  const start = heads[0].start
+  const end = source.indexOf('LEGACY_WIZARD_ARCHIVED &&', start)
+  assert.notEqual(end, -1,
+    'the archived-block boundary must resolve (an unresolved end makes the window the rest of the file)')
+  return { start, end }
+}
+
+/**
+ * The fallback values of the ready-copy `shownOrgName || '<fallback>'` sites INSIDE
+ * the live welcome card, in file order.
+ *
+ * #3726 cycle 5 (P1): the pin used to collect every `x || <string>` in the 12k-line
+ * module and assert that ONE of them was `'your organization'`. main.jsx has three
+ * such sites — the welcome ready copy this test exists for, plus two
+ * "Continue setting up" headings in a DIFFERENT card — so deleting the ready-copy
+ * fallback stayed GREEN while the assertion message still claimed the ready copy
+ * was pinned. Anchored on all three axes: the left operand is the org variable, the
+ * fallback is a static string (any quoting, any spacing), and the site is in the
+ * card. A `||` elsewhere cannot satisfy it.
+ */
+function readyCopyOrgFallbacks(source, ast) {
+  const { start, end } = welcomeCardWindow(source, ast)
+  return orFallbacks(ast)
+    .filter((f) => f.left === 'shownOrgName' && f.start > start && f.start < end)
+    .map((f) => f.value)
+}
+
+/**
+ * Every write that sets `onboarding_complete` to **true** — object properties and
+ * member assignments, whatever the key's quoting.
+ *
+ * #3726 cycle 5 (P2): the reader pushed the literal's value REGARDLESS of polarity,
+ * so a legitimate reset (`onboarding_complete: false`) landed as `[false]` and
+ * failed a `deepEqual(…, [])` with a message naming a write that is not the defect.
+ * Only `true` is the forbidden opt-in (the sibling `stepWrites` pin has the same
+ * polarity discipline, and a positive control proving the reader can see the
+ * write at all).
+ */
+function onboardingCompleteWrites(ast) {
+  const out = []
+  walkNodes(ast, (node) => {
+    const isProp = node.type === 'ObjectProperty' && keyName(node.key) === 'onboarding_complete'
+    const isAssign = node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression'
+      && keyName(node.left.property) === 'onboarding_complete'
+    if (!isProp && !isAssign) return
+    const v = isProp ? node.value : node.right
+    if (v.type === 'BooleanLiteral' && v.value === true) out.push(true)
   })
   return out
 }
@@ -204,13 +299,14 @@ test('archived marker comment present (rollback drill reference)', () => {
 })
 
 test('legacy wizard labels still exist in source (archived-not-deleted)', () => {
-  // #3726 cycle 4 (P1): read the ARRAY, not the file text. The pre-fix form
-  // normalised the escape spelling and then substring-matched the whole file,
-  // which made `You're set` unfalsifiable (live copy + a comment both contain it)
-  // — a false green in the one test that guards the A0 rollback copy. The array's
-  // own elements are quote-agnostic AND cannot be satisfied by copy that renders
-  // somewhere else.
-  const { declarators, labels } = legacyWizardLabels(src)
+  // #3726 cycle 4 (P1): read the ARRAY, not the file text. main's needle was the
+  // ESCAPED spelling (`You\'re set`), so it pinned the array correctly but
+  // FALSE-REDDED on a pure re-quote of it; the obvious fix — normalise the escape
+  // and match the file — makes `You're set` unfalsifiable instead, because the live
+  // ready copy and a comment both contain it. Both directions are measured in the
+  // cycle-5 falsifiability test below. The array's own elements are quote-agnostic
+  // AND cannot be satisfied by copy that renders somewhere else.
+  const { declarators, labels } = legacyWizardLabels(SRC_AST)
   assert.equal(declarators, 1, 'exactly one `wizardSteps` binding — a second (a shadow) would make this pin ambiguous')
   assert.deepEqual(labels, ["Connect your tool", "Memory sources",
                             "Your agent's toolkit", "Seed your graph", "You're set"],
@@ -236,7 +332,7 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   // but MISLEADING red ("the <h1> does not name the stage") on a pure re-quote. On
   // the negative pin below the same empty window PASSED, which is the false GREEN
   // this branch exists to close. Selecting the element removes the window entirely.
-  const titles = jsxElements(src).filter((e) => e.tag === 'h1' && hasClass(e.cls, 'welcome-title'))
+  const titles = SRC_JSX.filter((e) => e.tag === 'h1' && hasClass(e.cls, 'welcome-title'))
   assert.equal(titles.length, 1, 'the live wizard <h1> (.welcome-title) must resolve exactly once')
   const stage = stageLabelCall(titles[0].node)
   assert.ok(stage, 'the live wizard <h1> names the stage through wizardStageLabel (a source grep cannot prove the override ORDER, which wizardFlow.test.js pins)')
@@ -253,22 +349,22 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   // The NEGATIVE pin's region: the live welcome card, from its own element to the
   // archived block that legitimately keeps the in-card label. Both boundaries are
   // checked; an unresolved END is the hazard that makes a negative pin vacuous.
-  const heads = jsxElements(src).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
-  assert.equal(heads.length, 1, 'the welcome-head card must resolve exactly once (a negative pin over an empty window is a false green)')
-  const headOpen = heads[0].start
-  const headEnd = src.indexOf('LEGACY_WIZARD_ARCHIVED &&', headOpen)
-  assert.notEqual(headEnd, -1, 'the archived-block boundary must resolve (an unresolved end makes the window the rest of the file)')
+  // #3726 cycle 5: the window bounds are derived ONCE, by a helper that asserts
+  // BOTH ends, and are shared with the ready-copy pin below. An unresolved END is
+  // the hazard that makes a negative pin vacuous; an unresolved START makes it
+  // empty, which passes `!includes(...)`.
+  const { start: headOpen, end: headEnd } = welcomeCardWindow(src, SRC_AST)
   // #3726 cycle 3: the assertion itself was still a two-delimiter regex, so the
   // third delimiter — and the JSX container form — kept the pin GREEN while the
   // label was genuinely back in the card. Class names from the AST instead: one
   // shape covers every spelling (`"wizard-title"`, `{'wizard-title'}`, `` {`wizard-title`} ``).
-  const inCardTitles = jsxElements(src).filter((e) => e.start > headOpen && e.start < headEnd && hasClass(e.cls, 'wizard-title'))
+  const inCardTitles = SRC_JSX.filter((e) => e.start > headOpen && e.start < headEnd && hasClass(e.cls, 'wizard-title'))
   assert.deepEqual(inCardTitles, [],
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // The archived block's title still READS wizardSteps (kept for rollback): the
   // element's own subtree must contain the `wizardSteps[...]` member read, which a
   // nearby comment or an unrelated 400-character slice cannot satisfy.
-  const archivedTitles = jsxElements(src).filter((e) => hasClass(e.cls, 'wizard-title'))
+  const archivedTitles = SRC_JSX.filter((e) => hasClass(e.cls, 'wizard-title'))
   assert.ok(archivedTitles.some((e) => hasWizardStepsRead(e.node)),
     'archived legacy title retained (it still renders wizardSteps[wizardStep])')
 })
@@ -276,38 +372,46 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
 // ── #3726 falsifiability: each pin above must be able to go RED ──────────────
 
 test('#3726 falsifiability: the legacy-label pin reads the ARRAY, not copy that happens to contain the label', () => {
-  // The pre-fix assertion, reproduced: normalise the escape spelling, then
-  // substring-match the WHOLE file. The live ready copy and a comment both
-  // contain `You're set`, so it stayed green with the legacy array's label gone —
-  // deleting the label from `wizardSteps` is exactly the archived-not-deleted
-  // break the test exists to catch.
-  const synthetic = [
-    'export const Card = () => (',
-    '  <p>',
-    '    You\'re set up in <strong>{shownOrgName || \'your organization\'}</strong>',
-    "    {/* the old step said You're set */}",
-    '  </p>',
-    ')',
-  ].join('\n')
-  assert.ok(synthetic.replace(/\\'/g, "'").includes("You're set"),
-    'the OLD needle matches live copy and a comment — this is the false green')
-  assert.deepEqual(legacyWizardLabels(synthetic), { declarators: 0, labels: null },
-    'the AST pin finds no legacy array, so the same source reddens instead')
-  // …and it stays quote-agnostic, which is what the escape normalisation was for:
-  // every element in a different spelling still reads back as the same label.
+  // ── the direction main actually had: a FALSE RED on a pure re-quote ────────
+  // main's needle was the ESCAPED spelling, and in main.jsx that sequence occurs
+  // only inside the legacy array — so the pre-fix pin was NOT vacuous for
+  // `You're set`. What it could not survive is the change this issue is about:
+  // re-quoting the array without touching one character of the copy.
+  const mainNeedle = "You\\'re set"
+  assert.ok(src.includes(mainNeedle),
+    "the pre-fix needle resolves against the real source — it is the legacy array's own spelling")
   const requoted = [
     'const wizardSteps = [',
     '  "Connect your tool",',
     "  'Memory sources',",
     '  `Your agent\'s toolkit`,',
     '  "Seed your graph",',
-    '  `You\\\'re set`,',
+    "  `You're set`,",
     ']',
   ].join('\n')
-  assert.deepEqual(legacyWizardLabels(requoted), {
+  assert.ok(!requoted.includes(mainNeedle),
+    'a pure re-quote FALSE-REDDED the pre-fix pin (defect 2: a re-quote is not a behaviour change)')
+  assert.deepEqual(legacyWizardLabels(parseModule(requoted)), {
     declarators: 1,
     labels: ["Connect your tool", "Memory sources", "Your agent's toolkit", "Seed your graph", "You're set"],
   }, 'a re-quoted array renders the same five labels and must not redden the pin')
+  // ── the direction an obvious "fix" introduces: a FALSE GREEN ─────────────
+  // Normalising the escape before matching is the natural repair for that false
+  // red, and it makes the needle match LIVE copy plus a comment — so the pin stays
+  // green with the array's label deleted, which is the archived-not-deleted break
+  // this test exists to catch.
+  const liveCopyOnly = [
+    'export const Card = () => (',
+    '  <p>',
+    "    You're set up in <strong>{shownOrgName || 'your organization'}</strong>",
+    "    {/* the old step said You're set */}",
+    '  </p>',
+    ')',
+  ].join('\n')
+  assert.ok(liveCopyOnly.replace(/\\'/g, "'").includes("You're set"),
+    'the normalised needle matches live copy and a comment — the false green this pin must not have')
+  assert.deepEqual(legacyWizardLabels(parseModule(liveCopyOnly)), { declarators: 0, labels: null },
+    'the AST pin finds no legacy array, so the same source reddens instead')
 })
 
 test('#3726 falsifiability: the <h1> pin is selected by class and names every override', () => {
@@ -323,18 +427,18 @@ test('#3726 falsifiability: the <h1> pin is selected by class and names every ov
   ].join('\n')
   const allOverrides = 'wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })'
   for (const className of ["'welcome-title'", "\"welcome-title\"", '`welcome-title`']) {
-    const titles = jsxElements(element(className, allOverrides)).filter((e) => e.tag === 'h1' && hasClass(e.cls, 'welcome-title'))
+    const titles = jsxOf(element(className, allOverrides)).filter((e) => e.tag === 'h1' && hasClass(e.cls, 'welcome-title'))
     assert.equal(titles.length, 1, `the <h1> must resolve for className={${className}}`)
     assert.deepEqual(stageLabelCall(titles[0].node).overrides, {
       hasOrg: 'welcomeHasOrg', paused: 'effectivelyPaused', connected: 'serverHarnessConnected', buildFork: 'isBuildFork',
     }, 'a purely formatting edit (attribute added, class spelling changed) is a no-op')
   }
   const dropped = 'wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected })'
-  const titles = jsxElements(element("'welcome-title'", dropped)).filter((e) => e.tag === 'h1' && hasClass(e.cls, 'welcome-title'))
+  const titles = jsxOf(element("'welcome-title'", dropped)).filter((e) => e.tag === 'h1' && hasClass(e.cls, 'welcome-title'))
   assert.ok(!('buildFork' in stageLabelCall(titles[0].node).overrides),
-    'a DROPPED override must be visible to the pin (it reddens on the deepEqual above)')
+    'a DROPPED override must be visible to the pin (on the real <h1> the deepEqual on the override map above reddens)')
   // A heading that stops calling the helper at all is a failure, not a skip.
-  assert.equal(stageLabelCall(jsxElements(element("'welcome-title'", "'Connect your agent'"))[0].node), null,
+  assert.equal(stageLabelCall(jsxOf(element("'welcome-title'", "'Connect your agent'"))[0].node), null,
     'an <h1> that no longer calls wizardStageLabel must redden the pin')
 })
 
@@ -349,18 +453,19 @@ test('#3726 falsifiability: the in-card title pin fires on EVERY className spell
       `    <p className={${className}}>{wizardSteps[wizardStep]}</p>`,
       '  </div>',
       ')',
+      'export const Legacy = () => LEGACY_WIZARD_ARCHIVED && null',
     ].join('\n')
-    const heads = jsxElements(synthetic).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
-    assert.equal(heads.length, 1, 'the card must resolve in the synthetic source')
-    const headEnd = synthetic.indexOf('LEGACY_WIZARD_ARCHIVED &&', heads[0].start)
-    const inCard = jsxElements(synthetic)
-      .filter((e) => e.start > heads[0].start && e.start < (headEnd === -1 ? synthetic.length : headEnd) && hasClass(e.cls, 'wizard-title'))
+    // The SAME window helper the live pin uses — so the synthetic exercises the
+    // boundary checks too, rather than re-deriving a window with its own fallback.
+    const { start: headOpen, end: headEnd } = welcomeCardWindow(synthetic, parseModule(synthetic))
+    const inCard = jsxOf(synthetic)
+      .filter((e) => e.start > headOpen && e.start < headEnd && hasClass(e.cls, 'wizard-title'))
     assert.equal(inCard.length, 1, `an in-card label spelled className={${className}} must redden the pin`)
   }
 })
 
 test('#3726 falsifiability: stepWrites records every write spelling, so its negative pin can red', () => {
-  // The live pin is `!stepWrites(src).includes('catalog-presented')`. A helper that
+  // The live pin is `!stepWrites(SRC_AST).includes('catalog-presented')`. A helper that
   // cannot recognise the write would make that assertion vacuous, so plant the
   // write in the three delimiter spellings (plus a member assignment and a quoted
   // key) and require it to be read back.
@@ -373,7 +478,7 @@ test('#3726 falsifiability: stepWrites records every write spelling, so its nega
     '  state.post({ step: nextStep })',   // not a literal: not a readable write
     '}',
   ].join('\n')
-  assert.deepEqual(stepWrites(synthetic).sort(), [
+  assert.deepEqual(stepWrites(parseModule(synthetic)).sort(), [
     'catalog-presented', 'catalog-presented', 'catalog-presented', 'catalog-presented',
   ].sort(), 'every `step` write spelling must be read back')
 })
@@ -389,16 +494,48 @@ test('DE2E-2 copy sweep: org-create dialog + wizard copy say Organization', () =
   // #3726 cycle 3: a pure-formatting edit (`{ shownOrgName || 'your organization' }`)
   // or a template-literal fallback false-redded this. The rendered behaviour is
   // a `||` whose right side is the string; read that, not the punctuation.
-  const orgFallbacks = []
-  walkNodes(parseModule(src), (node) => {
-    if (node.type !== 'LogicalExpression' || node.operator !== '||') return
-    const v = literalString(node.right)
-    if (v !== null) orgFallbacks.push(v)
-  })
-  assert.ok(orgFallbacks.includes('your organization'),
-    'welcome ready copy names the user\'s Organization')
+  // #3726 cycle 5 (P1): reading EVERY `|| <string>` in the module was a false
+  // green — main.jsx has three `shownOrgName || 'your organization'` sites (this
+  // ready copy plus two "Continue setting up" headings in a different card), so
+  // deleting the ready-copy fallback left the assertion green. The pin is anchored
+  // to the LIVE WELCOME CARD and to the `shownOrgName` operand. The card's only
+  // other org fallback is the connect-step key line, which spells the string with
+  // a capital O (`'your Organization'`) and therefore cannot satisfy this pin.
+  assert.ok(readyCopyOrgFallbacks(src, SRC_AST).includes('your organization'),
+    'the live welcome ready copy falls back to the user\'s Organization — a `||` in another card cannot satisfy this')
   assert.ok(src.includes('Creating your Organization and API key'), 'provisioning copy')
   assert.ok(src.includes('Your Organization and API key are live'), 're-entry + first-data cards')
+})
+
+test('#3726 falsifiability: the ready-copy pin is anchored to the welcome card, not the module', () => {
+  // The mutation the old whole-file scan could not see: drop the ready copy's
+  // fallback while an unrelated card keeps the same `|| 'your organization'`.
+  const card = (ready) => [
+    'export const Card = () => (',
+    '  <div className="welcome-head">',
+    `    <p>You're set up in <strong>${ready}</strong></p>`,
+    '  </div>',
+    ')',
+  ].join('\n')
+  // The archived block is the window's END sentinel; without it the window has no
+  // documented end and `welcomeCardWindow` refuses (fail loud, not rest-of-file).
+  const archived = 'export const Legacy = () => LEGACY_WIZARD_ARCHIVED && null'
+  const otherCard = "export const Other = () => <h2>Continue setting up {shownOrgName || 'your organization'}</h2>"
+  const withFallback = `${card("{shownOrgName || 'your organization'}")}\n${archived}\n${otherCard}`
+  const withoutFallback = `${card('{shownOrgName}')}\n${archived}\n${otherCard}`
+  assert.deepEqual(readyCopyOrgFallbacks(withFallback, parseModule(withFallback)), ['your organization'],
+    'the ready copy resolves when its fallback is present')
+  // The pre-fix form: collect every `x || '<string>'` in the module. It stays
+  // satisfied by the heading in the OTHER card — the false green.
+  assert.ok(orFallbacks(parseModule(withoutFallback)).map((f) => f.value).includes('your organization'),
+    'a whole-module scan is still satisfied by the unrelated card — that is the false green this pin must not have')
+  assert.deepEqual(readyCopyOrgFallbacks(withoutFallback, parseModule(withoutFallback)), [],
+    'deleting the ready-copy fallback must REDDEN the anchored pin')
+  // …and a formatting-only edit (spaces inside the braces, a template fallback)
+  // is still the same input, which is what reading the AST buys.
+  const spaced = `${card('{ shownOrgName || `your organization` }')}\n${archived}\n${otherCard}`
+  assert.deepEqual(readyCopyOrgFallbacks(spaced, parseModule(spaced)), ['your organization'],
+    'spacing and a template-literal fallback are formatting, not behaviour')
 })
 
 test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan T7)', () => {
@@ -406,18 +543,35 @@ test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan
   // source match that hard-codes the key's spelling, so a re-quoted key
   // (`{ "onboarding_complete": true }`) shipped the write it forbids and stayed
   // GREEN. Read the AST: any object property or member assignment that sets it
-  // to true. The PATCH body shape is asserted separately below.
-  const trueWrites = []
-  walkNodes(parseModule(src), (node) => {
-    const isProp = node.type === 'ObjectProperty' && keyName(node.key) === 'onboarding_complete'
-    const isAssign = node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression'
-      && keyName(node.left.property) === 'onboarding_complete'
-    if (!isProp && !isAssign) return
-    const v = isProp ? node.value : node.right
-    if (v.type === 'BooleanLiteral') trueWrites.push(v.value)
-  })
-  assert.deepEqual(trueWrites, [],
+  // to TRUE. The PATCH body shape is asserted separately below.
+  assert.deepEqual(onboardingCompleteWrites(SRC_AST), [],
     'wizardComplete dropped the PATCH onboarding_complete write')
+})
+
+test('#3726 falsifiability: the onboarding_complete reader sees a TRUE write and ignores a reset', () => {
+  // A negative pin whose reader cannot recognise the write is vacuous, and main.jsx
+  // has no live `onboarding_complete: true` write to exercise it — so plant the
+  // write in the key spellings a re-quote produces, plus the member assignment.
+  const synthetic = [
+    'export const go = (state) => {',
+    '  state.patch({ onboarding_complete: true })',
+    '  state.patch({ "onboarding_complete": true })',
+    '  state.patch({ [`onboarding_complete`]: true })',
+    '  state.onboarding_complete = true',
+    '  state.patch({ onboarding_complete: false })',   // a RESET, not the forbidden opt-in
+    '  state.onboarding_complete = false',
+    '}',
+  ].join('\n')
+  assert.equal(onboardingCompleteWrites(parseModule(synthetic)).length, 4,
+    'every TRUE write spelling must be read back — otherwise the negative pin cannot red')
+  const resetOnly = [
+    'export const go = (state) => {',
+    '  state.patch({ onboarding_complete: false })',
+    '  state.onboarding_complete = false',
+    '}',
+  ].join('\n')
+  assert.deepEqual(onboardingCompleteWrites(parseModule(resetOnly)), [],
+    'a `false` write is a reset — collecting it made the pin report a defect that is not there')
 })
 
 test('review P1 / #3913: the build fork handler writes NO checkpoint step (the catalog card still renders)', () => {
@@ -431,11 +585,11 @@ test('review P1 / #3913: the build fork handler writes NO checkpoint step (the c
   // author use" is not a behaviour), while the checkpoint pin beside it stayed
   // GREEN — the same hard-coding in the negative form is a false green, because
   // the pattern simply stops matching the writer it exists to catch.
-  assert.deepEqual(forkIdComparisons(src), ['build'],
+  assert.deepEqual(forkIdComparisons(SRC_AST), ['build'],
     'handleWizardFork still branches on the build pick (non-build picks advance, build stays for the card)')
   assert.ok(src.includes('Build catalog'),
     'the build catalog CARD still renders (only the write was removed)')
-  assert.ok(!stepWrites(src).includes('catalog-presented'),
+  assert.ok(!stepWrites(SRC_AST).includes('catalog-presented'),
     'no catalog-presented checkpoint anywhere in main.jsx — #3913 removed the writer')
 })
 
