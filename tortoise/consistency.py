@@ -2573,7 +2573,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
     envelopes (a missing/non-string ``type``, a non-dict ``point``) are dropped
     silently and still increment `applied`. They carry no identity to attribute,
     so the invariant above does not hold for them either way — recorded here so
-    the next reader does not assume the counting is exhaustive (#8878).
+    the next reader does not assume the counting is exhaustive (#8843).
     """
     import os
 
@@ -3231,8 +3231,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # WHICH record is missing from the graph.
         _dropped = [s for s in _id_skips if s.drops_record]
         _named = "; ".join(str(s) for s in _dropped[:3])
-        _more = (f" (+{identity_skipped - 3} more)"
-                 if identity_skipped > 3 else "")
+        _more = (f" (+{len(_dropped) - 3} more)"
+                 if len(_dropped) > 3 else "")
         extra += (
             f" ({identity_skipped} dropped — the fold SKIPPED "
             f"{'a record' if identity_skipped == 1 else 'records'}"
