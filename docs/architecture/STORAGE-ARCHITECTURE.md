@@ -404,10 +404,10 @@ Supabase database storage **$0.125/GB/month**; object storage **$0.0213/GB/month
 
 | record class | bytes on disk | what dominates |
 |---|---|---|
-| `PointAdded` (create, with `embedding`) | **9,176 B** | **8,414 B is the vector** — 384 floats written as JSON decimal text, **21.9 chars/float**, where the graph stores 4 B/float as `vecf32`. #5004's three identity keys (`embedding_text_hash`, `embedding_model`, `embedding_revision`) are the other ~204 B. |
+| `PointAdded` (create, with `embedding`) | **9,176 B** | **8,414 B is the vector** — 384 floats written as JSON decimal text, **21.9 chars/float**, where the graph stores 4 B/float as `vecf32`. The committed record it is compared against is already **570 B** and is *not* vectorless (it carries a 2-element placeholder vector), so the growth is **8,606 B** = **+8,404 B** (the 8,414 B of vector text replacing the 10 B placeholder) **+ 202 B** for #5004's three identity keys (`embedding_text_hash`, `embedding_model`, `embedding_revision`). |
 | `PointRevised` (content/metadata edit) | **196 B** | a delta; the vector it derives from `new_content` is stripped (#4208 — the replay re-encodes it), so only a CALLER-supplied vector rides this record |
 | `EntityLinked` | 249 B | a delta |
-| corpus `p50` / `p95` (vector-bearing) | 229 B / **8,877 B** | a 39× gap — **the tail IS the snapshot record**, so a bound argued from a mean plans for a record no journal contains |
+| corpus `p50` / `p95` (vector-bearing) | 219 B / **8,877 B** | a 41× gap — **the tail IS the snapshot record**, so a bound argued from a mean plans for a record no journal contains |
 
 **⇒ Growth tracks CREATES, not writes: ≈8.8 MB per 1,000 point creates / capture turns; 10,000 ≈ 88 MB; 1,000,000 ≈ 8.5 GB.** Revisions are ~0.2 MB per 1,000 and do not move the number.
 

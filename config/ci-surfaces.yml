@@ -4685,9 +4685,10 @@ durations:
   # (5.9 s / 12.2 s; hermetic — temp-dir journals + the committed fixture, no DB;
   # the spread is fleet I/O, same as #6144 above). Erring high is correct for
   # sharding. NO TEST COUNT here: the count published before this line ("14
-  # tests") was measured on an earlier revision and the file collects 24 — nothing
-  # reads or revalidates a count in a comment, so it re-stales silently. The count
-  # is published in the PR body and the evidence README, where it has a method.
+  # tests") was measured on an earlier revision, and this comment then stated
+  # another stale one ("24") while declaring it states none. Nothing reads or
+  # revalidates a count in a comment, so it re-stales silently. The count is
+  # published in the PR body and the evidence README, where it has a method.
   test_journal_growth.py: 12.2
   test_who_is_on.py: 0.9  # #4256: analogue estimate (same subprocess harness as test_collision_preflight.py); refresh from the first post-merge junit artifact
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default

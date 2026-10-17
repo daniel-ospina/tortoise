@@ -445,13 +445,25 @@ def test_text_form_total_is_the_sum_of_its_rows(
     assert int(total_line.split()[2].replace(",", "")) == file_total
 
 
-def test_probe_pins_its_published_outputs() -> None:
+def test_probe_pins_its_published_outputs(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The evidence probe is a pinned artifact, not a dead file.
 
     `config/ci-surfaces.yml` selects `core` on a probe-only change, and the
     numbers `docs/evidence/5612-journal-growth/README.md` publishes are the
     probe's output. Without this pin the probe could drift while CI stayed green
     — the silent-drop class the CORE_ALSO entries exist to close.
+
+    Pins the PUBLISHED FIGURES, not the helper shapes: every number the README,
+    `STORAGE-ARCHITECTURE.md` §5.2 and the `docs/00_index.md` row quote is
+    asserted here, so a probe change that moves one of them reds instead of
+    leaving three documents publishing a figure the probe no longer produces.
+
+    The `richest_by_type` pin is the one with a measured history: b08d526b6
+    replaced last-wins (which published the 246 B minimal `PointAdded` — ~3.4%
+    LOW, the understating direction this measurement exists to avoid) with
+    fullest-wins. Nothing else in the repo calls that function, so without this
+    assertion reverting it stays green.
     """
     assert PROBE.is_file()
     spec = importlib.util.spec_from_file_location("corpus_growth_probe", PROBE)
@@ -461,16 +473,79 @@ def test_probe_pins_its_published_outputs() -> None:
 
     assert probe.VECTOR_WIDTH == 384             # the pinned embedder's width
     assert probe.CORPUS.is_file()                # the committed corpus
-    rec = {"type": "PointAdded", "point": {"id": "p1", "content": "c"}}
-    assert probe.line_bytes(rec) == len(
-        json.dumps(rec, ensure_ascii=False).encode("utf-8")) + 1
-    stamped = probe.stamp(rec, probe.unit_vector())
-    assert len(stamped["point"]["embedding"]) == probe.VECTOR_WIDTH
-    assert probe.line_bytes(stamped) > probe.line_bytes(rec)
+
+    records = [json.loads(line) for line in
+               probe.CORPUS.read_text(encoding="utf-8").splitlines()
+               if line.strip()]
+    by_type = probe.richest_by_type(records)
+    vec = probe.unit_vector()
+
+    # FULLEST-wins vs last-wins: last-wins measures `PointAdded`'s MINIMAL shape.
+    last_wins: dict[str, dict] = {}
+    for rec in records:
+        if isinstance(rec.get("type"), str) and rec.get("type"):
+            last_wins[rec["type"]] = rec
+    assert probe.line_bytes(last_wins["PointAdded"]) == 246   # what the fix rejects
+    assert probe.line_bytes(by_type["PointAdded"]) == 570     # what production writes
+
+    # The published per-operation table (README / §5.2).
+    plain_point = by_type["PointAdded"]
+    stamped_point = probe.stamp(plain_point, vec)
+    assert probe.line_bytes(stamped_point) == 9_176
+    assert probe.line_bytes(by_type["PointRevised"]) == 196
+    assert probe.line_bytes(by_type["EntityLinked"]) == 249
+    assert probe.line_bytes(by_type["OperatorAdded"]) == 319
+    assert probe.line_bytes(probe.stamp(by_type["OperatorAdded"], vec)) == 8_859
+    assert probe.line_bytes(by_type["PointPromoted"]) == 228
+    assert probe.line_bytes(probe.stamp(by_type["PointPromoted"], vec)) == 8_657
+
+    # The vector's bytes, and the published decomposition of the 8,606 B
+    # growth over the `as committed` record: the 8,414 B of vector text
+    # REPLACES the committed 10 B placeholder `[0.1, 0.2]` (+8,404 B) and the
+    # three #5004 identity keys add the remaining 202 B — not 8,414 + 204,
+    # which would exceed the growth it claims to decompose.
+    emb = stamped_point["point"]["embedding"]
+    assert len(json.dumps(emb)) == 8_414
+    growth = probe.line_bytes(stamped_point) - probe.line_bytes(plain_point)
+    assert growth == 8_606
+    vector_growth = (len(json.dumps(emb))
+                     - len(json.dumps(plain_point["point"]["embedding"])))
+    assert vector_growth == 8_404
+    keys_added = sum(
+        len(f', "{k}": {json.dumps(stamped_point["point"][k])}')
+        for k in ("embedding_model", "embedding_revision", "embedding_text_hash"))
+    assert keys_added == 202
+    assert growth == vector_growth + keys_added
+
+    # The published whole-corpus figures, measured through the tool the probe
+    # itself uses (`measure`), on the bytes the probe itself writes.
+    committed_dir = tmp_path / "committed"
+    hosted_dir = tmp_path / "hosted"
+    probe.write_journal(committed_dir / "graph.jsonl", records)
+    probe.write_journal(hosted_dir / "graph.jsonl",
+                        [probe.stamp(rec, vec) for rec in records])
+    base = measure(committed_dir)["total"]
+    hosted = measure(hosted_dir)["total"]
+    assert (base["records"], base["bytes"], base["record_bytes"]["p50"],
+            base["record_bytes"]["p95"], base["record_bytes"]["max"]) == (
+                39, 8_711, 218, 336, 570)
+    assert (hosted["records"], hosted["bytes"], hosted["record_bytes"]["p50"],
+            hosted["record_bytes"]["p95"], hosted["record_bytes"]["max"]) == (
+                39, 51_346, 219, 8_877, 9_176)
+    assert hosted["embedding_bytes"] == 42_070
+
     # Only the creating/promoted types are stamped (`PointRevised` is a delta).
-    revised = probe.stamp({"type": "PointRevised", "point": {"id": "p1"}},
-                          probe.unit_vector())
+    revised = probe.stamp({"type": "PointRevised", "point": {"id": "p1"}}, vec)
     assert "embedding" not in revised["point"]
+
+    # And the probe's own printed report carries those figures, so a reader can
+    # reproduce them from the console block the README pastes.
+    assert probe.main() == 0
+    out = capsys.readouterr().out
+    assert "PointAdded           9,176 B  (as committed: 570 B)" in out
+    assert "p50    219 B" in out                 # the corpus p50, published 3×
+    assert "8,414 B (21.9 chars/float)" in out
+    assert "42,070 / 51,346 B (81.9%)" in out
 
 
 @pytest.mark.parametrize("bad", ["not json at all", "[1, 2, 3]", "42", '"s"'])

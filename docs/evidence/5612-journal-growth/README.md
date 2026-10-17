@@ -61,15 +61,19 @@ corpus: record_projection_journal.jsonl — 39 records, 29 event types
 vector: 384-d, BAAI/bge-small-en-v1.5, stamped through stamp_journal_embedding (the writer's own seam)
 
 == per-operation cost (bytes on disk, JSON line + terminator)
-  create_point / capture turn              PointAdded           9,176 B  (no vector: 570 B)
-  add_operator                             OperatorAdded        8,859 B  (no vector: 319 B)
-  promote (re-emitted snapshot)            PointPromoted        8,657 B  (no vector: 228 B)
+  create_point / capture turn              PointAdded           9,176 B  (as committed: 570 B)
+  add_operator                             OperatorAdded        8,859 B  (as committed: 319 B)
+  promote (re-emitted snapshot)            PointPromoted        8,657 B  (as committed: 228 B)
   content/metadata revision (delta)        PointRevised           196 B
   of which the vector's bytes:                                 8,414 B (21.9 chars/float)
+  NOTE: 'as committed' is the committed record UNCHANGED — the
+  PointAdded one already carries a 2-element placeholder vector
+  [0.1, 0.2] plus #5004's identity keys, so it is NOT a vectorless
+  record: growth over it understates the vector's own cost.
 
 == the 29-type corpus, measured WHOLE (all 39 committed records — a record-type mix, NOT an operation mix)
-  as committed        39 records     8,711 B  mean   223.4 B  p95    336 B  max    570 B
-  with 384-d vector   39 records    51,346 B  mean  1316.6 B  p95  8,877 B  max  9,176 B
+  as committed        39 records     8,711 B  mean   223.4 B  p50    218 B  p95    336 B  max    570 B
+  with 384-d vector   39 records    51,346 B  mean  1316.6 B  p50    219 B  p95  8,877 B  max  9,176 B
   embedding share of the vector-bearing corpus: 42,070 / 51,346 B (81.9%)
 
 == growth per 1,000 operations
@@ -86,7 +90,7 @@ VERDICT: a measurement, not a bound — the retention/rotation/checkpoint shape 
 | input | what is real about it |
 |---|---|
 | record shapes | the committed corpus `supabase/tests/fixtures/record_projection_journal.jsonl` — all 39 records, 29 emitted event types |
-| WHICH record of a type | the **fullest** committed record of that type (`probe.richest_by_type`). Ten types appear more than once, and taking the last one would have measured `PointAdded`'s *minimal* shape (246 B — no `kind`, no `content_hash`, no identity keys, no `point.subtype`), understating a create by ~3.4% and reporting a baseline no writer emits. The published rows are therefore the production-shaped records: `PointAdded` 570 B without a vector, `EntityLinked` 249 B. |
+| WHICH record of a type | the **fullest** committed record of that type (`probe.richest_by_type`). Ten types appear more than once, and taking the last one would have measured `PointAdded`'s *minimal* shape (246 B — no `kind`, no `content_hash`, no identity keys, no `point.subtype`), understating a create by ~3.4% and reporting a baseline no writer emits. The published rows are therefore the production-shaped records: `PointAdded` 570 B **as committed** — that committed record already carries a 2-element placeholder vector `[0.1, 0.2]` and #5004's three identity keys, so it is **not** a vectorless record (a genuinely vectorless `PointAdded` is smaller still) — and `EntityLinked` 249 B. |
 | the corpus re-encoded | every record is round-tripped `json.loads` → `json.dumps` with the writer's DEFAULT separators (comma-space between items, colon-space after a key), which is exactly what `EventLog.append` writes (`json.dumps(event, ensure_ascii=False)`). The committed fixture is compact, so **`tools/journal_growth.py <fixture>` reports the file's own 8,023 B** while this table's `as committed` row reports **8,711 B** for the same 39 records in the bytes a live journal stores. Both are correct; they are different bytes. |
 | the vector | width = the pinned embedder's (`tortoise.embeddings.EMBEDDING_MODEL`, BAAI/bge-small-en-v1.5, **384**); encoded by `tortoise.embeddings.stamp_journal_embedding` — the SAME seam `TortoiseSDK._emit_event` and `EventAPI._point` call — so the float reprs and the `embedding_model` / `embedding_revision` / `embedding_text_hash` identity keys are production code, not a probe re-implementation |
 | the vector's values | a seeded unit vector. Bytes do not depend on which text was encoded: same width, same range, same repr length |
@@ -101,13 +105,16 @@ replay re-encodes it); only a CALLER-supplied vector rides that record.
 ## What the numbers say
 
 1. **The journal is vector-dominated, not record-dominated.** A `PointAdded`
-   without a vector is 570 B; with one it is 9,176 B, and **8,414 B of that
-   (92%) is the vector's text** — the *decimal expansion* of 384 floats
+   as committed is 570 B; with a real vector it is 9,176 B, and **8,414 B of
+   that (92%) is the vector's text** — the *decimal expansion* of 384 floats
    (**21.9 characters per float**, where the graph stores 4 bytes per float as
-   `vecf32`). The vector is 98% of the record's growth over the vectorless form
-   (8,606 B). The three identity keys #5004 stamps (`embedding_text_hash`,
-   `embedding_model`, `embedding_revision`) are the remaining ~204 B: the
-   `stamp_journal_embedding` seam is not what costs memory, the encoding is.
+   `vecf32`). The growth over the committed record is **8,606 B**, and it
+   decomposes exactly: the 8,414 B of vector text *replaces* the 10 B
+   placeholder `[0.1, 0.2]` (**+8,404 B**) and the three identity keys #5004
+   stamps (`embedding_text_hash`, `embedding_model`, `embedding_revision`) add
+   the remaining **202 B**. So the vector's encoding is ~98% of the growth and
+   the `stamp_journal_embedding` seam is not what costs memory — the encoding
+   is. (The committed baseline is not vectorless; see the probe's NOTE.)
 2. **Creates dominate; revisions are cheap.** A content or metadata revision is
    a 196 B delta. Growth tracks the number of **creates** (points, operators,
    capture turns) — i.e. it tracks the number of *snapshots*, and a snapshot is
@@ -116,7 +123,7 @@ replay re-encodes it); only a CALLER-supplied vector rides that record.
    embedder: 10,000 creates ≈ 88 MB, 1,000,000 ≈ 8.5 GB. That is the figure
    §5's cost table and §6's volume problem have been missing.
 4. **The `p95` of a journal is a vector record, always.** On the vector-bearing
-   corpus, p50 is 229 B and p95 is 8,877 B — a 39× gap. Any bound argued from a
+   corpus, p50 is 219 B and p95 is 8,877 B — a 41× gap. Any bound argued from a
    mean is arguing from a number no single record resembles. This is also why
    the whole-journal read's cost matters: it is proportional to the sum of
    these, and `restore()` no longer parses the journal to report its event
@@ -160,5 +167,5 @@ needs its own decision and its own tests.
 
 ```console
 $ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_journal_growth.py -q
-24 passed
+25 passed
 ```

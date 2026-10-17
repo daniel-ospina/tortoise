@@ -103,7 +103,7 @@ def richest_by_type(records: list[dict]) -> dict[str, dict]:
     `kind` / `contains_session` / `point.subtype` / `ep_alpha` fields. Taking
     the last one therefore published a create cost ~3.4% LOW, i.e. in the
     understating direction this measurement exists to avoid, and the reported
-    "no vector" baseline was a record shape no writer emits.
+    "as committed" baseline was a record shape no writer emits.
     """
     out: dict[str, dict] = {}
     for rec in records:
@@ -146,11 +146,15 @@ def main() -> int:
         vector = line_bytes(stamped_by_type[rtype])
         print(f"  {what:<40} {rtype:<16} "
               f"{vector:>9,} B" + ("" if vector == plain
-                                   else f"  (no vector: {plain:,} B)"))
+                                   else f"  (as committed: {plain:,} B)"))
     emb = stamped_by_type["PointAdded"]["point"]["embedding"]
     print(f"  of which the vector's bytes:            "
           f"{'':<16} {len(json.dumps(emb).encode()):>9,} B "
           f"({len(json.dumps(emb)) / VECTOR_WIDTH:.1f} chars/float)")
+    print("  NOTE: 'as committed' is the committed record UNCHANGED — the")
+    print("  PointAdded one already carries a 2-element placeholder vector")
+    print("  [0.1, 0.2] plus #5004's identity keys, so it is NOT a vectorless")
+    print("  record: growth over it understates the vector's own cost.")
     print()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -167,6 +171,7 @@ def main() -> int:
                          ("with 384-d vector", hosted)):
         print(f"  {label:<18} {total['records']:>3} records  "
               f"{total['bytes']:>8,} B  mean {total['record_bytes']['mean']:>7.1f} B"
+              f"  p50 {total['record_bytes']['p50']:>6,} B"
               f"  p95 {total['record_bytes']['p95']:>6,} B"
               f"  max {total['record_bytes']['max']:>6,} B")
     print(f"  embedding share of the vector-bearing corpus: "
