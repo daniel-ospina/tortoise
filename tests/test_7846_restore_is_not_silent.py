@@ -35,6 +35,7 @@ from tortoise.graph_key_restore import (
     BLOCKED,
     CALLER_STALL,
     INSTANCE_GONE,
+    LIVENESS_UNMEASURED,
     SERVED,
     UNMEASURED,
     GraphRestoreLostError,
@@ -200,12 +201,120 @@ def test_a_dead_instance_is_a_DIFFERENT_error_from_a_blocked_one() -> None:
         "a dead instance was reported as merely blocked"
     )
     assert lost.value.observation.status == INSTANCE_GONE
-    assert "died during the restore" in str(lost.value)
-    assert "#8270" in str(lost.value)
+    lost_message = str(lost.value)
+    assert "died during the restore" in lost_message
+    # #8827 review (cycle 12): a REFUSED port proves the death, NOT its cause. The
+    # message used to assert the #8270 SIGSEGV as the cause unconditionally, which a
+    # refused connect cannot establish — and which the module's own ⛔ rule makes the
+    # LEAST likely cause for a caller who followed it. The cause is now named as one
+    # conditional candidate, so the measurement and the inference are visibly split.
+    assert "proves the DEATH, not its cause" in lost_message, (
+        f"the death message asserts a cause the refused port cannot establish: "
+        f"{lost_message}"
+    )
+    assert "#8270" in lost_message and "if the payload" in lost_message, (
+        f"the #8270 trigger is no longer named as a CONDITIONAL cause: {lost_message}"
+    )
     assert "died" not in str(silent.value), (
         "the blocked-instance message claims a death it did not observe"
     )
     assert str(lost.value) != str(silent.value)
+
+
+def test_an_overrun_without_a_liveness_probe_makes_NO_liveness_claim() -> None:
+    """#8827 review (cycle 12), P2: the DEFAULT configuration published a liveness it
+    never measured.
+
+    ``listening`` is optional, and with it omitted an overrun that measured the silence
+    was still published as ``ALIVE_BUT_SILENT`` and raised an error whose contract said
+    *"the process is still listening (blocked, not dead, not loaded)"* — about a port no
+    probe had touched. A process that DIED reads exactly the same from the witness alone,
+    so the driver told the operator "do not restart, wait and re-probe" for a dead box.
+
+    Both measured block shapes are pinned (unanswered PINGs, and answered-but-slow), so
+    the status cannot be manufactured through the other arm either. Pre-fix this fails on
+    the status (``alive-but-silent``) and on every "makes no claim" assertion.
+    """
+    instance = _FakeInstance()
+    instance.blocked.set()
+
+    def never_returns(_payload):
+        time.sleep(5.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreSilentError) as raised:
+        _observe(instance, never_returns, bound_s=0.2)  # no `listening` at all
+
+    observation = raised.value.observation
+    assert observation.witness_failures > 0, "the premise is a measured silence"
+    assert observation.measured is True, "the BLOCK itself was measured here"
+    assert observation.instance_listening is None, "no probe was supplied"
+    assert observation.status == LIVENESS_UNMEASURED, (
+        f"a run whose liveness was never probed was published as {observation.status!r}, "
+        f"which asserts a live process nothing measured"
+    )
+    assert observation.as_dict()["status"] == LIVENESS_UNMEASURED
+
+    message = str(raised.value)
+    assert "LIVENESS WAS NOT MEASURED" in message, (
+        f"the message does not say liveness was not measured: {message}"
+    )
+    assert "still listening" not in message, (
+        f"the message claims a listening process no probe measured: {message}"
+    )
+    assert "still ACCEPTS" not in message
+    assert "not a crash" not in message, (
+        f"the message rules out a crash it never looked for: {message}"
+    )
+    assert "died" not in message, (
+        "the message must not swing to a death claim either — nothing was probed"
+    )
+    # The block IS measured, so the message must still carry it and still say don't retry.
+    assert "BLOCK" in message.upper(), f"the measured block vanished: {message}"
+    assert "Do not retry" in message
+    assert not isinstance(raised.value, GraphRestoreLostError)
+
+    # The other measured-block arm: nothing failed, one ANSWERED PING was slow.
+    def slow_ping() -> None:
+        time.sleep(0.3)  # queued behind the rebuild, but it does answer
+        instance.pings += 1
+
+    with pytest.raises(GraphRestoreSilentError) as slow:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=slow_ping,
+            bound_s=0.6,
+            witness_join_s=1.0,
+            poll_interval_s=_POLL_S,
+        )
+
+    slow_observation = slow.value.observation
+    assert slow_observation.witness_failures == 0
+    assert slow_observation.witness_max_latency_ms >= slow_observation.blocked_latency_ms
+    assert slow_observation.status == LIVENESS_UNMEASURED, (
+        f"the answered-but-slow block was published as {slow_observation.status!r} with no "
+        f"liveness probe"
+    )
+    assert "LIVENESS WAS NOT MEASURED" in str(slow.value)
+    assert "still listening" not in str(slow.value)
+
+
+def test_the_silent_error_does_not_promise_a_liveness_it_may_not_have() -> None:
+    """The class docstring is the error's CONTRACT — it must match the statuses it serves.
+
+    It read *"the restore overran its bound while the instance answered nothing, but the
+    process is still listening (blocked, not dead, not loaded)"*, which is false for the
+    two statuses that reach it without a probe (``LIVENESS_UNMEASURED``) or without any
+    reading (``UNMEASURED``). Pre-fix this fails on both assertions.
+    """
+    doc = " ".join((GraphRestoreSilentError.__doc__ or "").split())
+    assert "the process is still listening" not in doc, (
+        f"the error still promises a liveness it may not have measured: {doc!r}"
+    )
+    assert "LIVENESS_UNMEASURED" in doc, (
+        f"the error's contract does not name the status that reaches it without a probe: {doc!r}"
+    )
 
 
 def test_the_bound_is_the_CALLER_side_and_a_blocked_restore_cannot_exceed_it() -> None:
@@ -968,9 +1077,18 @@ def test_the_module_states_the_UNMEASURED_split_and_the_WHOLE_caller_held_ceilin
     completed path spends waiting for the recovery edge. Both are prose-only, so they are
     pinned here rather than by a behavioural test — behaviour was already correct.
 
-    Pre-fix this FAILS both arms: the ceiling sentence reads
-    ``bound_s + witness_join_s + probe_timeout`` (no ``recovery_probe_s``), and no
-    sentence places ``UNMEASURED`` on both paths — the prose says only that it "raises".
+    #8827 review (cycle 12) added the SECOND half of the ceiling: it also omitted the
+    inline ``DUMP``/``DEL``, which run on the caller's thread OUTSIDE every bound, so
+    "``elapsed_s`` reports THAT number" was false by exactly the ``dump()``/``delete()``
+    time — the same paragraph says those two are bounded only by the caller's own client
+    timeout. The ceiling is now stated for the tail AFTER ``DUMP``/``DEL``, and
+    ``elapsed_s`` is stated as that tail PLUS the caller's own dump/delete time.
+
+    Pre-fix this FAILS every arm: the ceiling sentence reads
+    ``bound_s + witness_join_s + probe_timeout`` (no ``recovery_probe_s``), no sentence
+    places ``UNMEASURED`` on both paths, the ceiling sentence never mentions
+    ``DUMP``/``DEL``, and no ``elapsed_s`` sentence says that it carries the dump/delete
+    time. The cycle-12 arms fail on ``b84f66dec`` too.
 
     The ``UNMEASURED`` arm is deliberately measured as ONE span naming BOTH paths: the
     prose wraps across lines and the status table has no full stops, so a looser test
@@ -983,14 +1101,25 @@ def test_the_module_states_the_UNMEASURED_split_and_the_WHOLE_caller_held_ceilin
         ("restore_graph_key docstring", restore_graph_key.__doc__ or ""),
     ):
         sentences = _doc_sentences(doc)
-        ceiling = [s for s in sentences if "held at most" in s]
+        ceiling = [s for s in sentences if "at most" in s]
         assert ceiling, f"the {where} no longer states a caller-held ceiling"
-        assert any(
-            all(term in s for term in ("bound_s", "recovery_probe_s", "witness_join_s"))
+        tailed = [
+            s
             for s in ceiling
-        ), (
+            if all(term in s for term in ("bound_s", "recovery_probe_s", "witness_join_s"))
+        ]
+        assert tailed, (
             f"the {where}'s ceiling omits ``recovery_probe_s``, which the completed path "
             f"spends before publishing: {ceiling}"
+        )
+        assert any("DUMP" in s for s in tailed), (
+            f"the {where}'s ceiling does not say it starts AFTER ``DUMP``/``DEL``, which "
+            f"run outside every bound — so it reads as a bound on the whole call: {tailed}"
+        )
+        elapsed = [s for s in sentences if "elapsed_s" in s]
+        assert any("dump" in s.lower() and "tail" in s.lower() for s in elapsed), (
+            f"the {where} never says ``elapsed_s`` is the bounded tail PLUS the caller's "
+            f"own ``dump()``/``delete()`` time: {elapsed}"
         )
 
         if where == "module docstring":

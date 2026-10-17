@@ -36,13 +36,16 @@ explicit error the caller can act on"). ``restore_graph_key``:
    witness blocked inside its own PING is only released when that PING does) plus the
    caller-supplied liveness probe's own timeout (``tcp_is_listening``'s 1 s default),
    plus — on a COMPLETED run — the bounded ``recovery_probe_s`` window (1 s default) in
-   which the driver waits for the instance to answer once more. So the caller is held
-   at most ``bound_s + recovery_probe_s + witness_join_s + probe_timeout`` (the
+   which the driver waits for the instance to answer once more. So the tail AFTER
+   ``DUMP``/``DEL`` is at most
+   ``bound_s + recovery_probe_s + witness_join_s + probe_timeout`` (the
    recovery term is spent only when the restore returned; an overrun spends the whole
-   ``bound_s`` instead), and
-   ``elapsed_s`` reports THAT number: it is captured when the observation is
-   published, not at the bound, so the caller-held time in the data is the whole
-   call and cannot drift below what the caller actually waited.
+   ``bound_s`` instead), and ``elapsed_s`` is THAT TAIL **plus** the caller's own
+   ``dump()``/``delete()`` time: it is captured when the observation is published, not
+   at the bound, so the caller-held time in the data is the whole call and cannot drift
+   below what the caller actually waited. There is no bound that covers the inline
+   ``dump()``/``delete()`` — that is the paragraph below, and conflating them understated
+   the ceiling (#8827 review).
    ``dump`` and ``delete`` run INLINE on the caller's thread *before* the worker is
    started, so ``bound_s`` does NOT cover them: their only limit is whatever socket
    timeout the caller's own client carries. Give that client a socket timeout below
@@ -58,28 +61,32 @@ explicit error the caller can act on"). ``restore_graph_key``:
    inferred from the operation's duration.
 3. **Tells the states apart**, which is the whole point of criterion 5:
 
-   ======================  =============================================  =====================
-   state                   evidence                                       what it means
-   ======================  =============================================  =====================
-   ``SERVED``              restore returned; at least one witness PING   load, if anything
-                           was SAMPLED and every one answered
-   ``BLOCKED``             restore returned with witness evidence: >=1    the instance was off
-                           PING unanswered, or an ANSWERED PING took      the air for the
-                           >= ``blocked_latency_ms`` (queued behind the   restore only
-                           rebuild); the silence / slow PING ENDS when
-                           the restore does
-   ``ALIVE_BUT_SILENT``    restore overran ``bound_s``; PINGs unanswered  blocked server: not
-                           and the port still ACCEPTS a connection        load, not a crash
-   ``INSTANCE_GONE``       restore overran ``bound_s``; port REFUSED      the process died
-                                                                          (the #8270 class)
-   ``CALLER_STALL``        restore overran ``bound_s`` but EVERY PING      the caller is stuck,
-                           answered — the serving thread cannot be        not the engine
-                           inside a rebuild while that is true
-   ``UNMEASURED``          the witness produced nothing it can trust:     nothing is known about
-                           zero samples inside the window, or a           the instance — this is
-                           NON-transport witness failure (WRONGPASS,       NOT a green, and not
-                           a DNS error, a probe bug)                      a block verdict either
-   ======================  =============================================  =====================
+   =======================  =============================================  =====================
+   state                    evidence                                       what it means
+   =======================  =============================================  =====================
+   ``SERVED``               restore returned; at least one witness PING   load, if anything
+                            was SAMPLED and every one answered
+   ``BLOCKED``              restore returned with witness evidence: >=1    the instance was off
+                            PING unanswered, or an ANSWERED PING took      the air for the
+                            >= ``blocked_latency_ms`` (queued behind the   restore only
+                            rebuild); the silence / slow PING ENDS when
+                            the restore does
+   ``ALIVE_BUT_SILENT``     restore overran ``bound_s``; PINGs unanswered  blocked server: not
+                            (or one ANSWERED slowly) AND the port still    load, not a crash
+                            ACCEPTS a connection
+   ``LIVENESS_UNMEASURED``  restore overran ``bound_s``; PINGs unanswered  the BLOCK is
+                            (or one ANSWERED slowly) and liveness was      measured; blocked
+                            NEVER probed (no ``listening`` callable)       vs dead is NOT
+   ``INSTANCE_GONE``        restore overran ``bound_s``; port REFUSED      the process died
+                                                                           (cause not proved)
+   ``CALLER_STALL``         restore overran ``bound_s`` but EVERY PING      the caller is stuck,
+                            answered — the serving thread cannot be        not the engine
+                            inside a rebuild while that is true
+   ``UNMEASURED``           the witness produced nothing it can trust:     nothing is known about
+                            zero samples inside the window, or a           the instance — this is
+                            NON-transport witness failure (WRONGPASS,       NOT a green, and not
+                            a DNS error, a probe bug)                      a block verdict either
+   =======================  =============================================  =====================
 
    ``UNMEASURED`` exists because a verdict that was never measured must not be
    published as one (#8827 review): the completed path used to answer ``SERVED`` when
@@ -93,9 +100,19 @@ explicit error the caller can act on"). ``restore_graph_key``:
    unanswered PING (socket timeout expired) and an ANSWERED PING whose latency is the
    block itself (the engine queues the command behind the rebuild on its serving
    thread). The second is why a 0.27 s block at 3 000 nodes is still reported rather
-   than greened by a 1 s witness timeout. The three overrun states raise
-   ``GraphRestoreSilentError`` / ``GraphRestoreLostError`` / ``GraphRestoreStalledError``
-   respectively, whose messages carry the measurement and the recovery instruction.
+   than greened by a 1 s witness timeout. The overrun states raise
+   ``GraphRestoreSilentError`` (``ALIVE_BUT_SILENT``, ``LIVENESS_UNMEASURED``) /
+   ``GraphRestoreLostError`` (``INSTANCE_GONE``) / ``GraphRestoreStalledError``
+   (``CALLER_STALL``), whose messages carry the measurement and the recovery
+   instruction.
+
+   ``LIVENESS_UNMEASURED`` exists because the block and the DEATH are told apart by the
+   transport probe alone (#8827 review): with ``listening`` omitted, an overrun that
+   measured the silence had no evidence about the process at all, yet it was published
+   as ``ALIVE_BUT_SILENT`` and raised an error whose contract said the process was still
+   listening. Passing ``listening`` is therefore the DISCRIMINATOR between *blocked* and
+   *dead*, not a refinement of the blocked message: omit it and a refused port is
+   indistinguishable from a blocked one.
    ``UNMEASURED`` is reachable on BOTH paths, and the two behave differently: on a
    COMPLETED restore it is RETURNED as an observation whose message says the reading is
    unusable (the restore returned, so there is nothing to hang on), while on an OVERRUN
@@ -152,6 +169,11 @@ BLOCKED = "blocked"
 #: The restore overran its bound and the port still accepts connections: blocked, not
 #: load, not a crash.
 ALIVE_BUT_SILENT = "alive-but-silent"
+#: The restore overran its bound and the witness measured a block, but no liveness probe
+#: was supplied: the block is measured, blocked-vs-dead is NOT. Its own status because
+#: ``ALIVE_BUT_SILENT`` (and ``GraphRestoreSilentError``'s contract) asserts a live
+#: process that nothing measured (#8827 review).
+LIVENESS_UNMEASURED = "liveness-unmeasured"
 #: The restore overran its bound and the port refused: the process is gone.
 INSTANCE_GONE = "instance-gone"
 #: The restore overran its bound while EVERY witness PING answered: the instance was
@@ -280,8 +302,9 @@ class RestoreObservation:
     witness_max_latency_ms: float
     #: At or above this, an answered-but-slow witness PING counts as a block.
     blocked_latency_ms: float
-    #: ``True`` = port accepts, ``False`` = refused, ``None`` = not probed (the
-    #: restore returned, or no probe was supplied).
+    #: ``True`` = port accepts, ``False`` = refused, ``None`` = not probed. ``None`` on
+    #: the overrun path is not a detail: it is what makes the status
+    #: ``LIVENESS_UNMEASURED`` instead of ``ALIVE_BUT_SILENT`` (#8827 review).
     instance_listening: bool | None
     #: Whether the RESTORE call itself returned before ``bound_s``. The status cannot
     #: stand in for it: ``UNMEASURED`` is reachable on BOTH paths, so keying the
@@ -444,11 +467,41 @@ class RestoreObservation:
             # it may coexist with an empty sample list.
             return (
                 f"{verdict} The port REFUSED a TCP connection, so the server process "
-                f"is gone — it died during the restore. That is the #8270 class "
-                f"(SIGSEGV in Index_SetLanguage on falkordb-server v4.20.x when an "
-                f"indexed payload is restored under a new key while the source still "
-                f"exists); every graph in that instance went with it. Restart the "
-                f"instance and do NOT repeat this restore — same-name only."
+                f"is gone — it died during the restore, and every graph in that instance "
+                f"went with it. A refusal proves the DEATH, not its cause (#8827 review): "
+                f"if the payload was being restored under a NEW key while the source "
+                f"still existed, this is the #8270 trigger (SIGSEGV in "
+                f"Index_SetLanguage on falkordb-server v4.20.x) — the shape the ⛔ rule "
+                f"above forbids, so a caller who followed it can rule that out; an "
+                f"OOM-kill or any other crash is equally consistent with what was "
+                f"measured. Restart the instance and do NOT repeat this restore — "
+                f"same-name only."
+            )
+        if self.status == LIVENESS_UNMEASURED:
+            # The block WAS measured; the process's liveness was not. Say only that.
+            # The blocked message used to be delivered here too, and it asserted "this is
+            # not a crash" about a port nothing had probed (#8827 review).
+            best = (
+                "No witness PING went unanswered, but the slowest ANSWERED one took "
+                f"{self.witness_max_latency_ms:.0f} ms (threshold "
+                f"{self.blocked_latency_ms:.0f} ms), so the command queued behind the "
+                "index rebuild"
+                if not self.witness_failures
+                else f"{self.witness_failures} of {self.witness_samples} witness PINGs "
+                f"on a separate connection went unanswered (longest silence "
+                f"{self.silent_ms:.0f} ms)"
+            )
+            return (
+                f"{verdict} {best}. That is the #7846 BLOCK measured from the witness "
+                f"side — the instance did not answer normally during the restore. "
+                f"LIVENESS WAS NOT MEASURED: no transport probe was supplied (pass "
+                f"``listening=tcp_is_listening(host, port)``), so this account cannot "
+                f"tell a BLOCKED process from a DEAD one, and it makes no claim either "
+                f"way. Do not retry (a retry re-blocks the instance for another full "
+                f"rebuild), and do not restart on this alone: probe the port and PING "
+                f"on a separate connection yourself — a REFUSED port means the process "
+                f"is gone and needs a restart; an ACCEPTED one means blocked, so wait "
+                f"and re-probe."
             )
         if self.status == UNMEASURED or self.witness_fault or not self.witness_samples:
             # The instrument failed, or it never got a reading. Neither is the block, and
@@ -464,13 +517,22 @@ class RestoreObservation:
                 f"instance with a PING on a separate connection."
             )
         if self.witness_failures:
-            liveness = (
-                "The port still ACCEPTS a TCP connection, so the server process is "
-                "alive and listening"
-                if self.instance_listening
-                else "Liveness could NOT be measured (no probe supplied, or the probe "
-                "did not complete — a connect timeout is NOT a refusal)"
-            )
+            # `instance_listening is None` on the overrun path is LIVENESS_UNMEASURED and
+            # never reaches here (it has its own account above). On the COMPLETED path the
+            # port is not probed at all, and the restore RETURNING is what establishes that
+            # the process was alive — say that instead of implying a probe ran.
+            if self.instance_listening:
+                liveness = (
+                    "The port still ACCEPTS a TCP connection, so the server process is "
+                    "alive and listening"
+                )
+            elif self.restore_returned:
+                liveness = (
+                    "The RESTORE call RETURNED, so the process was alive at least until "
+                    "it did; the port itself was NOT probed on this path"
+                )
+            else:
+                liveness = "Liveness was NOT measured, so blocked and dead are not told apart"
             return (
                 f"{verdict} {liveness}: this is not a crash and not load — a loaded "
                 f"server still answers, only slower. It is a BLOCKED server, the #7846 "
@@ -506,11 +568,19 @@ class RestoreObservation:
 
 
 class GraphRestoreSilentError(RuntimeError):
-    """The restore overran its bound while the instance answered nothing, but the
-    process is still listening (blocked, not dead, not loaded).
+    """The restore overran its bound and the caller must not be left hanging.
 
-    Distinct from :class:`GraphRestoreLostError` on purpose: this one's recovery is
-    "wait and re-probe, do not restart", the other's is "restart". A single error
+    Three measured situations raise it, and the message says which one it is:
+
+    * ``ALIVE_BUT_SILENT`` — the witness measured a block AND a liveness probe accepted
+      the port: the process is alive, so this is blocked, not dead and not loaded.
+    * ``LIVENESS_UNMEASURED`` — the block was measured but NO liveness probe was supplied,
+      so blocked-vs-dead was not established and the message claims neither.
+    * ``UNMEASURED`` — the witness produced no reading a verdict may rest on; the message
+      is an instrument report, not an engine verdict.
+
+    Distinct from :class:`GraphRestoreLostError` on purpose: the silent family's recovery
+    is "wait and re-probe, do not restart", the other's is "restart". A single error
     type would make an operator pick one and be wrong half the time.
     """
 
@@ -705,10 +775,18 @@ def restore_graph_key(
     split is reported rather than hidden (``elapsed_s`` = caller-held time for the whole
     sequence, ``restore_s`` = the bounded step).
 
+    ``listening`` is the BLOCKED-vs-DEAD discriminator, not a refinement of the blocked
+    message. Omit it and an overrun publishes ``LIVENESS_UNMEASURED``: the block is
+    measured from the witness, but a port that is refusing RIGHT NOW looks exactly like a
+    blocked one, so the driver makes no liveness claim at all. Pass
+    ``listening=lambda: tcp_is_listening(host, port)`` to get ``ALIVE_BUT_SILENT``
+    (do not restart) or ``INSTANCE_GONE`` (restart) instead.
+
     Raises:
-        GraphRestoreSilentError: the restore overran ``bound_s`` and the instance
-            answered nothing but its port still accepts — blocked (see the module
-            docstring's table).
+        GraphRestoreSilentError: the restore overran ``bound_s`` and the witness measured
+            a block — ``ALIVE_BUT_SILENT`` when a probe accepted the port (blocked, not
+            dead), ``LIVENESS_UNMEASURED`` when no probe was supplied (blocked-vs-dead
+            NOT established). See the module docstring's table.
         GraphRestoreLostError: the restore overran ``bound_s`` and the port refused —
             the process died.
         GraphRestoreStalledError: the restore overran ``bound_s`` while EVERY witness
@@ -724,9 +802,10 @@ def restore_graph_key(
     PING is) plus whatever timeout the ``listening`` callable carries, plus — on a
     COMPLETED run — ``recovery_probe_s``, the bounded window in which the driver waits
     for the instance to answer once more (the recovery edge that makes the silence
-    attributable; not part of ``bound_s``). So the caller is held at most
+    attributable; not part of ``bound_s``). So the tail AFTER ``DUMP``/``DEL`` is at most
     ``bound_s + recovery_probe_s + witness_join_s + probe_timeout`` — keep those small
-    when the tail matters, and read ``elapsed_s`` for the whole of it.
+    when the tail matters. ``elapsed_s`` is that tail PLUS the caller's own
+    ``dump()``/``delete()`` time, so read it for the whole of the call.
     """
     if bound_s <= 0:
         raise ValueError(f"bound_s must be positive, got {bound_s!r}")
@@ -934,7 +1013,12 @@ def restore_graph_key(
         # serving (#8827 review).
         status = CALLER_STALL
     else:
-        status = ALIVE_BUT_SILENT
+        # The block is measured, but `instance_listening is None` means nothing looked at
+        # the PROCESS. `ALIVE_BUT_SILENT` — and `GraphRestoreSilentError`'s contract —
+        # asserts a live process, so publishing it here was a verdict over evidence that
+        # was never taken, on the DEFAULT configuration (#8827 review). The status is its
+        # own so the message can carry only what was measured.
+        status = LIVENESS_UNMEASURED if instance_listening is None else ALIVE_BUT_SILENT
     observation = RestoreObservation(
         graph=graph,
         status=status,
