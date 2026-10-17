@@ -845,9 +845,10 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     (the ``env`` fixture's hosted app, shared by all REST test classes) — so the
     seam covers every REST read bound from them: ``GET /v1/team/keys`` (the
     busiest), ``GET /v1/team`` (the route this pin drives),
-    ``DELETE /v1/team/keys/{kid}``, ``POST /v1/points``, ``POST /v1/session/key``,
-    ``POST /v1/signup/email`` and the session-JWT REST lane — none of them
-    exempt from the bound. The one construction left PLAIN is
+    ``GET /v1/team/alerts?org_id=`` (requested three times — two 200 reads and a
+    403 assertion), ``DELETE /v1/team/keys/{kid}``, ``POST /v1/points``,
+    ``POST /v1/session/key``, ``POST /v1/signup/email`` and the session-JWT REST
+    lane — none of them exempt from the bound. The one construction left PLAIN is
     ``TestMcp._mcp_client``: it wraps a local ``Starlette`` carrying ONLY
     ``OrgResolutionMiddleware``, so no ``WaitBoundMiddleware`` is on its path
     and none of its reads can be a refusal — its ``status_code == 200`` reads
