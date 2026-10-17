@@ -382,25 +382,50 @@ def test_no_workflow_declares_the_version_as_an_env_key() -> None:
         walk(_load(path), path.name)
 
 
-def test_every_version_mention_is_a_read_or_an_asserted_spec() -> None:
+#: A segment that ASSIGNS the variable — the shape that gives the pin a home.
+_ASSIGNMENT = re.compile(r"^(?:export\s+|declare\s+)?WRANGLER_VERSION\s*=")
+_SEGMENT = re.compile(r"\|\||&&|[;|]")
+
+
+def _mention_offences(text: str) -> list[str]:
+    """Lines whose use of `WRANGLER_VERSION` is neither the declaration nor a read.
+
+    Judged per SEGMENT, not per line or per token: a line may assign a literal and
+    still name the variable elsewhere (`V="4.1"  # see $V`), and it may also hold
+    the declaration AND a second assignment. The value is read to the end of its
+    segment, because the legal value contains spaces.
+    """
     offenders = []
-    for path in _workflow_paths():
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            # CODE only: a trailing comment that merely mentions the variable used
-            # to satisfy the read tokens, so `V="4.1"  # see $V` was green.
-            code = _cut_comment(line)
-            if "WRANGLER_VERSION" not in code:
-                continue
-            if DECLARATION in code:
-                continue
-            # An ASSIGNMENT is the shape that gives the pin a second home, whatever
-            # else the line says — the read tokens below must not launder it.
-            if re.search(r"\bWRANGLER_VERSION\s*=", code):
-                offenders.append(f"{path.name}:{lineno}: {code.strip()}")
-                continue
-            if any(token in code for token in LEGAL_TOKENS):
-                continue
-            offenders.append(f"{path.name}:{lineno}: {code.strip()}")
+    for lineno, line in enumerate(text.splitlines(), 1):
+        code = _cut_comment(line)
+        if "WRANGLER_VERSION" not in code:
+            continue
+        assignment_bad = False
+        for segment in _SEGMENT.split(code):
+            segment = segment.strip()
+            match = _ASSIGNMENT.match(segment)
+            if match and not segment[match.end():].strip().startswith(
+                '"$(cat config/wrangler-version)"'
+            ):
+                assignment_bad = True
+                break
+        if assignment_bad:
+            offenders.append(f"{lineno}: {code.strip()}")
+            continue
+        if DECLARATION in code:
+            continue
+        if any(token in code for token in LEGAL_TOKENS):
+            continue
+        offenders.append(f"{lineno}: {code.strip()}")
+    return offenders
+
+
+def test_every_version_mention_is_a_read_or_an_asserted_spec() -> None:
+    offenders = [
+        f"{path.name}:{hit}"
+        for path in _workflow_paths()
+        for hit in _mention_offences(path.read_text(encoding="utf-8"))
+    ]
     assert not offenders, "WRANGLER_VERSION used outside the declared shapes:\n" + "\n".join(
         offenders
     )
@@ -484,6 +509,33 @@ def test_a_spec_may_be_named_in_a_comment_but_not_in_a_message() -> None:
     assert not _floating_specs(
         '  run: npx --yes "wrangler@${WRANGLER_VERSION:?}" --version  # was wrangler@4'
     ), "a TRAILING comment naming a spec is prose — cutting it is advertised"
+
+    # The mention rule's own self-tests: this arm carried the false negative that
+    # `V="4.1"  # see $V` slipped through, and nothing but a transcript pinned it.
+    declared = 'WRANGLER_VERSION="$(cat config/wrangler-version)"'
+    assert _mention_offences(declared) == [], "the declaration must pass"
+    assert _mention_offences("  " + declared) == [], "an indented declaration must pass"
+    assert _mention_offences("echo pinned; " + declared) == [], \
+        "the declaration after a separator must pass"
+    # The false negative this commit exists to fix: a SECOND assignment on the
+    # same line, which the old `DECLARATION in line` shortcut waved through.
+    assert _mention_offences(declared + '; WRANGLER_VERSION="4.151.1"'), \
+        "a second assignment beside the declaration must red"
+    assert _mention_offences(declared + ' || WRANGLER_VERSION="4.151.1"'), \
+        "a literal reached through `||` must red"
+    assert _mention_offences('WRANGLER_VERSION="4.151.1"  # see $WRANGLER_VERSION'), \
+        "a literal behind a comment mention must red"
+    assert _mention_offences('export WRANGLER_VERSION="4.151.1"'), \
+        "`export` does not make a literal legal"
+    assert _mention_offences('WRANGLER_VERSION="$(cat /tmp/elsewhere)"'), \
+        "only the ONE artefact is a legal source — a second file is a second home"
+    assert _mention_offences(
+        'WRANGLER_VERSION="$(cat /tmp/elsewhere)"; echo "$WRANGLER_VERSION"'
+    ), "a second source must red EVEN when the line also reads the variable legally"
+    assert _mention_offences('echo "pinned: ${WRANGLER_VERSION}"') == [], \
+        "a plain read must pass"
+    assert _mention_offences('echo "WRANGLER_VERSION=$WRANGLER_VERSION"') == [], \
+        "printing the NAME with the value assigns nothing"
 
 
 def test_each_workflow_reads_the_version_at_least_once() -> None:
