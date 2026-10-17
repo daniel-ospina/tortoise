@@ -3055,7 +3055,8 @@ _ENTITY_MUTATION_RECORD_TYPE = "EntityMutated"
 # silent, which is the failure mode the lane exists to remove.
 
 
-def _raise_update_point_status_error(proj, id: str) -> None:
+def _raise_update_point_status_error(proj, id: str, *,
+                                   status_only: bool = False) -> None:
     """#432: error path for the update_point draft→live promote guard.
 
     Runs a diagnostic existence read ONLY when the guarded SET returned no
@@ -3064,10 +3065,15 @@ def _raise_update_point_status_error(proj, id: str) -> None:
     not promotable → illegal-transition ValueError.
 
     #1088: an already-LIVE point is short-circuited in ``update_point``
-    (idempotent no-op), so the only statuses that reach this error are the
-    TERMINAL ones (``live.TERMINAL_EXCLUDED_STATUSES``: retracted /
-    superseded / outdated / archived / deprecated) — a terminal point is never
-    resurrected by update_point.
+    (idempotent no-op), so a TERMINAL status reaching this error is never
+    resurrected by update_point. A ``live`` node CAN reach it, though — the
+    replay may land it live between the pre-write short-circuit and the guarded
+    ``SET`` — and that case is only an idempotent success when the caller asked
+    for NOTHING BUT the status (``status_only``). With other props the promote
+    matched nothing and nothing was applied, so returning silently would report
+    a landed write that did not happen: measured, ``update_point(status='live',
+    confidence=0.42)`` returned success, left the confidence unset, and emitted
+    ``PointRevised`` carrying it.
     """
     exists = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
@@ -3075,15 +3081,16 @@ def _raise_update_point_status_error(proj, id: str) -> None:
     if not exists:
         raise ValueError(f"No point {id!r}")
     # #1088 / #8854 review round 5: an ALREADY-LIVE node is the idempotent
-    # no-op the pre-write short-circuit implements. It reaches here only on a
-    # RETRY (the replay landed the node live between the abort and the
-    # re-issue), where reporting an illegal transition would contradict the
-    # door's own contract. Returning lets the arm finish as a no-op.
-    status = proj.g.query(
-        "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
-    ).result_set
-    if status and status[0][0] == 'live':
-        return
+    # no-op the pre-write short-circuit implements. Reaching here means the
+    # replay landed the node live between the abort and the re-issue, where
+    # reporting an illegal transition would contradict the door's own contract
+    # — but ONLY for a status-only promote (see `status_only` above).
+    if status_only:
+        status = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
+        ).result_set
+        if status and status[0][0] == 'live':
+            return
     raise ValueError(
         f"Illegal status transition — update_point only promotes draft→live; "  # noqa: F541
         f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
@@ -10377,7 +10384,9 @@ class TortoiseSDK:
         # `status IS NULL OR status = 'draft'` predicate against the graph — it
         # cannot promote twice, and a legitimately-refused promote still yields
         # an empty result set (the caller's
-        # ``_raise_update_point_status_error`` path is unchanged).
+        # ``_raise_update_point_status_error`` path gains a ``status_only``
+        # argument, so a live node is an idempotent success only for a
+        # status-only promote and stays loud when other props went unwritten).
         def _promote_witness(result) -> bool:
             """A zero-row promote re-issue, classified by the node's STATUS.
 
@@ -10412,7 +10421,8 @@ class TortoiseSDK:
                 # no-op). With other props nothing was applied, so keep it
                 # loud instead of journaling a revision the graph never made.
                 return len(_props_param) == 1
-            _raise_update_point_status_error(proj, id)
+            _raise_update_point_status_error(
+                proj, id, status_only=len(_props_param) == 1)
             return False  # pragma: no cover — the helper always raises
 
         if has_object:
@@ -10446,7 +10456,8 @@ class TortoiseSDK:
                     witness=_promote_witness,
                 )
                 if not res.result_set:
-                    _raise_update_point_status_error(proj, id)
+                    _raise_update_point_status_error(
+                        proj, id, status_only=len(_props_param) == 1)
             else:
                 self._graph_write_with_retry(
                     lambda: proj.g.query(
@@ -10487,7 +10498,8 @@ class TortoiseSDK:
                     witness=_promote_witness,
                 )
                 if not res.result_set:
-                    _raise_update_point_status_error(proj, id)
+                    _raise_update_point_status_error(
+                        proj, id, status_only=len(_props_param) == 1)
             else:
                 # #7405: one key per statement, each an absolute
                 # `SET n += $props` — a re-issue writes the same value to

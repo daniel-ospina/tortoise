@@ -1496,3 +1496,91 @@ def test_a_non_string_tag_list_is_still_witnessed(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+class _PromoteLosesTheRace:
+    """Flip the node LIVE between the door's probe and its guarded ``SET``.
+
+    The pre-write short-circuit answers an already-live point as an idempotent
+    no-op, so the ``live`` status is only reachable AT the guarded statement when
+    the replay lands it in between — the window this pins.
+    """
+
+    def __init__(self, real, needle: str, victim: str) -> None:
+        self._real = real
+        self._needle = needle
+        self._victim = victim
+        self.flipped = False
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher and not self.flipped:
+            self.flipped = True
+            self._real.query(
+                "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                params={"id": self._victim})
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_live_node_with_unwritten_props_is_not_a_silent_success(tmp_path):
+    """A promote that matched nothing is NOT an idempotent no-op.
+
+    ``status_only`` is what separates the two: the replay can land the node
+    ``live`` between the door's probe and the guarded ``SET`` (this proxy does),
+    and returning silently then reports a landed write that never happened —
+    measured pre-fix: ``update_point(status='live', confidence=0.42)`` returned
+    success, left ``confidence`` unset, and emitted ``PointRevised`` carrying it.
+    """
+    sdk = _sdk(tmp_path, "promoterace")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="Illegal status transition"):
+            sdk.update_point(pid, status="live", confidence=0.42)
+
+        assert proxy.flipped, "fixture precondition: the node must have gone live"
+        proj.g = proxy._real
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status, n.confidence",
+            params={"id": pid}).result_set[0]
+        assert row[0] == "live"
+        assert row[1] is None, (
+            "the raise must not be papering over a partly-applied write: the "
+            f"confidence was never set, saw {row[1]!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
+        tmp_path):
+    """The other half of ``status_only``: nothing was asked for but the status.
+
+    A live node is exactly what a status-only promote wanted, so this must NOT
+    raise — otherwise the ``live`` classification would turn an idempotent retry
+    into a spurious error.
+    """
+    sdk = _sdk(tmp_path, "promoteidem")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
+        proj.g = proxy
+
+        out = sdk.update_point(pid, status="live")  # must NOT raise
+
+        assert out["status"] == "live"
+        assert proxy.flipped, "fixture precondition: the node must have gone live"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
