@@ -319,6 +319,101 @@ def test_a_pack_kind_must_be_named_explicitly():
     assert [m.key for m in plan.moves] == ["pt-pack-1"]
 
 
+# ── invariant 4 for :Subject — the declared vocabulary, not an empty set ────
+
+
+def test_point_to_subject_accepts_a_declared_kind_and_drops_the_content_vector():
+    """``kind_vocab`` used to seed ``Subject`` with ``frozenset()`` on the claim
+    that no code constant or write gate held the subject-kind vocabulary. That
+    premise was false: ``subject_binding.subject_kind_names()`` IS the declared
+    constant and ``is_subject_kind()`` is the gate on the live write doors — so
+    an empty set made this the looser door (``if allowed and …`` = anything
+    goes), accepting a ``subjectKind`` the binder then refuses to bind.
+
+    ``pt-goal-1`` has no ``:Subject`` move anywhere else in this file, so this is
+    also the only cover for the Subject half of ``NAME_REQUIRED_TARGETS`` /
+    ``NAME_EMBEDDED_TARGETS``."""
+    from tortoise.subject_binding import is_subject_kind
+
+    assert is_subject_kind("team")
+    dump = _dump()
+    out, _report = retype(
+        dump,
+        _all_keep(
+            dump,
+            overrides={"pt-goal-1": {"label": "Subject", "kind": "team", "name": "Platform team"}},
+        ),
+    )
+    node = next(n for n in out["nodes"] if n["props"]["id"] == "pt-goal-1")
+    assert node["labels"] == ["Subject"]
+    assert node["props"]["subjectKind"] == "team"
+    assert node["props"]["name"] == "Platform team"
+    assert "pointKind" not in node["props"]
+    # a :Subject encodes its vector FROM `name` (#7845), so the content-derived
+    # vector is dropped by default — the #8419 defect
+    assert "embedding" not in node["props"]
+
+
+def test_point_to_subject_also_accepts_the_declared_core_prefixed_form():
+    """``is_subject_kind`` accepts a declared key (``core:organization``) and its
+    bare form (``organization``) — the same two forms, no third."""
+    from tortoise.subject_binding import is_subject_kind
+
+    assert is_subject_kind("core:organization")
+    dump = _dump()
+    plan = build_plan(
+        dump,
+        _all_keep(
+            dump,
+            overrides={
+                "pt-goal-1": {
+                    "label": "Subject",
+                    "kind": "core:organization",
+                    "name": "Platform team",
+                }
+            },
+        ),
+    )
+    assert [(m.key, m.dst_label, m.kind) for m in plan.moves] == [
+        ("pt-goal-1", "Subject", "core:organization")
+    ]
+
+
+def test_point_to_subject_refuses_every_kind_the_live_gate_refuses():
+    """The retype door must be no looser than ``is_subject_kind``: a kind the
+    binder refuses (a non-subject kind, a foreign namespace, the ``other`` NIL
+    bucket) is refused here rather than written as ``subjectKind``."""
+    from tortoise.subject_binding import is_subject_kind
+
+    dump = _dump()
+    for kind in ("core:plan", "totally:invented", "acme:team", "other"):
+        assert not is_subject_kind(kind), kind
+        with pytest.raises(RetypeError) as exc:
+            build_plan(
+                dump,
+                _all_keep(
+                    dump,
+                    overrides={"pt-goal-1": {"label": "Subject", "kind": kind, "name": "X"}},
+                ),
+            )
+        assert any("Subject vocabulary" in p for p in exc.value.problems), exc.value.problems
+
+
+def test_a_pack_declared_subject_kind_must_be_named_explicitly():
+    """The declared set is the floor, not the ceiling: a pack-declared subject
+    kind still has to be named through ``extra_kinds`` (offline there is no
+    installed-namespace gate to compile against)."""
+    dump = _dump()
+    overrides = {"pt-goal-1": {"label": "Subject", "kind": "pack:vendor", "name": "Acme"}}
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, _all_keep(dump, overrides=overrides))
+    assert any("Subject vocabulary" in p for p in exc.value.problems)
+    plan = build_plan(
+        dump, _all_keep(dump, overrides=overrides), extra_kinds={"Subject": ["pack:vendor"]}
+    )
+    assert [(m.key, m.kind) for m in plan.moves] == [("pt-goal-1", "pack:vendor")]
+
+
 def test_a_target_kind_is_required():
     dump = _dump()
     with pytest.raises(RetypeError) as exc:
@@ -691,6 +786,26 @@ def test_two_kept_objects_sharing_a_name_are_refused():
     assert any("obj-1" in p and "obj-2" in p for p in exc.value.problems)
 
 
+def test_a_name_collision_is_reported_together_with_every_other_problem():
+    """The invariants each raise with the FULL problem list, but the collision
+    check was gated on ``if not problems`` — so a run holding one off-vocabulary
+    kind AND a collision reported only the kind, and the collision surfaced only
+    after the first was fixed. On a large snapshot that is an
+    iterate-until-quiet loop instead of one reviewable pass."""
+    dump = _dump()
+    overrides = {
+        "pt-goal-1": {"label": "Object", "kind": "goal", "name": "Alpha 2"},
+        "pt-stmt-1": {"label": "Object", "kind": "goal", "name": "Alpha 2"},
+        "pt-obs-1": {"label": "Object", "kind": "notAGoalKind", "name": "Unrelated"},
+    }
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, _all_keep(dump, overrides=overrides))
+    joined = " ".join(exc.value.problems)
+    assert "notAGoalKind" in joined  # the kind problem
+    assert "MERGEs on its name" in joined  # AND the collision, in the same raise
+    assert "pt-goal-1" in joined and "pt-stmt-1" in joined
+
+
 # ── the loader's own container contract, enforced at the door ───────────────
 
 
@@ -713,6 +828,29 @@ def test_a_non_list_label_set_is_refused():
     with pytest.raises(RetypeError) as exc:
         build_plan(dump, decisions)
     assert any("label" in p and "1" in p for p in exc.value.problems)
+
+
+def test_a_non_integer_dump_id_is_refused_rather_than_coerced():
+    """``restore_graph`` coerces ids with ``_coerce_dump_id`` (#3895 review P1),
+    which refuses a non-int/bool. A bare ``int()`` on this side accepted
+    ``"3"`` (and ``True`` → ``1``), reported a clean run, and handed Phase 4 a
+    dump the loader then refuses — the same hidden-corruption class as the
+    non-dict prop bag, on the id the loader links every edge by."""
+    dump = _dump()
+    decisions = _all_keep(dump)
+    dump["nodes"][2]["dump_id"] = "3"
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, decisions)
+    assert any("not an integer id" in p for p in exc.value.problems), exc.value.problems
+
+
+def test_a_bool_dump_id_is_refused():
+    dump = _dump()
+    decisions = _all_keep(dump)
+    dump["nodes"][0]["dump_id"] = True
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, decisions)
+    assert any("not an integer id" in p for p in exc.value.problems), exc.value.problems
 
 
 # ── the CLI must never exit 0 having written nothing ────────────────────────

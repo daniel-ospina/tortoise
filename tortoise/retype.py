@@ -58,11 +58,13 @@ job is the layer relocation the other one cannot do.
    single layer to re-type *from*; it needs a decision, not a rewrite.
 4. **Kind legality.** The target kind must exist in the target layer's
    vocabulary (``CANONICAL_OBJECT_KINDS`` / ``CORE_POINT_KINDS`` /
-   ``EVENT_KINDS``). Minting an off-vocabulary kind is a live defect class
-   (#5202 hosted door persists ``objectKind`` verbatim; #5475 the approval set
-   is writable through it) — this refuses to be another door. Pack-declared
-   kinds have no installed-namespace context offline, so they must be named
-   explicitly (``extra_kinds``).
+   ``EVENT_KINDS`` / ``subject_binding.subject_kind_names``). Minting an
+   off-vocabulary kind is a live defect class (#5202 hosted door persists
+   ``objectKind`` verbatim; #5475 the approval set is writable through it) —
+   this refuses to be another door. An EMPTY vocabulary means *nothing is
+   legal*, never *anything goes*: a kind outside the declared set has to be
+   named explicitly through ``extra_kinds`` (pack kinds have no
+   installed-namespace context offline).
 5. **Operator nodes stay ``:Point``.** ONTOLOGY §5: "*the operator node itself
    stays* ``:Point {is_operator:true}``; only its children and targets may be
    any of the four labels". A decision that moves an operator is refused.
@@ -355,6 +357,18 @@ def index_dump(dump: Mapping[str, Any]) -> dict[str, dict]:
             problems.append(f"malformed node row (no dump_id): {node!r:.80}")
             continue
         dump_id = node["dump_id"]
+        # The id's TYPE is part of the same contract: ``restore_graph`` coerces
+        # with ``_coerce_dump_id`` (hosted_backup, #3895 review P1), which refuses
+        # a non-int/bool. A bare ``int()`` here would coerce ``"3"`` (and
+        # ``True`` → ``1``), report a clean run, and hand Phase 4 a dump the
+        # loader then refuses.
+        if isinstance(dump_id, bool) or not isinstance(dump_id, int):
+            problems.append(
+                f"node dump_id {dump_id!r} is not an integer id "
+                f"({type(dump_id).__name__}) — restore_graph's _coerce_dump_id "
+                "calls that corruption"
+            )
+            continue
         if dump_id in seen_dump_ids:
             problems.append(f"duplicate dump_id {dump_id!r} in node list")
         seen_dump_ids.add(dump_id)
@@ -402,25 +416,44 @@ def _current_label(node: Mapping[str, Any]) -> tuple[str | None, list[str]]:
 # ── vocabulary ──────────────────────────────────────────────────────────────
 
 
+def _subject_kind_vocab() -> frozenset[str]:
+    """The declared §5 Subject kinds, in the forms the LIVE gate accepts.
+
+    ``subject_binding.subject_kind_names()`` IS the constant ONTOLOGY §5's prose
+    describes (the keys of ``extractor_v2.SUBJECTS``, drift-pinned by
+    ``tests/test_subject_binding_1370.py``) and ``is_subject_kind()`` is the gate
+    on the live write doors (``sdk.py`` / ``hosted_api.py``). Seeding from the
+    same declaration keeps this offline tool from being a second, looser door:
+    the forms accepted here are exactly the forms ``is_subject_kind`` accepts —
+    a declared key (``core:team``) or, only for a ``core:`` key, its bare form
+    (``team``, which is what the extractor and the fixture store). ``other`` is
+    deliberately absent: it is the fail-closed NIL bucket, not an identity.
+
+    Imported lazily (as ``subject_binding`` itself does) so the mechanics module
+    stays importable without dragging the extractor's declaration in.
+    """
+    from tortoise.subject_binding import subject_kind_names
+
+    declared = subject_kind_names()
+    forms = set(declared)
+    forms.update(k.split(":", 1)[1] for k in declared if k.startswith("core:"))
+    return frozenset(forms)
+
+
 def kind_vocab(
     extra_kinds: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, frozenset[str]]:
     """Legal kind values per target layer.
 
-    Core sets are the ontology's own (``pack_registry`` / ``commit_schema``).
-    Pack-declared kinds are NOT resolved: offline there is no graph, so no
-    installed-namespace gate to compile against — a pack kind must be named
-    explicitly through ``extra_kinds``.
+    Core sets are the ontology's own (``pack_registry`` / ``commit_schema`` /
+    ``subject_binding``). Pack-declared kinds are NOT resolved: offline there is
+    no graph, so no installed-namespace gate to compile against — a pack kind
+    must be named explicitly through ``extra_kinds``.
     """
     vocab: dict[str, frozenset[str]] = {
         "Point": frozenset(CORE_POINT_KINDS),
         "Object": frozenset(CANONICAL_OBJECT_KINDS),
-        # ONTOLOGY §5 declares a subject-kind vocabulary (organization, team,
-        # role, legalPerson, naturalPerson, other) but NO code constant holds it
-        # and no write path gates it (the #5339 finding), so re-typing cannot
-        # validate a subjectKind against an authority that does not exist. It is
-        # shape-checked (non-empty) and otherwise passed through.
-        "Subject": frozenset(),
+        "Subject": _subject_kind_vocab(),
         "Event": frozenset(EVENT_KINDS),
     }
     for label, kinds in (extra_kinds or {}).items():
@@ -689,8 +722,13 @@ def build_plan(
                 f"pointKind={props.get('pointKind')!r} is not a :{target} kind)"
             )
             continue
+        # An EMPTY vocabulary is "nothing is legal", never "anything goes":
+        # every layer here has a declared set, and a pack kind arrives through
+        # ``extra_kinds``. Gating on ``allowed and …`` left a layer with no
+        # declared set accepting ANY kind — the off-vocabulary-kind class this
+        # invariant exists to close (#5202/#5475).
         allowed = vocab[target]
-        if allowed and kind not in allowed:
+        if kind not in allowed:
             problems.append(
                 f"{key!r} → :{target} {KIND_PROP[target]}={kind!r} is not in the "
                 f"{target} vocabulary ({len(allowed)} core kinds); name a "
@@ -733,10 +771,13 @@ def build_plan(
             )
         )
 
-    if not problems:
-        # Invariant 6 — a name is required AND unique among the nodes that end
-        # in a name-MERGEed layer.
-        problems.extend(_name_collision_problems(index, moves))
+    # Invariant 6 — a name is required AND unique among the nodes that end in a
+    # name-MERGEed layer. Collected UNCONDITIONALLY: the invariants each raise
+    # with the FULL problem list, so a run holding an off-vocabulary kind AND a
+    # name collision must report both. Gating this on ``not problems`` turned a
+    # large snapshot into an iterate-until-quiet loop (fix the kinds, re-run,
+    # learn about the names).
+    problems.extend(_name_collision_problems(index, moves))
     if problems:
         raise RetypeError(problems)
     return RetypePlan(
@@ -781,9 +822,9 @@ def apply_plan(
         raise RetypeError(["dump carries no node/edge lists — nothing to re-type"])
 
     # Shape/dump_id validation before a single node is rewritten (the loader's
-    # own container contract: a non-dict prop bag or a non-list label set is
-    # corruption, a duplicate dump_id is an ambiguity), plus the id → identity
-    # map the plan is bound to.
+    # own container contract: a non-dict prop bag, a non-list label set or a
+    # non-integer ``dump_id`` is corruption, a duplicate dump_id is an
+    # ambiguity), plus the id → identity map the plan is bound to.
     index = index_dump(dump)
     identity_by_id = {int(node["dump_id"]): key for key, node in index.items()}
 
