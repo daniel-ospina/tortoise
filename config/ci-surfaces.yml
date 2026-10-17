@@ -4584,7 +4584,6 @@ durations:
   # pool, which is what pushed coverage under the 90% floor on this branch (#3400).
   # Both are measured locally under the same `# unmeasured` convention; refresh from
   # the first post-merge run that includes them.
-  test_5509_name_keyed_identity_reads.py: 134.1  # #5509: LOCAL reading (13 tests, junit sum 134.06s — 132.7s of it in TestBeliefTimelineIdentityRead, which drives the real graph). Carried here because its merge into this branch is what took durations coverage below the floor.
   test_7936_reference_fold_label_rekey.py: 8.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). The row is added for the HEADROOM the gate no longer has — main sits just above the 90% floor, so one more unmeasured fast file can tip `duration_coverage_issues()`, and an absent row is also what reds `tests/test_ci_timing.py`'s `validate_refreshed_manifest` assertions. Local embedded-lane reading 7.0-10.1 s (15 tests; `FalkorProjection(path=…)` graphs, plus one SDK live-build case). Refresh from the first post-merge run that includes it.
   eval/retrieval/test_integration.py: 1523.4
   # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
