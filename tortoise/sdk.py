@@ -5687,7 +5687,11 @@ class TortoiseSDK:
             keep = retryable_aborted_write(exc, graph_exists=_probe)
             if keep:
                 last_abort = exc
-                state_gated = graph_abort_family(exc)
+                # LATCHED for the same reason `armed_abort` is: a later
+                # write-slot abort is state-INDEPENDENT and must not re-open
+                # issuing into a graph the rebuild deleted (the #7685
+                # empty-graph harm the pre-issue probe exists to refuse).
+                state_gated = state_gated or graph_abort_family(exc)
                 if witness is not None and armed_abort is None and state_gated:
                     # Latch the first graph-replaced abort. `_WriteNotLanded`
                     # is intentionally NOT latched here: it is arm-neutral.

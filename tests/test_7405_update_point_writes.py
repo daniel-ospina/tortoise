@@ -1223,6 +1223,67 @@ def test_a_per_key_attempt_with_no_result_row_is_a_non_landing(
             sdk.close()
 
 
+class _GraphThenSlotThenDeletedGraph:
+    """Rebuild abort, then a write-slot abort, then the graph key is GONE.
+
+    The pre-issue `EXISTS` probe must stay armed across the state-independent
+    abort: otherwise the retry issues a statement into a graph FalkorDB would
+    auto-create EMPTY (the #7685 harm).
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+        self.applied = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            if self.matching == 2:
+                raise redis_exc.ResponseError(_WRITE_SLOT)
+            self.applied += 1
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 0 if self.matching >= 2 else 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_deleted_graph_is_not_issued_into_after_a_mixed_abort(
+        tmp_path, monkeypatch):
+    """The pre-issue deletion gate is latched like the witness (#8854 r6 P2).
+
+    A write-slot abort after a rebuild abort must not re-open issuing into a
+    graph whose key is gone.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "mixeddeleted")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _GraphThenSlotThenDeletedGraph(
+            proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError):
+            sdk.update_point(pid, confidence=0.9)
+
+        assert proxy.applied == 0, (
+            "a deleted graph must never be issued into, even after a "
+            "state-independent abort")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_a_deleted_graph_abort_on_the_property_set_stays_loud(tmp_path):
     """The retry must not MASK a deletion — the #7685 guarantee, extended.
 
