@@ -140,6 +140,13 @@ MARKER_SPELLINGS: tuple[str, ...] = (
 UNMARKED_SCRIPTS: frozenset[str] = frozenset(
     {
         "1714_dedup_observation.py",
+        # #4125: the LIVE operator CLI for the pre-#4005 basename session-Source
+        # migration. It is deliberately NOT marked: every declared spelling
+        # (HISTORICAL/ARCHIVED/SUPERSEDED/DEPRECATED/FROZEN/OBSOLETE) asserts
+        # the script does not run, while this one is the migration the
+        # durability doc tells an operator to run on an unmigrated graph. So it
+        # takes the residue side, and the ceiling moves with it (below).
+        "4125_migrate_legacy_session_sources.py",
         "2146_e2e_live_orphan_cleanup.py",
         "2146_falkordb_graph_cleanup.py",
         "2199_baseline_source_rename.py",
@@ -179,7 +186,10 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
 #: The ratchet: the markerless residue may never GROW. Raised only deliberately,
 #: in its own diff — and lowered by the retrofit as it marks files, so the count
 #: is a progress reading, not a fact that re-stales silently.
-UNMARKED_CEILING = 34
+#: 34 -> 35 (#4125): `4125_migrate_legacy_session_sources.py` is a LIVE operator
+#: CLI and cannot truthfully take a "does not run" marker — the deliberate,
+#: argued raise the ratchet reserves for the diff that adds such a script.
+UNMARKED_CEILING = 35
 
 #: Scripts that assert a price **of this product**. #4830's sharpest gap: both
 #: ``bp_approach_cycle3``/``cycle4`` assert non-canonical tiers as ours and

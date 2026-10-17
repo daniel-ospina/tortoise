@@ -965,12 +965,15 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
     "tests/test_hosted_api.py": (2, frozenset({"_verdict_client"})),
 
     # ── #8818: the #8802 remainder, tranche 1 (>= 17 in-class reads) ────────
-    # Same seam, same declaration. Each file's reads bind from a client over
-    # the wait-bound hosted app on a route outside the exempt set
+    # Same seam, same declaration. Each file's IN-CLASS reads bind from a
+    # client over the wait-bound hosted app on a route outside the exempt set
     # (`{("POST", "/v1/context")}` + the `/v1/internal/` prefix,
     # `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`), so one conversion per client
     # construction turns a transport wait-bound refusal into the contract's
-    # INCONCLUSIVE skip instead of an `assert 504 == 200` product FAIL.
+    # INCONCLUSIVE skip instead of an `assert 504 == 200` product FAIL. Not
+    # every plain construction a converted file keeps is in class — see this
+    # block's `test_github_index_lifecycle.py` entry, whose eleven mock-transport
+    # clients are outside it.
     # +1 in every entry below: the refusal pin's own control client, which must
     # stay PLAIN to observe the 504 it proves is real.
     "tests/test_action_endpoints_dual_auth.py": (1, frozenset({"env"})),

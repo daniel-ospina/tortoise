@@ -805,6 +805,15 @@ def restore(backup_dir: str, db_path: str,
                             logger.exception(
                                 "restore: deferred EntityLinked fold failed; %d "
                                 "link(s) not replayed", len(deferred_links))
+                    # #4125: re-derive the migrated session-Source identity from
+                    # the journal just replayed (this JSONL fallback is the
+                    # fourth whole-journal engine). The pre-#4005 basename node
+                    # is re-materialised by the replay and the canonical
+                    # `session:<id>` node is recreated beside it; only a
+                    # trailing sweep can converge them. Never raises
+                    # (post-restore: #2943).
+                    from tortoise.session_source_migration import reconcile_after_replay
+                    reconcile_after_replay(proj, engine="backup.restore")
                 assert_no_non_folded(_nf_entries, engine="restore")
             finally:
                 proj.close()
