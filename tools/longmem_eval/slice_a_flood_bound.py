@@ -164,9 +164,11 @@ _FLOOD_TAILS = (
 _FLOOD_ANCHOR = "the user's cat Luna sheds a lot in summer"
 _FLOOD_QUOTE = "the cat sheds a lot"
 
-#: The own-source TURNS are source turns whose verbatim text CONTAINS the
-#: anchored quote — the pass-2 own-source leg's shape (they are source hits,
-#: not statements). Their content differs only by non-fact-critical filler; a
+#: The own-source TURNS are the pass-2 own-source leg's shape: POINTS (not raw
+#: chunks) whose content carries the `[user] ` prefix `_is_turn_point()` keys
+#: on, with `source_turn_id` pointing at the anchor's own turn — and whose
+#: verbatim text CONTAINS the anchored quote. Their content differs only by
+#: non-fact-critical filler; a
 #: numeric filler would be a real value difference and the guard would —
 #: correctly — refuse to treat them as the same utterance.
 _TURN_TAILS = (

@@ -209,7 +209,9 @@ content-less operator hits stopped consuming a reader-context item slot —
 **three days after** Slice A merged (`b3ed420d9`, 2026-09-09). "Recover" was
 defined against a window that can no longer be produced, so a re-run would
 confound the assembly change with the #2978 change. No receipt for Runs A/B/C
-ever existed (`tools/longmem_eval/receipts/` does not exist).
+was ever **committed** — `git ls-files` carries none, and the uncommitted cycle
+receipts this document's §7 names lived in one lane's `.worktrees/opt/
+2080-measure/` checkout, which no longer exists.
 
 **The gate is re-specified** (`docs/runbook/8043-slice-a-t-gate.md`; receipt
 `docs/runbook/8043-slice-a-t-gate-receipt.json`; instrument

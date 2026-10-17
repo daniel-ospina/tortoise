@@ -66,8 +66,9 @@ ON/OFF delta; it cannot measure the old T.
 
 ## 2. The run — three arms on the C2 shape
 
-Pool: **139 hits** — 103 for the flooded fact (79 statement restatements + 13
-own-source chunks/turns + the anchor + the entangled top), **24 content-less
+Pool: **139 hits** — 103 for the flooded fact (79 statement restatements +
+13 flood points entangled with the content-less class + 3 own-source turns +
+8 raw chunks), **24 content-less
 operator hits** (#2978's class), 4 value-critical claims (two same-frame
 different-value pairs: `300`/`400`, `12`/`60`), 8 unrelated facts. Window:
 **40 items** (wave §1's window), token budget far above the cap so the ITEM
@@ -155,7 +156,7 @@ The wave doc's §6 acceptance line and §8 status are marked accordingly (§9 of
 
 | Leg | Statement | State |
 |---|---|---|
-| **T-1** *(structural)* | On a C2-shaped pool, the shipped window admits **no** content-less slot; the A6/A8 assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool is returned byte-identically. | **RUN** — this document + the receipt + `tests/longmem_eval/test_slice_a_flood_bound.py`. |
+| **T-1** *(structural)* | On a **provenance-bearing** C2-shaped pool, the shipped window admits **no** content-less slot; the A6/A8 assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool is returned byte-identically. (The provenance-free ask-lane shape is measured separately at 12 slots — #8658.) | **RUN** — this document + the receipt + `tests/longmem_eval/test_slice_a_flood_bound.py`. |
 | **T-2** *(end-to-end, post-#2978)* | Same frozen reader + judge on the frozen 50 qids: the A6 arm **ON vs OFF**, reported as an **ON/OFF delta against the post-#2978 OFF arm** (never against C1's 0.780). | **NOT RUN here** — re-homed, §4.4. |
 
 **Why T-1 is the right re-specification and not a substitute dressed up as
