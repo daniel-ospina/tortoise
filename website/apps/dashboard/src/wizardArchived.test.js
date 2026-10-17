@@ -372,7 +372,7 @@ const COPY_READ_CENSUS = Object.freeze({
   HARNESS_SKILLS_IN_PROMPT: [0, 2],
   HARNESS_SKILLS_IN_STEPS: [0, 2],
   HARNESS_STEPS: [0, 2],
-  UNIVERSAL_COMMAND: [1, 0],
+  CODEX_DESKTOP_COMMAND: [1, 0],
   WIZARD_CAPTIONS: [7, 0],
   analyticsHarnessOf: [1, 0],
   harnessDisplayName: [1, 0],

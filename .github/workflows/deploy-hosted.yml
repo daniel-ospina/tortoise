@@ -241,6 +241,39 @@ jobs:
       # silently — the same shape as the 4.6-day stall #2240 is about. Same
       # script, same substrate, per-step key; see the long note on the
       # `deploy-api` site for the token and ordering rationale.
+      # ── Resolve recovered alerts (#8841) ───────────────────────────────
+      # The OTHER half of the ledger. `Alert on failure` below files/updates ONE
+      # issue per failing (job, step); without this leg NOTHING ever closes it,
+      # so a recovered fault leaves an OPEN issue behind claiming a condition
+      # that is no longer true. Measured on the `deploy-api` `drift` key (#7634):
+      # filed 2026-10-07T20:11Z, **21 later runs SUCCEEDED**, and the issue was
+      # still OPEN with 238 `Recurrence` comments ten days on.
+      #   It retires exactly the keys whose steps reported `success` in THIS run
+      # (plus the job-level key when `job.status` is `success`), reusing the same
+      # `id=outcome` map the alert passes — so a step cannot be alerted on a key
+      # it can never resolve. A `skipped` step is NOT a pass: a run that dies
+      # early skips everything below it.
+      #   `if: always() && !cancelled()` on purpose: on a partially red run an
+      # EARLIER step that passed should still retire its stale alert (a cancel
+      # observes neither, and the next green run retires them anyway).
+      #   ⛔ It can NEVER fail the job — every failure in `--resolve` mode is a
+      # `::warning::` with exit 0. A red here would be a FALSE deploy failure,
+      # and this step's id is not in the alert's `--steps` list, so the alert
+      # would file a job-level key claiming the deploy failed when it did not.
+      - name: Resolve recovered alerts (out-of-band) — packaging-smoke (#8841)
+        if: always() && !cancelled()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::warning::the alert script is not on disk (checkout failed?) — a recovered finding's ledger issue stays OPEN; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 0
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job packaging-smoke \
+            --resolve \
+            --job-status "${{ job.status }}" \
+            --steps "buildx=${{ steps.buildx.outcome }} build-image=${{ steps.build-image.outcome }} pack-assert=${{ steps.pack-assert.outcome }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Alert on failure (out-of-band) — packaging-smoke (#2240)
         if: failure()
         run: |
@@ -929,6 +962,28 @@ jobs:
       #   matches nothing, and would file a DUPLICATE issue on every failing run
       #   (#2706). The substrate refuses a non-Actions author rather than
       #   degenerating.
+      # ── Resolve recovered alerts (#8841) ───────────────────────────────
+      # See the `packaging-smoke` site for the full rationale. Short form: the
+      # alert below opens/updates ONE issue per failing (job, step); this leg
+      # RETIRES the keys whose steps passed in this run, so a recovered fault
+      # cannot leave a stale OPEN alert behind (#7634 stayed open across 21 green
+      # runs and 238 recurrences). `--job-status "${{ job.status }}"` is what makes
+      # the job-level fallback key resolvable, and only when the WHOLE job is
+      # green. Never fails the job: every failure here is a `::warning::`.
+      - name: Resolve recovered alerts (out-of-band) — deploy-api (#8841)
+        if: always() && !cancelled()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::warning::the alert script is not on disk (checkout failed?) — a recovered finding's ledger issue stays OPEN; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 0
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job deploy-api \
+            --resolve \
+            --job-status "${{ job.status }}" \
+            --steps "parity=${{ steps.parity.outcome }} verify-secrets=${{ steps.verify-secrets.outcome }} provenance=${{ steps.provenance.outcome }} drift=${{ steps.drift.outcome }} fly-machines=${{ steps.fly-machines.outcome }} set-secrets=${{ steps.set-secrets.outcome }} deploy=${{ steps.deploy.outcome }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Alert on failure (out-of-band) — deploy-api (#2240)
         if: failure()
         run: |
@@ -1111,6 +1166,25 @@ jobs:
       # reports that out-of-band. Same script, same substrate, per-step key; see
       # the long note on the `deploy-api` site for the token and ordering
       # rationale — this one is LAST in its job too.
+      # ── Resolve recovered alerts (#8841) ──────────────────────────────
+      # Same contract, same script, same per-step keys as the alert below; see
+      # the `deploy-api` site for the rationale. This one matters most for the
+      # LIVE-release reading: once the health gate passes again, the issue that
+      # said the release was unhealthy must stop standing.
+      - name: Resolve recovered alerts (out-of-band) — post-deploy-verify (#8841)
+        if: always() && !cancelled()
+        run: |
+          if [ ! -f .github/scripts/deploy-api-alert.sh ]; then
+            echo "::warning::the alert script is not on disk (checkout failed?) — a recovered finding's ledger issue stays OPEN; see run ${GITHUB_RUN_ID} on ${GITHUB_SHA}"
+            exit 0
+          fi
+          bash .github/scripts/deploy-api-alert.sh \
+            --job post-deploy-verify \
+            --resolve \
+            --job-status "${{ job.status }}" \
+            --steps "health-gate=${{ steps.health-gate.outcome }} bypass-report=${{ steps.bypass-report.outcome }} machine-env=${{ steps.machine-env.outcome }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Alert on failure (out-of-band) — post-deploy-verify (#2240)
         if: failure()
         run: |

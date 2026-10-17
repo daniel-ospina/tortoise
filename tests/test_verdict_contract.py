@@ -998,6 +998,73 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
     # converted to `verdict_async_client`; the pin's control is the +1.
     "tests/test_session_key_http.py": (1, frozenset({
         "client", "_run", "test_concurrent_recovery_mints_stay_at_cap"})),
+
+    # ── #8818: the #8802 remainder, tranche 3 (13-16 in-class reads) ────────
+    # Same seam, same declaration, same pin shape; the only allowed plain
+    # construction in these six files is the pin's own control, which must stay
+    # PLAIN to observe the 504 it proves is real — except where an entry below
+    # says otherwise and names the construction.
+    # +1: the pin's control.
+    "tests/test_onboarding_truth_surface.py": (1, frozenset({
+        "_post_point_request", "_post_step", "env",
+        "test_non_step_flow_op_keeps_its_session_lane",
+        "test_operational_key_still_writes",
+        "test_server_owned_capture_keys_are_refused"})),
+    # +2: the mount-only MCP parent (`TestMcp._mcp_client` — a local `Starlette`
+    # carrying ONLY `OrgResolutionMiddleware`, so no `WaitBoundMiddleware` is on
+    # its path; its `status_code == 200` reads are answered by that local echo
+    # route, never by the hosted app) and the pin's control. The other
+    # twenty-five constructions (all `TestClient(env["app"])`) are converted.
+    "tests/test_abuse_integration.py": (2, frozenset({
+        "test_alerts_endpoint_session_authed",
+        "test_alerts_reachable_while_suspended",
+        "test_alerts_require_membership", "test_bootstrap_mints_excluded",
+        "test_boundary_crossing_alerts_and_does_not_403",
+        "test_burst_flags_but_never_suspends",
+        "test_captcha_400_when_challenge_fails",
+        "test_captcha_passes_and_flow_continues",
+        "test_drift_resolution_clears_suspension_signal",
+        "test_fail_open_without_secret", "test_fanout_team_velocity",
+        "test_key_lane_unchanged",
+        "test_mint_allowed_under_0015_drift_then_blocked_after_recovery",
+        "test_mint_rejected_while_suspended",
+        "test_new_country_notifies_then_quiet", "test_no_header_fail_open",
+        "test_non_create_writes_never_trip_r1",
+        "test_per_key_velocity_notifies_once",
+        "test_signup_path_key_creates_counted",
+        "test_suspended_team_403_with_appeal",
+        "test_suspension_survives_restart", "test_team_info_status_flagged",
+        "test_unsuspend_restores_next_request",
+        "test_writes_not_counted_as_reads"})),
+    # +1: the pin's control. `TestRevokeBodySweepCap.sweep_client` keeps
+    # `raise_server_exceptions=False` through the seam, so its malformed-body
+    # 500 pin still observes a real response.
+    "tests/test_signup_token_revoke.py": (1, frozenset({
+        "client", "sweep_client"})),
+    # +1: the pin's control. `test_callback_fails_closed_on_control_plane_outage`
+    # keeps `raise_server_exceptions=False` through the seam for the same reason.
+    "tests/test_onboarding_health_flip.py": (1, frozenset({
+        "_registry_client", "supabase_client",
+        "test_callback_fails_closed_on_control_plane_outage"})),
+    # +1: the pin's control. Both constructions are converted (the `client`
+    # fixture and `registry_client`), covering `POST /v1/billing/checkout/new-org`
+    # (10 reads), `POST /v1/organizations` (1) and `POST /webhooks/stripe`
+    # (already `require_answered`-wrapped in `_post_signed`).
+    "tests/test_one_free_org_entitlement.py": (1, frozenset({
+        "client", "registry_client"})),
+    # +1: the pin's control. The `client` and `reg_client` fixtures are
+    # converted, as are the three concurrent-burst `_burst` helpers, which build
+    # `verdict_async_client(app, base_url="http://test")` in place of their own
+    # `httpx.ASGITransport(app=app)` client — same transport, same base_url, so
+    # the burst still runs in ONE event loop over the same app. Reads: 18
+    # `POST /v1/organizations` + 1 `GET /v1/organizations`, 9
+    # `POST /v1/onboarding/team`, 2 `POST /v1/register`, 1
+    # `PATCH /v1/onboarding/state`.
+    "tests/test_free_team_entitlement.py": (1, frozenset({
+        "_burst", "client", "reg_client",
+        "test_concurrent_create_team_one_minted",
+        "test_concurrent_create_team_one_minted_registry",
+        "test_concurrent_onboarding_sub_team_one_minted"})),
 }
 
 

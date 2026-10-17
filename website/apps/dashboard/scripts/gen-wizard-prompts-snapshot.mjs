@@ -42,12 +42,12 @@ import {
   HARNESS_STEPS,
   PI_CAPTURE_INSTALL,
   SKILLS_LIST,
-  UNIVERSAL_COMMAND,
+  CODEX_DESKTOP_COMMAND,
 } from '../src/harnesses.js'
 
 // The harnesses with a live dashboard surface. `chatgpt` is deliberately absent:
 // #2698 keeps it out of the chooser, so wizardPromptText returns '' for it and
-// its URL rides UNIVERSAL_COMMAND.chatgpt for roundtrip consumers only.
+// it has no wizard surface at all (its carrier is the setup docs page).
 const HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web']
 // Both are live: main.jsx:2906 `useState('included')`, passed to every prompt.
 const MODES = ['included', 'separate']
@@ -64,14 +64,14 @@ for (const harness of HARNESSES) {
   }
 }
 
-// The universal command is the dashboard's PRIMARY served surface — the block
-// every config-writing harness copies. Pinned here so a change to it is a
-// reviewed diff, and so the Python side can check the same strings without
-// parsing JavaScript source.
-const commands = {}
-for (const harness of Object.keys(UNIVERSAL_COMMAND)) {
-  commands[harness] = UNIVERSAL_COMMAND[harness](KEY)
-}
+// The ONE config-writing leaf still rendered as a single paste-able block
+// (Codex Desktop — no terminal, #2827/#3232). The other harnesses are
+// agent-driven, so their universal-command copy was deleted rather than
+// pinned: pinning copy nobody renders is what let #3430's suite keep
+// asserting a claim the product no longer makes. Pinned here so a change to
+// it is a reviewed diff, and so the Python side can check the same string
+// without parsing JavaScript source.
+const commands = { codexDesktop: CODEX_DESKTOP_COMMAND(KEY) }
 
 // The remaining live, data-driven surfaces.
 const harnessIntro = HARNESS_INTRO
