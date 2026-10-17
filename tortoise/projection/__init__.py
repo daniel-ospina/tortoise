@@ -10199,6 +10199,12 @@ class FalkorProjection(
         # journal order, which is what makes a ``clear`` followed by a
         # ``set`` land on the ``set`` (last writer wins, per edge).
         edge_message_events: list[tuple[int, dict]] = []
+        # #8398: ``EventRecorded`` replay links, buffered for the SAME reason as
+        # ``edge_message_events`` — the replay stream is filename order, not
+        # chronology, and pass-1a hoists only Points/Operators, so an inline
+        # wiring would need the target Object/Subject/Source to already exist.
+        # Wired in a trailing sweep once every entity registration has folded.
+        about_link_events: list[tuple[int, dict]] = []
         # #2488: per-id highest journal seq of a same-id INLINE updatedAt
         # writer (PointRevised / PointPromoted — pass-1b applies both
         # inline; they never enter the deferred list); a PointInvalidated
@@ -10774,9 +10780,10 @@ class FalkorProjection(
                 edge_message_events.append((seq, ev))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
-                # #8398: see above — the about* links are graph edges, so the
-                # rebuild must re-wire them from the record (idempotent MERGE).
-                self.replay_about_links(ev)
+                # #8398: BUFFER the about* links — see ``about_link_events`` at
+                # its declaration. Wired in a trailing sweep, because the replay
+                # stream is filename order and the target may not exist yet.
+                about_link_events.append((seq, ev))
             elif t == "SubjectAdded":
                 self._upsert_subject(ev)
             elif t == "ObjectRegistered":
@@ -12581,6 +12588,29 @@ class FalkorProjection(
                     "re-created by any journaled event (#5380)",
                     _em_ev.get("event_id"), _em_ev.get("src"),
                     _em_ev.get("tgt"), _em_ev.get("rel"))
+
+        # ── #8398 trailing sweep: re-wire the journaled Event→entity about*
+        # links. Runs HERE, after every entity registration and after the
+        # edge-message sweep, so a rotated journal whose registration landed in
+        # a later file cannot lose the link. A link the sweep cannot re-wire is
+        # REPORTED — an un-reported drop is the defect this fixes.
+        if about_link_events:
+            _about_wired = _about_failed = 0
+            for _al_seq, _al_ev in about_link_events:
+                self._replay_seq = _al_seq
+                _w, _f = self.replay_about_links(_al_ev)
+                _about_wired += _w
+                _about_failed += _f
+            if _about_wired:
+                logger.info(
+                    "rebuild: re-wired %d journaled Event→entity about* link(s)",
+                    _about_wired)
+            if _about_failed:
+                logger.warning(
+                    "rebuild: %d journaled Event→entity about* link(s) could "
+                    "NOT be re-wired — the target node was not restored by this "
+                    "replay (#8398); the live graph had these edges",
+                    _about_failed)
         # #5380 indicator 4 (the MIXED case): the report below is gated on
         # ``not _edge_msg_journaled`` — zero records or nothing. Once a
         # #5380-era journal has recorded even ONE edge message that flag stays

@@ -26636,7 +26636,15 @@ class TortoiseSDK:
                 else:
                     _hits = []
                 if _hits:
-                    about_links.append({"rel": _rel, "value": _val, "how": "id"})
+                    # Journal the RESOLVED values, not a flag: an id that resolved
+                    # to the rel's target label NOW. Replay repeats an exact
+                    # endpoint instead of re-running the id-or-name cascade
+                    # against a graph whose answers may differ.
+                    about_links.append({
+                        "rel": _rel,
+                        "how": "id",
+                        "targets": [_h["value"] for _h in _hits],
+                    })
                 elif isinstance(_val, str) and not _is_entity_id(_val):
                     # resolves to nothing and is not handle-shaped → the name
                     # path (resolve-or-mint) is what will actually wire it

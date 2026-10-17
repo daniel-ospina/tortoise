@@ -140,9 +140,11 @@ def test_the_record_journals_the_precise_link_form(wired) -> None:
     record = _event_records(journal, "marked")[0]
     links = {link["rel"]: link for link in record["aboutLinks"]}
 
-    assert links["aboutObject"]["value"] == obj
     assert links["aboutObject"]["how"] == "id", (
         "a value that resolved to the rel's target label must journal as 'id'")
+    assert links["aboutObject"]["targets"] == [obj], (
+        "the RESOLVED target value must be journaled, so replay repeats an exact "
+        f"endpoint instead of re-deriving the cascade: {links['aboutObject']!r}")
     assert links["aboutDocument"]["how"] == "name", (
         "a value that did not resolve must journal as the name path")
 
@@ -172,3 +174,39 @@ def test_an_unresolvable_handle_is_not_journaled(wired) -> None:
         "an unresolvable handle wired NO edge, so the record must not claim a "
         f"link to replay: {record.get('aboutLinks')!r}")
     assert _counts(proj)["aboutObject"] == 0
+
+
+def test_the_link_survives_a_ROTATED_journal(wired) -> None:
+    """The replay stream is filename order, not chronology.
+
+    ``rebuild_all`` reads ``sorted(os.listdir(log_dir))``, and pass-1a hoists
+    only ``PointAdded``/``OperatorAdded`` — so if the target's registration sits
+    in a LATER file than the ``EventRecorded`` that links to it, an inline
+    re-wire would run before the target exists and drop the link silently. The
+    wiring is buffered into a trailing sweep for exactly this reason. Here the
+    event is forced into a file that sorts BEFORE the object registrations.
+    """
+    sdk, proj, events, journal = wired
+    obj = _nid(sdk.create_object("TheObject"))
+    sdk.create_event("obs", "event", aboutObject=obj)
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _counts(proj)["aboutObject"] == 1
+
+    # Re-cut the journal: the EventRecorded alone in "a-events.jsonl", every
+    # other record in "b-rest.jsonl" -> the event replays FIRST.
+    with open(journal, encoding="utf-8") as fh:
+        records = [line for line in fh if line.strip()]
+    event_lines = [ln for ln in records if '"EventRecorded"' in ln]
+    rest = [ln for ln in records if '"EventRecorded"' not in ln]
+    assert event_lines and rest
+    os.remove(journal)
+    with open(os.path.join(str(events), "a-events.jsonl"), "w", encoding="utf-8") as fh:
+        fh.writelines(event_lines)
+    with open(os.path.join(str(events), "b-rest.jsonl"), "w", encoding="utf-8") as fh:
+        fh.writelines(rest)
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _counts(proj)["aboutObject"] == 1, (
+        "the link was dropped because the EventRecorded replays before the "
+        "ObjectRegistered in a rotated journal — the re-wire must be a trailing "
+        "sweep, not inline")

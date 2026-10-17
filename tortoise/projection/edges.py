@@ -991,7 +991,7 @@ class _EdgeHandlers:
                     created = True
         return created
 
-    def replay_about_links(self, payload: dict) -> int:
+    def replay_about_links(self, payload: dict) -> tuple[int, int]:
         """Re-wire the ``about*`` edges journaled WITH an ``EventRecorded`` record.
 
         #8398: ``create_event(aboutObject=…)`` wires its links as GRAPH EDGES,
@@ -1000,34 +1000,50 @@ class _EdgeHandlers:
         rebuild dropped the Event→entity links while ``create_operator``'s IMPL
         edges, which journal an ``OperatorAdded`` record, survived).
 
-        The SDK classifies each link LIVE, at write time, and journals the
-        PRECISE form (``how``: ``id`` = the value resolved to the rel's target
-        label then; ``name`` = it did not, and was resolve-or-minted by name).
-        Replay therefore repeats a known-good construction instead of
-        re-deriving the id/name decision against a graph that may answer
-        differently — the drift this method exists to avoid.
+        ⚠️ **The CALLER must run this in a TRAILING SWEEP, after every entity
+        registration has folded** — not inline in the record loop. The replay
+        stream is filename order, not chronology (``sorted(os.listdir(…))``),
+        and pass-1a hoists only ``PointAdded``/``OperatorAdded``: invoked inline,
+        a rotated journal whose ``ObjectRegistered`` lands in a later file would
+        replay this record while the target does not exist yet, and
+        ``create_about_edge`` would return False and drop the link silently —
+        the very defect this fixes. This mirrors ``edge_message_events``, which
+        is buffered for the same reason ("making the target edge exist").
 
-        Idempotent: both branches MERGE. Returns the number of links processed.
+        ``how == "id"`` carries the values RESOLVED at write time, so replay
+        repeats an exact endpoint instead of re-running the id-or-name cascade
+        against a graph whose answers may differ (the drift this method exists
+        to avoid). ``how == "name"`` cannot be resolved at write time (nothing
+        matched), so it repeats the live name path.
+
+        Returns ``(wired, failed)`` — the caller reports ``failed`` so a rebuild
+        that could not re-wire a journaled link is never silent.
         """
         inner = payload.get("event", payload)
         source = inner.get("id") or inner.get("eventId")
         links = inner.get("aboutLinks") or []
         if not isinstance(source, str) or not isinstance(links, list):
-            return 0
-        processed = 0
+            return (0, 0)
+        wired = failed = 0
         for link in links:
             if not isinstance(link, dict):
                 continue
-            rel, value, how = link.get("rel"), link.get("value"), link.get("how")
-            if rel not in _ABOUT_REPLAY_RELS or not value:
+            rel = link.get("rel")
+            if rel not in _ABOUT_REPLAY_RELS:
                 continue
-            processed += 1
-            if how == "id":
-                self.create_about_edge(
-                    source, value, rel, target_label=STRUCTURAL_REL_LABELS.get(rel))
-            elif how == "name" and isinstance(value, str):
-                self._create_about_edges(source, value)
-        return processed
+            if link.get("how") == "id":
+                for value in link.get("targets") or []:
+                    ok = bool(value) and self.create_about_edge(
+                        source, value, rel,
+                        target_label=STRUCTURAL_REL_LABELS.get(rel))
+                    if ok:
+                        wired += 1
+                    else:
+                        failed += 1
+            elif link.get("how") == "name" and isinstance(link.get("value"), str):
+                self._create_about_edges(source, link["value"])
+                wired += 1
+        return (wired, failed)
 
     def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:
         """Link entity → Source via extractedFrom edge (Ontology v3.3).
