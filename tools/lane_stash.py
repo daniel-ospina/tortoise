@@ -662,7 +662,13 @@ def _guard_refs() -> list[tuple[str, str, str]]:
     cp = _git("for-each-ref", "--format=%(refname) %(objectname)", GUARD_NS,
               check=False)
     if cp.returncode != 0:
-        return []
+        # A failed read is a STATE error, never an empty namespace: collapsing it
+        # hid every guard from `list` AND let a prune report "no guards" while the
+        # reap silently did nothing (#8822 review P2).
+        raise LaneStashError(
+            f"could not read the prune-guard refs under {GUARD_NS} "
+            f"({cp.stderr.strip() or 'git for-each-ref failed'})"
+        )
     out: list[tuple[str, str, str]] = []
     for ln in cp.stdout.splitlines():
         parts = ln.split()
@@ -707,18 +713,34 @@ def _live_lane_keys() -> tuple[set[str], list[str]] | None:
     worktree; telling a live owner from a removed one is what makes it safe to
     reap a stale guard without touching a concurrent peer prune's protection.
     """
-    cp = _git("worktree", "list", "--porcelain", check=False)
+    cp = _git("worktree", "list", "--porcelain", "-z", check=False)
     if cp.returncode != 0:
         return None
     keys: set[str] = set()
     stale: list[str] = []
     current: str | None = None
-    for ln in cp.stdout.splitlines():
-        if ln.startswith("worktree "):
-            current = ln[len("worktree "):]
+    # `-z` (NUL-terminated fields) is what makes a path containing a NEWLINE
+    # unambiguous: in the newline-separated form such a path splits the record and
+    # the live key derived from it is silently absent, so a live owner reads as
+    # dead (#8822 review P2).
+    for field in cp.stdout.split("\0"):
+        if not field:
+            continue
+        if field.startswith("worktree "):
+            current = field[len("worktree "):]
             keys.add(lane_key(Path(current)))
-        elif ln.startswith("prunable") and current is not None:
+        elif field.startswith("prunable"):
+            if current is None:
+                return None  # a prunable field before any worktree: unparseable
             stale.append(current)
+        elif field == "detached" or field.startswith(
+            ("HEAD ", "branch ", "locked", "bare")
+        ):
+            continue
+        else:
+            # An unrecognised field may be a fragment of an exotic path. Fail
+            # closed rather than derive keys from a broken parse.
+            return None
     return keys, stale
 
 
@@ -746,6 +768,7 @@ def _reap_stale_guards() -> None:
     guards = _guard_refs()
     if not guards:
         return
+    released = 0
     live = _live_lane_keys()
     if live is None:
         print(f"kept   {len(guards)} prune guard(s) — `git worktree list` could not be read, "
@@ -763,6 +786,21 @@ def _reap_stale_guards() -> None:
     for ref, sha, owner in guards:
         if not owner or owner in keys:
             continue
+        # Compute the two frames FIRST, then take the register read and release
+        # immediately: `present` must be the LAST read before the `update-ref -d`,
+        # or the documented window is wider than one subprocess (#8822 review P2).
+        others = {
+            r for r in _refs_pointing_at(sha)
+            # Neither a guard (releasable at its owner's will) nor `refs/stash`
+            # (moved by any later `stash store`) is durable backing.
+            if r != ref and r != "refs/stash" and not r.startswith(GUARD_NS + "/")
+        }
+        live_now = _live_lane_keys()
+        if live_now is None:
+            continue
+        keys_now, stale_now = live_now
+        if stale_now or owner in keys_now:
+            continue
         try:
             # Read the register for EACH release, immediately before deciding. A
             # peer `stash drop`/`clear` or a reflog expiry between the read and the
@@ -770,26 +808,13 @@ def _reap_stale_guards() -> None:
             # the guard we drop the object's LAST handle (#8822 review P1).
             present = {r["sha"] for r in _shared_register()}
         except LaneStashError:
-            return  # an unreadable register is not evidence — retain conservatively
-        others = {
-            r for r in _refs_pointing_at(sha)
-            # Neither a guard (releasable at its owner's will) nor `refs/stash`
-            # (moved by any later `stash store`) is durable backing.
-            if r != ref and r != "refs/stash" and not r.startswith(GUARD_NS + "/")
-        }
+            print(f"kept   {len(guards) - released} prune guard(s) — the shared register "
+                  "could not be read, so no further guard was checked")
+            return
         if not (sha in present or others):
             continue
-        # CANDIDATE: re-read LIVENESS before releasing. The loop's `keys` is one
-        # snapshot, and a worktree created at a removed worktree's path derives the
-        # SAME lane key — its in-flight prune's guards would otherwise be judged
-        # dead and stripped (#8822 review P2).
-        live_now = _live_lane_keys()
-        if live_now is None:
-            continue
-        keys_now, stale_now = live_now
-        if stale_now or owner in keys_now:
-            continue
         _guard_unpin(ref, sha)
+        released += 1
         print(f"released stale guard {ref} for {sha[:12]} — its worktree is gone "
               "and the object is named elsewhere")
 

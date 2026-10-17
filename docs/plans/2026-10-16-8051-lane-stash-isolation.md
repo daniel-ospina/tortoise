@@ -203,7 +203,9 @@ One primitive, in `tools/lane_stash.py`:
   command can release that one, and left alone it blocks gc forever. The reap is suspended entirely
   — and says so — while `git worktree list` reports any `prunable` registration (a worktree moved
   with plain `mv` leaves its OLD path registered, so a stale entry could hide a LIVE key), and it
-  retains on a failed register read. `lane_stash list` prints any
+  reports a failed register read instead of retaining silently, and its lane-key parse uses
+  `--porcelain -z` and fails closed on any field it does not recognise (a path containing a
+  newline splits the newline-separated form and would hide a LIVE key). `lane_stash list` prints any
   still held and, per guard, whether another ref names the object — a peer guard does not count as
   durable, since either owner may release it — so the namespace can be enumerated and cleared rather
   than silently keeping objects un-gc-able forever.
