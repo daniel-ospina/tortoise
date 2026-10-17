@@ -963,6 +963,38 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
     # a 12k-line file.
     # +1: this file's own pin control, which must stay plain to observe the 504.
     "tests/test_hosted_api.py": (2, frozenset({"_verdict_client"})),
+
+    # ── #8818: the #8802 remainder, tranche 1 (>= 17 in-class reads) ────────
+    # Same seam, same declaration. Each file's reads bind from a client over
+    # the wait-bound hosted app on a route outside the exempt set
+    # (`{("POST", "/v1/context")}` + the `/v1/internal/` prefix,
+    # `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`), so one conversion per client
+    # construction turns a transport wait-bound refusal into the contract's
+    # INCONCLUSIVE skip instead of an `assert 504 == 200` product FAIL.
+    # +1 in every entry below: the refusal pin's own control client, which must
+    # stay PLAIN to observe the 504 it proves is real.
+    "tests/test_action_endpoints_dual_auth.py": (1, frozenset({"env"})),
+    "tests/test_agent_signup.py": (1, frozenset({"client"})),
+    "tests/test_capture_session.py": (1, frozenset({
+        "consent_client", "test_phase_e_rest_mcp_same_flag_drift_proof"})),
+    "tests/test_export_delete.py": (1, frozenset({"reg_client", "sb_client"})),
+    # +12: eleven `httpx.AsyncClient(transport=<MockGitHubTransport>)` clients
+    # (`_github_mock` — the real-GitHub API stub this file drives) plus the pin
+    # control. Those eleven are not ASGI clients over `app`, so no
+    # `WaitBoundMiddleware` sits on their path and no read bound to them can be
+    # a refusal; their `status_code` reads are stub expectations. The file's
+    # only in-class construction is the `client` fixture's, now converted.
+    "tests/test_github_index_lifecycle.py": (12, frozenset({"client"})),
+    "tests/test_github_connect.py": (1, frozenset({"client", "unauth_client"})),
+    "tests/test_import_endpoint.py": (1, frozenset({"sb_client"})),
+    "tests/test_onboarding_state_split_checkpoint.py": (1, frozenset({
+        "_registered_client"})),
+    "tests/test_rotate_key.py": (1, frozenset({"client"})),
+    "tests/test_session_extraction_modes.py": (1, frozenset({"client"})),
+    # the async half is the file's `_run` (an `ASGITransport(app=app)` burst),
+    # converted to `verdict_async_client`; the pin's control is the +1.
+    "tests/test_session_key_http.py": (1, frozenset({
+        "client", "_run", "test_concurrent_recovery_mints_stay_at_cap"})),
 }
 
 

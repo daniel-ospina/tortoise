@@ -29,11 +29,13 @@ Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
 import time
 import uuid
+from urllib.parse import urlsplit
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
@@ -292,6 +294,41 @@ ONBOARDING_SKILL_URL = os.environ.get(
     "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md",
 )
 
+# #4932: the per-PR `welcome-e2e` job booted this suite with ONBOARDING_SKILL_URL
+# UNSET, so `test_onboarding_instructions_serves_markdown` fetched PRODUCTION on
+# every PR. That grades a branch against a document the branch does not contain:
+# it can pass while the PR's own copy is broken, and it reds a PR for a reason
+# that belongs to whatever was last deployed rather than to the change.
+#
+# The assertion is a DEPLOYED-artifact contract, so it runs where the deployed
+# artifact is the thing under test — `welcome-e2e-monitor.yml` (scheduled +
+# on-merge) runs this whole file against production. Nothing is lost by skipping
+# it per-PR: in-repo mirror/canonical parity is pinned by
+# `test_m8_deploy_mirror_matches_canonical`, and the SERVED bytes by
+# deploy-pages' post-deploy sha256 gate (#4914). Each surface keeps exactly one
+# owner instead of the per-PR leg silently covering none of them.
+_PER_PR = os.environ.get("WELCOME_E2E_PER_PR") == "1"
+
+
+def _targets_production(url: str) -> bool:
+    """True when `url` is a DEPLOYED host — i.e. not a loopback target.
+
+    Hostname-based on purpose. A substring test (`"://127.0.0.1" not in url`)
+    misclassified in BOTH directions: it read `http://127.0.0.1.example.com/` as
+    local (skipping the guard for a genuine remote host), and it read
+    `http://[::1]:8788/` and an uppercase `HTTP://` as production (fetching a
+    deployed host from the per-PR leg). `urlsplit().hostname` also strips the
+    brackets off an IPv6 literal, so `[::1]` arrives as `::1`.
+    """
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True
+
+
 # #4686: the MCP probe below targets LIVE PRODUCTION, and a transport failure
 # is not a 401-contract violation — but until this block it surfaced as one.
 # `APIRequestContext.post: Timeout 15000ms exceeded` reads exactly like "the
@@ -331,7 +368,19 @@ def test_onboarding_instructions_serves_markdown(page: Page) -> None:
     artifact URL the CLI prints after `tortoise onboard` (#544, repointed by
     #1998). Since #4365 it is instructions the agent READS, not an installed
     skill: the installer ships the three reusable capabilities only. The
-    skill-shaped filename/URL is kept deliberately (it is the served path)."""
+    skill-shaped filename/URL is kept deliberately (it is the served path).
+
+    #4932: skipped in the per-PR job when the target is a deployed host. See the
+    _PER_PR block above for where this contract actually lives.
+    """
+    if _PER_PR and _targets_production(ONBOARDING_SKILL_URL):
+        pytest.skip(
+            "#4932: per-PR must not grade this branch against PRODUCTION's copy "
+            "of the onboarding document. The deployed-artifact contract is "
+            "asserted by welcome-e2e-monitor.yml against production, in-repo "
+            "parity by test_m8_deploy_mirror_matches_canonical, and the served "
+            "bytes by the deploy-pages sha256 gate (#4914)."
+        )
     resp = page.request.get(ONBOARDING_SKILL_URL, timeout=15_000)
     assert resp.ok, f"instructions URL returned {resp.status}"
     assert "text/markdown" in (resp.headers.get("content-type") or "")

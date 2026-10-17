@@ -1701,6 +1701,14 @@ jobs:
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
         env:
           WELCOME_URL: http://127.0.0.1:8788/welcome
+          # #4932: this job must NOT grade a branch against PRODUCTION's copy of
+          # the onboarding document. ONBOARDING_SKILL_URL is deliberately left
+          # unset, so before this flag the per-PR run fetched the deployed
+          # artifact on every PR — passing while the PR's own copy was broken,
+          # and redding a PR for whatever happened to be deployed. The
+          # deployed-artifact contract belongs to welcome-e2e-monitor.yml
+          # (scheduled + on-merge, which runs this same file against prod).
+          WELCOME_E2E_PER_PR: "1"
           # Epic #1647 Task 10 (P4): this job runs pytest URI-less BY DESIGN
           # (the e2e surface needs no FalkorDB server) — the URI-required
           # enforcement opt-in.

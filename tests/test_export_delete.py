@@ -35,6 +35,7 @@ from tortoise.retention import RESTORE_WINDOW_HOURS
 from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM, TOKEN, _key_row, _membership_row,
@@ -661,7 +662,7 @@ def sb_client(monkeypatch):
         # close-at-restore still apply here.
         with patched_tortoise_sdk(db_path):
             try:
-                with TestClient(app) as tc:
+                with verdict_client(app) as tc:
                     yield tc, fake, db_path
             finally:
                 # sb tests never append to _SEED_SDKS (graph seeds are
@@ -705,7 +706,7 @@ def reg_client(monkeypatch):
                     f"pinned db_path: {counter.expected_db_path!r} != "
                     f"{_computed_db_path()!r}"
                 )
-                with TestClient(app) as tc:
+                with verdict_client(app) as tc:
                     yield tc, db_path
             finally:
                 # ══ #2090 teardown (pinned — runs on body-failure paths too) ══
@@ -3339,3 +3340,29 @@ class TestUuidComparisonTolerance:
 
         monkeypatch.setattr(fake, "query", _pg_uuid_equality)
         assert sc.sole_owned_org_ids(fake, OWNER.upper()) == [ORG_ID]
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``DELETE /v1/user/account`` is
+    the route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("DELETE", "/v1/user/account")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.delete(route[1]).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.delete(route[1])
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "DELETE /v1/user/account answered" in message
