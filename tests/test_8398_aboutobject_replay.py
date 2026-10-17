@@ -549,3 +549,25 @@ def test_apply_does_not_abort_when_the_about_re_wire_raises(wired, monkeypatch) 
         "MATCH (e:Event {id:$id}) RETURN e.name",
         params={"id": ev}).result_set == [["boom2"]], (
         "the record did not fold before the failing re-wire")
+
+
+def test_a_LEGACY_name_link_record_still_replays(wired) -> None:
+    """A record written BEFORE the P1-2 fix carries no endpoint — it still replays.
+
+    The journal is append-only, so a deployment upgrading mid-stream has
+    ``how:"name"`` links in it. They cannot be repaired (there is no resolved
+    endpoint on them to repeat), so the legacy branch keeps their pre-fix
+    behaviour rather than reporting every one of them as a lost link. This pins
+    that branch AND documents the drift it keeps: the edge lands on whatever the
+    rel-ignoring cascade finds, not on the record's ``rel``.
+    """
+    sdk, proj, _events, _journal = wired
+    ev = _nid(sdk.create_event("legacy", "event"))
+    payload = {"id": ev,
+               "aboutLinks": [{"rel": "aboutObject", "value": "Legacy",
+                               "how": "name"}]}
+    assert proj.replay_about_links(payload) == (1, 0)
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id})-[r]->(t) RETURN type(r), labels(t), t.name",
+        params={"id": ev}).result_set == [["aboutSubject", ["Subject"], "Legacy"]], (
+        "the legacy name link did not replay through the cascade")
