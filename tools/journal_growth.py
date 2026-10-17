@@ -109,6 +109,17 @@ def _is_seal(text: str) -> bool:
     measurer, or every tear is reported to the operator as a malformed record.
     The sentinel is deliberately not JSON, so no torn RECORD fragment can be a
     prefix of it.
+
+    Applied to EVERY non-empty line here, not only to the successor of a torn
+    fragment as `_is_seal_prefix`'s own docstring describes — recorded, because
+    the two may look divergent and are not. `read_all` reaches the same verdict
+    for the same bytes: a COMPLETE marker is skipped before any parse, and any
+    line that fails to parse is handed to `_tolerate_or_raise`, whose FIRST arm
+    is the same prefix test (the torn-seal-not-directly-after-its-fragment case
+    it documents). No prefix of the sentinel is valid JSON, so the pre-parse
+    placement here cannot reclassify a line `read_all` would call malformed.
+    `test_seal_prefix_is_classified_as_the_reader_classifies_it` pins the
+    agreement rather than leaving it to this paragraph.
     """
     return bool(text) and _is_seal_prefix(text)
 
@@ -304,7 +315,7 @@ def measure_file(path: Path) -> dict:
             "file_bytes": file_bytes}
 
 
-def _finalize(raw: dict, file_bytes: int) -> dict:
+def _finalize(raw: dict) -> dict:
     sizes = sorted(raw["sizes"])
     n = len(sizes)
     by_type = {}
@@ -364,7 +375,7 @@ def measure(target: str | Path, *, project_records: int = 100_000) -> dict:
             "path": got["path"],
             "graph": _graph_key(Path(got["path"])),
             "file_bytes": got["file_bytes"],
-            **_finalize(raw, got["file_bytes"]),
+            **_finalize(raw),
         })
         merged["records"] += raw["records"]
         merged["bytes"] += raw["bytes"]
@@ -384,7 +395,7 @@ def measure(target: str | Path, *, project_records: int = 100_000) -> dict:
             dst["bytes"] += slot["bytes"]
             dst["sizes"].extend(slot["sizes"])
     file_bytes = sum(f["file_bytes"] for f in per_file)
-    total = _finalize(merged, file_bytes)
+    total = _finalize(merged)
     # Reported so the accounting is checkable from `--json` alone:
     # `bytes + other_bytes == file_bytes` is a real arithmetic check.
     total["file_bytes"] = file_bytes

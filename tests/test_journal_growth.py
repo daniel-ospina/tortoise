@@ -358,6 +358,44 @@ def test_seal_marker_is_an_annotation_even_when_torn(
                                     + (len(marker.encode()) + 1))
 
 
+def test_seal_prefix_is_classified_as_the_reader_classifies_it(
+        tmp_path: Path) -> None:
+    """A bare sentinel PREFIX is an annotation to the reader too — not a tear.
+
+    `_is_seal` applies the prefix test to every non-empty line, while
+    `log.py::_is_seal_prefix`'s docstring describes only the line FOLLOWING a
+    torn fragment. The two look divergent and are not: `read_all` skips a
+    COMPLETE marker before parsing, and every line it fails to parse reaches
+    `_tolerate_or_raise`, whose FIRST arm is this same prefix test. So a stray
+    prefix — no fragment before it — is tolerated by the reader as an
+    annotation, and the measurer must agree or the `malformed` column
+    over-reports corruption that a replay would not see.
+
+    Pinned rather than narrated: a context-dependent `_is_seal` (the rule the
+    prefix test's own docstring implies) would report ``malformed == 1`` here
+    while `read_all` still replays the journal, so this test reds on the
+    divergence instead of a comment asserting it does not exist.
+    """
+    from tortoise.log import EventLog
+
+    path = tmp_path / "graph.jsonl"
+    stray = SEAL_SENTINEL[:3]                    # a prefix, NOT valid JSON
+    data = (json.dumps({"type": "PointAdded", "id": "p1"}) + "\n"
+            + stray + "\n").encode()
+    path.write_bytes(data)
+
+    total = measure(path)["total"]
+    assert total["records"] == 1
+    assert total["malformed"] == 0               # not a torn RECORD fragment
+    assert total["seal_annotations"] == 1        # the reader's verdict too
+    assert total["other_bytes"] == len(stray.encode()) + 1
+    assert total["bytes"] + total["other_bytes"] == len(data)
+
+    # The same bytes, read by the journal's own reader: the record replays and
+    # the stray line is tolerated (no ValueError, nothing extra emitted).
+    assert EventLog(path).read_all() == [{"type": "PointAdded", "id": "p1"}]
+
+
 def test_empty_journal_has_no_phantom_line(tmp_path: Path) -> None:
     """A 0-byte journal has no lines at all — not one empty line."""
     path = tmp_path / "graph.jsonl"
