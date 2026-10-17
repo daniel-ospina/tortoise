@@ -196,6 +196,7 @@ from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_LIST_FIELDS,
     session_extraction_status,  # #3520: the ONE extraction-status derivation
 )
+from tortoise.session_schema import demo_session_id  # #3554: the ONE demo-session id derivation
 from tortoise.supabase_control import _service_key  # #3677
 
 # #4179: the team-account and user-account restore windows derive from the ONE
@@ -10367,7 +10368,9 @@ def _seed_demo_graph(org_id: str) -> dict:
             )
 
     # ── Episodic Layer — session events ──────────────────────────
-    session_id = f"session_demo_{org_id[:8]}"
+    # #3554: the id comes from the ONE declaration (`session_schema.demo_session_id`),
+    # not a local f-string, so the writer and any future exclusion cannot drift.
+    session_id = demo_session_id(org_id)
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
         "SET s.created_at=$now, s.turn_count=3",

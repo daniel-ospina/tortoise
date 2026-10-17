@@ -775,6 +775,21 @@ def test_no_redirect_stems_registry_exact():
         # pin working as designed, so the stem is DECLARED here rather than
         # exempted.
         "test_verbatim_embedding_read_8316",
+        # #5097 (lane L5, gate item 2): the capture path's session `:Source`
+        # journal carrier. The fixture builds `TortoiseSDK(<tmpfile>)`, captures
+        # a session and drives BOTH replay engines (`rebuild()` and
+        # `rebuild_all()`) against the embedded store. The module carries NO
+        # module-level `embedded_only` marker, so the load-bearing reason it
+        # needs the exemption is the REDIRECT: a URI-set lane would discard the
+        # path, connect the construction to the server, and the embedded replay
+        # this file exists to prove would never happen. (The docker/FalkorDB
+        # lane also cannot run it: the server panics in `reply_compact` — same
+        # as the sibling `test_rebuild_turn_points_3947`.) The third leg of the
+        # three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding
+        # on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_5097_capture_source_replay",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

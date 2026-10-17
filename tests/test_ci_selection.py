@@ -1284,6 +1284,46 @@ def test_the_blog_authoring_doc_guard_runs_on_its_doc_too():
     )
 
 
+def test_the_session_declaration_guard_runs_on_its_docs_subjects_too():
+    """#3554 review (P2, Finding 2): the guard's `docs/` subjects must select it.
+
+    `test_session_schema_3554.py` pins `docs/ONTOLOGY.md` §4.8's owner table
+    against the machine declaration and reads the plan's `#3554 amendment`. Both
+    are `docs/` paths: `docs/` is in NON_PYTHON_PREFIXES and neither is a
+    concrete SOURCE_PATTERNS entry, so a docs-only edit selected NO surface
+    (`surfaces=[]`) and fell back to tier-1 smoke — whose set does not contain
+    this file. A §4.8 edit could then drop an owner and merge green against the
+    declaration it claims to be pinned to. Same silent-drop class as the #3524
+    consent-bridge records; the `core` registration alone cannot fix it, because
+    a name in a surface's test_files only runs when that surface is ALREADY
+    selected.
+
+    #3554 review (P2): the THIRD subject — `docs/ONTOLOGY-CHANGELOG.md`, read by
+    `test_section_4_8_changelog_entry_sits_under_its_own_version_block` — was
+    omitted from this list and from `CORE_ALSO`, so a docs-only edit that moved
+    the `§4.8 (added by #3554` bullet back under the wrong `Changelog vX.Y`
+    header (the exact defect that test exists to prevent) selected no surface and
+    ran a 45-file smoke set without the guard. The sibling changelog readers are
+    covered only because they sit in tier1; this module is not.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for changed in ("docs/ONTOLOGY.md",
+                    "docs/ONTOLOGY-CHANGELOG.md",
+                    "docs/plans/2026-08-25-1714-memory-capture-onboarding.md"):
+        assert (root / changed).exists(), f"guarded doc subject is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False
+        assert "core" in r["surfaces"], (
+            f"{changed} selects {r['surfaces']} — the guard is not in tier1, so "
+            "a docs-only edit to this record runs it nowhere"
+        )
+        assert "test_session_schema_3554.py" in r["test_files"], (
+            f"a docs-only edit to {changed} does not run "
+            "tests/test_session_schema_3554.py, so its declaration mirror cannot "
+            "fire on the change it pins (#3554 review)"
+        )
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -2010,6 +2050,50 @@ def test_who_is_on_tool_change_fails_closed_to_full():
         assert r["full"] is True, path
         assert r["test_files"] == "ALL", path
         assert "core" in r["surfaces"], path
+
+
+def test_session_retrofit_audit_tool_change_fails_closed_to_full():
+    # #3554: tools/session_retrofit_audit.py owns
+    # tests/test_session_schema_3554.py, whose guards pin the :Session writer
+    # inventory predicate (it must be CLEAN on the tree it ships with) and the
+    # D9 retrofit CLI. Same silent-drop class as the carve-outs above: the flat
+    # "tools/" NON_PYTHON_PREFIXES entry swallows a tool-only change, so
+    # without a TOOL_CARVEOUTS entry `changed` is empty and select() takes the
+    # docs-only return (surfaces=[], tier-1 smoke only) — and that early return
+    # bypasses the `if not matched: matched.add("core")` fallback, so the guard
+    # suite would never run on the PR that changes the instrument. Registering
+    # the TEST under `core` in ci-surfaces.yml does NOT cover this: it applies
+    # to edits of the test file, not of the tool. No SOURCE_PATTERNS entry
+    # matches the path, so it lands in the unknown-path fail-closed branch ->
+    # FULL matrix + both legs. Mutation check: removing the TOOL_CARVEOUTS
+    # entry filters the path out (docs-only early return), failing all three
+    # asserts below.
+    r = _sel(["tools/session_retrofit_audit.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
+def test_session_schema_guard_runs_on_every_declared_writer_surface():
+    # #3554: the declared :Session writer inventory SPANS surfaces —
+    # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,
+    # tools/ask_spotcheck.py selects `sdk`, tortoise/hosted_api.py selects
+    # `api`, and tortoise/session_schema.py (the declaration itself) falls to
+    # the `core` fallback — so the drift guard
+    # (tests/test_session_schema_3554.py) must be registered on each surface
+    # its subjects select. A named-surface match REPLACES the `core` fallback
+    # (#2938), so a core+api-only registration silently drops the guard on an
+    # eval- or sdk-only change. Mutation check: removing ANY ci-surfaces.yml
+    # arm fails the corresponding assert below — the `api` and `core` arms were
+    # unpinned (the whole suite stayed green with either removed), so they are
+    # in this list too.
+    for path in ("tools/longmem_eval/ingest.py",
+                 "tools/longmem_eval/ingest_v2.py",
+                 "tools/ask_spotcheck.py",
+                 "tortoise/hosted_api.py",
+                 "tortoise/session_schema.py"):
+        r = _sel([path])
+        assert "test_session_schema_3554.py" in r["test_files"], path
 
 
 def test_backfill_script_only_change_selects_eval():
@@ -7700,3 +7784,25 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_lane_stash.py" in r["test_files"], r
+
+
+def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
+    # #5612: `tests/test_journal_growth.py` (registered `core`) pins the
+    # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as
+    # missing (`bytes + other_bytes == file size` exactly, malformed lines
+    # counted not raised, the embedding share found nested in the snapshot).
+    # ALL guarded paths are flat NON_PYTHON_PREFIXES entries (`tools/`,
+    # `docs/`, `supabase/`) matching no SOURCE_PATTERNS row, so without the
+    # CORE_ALSO entries a tool-only, probe-only or FIXTURE-only diff was
+    # filtered out BEFORE the "not matched -> core" fallback and the pins never
+    # ran on the files they exist to hold (the #1349/#3332/#3616 silent-drop
+    # class, the same shape as the `tools/lane_stash.py` arm above).
+    for changed in ("tools/journal_growth.py",
+                    "docs/evidence/5612-journal-growth/probes/"
+                    "corpus_growth_probe.py",
+                    # the corpus the pins hard-code (`records == 39`, 29 types)
+                    "supabase/tests/fixtures/record_projection_journal.jsonl"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_journal_growth.py" in r["test_files"], (changed, r)

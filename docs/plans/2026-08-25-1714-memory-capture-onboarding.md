@@ -766,3 +766,40 @@ the HOME-scoped capture seam live without saying so).
 codex` wrote `$CODEX_HOME/hooks/tortoise-session-end.sh` and merged the `SessionEnd` entry with the
 script's **absolute** path into `$CODEX_HOME/hooks.json`. The seam is CI-selected for a change to
 its own files (`config/ci-surfaces.yml:643`, `:1439`).
+
+## #3554 amendment (2026-10-12) — the D9 retrofit classes are recorded honest gaps
+
+*Appended by `#3554`; the reviewed text above is unchanged. This amendment records the three D9
+decisions this issue owns, and the canonical home of the `:Session` schema it verifies.*
+
+**The schema's canonical doc home is `docs/ONTOLOGY.md` §4.8.** #3554 declares no second schema: the
+machine declaration is `tortoise/session_schema.py` (`SESSION_PROPERTIES` / `SESSION_WRITERS` /
+`SESSION_PROPERTY_OWNERS`), and §4.8 is its doc mirror — the full `:Session` property set with the
+owning writer(s) of each, generated from that declaration. §4.1's `speaker` row is corrected in the
+same change: **both** hosted capture and the SDK write `t.speaker`, through the ONE shared turn
+store (`tortoise/sdk.py::_TURN_WRITE_CYPHER`, #3086/#3551) — the row's earlier "SDK only" claim was
+false.
+
+**The re-runnable predicate is the completeness claim.** `tools/session_retrofit_audit.py inventory`
+re-runs the RECORDED search predicate over the **tracked tree** (`git ls-files`) — minus the path prefixes and directory
+names `PREDICATE` declares out of scope (`tests/`, `docs/`, and the third-party/cache directories) —
+and diffs the sites it finds against the declaration, in both directions;
+`tests/test_session_schema_3554.py` fails on `INVENTORY DRIFT`. The scan scope is part of that
+declared predicate, not a private allow-list inside the tool, so a writer under any other directory
+cannot print `INVENTORY CLEAN`. A new writer — or a removed one — is a red build, not a stale table.
+
+**The three D9 decisions — record the gap; do not rewrite the stored record.** All three live in
+`RETROFIT_VERDICTS` (`tortoise/session_schema.py`) with their falsification conditions, and are
+summarised in `docs/ONTOLOGY.md` §4.8:
+
+| Class | Decision | Why the record is not rewritten |
+|---|---|---|
+| `turn_count` shortfall under `capture_ok = true` | recorded honest gap | `capture_ok` attests an EXTRACTION ATTEMPT, not store integrity; forcing it `false` re-labels a store loss as an extraction failure and arms the #2335 TRUE-retry gate, which can mint duplicate claims. The gap is derivable from graph truth, which the audit reads. |
+| `capture_ok` pre/post-verification-read ordering | recorded honest gap (bounded) | No writer stamps which lane computed `capture_ok`, so per-record retro-attribution is impossible; the class IS bounded because the hosted lane can only be equal or MORE pessimistic, so the upper bound is the `capture_ok = true` set the audit reports. |
+| `entity_links_created` under-count | recorded honest gap | The counter is non-monotone by construction (capture-time pass vs index-completion re-link); it is per-run EVIDENCE, and rewriting it to the live edge count would destroy what the runs reported. The audit reports the per-session under-count. |
+
+**Quantification ships as a read-only instrument, not a backfill.**
+`tools/session_retrofit_audit.py retrofit` issues MATCH-only reads against a graph it is given
+explicitly (`--db`, or `--uri` with `TORTOISE_DB_URI`); without a graph it REFUSES TO RUN (non-zero
+exit, nothing on stdout) rather than printing a zero that reads like a clean graph. Each verdict's
+`where_recorded` field points at §4.8 and at this amendment.
