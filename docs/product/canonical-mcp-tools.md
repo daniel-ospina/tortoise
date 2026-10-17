@@ -19,7 +19,7 @@ related:
   - "#4114"
 ---
 
-# Canonical MCP tool list — 23 proposed tools (the beta target is 26)
+# Canonical MCP tool list — 23 proposed tools (the beta target is 27 as of the 2026-10-17 #3540 amendment; it was 26)
 
 **Owner-approved 2026-09-18.** This is the target MCP surface. Everything not on this
 list is retired, folded into a member below, or archived. The surface is frozen in both
@@ -75,6 +75,43 @@ now records the actual order plus the separate inner extractor-provider 503. **N
 added, removed or renamed; the served schema, parameters and bindings are unchanged** — only
 the description text, and hence the handler digest, changes. status: approved · principal:
 daniel-ospina · PR #8563 · date: 2026-10-14.
+
+**Amended 2026-10-17** (owner ruling on **#3540**, **PR #8863**): **one tool is added and two
+are retired — a net REDUCTION of one**, which is the ruling's own requirement. The TARGET count
+moves the other way, 26 → 27, because the two retired switches were never ON this target list: the
+merged list gains `tortoise_manage_sources` while the SERVED surface loses one net (**82 → 81**).
+Both pairs are stated because they move in opposite directions, and a generated table that prints
+"27" must not be read as contradicting this record. Owner's words:
+*"b sounds good because we enable agents to configure the system (assuming they have
+permission) and that's better UX than clicking on the UI"* (2026-10-12).
+
+`tortoise_manage_sources(action=list|enable|disable,
+source=github_issues|github_documents|agent_sessions)` is ONE consolidated source-management
+operation. It replaces the two per-source switches `tortoise_onboarding_github_index` and
+`tortoise_onboarding_session_recording`, which are **retired through `RETIRED_USE_INSTEAD`**
+(#3883), not deleted — a caller still resolves them and is handed the replacement. It also
+closes the tracked `github_documents` gap, which had no tool at all.
+
+`tortoise_onboarding_github_connect` is deliberately **not** folded in: it is the OAuth
+handshake, and the ruling's own *"credentials never pass through the model"* condition is
+what keeps it out of an agent-callable list/enable/disable operation.
+
+Permission is the condition the owner attached to the ruling and is enforced at the tool
+boundary: the entry declares `writes=True`, so `_enforce_mcp_tool_scope` requires
+`graphs:write` and denies an unresolvable name. Agent session recording keeps its recorded
+`#1927` default (ON — the optional off-switch, ToS-covered); the ruling's "deny-by-default"
+is taken to govern what the assistant may DO, not to reverse what the product ALREADY does.
+
+> **OVERRIDES:** the "reads and writes never share a tool" principle stated immediately below,
+> and `beta-sdk-surface.md`'s "account tenancy is not on the MCP" — the owner ruled for **one**
+> consolidated operation that both lists and switches sources, over per-source tools
+> (2026-10-12, on #3540). The permission condition is what makes the departure safe rather than
+> the split: `writes=True` means a read-only key is refused even for `action="list"`, so the
+> read inside a write-gated tool can never be reached by a read-scoped caller. A future lane
+> that "fixes" this by splitting `list` into its own read tool would restore the principle and
+> **undo the ruling's single-tool arithmetic** — reopen #3540 instead of editing this tool.
+
+status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 
 ## Principle: reads and writes never share a tool
 

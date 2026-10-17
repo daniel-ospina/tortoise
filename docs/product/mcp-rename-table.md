@@ -77,49 +77,50 @@ not something to reconcile silently.
 | 57 | `tortoise_list_sources` | `tool_registry.py:194` | `tortoise_overview(section="sources")` | `graph_overview` | warning shim |
 | 58 | `tortoise_list_tags` | `tool_registry.py:261` | `tortoise_overview(section="tags")` | `graph_overview` | warning shim |
 | 59 | `tortoise_list_topics` | `tool_registry.py:816` | **no replacement** | `list_knowledge` | absent |
-| 60 | `tortoise_mine_conversations` | `tool_registry.py:347` | **no replacement** | `mine_knowledge_from_directory` | absent |
-| 61 | `tortoise_mitigate_operator` | `tool_registry.py:520` | **no replacement** | `adjust_relationship` | absent |
-| 62 | `tortoise_onboarding_demo_create` | `tool_registry.py:1175` | **no replacement** | `REMOVED` | absent |
-| 63 | `tortoise_onboarding_github_connect` | `tool_registry.py:1218` | **no replacement** | `REMOVED` | absent |
-| 64 | `tortoise_onboarding_github_index` | `tool_registry.py:1228` | **no replacement** | `REMOVED` | absent |
-| 65 | `tortoise_onboarding_github_status` | `tool_registry.py:1238` | **no replacement** | `REMOVED` | absent |
-| 66 | `tortoise_onboarding_seed` | `tool_registry.py:1194` | **no replacement** | `REMOVED` | absent |
-| 67 | `tortoise_onboarding_session_recording` | `tool_registry.py:1208` | **no replacement** | `REMOVED` | absent |
-| 68 | `tortoise_onboarding_state` | `tool_registry.py:1185` | **no replacement** | `REMOVED` | absent |
-| 69 | `tortoise_operator_action` | `tool_registry.py:1108` | **no replacement** | `adjust_relationship` | absent |
-| 70 | `tortoise_org_create` | `tool_registry.py:891` | **no replacement** | `tenancy:create_memory_graph` | absent |
-| 71 | `tortoise_overview` | `tool_registry.py:1142` | **no replacement** | `graph_overview` | absent |
-| 72 | `tortoise_pack_install` | `tool_registry.py:244` | **no replacement** | `REMOVED` | absent |
-| 73 | `tortoise_packs_list` | `tool_registry.py:233` | **no replacement** | `REMOVED` | absent |
-| 74 | `tortoise_paginated_query` | `tool_registry.py:129` | `tortoise_query(offset=..., limit=...)` | `search_knowledge` | warning shim |
-| 75 | `tortoise_promote_point` | `tool_registry.py:381` | **no replacement** | `refresh_confidence` | absent |
-| 76 | `tortoise_provenance` | `tool_registry.py:881` | **no replacement** | `check_confidence` | absent |
-| 77 | `tortoise_query` | `tool_registry.py:116` | **no replacement** | `search_knowledge` | absent |
-| 78 | `tortoise_query_points_by_tag` | `tool_registry.py:269` | `tortoise_query(tag=...)` | `search_knowledge` | warning shim |
-| 79 | `tortoise_recall` | `tool_registry.py:319` | **no replacement** | `check_confidence` | absent |
-| 80 | `tortoise_retract_point` | `tool_registry.py:604` | **no replacement** | `update_knowledge` | absent |
-| 81 | `tortoise_review_connections` | `tool_registry.py:845` | **no replacement** | `review_link_candidates` | absent |
-| 82 | `tortoise_search` | `tool_registry.py:296` | **no replacement** | `search_knowledge` | absent |
-| 83 | `tortoise_search_sessions` | `tool_registry.py:974` | **no replacement** | `search_knowledge` | absent |
-| 84 | `tortoise_session_capture` | `tool_registry.py:700` | **no replacement** | `mine_knowledge_from_session` | absent |
-| 85 | `tortoise_session_context` | `tool_registry.py:690` | **no replacement** | `check_confidence` | absent |
-| 86 | `tortoise_set_point_baseline` | `tool_registry.py:424` | **no replacement** | `refresh_confidence` | absent |
-| 87 | `tortoise_set_source_tier` | `tool_registry.py:1026` | **no replacement** | `manage_source_trust` | absent |
-| 88 | `tortoise_stale` | `tool_registry.py:837` | `tortoise_overview(section="stale")` | `graph_overview` | warning shim |
-| 89 | `tortoise_status` | `tool_registry.py:673` | `tortoise_overview(section="status")` | `graph_overview` | warning shim |
-| 90 | `tortoise_suggest_entry_points` | `tool_registry.py:287` | **no replacement** | `search_knowledge` | absent |
-| 91 | `tortoise_summarize_structure` | `tool_registry.py:158` | **no replacement** | `graph_overview` | absent |
-| 92 | `tortoise_supersede` | `tool_registry.py:575` | **no replacement** | `supersede_knowledge` | absent |
-| 93 | `tortoise_taxonomy` | `tool_registry.py:806` | `tortoise_overview(section="taxonomy")` | `graph_overview` | warning shim |
-| 94 | `tortoise_traverse` | `tool_registry.py:627` | **no replacement** | `explore_connections` | absent |
-| 95 | `tortoise_update` | `tool_registry.py:1084` | **no replacement** | `update_knowledge` | absent |
-| 96 | `tortoise_update_entity` | `tool_registry.py:1047` | **no replacement** | `update_knowledge` | absent |
-| 97 | `tortoise_update_point` | `tool_registry.py:479` | **no replacement** | `update_knowledge` | absent |
-| 98 | `tortoise_validate_domain` | `tool_registry.py:146` | **no replacement** | `graph_overview` | absent |
+| 60 | `tortoise_manage_sources` | `tool_registry.py:1208` | **no replacement** | `manage_sources` | absent |
+| 61 | `tortoise_mine_conversations` | `tool_registry.py:347` | **no replacement** | `mine_knowledge_from_directory` | absent |
+| 62 | `tortoise_mitigate_operator` | `tool_registry.py:520` | **no replacement** | `adjust_relationship` | absent |
+| 63 | `tortoise_onboarding_demo_create` | `tool_registry.py:1175` | **no replacement** | `REMOVED` | absent |
+| 64 | `tortoise_onboarding_github_connect` | `tool_registry.py:1250` | **no replacement** | `REMOVED` | absent |
+| 65 | `tortoise_onboarding_github_index` | `tool_registry.py:1260` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
+| 66 | `tortoise_onboarding_github_status` | `tool_registry.py:1270` | **no replacement** | `REMOVED` | absent |
+| 67 | `tortoise_onboarding_seed` | `tool_registry.py:1194` | **no replacement** | `REMOVED` | absent |
+| 68 | `tortoise_onboarding_session_recording` | `tool_registry.py:1240` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
+| 69 | `tortoise_onboarding_state` | `tool_registry.py:1185` | **no replacement** | `REMOVED` | absent |
+| 70 | `tortoise_operator_action` | `tool_registry.py:1108` | **no replacement** | `adjust_relationship` | absent |
+| 71 | `tortoise_org_create` | `tool_registry.py:891` | **no replacement** | `tenancy:create_memory_graph` | absent |
+| 72 | `tortoise_overview` | `tool_registry.py:1142` | **no replacement** | `graph_overview` | absent |
+| 73 | `tortoise_pack_install` | `tool_registry.py:244` | **no replacement** | `REMOVED` | absent |
+| 74 | `tortoise_packs_list` | `tool_registry.py:233` | **no replacement** | `REMOVED` | absent |
+| 75 | `tortoise_paginated_query` | `tool_registry.py:129` | `tortoise_query(offset=..., limit=...)` | `search_knowledge` | warning shim |
+| 76 | `tortoise_promote_point` | `tool_registry.py:381` | **no replacement** | `refresh_confidence` | absent |
+| 77 | `tortoise_provenance` | `tool_registry.py:881` | **no replacement** | `check_confidence` | absent |
+| 78 | `tortoise_query` | `tool_registry.py:116` | **no replacement** | `search_knowledge` | absent |
+| 79 | `tortoise_query_points_by_tag` | `tool_registry.py:269` | `tortoise_query(tag=...)` | `search_knowledge` | warning shim |
+| 80 | `tortoise_recall` | `tool_registry.py:319` | **no replacement** | `check_confidence` | absent |
+| 81 | `tortoise_retract_point` | `tool_registry.py:604` | **no replacement** | `update_knowledge` | absent |
+| 82 | `tortoise_review_connections` | `tool_registry.py:845` | **no replacement** | `review_link_candidates` | absent |
+| 83 | `tortoise_search` | `tool_registry.py:296` | **no replacement** | `search_knowledge` | absent |
+| 84 | `tortoise_search_sessions` | `tool_registry.py:974` | **no replacement** | `search_knowledge` | absent |
+| 85 | `tortoise_session_capture` | `tool_registry.py:700` | **no replacement** | `mine_knowledge_from_session` | absent |
+| 86 | `tortoise_session_context` | `tool_registry.py:690` | **no replacement** | `check_confidence` | absent |
+| 87 | `tortoise_set_point_baseline` | `tool_registry.py:424` | **no replacement** | `refresh_confidence` | absent |
+| 88 | `tortoise_set_source_tier` | `tool_registry.py:1026` | **no replacement** | `manage_source_trust` | absent |
+| 89 | `tortoise_stale` | `tool_registry.py:837` | `tortoise_overview(section="stale")` | `graph_overview` | warning shim |
+| 90 | `tortoise_status` | `tool_registry.py:673` | `tortoise_overview(section="status")` | `graph_overview` | warning shim |
+| 91 | `tortoise_suggest_entry_points` | `tool_registry.py:287` | **no replacement** | `search_knowledge` | absent |
+| 92 | `tortoise_summarize_structure` | `tool_registry.py:158` | **no replacement** | `graph_overview` | absent |
+| 93 | `tortoise_supersede` | `tool_registry.py:575` | **no replacement** | `supersede_knowledge` | absent |
+| 94 | `tortoise_taxonomy` | `tool_registry.py:806` | `tortoise_overview(section="taxonomy")` | `graph_overview` | warning shim |
+| 95 | `tortoise_traverse` | `tool_registry.py:627` | **no replacement** | `explore_connections` | absent |
+| 96 | `tortoise_update` | `tool_registry.py:1084` | **no replacement** | `update_knowledge` | absent |
+| 97 | `tortoise_update_entity` | `tool_registry.py:1047` | **no replacement** | `update_knowledge` | absent |
+| 98 | `tortoise_update_point` | `tool_registry.py:479` | **no replacement** | `update_knowledge` | absent |
+| 99 | `tortoise_validate_domain` | `tool_registry.py:146` | **no replacement** | `graph_overview` | absent |
 
-**98 served MCP tools, 28 destinations.** 16 retire **with a warning shim**; the other **82** are simply absent — no shim.
+**99 served MCP tools, 29 destinations.** 18 retire **with a warning shim**; the other **81** are simply absent — no shim.
 
-**`Retirement` is today's behaviour, not a forecast.** PR #4031 MERGED as `e3bb78a14` (2026-09-21), so the 16 `warning shim` names are
+**`Retirement` is today's behaviour, not a forecast.** PR #4031 MERGED as `e3bb78a14` (2026-09-21), so the 18 `warning shim` names are
 retired ON `main` and this column is what a caller experiences now. The map is read live from `tortoise.tool_registry.RETIRED_USE_INSTEAD` rather than pinned, so it cannot describe a plan that has since landed differently.
 
 The registry states what retiring a name DOES — quoted verbatim and in full:
@@ -146,7 +147,7 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 | Destination | Count |
 |---|---|
 | `graph_overview` | 13 |
-| `REMOVED` | 11 |
+| `REMOVED` | 9 |
 | `check_confidence` | 7 |
 | `create_entity` | 7 |
 | `get_entity` | 7 |
@@ -157,6 +158,7 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 | `delete_knowledge` | 3 |
 | `explore_connections` | 3 |
 | `index_sources_from_directory` | 3 |
+| `manage_sources` | 3 |
 | `refresh_confidence` | 3 |
 | `review_link_candidates` | 3 |
 | `link_entities` | 2 |
@@ -173,16 +175,16 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 | `tenancy:create_memory_graph` | 1 |
 | `tenancy:list_memory_graphs` | 1 |
 | `write_question` | 1 |
-| **total** | **98** |
+| **total** | **99** |
 
-98 served tools → 28 destinations: **84** absorbed into the **26** MCP targets, **1** into a builder-only SDK method (not on the MCP), **2** tenancy (SDK/REST only), **11** removed.
+99 served tools → 29 destinations: **87** absorbed into the **27** MCP targets, **1** into a builder-only SDK method (not on the MCP), **2** tenancy (SDK/REST only), **9** removed.
 
 ---
 
 ## Part B — agreement with PR #4031's `RETIRED_USE_INSTEAD`
 
 PR #4031 encodes the *current-surface* redirects. This table encodes the *target-surface*
-destinations. They answer different questions about the same 16 names, and they must not
+destinations. They answer different questions about the same 18 names, and they must not
 contradict each other: a caller who follows a redirect to `tortoise_overview` lands
 on `graph_overview`, so if the 0.1 map sends the ORIGINAL name somewhere else the two
 artifacts disagree about which target absorbs it.
@@ -203,17 +205,19 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_list_pointkinds` | `graph_overview` | `tortoise_overview(section="pointkinds")` | `graph_overview` | AGREE |
 | `tortoise_list_sources` | `graph_overview` | `tortoise_overview(section="sources")` | `graph_overview` | AGREE |
 | `tortoise_list_tags` | `graph_overview` | `tortoise_overview(section="tags")` | `graph_overview` | AGREE |
+| `tortoise_onboarding_github_index` | `manage_sources` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | AGREE |
+| `tortoise_onboarding_session_recording` | `manage_sources` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | AGREE |
 | `tortoise_paginated_query` | `search_knowledge` | `tortoise_query(offset=..., limit=...)` | `search_knowledge` | AGREE |
 | `tortoise_query_points_by_tag` | `search_knowledge` | `tortoise_query(tag=...)` | `search_knowledge` | AGREE |
 | `tortoise_stale` | `graph_overview` | `tortoise_overview(section="stale")` | `graph_overview` | AGREE |
 | `tortoise_status` | `graph_overview` | `tortoise_overview(section="status")` | `graph_overview` | AGREE |
 | `tortoise_taxonomy` | `graph_overview` | `tortoise_overview(section="taxonomy")` | `graph_overview` | AGREE |
 
-**16 of 16 agree; 0 disagree.**
+**18 of 18 agree; 0 disagree.**
 
 ### B1 — the disagreements
 
-**None — 0 findings.** The 0.1 map and the redirect agree on the target for all 16 names. This section is kept, not deleted: an explicit empty finding list stays machine-visible, and a section that silently vanished would hide the difference between *no disagreements* and *nobody looked*.
+**None — 0 findings.** The 0.1 map and the redirect agree on the target for all 18 names. This section is kept, not deleted: an explicit empty finding list stays machine-visible, and a section that silently vanished would hide the difference between *no disagreements* and *nobody looked*.
 
 ---
 

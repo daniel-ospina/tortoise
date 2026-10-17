@@ -941,6 +941,10 @@ surfaces:
   # `core` entry alone would never run on the handler change that can reorder
   # the positional columns. (The #2938/#3154 dual-registration convention.)
   - test_session_capture_status.py
+  # #3540 ruling B: the consolidated source-management tool's handlers live in
+  # `tortoise/mcp_server.py` + `tortoise/hosted_api.py`; the guard must run on
+  # the surface change it guards.
+  - test_manage_sources_3540.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -4540,6 +4544,13 @@ durations:
   test_7405_update_point_writes.py: 2.0  # #7405/#8737: same #3400 flat default as the row above and for the same reason — a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
+  test_manage_sources_3540.py: 2.3  # #3540 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED at the branch head, after the review fixes: sum of testcase/@time over ALL 30 tests = 2.29s (1.08s of it is the one-time `tortoise.mcp_server` import in the first test). An earlier row claimed 1.52s over "15 tests" when the file already held 24 — the count and the sum are re-derived together, never carried forward (review P2); the file is DB-free and monkeypatched, so conftest setup is the once-per-leg cost the method attributes to no file. Without this row the file packs at the flat 2.0s default and `tools/ci_selection.py --integrity` reds the durations coverage floor — the surface entry alone does not cover it (#4348 trap). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
+  # The two rows below arrived with the origin/main merge, unmeasured and IN the fast
+  # pool, which is what pushed coverage under the 90% floor on this branch (#3400).
+  # Both are measured locally under the same `# unmeasured` convention; refresh from
+  # the first post-merge run that includes them.
+  test_5509_name_keyed_identity_reads.py: 134.1  # #5509: LOCAL reading (13 tests, junit sum 134.06s — 132.7s of it in TestBeliefTimelineIdentityRead, which drives the real graph). Carried here because its merge into this branch is what took durations coverage below the floor.
+  test_7936_reference_fold_label_rekey.py: 4.0  # #7936: LOCAL reading (10 tests, junit sum 4.04s). Same reason as the row above.
   eval/retrieval/test_integration.py: 1523.4
   # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
   # It is NOT presented as a measurement — it carries the branch's local reading under the
@@ -5642,7 +5653,6 @@ durations:
   test_env_contract_covers_supabase_config.py: 2.0  # #4030: appended by hand so the entry exists at all — main sat only just above the guard's floor (764/848 fast files = 90.09%), and this new fast file tipped `duration_coverage_issues()` below it (764/849 = 89.99%, formatted as the `90.0%` in that error). Local estimate: 3.24 s measured for this file plus its paired pin in test_ci_selection.py, most of it one conftest import. `tools/ci_timing.py --refresh-durations` replaces it with the CI-measured value.
   test_7936_stable_stub_ids.py: 18.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 777/864 = 89.9% (the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor) — the same shape as `test_7951_create_point_outbox.py` above, and it is also what reds `tests/test_ci_timing.py`'s four `validate_refreshed_manifest` assertions on the manifest of record. Local embedded-lane reading 16.6–20.4 s (18 tests; three rebuild the graph). Refresh from the first post-merge run that includes it.
   test_7935_restore_destination_lock.py: 5.0  # #7935 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 780/867 = 89.97% (formatted as the `90.0%` in that error) — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor; the same shape as the rows above. Local embedded-carve-out reading (4 tests, re-measured after the P3 journal-lock test was added): call 0.52 s + 2.83 s + 2.73 s + <0.01 s (the lock-only test enters `_destination_lock` directly, no restore), setup/teardown ~0.5 s each. The file's FIRST embedded replay in a cold process also pays the once-per-leg embedding-model load the #3400 method attributes to no file (~124 s, and the fixture pays it in setup so the lock gates are not timed against it) — that cost is already carried by `test_7767_restore_rollback.py`, which replays the same path. Refresh from the first post-merge run that includes it.
-  test_7936_reference_fold_label_rekey.py: 8.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). The row is added for the HEADROOM the gate no longer has — main sits just above the 90% floor, so one more unmeasured fast file can tip `duration_coverage_issues()`, and an absent row is also what reds `tests/test_ci_timing.py`'s `validate_refreshed_manifest` assertions. Local embedded-lane reading 7.0-10.1 s (15 tests; `FalkorProjection(path=…)` graphs, plus one SDK live-build case). Refresh from the first post-merge run that includes it.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-

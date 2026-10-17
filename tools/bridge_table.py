@@ -66,6 +66,11 @@ TARGET_MCP = [
     "get_historical_knowledge", "explore_connections", "graph_overview",
     "review_link_candidates", "poll_events", "check_connection",
     "create_entity", "register_source", "index_sources_from_directory",
+    # #3540 ruling B: the consolidated source-management operation. It is on the
+    # target because the owner approved it as the ONE way an agent switches
+    # sources on/off — replacing two per-source tools with one, so the target
+    # GROWS a name while the served surface SHRINKS a tool.
+    "manage_sources",
     "mine_knowledge_from_session", "mine_knowledge_from_directory",
     "manage_source_trust", "link_entities", "write_question", "record_decision",
     "update_knowledge", "supersede_knowledge", "delete_knowledge",
@@ -207,14 +212,20 @@ DESTINATION = {
     "tortoise_diary_write": "create_entity",              # canonical row 10
     "tortoise_checkpoint": "mine_knowledge_from_session",  # canonical row 13 (`capture_knowledge`, renamed by beta)
     "tortoise_diary_read": "list_knowledge",               # canonical "Removed entirely": `list_knowledge(kind="diary")`
+    # #3540 ruling B: the consolidated source-management operation.
+    "tortoise_manage_sources": "manage_sources",
     # ── Onboarding and packs ────────────────────────────────────────
     "tortoise_onboarding_state": "REMOVED",
     "tortoise_onboarding_seed": "REMOVED",
     "tortoise_onboarding_demo_create": "REMOVED",
     "tortoise_onboarding_github_connect": "REMOVED",
-    "tortoise_onboarding_github_index": "REMOVED",
+    # #3540 ruling B: retired INTO the consolidated operation — the 0.1
+    # destination is the tool that replaces it, so the redirect agrees.
+    "tortoise_onboarding_github_index": "manage_sources",
     "tortoise_onboarding_github_status": "REMOVED",
-    "tortoise_onboarding_session_recording": "REMOVED",
+    # #3540 ruling B: retired INTO the consolidated operation — the 0.1
+    # destination is the tool that replaces it, so the redirect agrees.
+    "tortoise_onboarding_session_recording": "manage_sources",
     "tortoise_pack_install": "REMOVED",
     "tortoise_packs_list": "REMOVED",
     # ── Tenancy / admin ─────────────────────────────────────────────
@@ -311,12 +322,6 @@ REMOVALS: dict[str, str] = {
         "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
     ),
     "tortoise_onboarding_github_connect": (
-        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
-    ),
-    "tortoise_onboarding_github_index": (
-        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
-    ),
-    "tortoise_onboarding_session_recording": (
         "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
     ),
     "tortoise_packs_list": (

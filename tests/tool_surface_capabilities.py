@@ -201,12 +201,25 @@ TENANT_SCOPED_LABELS: frozenset[str] = frozenset({":Graph"})
 # Registry entries with an EMPTY `sdk_method` whose write happens in hosted_api
 # (outside the sdk.py derivation).  Writer ones must be writer-annotated +
 # WRITE_TOOL_NAMES; the reads are the declared read side.  Kept exact so a new
-# empty-binding entry must be declared.
+# empty-binding entry must be declared.  Liveness — every member still resolving
+# in the SERVED registry — is asserted by
+# `tests/test_tool_registry.py::test_every_non_sdk_writer_is_still_served`,
+# because `declared_set_violations` is also called on probe SUBSETS and so
+# cannot host a "missing" arm here.
 NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_session_capture", "tortoise_graph_set_recording",
     "tortoise_onboarding_demo_create", "tortoise_onboarding_seed",
+    # #3540: RETIRED-but-SERVED. `RETIRED_USE_INSTEAD` hides these two from
+    # `list_tools` and redirects the name, but both still resolve and still
+    # serve a write, so they belong here for as long as they resolve — dropping
+    # them would leave a served writer's empty binding unchecked (#3883).
     "tortoise_onboarding_session_recording",
     "tortoise_onboarding_github_connect", "tortoise_onboarding_github_index",
+    # #3540 ruling B: the consolidated source-management operation — its write
+    # happens through hosted_api helpers (index job / onboarding state), so it
+    # is an empty-binding writer here. It deliberately does NOT tear the GitHub
+    # connection down: #1924 made the per-source switch intent, not a disconnect.
+    "tortoise_manage_sources",
     # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
     "tortoise_pack_install",
     # #3904: handler-served writer (dispatches to sdk.mitigate_operator / sdk.annotate_operator)

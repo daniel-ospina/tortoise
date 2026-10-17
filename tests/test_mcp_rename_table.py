@@ -58,6 +58,13 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_health": 'tortoise_overview(section="health")',
     "tortoise_index_sessions": "tortoise_index_files(directory)",
     "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+    # #3540 ruling B: the two per-source switches retired into the ONE
+    # consolidated source-management operation (net one tool fewer).
+    "tortoise_onboarding_github_index":
+        'tortoise_manage_sources(action="enable", source="github_issues")'
+        ' (no per-repo scope: it indexes every connected repo)',
+    "tortoise_onboarding_session_recording":
+        'tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")',
     "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
     "tortoise_list_sources": 'tortoise_overview(section="sources")',
     "tortoise_list_tags": 'tortoise_overview(section="tags")',
@@ -366,8 +373,12 @@ def test_destination_counts_table_and_prose_are_arithmetic() -> None:
         "the bucket sentence's `absorbed into MCP targets` figure does not match the "
         "other four buckets"
     )
-    assert n_targets == 26, (
-        f"the bucket sentence says {n_targets} MCP targets; the approved target surface is 26"
+    # #3540 ruling B: the owner approved ONE new target name
+    # (`manage_sources`, the consolidated source-management operation), so the
+    # approved target surface moved 26 -> 27. It is a target ADDITION with a
+    # served-surface REDUCTION — the tool count still fell by one.
+    assert n_targets == 27, (
+        f"the bucket sentence says {n_targets} MCP targets; the approved target surface is 27"
     )
     assert on_mcp + sdk_only + tenancy + removed == n_tools
 
@@ -456,8 +467,8 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     assert f"the same {len(RETIRED_LITERAL)} names" in _doc(), (
         "the Part B intro no longer states the redirect-map size the table covers"
     )
-    assert len(RETIRED_LITERAL) == 16, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 16"
+    assert len(RETIRED_LITERAL) == 18, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 18"
     )
 
 
