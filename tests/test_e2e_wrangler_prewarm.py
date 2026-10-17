@@ -88,14 +88,18 @@ _CONTINUATION = re.compile(r"\\\n")
 #: interpreted at all.
 #:
 #: This replaced a hand-written shell lexer that STRIPPED comments before reading
-#: the token. Its ONLY deletion point was the comment tail, so it could hide an
-#: invocation only where it misread a `#` as starting a comment — `echo a;# x &&
-#: npx --yes wrangler@4 --version` is exactly that (measured on `main`: the tail
-#: was cut, so a real float came back as nothing). Its other gaps — `<<'EOF'`,
-#: `<<\EOF`, two here-docs on one line, `<<'1'`, an escaped quote, an apostrophe in
-#: a here-doc body — could only OVER-report, which is the safe direction. The arms
-#: below pin each input so the reading that keeps it reported cannot be dropped
-#: silently; they pin the CONTRACT, and only `;#` is also a pre-fix miss.
+#: the token, and whose here-doc model MISSED real invocations. Measured against
+#: `origin/main`'s copy, exactly two classes changed a verdict:
+#:   - `<<\EOF` and two here-docs on ONE line (A2, A3): NOTHING on `main`,
+#:     `{'4'}` here. Bash really RUNS that npx, so these are the fail-open fixes.
+#:   - a same-line `;#` / `&#` tail (the DELTA ARMS block below): NOTHING on
+#:     `main`, `{'4'}` here — an OVER-report, because shell also reads that `#`
+#:     as a comment to end of line. Fail-closed, this file's declared direction.
+#: Everything else below is a CONTRACT pin: it holds a reading that keeps an input
+#: reported, so dropping a modelled form fails an arm. No arm claims a fail-open
+#: fix it did not measure — the tail-cut spelling in particular is NOT one (the
+#: earlier "`main` missed a real float there" narrative was false, see the DELTA
+#: ARMS note).
 #:
 #: WHY THIS IS THE FLOOR. Each earlier draft added a rule to tell a pin from a
 #: mention, and every rule could be defeated by text shell interprets but the
@@ -181,6 +185,8 @@ _ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
 _ANSI_OCTAL = re.compile(r"[0-7]{1,3}")
 _ANSI_HEX = re.compile(r"[0-9A-Fa-f]{1,2}")
 _ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{1,4}"), 8: re.compile(r"[0-9A-Fa-f]{1,8}")}
+
+
 def _ansi_translate(body: str) -> str:
     r"""What bash puts in the word for a `$'…'` BODY.
 
@@ -794,15 +800,19 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     assert _floating_wranglers("npx --yes wrangler\\\n@4 --version") == {"4"}
 
     # ARMS — spellings this matcher must report, each of which really runs a
-    # floating `wrangler@4`. They pin the reading (drop a modelled form and the
-    # arm fails), NOT a history: most are already caught by the replaced lexer, and
-    # the per-revision story was measured inconsistently across review rounds, so
-    # the arm pins the input. Only `;#` is also a pre-fix miss (see the comment
-    # above `_CONTINUATION`).
+    # floating `wrangler@4`. They pin the reading (drop a modelled form and the arm
+    # fails), NOT a history: the per-revision story was measured inconsistently
+    # across review rounds, so a PRE-FIX verdict is claimed only where it was
+    # measured against `origin/main`'s copy. Those are A2 and A3 — `<<\EOF` and two
+    # here-docs on ONE line both read NOTHING on the replaced lexer while bash really
+    # runs the npx. A10 is marked NOT a pre-fix miss on purpose: it keeps the npx on
+    # the NEXT line, so the tail cut still reported it, and claiming otherwise was
+    # the round-8 finding; the same-line tail spellings are pinned in the DELTA ARMS
+    # block below.
     for run in (
         "cat <<'EOF'\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A1
-        "cat <<\\EOF\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A2
-        "cat <<'A' <<'B'\nA\nDon't\nB\necho 'see #1' && npx --yes wrangler@4 --version",  # A3
+        "cat <<\\EOF\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A2 pre-fix MISS
+        "cat <<'A' <<'B'\nA\nDon't\nB\necho 'see #1' && npx --yes wrangler@4 --version",  # A3 pre-fix MISS (one line)
         "cat <<'1'\nDon't\n1\nnpx --yes wrangler@4 --version",  # A4
         "echo \"escaped \\\" # note\" && npx --yes wrangler@4 --version",  # A5
         "echo a\\;# x && npx --yes wrangler@4 --version",  # A6
@@ -813,7 +823,9 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
         #     expected value.
         "echo x $(cat <<\\EOF\nDont\nEOF\n) && npx --yes wrangler@4 --version",  # A8
         "echo $'x' # note\nnpx --yes wrangler@4 --version",  # A9  ANSI-C, then `#`
-        "echo a;# (note)\nnpx --yes wrangler@4 --version",  # A10 `;#`, npx on the NEXT line
+        "echo a;# (note)\nnpx --yes wrangler@4 --version",  # A10 `;#`, npx on the NEXT line —
+        #     NOT a pre-fix miss: the tail cut still saw the next line's npx. It pins
+        #     the SHAPE only; the real `;#` miss is pinned in the REGRESSION ARMS below.
         'echo "refs \\\n#8743" && npx --yes wrangler@4 --version',  # A11 quote over a continuation
         # The round-3 class: a `#` line inside a here-doc body or a quoted string,
         # which a COMMENT FILTER dropped while shell substituted into it.
@@ -827,6 +839,31 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
         "$@wrangler@4 --version",  # A16
     ):
         assert _floating_wranglers(run) == {"4"}, run
+
+    # DELTA ARMS — the spellings a reintroduced COMMENT-TAIL CUT would read as
+    # nothing. Measured against `origin/main`'s copy: each reads `set()` there and
+    # `{'4'}` here, so putting the tail cut back fails this block (A10 above does
+    # NOT discriminate — it keeps the npx on the next line — which is the round-8
+    # finding).
+    #
+    # DIRECTION, stated rather than implied: in both rows shell really DOES treat
+    # `#` as a comment to end of line, so bash runs no `wrangler` — the delta is an
+    # OVER-report here, which is this file's declared fail-closed direction, NOT a
+    # fix for a fail-open miss (`main`'s tail cut was correct on these two lines).
+    # The fail-OPEN class a comment filter CAN produce is the substituted/quoted
+    # bodies pinned as A12–A15 above, where shell DOES run the command (`main`'s
+    # copy already reports those, so they are contract pins, not deltas).
+    for run in (
+        "echo a;# x && npx --yes wrangler@4 --version",  # the docstring's tail-cut spelling
+        "echo a&# x && npx --yes wrangler@4 --version",
+    ):
+        assert _floating_wranglers(run) == {"4"}, run
+    # NON-VACUITY: the cut these arms forbid really changes the verdict — apply it
+    # by hand (the deleted lexer cut the tail at the `#`) and the float is gone.
+    for run in ("echo a;# x && npx --yes wrangler@4 --version",
+                "echo a&# x && npx --yes wrangler@4 --version"):
+        cut_at = min(i for i in (run.find(";#"), run.find("&#")) if i >= 0)
+        assert _floating_wranglers(run[:cut_at]) == set(), run
 
     # REGRESSION ARMS from the review of an earlier draft of this matcher, which
     # required a command word or an ENUMERATED command position and therefore
