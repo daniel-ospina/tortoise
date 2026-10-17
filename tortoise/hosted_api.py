@@ -19836,11 +19836,17 @@ async def _membership_role(user_id: str, org_id: str) -> str | None:
     # anchor is process-lifetime and sees them).
     sdk = _registry_anchor()
     try:
-        rows = sdk._get_registry().query(
-            "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
-            "RETURN m.role",
-            params={"uid": user_id, "tid": org_id},
-        ).result_set
+        # #3718/#4660: the registry read is synchronous FalkorDB I/O, so it runs
+        # on the dedicated `graph` pool — an inline query here would block the
+        # event loop (the rule `test_read_routes_loop_responsiveness` enforces).
+        rows = await _graph_offload(
+            lambda: sdk._get_registry().query(
+                "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
+                "RETURN m.role",
+                params={"uid": user_id, "tid": org_id},
+            ).result_set,
+            op="membership_role_registry",
+        )
     except Exception as _exc:
         _raise_503_if_cp_outage(_exc)
         raise

@@ -726,7 +726,7 @@ class TestOwnKeyRegistryParity:
             "the registry twin must inherit the absolute expiry too"
         )
         rows = _reg_rows(reg, "team-2446r", _U1)
-        assert [x for x in rows if x["id"] == "own-boot"][0]["revoked_at"] is not None
+        assert next(x for x in rows if x["id"] == "own-boot")["revoked_at"] is not None
         live = [x for x in rows if x["revoked_at"] is None]
         assert len(live) == 1 and live[0]["expires_at"] == _FAR_FUTURE
 
@@ -741,8 +741,8 @@ class TestOwnKeyRegistryParity:
         r = _replace(tc, "owner-boot")
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == _NOT_YOURS
-        assert [x for x in _reg_rows(reg, "team-2446r", _UOWN)
-                if x["id"] == "owner-boot"][0]["revoked_at"] is None
+        assert next(x for x in _reg_rows(reg, "team-2446r", _UOWN)
+                    if x["id"] == "owner-boot")["revoked_at"] is None
 
     def test_member_turns_off_own_key(self, reg_client, reg, as_user):
         tc = reg_client
