@@ -100,6 +100,101 @@ if [ "$1 $2" = "api user" ]; then
   exit 0
 fi
 
+# REST issue metadata (#3435): `gh api repos/<slug>/issues/<N>`, the fallback the
+# tool takes when the GraphQL budget is exhausted. Deliberately emits REST's
+# LOWERCASE `state` and `html_url`, so a test proves the normalisation onto the
+# `gh issue view --json` shape rather than assuming the two agree.
+if [ "$1" = "api" ] && [[ "$2" =~ ^repos/[^/]+/[^/]+/issues/[0-9]+$ ]]; then
+  # ⛔ MIRROR THE REAL ENDPOINT'S FAILURES, or the fallback becomes a fail-open
+  # TEST HARNESS. `$repo` is parsed from `--repo`, which this REST form does not
+  # carry, so the slug must be recovered FROM THE PATH — a guard keyed on an empty
+  # `$repo` can never match and is dead code that merely looks like protection.
+  _slug="${2#repos/}"; _slug="${_slug%/issues/*}"
+  if [ "${GH_STUB_ISSUE_REST_FAIL:-0}" = "1" ]; then
+    echo "gh-stub: HTTP 403: Resource not accessible" >&2
+    exit 1
+  fi
+  # #3435 review (P1): a 200 with a body that BREAKS the issue-payload contract.
+  # Without this seam the malformed-REST arm is never executed, which is why a
+  # crash on it survived a review cycle: the only other failures here are
+  # transport failures, which never reach the validation.
+  if [ "${GH_STUB_ISSUE_REST_MALFORMED:-0}" = "1" ]; then
+    printf '{"number": %s}\n' "${2##*/}"
+    exit 0
+  fi
+  # #3435 review (P2): REST says 404 while the GraphQL read was rate-limited.
+  # A REST-only absence seam, because GH_STUB_ISSUE_ABSENT fails the `issue view`
+  # call FIRST (so the fallback is never taken) and would pin the wrong path.
+  if [ "${GH_STUB_ISSUE_REST_ABSENT:-0}" = "1" ]; then
+    echo "gh-stub: HTTP 404: Not Found (https://api.github.com/repos/x/y/issues/1)" >&2
+    exit 1
+  fi
+  # #3435 review (P2): `subprocess.run(text=True)` decodes STRICTLY, so one bad
+  # byte used to raise UnicodeDecodeError — not a SurfaceError — and escaped as a
+  # traceback with no VERDICT line and exit 1 (COLLISION).
+  if [ "${GH_STUB_ISSUE_REST_INVALID_UTF8:-0}" = "1" ]; then
+    printf '\xff\xfe{"number": %s}\n' "${2##*/}"
+    exit 0
+  fi
+  # #3435 review (P2): `/issues/<N>` is the ISSUE-OR-PULL-REQUEST endpoint, and a
+  # PR object carries every key the normaliser reads — so without a guard it was
+  # read as an issue (measured: VERDICT CLEAN, i.e. the fail-open direction).
+  if [ "${GH_STUB_ISSUE_REST_PULL_REQUEST:-0}" = "1" ]; then
+    printf '{"number": %s, "title": "feat: a PR", "state": "open", "state_reason": null, "assignees": [], "html_url": "https://github.com/x/y/pull/%s", "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/%s"}}\n' "${2##*/}" "${2##*/}" "${2##*/}"
+    exit 0
+  fi
+  # #3435 review (P2): a body about a DIFFERENT issue must not be read as this
+  # one's state/assignees (an `OPEN` with no assignees reads free).
+  if [ "${GH_STUB_ISSUE_REST_WRONG_NUMBER:-0}" = "1" ]; then
+    printf '{"number": %s, "title": "some other issue", "state": "open", "state_reason": null, "assignees": [], "html_url": "https://github.com/x/y/issues/%s"}\n' "$(( ${2##*/} + 1 ))" "$(( ${2##*/} + 1 ))"
+    exit 0
+  fi
+  # #3435 review (P2): the CLOSED-over-REST path, and the ONE key REST spells
+  # differently. `_issue_view_rest` maps REST's `state_reason` onto the
+  # `stateReason` key `gh issue view --json` returns, and every other REST
+  # success here answers an OPEN issue with `state_reason: null` — so deleting
+  # that mapping kept the whole suite green while a CLOSED issue rescued over
+  # REST lost its reason and fell back to the generic "TERMINAL" wording
+  # instead of naming the closure that happened (the #8497 wording defect,
+  # `state_reason=not_planned` read as a shipment, reached through a second key
+  # spelling). It is also the only fixture that decides LANDED from a REST body
+  # alone: a terminal state SKIPS the timeline query.
+  if [ -n "${GH_STUB_ISSUE_REST_CLOSED:-}" ]; then
+    printf '{"number": %s, "title": "florfenicol dosing audit", "state": "closed", "state_reason": "%s", "assignees": [], "html_url": "https://github.com/%s/issues/%s"}\n' "${2##*/}" "$GH_STUB_ISSUE_REST_CLOSED" "$_slug" "${2##*/}"
+    exit 0
+  fi
+  # #3435 review (P2): a top-level NON-OBJECT body (a JSON array, a bare
+  # string) is refused BY NAME. Unpinned, deleting the guard turns the body into
+  # an `AttributeError` in the normaliser — no VERDICT line, exit 1, the code
+  # this tool documents as COLLISION.
+  if [ "${GH_STUB_ISSUE_REST_NON_OBJECT:-0}" = "1" ]; then
+    printf '[]\n'
+    exit 0
+  fi
+  # NOTE: there is deliberately NO `GH_STUB_ISSUE_ABSENT` guard here, and no
+  # copy of it belongs here either. That seam fails the `issue view` call FIRST
+  # (so the fallback is never attempted), which makes a copy inside THIS branch
+  # unreachable code that reads as protection — the same defect the `$repo` note
+  # above names. The live REST-404 seam is `GH_STUB_ISSUE_REST_ABSENT` above.
+  # (Cycle 4's commit text recorded this copy as DELETED; that commit had only
+  # added this note, so the record and the code disagreed until now.)
+  # The endpoint failing FOR THIS SLUG (an unreachable host, a proxy refusing
+  # the repo) — the REST counterpart of the `$repo`-keyed probe guard further
+  # down. ⛔ IT MUST BE FIRED BY A TEST OR IT DOES NOT EXIST (#3435 review, P2):
+  # the only other writer of `probe_unqueried.txt` is the cross-repo CANDIDATE,
+  # while this branch is reached only for the TARGET slug, so an unwired guard
+  # here is dead code that merely looks like protection — the defect the `$repo`
+  # note above names. `test_a_rest_transport_failure_names_the_transport_not_a_
+  # missing_issue` drives it (a `--repo` run, so the ambiguity probe does not
+  # read the file, plus a rate-limited `issue view`); deleting this guard makes
+  # that case go CLEAN.
+  if [ -f "$d/probe_unqueried.txt" ] && grep -qx "$_slug" "$d/probe_unqueried.txt"; then
+    echo "gh-stub: could not connect to api.github.com" >&2; exit 1
+  fi
+  printf '{"number": %s, "title": "florfenicol dosing audit", "state": "open", "state_reason": null, "assignees": [], "html_url": "https://github.com/%s/issues/%s"}\n' "${2##*/}" "$_slug" "${2##*/}"
+  exit 0
+fi
+
 case "$1 $2" in
   "pr list")
     # #3587: the `gh pr list` GraphQL path for CLOSED PRs resets on this host
@@ -108,6 +203,14 @@ case "$1 $2" in
     # GraphQL path, fail loudly exactly as production does.
     if [ "${state:-open}" = "closed" ] && [ "${GH_STUB_CLOSED_PR_LIST_FAILS:-1}" != "0" ]; then
       echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
+      exit 1
+    fi
+    # #3435 review (P2): GitHub's PRIMARY GraphQL budget is ONE shared bucket, so
+    # a genuine exhaustion kills `pr list` too. Without this seam the CLEAN test
+    # models a state production cannot reach and overstates what the fallback
+    # delivers (the OPEN-PR surface stays GraphQL-only by design).
+    if [ "${state:-open}" = "open" ] && [ "${GH_STUB_PR_LIST_RATE_LIMITED:-0}" = "1" ]; then
+      echo "GraphQL: API rate limit already exceeded for user ID 81560491." >&2
       exit 1
     fi
     # The target repo is sent EXPLICITLY (#4027): record it so a test can
@@ -175,7 +278,24 @@ case "$1 $2" in
       echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2
       exit 1
     fi
-    # Probe form (the cross-repo ambiguity check asks for `--json number` only).
+    # #3435: GraphQL budget exhausted while REST still answers. The exact text
+    # the real CLI prints on this host, which is NOT "the issue could not be
+    # read" — it is "this endpoint is out of budget".
+    if [ "${GH_STUB_ISSUE_VIEW_RATE_LIMITED:-0}" = "1" ]; then
+      echo "GraphQL: API rate limit already exceeded for user ID 81560491." >&2
+      exit 1
+    fi
+    # ⛔ THE CANONICAL EXHAUST FORM, and the reason the gate matches three strings
+  # rather than one (#3435 review, P2): `gh` renders a non-2xx as
+  # `HTTP <code>: <status> (<url>)` — so a 429 with NO body prose arrives with
+  # no "rate limit" substring at all, and a bare substring test under-triggers.
+  # Unpinned, deleting the `"too many requests"` / `"http 429"` arms restores that
+  # defect with a green suite.
+  if [ "${GH_STUB_ISSUE_VIEW_HTTP_429:-0}" = "1" ]; then
+    echo "gh-stub: HTTP 429: Too Many Requests (https://api.github.com/graphql)" >&2
+    exit 1
+  fi
+  # Probe form (the cross-repo ambiguity check asks for `--json number` only).
     if [ "$json_args" = "number" ]; then
       if [ -f "$d/probe_unqueried.txt" ] && grep -qx "$repo" "$d/probe_unqueried.txt"; then
         echo "gh-stub: could not connect to api.github.com" >&2; exit 1
@@ -2305,6 +2425,255 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertNotIn("VERDICT: CLEAN", out)
         self.assertIn("OPEN-ISSUE read hit its cap", out)
+
+    def test_graphql_exhaustion_falls_back_to_rest_instead_of_incomplete(self):
+        # ⛔ THE INSTRUMENT HOLDING THE DATUM AND NOT READING IT (#3435).
+        # `gh issue view` is GraphQL-only. When THAT CALL is refused, the tool
+        # used to report the issue surface INCOMPLETE — and because the landed
+        # surface reads the issue's `state`, it went INCOMPLETE too — while
+        # `gh api` answers the identical question on REST's separate budget. A
+        # refusal it could have measured is not a refusal, it is a blind spot.
+        #
+        # SCOPE: this fixture models ONE refused GraphQL call (a secondary /
+        # per-query limit), not a spent primary bucket — see
+        # test_shared_graphql_exhaustion_rescues_the_issue_reads_but_not_open_prs
+        # for the shared-bucket shape, which still ends INCOMPLETE on `open PRs`
+        # because that surface is GraphQL-only BY DESIGN (its
+        # `closingIssuesReferences` field has no REST equivalent).
+        rc, out = self.run_tool(env_extra={"GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("issue-metadata-unavailable", out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+        # The REST payload says "open" (lowercase) where GraphQL says "OPEN".
+        # The landed surface must still read it as OPEN and consult the
+        # timeline; a case-sensitive compare would silently skip that query.
+        self.assertIn("issue state=OPEN", out)
+
+    def test_a_bare_http_429_also_triggers_the_rest_fallback(self):
+        # ⛔ THE CANONICAL EXHAUST FORM (#3435 review, P2). `gh` renders a non-2xx
+        # as `HTTP <code>: <status> (<url>)`, so a 429 with no body prose carries
+        # NO "rate limit" substring. A bare substring test therefore under-
+        # triggers on exactly the form the premise calls routine, and deleting
+        # the `"too many requests"` / `"http 429"` arms used to keep the suite
+        # green — so this case pins them.
+        rc, out = self.run_tool(env_extra={"GH_STUB_ISSUE_VIEW_HTTP_429": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("issue state=OPEN", out)
+        self.assertNotIn("issue-metadata-unavailable", out)
+
+    def test_shared_graphql_exhaustion_rescues_the_issue_reads_but_not_open_prs(self):
+        # ⛔ THE REAL SHAPE OF THE FLEET SYMPTOM (#3435 review, P2). GitHub's
+        # PRIMARY GraphQL budget is ONE shared bucket, so a genuine exhaustion
+        # kills `gh pr list` as well as `gh issue view`. The fallback does NOT
+        # make that run CLEAN — it makes the issue surfaces stop lying about
+        # why: they are READ over REST while `open PRs` (GraphQL-only by design)
+        # stays a fail-closed refusal. Asserting both halves is what keeps the
+        # test from overstating the fix, and the CLEAN issue rows are only
+        # reachable when the fallback ran.
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_PR_LIST_RATE_LIMITED": "1",
+        })
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("[open PRs]", out)
+        # The ISSUE surfaces were rescued: read, not refused, and not blamed on
+        # the budget — which is the whole point of the fallback.
+        self.assertRegex(out, r"(?m)^issue assignee/holder\s+CLEAN")
+        self.assertNotIn("issue-metadata-unavailable", out)
+        self.assertIn("issue state=OPEN", out)
+
+    def test_graphql_exhaustion_with_rest_also_down_still_fails_closed(self):
+        # The fallback must never become a fail-open. With BOTH budgets gone the
+        # tool has genuinely read nothing, so it must still refuse — otherwise
+        # "try REST" would convert an unmeasured issue into a CLEAN verdict.
+        # ⛔ AND IT MUST NAME THE REST REFUSAL (#3435 review, P2): without that
+        # assertion this test also passes on a tool with NO fallback at all (the
+        # stub's `issue view` fails first), so it would pin nothing.
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_FAIL": "1",
+        })
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("issue-metadata-unavailable", out)
+        self.assertIn("gh api repos/test-owner/test-repo/issues/3061 failed", out)
+        self.assertIn("Resource not accessible", out)
+
+    def test_a_rest_200_that_is_a_pull_request_is_not_read_as_an_issue(self):
+        # ⛔ THE TRANSPORT MUST NOT DECIDE THE ANSWER (#3435 review, P2).
+        # `/repos/<slug>/issues/<N>` is the ISSUE-OR-PULL-REQUEST endpoint, and a
+        # PR object carries `number/title/state/assignees/html_url` — every key
+        # the normaliser reads — so it satisfied the payload contract and was
+        # read as an ISSUE. Pre-fix this run came back `VERDICT: CLEAN` (the
+        # fail-open direction) while `gh issue view` refuses the same input.
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_PULL_REQUEST": "1",
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("is a PULL REQUEST, not an issue", out)
+
+    def test_a_rest_body_about_another_issue_is_refused(self):
+        # A misrouted body must not be read as THIS issue's state and assignees:
+        # an `OPEN` with no assignees reads free. Pre-fix the answer was CLEAN.
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_WRONG_NUMBER": "1",
+        })
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("answered for #3062, not #3061", out)
+
+    def test_a_non_utf8_rest_body_is_a_named_incomplete_not_a_traceback(self):
+        # ⛔ `subprocess.run(text=True)` decodes in STRICT mode (#3435 review,
+        # P2), so one bad byte raised `UnicodeDecodeError` — a ValueError, NOT a
+        # `SurfaceError` — which passed every handler and escaped as a traceback
+        # with no VERDICT line and exit 1 (COLLISION).
+        #
+        # Refusing beats `errors="replace"` HERE: replacement characters would
+        # manufacture a payload no endpoint sent (the same reasoning that makes a
+        # substituted slug a silent wrong answer). The identical hole on the
+        # PRIMARY reads is pre-existing, lives at the `_run` boundary, and is NOT
+        # yet covered by any test — tortoise#8881 needs this case written for the
+        # primary surfaces too.
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_INVALID_UTF8": "1",
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("UnicodeDecodeError", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("not decodable as text", out)
+
+    def test_a_malformed_rest_payload_is_a_named_incomplete_not_a_collision(self):
+        # ⛔ #3435 review cycle 2, P1. `_require_issue_payload` lives INSIDE the
+        # caller's `except SurfaceError` handler, and `main()` catches only
+        # NotAWorkItem / RuntimeError (`SurfaceError` is a plain Exception). So a
+        # malformed REST body must never RAISE from there: doing so escaped as a
+        # traceback with no VERDICT line and exited 1 — the code this tool
+        # defines as COLLISION, so an operator reads a false collision and waits
+        # for a lane that never appears.
+        #
+        # Pre-fix this test fails twice over: `rescued` was set to None in the
+        # handler and the very next statement called `rescued.get(...)`, giving
+        # `AttributeError` -> exit 1; and the issue surface was never marked
+        # INCOMPLETE, so the reason vanished with it.
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_MALFORMED": "1",
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # The issue surface is the one that must be NAMED incomplete — the
+        # landed surface's note alone would leave the actual cause unrecorded.
+        self.assertIn("[issue assignee/holder]", out)
+        self.assertIn("non-list 'assignees'", out)
+        self.assertIn("issue-metadata-unavailable", out)
+
+    def test_a_rest_transport_failure_names_the_transport_not_a_missing_issue(self):
+        # ⛔ THE STUB'S SLUG GUARD THAT NOTHING COULD FIRE (#3435 review, P2).
+        # `probe_unqueried.txt` had exactly ONE writer — the cross-repo CANDIDATE
+        # (`other-owner/other-repo`) — while the REST branch is reached only for
+        # the TARGET slug, so `grep -qx "$_slug"` could never match: the guard,
+        # and the path-derived `$_slug` it exists for, were dead code that merely
+        # LOOKED like protection. That is the same defect the branch's own `$repo`
+        # note names, left unexamined three lines below it.
+        #
+        # Reachable, and this is the fixture that reaches it: `--repo` is given
+        # (so the ambiguity probe runs no `--json number` read at all and the
+        # target slug in `probe_unqueried.txt` has no other reader) while
+        # `issue view` is rate-limited, so the fallback runs and the endpoint
+        # fails for the target slug specifically.
+        #
+        # WHAT IT PINS, in both directions: the guard must FIRE (deleted or
+        # re-keyed on the empty `$repo`, the valid REST body is read and the run
+        # goes CLEAN at rc 0), and the refusal must be classified as a TRANSPORT
+        # failure — `gh-unavailable`, the pre-existing fail-closed wording — and
+        # not mistaken for `issue-absent`, which would report a live issue as
+        # nonexistent.
+        (self.gh_dir / "probe_unqueried.txt").write_text("test-owner/test-repo\n")
+        rc, out = self.run_tool(env_extra={"GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1"})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("could not connect to api.github.com", out)
+        self.assertIn("gh-unavailable", out)
+        self.assertNotIn("issue-absent", out)
+
+    def test_a_rest_404_during_exhaustion_reads_as_issue_absent(self):
+        # #3435 review (minor): a REST 404 used to be swallowed into `None`, so
+        # the fall-through classified the RATE-LIMIT exception and a genuinely
+        # absent issue reported `gh-unavailable`. Same exit code, wrong reason —
+        # and "the budget is spent" is not why the issue was not found.
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_ABSENT": "1",
+        })
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("issue-absent", out)
+        self.assertNotIn("gh-unavailable", out)
+
+    def test_a_closed_issue_rescued_over_rest_keeps_its_reason(self):
+        # ⛔ THE ONE KEY REST SPELLS DIFFERENTLY (#3435 review, P2).
+        # `_issue_view_rest` maps REST's `state_reason` onto the `stateReason`
+        # key `gh issue view --json` returns. Every other REST fixture here
+        # answers an OPEN issue with `state_reason: null`, so deleting that
+        # mapping kept the whole suite green while a CLOSED issue rescued over
+        # REST silently lost its reason and printed the generic "the work item
+        # is TERMINAL" wording instead of naming the closure that happened —
+        # the #8497 wording defect (`state_reason=not_planned` read as a
+        # shipment), reached through a second key spelling.
+        #
+        # It is also the only case that decides LANDED from a REST body ALONE:
+        # a terminal state skips the timeline query, so no other test reaches
+        # that branch with the rescue in play (they are all OPEN).
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_CLOSED": "not_planned",
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # REST says `closed`/`not_planned`; both consumers upper-case and
+        # `-`->`_`-fold, so the reason must reach the wording intact.
+        self.assertIn("issue state=closed", out)
+        self.assertIn("closed as NOT PLANNED", out)
+        self.assertIn("was CLOSED AS NOT PLANNED", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        # A terminal issue must not pay for a timeline query it cannot need.
+        self.assertFalse((self.gh_dir / "timeline-calls.log").exists(), out)
+
+    def test_a_non_object_rest_body_is_a_named_incomplete_not_a_traceback(self):
+        # ⛔ `if not isinstance(raw, dict)` had NO fixture (#3435 review, P2):
+        # every other refusal in the REST reader was pinned, this one was not.
+        # Unpinned it is untested code on the path whose whole job is that a
+        # malformed body can never become exit 1 — without the guard,
+        # `raw.get(...)` on a list is an `AttributeError`, which `main()` does
+        # not catch, so it escapes as a traceback with no VERDICT line and
+        # exits 1 (the code this tool documents as COLLISION).
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_NON_OBJECT": "1",
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("non-object JSON (list)", out)
+        self.assertIn("issue-metadata-unavailable", out)
 
     def test_a_truncated_board_still_blocks_a_live_holder(self):
         # The truncation refusal is scoped to ABSENCE: a board that DID attribute a
