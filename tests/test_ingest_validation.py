@@ -238,9 +238,36 @@ class TestPhase1Phase2Parity:
             "reify carries confidence": _points_pair() | {"connections": [
                 {"from": "pA", "to": "pB", "operator": "IMPL", "reify": True,
                  "confidence": 0.5}]},
+            # #5244: `mitigation` is an OPERATOR-route attribute (a mitigation
+            # damps the operator bridge it attacks, #4937). A structural edge
+            # has no operator to damp, so the key was accepted and dropped —
+            # the same accept-and-drop defect the operator route carried.
+            "relation carries mitigation": _points_pair() | {"connections": [
+                {"from": "pA", "to": "pB", "relation": "hasPart",
+                 "mitigation": {"reason": "r", "strength": 0.3}}]},
+            "relation carries malformed mitigation": _points_pair() | {
+                "connections": [
+                    {"from": "pA", "to": "pB", "relation": "hasPart",
+                     "mitigation": "dampen it"}]},
         }
         for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
+
+    def test_relation_mitigation_refusal_names_the_sanctioned_route(self, sdk):
+        """#5244 — refusing `mitigation` on a relation connection must tell the
+        caller what to do instead (the operator route / sdk.mitigate_operator),
+        and must mutate nothing (Phase-1, zero-mutation contract)."""
+        from tortoise.exceptions import BundleValidationError
+        bundle = _points_pair() | {"connections": [
+            {"from": "pA", "to": "pB", "relation": "hasPart",
+             "mitigation": {"reason": "r", "strength": 0.3}}]}
+        with pytest.raises(BundleValidationError) as exc:
+            sdk.ingest(bundle)
+        msg = exc.value.violations[0]["message"]
+        assert "mitigate_operator" in msg, msg
+        assert "operator" in msg and "mitigation" in msg, msg
+        assert _point_count(sdk) == 0, "zero-mutation on the rejection"
+        assert _edge_count(sdk, "mitigated_by") == 0
 
     def test_duplicate_classes(self, sdk):
         cases = {

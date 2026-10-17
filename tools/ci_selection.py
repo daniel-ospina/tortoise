@@ -676,6 +676,13 @@ SOURCE_PATTERNS = {
     # a future core-registered test reading it would silently stop running on
     # the PR that edits it. Fail-closed is the right default for the file that
     # owns the deploy.
+    #
+    # #8816 makes that dependency sharper: `tests/test_e2e_wrangler_prewarm.py`
+    # is registered as CORE and now reads deploy-pages.yml (the pin and the
+    # verify-before-upload shape). It is safe ONLY because the file stays
+    # unlisted here — an unlisted deploy-pages.yml edit takes the FULL matrix,
+    # which includes core. Listing it would drop that guard's coverage on the
+    # very PR that changes the deploy spec.
     "ep": ("tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
@@ -1185,6 +1192,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # never ran on the bytes they hard-code. Pinned by
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "supabase/tests/fixtures/record_projection_journal.jsonl",
+             # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the
+             # documented manual deploy, and the #8816 guard
+             # (tests/test_e2e_wrangler_prewarm.py, registered `core`) both reads
+             # it and EXECUTES it from a scratch tree. `website/` is a flat
+             # NON_PYTHON_PREFIXES entry and the script matches no SOURCE_PATTERNS
+             # row, so a deploy.sh-only diff came back with `changed == []`, took
+             # the docs-only early return and fell back to tier-1 smoke — where
+             # that guard is NOT selected, so the arm that would catch a broken
+             # path never ran on the only PR that can break it. Measured before
+             # this entry: `select(["website/apps/dashboard/deploy.sh"])` ->
+             # surfaces=[], full=False, 46 test files, guard absent. Same
+             # #1349/#3332/#3616 silent-drop class as the `tools/` entries above;
+             # a name in a surface's test_files cannot fix it, because it only
+             # runs when that surface is ALREADY selected. Pinned by
+             # tests/test_ci_selection.py::
+             # test_dashboard_deploy_script_change_selects_core_not_tier1.
+             "website/apps/dashboard/deploy.sh",
              # #8491: the meeting→CRM bridge. `integrations/` is a flat
              # NON_PYTHON_PREFIXES entry and bridge.py matches no
              # SOURCE_PATTERNS row, so a bridge.py-only change was filtered out
