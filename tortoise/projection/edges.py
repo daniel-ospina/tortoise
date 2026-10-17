@@ -64,6 +64,13 @@ STRUCTURAL_REL_LABELS = {
     'extractedFrom': 'Source',
 }
 
+#: The about* rels an ``EventRecorded`` record may carry replay links for
+#: (#8398). A subset of ``STRUCTURAL_REL_LABELS`` — ``extractedFrom`` is not an
+#: about* prop a caller can set on ``create_event``.
+_ABOUT_REPLAY_RELS = frozenset({
+    'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint', 'aboutDocument',
+})
+
 
 def stub_key(rel: str, target: dict):
     """Extract the replayable (label, key) for a structural edge's target node.
@@ -983,6 +990,44 @@ class _EdgeHandlers:
                 if r.result_set and r.result_set[0][0]:
                     created = True
         return created
+
+    def replay_about_links(self, payload: dict) -> int:
+        """Re-wire the ``about*`` edges journaled WITH an ``EventRecorded`` record.
+
+        #8398: ``create_event(aboutObject=…)`` wires its links as GRAPH EDGES,
+        so they were never among the writes ``rebuild_all`` replays —
+        ``derived == replay(journal)`` was false for exactly this class (a
+        rebuild dropped the Event→entity links while ``create_operator``'s IMPL
+        edges, which journal an ``OperatorAdded`` record, survived).
+
+        The SDK classifies each link LIVE, at write time, and journals the
+        PRECISE form (``how``: ``id`` = the value resolved to the rel's target
+        label then; ``name`` = it did not, and was resolve-or-minted by name).
+        Replay therefore repeats a known-good construction instead of
+        re-deriving the id/name decision against a graph that may answer
+        differently — the drift this method exists to avoid.
+
+        Idempotent: both branches MERGE. Returns the number of links processed.
+        """
+        inner = payload.get("event", payload)
+        source = inner.get("id") or inner.get("eventId")
+        links = inner.get("aboutLinks") or []
+        if not isinstance(source, str) or not isinstance(links, list):
+            return 0
+        processed = 0
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            rel, value, how = link.get("rel"), link.get("value"), link.get("how")
+            if rel not in _ABOUT_REPLAY_RELS or not value:
+                continue
+            processed += 1
+            if how == "id":
+                self.create_about_edge(
+                    source, value, rel, target_label=STRUCTURAL_REL_LABELS.get(rel))
+            elif how == "name" and isinstance(value, str):
+                self._create_about_edges(source, value)
+        return processed
 
     def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:
         """Link entity → Source via extractedFrom edge (Ontology v3.3).

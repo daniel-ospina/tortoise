@@ -8157,7 +8157,12 @@ class FalkorProjection(
                 ev, journal_first_materialized=journal_first_materialized,
                 journal_seq=journal_seq)
         elif t == "EventRecorded":
-            return self._upsert_event(ev)
+            _replayed = self._upsert_event(ev)
+            # #8398: the about* links are GRAPH EDGES written live, not node
+            # properties — so nothing replayed them and a rebuild silently
+            # dropped every Event→entity link. Re-wire them from the record.
+            self.replay_about_links(ev)
+            return _replayed
         elif t == "EntityLinked":
             # #3664: the capture entity-attachment replay consumer — an
             # idempotent about* edge MERGE keyed on the flat logical ids
@@ -10769,6 +10774,9 @@ class FalkorProjection(
                 edge_message_events.append((seq, ev))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
+                # #8398: see above — the about* links are graph edges, so the
+                # rebuild must re-wire them from the record (idempotent MERGE).
+                self.replay_about_links(ev)
             elif t == "SubjectAdded":
                 self._upsert_subject(ev)
             elif t == "ObjectRegistered":
