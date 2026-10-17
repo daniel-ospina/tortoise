@@ -1316,6 +1316,27 @@ def _arm_steps(doc: dict) -> list[tuple[str, dict, dict]]:
             if _is_arm_step(step)]
 
 
+def _job_syncs(job: dict) -> bool:
+    """True iff ANY step of the job runs `--sync` on THIS tree's tool.
+
+    The hazard is JOB-scoped, not step-scoped: step 1 re-derives the mirror and
+    re-cuts the pin, step 2 certifies precisely the bytes step 1 just wrote, and
+    the build stages them. The tool refuses the flag combination inside ONE
+    invocation for this reason, so the two-step form must not be certified
+    either (review finding, P2).
+    """
+    for step in (job.get("steps") or []):
+        if not isinstance(step, dict):
+            continue
+        body = step.get("run")
+        if not isinstance(body, str) or "served_skills_parity" not in body:
+            continue
+        _rc, calls = _execute_step(body, flags=_shell_flags(step))
+        if any(_runs_sync(a) for a in calls):
+            return True
+    return False
+
+
 def _upstream_runners(workflows: Path | None = None) -> dict[str, dict]:
     """Workflows that EXECUTE `--check-upstream`, derived by executing their
     steps — the definition of "wired" that survives a rename, and that does not
@@ -1330,7 +1351,7 @@ def _upstream_runners(workflows: Path | None = None) -> dict[str, dict]:
         # and `if: false` skips it — either way the arm never gates a deploy
         # and every surface here still says "failing closed" (P2, measured:
         # both left 49/49 green).
-        if any(_can_fail(job) for _, job, _ in _arm_steps(doc)):
+        if any(_can_fail(job) and not _job_syncs(job) for _, job, _ in _arm_steps(doc)):
             runners[path.name] = doc
     return runners
 
@@ -1542,6 +1563,49 @@ def test_4643_a_piped_gate_under_the_pipefail_shell_is_still_a_runner(tmp_path):
         "a piped gate under `shell: bash` fails the step, so it is a runner")
 
 
+def test_4643_a_sync_in_a_separate_step_still_disarms_the_job(tmp_path):
+    """Step-level rejection is not enough: `--sync` as its OWN step, followed by
+    the arm, grades exactly the bytes the sync just wrote — the hazard the tool
+    refuses inside one invocation. The job must lose its runner status
+    (review finding, P2)."""
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    for name in ("deploy-pages.yml", "skills-parity.yml"):
+        shutil.copyfile(WORKFLOWS / name, workflows / name)
+    path = workflows / "deploy-pages.yml"
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["deploy-dashboard"]["steps"]
+    index = next(i for i, s in enumerate(steps)
+                 if isinstance(s.get("run"), str)
+                 and "served_skills_parity" in s["run"])
+    steps.insert(index, {
+        "name": "Re-derive the mirror from upstream",
+        "run": "uv run --no-project --with pyyaml==6.0.3 python3 "
+               "tools/served_skills_parity.py --sync",
+    })
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+        "a job whose first step RE-DERIVES the mirror certifies the bytes it "
+        "just wrote — it is not a fail-closed runner")
+
+
+def test_4643_json_is_refused_with_sync_rather_than_silently_ignored(tmp_path, capsys):
+    """The `--json` contract is unconditional (ONE document on stdout, so
+    `json.loads(stdout)` works). The `--sync` branch returns BEFORE the JSON
+    block, so accepting the flag printed human lines and no document on a run
+    that exited 0 — the one combination a monitor would use. Refused, like
+    `--sync --check*` (review finding, P2)."""
+    with pytest.raises(SystemExit) as exc:
+        sp.main(["--sync", "--json", "--root", str(tmp_path),
+                 "--manifest", str(MANIFEST)])
+    out = capsys.readouterr()
+    assert exc.value.code not in (0, None), (
+        "`--sync --json` must be refused, not accepted")
+    assert "cannot be combined" in out.err or "cannot be combined" in out.out
+    assert "would re-derive" not in out.out, (
+        "the refusal must not print the human sync lines on stdout")
+
+
 def test_4643_a_sync_step_is_not_a_gate(tmp_path):
     """`--sync` re-derives the mirror and returns 0 BEFORE either arm runs, so a
     deploy step written that way rewrites the pin at deploy time and gates
@@ -1576,9 +1640,21 @@ def _workflows_with_mutation(tmp_path: Path, mutate, mutate_job=None) -> Path:
     path = out / "deploy-pages.yml"
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     steps = doc["jobs"]["deploy-dashboard"]["steps"]
-    arm = next(s for s in steps
-               if isinstance(s.get("run"), str)
-               and "served_skills_parity" in s["run"])
+    # Exactly ONE gate step, asserted: the head's P1 is "a step that SYNCS and
+    # CHECKS is not a gate", and the two-STEP equivalent (`--sync` as its own
+    # step, then the arm) grades the same bytes. A helper that silently mutated
+    # the first of several tool-bearing steps turned a legitimately split job
+    # into 15 misleading `cannot fail` failures — it must say what it assumes
+    # (review finding, P2).
+    candidates = [s for s in steps
+                  if isinstance(s.get("run"), str)
+                  and "served_skills_parity" in s["run"]]
+    assert len(candidates) == 1, (
+        f"this helper mutates exactly ONE gate step; deploy-dashboard has "
+        f"{len(candidates)} tool-bearing steps. A split invocation (or a "
+        f"smuggled `--sync` step) is a different question and must be asserted "
+        f"deliberately, not mutated in the wrong step")
+    arm = candidates[0]
     mutate(arm)
     if mutate_job is not None:
         mutate_job(doc["jobs"]["deploy-dashboard"])

@@ -839,7 +839,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.sync:
         requested = [flag for flag, on in (("--check", args.check),
                                            ("--check-local", args.check_local),
-                                           ("--check-upstream", args.check_upstream))
+                                           ("--check-upstream", args.check_upstream),
+                                           ("--json", args.json))
                      if on]
         if requested:
             parser.error(
@@ -847,6 +848,11 @@ def main(argv: list[str] | None = None) -> int:
                 "RE-DERIVES the mirror and writes the pin, so a check in the same "
                 "invocation would grade bytes it just overwrote. Run --sync, "
                 "commit, then --check.")
+        # `--json` is refused too, and for its own reason: this branch returns
+        # BEFORE the JSON block below, so accepting the flag would print human
+        # lines and no document at all — `json.loads(stdout)` raises on a run
+        # that exited 0. A flag accepted and silently ignored is worse than a
+        # refusal (review finding, P2).
 
     root = Path(args.root).resolve()
     manifest_path = Path(args.manifest) if args.manifest else root / MANIFEST_REL
