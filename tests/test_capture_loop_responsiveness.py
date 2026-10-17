@@ -2455,8 +2455,8 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     in this file, and it is not exempt from the bound. No load and no wait: the
     bound is forced to 0 s, so the refusal comes from the REAL
     ``WaitBoundMiddleware``. The plain-client control is the non-vacuity leg —
-    it would pass unchanged if the route were ever exempted, turning this pin
-    red instead of letting the conversion silently become dead code.
+    it goes RED if the route is ever exempted (the middleware stops refusing),
+    so the conversion cannot silently become dead code.
     """
     import asyncio
 

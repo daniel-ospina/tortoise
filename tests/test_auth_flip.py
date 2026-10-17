@@ -1215,14 +1215,18 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/session/key`` is the
     route the concurrency legs read and it is not exempt from the bound. The
     plain-client control is the non-vacuity leg — it is the exact
-    ``assert 504 == 200`` shape this conversion removes, and it would pass
-    unchanged if the route were ever exempted.
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if
+    the route is ever exempted (the middleware stops refusing, so the
+    control's 504 assertion fails).
 
     ONE client in this module stays plain, declared in
     `test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS`: ``_mounted_test_client``
     wraps a local ``Mount("/mcp", ...)`` parent that carries no
-    ``WaitBoundMiddleware``, so no read bound from it can be a transport
-    refusal.
+    ``WaitBoundMiddleware``, so the REST 504 arm cannot reach it. (The MCP
+    seam's own refusal is answered **200** with an error envelope —
+    ``mcp_server._await_under_mcp_wait_bound`` — and a bare
+    ``assert status_code == 200`` PASSES on that; that is the false-PASS arm,
+    #8763's subject, and this file makes no ``tools/call`` request at all.)
     """
     from fastapi.testclient import TestClient
 

@@ -22,6 +22,7 @@ Run:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -230,12 +231,37 @@ def test_check_is_safe_when_the_top_entry_is_this_branch(repo):
     check = repo.lane(repo.a, "check")
     assert check.returncode == 0, _fail(check)
     assert "SAFE" in check.stdout
+    # the safe verdict must speak of the LANE, never the branch: a branch name
+    # identifies a branch, never a lane (#8773 review P2).
+    assert "THIS lane's own entry" in check.stdout, check.stdout
+
+
+def test_check_advisory_matches_prune_reclaimability(repo):
+    """`check` must not call an applied entry "prune will refuse to touch".
+
+    The normal post-`pop` state is an unpinned register entry that `prune --apply`
+    WILL reclaim (this lane recorded it applied); the advisory contradicted prune
+    on the state the tool creates by design (#8773 review P2).
+    """
+    repo.dirty(repo.a, "f.txt", "base\na\n")
+    assert repo.lane(repo.a, "push", "-m", "A").returncode == 0
+    assert repo.lane(repo.a, "pop").returncode == 0
+    check = repo.lane(repo.a, "check")
+    assert "1 reclaimable by `prune --apply`" in check.stdout, check.stdout
+    assert "refused" not in check.stdout, check.stdout
+    # and prune agrees: the same state is reclaimable
+    assert repo.lane(repo.a, "prune", "--apply").returncode == 0
+    assert repo.stash_shas() == []
 
 
 def test_check_is_safe_on_an_empty_register(repo):
     check = repo.lane(repo.a, "check")
     assert check.returncode == 0, _fail(check)
-    assert "empty" in check.stdout
+    assert "the shared register is empty" in check.stdout, check.stdout
+    # SAFE here is true for a DIFFERENT reason than the own-entry case: there is
+    # nothing at all to take (#8822 review P2).
+    assert "has nothing to take" in check.stdout, check.stdout
+    assert "THIS lane's own entry" not in check.stdout, check.stdout
 
 
 def test_check_fails_closed_on_an_unattributable_top_entry(repo):
@@ -688,6 +714,161 @@ def test_prune_reclaims_this_lanes_own_popped_entries(repo):
     check = repo.lane(repo.a, "check")
     assert check.returncode == 0, _fail(check)
     assert "SAFE" in check.stdout
+
+
+def test_prune_names_the_exact_peer_handle_it_leaves_behind(repo):
+    """The `remove` line must name a ref that EXISTS and a `pop` id that works.
+
+    The first version printed a literal ``<n>`` placeholder and advised a bare
+    `lane_stash pop` — which restores ``entries[-1]``, not the entry the line is
+    about. A peer holding TWO pins therefore got advice that restored the other
+    entry: the same "advice that can only resolve to a different entry" defect
+    this PR fixes in `recover`, reintroduced in a new message (#8822 review P2).
+
+    And in the legacy DOUBLE-PIN state (this lane ALSO pins the sha — the state
+    `recover` used to mint, still held by older worktrees) the line must offer this
+    lane's own handle instead of claiming `list` here cannot show the entry, which
+    is false there (#8822 re-review P2).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nb-one\n")
+    assert repo.lane(repo.b, "push", "-m", "B one").returncode == 0
+    repo.dirty(repo.b, "f.txt", "base\nb-two\n")
+    assert repo.lane(repo.b, "push", "-m", "B two").returncode == 0
+    peers = repo.stash_pins()
+    assert len(peers) == 2, peers
+    key_b = next(iter(peers)).split("/")[2]
+    assert key_b.startswith("wtB-"), key_b
+    sha_two = repo.stash_sha()
+    assert sha_two
+    key_a = mod.lane_key(repo.a)
+    repo.git("update-ref", f"refs/lane/{key_a}/stash/7", sha_two)
+    listed = repo.lane(repo.a, "list")
+    assert sha_two[:12] in listed.stdout, listed.stdout
+    before = repo.stash_pins()
+
+    cp = repo.lane(repo.a, "prune", "--apply")
+    assert cp.returncode == 0, _fail(cp)
+    lines = [ln for ln in cp.stdout.splitlines() if ln.startswith("  remove ")]
+    assert len(lines) == 2, cp.stdout
+    for ref in peers:
+        n = ref.rsplit("/", 1)[1]
+        named = [ln for ln in lines if ref in ln]
+        assert len(named) == 1, (ref, cp.stdout)
+        assert f"`lane_stash pop {n}`" in named[0], named[0]
+    assert "stash/<n>" not in cp.stdout, cp.stdout
+    # the double-pinned row names A's OWN handle and does not claim invisibility
+    own_row = [ln for ln in lines if sha_two[:12] in ln]
+    assert len(own_row) == 1, cp.stdout
+    assert f"refs/lane/{key_a}/stash/7" in own_row[0], own_row[0]
+    assert "`lane_stash pop 7` here restores it" in own_row[0], own_row[0]
+    assert "cannot show it" not in own_row[0], own_row[0]
+    # …while the peer-only row still says where the peer's copy lives
+    peer_row = [ln for ln in lines if ln is not own_row[0]]
+    assert len(peer_row) == 1 and "cannot show it" in peer_row[0], cp.stdout
+    # nothing was lost, and the printed ids really restore those very entries
+    assert sorted(repo.stash_pins()) == sorted(before), repo.lane_refs()
+    assert repo.lane(repo.b, "pop", "2").returncode == 0
+    assert "b-two" in (repo.b / "f.txt").read_text()
+
+
+def test_list_says_a_guard_on_a_register_entry_is_redundant(repo, monkeypatch, capsys):
+    """`list` must not call a guard "the handle" when the register handles it.
+
+    `prune --apply` releases a guard whose object the shared register still
+    enumerates, so a note presenting that guard as the last handle contradicted the
+    reap. The arm that says otherwise sat BELOW the `refs/stash` arm — and
+    `refs/stash` names the register TIP by definition — so the commonest leftover
+    guard (a dead key's guard on the newest entry) still read as the handle, and
+    deleting the arm left the whole suite green (#8822 re-review P2).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nolder\n")
+    repo.git("stash", "push", "-q", "-m", "older", cwd=repo.b)
+    older = repo.stash_sha()
+    repo.dirty(repo.b, "f.txt", "base\nnewer\n")
+    repo.git("stash", "push", "-q", "-m", "newer", cwd=repo.b)
+    tip = repo.stash_sha()
+    assert older and tip and older != tip
+    guards = [f"refs/pi-lane-prune-guard/deadlane-22222222/{s}" for s in (older, tip)]
+    for ref in guards:
+        repo.git("update-ref", ref, ref.rsplit("/", 1)[1])
+
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    assert mod.main(["list"]) == 0
+    out = capsys.readouterr().out
+    for sha in (older, tip):
+        hit = [
+            ln for ln in out.splitlines()
+            if sha[:12] in ln and "pi-lane-prune-guard" in ln
+        ]
+        assert len(hit) == 1, out
+        assert "the shared register still enumerates it" in hit[0], hit[0]
+    assert "this guard is the handle" not in out, out
+
+    assert mod.main(["prune", "--apply"]) == 0
+    left = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert left == [], f"the register names both objects, so both guards are reaped: {left}"
+
+
+def test_prune_says_a_peer_applied_record_already_restored_the_work(repo):
+    """A peer's APPLIED record is not a pin — do not tell the reader to `pop` it.
+
+    `_foreign_pin_owners` returns any lane-owned ref, and
+    ``refs/lane/<key>/applied/<sha>`` is one. The first version then promised
+    "refs/lane/<key>/stash/<n>" (a ref that does not exist) and "that lane's
+    `lane_stash pop` restores it", but that lane has no pin, so `pop` exits 2 —
+    a wrong instruction for a state this tool's own `recover` can no longer create
+    but older worktrees still hold (#8822 review P2).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nb-legacy\n")
+    repo.git("stash", "push", "-q", "-m", "B bare", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    key_a, key_b = mod.lane_key(repo.a), mod.lane_key(repo.b)
+    # the legacy double-claim: A's pin makes the row reclaimable, B's only handle is
+    # the applied record `pop` writes — no pin of B's exists anywhere.
+    repo.git("update-ref", f"refs/lane/{key_a}/stash/9", sha)
+    repo.git("update-ref", f"refs/lane/{key_b}/applied/{sha}", sha)
+    assert repo.lane(repo.b, "pop").returncode == 2, "precondition: B has no pin to pop"
+
+    cp = repo.lane(repo.a, "prune", "--apply")
+    assert cp.returncode == 0, _fail(cp)
+    assert f"refs/lane/{key_b}/applied/{sha}" in cp.stdout, cp.stdout
+    assert "already restored" in cp.stdout, cp.stdout
+    assert "stash/<n>" not in cp.stdout, cp.stdout
+    # no `pop` is offered for the peer: that lane holds no pin to pop
+    note = next(ln for ln in cp.stdout.splitlines() if ln.startswith("  remove "))
+    assert "lane_stash pop" not in note.split(f"lane {key_b}")[-1], note
+
+
+def test_prune_output_names_the_foreign_lane_that_still_holds_the_entry(repo):
+    """Reclaiming a row pinned by a PEER must say where the work still lives.
+
+    `prune` reclaims an entry whose object a lane ref pins — that ref may be
+    ANOTHER lane's, and `lane_stash list` in this lane cannot show it once the
+    register row is gone. The old output said only `remove <pos> <sha> <subject>`
+    and its recovery hint pointed at `lane_stash list`, i.e. at a command that
+    cannot see the pin (#8773 review P2).
+    """
+    repo.dirty(repo.a, "f.txt", "base\na-only\n")
+    assert repo.lane(repo.a, "push", "-m", "A work").returncode == 0
+    key_a = next(iter(repo.lane_refs())).split("/")[2]
+    assert key_a.startswith("wtA-"), key_a
+
+    cp = repo.lane(repo.b, "prune", "--apply")
+    assert cp.returncode == 0, _fail(cp)
+    assert "remove" in cp.stdout, cp.stdout
+    assert f"refs/lane/{key_a}/stash/" in cp.stdout, cp.stdout
+    assert f"lane {key_a}" in cp.stdout, cp.stdout
+    # nothing was lost: A's pin still names the object
+    assert list(repo.stash_pins()) == [f"refs/lane/{key_a}/stash/1"], repo.lane_refs()
+    assert repo.lane(repo.a, "pop").returncode == 0
+    assert "a-only" in (repo.a / "f.txt").read_text()
 
 
 def test_pop_never_modifies_the_shared_register(repo):
@@ -1465,8 +1646,9 @@ def test_recover_does_not_guard_an_already_pinned_head(repo, monkeypatch, capsys
     """A head another ref already names needs no guard (which would leak).
 
     `_guard_release_all` only ever frees guards for the recovered sha, so a guard
-    created for a head that was already pinned under `refs/lane` would live
-    forever, contradicting the plan's one-lifetime rule (#8773 review P2).
+    created for a head that was already pinned under `refs/lane` would outlive every
+    release route: the file has no rule by that name, and only `_reap_stale_guards`
+    could ever reach it — and only once this worktree is gone (#8773 review P2).
     """
     mod = _load_tool()
     repo.dirty(repo.b, "f.txt", "base\nz\n")
@@ -1722,6 +1904,43 @@ def test_recover_refuses_a_peer_marker_after_its_pin_is_released(repo):
     assert repo.stash_shas() == [sha_b], "the register must be untouched"
 
 
+def test_check_and_recover_refuse_a_peer_ref_on_a_marker_less_entry(repo):
+    """A foreign lane REF must outrank a local pin even with NO message marker.
+
+    `_entry_ownership` step 1 says a foreign lane ref is decisive — but every other
+    test for that precedence uses an entry that ALSO carries a peer `[<lane-key>]`
+    marker, so the MARKER branch answered and the REF branch could be deleted with
+    the whole file still green (#8822 review: a mutation of `_foreign_owner`'s
+    `if foreign:` left 98 passed). The ref branch is load-bearing exactly for a
+    peer's BARE `git stash push` — marker-less by construction — pinned by two
+    lanes: the state a cross-lane `recover` used to mint, i.e. the #8773 P1 harm.
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nb-secret\n")
+    repo.git("stash", "push", "-q", "-m", "B bare", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    subject = repo.git("log", "-1", "--format=%s", sha).stdout.strip()
+    assert "[wt" not in subject, f"precondition: marker-less, got {subject!r}"
+    key_a, key_b = mod.lane_key(repo.a), mod.lane_key(repo.b)
+    # the legacy double-pin: B's own ref AND A's, no lane marker anywhere
+    repo.git("update-ref", f"refs/lane/{key_a}/stash/9", sha)
+    repo.git("update-ref", f"refs/lane/{key_b}/stash/9", sha)
+    before = repo.lane_refs()
+
+    check = repo.lane(repo.a, "check")
+    assert check.returncode == 1, _fail(check)
+    assert "SAFE" not in check.stdout, check.stdout
+    assert "another lane's ref" in check.stdout, check.stdout
+    assert key_b in check.stdout, check.stdout
+
+    cp = repo.lane(repo.a, "recover", sha)
+    assert cp.returncode == 2, _fail(cp)
+    assert "another lane's ref" in cp.stderr, cp.stderr
+    assert repo.lane_refs() == before, "the refusal must not mint anything"
+    assert repo.stash_shas() == [sha], repo.stash_shas()
+
+
 def test_check_fails_closed_when_a_local_pin_claims_a_peer_marked_entry(repo):
     """A LOCAL pin must not launder a peer's marker — the double-pin state.
 
@@ -1947,12 +2166,15 @@ def test_list_reports_a_guard_left_by_another_lane(repo):
     assert f"[lane {b_key} — not this lane]" in listed.stdout, listed.stdout
 
 
-def test_prune_releases_a_guard_left_under_another_lane(repo, monkeypatch, capsys):
-    """A guard is redundant once its sha is back in the register — under ANY key.
+def test_prune_keeps_a_LIVE_lanes_guard_for_an_unpinned_entry(
+    repo, monkeypatch, capsys,
+):
+    """A live peer prune's guard must not be deleted just because a sha is registered.
 
-    Another lane (or a since-removed worktree) can leave a guard for an entry this
-    prune is about to keep. Releasing only this prune's own guard left that ref
-    blocking gc forever (#8773 review P2).
+    Being in the register is the TRANSIENT state a guard exists for: two lanes can
+    each classify the same unpinned entry as kept, and the first to finish must not
+    strip the other's protection while it is still deleting positions (#8773 P2).
+    The owner key here is lane B's LIVE key (#8822 review P2 sharpened the rule).
     """
     mod = _load_tool()
     repo.dirty(repo.a, "f.txt", "base\ndoomed\n")
@@ -1961,7 +2183,7 @@ def test_prune_releases_a_guard_left_under_another_lane(repo, monkeypatch, capsy
     repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
     kept = repo.stash_sha()
     assert kept
-    ghost = f"refs/pi-lane-prune-guard/ghost-00000000/{kept}"
+    ghost = f"refs/pi-lane-prune-guard/{mod.lane_key(repo.b)}/{kept}"
     repo.git("update-ref", ghost, kept)
 
     monkeypatch.chdir(repo.a)
@@ -1970,7 +2192,349 @@ def test_prune_releases_a_guard_left_under_another_lane(repo, monkeypatch, capsy
     remaining = repo.git(
         "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
     ).stdout.split()
-    assert ghost not in remaining, f"a foreign guard for a live entry leaked: {remaining}"
+    assert ghost in remaining, (
+        "a foreign guard for an UNPINNED entry is a peer prune's live protection and "
+        f"must not be released: {remaining}"
+    )
+    # and it stays enumerable, so it cannot leak silently either
+    listed = repo.lane(repo.a, "list")
+    assert ghost in listed.stdout, listed.stdout
+
+
+def test_prune_reaps_a_guard_whose_worktree_is_gone(repo, monkeypatch, capsys):
+    """A guard under a REMOVED key is released once the object has another handle.
+
+    Before this reap, no routine command released it: `prune`'s `finally` releases
+    only the guards IT created, and `recover` frees them only for the sha it adopts
+    (an explicit `recover <sha>` is the escape hatch, not an automatic route). Left
+    alone, that ref blocks gc forever (#8822 review P2).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-11111111/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    assert mod.main(["prune", "--apply"]) == 0
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert dead not in refs, (
+        f"a guard whose owner worktree is gone must be reaped once the object is "
+        f"named elsewhere: {refs}"
+    )
+
+
+def test_prune_keeps_a_dead_lanes_guard_that_is_the_only_handle(repo, monkeypatch):
+    """The last handle on an object is never released, however dead its owner is."""
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nonly\n")
+    repo.git("stash", "push", "-q", "-m", "only", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-33333333/{sha}"
+    repo.git("update-ref", dead, sha)
+    # Nothing else names it: no register entry and no refs/stash.
+    repo.git("reflog", "expire", "--expire=now", "--all")
+    repo.git("update-ref", "-d", "refs/stash")
+
+    monkeypatch.chdir(repo.a)
+    assert mod.main(["prune", "--apply"]) == 0
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert dead in refs, f"the only handle on an object must survive: {refs}"
+
+
+def test_prune_retains_guards_while_a_worktree_registration_is_stale(
+    repo, monkeypatch, capsys,
+):
+    """A stale registration can hide a LIVE key, so nothing is reaped until it is pruned.
+
+    `mv` on a worktree leaves the OLD path registered, so the key the live
+    worktree derives from `--show-toplevel` is absent from the live set. Reaping
+    then would strip a live lane's protection — the wrong direction (#8822 P2).
+    """
+    mod = _load_tool()
+    stale = repo.root.parent / "wtStale"
+    repo.git("worktree", "add", "-q", "-b", "feat/stale", str(stale))
+    shutil.rmtree(stale)
+    assert "prunable" in repo.git("worktree", "list", "--porcelain").stdout
+
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-44444444/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    assert mod.main(["prune", "--apply"]) == 0
+    out = capsys.readouterr().out
+    # Suspension is reported, never silent: this state creates dead-key guards
+    # and is also the state that suspends their reaper.
+    assert "STALE" in out and "git worktree prune" in out, out
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert dead in refs, (
+        "a stale worktree registration could hide a live key — nothing may be "
+        f"reaped: {refs}"
+    )
+
+
+def test_reap_re_reads_the_register_before_each_release(repo, monkeypatch, capsys):
+    """The k-th release must not be decided from a read k subprocesses old.
+
+    Two dead-owner guards whose objects are both registered, then a peer drops the
+    SECOND between the two releases. A single read for the whole loop releases
+    both and makes the second guard the object's last handle (#8822 review P1).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\none\n")
+    repo.git("stash", "push", "-q", "-m", "one", cwd=repo.b)
+    sha_one = repo.stash_sha()
+    repo.dirty(repo.b, "f.txt", "base\ntwo\n")
+    repo.git("stash", "push", "-q", "-m", "two", cwd=repo.b)
+    sha_two = repo.stash_sha()
+    assert sha_one and sha_two and sha_one != sha_two
+    # refname order decides the release order: ...50/<sha_one> then ...51/<sha_two>
+    repo.git("update-ref", f"refs/pi-lane-prune-guard/deadlane-55555550/{sha_one}", sha_one)
+    repo.git("update-ref", f"refs/pi-lane-prune-guard/deadlane-55555551/{sha_two}", sha_two)
+
+    rows = None
+    calls = {"n": 0}
+    monkeypatch.chdir(repo.a)
+    rows = mod._shared_register()
+    assert {r["sha"] for r in rows} == {sha_one, sha_two}
+
+    def scripted():
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the peer's drop lands after the first release
+            return [r for r in rows if r["sha"] != sha_two]
+        return list(rows)
+
+    monkeypatch.setattr(mod, "_shared_register", scripted)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert not any(sha_one in r for r in refs), (
+        f"the first guard's object is still registered and named by lane refs: {refs}"
+    )
+    assert any(sha_two in r for r in refs), (
+        "the second guard is now the object's LAST handle and must be kept: " f"{refs}"
+    )
+
+
+def test_reap_reports_and_retains_when_the_worktree_list_cannot_be_read(
+    repo, monkeypatch, capsys,
+):
+    """An unreadable worktree list is not evidence: nothing is released, and it says so."""
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-66666666/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    real_git = mod._git
+
+    def failing(*args, **kwargs):
+        if tuple(args[:2]) == ("worktree", "list"):
+            return subprocess.CompletedProcess(args, 1, "", "boom")
+        return real_git(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_git", failing)
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    out = capsys.readouterr().out
+    assert "could not be read" in out, out
+    assert dead in repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+
+
+def test_lane_keys_survive_a_worktree_path_containing_a_newline(repo, monkeypatch):
+    """A newline in a worktree path must not truncate the live key."""
+    mod = _load_tool()
+    weird = repo.root.parent / "wt\nnl"
+    repo.git("worktree", "add", "-q", "-b", "feat/nl", str(weird))
+    monkeypatch.chdir(weird)
+    keys, stale, why = mod._live_lane_keys()
+    assert keys is not None, why
+    assert stale == [] and why == ""
+    assert mod.lane_key() in keys, (mod.lane_key(), sorted(keys))
+
+
+def test_lane_keys_fail_closed_on_an_unrecognised_field(monkeypatch):
+    """A field the parser does not know is UNDETERMINABLE, and the reason names it."""
+    mod = _load_tool()
+    real = mod._git
+
+    def fake(*args, **kwargs):
+        if tuple(args[:2]) == ("worktree", "list"):
+            return subprocess.CompletedProcess(args, 0, "worktree /x\0weird\0", "")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_git", fake)
+    keys, _stale, why = mod._live_lane_keys()
+    assert keys is None
+    assert "could not understand" in why, why
+
+
+def test_a_failed_guard_read_is_a_state_error_not_an_empty_namespace(repo, monkeypatch):
+    """`list` must fail closed when the guard refs cannot be read, not show none."""
+    mod = _load_tool()
+    real = mod._git
+
+    def fake(*args, **kwargs):
+        if args and args[0] == "for-each-ref" and str(args[-1]) == mod.GUARD_NS:
+            return subprocess.CompletedProcess(args, 1, "", "boom")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_git", fake)
+    monkeypatch.chdir(repo.a)
+    assert mod.main(["list"]) == 2
+    assert mod.main(["prune", "--apply"]) == 2
+
+
+def test_reap_reports_a_failed_register_read_and_releases_nothing(repo, monkeypatch, capsys):
+    """A register read failure is reported, never a silent retention."""
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-77777777/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    def boom():
+        raise mod.LaneStashError("register unreadable")
+
+    monkeypatch.setattr(mod, "_shared_register", boom)
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    out = capsys.readouterr().out
+    assert "could not be read" in out and "no further guard was checked" in out, out
+    assert dead in repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+
+
+def test_recover_accepts_an_own_orphan_the_ref_still_names(repo):
+    """The emptied-reflog door refuses STRANGERS, not this lane's own pinned entry.
+
+    Demanding `-m` for an own pin asks the operator to assert ownership the tool
+    already holds (and the refusal text would be false: the marker and ref exist)
+    (#8822 review P2).
+    """
+    repo.dirty(repo.a, "f.txt", "base\nmine\n")
+    assert repo.lane(repo.a, "push", "-m", "mine").returncode == 0
+    sha = repo.stash_sha()
+    assert sha
+    # an emptied reflog: the register lists nothing, refs/stash still names it
+    repo.git("reflog", "expire", "--expire=now", "--all")
+    assert repo.stash_shas() == []
+    assert repo.stash_sha() == sha
+
+    rec = repo.lane(repo.a, "recover", sha)
+    assert rec.returncode == 0, _fail(rec)
+    check = repo.lane(repo.a, "check")
+    assert check.returncode == 0, _fail(check)
+
+
+def test_reap_failure_message_counts_the_guards_actually_kept(repo, monkeypatch, capsys):
+    """The abort message must report HELD guards, not merely unexamined ones.
+
+    One live-owner guard is skipped (still held), one is released, then the register
+    read fails. `kept 2` is the truth; counting loop indices would say `kept 1`
+    (#8822 review P2).
+    """
+    mod = _load_tool()
+    # a LIVE third worktree whose key sorts FIRST, so its guard is skipped first
+    live_wt = repo.root.parent / "aaa-live"
+    repo.git("worktree", "add", "-q", "-b", "feat/live", str(live_wt))
+    live_key = mod.lane_key(live_wt)
+
+    repo.dirty(repo.b, "f.txt", "base\none\n")
+    repo.git("stash", "push", "-q", "-m", "one", cwd=repo.b)
+    sha_one = repo.stash_sha()
+    repo.dirty(repo.b, "f.txt", "base\ntwo\n")
+    repo.git("stash", "push", "-q", "-m", "two", cwd=repo.b)
+    sha_two = repo.stash_sha()
+    assert sha_one and sha_two
+    live_guard = f"refs/pi-lane-prune-guard/{live_key}/{sha_one}"
+    dead_one = f"refs/pi-lane-prune-guard/deadlane-55555550/{sha_one}"
+    dead_two = f"refs/pi-lane-prune-guard/deadlane-55555551/{sha_two}"
+    for g, sha in ((live_guard, sha_one), (dead_one, sha_one), (dead_two, sha_two)):
+        repo.git("update-ref", g, sha)
+
+    monkeypatch.chdir(repo.a)
+    rows = mod._shared_register()
+    calls = {"n": 0}
+
+    def scripted():
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the read fails on the SECOND dead-owner candidate
+            raise mod.LaneStashError("register unreadable")
+        return list(rows)
+
+    monkeypatch.setattr(mod, "_shared_register", scripted)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    out = capsys.readouterr().out
+    assert "kept   2 prune guard(s)" in out, out
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert live_guard in refs, refs
+    assert dead_one not in refs, refs
+    assert dead_two in refs, refs
+
+
+def test_check_does_not_name_prune_as_reclaimable_on_a_diverged_register(repo):
+    """`check` must not advertise `prune --apply` on a state prune refuses.
+
+    A bare `git reflog delete` without `--updateref` leaves `refs/stash` on a sha
+    the register no longer enumerates; `prune --apply` then exits 2. The advisory
+    naming it was the same contradiction it exists to remove (#8822 review P2).
+    """
+    repo.dirty(repo.a, "f.txt", "base\na\n")
+    assert repo.lane(repo.a, "push", "-m", "A").returncode == 0
+    assert repo.lane(repo.a, "pop").returncode == 0  # unpinned + applied record
+    repo.dirty(repo.b, "f.txt", "base\nb\n")
+    repo.git("stash", "push", "-q", "-m", "B", cwd=repo.b)
+    repo.git("reflog", "delete", "refs/stash@{0}")  # no --updateref: diverges
+
+    check = repo.lane(repo.a, "check")
+    assert check.returncode == 1, _fail(check)
+    assert "reclaimable once the diverged register" in check.stdout, check.stdout
+    assert "reclaimable by `prune --apply`" not in check.stdout, check.stdout
+
+
+def test_list_does_not_call_a_peer_guard_durable(repo):
+    """Two guards for one object are not mutual evidence of durability."""
+    repo.dirty(repo.b, "f.txt", "base\nx\n")
+    repo.git("stash", "push", "-q", "-m", "x", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    for key in ("deadlane-11111111", "deadlane-22222222"):
+        repo.git("update-ref", f"refs/pi-lane-prune-guard/{key}/{sha}", sha)
+
+    listed = repo.lane(repo.a, "list")
+    assert listed.returncode == 0, _fail(listed)
+    assert "NOT durable" in listed.stdout, listed.stdout
+    assert "also named durably by" not in listed.stdout, listed.stdout
 
 
 def test_an_unreadable_ref_list_is_a_state_error_not_safe(repo, monkeypatch):
@@ -2161,6 +2725,38 @@ def test_prune_releases_an_applied_record_whose_entry_is_already_gone(repo):
 
 
 # ── round-6 review P1s ──────────────────────────────────────────────────────
+
+def test_recover_refuses_a_bare_orphan_the_ref_still_names(repo):
+    """`recover` must not mint ownership of a peer's entry in the ORPHAN state.
+
+    The emptied-reflog state (`refs/stash` resolves, the register enumerates
+    nothing) is the sibling door to the enumerated one below: nothing was dropped,
+    and a peer's BARE push there carries no `[<lane-key>]` marker and is named by
+    no lane ref, so nothing proves whose it is. `recover` pinned it to this lane
+    and `check` then reported SAFE — the #8051 harm, blessed (#8773 review P1).
+    """
+    repo.dirty(repo.b, "f.txt", "base\nb-orphan\n")
+    repo.git("stash", "push", "-q", "-m", "On feat/b: B bare", cwd=repo.b)
+    sha_b = repo.stash_sha()
+    assert sha_b
+    repo.git("reflog", "expire", "--expire=now", "--all")
+    assert repo.stash_shas() == [] and repo.stash_sha() == sha_b, "orphan state"
+    assert repo.lane(repo.a, "check").returncode == 1
+
+    cp = repo.lane(repo.a, "recover", sha_b)
+    assert cp.returncode == 2, _fail(cp)
+    assert "refs/stash` still NAMES" in cp.stderr, cp.stderr
+    assert repo.stash_pins() == {}, "the refusal must not pin a peer's entry"
+    assert repo.stash_sha() == sha_b, "the refusal must not move the register"
+    assert repo.lane(repo.a, "check").returncode == 1, (
+        "the refusal must not launder HAZARD into SAFE"
+    )
+
+    # the explicit assertion escape still works — it is the operator's claim
+    forced = repo.lane(repo.a, "recover", sha_b, "-m", "deliberate rescue")
+    assert forced.returncode == 0, _fail(forced)
+    assert repo.stash_pins(), "an explicit -m recovery must still pin"
+
 
 def test_recover_refuses_an_unpinned_bare_entry_already_in_the_register(repo):
     """`recover` must not mint ownership of a marker-less bare entry in the register.

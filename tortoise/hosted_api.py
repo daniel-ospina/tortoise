@@ -196,6 +196,7 @@ from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_LIST_FIELDS,
     session_extraction_status,  # #3520: the ONE extraction-status derivation
 )
+from tortoise.session_schema import demo_session_id  # #3554: the ONE demo-session id derivation
 from tortoise.supabase_control import _service_key  # #3677
 
 # #4179: the team-account and user-account restore windows derive from the ONE
@@ -5836,6 +5837,79 @@ def _require_keys_manage(org: dict, surface: str) -> None:
         )
 
 
+#: #2446: the session-credential class a member may self-manage. A
+#: `bootstrap` row is the ONLY class a member can mint today
+#: (`POST /v1/session/key` purpose=bootstrap is member-open; `recovery` is
+#: owner/admin-gated by POLICY A, #2380), so it is the only class the
+#: own-key lane can ever reach.
+_SESSION_KEY_CREATED_VIA = "bootstrap"
+
+#: #2446: the bootstrap 3-active backstop (the session-mint lanes' own cap).
+_BOOTSTRAP_KEY_CAP = 3
+
+
+def _session_key_holder(row: dict) -> str | None:
+    """#2446: the HOLDER of a credential row — the user who may self-manage it.
+
+    This is the `#2427` brief §4.2 backfill rule expressed as a READ-TIME
+    predicate, deliberately, because the holder COLUMN (`api_keys.
+    owner_user_id`) is delivered by phase 3 (#8692) — not by this issue:
+
+        holder(row) = row.created_by   iff created_via == 'bootstrap'
+                                       (the SELF-SERVICE session mint)
+        holder(row) = None             otherwise (ORG-OWNED / shared)
+
+    Why the class gate and not `created_by` alone. `created_by` is the MINTER,
+    not the holder (brief §2.3 item 4): a pre-POLICY-A member-minted DURABLE
+    row also carries the member's id, yet §4.2's backfill makes every
+    non-self-service row ORG-OWNED (`owner_user_id IS NULL` — admin-managed).
+    The bootstrap class IS the self-service mint, so the two agree on today's
+    rows, and the predicate cannot be talked into widening to durable rows a
+    member merely once minted.
+
+    `None` therefore means "not self-manageable by anyone but an owner/admin":
+    an org-owned key stays admin-managed, and a member who holds a COPY of a
+    shared key must never be able to replace or retire it (#2427 §4.2).
+
+    `created_by` is a user UUID, or the literal ``"api"`` for key-driven
+    mints (never a key id — see `_mint_key`); a non-user attribution is not a
+    holder. When #8692 adds the column this function becomes a one-line read
+    of it (NULL = org-owned), which is why callers must go through it rather
+    than touching `created_by` directly.
+    """
+    if not row:
+        return None
+    if row.get("created_via") != _SESSION_KEY_CREATED_VIA:
+        return None
+    holder = row.get("created_by")
+    if not holder or holder == "api":
+        return None
+    return holder
+
+
+def _key_row_is_expired(row: dict, now: str) -> bool:
+    """#2446: True iff the row's stored `expires_at` is at/before `now`.
+
+    An expired row never authenticates (#742) and is never a valid replace
+    target: inheriting its absolute expiry would mint an already-dead
+    replacement. NULL-tolerant (a Never row is not expired) and fail-closed
+    on an unparseable stamp (treat as expired — the safe direction).
+    """
+    raw = row.get("expires_at")
+    if raw is None:
+        return False
+    try:
+        exp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        ref = datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=UTC)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=UTC)
+    return exp <= ref
+
+
 def _reject_minted_delegated_key(org: dict, surface: str) -> None:
     """C2 (#2111) one-level-deep guard (code-review security P1): a MINTED
     (deleg=0) per-graph key must NEVER reach account-management or
@@ -10294,7 +10368,9 @@ def _seed_demo_graph(org_id: str) -> dict:
             )
 
     # ── Episodic Layer — session events ──────────────────────────
-    session_id = f"session_demo_{org_id[:8]}"
+    # #3554: the id comes from the ONE declaration (`session_schema.demo_session_id`),
+    # not a local f-string, so the writer and any future exclusion cannot drift.
+    session_id = demo_session_id(org_id)
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
         "SET s.created_at=$now, s.turn_count=3",
@@ -10902,9 +10978,11 @@ def _rotatable_key_row(org_id: str, key_id: str) -> dict | None:
     """#4355: read the displaceable row's CLASS + label (both auth lanes).
 
     Returns ``{org_id, name, graph_id, scopes, delegation_depth,
-    created_by_key_id, created_via, expires_at, revoked_at}`` or None when the
-    id does not resolve. Ownership (403) and slot-occupancy (409) are checked
-    by the caller with the shared helpers — this is only the field read.
+    created_by_key_id, created_via, expires_at, revoked_at, created_by}`` or
+    None when the id does not resolve. ``created_by`` rides it for the #2446
+    holder predicate (``_session_key_holder``). Ownership (403) and
+    slot-occupancy (409) are checked by the caller with the shared helpers —
+    this is only the field read.
     ``expires_at`` rides it so a body-omitted expiry inherits the displaced
     row's expiry verbatim instead of widening the replacement to Never.
     """
@@ -10919,7 +10997,7 @@ def _rotatable_key_row(org_id: str, key_id: str) -> dict | None:
     rows = sdk._get_registry().query(
         "MATCH (k:APIKey {id: $id}) RETURN k.org_id, k.name, k.graph_id, "
         "k.scopes, k.delegation_depth, k.created_by_key_id, k.created_via, "
-        "k.expires_at, k.revoked_at",
+        "k.expires_at, k.revoked_at, k.created_by",
         params={"id": key_id},
     ).result_set
     if not rows:
@@ -10929,6 +11007,7 @@ def _rotatable_key_row(org_id: str, key_id: str) -> dict | None:
         "scopes": rows[0][3], "delegation_depth": rows[0][4],
         "created_by_key_id": rows[0][5], "created_via": rows[0][6],
         "expires_at": rows[0][7], "revoked_at": rows[0][8],
+        "created_by": rows[0][9],
     }
 
 
@@ -11932,13 +12011,31 @@ async def toggle_api_key_enabled(
             raise HTTPException(status_code=404, detail="API key not found")
         org_id = row.get("org_id")
         _ensure_key_in_pinned_org(pinned, org_id)
-        await _require_owner_admin(user["user_id"], org_id)
+        # #2446 phase 2: owner/admin keep POLICY A unchanged; a MEMBER holding
+        # this row is admitted on the own-key slice ("own"), and every other
+        # member case raises the byte-identical POLICY A 403. See
+        # `_require_owner_admin_or_own_key` — the pins in
+        # tests/test_own_key_selfservice_2446.py hold the non-own 403 verbatim.
+        gate = await _require_owner_admin_or_own_key(user["user_id"], org_id, row)
         if row.get("revoked_at") is not None:
             raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
-        if row.get("created_via") == "bootstrap":
+        if gate == "own":
+            # #2446: the member own slice is enable/disable ONLY. `name` and
+            # `scopes` stay owner/admin verbs — the issue's own vocabulary is
+            # "replace/rotate ... and disable/enable own key", and scope-shrink
+            # / relabel are not part of the compromise remedy. Refused with the
+            # POLICY A detail rather than a new one: a member must not be able
+            # to probe which fields their own row would have accepted.
+            if "name" in body.model_fields_set or "scopes" in body.model_fields_set:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Requires owner or admin role in team")
+        elif row.get("created_via") == "bootstrap":
             # P3 (review): session/bootstrap keys are ephemeral — disabling
             # or renaming them mid-session breaks the very credential the
-            # owner is using.
+            # owner is using. #2446 narrows nothing here: an OWNER/admin still
+            # gets this 409 on a bootstrap row, exactly as before; only the
+            # member who HOLDS the row may turn their own credential off.
             raise HTTPException(status_code=409, detail="Cannot modify a session key")
         result = {"key_id": key_id}
         # C3 (#2112) shrink branch: {scopes} replaces the current scopes
@@ -12003,16 +12100,39 @@ async def toggle_api_key_enabled(
     rows = sdk._get_registry().query(
         "MATCH (k:APIKey {id: $id}) "
         "RETURN k.org_id, k.revoked_at, k.created_via, k.scopes, "
-        "k.delegation_depth",
+        "k.delegation_depth, k.created_by",
         params={"id": key_id},
     ).result_set
     if not rows:
         raise HTTPException(status_code=404, detail="API key not found")
-    org_id, revoked_at, created_via, current_scopes, deleg = rows[0]
-    await _require_owner_admin(user["user_id"], org_id)
+    org_id, revoked_at, created_via, current_scopes, deleg, created_by = rows[0]
+    # #2446 phase 2 (registry parity with the Supabase lane above): the same
+    # gate, the same policy-A 403 for a non-held row, the same enable/disable-
+    # only own slice. `created_by` joins the RETURN for the holder predicate.
+    gate = await _require_owner_admin_or_own_key(
+        user["user_id"], org_id,
+        {"created_via": created_via, "created_by": created_by})
     if revoked_at is not None:
         raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
-    if created_via == "bootstrap":
+    if gate == "own":
+        if "name" in body.model_fields_set or "scopes" in body.model_fields_set:
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
+        if body.enabled is False:
+            # #2446 review P2-4: this lane has NO per-key `enabled` column, so
+            # the `{"key_id", "enabled": True}` echo further down is a no-op
+            # (#1148). Echoing success to the member's "turn off my key" would
+            # report a security action that did not happen while the credential
+            # keeps authenticating, so the #2446 member slice refuses instead of
+            # lying. Owner/admin keep the historical echo: that shape predates
+            # #2446 and changing it lane-wide is a separate decision.
+            raise HTTPException(
+                status_code=409,
+                detail=("Turning off a key is not available on this "
+                        "deployment — this lane has no per-key disable. "
+                        "Replace or revoke the session key instead."),
+            )
+    elif created_via == "bootstrap":
         raise HTTPException(status_code=409, detail="Cannot modify a session key")
     result = {"key_id": key_id, "enabled": True}
     # C3 (#2112) shrink branch — registry parity with the supabase lane:
@@ -14317,8 +14437,9 @@ def _record_capture_last_error(org_id: str, harness: str | None,
         # would leak structure. Stringify to the message.
         detail = str(detail.get("message") or detail)
     # #4625: write-only — this caller discards the echo, and computing it
-    # costs two fresh FalkorDB connections on the event loop (see
-    # ``_update_onboarding_state``).
+    # costs a registry probe plus an org-graph open on the event loop (see
+    # ``_update_onboarding_state``; #4661 made the probe reuse its connection
+    # and sample the registry once).
     _update_onboarding_state(org_id, _echo=False, **{key: detail})
 
 
@@ -19693,15 +19814,31 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
 # model — invitable roles: admin, member). Free/Solo/Pro: invites disabled
 # (max_users=1 or invite path deferred to billing).
 
-async def _require_owner_admin(user_id: str, org_id: str) -> dict:
-    """Return the membership if the user is owner/admin in the org, else 403.
+async def _membership_role(user_id: str, org_id: str) -> str | None:
+    """#2446: the caller's ACTIVE role in the org, or None (no membership).
 
-    #1853: a SUSPENDED org 403s here too (checked AFTER role authz — no
-    existence-oracle change) — this is the enforcement seam for every
-    owner/admin management endpoint (invites, members, key toggle,
-    dashboard-login), so they all inherit suspension parity. The appeal
-    flow (/v1/team/alerts) uses _membership_org directly and is
-    unaffected."""
+    The membership read `_require_owner_admin` has always performed,
+    extracted so the #2446 own-key gate can ask for the role WITHOUT turning
+    "member" into a 403. The owner/admin seam now calls this helper, so the
+    two gates can never disagree about a user's role, and the seam's
+    behaviour is unchanged: same read, same outage wrap, same 403 detail,
+    same ordering (role 403 precedes the SUSPENDED read).
+
+    #2380 (P2, #1719 class) outage contract preserved verbatim: this is a
+    control-plane call, so an outage/schema-cache failure degrades to the
+    repo-standard 503 control_plane_unavailable (mirrors the lazy
+    _session_pinned_org read wrapped by #2401 and the mint-path map), never a
+    raw 500 from the global handler. Non-outage exceptions propagate
+    untouched (a schema/dialect bug must stay loud, not masquerade as an
+    outage).
+
+    The registry fallback runs its read INLINE and is declared in the
+    loop-responsiveness residual (`_KNOWN_INLINE_HELPER_RESIDUAL`) beside
+    `_membership_org`, `_org_node` and `_require_owner_admin`. That is deliberate
+    tracked debt, not an oversight: off-loading this read moved it onto another
+    thread and changed behaviour observable from `/v1/organizations/{id}/members`
+    (see the note at the call site), so the offload is left to a deliberate fix.
+    """
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -19711,38 +19848,28 @@ async def _require_owner_admin(user_id: str, org_id: str) -> dict:
     )
     if is_supabase_enabled():
         try:
-            # #2380 (P2, #1719 class): this seam's OWN membership read is a
-            # control-plane call — an outage/schema-cache failure degrades to
-            # the repo-standard 503 control_plane_unavailable (mirrors the
-            # lazy _session_pinned_org read wrapped by #2401 and the
-            # mint-path map), never a raw 500 from the global handler. The
-            # seam is shared by invites / members / key-toggle /
-            # dashboard-login / create / revoke — all inherit 503 parity.
-            # Non-outage exceptions propagate untouched (a schema/dialect
-            # bug must stay loud, not masquerade as an outage).
             membership = await _cp_offload(
                 lambda: _sb_membership(get_control_plane(), user_id, org_id),
                 op="membership_for_user_org")
         except Exception as _exc:
             _raise_503_if_cp_outage(_exc)
             raise
-        if not membership or membership["role"] not in ("owner", "admin"):
-            raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
-        try:
-            # The suspension-stamp read (orgs row, _org_node) is a SECOND
-            # control-plane call AFTER the role check (#1853 ordering — role
-            # 403 precedes SUSPENDED) — same outage class, same 503.
-            _ensure_not_suspended(await _org_node(org_id))
-        except Exception as _exc:
-            _raise_503_if_cp_outage(_exc)
-            raise
-        return {"org_id": org_id, "role": membership["role"]}
+        return (membership or {}).get("role")
     # #1853: registry reads use the KEEPALIVE anchor (#1607 pattern — a
     # fresh _make_sdk is GC'd with close-on-GC + SHUTDOWN NOSAVE, killing
     # the shared embedded server and losing un-saved cascade writes; the
     # anchor is process-lifetime and sees them).
     sdk = _registry_anchor()
     try:
+        # #2446: this read stays INLINE, and is declared in
+        # `tests/test_read_routes_loop_responsiveness.py::_KNOWN_INLINE_HELPER_RESIDUAL`
+        # beside `_membership_org`, `_org_node` and `_require_owner_admin` — the
+        # same read this helper was extracted from. Off-loading it is NOT free:
+        # both `asyncio.to_thread` and `_graph_offload` made
+        # `test_invites_http.py::TestExpiredInviteReMint` see an EMPTY member
+        # list (measured on this branch; the inline form passes 4/4). An
+        # auth-path read whose result depends on which thread runs it is tracked
+        # debt, not a silent lock — fix it deliberately, not here.
         rows = sdk._get_registry().query(
             "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
             "RETURN m.role",
@@ -19751,16 +19878,95 @@ async def _require_owner_admin(user_id: str, org_id: str) -> dict:
     except Exception as _exc:
         _raise_503_if_cp_outage(_exc)
         raise
-    if not rows or rows[0][0] not in ("owner", "admin"):
+    return rows[0][0] if rows else None
+
+
+async def _require_owner_admin(user_id: str, org_id: str) -> dict:
+    """Return the membership if the user is owner/admin in the org, else 403.
+
+    #1853: a SUSPENDED org 403s here too (checked AFTER role authz — no
+    existence-oracle change) — this is the enforcement seam for every
+    owner/admin management endpoint (invites, members, key toggle,
+    dashboard-login), so they all inherit suspension parity. The appeal
+    flow (/v1/team/alerts) uses _membership_org directly and is
+    unaffected.
+
+    #2446: the membership read is the shared `_membership_role` helper (no
+    behaviour change — same 403 detail, same ordering, same outage wrap).
+    The member OWN-KEY slice of the key surfaces goes through
+    `_require_owner_admin_or_own_key`, which calls that same helper, so the
+    two gates cannot drift.
+    """
+    role = await _membership_role(user_id, org_id)
+    if role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
     try:
-        # #1853 ordering preserved: role 403 precedes the SUSPENDED check;
-        # the orgs-node read is a second store call — same outage class.
+        # The suspension-stamp read (orgs row, _org_node) is a SECOND
+        # control-plane call AFTER the role check (#1853 ordering — role
+        # 403 precedes SUSPENDED) — same outage class, same 503.
         _ensure_not_suspended(await _org_node(org_id))
     except Exception as _exc:
         _raise_503_if_cp_outage(_exc)
         raise
-    return {"org_id": org_id, "role": rows[0][0]}
+    return {"org_id": org_id, "role": role}
+
+
+async def _require_owner_admin_or_own_key(user_id: str, org_id: str,
+                                          row: dict) -> str:
+    """#2446 phase 2 — the key-management gate with the member OWN-KEY slice.
+
+    Returns the caller's authority over the TARGET ROW:
+
+      * ``"owner"`` / ``"admin"`` — POLICY A, unchanged: every key verb on
+        every row in the org.
+      * ``"own"`` — a MEMBER holding this credential
+        (``_session_key_holder(row) == user_id``): the #2446 self-service
+        slice. It is strictly narrower than the role it sits beside — the
+        class is the self-service session credential (the only class a member
+        can mint: ``POST /v1/session/key`` purpose=bootstrap is member-open,
+        ``recovery`` is POLICY A-gated by #2380), so a holder can only ever
+        retire or replace the credential the server itself handed them —
+        and only WHILE they remain an active member (a REMOVED holder, or one
+        whose membership row is gone, gets POLICY A via the `role is not None`
+        clause in the body).
+      * 403 ``"Requires owner or admin role in team"`` — BYTE-IDENTICAL to
+        POLICY A for every other case, so a member acting on anyone else's key
+        (the owner's, another member's, or an ORG-OWNED/shared key they merely
+        hold a COPY of) reads exactly as it did before this issue existed.
+        That detail is deliberately NOT specialised per case: a distinct
+        message would turn the gate into an ownership oracle for rows a member
+        cannot manage.
+
+    #1853 ordering parity: the role 403 precedes any SUSPENDED read, so a
+    non-holder member on a suspended org gets the same role detail POLICY A
+    gives; BOTH admitted lanes then check suspension, so this slice widens no
+    org-state access either.
+    """
+    role = await _membership_role(user_id, org_id)
+    if role in ("owner", "admin"):
+        admitted = role
+    elif role is not None and _session_key_holder(row) == user_id:
+        # #2446 review P2-1: `role is not None` is load-bearing, not a
+        # tautology. `_membership_role` returns a role ONLY for an ACTIVE
+        # membership (registry `status:'active'`; supabase `status eq
+        # 'active'`), so a REMOVED member — or a row whose membership is gone
+        # entirely — yields None here. Holding the row is NOT enough on its
+        # own: `remove_member` does not revoke the member's api_keys and key
+        # auth performs no membership check, so without this clause a removed
+        # member could still re-enable (or replace) the session credential
+        # they were left with, and authenticate with it. Admission therefore
+        # requires an active membership AND the holder predicate; every other
+        # case falls to the byte-identical POLICY A 403 below.
+        admitted = "own"
+    else:
+        raise HTTPException(status_code=403,
+                            detail="Requires owner or admin role in team")
+    try:
+        _ensure_not_suspended(await _org_node(org_id))
+    except Exception as _exc:
+        _raise_503_if_cp_outage(_exc)
+        raise
+    return admitted
 
 
 def _raise_503_if_cp_outage(exc: BaseException) -> None:
@@ -25587,6 +25793,175 @@ def _org_mint_lock(org_id: str) -> threading.Lock:
         return lock
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# #2446 phase 2 — member SELF-SERVICE over their own session credential.
+#
+# The own-key slice of the session lane. Why it lives HERE and not on
+# `POST /v1/team/keys/{id}/rotate`:
+#
+#   * `rotate` is the DURABLE, cap-counted replacement primitive. Its 409 on any
+#     row `quota.api_key_occupies_slot` rejects is load-bearing — it is what
+#     keeps rotate cap-neutral (#4355 T5), and a bootstrap row is cap-EXEMPT, so
+#     crediting it would buy a slot the cap never charged. The #2427 brief §8
+#     therefore keeps that 409 and gives members a DISTINCT replace that mints
+#     through the BOOTSTRAP lane (the brief's provisional recommendation).
+#   * The bootstrap lane is the only mint a member may reach at all
+#     (`purpose=bootstrap` is member-open; `recovery` is POLICY A-gated by
+#     #2380), so it is provably a same-class replacement: a session credential
+#     is replaced by a session credential. No privilege class can be widened,
+#     and no durable slot can be conjured.
+#   * `POST /v1/team/keys`+`DELETE` (the two-call rotate the dashboard retired in
+#     #4355) is NOT an option: it is not atomic, and the whole point of the
+#     affordance is the compromised-key moment, where the old secret must die in
+#     the same call that reveals the new one.
+#
+# Both mint lanes (Supabase + registry) take the same three steps: resolve the
+# target, mint with the target's ABSOLUTE expiry (bounded — never widening),
+# then claim-revoke the displaced row with the rotate lane's compensation and
+# disclosure semantics.
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def _clean_replace_key_id(raw: object) -> str | None:
+    """#2446: normalize the optional `replace_key_id` (fail-closed on shape).
+
+    Absent / null / empty means "a plain session mint" — the pre-#2446 call,
+    byte-identical. A non-string is a 422 rather than a silent coercion: this
+    value names the credential the caller is DESTROYING, so a typo must never
+    be interpreted as "no replace requested" (the member would be told the old
+    key is dead while it is still live).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise HTTPException(
+            status_code=422,
+            detail="replace_key_id must be the id of the session key to replace",
+        )
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 128:
+        raise HTTPException(
+            status_code=422,
+            detail="replace_key_id must be the id of the session key to replace",
+        )
+    return cleaned
+
+
+async def _resolve_replace_target(org_id: str, key_id: str,
+                                  user_id: str) -> dict:
+    """#2446: the row a member is allowed to replace, or a refusal.
+
+    FOUR gates, all fail-closed, in the order a caller can act on:
+
+      1. the id must resolve at all              → 404
+      2. it must be THIS org's row              → 403 "Not your API key"
+         (the same detail the team-keys lanes' `_ensure_key_in_pinned_org`
+         raises — one ownership vocabulary, no new message to learn)
+      3. the caller must HOLD it                → 403 "Not your API key"
+         (`_session_key_holder`: a self-service session row minted by the
+         caller. An org-owned/shared row, an owner-minted row, another
+         member's row AND a durable row the caller once minted all refuse
+         here — the #2427 §4.2 "org-owned is admin-managed" rule.)
+      4. it must be LIVE                        → 409
+         (revoked, or expired: an expired row never authenticates (#742), so
+         inheriting its expiry would mint an already-dead replacement. The
+         remedy is a fresh session mint, which is member-open.)
+
+    A member may LIST every org key (GET /v1/team/keys is member-open, #1828),
+    so the 404/403 split leaks nothing they cannot already read — and both
+    refusals happen BEFORE any mint, so no key is ever created by a refused
+    replace.
+    """
+    try:
+        row = await asyncio.to_thread(_rotatable_key_row, org_id, key_id)
+    except Exception as _exc:
+        # #2380 (#1719 class): this read is a CONTROL-PLANE call in supabase
+        # mode (PostgREST via `api_key_by_id`), so an outage must degrade to
+        # the repo-standard 503 control_plane_unavailable, never a raw 500 out
+        # of the handler. The PATCH lane's equivalent read gets this for free
+        # through `_cp_offload`; `asyncio.to_thread` does not map exceptions,
+        # so the wrap is explicit here (review P2-2).
+        _raise_503_if_cp_outage(_exc)
+        raise
+    if row is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    if row.get("org_id") != org_id or _session_key_holder(row) != user_id:
+        raise HTTPException(status_code=403, detail="Not your API key")
+    if row.get("revoked_at") is not None \
+            or _key_row_is_expired(row, datetime.now(UTC).isoformat()):
+        raise HTTPException(
+            status_code=409,
+            detail=("API key is no longer active — replace requires a live, "
+                    "unexpired session key; mint a new one instead"),
+        )
+    return row
+
+
+async def _claim_replace_leg(org_id: str, old_id: str, new_id: str,
+                             now: str) -> tuple[bool, str | None]:
+    """#2446: retire the displaced row, atomically with its replacement.
+
+    Returns ``(replaced_revoked, warning)`` and mirrors the rotate lane
+    (#4355) exactly, because the failure modes are the same ones and a member
+    must not be given a worse disclosure than an owner:
+
+      * the revoke is a CLAIM (`revoked_at IS NULL` conditioning), so of N
+        concurrent replaces of one row exactly one wins;
+      * a loser COMPENSATES its replacement away and refuses 409 — never an
+        orphan live credential, and never a silently-dead one either;
+      * if the compensation ALSO fails, both keys are live and the replacement
+        plaintext is still returned (reveal-once: the only alternative is a
+        live secret nobody can see) with a `warning` naming the cleanup.
+    """
+    try:
+        claimed = await asyncio.to_thread(
+            _claim_key_revocation, org_id, old_id, now)
+    except Exception as _exc:
+        _logger.exception("replace-own: claim-revoke of %s failed", old_id)
+        # #2446 review P2-3: a RAISED claim did not lose a race — it never ran,
+        # so the displaced row is still LIVE. Falling through to the 409 below
+        # would report "it was revoked while this replace ran", which is false,
+        # and in a compromised-key workflow that is the one fact the caller must
+        # not be misinformed about. Compensate the replacement away first (never
+        # leave an orphan live credential), then surface the outage.
+        compensated = True
+        try:
+            await asyncio.to_thread(_force_revoke_key_row, org_id, new_id, now)
+        except Exception:
+            compensated = False
+            _logger.exception("replace-own: compensation of %s failed", new_id)
+        if not compensated:
+            return False, (
+                "The replacement was created, but the previous session key "
+                "could not be revoked and the rollback failed — both are "
+                "currently active. Turn off the key you no longer need."
+            )
+        _raise_503_if_cp_outage(_exc)
+        raise
+    if claimed:
+        return True, None
+    compensated = True
+    try:
+        await asyncio.to_thread(_force_revoke_key_row, org_id, new_id, now)
+    except Exception:
+        compensated = False
+        _logger.exception("replace-own: compensation of %s failed", new_id)
+    if compensated:
+        raise HTTPException(
+            status_code=409,
+            detail=("API key is no longer active — it was revoked while this "
+                    "replace ran; the replacement was rolled back. Retry, or "
+                    "mint a new session key."),
+        )
+    return False, (
+        "The replacement was created, but the previous session key could not "
+        "be revoked and the rollback failed — both are currently active. "
+        "Turn off the key you no longer need."
+    )
+
+
 @app.post("/v1/session/key")
 async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):  # noqa: B008
     """E1 — session-scoped key mint (the #518 chicken-and-egg fix).
@@ -25625,13 +26000,32 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     if purpose not in ("bootstrap", "recovery"):
         raise HTTPException(status_code=422, detail="purpose must be 'bootstrap' or 'recovery'")
 
+    # #2446 phase 2: an optional `replace_key_id` turns this mint into an
+    # atomic REPLACE of the caller's OWN session credential — the same call
+    # mints the replacement and retires the displaced row, which is the whole
+    # point of the compromised-key affordance (a two-call shape leaves the
+    # leaked secret live for the length of the RTT).
+    replace_key_id = _clean_replace_key_id((body or {}).get("replace_key_id"))
+    if replace_key_id is not None and purpose != "bootstrap":
+        # `recovery` is a DURABLE, owner/admin-gated mint (POLICY A, #2380).
+        # Allowing a replace off it would be a different feature (it would
+        # trade a durable credential for another one) and a POLICY A surface
+        # change — refuse instead of silently ignoring the field, so a caller
+        # can never believe an old key was retired when it was not.
+        raise HTTPException(
+            status_code=422,
+            detail=("replace_key_id is only available for purpose='bootstrap' "
+                    "— a session credential is replaced by a session credential"),
+        )
+
     # #767 (plan Task 3, E2E-2): in Supabase mode the mint writes api_keys
     # (lookup_hash + created_via + expires_at) so the minted key resolves via
     # api_keys.lookup_hash and revocation is authoritative. The registry mint
     # stays for selfhost.
     from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
-        return await _session_key_supabase(body or {}, request, user)
+        return await _session_key_supabase(body or {}, request, user,
+                                           replace_key_id=replace_key_id)
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
@@ -25689,6 +26083,12 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     # #1854: prefix of the rotated key (names the banner's victim). Set only
     # when a rotation happened; None otherwise.
     rotated_key_prefix = None
+    # #2446: resolve the replace target BEFORE the mint lock — the ownership
+    # gates await, and the lock section forbids awaits. A refusal here happens
+    # before any row is written, so a refused replace creates nothing.
+    replace_target = None
+    if replace_key_id is not None:
+        replace_target = await _resolve_replace_target(tid, replace_key_id, user_id)
 
     with _org_mint_lock(tid):
 
@@ -25699,9 +26099,25 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                 "RETURN count(k)",
                 params={"tid": tid, "uid": user_id, "now": now},
             ).result_set[0][0]
-            if active_boot >= 3:
+            # #2446: a REPLACE is net-zero (one session row in, one out), so the
+            # displaced row — still live and still counted here — is credited
+            # exactly as the rotate lane credits a released slot (#4355). +1,
+            # never a blanket exemption: a caller already OVER the backstop
+            # still refuses fail-closed.
+            boot_cap = _BOOTSTRAP_KEY_CAP + (1 if replace_target is not None else 0)
+            if active_boot >= boot_cap:
                 raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
             expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+            if replace_target is not None:
+                # #2446: BOUNDED, never widening (#2427 brief §2.3 item 1 / §8).
+                # The replacement inherits the displaced row's ABSOLUTE expiry
+                # instant, so a replace can never lengthen a session
+                # credential's life — and this lane takes NO expiry from the
+                # caller at all, so a body cannot launder one either. A NULL
+                # expiry is anomalous for a bootstrap row (the RPC refuses it);
+                # fall back to the lane's own 24h span rather than mint a Never
+                # key outside every cap.
+                expires_at = replace_target.get("expires_at") or expires_at
             created_via = "bootstrap"
         else:
             lim = tier_limits(tier)
@@ -25896,16 +26312,50 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     "cb": user_id, "now": now, "exp": expires_at, "cv": created_via},
         )
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+    # #2446: the destructive leg runs AFTER the mint lock — its claim is a
+    # separate write by design (the rotate lane's ordering, create-first, so a
+    # failure never leaves the caller with NO key), and the lock section must
+    # not await. A refused/rolled-back claim raises 409 here (the replacement
+    # is compensated away); a double failure discloses both live keys.
+    replaced_key_id = None
+    replaced_revoked = None
+    warning = None
+    if replace_target is not None:
+        replaced_key_id = replace_key_id
+        replaced_revoked, warning = await _claim_replace_leg(
+            tid, replace_key_id, kid, now)
+        # The `api_key_rotate` event is the established "a credential was
+        # replaced" vocabulary (#4355) — a replace is exactly that, so the
+        # audit trail reads the same for a member's session credential as for
+        # an owner's durable key (the brief's "audit visible" rule).
+        await _async_audit(
+            request, tid, "api_key_rotate", resource_type="api_key",
+            resource_id=kid,
+            detail={"replaced_key_id": replace_key_id,
+                    "replaced_revoked": replaced_revoked})
     # #308 (R2): evaluate key-create velocity after a successful mint
     # (bootstrap mints are trigger-excluded but evaluation is harmless).
     await _abuse_evaluate_keys(tid)
 
-    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+    resp = {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
             "org_id": tid, "purpose": purpose, "rotated": rotated,
             "rotated_key_prefix": rotated_key_prefix}
+    if replaced_key_id is not None:
+        # Additive, and present ONLY when a replace ran — a plain session mint
+        # keeps its byte-identical pre-#2446 shape. `key_id` names the
+        # REPLACEMENT (the session lane's plain response carries no id at all),
+        # so the caller can address the new row — e.g. to turn it off — without
+        # re-reading the list.
+        resp["key_id"] = kid
+        resp["replaced_key_id"] = replaced_key_id
+        resp["replaced_revoked"] = replaced_revoked
+    if warning is not None:
+        resp["warning"] = warning
+    return resp
 
 
-async def _session_key_supabase(body: dict, request: Request, user: dict) -> dict:
+async def _session_key_supabase(body: dict, request: Request, user: dict,
+                               replace_key_id: str | None = None) -> dict:
     """E1 session-key mint against Supabase (#767 E2E-2 round-trip).
 
     Mirrors the registry mint exactly (bootstrap: 24h expiry, 3-active cap;
@@ -25997,8 +26447,30 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     # a second `now()+24h` after the mint would advertise an `expires_at` a few
     # milliseconds LATER than the row's (the row is authoritative; the response
     # must not disagree with it).
+    # #2446: resolve the replace target BEFORE the mint lock — the ownership
+    # gates await, and the lock section forbids awaits. A refusal here happens
+    # before any row is written, so a refused replace creates nothing.
+    replace_target = None
+    if replace_key_id is not None:
+        replace_target = await _resolve_replace_target(tid, replace_key_id, user_id)
     expires_at = ((datetime.now(UTC) + timedelta(hours=24)).isoformat()
                   if purpose == "bootstrap" else None)
+    if replace_target is not None:
+        # #2446: BOUNDED, never widening (#2427 brief §2.3 item 1 / §8). The
+        # replacement inherits the displaced row's ABSOLUTE expiry instant, so
+        # a replace can never lengthen a session credential's life — and this
+        # lane takes NO expiry from the caller at all, so a body cannot launder
+        # one either (the ephemeral credential cannot become a durable one,
+        # nor a longer-lived ephemeral one, through replace). A NULL expiry is
+        # anomalous for a bootstrap row (the RPC refuses one); fall back to the
+        # lane's own 24h span rather than mint a Never key outside every cap.
+        expires_at = replace_target.get("expires_at") or expires_at
+    # #2446: a REPLACE is net-zero (one session row in, one out), so the
+    # displaced row — still live and still counted by the RPC — is credited
+    # exactly as the rotate lane credits a released slot (#4355). +1, never a
+    # blanket exemption: a caller already OVER the backstop still refuses
+    # fail-closed.
+    bootstrap_cap = _BOOTSTRAP_KEY_CAP + (1 if replace_target is not None else 0)
     # #1828 review P3-2: True when the recovery fallback rotated a session
     # credential to make room — the dashboard shows a one-time banner.
     rotated = False
@@ -26027,6 +26499,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
                 created_at=now,
                 expires_at=expires_at,
                 max_api_keys=max_keys,
+                bootstrap_cap=bootstrap_cap,
             )
         except SessionKeyMintRefusal as e:
             # Semantic refusal from the serialized transaction — the SAME
@@ -26041,14 +26514,50 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
         rotated = bool(minted.get("rotated"))
         rotated_key_prefix = minted.get("rotated_key_prefix")
 
+    # #2446: the destructive leg runs AFTER the mint lock — its claim is a
+    # separate request/transaction by design (the rotate lane's ordering,
+    # create-first, so a failure never leaves the caller with NO key), and the
+    # lock section must not await. A refused/rolled-back claim raises 409 here
+    # (the replacement is compensated away); a double failure discloses both
+    # live keys through `warning`.
+    replaced_key_id = None
+    replaced_revoked = None
+    warning = None
+    if replace_target is not None:
+        replaced_key_id = replace_key_id
+        replaced_revoked, warning = await _claim_replace_leg(
+            tid, replace_key_id, kid, now)
+
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
+    if replaced_key_id is not None:
+        # The `api_key_rotate` event is the established "a credential was
+        # replaced" vocabulary (#4355) — a replace is exactly that, so the
+        # audit trail reads the same for a member's session credential as for
+        # an owner's durable key (the brief's "audit visible" rule).
+        await _async_audit(
+            request, tid, "api_key_rotate", resource_type="api_key",
+            resource_id=kid,
+            detail={"replaced_key_id": replace_key_id,
+                    "replaced_revoked": replaced_revoked})
     # #308 (R2): evaluate key-create velocity after a successful mint.
     await _abuse_evaluate_keys(tid)
 
-    return {"key": api_key, "key_prefix": api_key[:10],
+    resp = {"key": api_key, "key_prefix": api_key[:10],
             "expires_at": expires_at,
             "org_id": tid, "purpose": purpose, "rotated": rotated,
             "rotated_key_prefix": rotated_key_prefix}
+    if replaced_key_id is not None:
+        # Additive, and present ONLY when a replace ran — a plain session mint
+        # keeps its byte-identical pre-#2446 shape. `key_id` names the
+        # REPLACEMENT (the session lane's plain response carries no id at all),
+        # so the caller can address the new row — e.g. to turn it off — without
+        # re-reading the list.
+        resp["key_id"] = kid
+        resp["replaced_key_id"] = replaced_key_id
+        resp["replaced_revoked"] = replaced_revoked
+    if warning is not None:
+        resp["warning"] = warning
+    return resp
 
 
 @app.get("/v1/context")
@@ -27178,12 +27687,11 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
     ``_echo=False`` is the WRITE-ONLY contract for callers that DISCARD that
     return (#4625): the writes above still happen; only the projection read is
     skipped, so it cannot change what was written. It exists because the
-    projection is not free — ``_get_onboarding_projection`` probes the
-    registry UP TO TWICE (one probe when the org graph is ABSENT, which
-    returns early in ``_get_onboarding_projection``; two when it is present),
-    and in URI mode each probe builds a fresh registry SDK and
-    opens a NEW FalkorDB connection (TCP + TLS handshake + ``INFO`` +
-    ``list_graphs``), synchronously, on the event loop. Returns ``{}`` when
+    projection is not free — ``_get_onboarding_projection`` samples the
+    registry ONCE (two probes before #4661) and, in URI mode, each probe used
+    to build a fresh registry SDK and open a NEW FalkorDB connection (TCP +
+    TLS handshake + ``INFO`` + ``list_graphs``), synchronously, on the event
+    loop; the connection is process-lifetime since #4661. Returns ``{}`` when
     skipped: a caller that discards the value cannot tell the difference.
     Callers that need the echo (GET/PATCH) keep the default.
 
@@ -27242,23 +27750,21 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
     # overlay is never FLOW — operational keys only.
     #
     # #4625: the echo is NOT free, and callers that DISCARD it must say so.
-    # ``_get_onboarding_projection`` reaches ``_registry_existing_graphs()``
-    # UP TO TWICE (one probe when the org graph is absent — it returns early
-    # there; two when present, the per-capture case), and in URI mode each
-    # probe builds a fresh
-    # ``_make_sdk(namespace="registry")`` and opens a NEW FalkorDB connection
-    # (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` + ``list_graphs``).
-    # An AGENT capture (the fleet case) calls this router twice — the receipt
-    # write, then the last-error clear — and discards both returns, so the
-    # discarded reads alone open four fresh connections per capture. (A
-    # no-harness capture — a session-JWT/dashboard caller — writes the bare
-    # receipt but has no last-error key, so it makes one call, two
-    # connections.) All of it runs synchronously ON the event loop, which stalls
-    # every read in flight and drives the transport-bound 504s. Measured by
-    # py-spy on the live machine: the loop thread sitting in
-    # ``do_handshake (ssl.py:1319)`` <- ``_registry_existing_graphs`` <-
-    # ``_get_onboarding_projection`` <- ``_record_capture_last_error`` <-
-    # ``_capture_session_impl``.
+    # ``_get_onboarding_projection`` samples ``_registry_existing_graphs()``
+    # (ONE probe since #4661; two before it), and in URI mode that probe used
+    # to build a fresh ``_make_sdk(namespace="registry")`` and open a NEW
+    # FalkorDB connection (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` +
+    # ``list_graphs``) per call; #4661 makes the connection process-lifetime,
+    # so the cost is the ``list_graphs`` round trip, not a handshake. The
+    # projection also opens the org graph. An AGENT capture (the fleet case)
+    # calls this router twice — the receipt write, then the last-error clear —
+    # and discards both returns, so the discarded reads alone were four fresh
+    # connections per capture before #4661/#4625. All of it runs
+    # synchronously ON the event loop, which stalls every read in flight and
+    # drives the transport-bound 504s. Measured by py-spy on the live machine:
+    # the loop thread sitting in ``do_handshake (ssl.py:1319)`` <-
+    # ``_registry_existing_graphs`` <- ``_get_onboarding_projection`` <-
+    # ``_record_capture_last_error`` <- ``_capture_session_impl``.
     #
     # Scope: #4625 names "the capture path and install-probe", and exactly the
     # sites on those two endpoints pass ``_echo=False``. The onboarding, demo
@@ -27302,7 +27808,23 @@ class OnboardingStateResponse(BaseModel):
 _ACCEPT_AND_DROP = True  # W1 (#1997) landed — PATCH onboarding_complete is dropped on node-present orgs (plan T7)
 
 
-def _graph_has_org_namespace(org_id: str) -> bool:
+class _ProbeNotSampled:
+    """Sentinel type for ``_open_org_graph_sdk``'s ``listed`` argument.
+
+    ``None`` already MEANS something on that argument — the registry probe
+    FAILED (fail-open, #3543) — so it cannot double as "the caller did not
+    sample the listing". ``isinstance`` keeps the two distinguishable without
+    a second boolean parameter.
+    """
+
+
+_PROBE_NOT_SAMPLED = _ProbeNotSampled()
+
+
+def _graph_has_org_namespace(
+        org_id: str, *,
+        listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+) -> bool:
     """Existence check WITHOUT constructing the ORG projection (constructing
     org_{tid} would materialize an absent org graph — a read-path write,
     banned by pin 4). Probes the server-wide graph list via the registry
@@ -27315,17 +27837,113 @@ def _graph_has_org_namespace(org_id: str) -> bool:
     namespace rule and would therefore open, and so MINT, a different, absent
     graph for a legacy `team_{org_id}` org, defeating this function's purpose.
     Callers that only need the verdict (accept-and-drop gates) keep using
-    this."""
+    this.
+
+    ``listed`` optionally carries a listing the CALLER already sampled
+    (#4661). ``_get_onboarding_projection`` needs the verdict AND the open,
+    and both must come from ONE snapshot: a second probe was a second
+    FalkorDB connection in URI mode, and it could also list a DIFFERENT name
+    than the one the verdict was about. ``None`` cannot be the default — it is
+    the probe's own FAILURE signal (fail-open below)."""
     # #3543: both tenant prefixes are probed — a graph minted before the
     # rename is `team_{org_id}`, and no data migration rewrites it. Probing
     # only `org_` reported "node absent" for every pre-rename org, which made
     # the onboarding projection take the no-write FLOW-defaults path.
-    graphs = _registry_existing_graphs()
-    if graphs is None:
+    if isinstance(listed, _ProbeNotSampled):
+        listed = _registry_existing_graphs()
+    if listed is None:
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
-    return any(name in graphs for name in (f"org_{org_id}", f"team_{org_id}"))
+    return any(name in listed
+               for name in (f"org_{org_id}", f"team_{org_id}"))
+
+
+# ── #4661: the registry probe's CONNECTION is reused in URI mode ───────────
+# `_registry_existing_graphs()` sits on the onboarding projection's read path
+# (the MCP gate, GET /v1/onboarding/state, and the capture path's echo before
+# #4625 made that write-only) and every call used to build a FRESH
+# `_make_sdk(namespace="registry")`. In URI mode that is a new TCP connection +
+# TLS handshake (`ssl.create_default_context` → `load_default_certs`
+# re-parsing the system CA bundle) + the `Is_Sentinel` INFO, PER PROBE —
+# py-spy on the live box caught the loop/hot thread inside exactly that
+# handshake for seconds at a time while reads blew the 10 s transport bound.
+#
+# Only the CONNECTION is cached — the LISTING never is: `list_graphs()` is a
+# probe-before-purge / pin-4 gate, so a cached listing would be a decision on
+# stale state. Embedded mode keeps the fresh-SDK-and-close shape below: there
+# the anchor (`_FALLBACK_KEEPALIVE`) holds the redislite daemon and a fresh
+# per-call handle is the #2251 anti-stray-DB contract, and a loopback
+# connection is not the cost.
+_REGISTRY_PROBE_SDK: TortoiseSDK | None = None
+#: The `TORTOISE_DB_URI` `_REGISTRY_PROBE_SDK` was built for. A changed URI
+#: means the cached handle addresses ANOTHER server (process reconfiguration,
+#: or a test's private lane) — it is closed and rebuilt, never reused.
+_REGISTRY_PROBE_URI: str | None = None
+
+
+def _reset_registry_probe_sdk() -> None:
+    """Close + drop the cached registry probe (teardown / reconfiguration).
+
+    Used by tests: the cache is a PROCESS global, so a test that monkeypatches
+    `_make_sdk`/`TortoiseSDK` must not inherit a handle an earlier test built
+    (#5049 rule 4). The close runs OUTSIDE `_KEEPALIVE_LOCK` so a slow close
+    cannot block a concurrent construction (the #2172 lock discipline)."""
+    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI
+    if _REGISTRY_PROBE_SDK is None:
+        return
+    with _KEEPALIVE_LOCK:
+        sdk, _REGISTRY_PROBE_SDK = _REGISTRY_PROBE_SDK, None
+        _REGISTRY_PROBE_URI = None
+    try:  # noqa: SIM105
+        sdk.close()
+    except Exception:
+        pass
+
+
+def _registry_probe_sdk() -> TortoiseSDK:
+    """The process-lifetime registry SDK behind `list_graphs()` (#4661).
+
+    URI mode only — the embedded caller keeps its fresh handle. Construction
+    (and the eager `_get_proj()` that binds the projection) runs under
+    `_KEEPALIVE_LOCK`, so two worker threads cannot both build one and leak
+    the loser. A construction FAILURE is not cached: the exception propagates
+    to `_registry_existing_graphs`'s never-raise wrapper and the next probe
+    retries, so the fail-open contract is unchanged."""
+    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI
+    uri = os.environ.get("TORTOISE_DB_URI")
+    cached = _REGISTRY_PROBE_SDK
+    cached_uri = _REGISTRY_PROBE_URI
+    if cached is not None and cached_uri == uri:
+        return cached
+    with _KEEPALIVE_LOCK:
+        cached = _REGISTRY_PROBE_SDK
+        cached_uri = _REGISTRY_PROBE_URI
+        if cached is not None and cached_uri == uri:
+            return cached
+        if cached is not None:
+            # The configured server changed — a reconfiguration event, not a
+            # request event (the embedded anchor evicts on drift the same
+            # way, #1502). Drop the handle: reusing it would probe a server
+            # this process no longer talks to.
+            try:  # noqa: SIM105
+                cached.close()
+            except Exception:
+                pass
+            _REGISTRY_PROBE_SDK = None
+            _REGISTRY_PROBE_URI = None
+        sdk = _make_sdk(namespace="registry")
+        try:
+            sdk._get_proj()
+        except Exception:
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+            raise
+        _REGISTRY_PROBE_SDK = sdk
+        _REGISTRY_PROBE_URI = uri
+        return sdk
 
 
 def _registry_existing_graphs() -> set[str] | None:
@@ -27356,8 +27974,16 @@ def _registry_existing_graphs() -> set[str] | None:
     connection — the keepalive anchor holds the daemon, #493/#1607). The
     construction sits INSIDE the try so a cross-process
     EmbeddedStoreBusyError keeps the never-raise contract.
+
+    #4661: in URI mode the handle is NOT built and closed per call — the
+    CONNECTION is process-lifetime (`_registry_probe_sdk`), because on the
+    read path the handshake, not the query, was the cost. Embedded mode keeps
+    the fresh-and-close shape above unchanged.
     """
     try:
+        if os.environ.get("TORTOISE_DB_URI"):
+            sdk = _registry_probe_sdk()
+            return set(sdk._get_proj().db.list_graphs() or [])
         sdk = _make_sdk(namespace="registry")
         try:
             graphs = sdk._get_proj().db.list_graphs() or []
@@ -27368,7 +27994,10 @@ def _registry_existing_graphs() -> set[str] | None:
         return None
 
 
-def _open_org_graph_sdk(org_id: str) -> TortoiseSDK | None:
+def _open_org_graph_sdk(
+        org_id: str, *,
+        listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+) -> TortoiseSDK | None:
     """SDK on the org's DEFAULT graph, or None when the server lists neither
     the canonical nor the pre-rename name.
 
@@ -27389,8 +28018,14 @@ def _open_org_graph_sdk(org_id: str) -> TortoiseSDK | None:
     raise → 'unavailable'); a WRITE caller must instead SKIP, because minting
     a name the probe never observed is exactly the pin-4 violation this
     helper exists to prevent.
+
+    ``listed`` optionally carries a listing the CALLER already sampled
+    (#4661): a caller that needs both the existence verdict and the open —
+    ``_get_onboarding_projection`` — must not pay a second probe, and must not
+    decide on two different snapshots.
     """
-    listed = _registry_existing_graphs()
+    if isinstance(listed, _ProbeNotSampled):
+        listed = _registry_existing_graphs()
     if not listed:
         return None
     if f"org_{org_id}" in listed:
@@ -27426,7 +28061,14 @@ def _get_onboarding_projection(org_id: str) -> dict:
     ONE projection site for GET + PATCH echo + the MCP gate/tool — they
     cannot diverge."""
     raw = _get_onboarding_state(org_id)
-    if not _graph_has_org_namespace(org_id):
+    # #4661: ONE registry probe per projection. The existence verdict and the
+    # graph OPEN below both need the listing, and each used to run its own
+    # `_registry_existing_graphs()` — in URI mode a fresh FalkorDB connection
+    # per probe (TCP + TLS + Is_Sentinel INFO) on the read path. They now
+    # share this single snapshot, which also closes the gap where the second
+    # probe could list a DIFFERENT name than the one the verdict was about.
+    listed = _registry_existing_graphs()
+    if not _graph_has_org_namespace(org_id, listed=listed):
         state = dict(raw)
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
@@ -27444,7 +28086,7 @@ def _get_onboarding_projection(org_id: str) -> dict:
         # name this line never opens. None comes back when the probe failed
         # (fail-open) or neither name is listed: fall back to the inline
         # construction so the read proceeds and raises → 'unavailable'.
-        proj = (_open_org_graph_sdk(org_id)
+        proj = (_open_org_graph_sdk(org_id, listed=listed)
                 or _make_sdk(namespace=org_id))._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         steps = _os.completed_steps(proj, org_id) if node is not None else []

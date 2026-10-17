@@ -199,7 +199,7 @@ test('#2710: a non-402 mint failure is VISIBLE next to the mint CTA', () => {
 })
 
 test('#2756/#2912: the Codex Desktop surface hides the key-mode pills AND the separate key row', () => {
-  // UNIVERSAL_COMMAND.codexDesktop embeds the key by construction, so the
+  // CODEX_DESKTOP_COMMAND embeds the key by construction, so the
   // "separate" promise cannot be honored there. #2912 keeps the gate as the
   // shared `keyModeToggleable`/`keyRowVisible` derivations (the old per-surface
   // boolean toggle is gone — the surface IS the leaf harness now).
@@ -429,8 +429,8 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
   // every codexDesktop payload still renders
   assert.match(owner, /\{HARNESS_INTRO\.codexDesktop\}/,
     'HARNESS_INTRO.codexDesktop (~/.codex/config.toml) is rendered')
-  assert.match(owner, /UNIVERSAL_COMMAND\.codexDesktop\(harnessKey\)/,
-    'UNIVERSAL_COMMAND.codexDesktop (the config.toml block) is rendered')
+  assert.match(owner, /CODEX_DESKTOP_COMMAND\(harnessKey\)/,
+    'CODEX_DESKTOP_COMMAND (the config.toml block) is rendered')
   assert.match(owner, /label=\{HARNESS_COPY_LABEL\.codexDesktop\}/,
     'HARNESS_COPY_LABEL.codexDesktop labels the copy control')
 })
@@ -540,7 +540,7 @@ test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
     'the Desktop arm end marker (") : (") must exist — refusing a slice to EOF')
   const desktop = src.slice(i, desktopEnd)
   // the merged block dropped the only unrecoverable-key cue on this surface
-  // (HARNESS_INTRO.codexDesktop / UNIVERSAL_COMMAND.codexDesktop never say it)
+  // (HARNESS_INTRO.codexDesktop / CODEX_DESKTOP_COMMAND never say it)
   // #4880: the advisory is now DATA in wizardPrompts.js (it was the last live
   // caption no invariant could observe), so assert it is the rendered string
   // the JSX interpolates rather than a literal in the source text.

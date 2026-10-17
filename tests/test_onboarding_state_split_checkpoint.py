@@ -38,6 +38,7 @@ if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
 
 from fastapi.testclient import TestClient
 
+from tests._verdict import verdict_client
 from tortoise.hosted_api import _make_sdk, app
 from tortoise.onboarding import state as onboarding_state
 
@@ -50,7 +51,7 @@ def _read_node(org_id: str):
 def _registered_client():
     """TestClient + a freshly registered team's key (registry lane)."""
     import uuid
-    tc = TestClient(app)
+    tc = verdict_client(app)
     tc.__enter__()
     email = f"w5t4-{uuid.uuid4().hex[:10]}@example.com"
     r = tc.post("/v1/register", json={"email": email,
@@ -622,3 +623,30 @@ class TestForkUnsureAt:
         assert onboarding_state.recompute_completion(
             g, tid, False) == "unchanged"
         assert onboarding_state.read_onboarding_node(g, tid)["status"] == "active"
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seam.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST
+    /v1/onboarding/state/checkpoint`` is the route this file reads most and it
+    is not exempt from the bound. The plain-client control is the non-vacuity
+    leg — it is the exact ``assert 504 == 200`` shape this conversion removes,
+    and it goes RED if the route is ever exempted (the middleware stops
+    refusing, so the control's 504 assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/onboarding/state/checkpoint")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/onboarding/state/checkpoint answered" in message

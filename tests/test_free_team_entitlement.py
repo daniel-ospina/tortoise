@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._verdict import verdict_async_client, verdict_client
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, _membership_row
 from tortoise.hosted_api import app, get_current_user
@@ -117,7 +118,7 @@ def client(monkeypatch, supabase_env):
         # between this fixture's write and the gate read → 403).
         os.environ["TORTOISE_DB_PATH"] = db_path
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 yield tc, supabase_env
         finally:
             os.environ.pop("TORTOISE_DB_PATH", None)
@@ -524,7 +525,7 @@ def reg_client(monkeypatch):
         # reused, not evicted, on every registry access.
         os.environ["TORTOISE_DB_PATH"] = db_path
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 # #2090: the dropped _make_sdk SDK below is benign — the same
                 # call's anchor eagerly holds a connection (count >= 2 at GC →
                 # disconnect-only, never NOSAVE).
@@ -766,12 +767,10 @@ class TestConcurrentTeamCreationTOCTOU:
         _tc, fake = user_client
         import asyncio
 
-        import httpx
 
         async def _burst():
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                           base_url="http://test") as ac:
                 r1, r2 = await asyncio.gather(
                     ac.post("/v1/organizations", json={"name": "alpha"}),
                     ac.post("/v1/organizations", json={"name": "beta"}),
@@ -800,15 +799,13 @@ class TestConcurrentTeamCreationTOCTOU:
         _tc, reg = reg_client
         import asyncio
 
-        import httpx
 
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "owner@example.com"}
         try:
             async def _burst():
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(transport=transport,
-                                             base_url="http://test") as ac:
+                async with verdict_async_client(app,
+                                               base_url="http://test") as ac:
                     r1, r2 = await asyncio.gather(
                         ac.post("/v1/organizations", json={"name": "gamma"}),
                         ac.post("/v1/organizations", json={"name": "delta"}),
@@ -844,13 +841,11 @@ class TestConcurrentTeamCreationTOCTOU:
             session_user_id=_USER1)
         import asyncio
 
-        import httpx
 
         try:
             async def _burst():
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(transport=transport,
-                                             base_url="http://test") as ac:
+                async with verdict_async_client(app,
+                                               base_url="http://test") as ac:
                     r1, r2 = await asyncio.gather(
                         ac.post("/v1/onboarding/team",
                                 json={"name": "subalpha"}),
@@ -914,3 +909,37 @@ class TestConcurrentTeamCreationTOCTOU:
         order = asyncio.run(_run())
         assert order == ["a-enter", "a-exit", "b-enter"], \
             f"critical sections did not serialize: {order}"
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. Five constructions are
+    converted — the ``client`` and ``reg_client`` fixtures (``verdict_client``)
+    and the three concurrent-burst ``_burst`` helpers, which build their own
+    ``httpx.ASGITransport(app=app)`` client (``verdict_async_client``, so the
+    per-response check runs on the ASGI transport they were already using) — so
+    the seam covers every read bound from them: 18
+    ``POST /v1/organizations`` and 1 ``GET /v1/organizations``, 9
+    ``POST /v1/onboarding/team``, 2 ``POST /v1/register`` and 1
+    ``PATCH /v1/onboarding/state``, none of them exempt from the bound. The
+    plain-client control is the non-vacuity leg: it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if the
+    route is ever exempted (the middleware stops refusing, so the control's 504
+    assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/organizations")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/organizations answered" in message

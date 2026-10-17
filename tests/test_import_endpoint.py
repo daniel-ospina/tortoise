@@ -74,6 +74,7 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM,
@@ -160,7 +161,7 @@ def sb_client(monkeypatch):
         # close anchors; the helper adds the deterministic close). The
         # module-scoped _embedded_local_file_lane autouse (TORTOISE_DB_URI
         # pop) + session-scoped _SEED_PROJS hold are untouched.
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             yield tc, fake, db_path
 
 
@@ -1691,3 +1692,45 @@ class TestImportIdempotencyAndSwapSafety:
             assert ids == ["old-0"]
         finally:
             proj._conn.close() if hasattr(proj, "_conn") else None
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seam.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. The converted ``tc`` reads
+    ``POST /v1/organizations/{org_id}/import`` (most of this file's reads) and
+    ``GET /v1/organizations/{org_id}/export``; neither is exempt from the
+    bound, and the import route is the one this pin drives. The plain-client
+    control is the non-vacuity leg — it is the exact ``assert 504 == 200``
+    shape this conversion removes, and it goes RED if the route is ever
+    exempted (the middleware stops refusing, so the control's 504 assertion
+    fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import (
+        _TRANSPORT_WAIT_BOUND_EXEMPT,
+        _TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX,
+    )
+
+    # ``WaitBoundMiddleware``'s exemption predicate is TWO arms: the exact
+    # ``(method, route_path)`` set, and the ``/v1/internal/`` prefix. Both are
+    # checked here, so neither arm can exempt this route behind the pin's back.
+    # ``get_route_path`` hands the middleware the CONCRETE request path, so the
+    # literal pair below is exactly what the first arm compares — the check is
+    # not vacuous. A *templated* member (``/v1/organizations/{org_id}/import``)
+    # could never match that concrete path, so it would be an inert entry and
+    # not an exemption at all: the two arms above are the whole effective
+    # surface. The 504 control is the independent leg proving the bound fires.
+    route = ("POST", f"/v1/organizations/{ORG_ID}/import")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    assert not route[1].startswith(_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX)
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert f"POST {route[1]} answered" in message

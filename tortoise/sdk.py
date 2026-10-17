@@ -74,7 +74,8 @@ from .live import direction_flows  # #7852 (source→target, target→source) fl
 from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
-    ADDRESSING_SOURCE, resolve_document_target_id, resolve_entity_id)
+    ADDRESSING_SOURCE, UnaddressableEntityName, resolve_document_target_id,
+    resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -3365,6 +3366,22 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "'_stub' is a server-managed event-stub discriminator and cannot "
             "be set via props."
         )
+    # Lane L5 (#5097 review P1): the SIBLING discriminator, and the same class
+    # of hole. `_stub_completion` is what `_upsert_source` reads to suppress the
+    # ON CREATE creator-only defaults (`id`/`version`/`externalId`) and to admit
+    # `_SOURCE_CAPTURE_REPLAY_PROPS` to the `:Source` passthrough. A caller that
+    # can set it can therefore forge the capture writer's provenance
+    # (`sessionId`/`capturedAt`/`eventId`) AND strip a node's identity props —
+    # and the key rides the journal, so a rebuild restores the forgery.
+    # `create_source` refuses it in its own `**props` guard (it bypasses this
+    # intake); this is the fail-closed backstop for every other props surface
+    # (`create_point`/`create_entity`/`update_*`). Hard-reject, never strip,
+    # matching `_stub` above: there is no legitimate caller intent.
+    if "_stub_completion" in props:
+        raise ValueError(
+            "'_stub_completion' is a server-managed capture-completion "
+            "discriminator and cannot be set via props."
+        )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
     # `mitigate_operator`, which validate it and run the authored-assertion
@@ -5438,9 +5455,21 @@ class TortoiseSDK:
         also raised, so that is not a regression).
 
         What this buys, stated honestly: a rebuild window of roughly 7-14 s now
-        heals in place (``base=2.0``, 3 retries). The window #7405 measured
-        lasted **over an hour**, and no bounded retry should wait that long — so
-        on exhaustion the original error still surfaces, **unchanged in type**.
+        heals in place (``base=2.0``, 3 retries). The window is per CALL, not
+        per verb: the whole ``fn`` is re-issued together, so a caller that
+        issues several statements inside one ``fn`` (``update_point``'s
+        per-key loop, ``_sync_tags``) shares that one budget. A verb that
+        reaches several wrapped call sites pays one window PER SITE, so its
+        caller-visible bound is one window x the number of sites that branch
+        reaches. ``update_point`` is the widest: one for the property write
+        (the per-key loop counts once), one for the derived-embedding
+        clear+set when ``content`` is given without ``embedding``, and one for
+        the tag sync when ``tags`` is given — up to three (roughly 21-42 s)
+        for ``update_point(content=..., tags=[...])``, two for
+        ``update_point(tags=[...])``, and one for ``annotate_operator``. The
+        window #7405 measured lasted **over an hour**, and no bounded retry
+        should wait that long — so on exhaustion the original error still
+        surfaces, **unchanged in type**.
 
         Residual window, stated honestly. The classification-time probe can be
         stale by the time the retry runs — ``call_with_predicate`` evaluates the
@@ -5456,6 +5485,16 @@ class TortoiseSDK:
         ``retryable_aborted_write`` re-raises anything it does not recognise, so
         a deterministic failure (a malformed statement, ``WRONGTYPE``) is never
         retried and never wrapped in the sentinel.
+
+        #8854 review P2: the budget is per CALL, and ``fn`` is the unit of
+        retry — so the bound belongs to the caller's ``fn``, not to the verb.
+        A multi-statement ``fn`` (``update_point``'s per-key ``SET`` loop,
+        ``_sync_tags``' MERGE/read/DELETE sequence) is re-issued as a whole and
+        shares ONE 7-14 s window; a verb that calls this twice
+        (``update_point`` with tags) is bounded by two. Callers must keep the
+        count of calls per verb deliberate rather than assuming a fixed bound
+        per verb — the per-key loop is one call precisely so
+        ``annotate_operator``'s four properties do not multiply it.
 
         Retry budget (#7405 P2-2). This inner loop owns the write refusals
         (graph-replaced / write-lock / MISCONF) with ``retries=3`` (~7-14 s) and
@@ -5718,7 +5757,8 @@ class TortoiseSDK:
 
     # ── Core CRUD ─────────────────────────────────────────────────
 
-    def _sync_tags(self, proj: FalkorProjection, pid: str, tags) -> None:
+    def _sync_tags(self, proj: FalkorProjection, pid: str, tags,
+                   *, sweep_orphans: bool = False) -> None:
         """Reconcile TAGGED edges for a point against a tags value (#485).
 
         DELEGATES to the projection's own `_sync_tags` (#2897): live and
@@ -5727,8 +5767,12 @@ class TortoiseSDK:
         projection is the owner of the write; this method is kept as the SDK
         entry point so the existing call sites (and their
         `_graph_write_with_retry` wrapping) are unchanged.
+
+        `sweep_orphans` is forwarded verbatim: `update_point` sets it because a
+        retried reconciler can skip the orphan-`:Tag` GC otherwise (#8854
+        review P3 — see the projection method's docstring).
         """
-        proj._sync_tags(pid, tags)
+        proj._sync_tags(pid, tags, sweep_orphans=sweep_orphans)
 
     # ── Events: cursor-based poll (Task 5) ────────────────────────────
 
@@ -9658,6 +9702,22 @@ class TortoiseSDK:
             "s.sourceKind=$sk",
             "s.sessionId=$sid",
             "s.capturedAt=$cap",
+            # Lane L5 (#5097): the update instant, GATED EXACTLY AS THE FOLD GATES
+            # IT — and placed BEFORE `s.contentHash` so the CASE can only ever
+            # read the PRE-write hash (`_upsert_source` relies on the same
+            # property for `version`, pinned at `version == 2`).
+            #
+            # A plain `coalesce` here kept the FIRST stamp forever while the
+            # record below always carries THIS call's instant, and
+            # `_upsert_source`'s ON MATCH writes `coalesce($updatedAt, $now)` on
+            # its hash-diff arm. So a second materialization whose transcript (and
+            # therefore hash) CHANGED left live on t1 and a replay on t2 — the
+            # divergence the previous comment claimed away (review P2). The two
+            # halves now move together: same-hash re-capture keeps the first
+            # stamp on both sides, a stub completion / hash change moves both.
+            "s.updatedAt=CASE WHEN s.contentHash IS NULL "
+            "OR s.contentHash <> $ch THEN $now "
+            "ELSE coalesce(s.updatedAt, $now) END",
             "s.contentHash=$ch",
             "s.summary=$sum",
             "s.topics=$topics",
@@ -9668,13 +9728,97 @@ class TortoiseSDK:
             set_clauses.append("s.eventId=$eid")
             params["eid"] = event_id
         proj = self._get_proj()
-        proj.g.query(
-            "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses),
+        # `RETURN s.validFrom, s.is_episodic` — the TWO properties this writer
+        # must NOT move but must not DESTROY on replay either (see the carrier
+        # note below). Read back from the node the write just completed, in the
+        # same statement, so the values are the ones it holds.
+        _rows = proj.g.query(
+            "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses)
+            + " RETURN s.validFrom, s.is_episodic",
             params=params,
-        )
+        ).result_set
+        prior_valid_from = _rows[0][0] if _rows else None
+        prior_is_episodic = _rows[0][1] if _rows else None
         if event_id:
             # Anchored ON CREATE by the shared derivation writer (#5199).
             proj.link_source_to_event(url, event_id)
+        # ⛔ THE RAW MERGE ABOVE NEEDS A JOURNAL CARRIER (lane L5 #5097, gate
+        # item 2). It is a raw graph SET on the capture path, and the rule for
+        # those is ALREADY recorded on this lane (`_write_capture_turns`'s
+        # `capture_redactions` note a few hundred lines up): a raw SET with no
+        # trailing record makes live and replay diverge, so a rebuild silently
+        # reverts what the write stored. Measured before this record existed
+        # (`capture_session` -> `rebuild()`): the session `:Source` came back
+        # with `summary`, `topics`, `sessionId`, `capturedAt`, `eventId`,
+        # `contentHash` and `_searchText` all GONE — every one of them derived
+        # from the #4911-redacted transcript, i.e. the lane's own sink losing
+        # its own output on the disaster-recovery path.
+        #
+        # `SourceCreated` is the carrier, not a new record type: the graph fold
+        # already replays it through `_upsert_source`, the existing producer
+        # (`create_source`) emits it for exactly this "same hash but new
+        # summary/topics" case (`_source_payload_is_noop`'s non-noop arm), and
+        # #5024 built its emission so the extras survive a rebuild. Emitting it
+        # here — rather than hand-rolling a shape — keeps ONE carrier for a
+        # `:Source` write.
+        #
+        # The payload carries THE VALUES THE WRITE STORED, never the caller's
+        # raw input (the `_journal_entity_mutation` `state` rule, and here it
+        # is also the #4911 rule: the redacted metadata is what must replay).
+        #
+        #   * `title=None` — this writer never sets one. The ON MATCH arm's
+        #     `coalesce($title, s.title)` then keeps whatever the node holds, and
+        #     the ON CREATE arm's `coalesce($title, $url)` reproduces the stub's
+        #     `title=url` instead of erasing it.
+        #   * `_stub_completion=True` — THIS RECORD COMPLETES A STUB, IT DOES NOT
+        #     CREATE A SOURCE (`_upsert_source` reads it as `$stub_completion`).
+        #     It suppresses the ON CREATE arm's three CREATOR-ONLY defaults, which
+        #     the live node never has (the M2 `_link_source` stub created it):
+        #     `id`, `version=1` and `externalId=''`. Without it a `rebuild_all` —
+        #     which folds `SourceCreated` in pass 1b, BEFORE pass 2 mints the stub
+        #     — recovered a session `:Source` carrying a version ordinal this
+        #     writer does not advance (review P1).
+        #   * it also admits this record's own prop spellings
+        #     (`_SOURCE_CAPTURE_REPLAY_PROPS`) to the passthrough WITHOUT widening
+        #     the caller surface a `create_source(**props)` call rides.
+        #   * `validFrom` and `is_episodic` are carried from the NODE
+        #     (`RETURN`ed above), because this writer must neither move nor erase
+        #     them: `_upsert_source`'s hash-diff arm writes `s.validFrom = $vf`,
+        #     and `$vf = null` REMOVES the property — so omitting the key cleared a
+        #     window a prior `create_source` (or the stub's `is_episodic`, the
+        #     #1486 discriminator) had established, i.e. a replay regression on a
+        #     RECORDED field (review P2). Carrying the node's own value makes the
+        #     fold's write a no-op on both arms.
+        #   * `updatedAt` carries the instant the write stamped, so the fold's
+        #     stub-completion arm reproduces it instead of the replay clock.
+        #
+        # ⚠️ `ingestedAt` is emitted too, but it is a KNOWN RESIDUAL and is not
+        # claimed as faithful: the stub this write completes is created by the
+        # M2 `_link_source` projection write, whose `ingestedAt` is minted from
+        # the clock at ITS write, and `_upsert_source`'s ON MATCH arm has no
+        # `ingestedAt` clause at all (only ON CREATE reads the recorded value).
+        # So a rebuilt session Source keeps a replay-clock ingest stamp. That
+        # is the same unjournaled-writer class one writer upstream, not
+        # something this record can fix; the recorded value is emitted anyway so
+        # the ON CREATE path (no stub) is faithful.
+        self._emit_event(
+            "SourceCreated", id=url,
+            url=url,
+            sourceKind="agentSession",
+            contentHash=content_hash,
+            title=None,
+            ingestedAt=now,
+            updatedAt=now,
+            validFrom=prior_valid_from,
+            is_episodic=prior_is_episodic,
+            _stub_completion=True,
+            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
+            sessionId=session_id,
+            capturedAt=now,
+            summary=summary,
+            topics=topics,
+            **(({"eventId": event_id}) if event_id else {}),
+        )
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -10022,86 +10166,41 @@ class TortoiseSDK:
                 "n", preserve_on_null=False)
             _embed_params[EMBEDDING_PROPERTY] = props.get(EMBEDDING_PROPERTY)
 
-        if has_object:
-            if 'status' in props:
-                # Promote guard folded INTO the WHERE clause (plan-review P2:
-                # single round trip, no widened write window).
-                # #2884 A2: carry the REST of `props` too. This arm used to
-                # write ONLY status/updatedAt/version while the emit below
-                # unconditionally journaled the whole `props` dict — so
-                # `update_point(draft, status='live', confidence=0.5)` claimed
-                # a write the live graph never made, and the replay fold then
-                # applied it: a rebuilt graph held a confidence the pre-wipe
-                # graph never had. The sibling no-status arm below already
-                # writes `SET n += $props`, so this makes the two arms agree
-                # and makes live match the durable record (write == read).
-                res = proj.g.query(
-                    "MATCH (n:Point:Object {id:$id}) "
-                    "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    + _embed_clear
-                    + "SET n.status = 'live', n.updatedAt = $now, "
-                    "n.version = coalesce(n.version, 0) + 1, n += $props"
-                    + _embed_set + " "
-                    "RETURN n",
-                    params={"id": id, "props": _props_param, "now": now,
-                            **_embed_params},
-                )
-                if not res.result_set:
-                    _raise_update_point_status_error(proj, id)
-            else:
-                proj.g.query(
-                    "MATCH (n:Point:Object {id:$id}) " + _embed_clear
-                    + "SET n += $props, n.version = coalesce(n.version, 0) + 1, "
-                    "n.updatedAt = $now" + _embed_set,
-                    params={"id": id, "props": _props_param, "now": now,
-                            **_embed_params},
-                )
-        else:
-            if 'status' in props:
-                # Promote guard folded INTO the WHERE clause (plan-review P2).
-                # #2884 A2: see the :Object arm above — the rest of `props`
-                # rides the same statement, so the journaled payload is the
-                # whole truth of this write.
-                res = proj.g.query(
-                    "MATCH (n:Point {id:$id}) "
-                    "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    + _embed_clear
-                    + "SET n.status = 'live', n.updatedAt = $now, n += $props"
-                    + _embed_set + " "
-                    "RETURN n",
-                    params={"id": id, "props": _props_param, "now": now,
-                            **_embed_params},
-                )
-                if not res.result_set:
-                    _raise_update_point_status_error(proj, id)
-            else:
-                for key, val in _props_param.items():
-                    proj.g.query(
-                        "MATCH (n:Point {id:$id}) SET n += $props",
-                        params={"id": id, "props": {key: val}},
-                    )
-                if _derived_embedding:
-                    # The clear and the set are ONE atomic query, so a crash
-                    # between them cannot leave the node vectorless. This arm
-                    # is already per-key (not one statement), so the added
-                    # embedding write introduces no new non-atomicity.
-                    proj.g.query(
-                        "MATCH (n:Point {id:$id}) " + _embed_clear
-                        + "SET " + set_embedding_clause(
-                            "n", preserve_on_null=False),
-                        params={"id": id, **_embed_params},
-                    )
-        # Tag sync (#485): keep TAGGED edges consistent with the n.tags
-        # property — update_point previously set the property but left edges
-        # stale, so query_points_by_tag missed updated points. Falsy tag
-        # values (None, "") normalize to [] like create_point, so the
-        # "clear tags" idiom removes edges instead of leaving them stale.
-        if "tags" in props:
-            self._sync_tags(proj, id, props["tags"] or [])
-        # Dreaming (#85): property mutations can affect confidence.
-        self._mark_dirty([id])
-        result = self.get_point(id)
-        # #548: emit PointRevised event for rebuild parity
+        # ── #7951 §17.1 — THE OUTBOX ORDERING ON `update_point` ──────────────
+        # THE APPEND IS THE COMMIT POINT (§17.1 mechanism (1) in its OUTBOX
+        # form; the same ordering `create_point` took in increment 1 —
+        # `docs/plans/2026-10-14-7951-atomic-write-outbox.md`). The record is
+        # built from the WRITE INTENT (`props`, the very dict the `SET` below
+        # writes — never a post-write read-back) and appended BEFORE the cache
+        # write, so the derived store cannot lead the truth.
+        #
+        # WHY THIS DOOR. Until now this door wrote the node and only then
+        # emitted `PointRevised` — apply-first. `_emit_event` is deliberately
+        # best-effort (#4240: a journal failure must never crash a write that
+        # DID persist), so a failed append left the CACHE AHEAD OF THE JOURNAL
+        # with no repair path: `rebuild_all` replays the OLD value and the
+        # revision is gone. That is window (a) of the ordering contract at the
+        # top of this module — the one a replay cannot undo — on the SDK's most
+        # common mutation door.
+        #
+        # ⛔ THE PROMOTE ARM (`status='live'`) IS EXEMPT AND STAYS APPLY-FIRST.
+        # Its `SET` is GUARDED by a `WHERE` that can legitimately match nothing
+        # (an illegal transition, or a node that vanished) and the door then
+        # RAISES. Journalling first would record a promotion the graph REFUSED,
+        # and a replay would apply it — truth claiming a state the live write
+        # never reached, which is strictly worse than the window this fixes.
+        # That is the contract's exception 2 shape (the record can only be
+        # stated AFTER the write) and it is pinned by
+        # `tests/test_7951_update_point_outbox.py`:
+        # `test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
+        # `test_a_refused_promote_journals_no_revision`.
+        #
+        # ⛔ NOT ROUTED THROUGH THE FOLD YET. The writes below still go through
+        # the raw guarded handle, so no `_live_write_scope` is opened here: the
+        # §17.1 guard covers `FalkorProjection.apply`/`.query`, and a scope
+        # around a raw handle would authorize nothing (the same statement
+        # `create_point`'s scope makes about itself). Moving these writes onto
+        # the fold is increment 3, and that is when this door declares itself.
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
         # #4208: the vector this path just DERIVED from the content is stripped
@@ -10115,8 +10214,188 @@ class TortoiseSDK:
             if k != "content_hash"
             and not (_derived_embedding and k == "embedding")
         }
-        self._emit_event("PointRevised", id=id,
-                         new_content=props.get("content"), **emit_props)
+        _promote_arm = 'status' in props
+        if not _promote_arm:
+            # The append's OWN per-call outcome is the commit signal — a
+            # per-call value, not a delta of the shared
+            # `_journal_write_failures` counter, which a CONCURRENT writer on
+            # the same instance can move (#5612).
+            _record_committed = self._emit_event(
+                "PointRevised", id=id,
+                new_content=props.get("content"), **emit_props)
+            if _record_committed is False:
+                # No record ⇒ NO cache write: the revision is not applied, and
+                # the caller is told so rather than handed a silent success.
+                from .exceptions import WriteNotLandedError
+                raise WriteNotLandedError(
+                    id, getattr(proj, "graph_name", None),
+                    operation="update_point")
+
+        # #7405: the property writes below ride the bounded write retry —
+        # `update_point` is the SDK's most common mutation door
+        # (`annotate_operator` delegates here), so a rebuild's per-query abort
+        # used to reject the revision outright while reads kept serving: the
+        # finding is revised in the caller's head and lost from the map. Every
+        # statement here is admissible on `retryable_aborted_write` ALONE — its
+        # arms prove the statement did NOT land — and every value is computed
+        # once above (``_props_param``, ``now``, ``_embed_params`` are all fixed
+        # at the call), so a re-issue converges on exactly the state a single
+        # successful issue would produce. That is also why the one relative
+        # write inside a statement (``n.version = coalesce(n.version, 0) + 1``)
+        # cannot double-bump: it is safe for the did-not-land reason, NOT
+        # because it is an absolute SET. The promote arms carry their guard INSIDE
+        # the statement, so a re-issue re-evaluates the same
+        # `status IS NULL OR status = 'draft'` predicate against the graph — it
+        # cannot promote twice, and a legitimately-refused promote still yields
+        # an empty result set (the caller's
+        # ``_raise_update_point_status_error`` path is unchanged).
+        if has_object:
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2:
+                # single round trip, no widened write window).
+                # #2884 A2: carry the REST of `props` too. This arm used to
+                # write ONLY status/updatedAt/version while the emit below
+                # unconditionally journaled the whole `props` dict — so
+                # `update_point(draft, status='live', confidence=0.5)` claimed
+                # a write the live graph never made, and the replay fold then
+                # applied it: a rebuilt graph held a confidence the pre-wipe
+                # graph never had. The sibling no-status arm below already
+                # writes `SET n += $props`, so this makes the two arms agree
+                # and makes live match the durable record (write == read).
+                # #7405: the property writes below ride the bounded write
+                # retry — explained once above the arm split.
+                res = self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (n:Point:Object {id:$id}) "
+                        "WHERE (n.status IS NULL OR n.status = 'draft') "
+                        + _embed_clear
+                        + "SET n.status = 'live', n.updatedAt = $now, "
+                        "n.version = coalesce(n.version, 0) + 1, n += $props"
+                        + _embed_set + " "
+                        "RETURN n",
+                        params={"id": id, "props": _props_param, "now": now,
+                                **_embed_params},
+                    ),
+                    what="update_point SET (Object promote)",
+                )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (n:Point:Object {id:$id}) " + _embed_clear
+                        + "SET n += $props, "
+                        "n.version = coalesce(n.version, 0) + 1, "
+                        "n.updatedAt = $now" + _embed_set,
+                        params={"id": id, "props": _props_param, "now": now,
+                                **_embed_params},
+                    ),
+                    what="update_point SET (Object)",
+                )
+        else:
+            if 'status' in props:
+                # Promote guard folded INTO the WHERE clause (plan-review P2).
+                # #2884 A2: see the :Object arm above — the rest of `props`
+                # rides the same statement, so the journaled payload is the
+                # whole truth of this write. #7405: retried, like its :Object
+                # sibling above.
+                res = self._graph_write_with_retry(
+                    lambda: proj.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "WHERE (n.status IS NULL OR n.status = 'draft') "
+                        + _embed_clear
+                        + "SET n.status = 'live', n.updatedAt = $now, "
+                        "n += $props" + _embed_set + " "
+                        "RETURN n",
+                        params={"id": id, "props": _props_param,
+                                "now": now, **_embed_params},
+                    ),
+                    what="update_point SET (promote)",
+                )
+                if not res.result_set:
+                    _raise_update_point_status_error(proj, id)
+            else:
+                # #7405: one key per statement, each an absolute
+                # `SET n += $props` — a re-issue writes the same value to
+                # the same key, so it cannot double-apply or clobber a
+                # sibling key the loop has not reached yet.
+                #
+                # ⛔ ONE retry budget for the WHOLE loop, not one per key
+                # (#8854 review P2). The budget in
+                # `_graph_write_with_retry` is per CALL (`retries=3` → one
+                # 7-14 s window), so wrapping each key separately made the
+                # caller-visible bound scale with the property count:
+                # `annotate_operator` always passes FOUR keys
+                # (`annotator_bias`/`_precision`/`_consistency`/`_directness`)
+                # and would have blocked 4x the documented window before
+                # raising — while buying nothing, because the #7405 window it
+                # cannot outlast refuses EVERY key. Re-issuing the whole loop
+                # is safe for the same reason each key is: an abort means the
+                # statement did not land, and every statement is an absolute
+                # `SET` of a value fixed before the first attempt, so the keys
+                # that DID land in the aborted attempt are rewritten to the
+                # same value rather than re-applied.
+                def _write_props() -> None:
+                    for key, val in _props_param.items():
+                        proj.g.query(
+                            "MATCH (n:Point {id:$id}) SET n += $props",
+                            params={"id": id, "props": {key: val}},
+                        )
+
+                self._graph_write_with_retry(
+                    _write_props, what="update_point SET (per-key)")
+                if _derived_embedding:
+                    # The clear and the set are ONE atomic query, so a crash
+                    # between them cannot leave the node vectorless. This arm
+                    # is already per-key (not one statement), so the added
+                    # embedding write introduces no new non-atomicity.
+                    # #7405: absolute clear+set, converged by a re-issue.
+                    self._graph_write_with_retry(
+                        lambda: proj.g.query(
+                            "MATCH (n:Point {id:$id}) " + _embed_clear
+                            + "SET " + set_embedding_clause(
+                                "n", preserve_on_null=False),
+                            params={"id": id, **_embed_params},
+                        ),
+                        what="update_point SET (embedding)",
+                    )
+        # Tag sync (#485): keep TAGGED edges consistent with the n.tags
+        # property — update_point previously set the property but left edges
+        # stale, so query_points_by_tag missed updated points. Falsy tag
+        # values (None, "") normalize to [] like create_point, so the
+        # "clear tags" idiom removes edges instead of leaving them stale.
+        # #7405: `create_point` already rides the retry for this same helper
+        # (`"create_point TAGGED edges"`); the update door did not, so the
+        # same mutation surface behaved differently depending on which verb
+        # the caller used. `_sync_tags` MERGEs each TAGGED edge and DELETEs the
+        # dropped ones by an explicit id, so a re-issue after a non-landing
+        # abort converges on the caller's tag list.
+        if "tags" in props:
+            # `sweep_orphans=True`: the orphan-`:Tag` GC inside `_sync_tags`
+            # normally keys off the edges THIS invocation deleted, and a retry
+            # re-invokes the whole helper — after an abort that landed the
+            # `DELETE r` before the GC statement, the re-read finds nothing
+            # stale and the GC would be skipped, leaving an orphan `:Tag` that
+            # a rebuilt graph (which never had one) does not have. Passing it
+            # unconditionally makes the sweep a function of the caller's tag
+            # list, not of a per-invocation counter (#8854 review P3).
+            self._graph_write_with_retry(
+                lambda: self._sync_tags(
+                    proj, id, props["tags"] or [], sweep_orphans=True),
+                what="update_point TAGGED edges",
+            )
+        # Dreaming (#85): property mutations can affect confidence.
+        self._mark_dirty([id])
+        result = self.get_point(id)
+        # #548: emit PointRevised event for rebuild parity.
+        # The PROMOTE arm's record is stated only now, AFTER its guarded write:
+        # the emit above ran for the unguarded arms (the outbox ordering), and
+        # this one may not precede a `SET` that can legitimately match nothing
+        # (see the outbox block above). The payload is the same dict either
+        # way — one record shape, one commit point per call.
+        if _promote_arm:
+            self._emit_event("PointRevised", id=id,
+                             new_content=props.get("content"), **emit_props)
         return result
 
     def delete_point(self, id: str) -> bool:
@@ -10454,19 +10733,34 @@ class TortoiseSDK:
             valid_to_precision=end_precision, expired_at=now,
         )
 
-        proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.outdated = true, "
-            "n.updatedAt = $now, n.validTo = $valid_to, "
-            "n.validToPrecision = $valid_to_precision, "
-            "n.expiredAt = $now, "
-            f"{decay_clause('n')}",
-            params={"id": id, "now": now, "valid_to": stamp_valid_to,
-                    "valid_to_precision": end_precision},
+        # #7405: both statements are retry-admissible on
+        # `retryable_aborted_write` alone. The terminal stamp is an ABSOLUTE
+        # `SET` whose every value (``now``, ``stamp_valid_to``,
+        # ``end_precision``) was fixed before the first attempt, so a re-issue
+        # writes the same end-state without moving the window end; the
+        # `CORRECTS` edge is a MERGE on its endpoints, so it cannot double.
+        # The abort means the statement did not land, so neither re-issue can
+        # re-apply an effect — which is why this is safe even though the event
+        # above is emitted BEFORE the mutation.
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.outdated = true, "
+                "n.updatedAt = $now, n.validTo = $valid_to, "
+                "n.validToPrecision = $valid_to_precision, "
+                "n.expiredAt = $now, "
+                f"{decay_clause('n')}",
+                params={"id": id, "now": now, "valid_to": stamp_valid_to,
+                        "valid_to_precision": end_precision},
+            ),
+            what="invalidate_point terminal stamp SET",
         )
-        proj.g.query(
-            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "MERGE (a)-[:CORRECTS]->(b)",
-            params={"new_id": corrected_by_id, "old_id": id},
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+                "MERGE (a)-[:CORRECTS]->(b)",
+                params={"new_id": corrected_by_id, "old_id": id},
+            ),
+            what="invalidate_point CORRECTS edge",
         )
         # Dreaming (#85): invalidation changes the propagation graph.
         # #2422 ORDERING: message drops BEFORE _mark_dirty's epoch bump (see
@@ -11224,12 +11518,23 @@ class TortoiseSDK:
         # shared vocabulary as the guard and the read path — the generic
         # `_terminal_excluded` predicate also rejects the legacy
         # `outdated=true` flag, not just a hardcoded status subset.
-        r = proj.g.query(
-            "MATCH (n:Point {id:$id}) "
-            f"WHERE {_terminal_excluded('n.status')} "
-            "SET n.status = 'retracted', n.updatedAt = $now, "
-            f"{decay_clause('n')} RETURN properties(n)",
-            params={"id": id, "now": _now})
+        # #7405: the CAS SET rides the bounded write retry — the same
+        # terminal-transition shape as `invalidate_point`'s stamp. The
+        # `_terminal_excluded` guard is INSIDE the statement and is re-read on
+        # re-issue, and `_now` is minted once above, so a re-issued abort (which
+        # by definition did not land) converges on the same stamp and cannot
+        # re-retract or move `updatedAt`. An already-terminal point still yields
+        # an empty result set on re-issue, so the `ValueError` contract is
+        # unchanged.
+        r = self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (n:Point {id:$id}) "
+                f"WHERE {_terminal_excluded('n.status')} "
+                "SET n.status = 'retracted', n.updatedAt = $now, "
+                f"{decay_clause('n')} RETURN properties(n)",
+                params={"id": id, "now": _now}),
+            what="retract_point CAS SET",
+        )
         if not r.result_set:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
@@ -11624,10 +11929,67 @@ class TortoiseSDK:
         ``limit`` is a NEWEST-END window: it returns at most the newest
         ``limit`` entries of the chain — the current belief is the last of
         them — never the oldest (#7293).
+
+        ``topic`` is an id or a NAME coordinate, resolved through
+        ``entity_identity.resolve_entity_id`` (#5509). A name is a mutable
+        natural key: under #3590 D2 two live Objects may hold it, so the read
+        must resolve to EXACTLY ONE live Object and never union both carriers'
+        decision Points into one chain (measured: renaming an unrelated
+        company to a topic's name appended its decisions to that topic's
+        timeline). Two or more live carriers REFUSES
+        (:class:`AmbiguousEntityName`, the non-folded entry already recorded by
+        the resolver); no live holder (absent, or held only by terminal
+        carriers — D2's ``single_terminal_holder_reference``) yields ``[]`` and
+        records the refusal, so it is distinguishable from a union.
+
+        ``canonical_name`` is matched by the resolver's name arm, not by this
+        read: it is a second spelling of the same natural key, so it takes the
+        same holder-count discipline instead of widening the union.
+
+        A single live holder that carries NO ``id`` (a raw/legacy producer
+        wrote it — ``hosted_api``'s capture wiring mints such a stub before its
+        entity step adopts it) is NOT refused here: the identity question is
+        already answered (exactly one live candidate) and the chain is
+        traversed through the ``aboutObject`` edges, so only the id-keyed
+        ADDRESS is missing, not the answer. That one case reads the holder by
+        its (unique, live) name — it cannot fold two carriers, because the
+        resolver just proved there is only one.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
+        # ROUTE-THEN-REFUSE (#5509, plan §B.1). The old read was
+        # `... -[:aboutObject]->(o:Object) WHERE o.name = $topic OR
+        # o.canonical_name = $topic`, i.e. a NAME-keyed match over every
+        # carrier. Two live same-name Objects are legal, so that read folded
+        # two identities' beliefs into one chain — and a name held only by a
+        # TERMINAL Object still resolved (D2 refuses that). Resolve the
+        # coordinate to one live id and match the id: the identity decision
+        # lives in the resolver, not here.
+        try:
+            entity_id = resolve_entity_id(
+                proj.g, "Object", topic, name_props=("name", "canonical_name"))
+            unaddressable = False
+        except UnaddressableEntityName:
+            # EXACTLY ONE live holder, and it carries no `id` property. The
+            # resolver refused it because an ID-KEYED WRITE could not address
+            # it; this read only needs to reach it, and the holder set is
+            # already proven unique — so the name below is unambiguous. The
+            # live predicate is what keeps the read from touching a terminal
+            # carrier, and it is the ONLY name-keyed branch left here.
+            entity_id = None
+            unaddressable = True
+        if entity_id is None and not unaddressable:
+            # No live holder: an absent name, or one held ONLY by terminal
+            # carriers (refused and recorded by the resolver above — D2 never
+            # hands a caller a terminal id). Nothing live to build a chain on.
+            return []
+        if unaddressable:
+            entity_predicate = (
+                "(o.name = $topic OR o.canonical_name = $topic) "
+                f"AND {_terminal_excluded('o.status')}")
+        else:
+            entity_predicate = "o.id = $oid"
         # The DB window MUST be taken from the NEWEST end (#7293). The former
         # `ORDER BY p.validFrom LIMIT` was ASCENDING, so it truncated to the
         # OLDEST rows and the `entries[-limit:]` tail below could only re-take
@@ -11644,10 +12006,10 @@ class TortoiseSDK:
             "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
             "(o:Object) "
             "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
-            "AND (o.name = $topic OR o.canonical_name = $topic) "
+            f"AND {entity_predicate} "
             "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
             "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit",
-            params={"topic": topic, "limit": limit},
+            params={"oid": entity_id, "topic": topic, "limit": limit},
         ).result_set
         entries = [list(r) for r in rows]
         # Superseded priors dropped out of the topic query (supersede_point
@@ -13633,7 +13995,9 @@ class TortoiseSDK:
         rejection on IMPL/NAND; multi-target rejection on plain IMPL/NAND
         (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
         + route-scoped attribute rejection (cycle-13: relation carries
-        direction/confidence/weight; operator route carries confidence/weight).
+        direction/confidence/weight — plus ``mitigation`` since #5244, because
+        a structural edge has no operator bridge to damp; operator route
+        carries confidence/weight).
         """
         if not isinstance(conn, dict):
             return  # dict-ness already reported by check 1
@@ -13805,6 +14169,24 @@ class TortoiseSDK:
                                    f"edges) — it belongs on plain IMPL/NAND "
                                    f"direct edges",
                     })
+            # #5244: `mitigation` is an OPERATOR-route attribute (§2.1 — a
+            # mitigation damps the operator bridge it attacks, #4937). A
+            # structural edge has no operator to damp, so accepting the key
+            # here would be the same accept-and-drop defect the operator route
+            # carried: the value validated, the write succeeded, nothing
+            # stored. Refuse it and name the route that does honor it.
+            if "mitigation" in conn:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] mitigation is "
+                               f"not allowed on relation connections "
+                               f"(structural edges) — a mitigation damps an "
+                               f"operator bridge (ontology §3.9); express the "
+                               f"connection as `operator` + `mitigation`, or "
+                               f"create it and call sdk.mitigate_operator("
+                               f"id=<operator id>, reason=..., "
+                               f"strength=0.10..0.50)",
+                })
 
     def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
         """ONE batched query resolving external endpoint existence, label
@@ -14340,6 +14722,16 @@ class TortoiseSDK:
           operator-less — routed to a DIRECT edge (no operator node, see
           INGEST_CONTRACT.md §8). A connection carrying ``relation`` stays a
           PLAIN structural edge (structural edges never reify).
+        - ``mitigation: {reason, strength}`` on an operator connection is
+          APPLIED, not just an anchor (#5244): after the operator is created /
+          deduped / absorbed, the mitigation is written through
+          :meth:`mitigate_operator` — a mitigation Point plus the
+          ``(op)-[:mitigated_by]->(m)`` edge, stamped with the bundle's
+          batch_id. Re-submission updates it IN PLACE (never a duplicate) and
+          warns ``mitigation_strength_change`` when the reason/strength
+          actually changed (INGEST_CONTRACT §3.2 key 6). On a ``relation``
+          connection a mitigation is a Phase-1 violation: a structural edge
+          has no operator bridge to damp.
         - Endpoint typing (#2062): operator-ROUTED connections (reify:
           true/mitigation/part-whole → create_operator) accept Point OR Event
           endpoints (A1b #1272 parity — the dedup key in _find_operator
@@ -14929,6 +15321,22 @@ class TortoiseSDK:
                 # (g)): a retry's _find_operator dedup hit on a batch-less
                 # operator Point acquires the bundle's batch_id.
                 self._stamp_batch_id(oid, batch_id)
+                # #5244: APPLY the connection's `mitigation` to the operator
+                # this connection resolved to — created, deduped OR absorbed.
+                # Until this call existed the field was read for ROUTING
+                # (`_connection_route`), accepted and validated by
+                # `_check_connection`, and then dropped: the caller got a real
+                # operator, a success status, no mitigation Point, no
+                # `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`
+                # edge and no warning. Applied AFTER the operator write (the
+                # target id is only known here) and on EVERY submission, so a
+                # re-submission re-applies too — `mitigate_operator` is
+                # idempotent: it UPDATES the existing mitigation in place,
+                # never duplicates (INGEST_CONTRACT §3.2 key 6). The helper
+                # stamps the mitigation Point with this bundle's batch_id.
+                mitigation = conn.get("mitigation")
+                if isinstance(mitigation, dict):
+                    self._apply_ingest_mitigation(oid, mitigation, batch_id)
                 ids["connections"].append(oid)
             else:
                 rel = conn["relation"]
@@ -15597,6 +16005,64 @@ class TortoiseSDK:
             return {"kind": "decline",
                     "candidates": [r[0] for r in prows]}
         return None
+
+    def _apply_ingest_mitigation(self, operator_id: str, mitigation: dict,
+                                 batch_id: str) -> str:
+        """Apply an ingest connection's `mitigation` to its operator (#5244).
+
+        Phase 1 validates the shape (``_check_connection``: non-empty string
+        ``reason``, numeric ``strength`` in [0, 1]) and Phase 2 must therefore
+        HONOR it — a validated field that is not persisted is the one failure
+        mode a caller cannot detect. The write goes through
+        :meth:`mitigate_operator`, the single sanctioned mitigation writer
+        (ontology §3.9: ``mitigated_by`` can only originate from an
+        ``is_operator:true`` Point — a mitigation damps the operator bridge it
+        attacks, #4937), so the ingest path cannot drift from the direct-call
+        path.
+
+        Re-submission semantics (INGEST_CONTRACT §3.2 key 6):
+        ``mitigate_operator`` is idempotent — it updates the existing
+        mitigation's reason/strength IN PLACE (never a second Point) — and the
+        documented ``mitigation_strength_change`` warning is emitted when that
+        update actually changed something. An unchanged re-submission is
+        silent, as are incident retries (the crash-retry contract, §7).
+
+        The mitigation Point is stamped with the bundle's ``batch_id`` (§16:
+        "every **new** Point the bundle creates — plain points, operator
+        Points, mitigation Points"), carrying the two record fields
+        ``_stamp_batch_id`` reserves for exactly this write, so a
+        ``list_batch`` audit of the bundle includes the dampener the response
+        claimed to commit.
+
+        Returns the mitigation Point id.
+        """
+        reason = mitigation["reason"]
+        strength = mitigation["strength"]
+        # Read the mitigation this operator already carries BEFORE the write,
+        # so the in-place update is observable (§3.2 key 6). One query, only on
+        # a connection that declared a mitigation.
+        prior = self._get_proj().g.query(
+            "MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) "
+            "RETURN m.id, m.content, m.mitigation_strength",
+            params={"oid": operator_id},
+        ).result_set
+        mid = self.mitigate_operator(
+            operator_id, reason=reason, strength=strength)["id"]
+        if prior:
+            _old_id, _old_content, _old_strength = prior[0]
+            _old_reason = (_old_content or "").removeprefix("[MITIGATION] ")
+            try:
+                _same_strength = (_old_strength is not None
+                                  and float(_old_strength) == float(strength))
+            except (TypeError, ValueError):  # unrepresentable legacy value
+                _same_strength = False
+            if _old_reason != reason or not _same_strength:
+                self._append_warning(
+                    f"mitigation_strength_change:{operator_id}:{mid}:"
+                    f"{_old_strength}->{strength}")
+        self._stamp_batch_id(mid, batch_id, mitigates_operator_id=operator_id,
+                             mitigation_strength=strength)
+        return mid
 
     def _append_warning(self, entry: str) -> None:
         """Append to the current ingest's warnings accumulator (A3 cycle-23
@@ -25369,20 +25835,17 @@ class TortoiseSDK:
                 id=event["id"],
                 **_journal_record_payload(event),
             )
-        # #452: Subject/Object MERGE by name (content-hash dedup).
-        # When the name already exists, the fresh id_val never lands on the
-        # node (ON CREATE never fires).  Re-fetch the canonical id from the
-        # graph so callers get a usable return value — matching create_point
-        # dedup behavior which returns the existing point id.
+        # #452: Subject/Object MERGE by name (content-hash dedup) — the fresh
+        # id_val never lands on a pre-existing node via ON CREATE, but the
+        # MERGE's ON MATCH clause writes it anyway (`o.id=coalesce($id, o.id)` /
+        # `s.id=coalesce($id, s.id)`), so the id this call returns is DERIVED
+        # from the write, not re-read from the graph. The re-fetch that used to
+        # live here (`MATCH (n:{label} {name:$name}) RETURN n.id` →
+        # `result_set[0][0]`) resolved identity by NAME: with two same-name
+        # carriers it returned an ARBITRARY row (backend order), i.e. possibly
+        # a node this call did not write. Deleted per #5509 (plan §A/§B P1-A
+        # "the ninth-cycle seed").
         canonical_id = id_val
-        if label in ("Subject", "Object") and "name" in event:
-            name = event["name"]
-            r = proj.g.query(
-                f"MATCH (n:{label} {{name: $name}}) RETURN n.id",
-                params={"name": name},
-            )
-            if r.result_set and r.result_set[0]:
-                canonical_id = r.result_set[0][0]
         # Wire edges after entity exists in graph (use canonical id)
         if props.get("authoredBy"):
             proj.create_authored_by(canonical_id, props["authoredBy"])
@@ -29247,6 +29710,31 @@ class TortoiseSDK:
                     f"props — the merge-run token is minted by the server "
                     f"(#5196)."
                 )
+        # Lane L5 (#5097 review P1): `_stub_completion` is the CAPTURE-
+        # COMPLETION DISCRIMINATOR. `_upsert_source` reads it as a PARAMETER
+        # (`$stub_completion`) and it SELECTS WRITE BEHAVIOUR twice: it
+        # suppresses the ON CREATE arm's creator-only defaults
+        # (`id`/`version`/`externalId`) and it widens the passthrough to
+        # `_SOURCE_CAPTURE_REPLAY_PROPS`. Because this method builds `ev` as
+        # `{..., **props}` and `_skip_sanitize=True`s the projection, an
+        # unlisted key rode straight through — measured on the review head:
+        # `create_source("session:x", "agentSession",
+        # _stub_completion=True, sessionId="forged", capturedAt="…",
+        # eventId="forged")` (a) PERSISTED all three provenance props the
+        # record's own comment says are denied here (#3998), (b) created the
+        # tenant's node with NO `id`/`version`/`externalId` — defeating this
+        # method's own `id` reject — and (c) JOURNALLED the forged key + props,
+        # so every rebuild restored the forgery. Same class as `_stub`
+        # (#7936), `__runId` (#5196) and `contains_session` (#3947): a payload
+        # key that decides replay behaviour is server-managed, not a prop. The
+        # ONE producer is `_materialize_session_source`'s own `_emit_event`
+        # call, which never re-enters this method.
+        if "_stub_completion" in props:
+            raise ValueError(
+                "'_stub_completion' is a server-managed capture-completion "
+                "discriminator and cannot be set via props — it is set only "
+                "by the session-capture writer (#5097)."
+            )
         # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
         # is the CLOSED :Source property surface in `projection/entities.py`
         # (`_SOURCE_EXTRA_PROPS`), which is the only form that can hold — a

@@ -35,7 +35,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_client
 from tortoise.auth import lookup_hash as _lookup_hash
 from tortoise.hosted_api import app
 
@@ -70,7 +70,7 @@ def _st_token() -> str:
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(app) as c:
+    with verdict_client(app) as c:
         yield c
 
 
@@ -807,8 +807,7 @@ class TestRevokeBodySweepCap:
 
     @pytest.fixture
     def sweep_client(self):
-        from fastapi.testclient import TestClient
-        with TestClient(app, raise_server_exceptions=False) as tc:
+        with verdict_client(app, raise_server_exceptions=False) as tc:
             yield tc
 
     def test_revoke_oversized_413(self, sweep_client, monkeypatch):
@@ -847,3 +846,36 @@ class TestRevokeBodySweepCap:
             assert r.status_code == 500
         finally:
             app.dependency_overrides.pop(get_current_org, None)
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. Both constructions in this file
+    are converted — the module-scoped ``client`` fixture and
+    ``TestRevokeBodySweepCap.sweep_client`` (which keeps
+    ``raise_server_exceptions=False`` so its malformed-body 500 pin still
+    observes a real response) — so the seam covers every read bound from them:
+    ``POST /v1/agent/token/revoke`` (17 call sites), ``POST /v1/agent/recover``
+    (8) and ``POST /v1/agent/signup`` (2), plus one parametrised pass over the
+    last two — none of them exempt from the bound. The
+    plain-client control is the non-vacuity leg: it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if the
+    route is ever exempted (the middleware stops refusing, so the control's 504
+    assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/agent/token/revoke")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/agent/token/revoke answered" in message

@@ -659,6 +659,99 @@ class TestR2OrUnionAndSearchKeys:
         finally:
             proj.close()
 
+    def test_event_migration_does_not_drop_an_already_correct_index(self):
+        """#5440: re-entering the Event migration on an index that ALREADY has
+        (subject, name) must not issue the destructive DROP.
+
+        The ``event_fts_v2`` marker is absent on a graph whose Event index is
+        already the target shape — every freshly built graph (the sweep mints
+        only the Point marker) and every restore/DR graph (the dump carries no
+        indexes). The legacy branch used that marker as its ONLY precondition,
+        so any other schema drift made it ``db.idx.fulltext.drop('Event')`` a
+        healthy, in-use FULLTEXT index and recreate it — and a failure between
+        the two steps left Event FTS absent for an index that never needed
+        migrating. Pre-fix, this test fails on the recorded drop statement.
+
+        The negative control is the sibling test above: a genuinely legacy
+        (subject-only) index must still be dropped and widened.
+        """
+        from falkordb import FalkorDB
+
+        from tortoise.projection import FalkorProjection
+        reset_circuit_breakers()
+        client = FalkorDB(host=_live_utils.service_host(),
+                          port=_live_utils.legacy_port())
+        gname = f"tortoise_test_event_noop_{os.urandom(4).hex()}"
+        from tests._embedded import _journal_append
+        _journal_append(gname)
+        raw = client.select_graph(gname)
+        raw.query("MATCH (n) DETACH DELETE n")
+        for drop in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+            try:
+                raw.query(f"CALL {drop}('Event')")
+                break
+            except Exception:
+                continue
+        # booting the projection creates the two-field Event index, then the
+        # marker is removed so the graph models the reachable no-marker state
+        # (fresh build / restore) explicitly rather than by assuming how the
+        # fresh-create path leaves it.
+        proj = FalkorProjection.from_uri(_live_utils.legacy_uri(gname))
+        try:
+            proj.g.query(
+                "CREATE (n:Event {eventId:'keep-1', subject:'standup notes', "
+                "name:'zeta'})")
+            proj.g.query("MATCH (m:Meta {key:'event_fts_v2'}) DETACH DELETE m")
+            # Schema drift in a DIFFERENT label: the next sweep is a full one,
+            # which is the only way the Event legacy branch is ever reached
+            # again on a graph that already carries the two-field index.
+            proj.g.query("CALL db.idx.fulltext.drop('Object')")
+            assert proj._schema_is_current() is False
+
+            statements: list[str] = []
+            graph_cls = type(proj.g)
+            orig_query = graph_cls.query
+
+            def _recording_query(self, cypher, *args, **kwargs):
+                statements.append(" ".join(str(cypher).split()))
+                return orig_query(self, cypher, *args, **kwargs)
+
+            graph_cls.query = _recording_query
+            try:
+                proj._ensure_indexes()
+            finally:
+                graph_cls.query = orig_query
+
+            destructive = [
+                s for s in statements
+                if "fulltext" in s.lower() and "drop" in s.lower()
+                and "'Event'" in s
+            ]
+            assert destructive == [], (
+                "the Event legacy migration DROPPED an index that already "
+                f"carried (subject, name): {destructive} — only a legacy "
+                "field set needs the drop, and the recreate that justifies "
+                "it never happened here (#5440)")
+            # ...but the migration is still RECORDED as done, so the branch
+            # cannot re-enter on every later sweep either.
+            marker = proj.g.query(
+                "MATCH (m:Meta {key:'event_fts_v2'}) RETURN m.v").result_set
+            assert marker and marker[0][0] is True, (
+                f"the no-op migration did not mint its marker: {marker}")
+            # And the untouched index still answers on BOTH fields — the
+            # migration changed nothing about what is indexed.
+            for token in ("zeta", "standup"):
+                hits = proj.g.query(
+                    f"CALL db.idx.fulltext.queryNodes('Event','{token}')"
+                ).result_set
+                assert hits, f"Event FTS stopped answering on {token!r}"
+            ev = [r for r in proj.g.query("CALL db.indexes()").result_set
+                  if r and r[0] == "Event"]
+            fields = ev[0][2] or {} if ev else {}
+            assert "subject" in fields and "name" in fields, ev
+        finally:
+            proj.close()
+
     def test_fts_leg_trace_healthy(self, proj):
         """R2 D5 (inherited from R3 D4): a healthy run records the FTS leg
         with ran=True, degraded=False, reason='ok', count == hits."""

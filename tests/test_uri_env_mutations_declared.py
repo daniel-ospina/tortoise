@@ -132,7 +132,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_extractor_reliability.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hard_reject.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hosted_api.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',  # #1686: register/provision journal tests force the embedded lane (the delenv IS the point)
-                             r'monkeypatch\.setenv\(\s*$'],  # #2251: URI-mode namespace-derivation envelope tests force the docker branch of _make_sdk/_registry_anchor with a RECORD-ONLY __init__ spy (the setenv IS the point — the (db_path=None, namespace=...) construction contract is pinned without touching a server)
+                             r'monkeypatch\.setenv\(\s*$',  # #2251: URI-mode namespace-derivation envelope tests force the docker branch of _make_sdk/_registry_anchor with a RECORD-ONLY __init__ spy (the setenv IS the point — the (db_path=None, namespace=...) construction contract is pinned without touching a server)
+                             r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],  # #4661: the registry-probe connection-reuse tests force the URI branch, where the URI string IS the cache key (and `_make_sdk` is faked, so no server is contacted) — DELIBERATE_URI
     "test_index_cli.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_index_restore.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_issue_4010_sessions_unlimited.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #4010: resolver/clearing unit tests force the embedded lane (db_path-pinned store; the delenv IS the point — no lane leak, monkeypatch auto-undo)
@@ -256,6 +257,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
     # without mocking `_get_proj` — the setenv IS the test input.
     "test_read_status.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3554: the retrofit verb's `--uri` reporting test sets a docker:// URI so
+    # `_get_proj` → `_derive_graph_name` has a graph name to resolve, while the
+    # SDK itself is REPLACED by a fake module (`fake_sdk_module`) — nothing
+    # connects, and the monkeypatch fixture auto-restores at teardown, so no
+    # lane leaks. The setenv IS the test input, the same "pinned without
+    # touching a server" shape as test_hosted_api.py's #2251 spy entry.
+    "test_session_schema_3554.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #3039: the ACL admin-client decode pin forces a docker:// URI so
     # `_admin_client` takes the redis path; redis.Redis is stubbed, never
     # connects. The setenv IS the test input (deliberate docker lane).
@@ -379,6 +387,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+    # #4125/#8229: the operator-CLI test forces the EMBEDDED lane deliberately —
+    # the target under test is a SCHEME-LESS `--db <path>` store, so the env
+    # control IS the test input (a URI-shaped value would send the fixture write
+    # through the #1647 test redirect to a server graph while the CLI reads the
+    # embedded file — the exact lane divergence this declaration documents).
+    # It is set BEFORE the fixture SDK is constructed, so both the write and the
+    # CLI read address the SAME embedded store in every lane; the fixture-param
+    # monkeypatch auto-restores at teardown (no lane leak).
+    "test_4125_legacy_session_source_migration.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*\w+\)'],
     "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      # the URI literal sits on the FOLLOWING line at
                                      # :251 (`setenv(` then the string), so the site's

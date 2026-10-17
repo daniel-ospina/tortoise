@@ -3429,14 +3429,19 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     comes from the REAL ``WaitBoundMiddleware``. ``/register`` is the route the
     concurrency and capacity legs of this file read and it is not exempt from
     the bound. The plain-client control is the non-vacuity leg — it is the exact
-    ``assert 504 == 200`` shape this conversion removes, and it would pass
-    unchanged if the route were ever exempted.
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if
+    the route is ever exempted (the middleware stops refusing, so the
+    control's 504 assertion fails).
 
     TWO clients in this module stay plain, both declared in
     `test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS`: ``_mounted_test_client``
     wraps a local ``Mount("/mcp", ...)`` parent that carries no
-    ``WaitBoundMiddleware`` (the MCP half of the bound lives in the tool
-    dispatch, not in that parent), and this pin's own control.
+    ``WaitBoundMiddleware``, so the REST 504 arm cannot reach it (the MCP
+    seam's own refusal lives in the tool dispatch and is answered **200** with
+    an error envelope — a bare ``assert status_code == 200`` PASSES on that, the
+    false-PASS arm #8763 owns; this file's single ``tools/call`` read — the POST
+    at line 2063, inside ``test_oauth_sessionless_create_point_actor_stamped`` —
+    already carries a ``require_answered`` call), and this pin's own control.
     """
     from tortoise import mcp_auth
     from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT

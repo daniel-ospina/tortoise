@@ -33,6 +33,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_async_client, verdict_client
 from tortoise.auth import hash_api_key, verify_api_key  # noqa: F401
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
@@ -71,7 +72,7 @@ def client():
         # close stay here (direct SDK constructions, not keepalive anchors).
         with patched_tortoise_sdk(db_path):
             try:
-                with TestClient(app) as tc:
+                with verdict_client(app) as tc:
                     yield tc
             finally:
                 while _REG_SDKS:
@@ -781,8 +782,6 @@ class TestSessionKeyMintConcurrency:
         of the lock; this catches a future await entering the section."""
         import asyncio
 
-        import httpx
-
         from tortoise.hosted_api import app
 
         tid = "team-a"
@@ -792,9 +791,8 @@ class TestSessionKeyMintConcurrency:
                       created_via="recovery", created_at=_hours_ago(48))
 
         async def _run():
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                          base_url="http://test") as ac:
                 async def _mint(_i):
                     return await ac.post("/v1/session/key",
                                          json={"purpose": "recovery"})
@@ -905,3 +903,40 @@ class TestOthersBranchFailClosedRecheck1879:
         assert _count_persistent_keys(reg, tid) == 3, (
             "2 pre-existing + the concurrent add; THIS mint must contribute 0 "
             f"— got {_count_persistent_keys(reg, tid)}")
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's SYNC client
+    seam.
+
+    The module has a second seam — the ``_run`` ASGI burst in
+    ``test_concurrent_recovery_mints_stay_at_cap``, built with
+    ``verdict_async_client`` — deliberately not pinned here: a reverted call
+    site is caught statically by `_CONVERTED_CLIENT_SEAMS`, and the async
+    factory's refusal behaviour is pinned by
+    `test_capture_loop_responsiveness.py`'s async leg. This pin covers the
+    ``client`` fixture, which is what the file's 29 route reads bind from (27
+    ``POST /v1/session/key`` + 2 ``GET /v1/team/keys``).
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/session/key`` is the
+    route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if
+    the route is ever exempted (the middleware stops refusing, so the
+    control's 504 assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/session/key")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/session/key answered" in message

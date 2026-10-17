@@ -28,7 +28,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_client
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_billing import FIXTURE_SUB, VALID_CATALOG
 from tests.test_supabase_control import FREE_TEAM, _membership_row
@@ -94,7 +94,7 @@ def client(monkeypatch, supabase_env):
         # matches (the anchor is reused, never evicted mid-test).
         os.environ["TORTOISE_DB_PATH"] = db_path
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 yield tc, supabase_env
         finally:
             os.environ.pop("TORTOISE_DB_PATH", None)
@@ -787,7 +787,7 @@ def registry_client(monkeypatch):
         ha_mod._FALLBACK_KEEPALIVE.clear()
         os.environ["TORTOISE_DB_PATH"] = db_path
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 app.dependency_overrides[get_current_user] = lambda: {
                     "user_id": _U1, "email": "owner@example.com"}
                 yield tc
@@ -954,3 +954,34 @@ class TestCancellationLifecycleKnownHole:
 
         # KNOWN HOLE: the canceled org is counted as free again.
         assert owned_free_org_ids(fake, _U1) == ["team-free-a", tid]
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. Both constructions are
+    converted — the ``client`` fixture and ``registry_client`` — so the seam
+    covers every read bound from them: ``POST /v1/billing/checkout/new-org``
+    (10 reads), ``POST /v1/organizations`` (1) and ``POST /webhooks/stripe``
+    (already ``require_answered``-wrapped in ``_post_signed``), none of them
+    exempt from the bound. The
+    plain-client control is the non-vacuity leg: it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if the
+    route is ever exempted (the middleware stops refusing, so the control's 504
+    assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/billing/checkout/new-org")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/billing/checkout/new-org answered" in message

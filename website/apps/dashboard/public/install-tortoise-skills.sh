@@ -41,10 +41,29 @@
 #
 # The skills are downloaded from the Tortoise product site
 # (https://app.premiselabs.co/skills/<name>/SKILL.md) — no git clone, no
-# third-party repo. The canonical skill sources (and this script) live in the
-# public repo https://github.com/daniel-ospina/tortoise — script at
-# website/apps/dashboard/public/install-tortoise-skills.sh, skills under
-# skills/ and tortoise/onboarding/.
+# third-party repo.
+#
+# ── WHICH REPO AUTHORS WHAT (#4643) ────────────────────────────────────────
+# Two repos hold Tortoise consumer artifacts, and editing the wrong one is a
+# drift rather than a fork. This header is the statement a contributor reads:
+#
+#   * The three reusable skills this script installs are AUTHORED in the public
+#     MIT repo https://github.com/daniel-ospina/tortoise-skills-and-integrations.
+#     The copies served here are a DERIVED MIRROR: they are pinned in
+#     `config/served-skills-upstream.yml` and gated fail-closed by
+#     `tools/served_skills_parity.py`: the offline served↔pin check runs per-PR
+#     today, and the upstream (honesty/currency) arm lands with the deploy-time
+#     + scheduled wiring in #8129. `--sync` re-derives. To change one of those
+#     skills, edit it UPSTREAM and re-derive — never edit a served copy here.
+#   * THIS script and the onboarding instructions are authored HERE, in
+#     https://github.com/daniel-ospina/tortoise — the script at
+#     `website/apps/dashboard/public/install-tortoise-skills.sh` (its source of
+#     truth was moved out of the MIT repo by #3324 because that copy went
+#     stale) and the onboarding document at `tortoise/onboarding/SKILL.md`
+#     (served, but not installed by this script since #4365).
+#
+# The ownership rationale and the artifacts NOT covered by the pin:
+# `docs/license-notes.md` §7.
 #
 # Project-scoped for Claude Code / Codex / Cursor (installs into the current
 # project's skills dir — version-controllable, non-destructive to the
