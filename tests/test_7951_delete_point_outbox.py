@@ -27,7 +27,11 @@ This suite pins the fix — the append is the COMMIT POINT of the hard delete:
   by a resurrect (T3);
 * a delete of a non-existent id journals nothing (T4);
 * one record, `op="delete"`, no `state`, and no JSONL `PointRetracted` (T5);
-* the `:GraphEvent` subscriber row is unchanged for a completed delete (T6).
+* the `:GraphEvent` subscriber row is unchanged for a completed delete (T6);
+* the `None` outcome (no journal configured — the DEFAULT embedded shape) is not
+  read as a refusal (T7);
+* the evidence probe's own class-attribute patch is restored to the CLASS
+  FUNCTION, so each section measures its OWN graph (T8).
 
 ⛔ SCOPE — what this suite does NOT claim. It does not claim the raw guarded
 handle (`proj.g.query`) is closed, and it does not claim the remaining
@@ -41,6 +45,8 @@ Plan of record: `docs/plans/2026-10-18-7951-delete-point-outbox.md`.
 """
 from __future__ import annotations
 
+import importlib.util as _ilu
+import inspect
 from pathlib import Path
 
 import pytest
@@ -48,6 +54,34 @@ import pytest
 from tortoise.log import EventLog
 
 _DELETE_CYPHER = "DETACH DELETE n"
+
+#: The evidence probe this suite's T8 pins (the evidence dir is hyphenated, so
+#: it is loaded by path — the same spec-loader pattern
+#: `tests/test_7950_capstone_probe.py` uses for its probe).
+_PROBE_PATH = (Path(__file__).resolve().parent.parent / "docs" / "evidence"
+               / "7951-delete-point-outbox" / "probes"
+               / "delete_order_probe.py")
+
+
+def _load_probe():
+    spec = _ilu.spec_from_file_location("delete_order_probe_7951",
+                                        str(_PROBE_PATH))
+    assert spec and spec.loader
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _count_on_raw_handle(graph, pid: str) -> int:
+    """Count through the UNDERLYING handle, bypassing `_GuardedGraph.query`.
+
+    A probe patches `type(graph).query` (a PROCESS-GLOBAL class attribute), so
+    a count taken through `graph.query` cannot tell a correctly-restored class
+    attribute from a bound method captured from another instance.
+    """
+    rows = graph._g.query("MATCH (n:Point {id:$id}) RETURN count(n)",
+                          params={"id": pid}).result_set
+    return int(rows[0][0]) if rows else 0
 
 
 @pytest.fixture
@@ -336,3 +370,66 @@ def test_a_journal_less_sdk_still_deletes(tmp_path):
         assert _live(sdk._get_proj(), pid) is False
     finally:
         sdk.close()
+
+
+# ── T8: the evidence probe measures each SDK's OWN graph ──────────────────
+
+def test_the_evidence_probe_rebinds_the_guarded_handle_per_instance(tmp_path):
+    """The probe's class-level spy must be restored to the CLASS FUNCTION.
+
+    `_GuardedGraph` defines `query` on the CLASS (`__slots__ = ("_g", "_proj")`
+    forbids an instance attribute), so the probe HAS to swap a process-global
+    class attribute to instrument the door. The pre-fix probe restored it with
+    `type(proj.g).query = real_query`, where `real_query` was `proj.g.query` —
+    a BOUND method. A bound method assigned to a class is NOT re-bound: it is
+    returned as-is for every instance, so every SDK constructed afterwards
+    dispatched all its statements to SDK #1's graph. The probe's verdicts still
+    looked right (its creates and its reads were misrouted CONSISTENTLY) while
+    section 3's `rebuild_all` destructively wiped section 1's graph — i.e. the
+    probe was not measuring what its own sections claim.
+
+    MUTATION: change `_patch_query` to capture `graph.query` (the bound method)
+    and this fails — SDK #2's Point lands in SDK #1's graph and these assertions
+    see it there / missing from #2's own handle.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    probe = _load_probe()
+    a = TortoiseSDK(str(tmp_path / "a.db"))
+    b = TortoiseSDK(str(tmp_path / "b.db"))
+    try:
+        ga, gb = a._get_proj().g, b._get_proj().g
+        assert type(ga) is type(gb), "premise: one guarded-handle class"
+        original = type(ga).query
+
+        seen: list[str] = []
+        _orig, restore = probe._patch_query(
+            ga, lambda real: probe._record_deletes(real, seen))
+        try:
+            doomed = a.create_point("observation", "deleted under the spy")["id"]
+            a.delete_point(doomed)
+        finally:
+            restore()
+
+        assert seen == ["cache-DETACH-DELETE"], (
+            f"premise: the spy watched the delete through the class attribute: "
+            f"{seen!r}")
+        assert not inspect.ismethod(type(ga).query), (
+            "the probe restored a BOUND method onto the guarded-handle CLASS — "
+            "every SDK created afterwards will address THAT instance's graph")
+        assert type(ga).query is original, (
+            "the class attribute must be the captured CLASS FUNCTION again")
+
+        # Behavioural half: SDK #2's write must land in SDK #2's graph. Read
+        # through the UNDERLYING handle, so a misrouted class attribute cannot
+        # mask the misroute by misrouting the read the same way.
+        pid_b = b.create_point("observation", "belongs to graph b")["id"]
+        assert _count_on_raw_handle(gb, pid_b) == 1, (
+            "SDK #2's Point did not land in its own graph — the patched class "
+            "attribute is still redirecting it")
+        assert _count_on_raw_handle(ga, pid_b) == 0, (
+            "SDK #2's Point landed in SDK #1's graph — the restore kept a "
+            "BOUND method on the class")
+    finally:
+        a.close()
+        b.close()

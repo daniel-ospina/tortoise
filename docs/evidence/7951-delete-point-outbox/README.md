@@ -33,12 +33,13 @@ ORDERING VERDICT: JOURNAL-FIRST
 delete records committed:        1
 Point live after the delete:     0
 Point live after rebuild_all:    0  (0 = the deletion is durable)
-failed append raised:            WriteNotLandedError (operation='delete_point')
+failed append raised:            WriteNotLandedError (operation='delete_point', record_committed=False)
 Point live after refused delete: 1  (1 = nothing was destroyed)
 delete records committed:        0
 REFUSAL VERDICT: NOTHING DESTROYED, NOTHING SKIPPED FROM THE RECORD
-failed cache delete raised:      RuntimeError
+failed cache delete raised:      WriteNotLandedError (operation='delete_point', record_committed=True, record='EntityMutated op=delete')
 record committed despite failure: 1
+caller told COMMITTED (no blind re-issue): True
 Point live before rebuild:       1
 Point live after rebuild:        0
 COMMIT VERDICT: COMMITTED + REPLAY-HEALABLE
@@ -47,8 +48,14 @@ delete_entity order:             ['cache-DETACH-DELETE', 'journal-EntityMutated-
 RESIDUAL: the raw handle is NOT closed, and `_delete_entity` is still apply-first — both recorded on #7951; increment 4a routes ONE delete door (`delete_point`).
 ```
 
-**Raw output:** `delete-order-probe.log` (verbatim; the shipped live engine logs `#4997`/pack-registry
-advisories and the `#2943` snapshot-dir note, which the headline block omits). Exit code `0`.
+**Raw output:** `delete-order-probe.log` (verbatim — **re-measured** after the review that found the
+earlier copy still carried the pre-`60dc70e` `RuntimeError`; the shipped live engine also logs
+`#4997`/pack-registry advisories and the `#2943` snapshot-dir note, which the headline block omits).
+Exit code `0`. Those advisory lines carry the paths of the worktree the log was measured in
+(`pack registry /tmp/cell-t3/.worktrees/repair-c2a/packs`, plus the per-run `mkdtemp` dirs) — they
+are the engine's own report, not probe output, and are left unfiltered so the log stays verbatim.
+Re-running the probe therefore differs from it in those paths only (the `mkdtemp` names are
+per-run); every measured line is stable.
 
 ## What each line means
 
@@ -56,7 +63,7 @@ advisories and the `#2943` snapshot-dir note, which the headline block omits). E
 |---|---|---|
 | `order: ['journal-EntityMutated-delete', 'cache-DETACH-DELETE']` | §17.1's ordering | on `origin/main` the order is reversed (`cache` first) — the door deleted the node and then appended the record |
 | `REFUSAL VERDICT` (append fails ⇒ node survives, no record) | §17.1's resurrection window | pre-fix, a failed append left the node **destroyed and unrecorded**, so `rebuild_all` re-folded the `PointAdded` line and the Point came back live |
-| `COMMIT VERDICT` | §17.1's crash window | with the `DETACH DELETE` forced to fail after the append, the record stands and a later `rebuild_all` removes the node — the cache is `extra_in_cache` (a node the record no longer has, `tortoise/reconciliation.py`'s second-writer class), NOT a lag (`missing_in_cache` is the lag direction) |
+| `COMMIT VERDICT` | §17.1's crash window, and its `record_committed=True` arm | with the `DETACH DELETE` forced to fail after the append, the record stands and a later `rebuild_all` removes the node — the cache is `extra_in_cache` (a node the record no longer has, `tortoise/reconciliation.py`'s second-writer class), NOT a lag (`missing_in_cache` is the lag direction). The caller is handed `WriteNotLandedError(record_committed=True, record='EntityMutated op=delete')`, not the bare engine error: a bare error reads as "the delete did not happen" and invites a blind re-issue that appends a SECOND delete record for one intent |
 | `Point live after rebuild_all: 0` (happy path) | `derived = replay(journal)` | a delete whose record is missing is undone by the replay; the line shows the deletion is durable |
 
 ## Tests (the gates those lines are drawn from)
@@ -64,14 +71,18 @@ advisories and the `#2943` snapshot-dir note, which the headline block omits). E
 ```console
 $ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
     tests/test_7951_delete_point_outbox.py -q
-6 passed
+8 passed
 ```
 
 `tests/test_7951_delete_point_outbox.py` carries the threat rows this increment declares: T1 ordering,
 T2 failed-append refusal, T3 committed-record healability, T4 no record for a no-op delete, T5 the
-record's declared shape, T6 the `:GraphEvent` subscriber row. **T1/T2/T3 were measured RED on the
-pre-change source** (`['cache', 'journal']`; `DID NOT RAISE WriteNotLandedError`; `[]` instead of
-`[('delete', 'Point')]`) — the docstrings name the mutation that reddens each.
+record's declared shape, T6 the `:GraphEvent` subscriber row, T7 the journal-less (`None`) arm, T8 the
+evidence probe's own instrumentation. **T1/T2/T3 were measured RED on the pre-change source**
+(`['cache', 'journal']`; `DID NOT RAISE WriteNotLandedError`; `[]` instead of
+`[('delete', 'Point')]`) — the docstrings name the mutation that reddens each. T4-T8 are declared
+guards: they pass on both sides by design (T8 reddens if the probe restores a BOUND method onto the
+guarded handle's CLASS, which would silently misroute every later section's reads and writes to
+section 1's graph).
 
 ## The residuals, shown rather than hidden
 

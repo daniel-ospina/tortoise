@@ -9906,6 +9906,11 @@ class TortoiseSDK:
           - Entity → delete_entity
         Returns True if a node was found and deleted, False otherwise.
 
+        Can raise instead of returning: the Point branch inherits
+        `delete_point`'s §17.1 refusal, `WriteNotLandedError`
+        (``operation="delete_point"``), when the outbox will not commit the
+        destruction. The entity branch is unchanged.
+
         #3300: for the Point branch the `PointRetracted` row is the
         :GraphEvent SUBSCRIBER signal only — rebuild parity comes from the
         JSONL `EntityMutated op="delete"` record, because the `PointRetracted`
@@ -10429,6 +10434,14 @@ class TortoiseSDK:
 
         Implementation behind delete(id) — the consolidated Point/entity
         delete (epic #888 W2).
+
+        Raises ``WriteNotLandedError`` (``operation="delete_point"``) instead of
+        returning when the §17.1 outbox refuses the destruction: either the
+        `EntityMutated` op=delete record could not be appended (the `DETACH
+        DELETE` was then NOT issued), or the record WAS committed and the cache
+        delete failed (``record_committed=True`` — treat the delete as COMMITTED
+        and do not re-issue it blindly, a replay heals the cache). A no-op id
+        still returns ``False``; ``True`` still means the node was destroyed.
         """
         proj = self._get_proj()
         exists = proj.g.query(

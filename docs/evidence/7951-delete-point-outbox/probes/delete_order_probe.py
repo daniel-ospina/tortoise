@@ -21,12 +21,20 @@ It demonstrates, against the shipped modules:
      (`proj.g.query`) still writes the cache directly, and `delete_entity` (the
      generic entity delete) is still apply-first — both recorded on #7951 and in
      plan §7 increment 4.
+
+Instrumenting the door means swapping `query` on the GUARDED GRAPH CLASS
+(`_GuardedGraph` keeps its state in `__slots__` and defines `query` on the
+class, so no instance attribute can shadow it) — see `_patch_query` below for
+why the RESTORE half of that swap is the part that has to be right.
 """
 from __future__ import annotations
 
 import sys
 import tempfile
 from pathlib import Path
+
+# The cache statement the probe watches for.
+_DELETE_STMT = "DETACH DELETE n"
 
 
 def _journal(events: Path) -> list[dict]:
@@ -40,6 +48,58 @@ def _deletes(events: Path, pid: str) -> list[dict]:
     return [e for e in _journal(events)
             if e.get("type") == "EntityMutated"
             and e.get("id") == pid and e.get("op") == "delete"]
+
+
+def _patch_query(graph, make_spy):
+    """Swap ``query`` on the GUARDED GRAPH CLASS and return ``(orig, restore)``.
+
+    ``_GuardedGraph`` defines ``query`` on the CLASS (``__slots__ = ("_g",
+    "_proj")`` — no instance attribute can shadow it), so instrumenting one
+    projection means swapping a PROCESS-GLOBAL class attribute. Which makes the
+    restore half the part that has to be right:
+
+    * ``orig = cls.query`` captures the plain CLASS FUNCTION, and ``restore()``
+      puts THAT back. Capturing ``graph.query`` instead yields a BOUND method;
+      assigning a bound method to the class does not re-bind it, it is returned
+      as-is for EVERY instance — so every SDK constructed later in this process
+      would silently dispatch its reads and writes to the graph captured here.
+      That is a false measurement, not a crash: the probe's own sections 2-4
+      would create their Points in section 1's graph and `rebuild_all` in
+      section 3 would wipe it.
+    * the spy is called with the instance as its first argument (it is a plain
+      function on the class), and calls the captured class function explicitly
+      rather than recursing through the patched attribute.
+    """
+    cls = type(graph)
+    orig = cls.query
+    cls.query = make_spy(orig)
+
+    def restore() -> None:
+        cls.query = orig
+
+    return orig, restore
+
+
+def _record_deletes(orig, order: list[str]):
+    """Spy that records every ``DETACH DELETE`` issued through the handle."""
+
+    def spy(_self, cypher, *args, **kwargs):
+        if _DELETE_STMT in (cypher or ""):
+            order.append("cache-DETACH-DELETE")
+        return orig(_self, cypher, *args, **kwargs)
+
+    return spy
+
+
+def _fail_deletes(orig):
+    """Spy that refuses every ``DETACH DELETE`` with an engine-style error."""
+
+    def spy(_self, cypher, *args, **kwargs):
+        if _DELETE_STMT in (cypher or ""):
+            raise RuntimeError("simulated engine failure (probe)")
+        return orig(_self, cypher, *args, **kwargs)
+
+    return spy
 
 
 def _count(proj, cypher: str, **params) -> int:
@@ -67,24 +127,19 @@ def main() -> int:
         pid = sdk.create_point("observation", "a deletion in order")["id"]
         order: list[str] = []
         real_mutate = sdk._journal_entity_mutation
-        real_query = proj.g.query
 
         def spy_mutate(label, id_val, op, **kwargs):
             if op == "delete":
                 order.append("journal-EntityMutated-delete")
             return real_mutate(label, id_val, op, **kwargs)
 
-        def spy_query(_self, cypher, *args, **kwargs):
-            if "DETACH DELETE n" in (cypher or ""):
-                order.append("cache-DETACH-DELETE")
-            return real_query(cypher, *args, **kwargs)
-
-        type(proj.g).query = spy_query
+        _orig_query, restore_query = _patch_query(
+            proj.g, lambda orig: _record_deletes(orig, order))
         sdk._journal_entity_mutation = spy_mutate
         try:
             sdk.delete_point(pid)
         finally:
-            type(proj.g).query = real_query
+            restore_query()
             sdk._journal_entity_mutation = real_mutate
 
         print(f"delete_point order:              {order}")
@@ -115,16 +170,24 @@ def main() -> int:
                 raise OSError("simulated journal append failure (probe)")
 
             log2.append = _boom
+            refused: BaseException | None = None
             try:
                 sdk2.delete_point(pid2)
             except Exception as exc:  # the refusal is the point of the probe
+                refused = exc
                 print(f"failed append raised:            {type(exc).__name__}"
-                      f" (operation={getattr(exc, 'operation', '?')!r})")
+                      f" (operation={getattr(exc, 'operation', '?')!r},"
+                      f" record_committed={getattr(exc, 'record_committed', '?')!r})")
             print(f"Point live after refused delete: {_live(proj2, pid2)}  "
                   "(1 = nothing was destroyed)")
             print(f"delete records committed:        {len(_deletes(events2, pid2))}")
+            # The NO-record arm: a caller that re-issues is right here.
+            no_record_arm = (refused is not None
+                             and type(refused).__name__ == "WriteNotLandedError"
+                             and getattr(refused, "record_committed", None) is False)
             refusal_ok = (_live(proj2, pid2) == 1
-                          and not _deletes(events2, pid2))
+                          and not _deletes(events2, pid2)
+                          and no_record_arm)
             print("REFUSAL VERDICT: "
                   f"{'NOTHING DESTROYED, NOTHING SKIPPED FROM THE RECORD' if refusal_ok else 'VIOLATED'}")
         finally:
@@ -139,27 +202,34 @@ def main() -> int:
         try:
             proj3 = sdk3._get_proj()
             pid3 = sdk3.create_point("observation", "cache lags")["id"]
-            real3 = proj3.g.query
-
-            def failing_delete(_self, cypher, *args, **kwargs):
-                if "DETACH DELETE n" in (cypher or ""):
-                    raise RuntimeError("simulated engine failure (probe)")
-                return real3(cypher, *args, **kwargs)
-
-            type(proj3.g).query = failing_delete
+            _orig3, restore3 = _patch_query(proj3.g, _fail_deletes)
+            raised: BaseException | None = None
             try:
                 sdk3.delete_point(pid3)
             except Exception as exc:
-                print(f"failed cache delete raised:      {type(exc).__name__}")
-            type(proj3.g).query = real3
+                raised = exc
+                print(f"failed cache delete raised:      {type(exc).__name__}"
+                      f" (operation={getattr(exc, 'operation', '?')!r},"
+                      f" record_committed={getattr(exc, 'record_committed', '?')!r},"
+                      f" record={getattr(exc, 'record', '?')!r})")
+            finally:
+                restore3()
             committed = len(_deletes(events3, pid3))
+            # The COMMITTED arm: the record landed and the cache write did not,
+            # so the caller must be told "do NOT re-issue blindly".
+            committed_arm = (raised is not None
+                             and type(raised).__name__ == "WriteNotLandedError"
+                             and getattr(raised, "record_committed", None) is True
+                             and getattr(raised, "record", None)
+                             == "EntityMutated op=delete")
             print(f"record committed despite failure: {committed}")
+            print(f"caller told COMMITTED (no blind re-issue): {committed_arm}")
             print(f"Point live before rebuild:       {_live(proj3, pid3)}")
             proj3.rebuild_all(str(events3), confirm_destructive=True)
             healed = _live(proj3, pid3)
             print(f"Point live after rebuild:        {healed}")
             print("COMMIT VERDICT: "
-                  f"{'COMMITTED + REPLAY-HEALABLE' if committed == 1 and healed == 0 else 'LOST'}")
+                  f"{'COMMITTED + REPLAY-HEALABLE' if committed == 1 and healed == 0 and committed_arm else 'LOST'}")
         finally:
             sdk3.close()
 
@@ -177,23 +247,19 @@ def main() -> int:
                 order4.append("journal-EntityMutated-delete")
             return real_mutate4(label, id_val, op, **kwargs)
 
-        def spy_query4(_self, cypher, *args, **kwargs):
-            if "DETACH DELETE n" in (cypher or ""):
-                order4.append("cache-DETACH-DELETE")
-            return real_query(cypher, *args, **kwargs)
-
-        type(proj.g).query = spy_query4
+        _orig4, restore4 = _patch_query(
+            proj.g, lambda orig: _record_deletes(orig, order4))
         sdk._journal_entity_mutation = spy_mutate4
         try:
             sdk.delete_entity(p4)
         finally:
-            type(proj.g).query = real_query
+            restore4()
             sdk._journal_entity_mutation = real_mutate4
         print(f"delete_entity order:             {order4}")
         print("RESIDUAL: the raw handle is NOT closed, and `_delete_entity` is "
               "still apply-first — both recorded on #7951; increment 4a routes "
               "ONE delete door (`delete_point`).")
-        return 0 if (journal_first and refusal_ok) else 1
+        return 0 if (journal_first and refusal_ok and committed_arm) else 1
     finally:
         sdk.close()
 

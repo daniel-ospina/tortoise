@@ -508,10 +508,13 @@ class WriteNotLandedError(RuntimeError):
             _contract = (
                 "The caller must not treat this call as successful: the "
                 "write was not applied, so re-issue it once a rebuild record "
-                "can be committed (`create_point`'s `dedup=True` is "
-                "content-hash idempotent). (A `:GraphEvent` may have been "
-                "written first by `_emit_event` — a declared residual, not a "
-                "committed rebuild record.)"
+                "can be committed — every door this class guards is "
+                "re-issue-safe (`create_point`'s `dedup=True` is content-hash "
+                "idempotent, `update_point` re-states the same revision, and "
+                "`delete_point` re-issues a `DETACH DELETE` by explicit id, "
+                "which is a no-op when the node is already gone). (A "
+                "`:GraphEvent` may have been written first by `_emit_event` — "
+                "a declared residual, not a committed rebuild record.)"
             )
         super().__init__(
             f"{operation}: the Point {point_id!r} was not committed{_where}: "
