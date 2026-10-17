@@ -29,29 +29,46 @@ TWO CHECKS, BECAUSE THEY FAIL DIFFERENTLY
   bytes really hash to the pin, and the bytes at upstream `main` HEAD are still
   those bytes. Needs the network.
 
-  ⛔ HONEST LIMIT: this arm is implemented and covered, but NO RUNNER INVOKES IT
-  YET. Wiring it (a step in `deploy-pages.yml` before the build stages
-  `public/`, plus a scheduled `skills-parity.yml` that auto-files) is a
-  `.github/workflows/*` change, and this lane's credential cannot push one —
-  #8129. So today the only live enforcement is the offline arm: an upstream
-  skill edit reds nothing by itself, and a served copy edited in place *plus* a
-  matching re-cut of the pin's `sha256:` passes. Do not read this file's
-  presence as "the mirror cannot drift".
+  Two runners execute it: the `deploy-dashboard` job in `deploy-pages.yml`
+  (before the build stages `public/`, so a stale mirror cannot deploy) and the
+  daily `.github/workflows/skills-parity.yml` (`schedule` +
+  `workflow_dispatch`), so drift is caught without waiting for a deploy.
 
 ⛔ `--check-upstream` is not decoration. A pin-only gate is VACUOUS: pin any
 old commit and the "byte-identical" claim becomes true of history. The gate is
 only meaningful because the upstream-HEAD bytes are compared alongside it.
 
+⛔ THE PIN'S SCOPE IS PART OF THE CLAIM. Both byte arms iterate the pin's own
+keys, so on their own a NEW upstream `skills/<name>/SKILL.md` would be neither
+mirrored nor reported — the mirror would silently serve an incomplete set of a
+repo that had grown. `--check-upstream` therefore also enumerates upstream
+`skills/` (at the pinned commit AND at `branch` HEAD) and requires set equality
+with the upstream directories the pin BINDS (the parent of each entry's
+`upstream_path` — the served name need not match it) plus the pin's declared
+`out_of_scope:` entries. An addition that is not ours to serve is recorded there
+deliberately, not left invisible — and the declaration is checked at HEAD, so a
+skill that appeared upstream after the pin can be declared without a pin re-cut.
+
+⛔ DRIFT AND "COULD NOT VERIFY" ARE DIFFERENT ANSWERS. Both exit non-zero
+(fail-closed), but they are reported separately: a network error, an
+unreadable listing or a rate-limited API is NOT evidence that the mirror
+drifted, and calling it drift would auto-file a false "the mirror drifted"
+alarm — or, worse, teach people to re-run the gate. `--json` carries `problems`
+(drift) and `cannot_verify` (a side was unreadable) as SEPARATE fields.
+
 WHY CURRENCY COMPARES BYTES, NOT THE COMMIT POINTER
 
 The currency arm compares the PINNED sha256 against the bytes at upstream HEAD.
 It deliberately does NOT require `HEAD == pinned`: the MIT repo also takes
-commits that cannot change what we serve (a README edit, a new unrelated skill,
-CI config). Keying on the pointer reds the dashboard deploy and auto-files a
-"the mirror drifted" P2 for a commit that changed none of the three files — a
-false alarm on the one signal humans are asked to trust, and a wrong diagnosis
-("a skill changed there") for a cause that did not happen. A skill edit still
-reds (the bytes at HEAD differ from the pin); an unrelated commit does not.
+commits that change no skill we serve (a README edit, CI config, an edit to a
+skill already recorded under `out_of_scope:`). Keying on the
+pointer reds the dashboard deploy and auto-files a "the mirror drifted" P2 for a
+commit that changed none of the three files — a false alarm on the one signal
+humans are asked to trust, and a wrong diagnosis ("a skill changed there") for a
+cause that did not happen. A skill edit still reds (the bytes at HEAD differ from
+the pin); an unrelated commit does not. ⛔ An upstream ADDITION is a different
+event and IS red, by the scope arm above — this paragraph bounds what the
+CURRENCY arm reports, never what the gate does.
 
 FAIL-CLOSED, EVERY TIME
 
@@ -111,12 +128,19 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_REL = Path("config") / "served-skills-upstream.yml"
 RAW_HOST = "https://raw.githubusercontent.com"
+# A directory listing has no raw form, so the one API call in this tool lives
+# here. Unauthenticated it is 60 requests/hour per IP — enough for a daily run
+# and a deploy, and both runners pass a token anyway (5000/hour).
+API_HOST = "https://api.github.com"
+# The upstream repo's skill directory; the pin's `upstream_path` values live
+# beneath it. Enumerated so an ADDITION upstream is visible (see the docstring).
+UPSTREAM_SKILLS_DIR = "skills"
 
 # A network blip must not red a deploy for a reason unrelated to the change,
 # and a fail-closed gate that is FLAKY teaches people to re-run it. Retry, then
@@ -127,6 +151,17 @@ DEFAULT_BACKOFF = 3.0
 
 class ParityError(RuntimeError):
     """A fail-closed check failure (never raised for "nothing to check")."""
+
+
+class PinDefect(ParityError):
+    """The PIN itself is unusable — a DETERMINISTIC defect, not a read failure.
+
+    Reported with the drift (`problems`), never as "could not verify": the file
+    is missing or malformed in THIS tree, so no re-run and no network condition
+    can change the answer. Filing it under "re-run once the network/credential is
+    sane" was advice that can never work, and it hid a pin defect behind a
+    transient-looking heading (review finding, P2).
+    """
 
 
 def _err(msg: str) -> None:
@@ -194,6 +229,26 @@ def load_manifest(path: Path) -> dict:
             raise ParityError(
                 f"the pin's skills.{name}.bytes is not an integer: "
                 f"{bytes_value!r}") from exc
+    out_of_scope = data.get("out_of_scope")
+    if out_of_scope is not None:
+        # Optional, and deliberately EXPLICIT: the upstream arm requires set
+        # equality between upstream `skills/` and the upstream directories the
+        # pin's `upstream_path`s bind, so the only
+        # way to say "that upstream skill is not ours to serve" is to write it
+        # down here. A malformed entry must fail closed — a silently ignored
+        # name would make the declaration a no-op that reads as an exclusion.
+        if not isinstance(out_of_scope, list):
+            raise ParityError("the pin's `out_of_scope:` must be a list of "
+                              f"skill names, got {type(out_of_scope).__name__}")
+        for name in out_of_scope:
+            if not isinstance(name, str) or not name.strip():
+                raise ParityError(
+                    f"the pin's `out_of_scope:` entries must be non-empty "
+                    f"strings, got {name!r}")
+            if name in skills:
+                raise ParityError(
+                    f"the pin lists {name!r} as BOTH pinned and out_of_scope — "
+                    "one skill cannot be in and out of the served set")
     return data
 
 
@@ -230,6 +285,17 @@ def dump_manifest(manifest: dict) -> str:
         lines.append(f"    served_path: {entry['served_path']}")
         lines.append(f"    sha256: {entry['sha256']}")
         lines.append(f"    bytes: {int(entry['bytes'])}")
+    out_of_scope = manifest.get("out_of_scope") or []
+    if out_of_scope:
+        # Only emitted when non-empty, so a pin that declares nothing keeps the
+        # shape it had (and `test_4643_the_pin_is_exactly_what_the_generator_
+        # writes` stays a byte-identity assertion rather than a reformat).
+        lines.append("# Upstream skills/ directories that are deliberately NOT served here.")
+        lines.append("# The upstream arm requires set equality against these, so an")
+        lines.append("# upstream addition must be pinned or recorded here.")
+        lines.append("out_of_scope:")
+        for name in sorted(out_of_scope):
+            lines.append(f"  - {name}")
     return "\n".join(lines) + "\n"
 
 
@@ -331,11 +397,192 @@ def fetch_raw(repo: str, commit: str, path: str, attempts: int = DEFAULT_ATTEMPT
     return _retry(_once, f"fetching {url}", attempts, backoff)
 
 
-def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
-                   backoff: float = DEFAULT_BACKOFF) -> list[str]:
-    """The pin is honest AND current, and the mirror matches it.
+def list_upstream_skills(repo: str, commit: str,
+                         attempts: int = DEFAULT_ATTEMPTS,
+                         backoff: float = DEFAULT_BACKOFF) -> list[str]:
+    """The skill DIRECTORY names under upstream `skills/` at ``commit``.
 
-    Three assertions, in the order that makes each failure legible:
+    The one thing the byte arms cannot see: they iterate the PIN's keys, so a
+    new upstream `skills/<name>/SKILL.md` would never be fetched, never be
+    mirrored and never be reported — the pin would quietly describe a smaller
+    set than the repo it claims to mirror. Enumerated here so the pin's SCOPE
+    is a checked claim, not an assumption.
+
+    Fail-closed: a non-200, a non-list payload, a malformed entry or an EMPTY
+    listing raises ``ParityError`` (which the CLI reports as *cannot verify*,
+    never as agreement). An empty answer is refused for the same reason
+    `remote_head` refuses one: GitHub serves `[]` for a moved/renamed path, and
+    reading that as "upstream has no skills" would silently satisfy a
+    set-equality test.
+
+    A `GITHUB_TOKEN`/`GH_TOKEN` in the environment is used when present (the
+    runners pass one): unauthenticated the API allows 60 requests/hour per IP.
+    """
+    url = f"{API_HOST}/repos/{repo}/contents/{UPSTREAM_SKILLS_DIR}?ref={commit}"
+
+    def _once() -> list[str]:
+        headers = {"User-Agent": "tortoise-parity-gate",
+                   "Accept": "application/vnd.github+json"}
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            if resp.status != 200:
+                raise ParityError(f"GET {url} answered HTTP {resp.status}")
+            payload = json.loads(resp.read())
+        if not isinstance(payload, list):
+            raise ParityError(
+                f"GET {url} did not return a directory listing "
+                f"(got {type(payload).__name__}) — refuse to guess the scope")
+        names: list[str] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                raise ParityError(f"GET {url} returned a malformed entry: {entry!r}")
+            if entry.get("type") != "dir":
+                # A file under `skills/` (the licence, say) is not a skill.
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ParityError(
+                    f"GET {url} returned a directory with no usable name: {entry!r}")
+            names.append(name)
+        if not names:
+            raise ParityError(
+                f"{repo}@{commit[:12]} listed NO skill directories under "
+                f"{UPSTREAM_SKILLS_DIR}/ — refuse to read an empty listing as "
+                "agreement (a moved path answers `[]`, not an error)")
+        return sorted(names)
+
+    return _retry(_once, f"listing {repo}/{UPSTREAM_SKILLS_DIR}@{commit[:12]}",
+                  attempts, backoff)
+
+
+def _upstream_dirs(manifest: dict) -> dict[str, list[str]]:
+    """Upstream DIRECTORY name → the pin keys that bind to it.
+
+    The pin carries the served name and the upstream binding as SEPARATE fields
+    (`skills.<key>` vs `<key>.upstream_path`), and nothing requires them to be
+    equal — a served name may be shortened. Comparing the pin's KEYS against the
+    upstream listing therefore reds a perfectly honest pin whose served name
+    differs from the directory, and the remedy it prints (`--sync`, which re-cuts
+    the same keys) cannot clear it: the binding is `upstream_path`.
+    """
+    dirs: dict[str, list[str]] = {}
+    for key, entry in manifest["skills"].items():
+        parts = PurePosixPath(str(entry["upstream_path"])).parts
+        # `skills/<dir>/SKILL.md` → `<dir>`; a bare `<dir>/SKILL.md` → `<dir>`.
+        name = parts[-2] if len(parts) >= 2 else parts[0]
+        dirs.setdefault(name, []).append(key)
+    return dirs
+
+
+def _check_scope(manifest: dict, head: str, attempts: int,
+                 backoff: float) -> list[str]:
+    """The pin describes the RIGHT SET of upstream skills — at both commits.
+
+    Two comparisons, because they fail differently:
+
+    * at the PINNED commit — the pin must not name a skill its own commit does
+      not contain (that is a dishonest pin, and the byte arm would report it as
+      a 404, i.e. as "cannot verify" rather than as the pin defect it is);
+    * at `branch` HEAD — an upstream ADDITION is the drift the byte arms cannot
+      see, and a REMOVAL is a pinned skill that no longer exists upstream.
+
+    Each directory may be excluded explicitly via the pin's `out_of_scope:`
+    list, so "that one is not ours to serve" is a recorded decision rather than
+    silence. The declaration is validated at HEAD ONLY: the only case that needs
+    it is a skill added upstream AFTER the pin, which is by definition absent
+    from the pinned commit, so validating it against the pin rejected the exact
+    declaration the "upstream added" message asks for (see the ⛔ below).
+    """
+    upstream = manifest["upstream"]
+    repo, branch, pinned = upstream["repo"], upstream["branch"], upstream["commit"]
+    pinned_dirs = _upstream_dirs(manifest)
+    declared_out = set(manifest.get("out_of_scope") or [])
+    expected = set(pinned_dirs) | declared_out
+    problems: list[str] = []
+
+    at_pin = set(list_upstream_skills(repo, pinned, attempts, backoff))
+    for name in sorted(set(pinned_dirs) - at_pin):
+        pinned_as = ", ".join(sorted(pinned_dirs[name]))
+        problems.append(
+            f"the pin NAMES a skill its own commit does not contain: "
+            f"'{UPSTREAM_SKILLS_DIR}/{name}' (pinned as {pinned_as}) is absent "
+            f"from {repo}@{pinned[:12]} — the pin is not honest about its scope. "
+            f"Re-cut it: `uv run python tools/served_skills_parity.py --sync`")
+    # ⛔ `out_of_scope:` is deliberately NOT validated against the PINNED commit.
+    # The only case that needs the declaration is an upstream skill added AFTER
+    # the pin — so a name it must carry is BY DEFINITION absent from the pinned
+    # commit. Rejecting `declared_out - at_pin` told the operator to "drop the
+    # stale declaration", i.e. to undo exactly what the "upstream added" message
+    # asks for; the two messages prescribed each other and the loop had no exit
+    # (review finding, P2). It is validated at HEAD below, where the drift is.
+    if problems:
+        # The pin misdescribes its OWN commit. Comparing that against HEAD too
+        # would add a second, noisier finding for the same underlying defect.
+        return problems
+
+    at_head = at_pin if head == pinned else set(
+        list_upstream_skills(repo, head, attempts, backoff))
+    # A directory in neither the pin nor `out_of_scope:` is red EITHER WAY, but
+    # the two cases must not be called the same thing: one really was added, the
+    # other has been sitting upstream since before the pin and was simply never
+    # declared. Reporting the second as "upstream added" sends the operator
+    # looking for an upstream commit that does not exist (review finding, P2).
+    undeclared = at_head - expected
+    since_pin = {name for name in undeclared if name in at_pin}
+    added = undeclared - since_pin
+    for name in sorted(since_pin):
+        problems.append(
+            f"upstream has '{UPSTREAM_SKILLS_DIR}/{name}' at {repo}@{branch} "
+            f"HEAD ({head[:12]}) AND at the pinned commit, but the pin neither "
+            f"serves nor declares it — this is not a new addition, it is an "
+            f"undeclared directory. Pin it (add it to the pin's `skills:` with "
+            f"its `upstream_path`/`served_path`) or record `{name}` under "
+            f"`out_of_scope:` if it is deliberately not served.")
+    for name in sorted(added):
+        problems.append(
+            f"upstream added '{UPSTREAM_SKILLS_DIR}/{name}' at {repo}@{branch} "
+            f"HEAD ({head[:12]}) — pin it or record it as out of scope.\n"
+            f"      The pin's byte arms iterate the pin's OWN keys, so this "
+            f"skill is invisible to them: it is not mirrored here, and nothing "
+            f"else reports it. Add it to the pin's `skills:` (with its "
+            f"`upstream_path`/`served_path`) and run `--sync`, or list "
+            f"`{name}` under `out_of_scope:` if it is deliberately not served — "
+            f"the declaration is checked at HEAD, so THAT path needs no pin "
+            f"re-cut.")
+    for name in sorted(set(pinned_dirs) - at_head):
+        problems.append(
+            f"upstream removed '{UPSTREAM_SKILLS_DIR}/{name}' at {repo}@{branch} "
+            f"HEAD ({head[:12]}) — the pinned skill no longer exists upstream, so "
+            f"the mirror is STALE. Re-derive with "
+            f"`uv run python tools/served_skills_parity.py --sync`, or drop it "
+            f"from the pin if it is no longer served.")
+    for name in sorted(declared_out - at_head):
+        # The declaration is checked at HEAD too: a skill somebody once excluded
+        # and that upstream has since deleted must be dropped from the pin, or
+        # the `out_of_scope:` list slowly widens the expected set with names
+        # nothing can ever match.
+        problems.append(
+            f"the pin's `out_of_scope:` names '{UPSTREAM_SKILLS_DIR}/{name}', "
+            f"which {repo}@{branch} HEAD ({head[:12]}) does not contain — drop "
+            "the stale declaration")
+    return problems
+
+
+def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
+                   backoff: float = DEFAULT_BACKOFF,
+                   problems: list[str] | None = None,
+                   cannot_verify: list[str] | None = None) -> list[str]:
+    """The pin is honest AND current AND the right scope, and the mirror matches it.
+
+    Four assertions, in the order that makes each failure legible:
+      0. upstream `skills/` contains EXACTLY the upstream directories the pin's
+         `upstream_path`s bind (plus the pin's
+         declared `out_of_scope:`) — at the pinned commit and at `branch` HEAD,
+         so an upstream ADDITION or REMOVAL is reported rather than invisible
+         (both byte assertions iterate the pin's own keys, see `_check_scope`);
       1. the pinned commit's bytes hash to the pinned sha256 (HONESTY — a
          hand-fabricated pin fails here instead of passing quietly);
       2. the bytes at upstream `branch` HEAD hash to the SAME sha256
@@ -344,23 +591,67 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
          commit that cannot change what we serve must not red this;
       3. the served mirror equals those bytes (the end-to-end claim, re-stated
          so this check alone is sufficient at a deploy).
+
+    A side that cannot be READ (network, rate limit, 5xx) is recorded in
+    ``cannot_verify`` — the CLI reports that as *cannot verify*, distinctly from
+    the drift list. ⛔ It is NOT accumulated in a local list dropped on the way
+    out: a later read failure used to raise out of this function, so a drift
+    already OBSERVED was discarded and the run reported "could not verify — this
+    is NOT a drift" with an empty drift section in the uploaded report (review
+    finding, P2). Callers that pass no lists get this function's own findings.
     """
-    problems: list[str] = []
+    problems = [] if problems is None else problems
+    cannot_verify = [] if cannot_verify is None else cannot_verify
     upstream = manifest["upstream"]
     repo, branch, pinned = upstream["repo"], upstream["branch"], upstream["commit"]
 
-    head = remote_head(repo, branch, attempts, backoff)
-    # Honesty + mirror first: a pin that is not what its own commit contains is
+    try:
+        head = remote_head(repo, branch, attempts, backoff)
+    except ParityError as exc:
+        cannot_verify.append(
+            f"upstream HEAD of {repo}@{branch}: {exc} — scope, honesty and "
+            "currency are all decided against HEAD, so this run proves nothing "
+            "about the bytes")
+        return problems
+    # SCOPE FIRST, and on a scope problem STOP: a skill the pin names but
+    # upstream does not have would make the byte arms fetch a 404, which the CLI
+    # reports as "cannot verify" — misclassifying a real, actionable drift as a
+    # network problem. Report the scope defect instead; it is the more
+    # fundamental answer, and it is what the operator must act on first.
+    try:
+        scope = _check_scope(manifest, head, attempts, backoff)
+    except ParityError as exc:
+        # An unreadable LISTING is not a scope defect — keep it in the other
+        # bucket and let the byte arms report whatever they CAN read.
+        cannot_verify.append(
+            f"the upstream `{UPSTREAM_SKILLS_DIR}/` listing: {exc} — the pin's "
+            "scope is unproven for this run")
+        scope = []
+    problems.extend(scope)
+    if scope:
+        return problems
+    # Honesty + mirror next: a pin that is not what its own commit contains is
     # the more fundamental failure, and it is reported even when upstream moved.
-    problems.extend(_check_pinned_bytes(manifest, root, attempts, backoff))
+    problems.extend(_check_pinned_bytes(manifest, root, attempts, backoff,
+                                        cannot_verify))
     if head == pinned:
         return problems
 
     # Currency. The pointer moved — but only a byte difference is a drift.
     drifted = 0
+    unread = 0
     for name in sorted(manifest["skills"]):
         entry = manifest["skills"][name]
-        payload = fetch_raw(repo, head, entry["upstream_path"], attempts, backoff)
+        try:
+            payload = fetch_raw(repo, head, entry["upstream_path"], attempts,
+                                backoff)
+        except ParityError as exc:
+            unread += 1
+            cannot_verify.append(
+                f"{name}: {exc} — the bytes at {repo}@{branch} HEAD "
+                f"({head[:12]}) could not be read, so currency is unproven for "
+                "this skill")
+            continue
         digest = sha256_bytes(payload)
         if digest == entry["sha256"]:
             continue
@@ -374,7 +665,7 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
             f"      Fix: `uv run python tools/served_skills_parity.py --sync` "
             f"and commit the mirrored skills + the pin. (#4643 target 2 — this "
             f"is the drift that must not ship behind a green deploy.)")
-    if not drifted:
+    if not drifted and not unread:
         # Green, but say WHY it is green — otherwise a reader sees the pin's
         # commit differ from HEAD and has to re-derive that it is harmless.
         _note(f"upstream {repo}@{branch} moved to {head[:12]} (pin: pinned "
@@ -384,13 +675,24 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
 
 
 def _check_pinned_bytes(manifest: dict, root: Path, attempts: int,
-                        backoff: float) -> list[str]:
+                        backoff: float,
+                        cannot_verify: list[str] | None = None) -> list[str]:
     problems: list[str] = []
+    cannot_verify = [] if cannot_verify is None else cannot_verify
     upstream = manifest["upstream"]
     repo, pinned = upstream["repo"], upstream["commit"]
     for name in sorted(manifest["skills"]):
         entry = manifest["skills"][name]
-        payload = fetch_raw(repo, pinned, entry["upstream_path"], attempts, backoff)
+        try:
+            payload = fetch_raw(repo, pinned, entry["upstream_path"], attempts,
+                                backoff)
+        except ParityError as exc:
+            # One unreadable file must not hide the others' verdicts.
+            cannot_verify.append(
+                f"{name}: {exc} — the PINNED bytes could not be read, so the "
+                "honesty, byte-count and mirror arms are unproven for this "
+                "skill")
+            continue
         digest = sha256_bytes(payload)
         if digest != entry["sha256"]:
             problems.append(
@@ -545,6 +847,20 @@ def main(argv: list[str] | None = None) -> int:
                 "RE-DERIVES the mirror and writes the pin, so a check in the same "
                 "invocation would grade bytes it just overwrote. Run --sync, "
                 "commit, then --check.")
+        # Output-mode flags are refused too, for a DIFFERENT reason: this branch
+        # returns before the document/report is written, so accepting them prints
+        # human lines (or nothing) and exits 0 — `json.loads(stdout)` raises, and
+        # a monitor asking for a report is handed nothing. A flag accepted and
+        # silently ignored is worse than a refusal (review finding, P2).
+        ignored = [flag for flag, on in (("--json", args.json),
+                                         ("--report", args.report is not None))
+                   if on]
+        if ignored:
+            parser.error(
+                f"--sync cannot be combined with {' / '.join(ignored)}: this "
+                "branch returns BEFORE the document/report is written, so the "
+                "flag would be accepted, print nothing machine-readable, and "
+                "exit 0. Run --sync, then the check that writes the report.")
 
     root = Path(args.root).resolve()
     manifest_path = Path(args.manifest) if args.manifest else root / MANIFEST_REL
@@ -558,8 +874,19 @@ def main(argv: list[str] | None = None) -> int:
     do_upstream = args.check or args.check_upstream or not (explicit or args.sync)
 
     problems: list[str] = []
+    cannot_verify: list[str] = []
     try:
-        manifest = load_manifest(manifest_path)
+        try:
+            manifest = load_manifest(manifest_path)
+        except ParityError as exc:
+            # ⛔ A pin this tool cannot read is a DEFECT IN THIS TREE, not a read
+            # failure: it is deterministic, so "re-run once the network/credential
+            # is sane" can never clear it, and the transient-looking heading hid
+            # an actionable defect (review finding, P2).
+            raise PinDefect(
+                f"the pin is UNUSABLE — {manifest_path}: {exc}. This is a defect "
+                "in this tree (fix the pin, or re-derive it with `--sync`), not "
+                "a network problem: a re-run cannot change the answer") from exc
         if args.sync:
             result = sync(root, manifest_path, args.commit, args.attempts,
                           args.backoff, args.dry_run)
@@ -586,25 +913,55 @@ def main(argv: list[str] | None = None) -> int:
         if do_local:
             problems.extend(check_local(manifest, root))
         if do_upstream:
-            problems.extend(check_upstream(manifest, root, args.attempts, args.backoff))
+            # ACCUMULATED INTO, not returned-and-replaced: a later fetch that
+            # exhausts its retries used to raise out of `check_upstream`, so a
+            # drift already observed was thrown away and the uploaded report said
+            # `### Drift (0)` on a run that HAD found one (review finding, P2).
+            check_upstream(manifest, root, args.attempts, args.backoff,
+                           problems, cannot_verify)
+    except PinDefect as exc:
+        problems.append(str(exc))
     except ParityError as exc:
-        problems.append(f"FAIL-CLOSED: {exc}")
+        # ⛔ NOT a drift. A network error, a 5xx, a rate-limited listing or an
+        # unreadable pin is *evidence of nothing* about the bytes; reporting it
+        # in `problems` makes a monitor auto-file "the served mirror drifted"
+        # for a cause that did not happen, and trains humans to re-run the gate.
+        # It still FAILS (fail-closed) — silence would report health it never
+        # observed.
+        cannot_verify.append(str(exc))
 
+    ok = not problems and not cannot_verify
     if args.json:
         print(json.dumps({
-            "ok": not problems,
+            "ok": ok,
             "checked_local": bool(do_local),
             "checked_upstream": bool(do_upstream),
+            # Two fields on purpose: `problems` is DRIFT (bytes disagree),
+            # `cannot_verify` is "a side was unreadable". A consumer that treats
+            # them alike re-introduces the false-alarm class this split removes.
             "problems": problems,
+            "cannot_verify": cannot_verify,
         }, indent=2))
 
     if problems:
-        _err(f"served-skills parity FAILED with {len(problems)} problem(s):")
+        _err(f"served-skills parity FAILED with {len(problems)} problem(s) — DRIFT:")
         for problem in problems:
             _err(f"  - {problem}")
-        if args.report:
-            _report(args.report, ["## served-skills parity failed", ""] + [
-                f"- {p}" for p in problems])
+    if cannot_verify:
+        _err("served-skills parity could NOT VERIFY — this is NOT a drift; a side "
+             f"could not be read ({len(cannot_verify)}):")
+        for problem in cannot_verify:
+            _err(f"  ! {problem}")
+        _err("  the gate fails closed: an unreadable side is never reported as "
+             "agreement. Re-run once the network/credential is sane.")
+    if not ok and args.report:
+        _report(args.report,
+                ["## served-skills parity failed", ""]
+                + [f"### Drift ({len(problems)})", ""]
+                + [f"- {p}" for p in problems]
+                + [f"### Could not verify ({len(cannot_verify)}) — not a drift", ""]
+                + [f"- {p}" for p in cannot_verify])
+    if not ok:
         return 1
 
     scope = " + ".join(filter(None, [

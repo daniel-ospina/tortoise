@@ -32,6 +32,16 @@
 #  15. the body file is written under RUNNER_TEMP and is the issue's body
 #  16. a NON-Actions author is refused by the shared substrate on this path too
 #      (the PAT trap: it would file a duplicate on every failing run)
+#  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
+#      `success` in this run (plus the job-level key only when `job.status` is
+#      `success`) — `skipped` and outcome-less steps are never read as a pass, and
+#      a failing step's streak is never retired
+#  22. a failed close is a WARNING and exit 0 — this leg runs on the GREEN path, so
+#      it must never become a false deploy failure
+#  23. an untrusted search closes NOTHING (fail closed) and still exits 0
+#  24. a missing token warns (never reds the job) and contacts nothing
+#  25. the ALERT path never closes anything (a failing run has not recovered)
+#  26. `--job-status` without `--resolve` (and an unknown status) is a usage error
 
 set -uo pipefail
 
@@ -48,6 +58,12 @@ assert_contains() {
 }
 assert_not_contains() {
   case "$1" in *"$2"*) bad "$3 (unexpectedly found '$2')" ;; *) ok "$3" ;; esac
+}
+assert_match() { # <haystack> <ERE> <label>
+  if grep -qE -- "$2" <<<"$1"; then ok "$3"; else bad "$3 (no line matches: $2)"; fi
+}
+assert_no_match() { # <haystack> <ERE> <label>
+  if grep -qE -- "$2" <<<"$1"; then bad "$3 (a line matches: $2)"; else ok "$3"; fi
 }
 
 FIX="$(mktemp -d)"
@@ -86,6 +102,24 @@ case "$path" in
     exit 1 ;;
   search/issues*)
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
+    if [ "${STUB_SEARCH_DYNAMIC:-0}" = "1" ]; then
+      # #8841: the resolve leg searches ONE KEY PER PASSING STEP, so a fixed
+      # fixture cannot tell the keys apart. Derive the item from the QUERY's own
+      # quoted title (url-decoded) and record it, so a case can assert WHICH key
+      # was searched — and the substrate's EXACT-title guard stays honest.
+      python3 - "$path" "$STUB_TMP" <<'PYEOF'
+import json, re, sys, urllib.parse
+q = urllib.parse.unquote(sys.argv[1])
+quoted = re.findall(r'"([^"]*)"', q)
+title = quoted[-1] if quoted else ""
+with open(sys.argv[2] + "/searched.txt", "a", encoding="utf-8") as fh:
+    fh.write(title + "\n")
+json.dump({"items": [{"number": 42, "title": title,
+                       "user": {"login": "github-actions[bot]", "type": "Bot"}}]},
+          sys.stdout)
+PYEOF
+      exit 0
+    fi
     printf '%s\n' "${STUB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}"
     if [ "$paginate" = "1" ] && [ -n "${STUB_SEARCH_JSON_P2:-}" ]; then printf '%s\n' "$STUB_SEARCH_JSON_P2"; fi
     exit 0 ;;
@@ -100,6 +134,13 @@ case "$path" in
     [ "${STUB_CREATE_FAIL:-0}" = "1" ] && { echo "gh: create failed" >&2; exit 1; }
     printf '%s\n' "${fields[@]}" > "$STUB_TMP/created.txt"
     printf '{"number":900,"user":{"login":"%s"}}' "${STUB_CREATE_LOGIN:-github-actions[bot]}" ;;
+  */issues/[0-9]*)
+    # PATCH close — the resolve leg (#8841). The closed TITLE is recorded so a
+    # case can assert WHICH key was retired (the resolve leg must retire exactly
+    # the steps that passed).
+    [ "${STUB_CLOSE_FAIL:-0}" = "1" ] && { echo "gh: patch failed" >&2; exit 1; }
+    printf 'closed #%s\n' "${path##*/}" >> "$STUB_TMP/closed.txt"
+    printf '{"number":%s,"state":"closed","user":{"login":"github-actions[bot]"}}' "${path##*/}" ;;
   *) printf '{}' ;;
 esac
 GH_EOF
@@ -150,10 +191,12 @@ REPORT_EOF
 
 reset_case() {
   : > "$STUB_TMP/calls.log"
-  rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt"
+  rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt" "$STUB_TMP/closed.txt" \
+        "$STUB_TMP/searched.txt"
   unset STUB_SEARCH_JSON STUB_SEARCH_JSON_P2 STUB_SEARCH_FAIL STUB_CREATE_FAIL \
         STUB_COMMENT_FAIL STUB_COMMENTS_FAIL STUB_COMMENTS_JSON \
-        STUB_CREATE_LOGIN STUB_COMMENT_LOGIN STUB_TG_FAIL || true
+        STUB_CREATE_LOGIN STUB_COMMENT_LOGIN STUB_TG_FAIL STUB_CLOSE_FAIL \
+        STUB_SEARCH_DYNAMIC || true
   export GH_TOKEN="test-token"
   export TELEGRAM_BOT_TOKEN="tg-secret"
   export TELEGRAM_CHAT_ID="12345"
@@ -171,6 +214,7 @@ count_calls()  { grep -c -- "$1" "$STUB_TMP/calls.log" 2>/dev/null || true; }
 # duplicate (and would have hidden a real duplicate behind the same collapse).
 count_creates()  { grep -cE -- 'GH POST .*/issues$' "$STUB_TMP/calls.log" 2>/dev/null || true; }
 count_comments() { grep -cE -- 'GH POST .*/issues/[0-9]+/comments$' "$STUB_TMP/calls.log" 2>/dev/null || true; }
+count_closes()   { grep -cE -- 'GH PATCH .*/issues/[0-9]+$' "$STUB_TMP/calls.log" 2>/dev/null || true; }
 title_line()   { grep -m1 '^title=' "$STUB_TMP/created.txt" 2>/dev/null || echo ''; }
 created()      { [ -f "$STUB_TMP/created.txt" ] && cat "$STUB_TMP/created.txt" || echo ''; }
 commented()    { [ -f "$STUB_TMP/comment.txt" ] && cat "$STUB_TMP/comment.txt" || echo ''; }
@@ -431,6 +475,109 @@ reset_case
 run_alert --help
 assert_eq "$RC" "0" "--help exits 0, as it claims"
 assert_eq "$(count_calls 'GH')" "0" "--help contacts nothing"
+
+# ── #8841: the RESOLVE leg — retiring a recovered finding's ledger key ──────
+# Filing without closing is a ledger that can only grow. Measured on this
+# workflow's own `drift` key: #7634 was filed 2026-10-07T20:11Z, **21 runs then
+# SUCCEEDED** on it, and ten days later the issue was still OPEN carrying 238
+# `Recurrence` comments — the standing alert claimed a condition that was no
+# longer true. These cases pin the closing half: only a step's OWN `success` in
+# this run retires its key, `skipped` is never a pass, the job-level key needs
+# `job.status == success`, and the leg can never redden a green deploy.
+
+echo
+echo "── case 19: every passing step retires its key; a green job retires the job key ──"
+reset_case
+export STUB_SEARCH_DYNAMIC=1
+run_alert --job deploy-api --resolve --job-status success \
+  --steps "parity=success drift=success deploy=success"
+assert_eq "$RC" "0" "the resolve leg exits 0 on a green run"
+assert_eq "$(count_closes)" "4" "3 passing steps + the job-level key are all retired"
+assert_contains "$(cat "$STUB_TMP/searched.txt")" "deploy-hosted: deploy-api failed at 'drift'" "the drift key is retired by its EXACT title"
+assert_contains "$(cat "$STUB_TMP/searched.txt")" "deploy-hosted: deploy-api failed at 'parity'" "and every other passing step's key"
+# The job-level fallback key carries no step id.
+assert_match "$(cat "$STUB_TMP/searched.txt")" '^deploy-hosted: deploy-api failed$' "the job-level key (no step id) is retired when the JOB is green"
+assert_eq "$(count_creates)" "0" "the resolve leg never files an issue"
+assert_eq "$(count_calls 'CURL')" "0" "and never pages (this is bookkeeping, not an alert)"
+assert_eq "$(count_calls 'GH POST .*/comments$')" "4" "each retirement records WHY on the issue"
+
+echo
+echo "── case 20: a FAILED step is not retired, and a red job keeps its job key ──"
+reset_case
+export STUB_SEARCH_DYNAMIC=1
+run_alert --job deploy-api --resolve --job-status failure \
+  --steps "parity=success drift=success deploy=failure"
+assert_eq "$RC" "0" "the resolve leg still exits 0 (never reddens the run)"
+assert_eq "$(count_closes)" "2" "only the two PASSING steps are retired"
+assert_contains "$(cat "$STUB_TMP/searched.txt")" "at 'parity'" "the passing step is retired"
+assert_not_contains "$(cat "$STUB_TMP/searched.txt")" "at 'deploy'" "the FAILING step's streak is NOT retired"
+assert_no_match "$(cat "$STUB_TMP/searched.txt")" '^deploy-hosted: deploy-api failed$' "the job-level key is NOT retired while the job is red"
+assert_eq "$(count_creates)" "0" "and nothing was filed"
+
+echo
+echo "── case 21: SKIPPED is not a pass (a run that dies early skips the rest) ──"
+reset_case
+export STUB_SEARCH_DYNAMIC=1
+run_alert --job deploy-api --resolve --job-status failure \
+  --steps "drift=success fly-machines=skipped set-secrets=skipped deploy="
+assert_eq "$RC" "0" "exit 0"
+assert_eq "$(count_closes)" "1" "only the one step that actually PASSED is retired"
+assert_contains "$(cat "$STUB_TMP/searched.txt")" "at 'drift'" "the passed step"
+assert_not_contains "$(cat "$STUB_TMP/searched.txt")" "at 'fly-machines'" "a skipped step is never read as a pass"
+assert_not_contains "$(cat "$STUB_TMP/searched.txt")" "at 'deploy'" "nor an outcome-less (never-reached) step"
+
+echo
+echo "── case 22: a failed close is a WARNING, never a red deploy ──────────────"
+reset_case
+export STUB_SEARCH_DYNAMIC=1
+export STUB_CLOSE_FAIL=1
+run_alert --job deploy-api --resolve --job-status success --steps "drift=success"
+assert_eq "$RC" "0" "a bookkeeping failure does NOT fail the job (a red here would be a FALSE deploy failure)"
+assert_contains "$OUT" "could NOT resolve" "the failure is surfaced on every run instead of being silent"
+assert_contains "$OUT" "stays OPEN" "and names the standing consequence"
+
+echo
+echo "── case 23: an untrusted search closes NOTHING (fail closed) ─────────────"
+reset_case
+export STUB_SEARCH_DYNAMIC=1
+export STUB_SEARCH_FAIL=1
+run_alert --job deploy-api --resolve --job-status success --steps "drift=success"
+assert_eq "$RC" "0" "still exit 0 (it cannot redden a green deploy)"
+assert_eq "$(count_closes)" "0" "'cannot see the ledger' is never 'resolved'"
+assert_contains "$OUT" "could NOT resolve" "and it says so loudly"
+
+echo
+echo "── case 24: resolve mode needs a token but must NOT red the job ──────────"
+reset_case
+unset GH_TOKEN GITHUB_TOKEN || true
+run_alert --job deploy-api --resolve --job-status success --steps "drift=success"
+assert_eq "$RC" "0" "a missing token is a warning on the green path, not a false deploy failure"
+assert_contains "$OUT" "GH_TOKEN is not set" "the missing token is named"
+assert_contains "$OUT" "stays OPEN" "and so is the consequence"
+assert_eq "$(count_calls 'GH')" "0" "nothing was contacted"
+export GH_TOKEN="test-token"
+
+echo
+echo "── case 25: the ALERT path never closes anything ────────────────────────"
+reset_case
+export STUB_SEARCH_DYNAMIC=1
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$DRIFT_REPORT"
+assert_eq "$RC" "0" "the alert path still succeeds"
+assert_eq "$(count_closes)" "0" "a FAILING run must never retire a key"
+assert_eq "$(count_comments)" "1" "it records the occurrence instead"
+
+echo
+echo "── case 26: usage — --resolve/--job-status validation ───────────────────"
+reset_case
+run_alert --job deploy-api --job-status success
+assert_eq "$RC" "2" "--job-status without --resolve is a usage error (it would silently do nothing)"
+assert_contains "$OUT" "only meaningful with --resolve" "and says so"
+run_alert --job deploy-api --resolve --job-status bogus
+assert_eq "$RC" "2" "an unknown --job-status is a usage error"
+run_alert --job deploy-api --resolve --job-status
+assert_eq "$RC" "2" "--job-status with no value is a usage error"
+assert_contains "$OUT" "needs a value" "and says so"
+assert_eq "$(count_calls 'GH')" "0" "a usage error contacts nothing"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

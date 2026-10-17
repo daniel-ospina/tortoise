@@ -1,4 +1,4 @@
-// tortoise-hook-version: 2
+// tortoise-hook-version: 3
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -15,6 +15,17 @@
 // length (see `clipTurnContent`), so the bytes this seam POSTs changed and
 // every already-installed generation-1 copy must read as stale and be
 // reinstalled — an old copy would keep storing an unmarked 5,000-char wall.
+//
+// Generation 3 (#5109): `resolveConfig` now WARNS (once per path, stderr, path
+// + mode only, never refusing) when the FILE-sourced credential store is
+// group/other-readable — the read side of a store our writers pin `0600`. That
+// is a behavioural edit to this artifact, so the generation moves with it: an
+// already-installed generation-2 copy must read as STALE (`found < expected`),
+// not as `modified-artifact` ("marker matches but its bytes differ — local
+// edit"), which would tell every existing Pi user they had edited a file they
+// never touched and make the generation number incomparable across installs.
+// Any later behavioural edit here moves it again — the marker is the install
+// contract, not a changelog (see `hook_install.detect_artifact_install`).
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
@@ -206,6 +217,57 @@ export type FetchLike = (
 
 // ── Config ────────────────────────────────────────────────────────────────
 
+// ── #5109: the READ side of the credential store ──────────────────────────
+
+/**
+ * Store paths already warned about, keyed by path — ONCE PER PROCESS. Every
+ * `turn_end` resolves the same store, so a line per resolution would drown the
+ * one warning that matters. Exported so a test can prove the key is the path
+ * (not a global boolean) and clear it between cases.
+ */
+export const _CREDENTIAL_MODE_WARNED = new Set<string>();
+
+/**
+ * #5109 (the capture-hook half): say so when a credential store is
+ * group/other-readable.
+ *
+ * EVERY writer of this store already pins it closed — the CLI writes it 0600
+ * and the directory 0700 (#1708) — but nothing verified that on READ, so a
+ * store whose mode had drifted (restored from a backup, re-created by hand,
+ * `cp`'d without `-p`) was opened and its value used at whatever mode it
+ * carried, silently. This is the sibling of
+ * `tortoise/__main__.py::_warn_if_credential_store_is_readable`: same check,
+ * same shape, the OTHER in-repo reader.
+ *
+ * What this is, and is not (mirrored from the CLI half, deliberately):
+ *
+ * * It WARNS, it does not refuse. A `0644` store behind a `0700` parent is not
+ *   reachable by another user (#5109's own 2026-10-09 correction), so refusing
+ *   would over-block a setup that is not exposed.
+ * * It NEVER prints the credential — the path and the mode only. A warning
+ *   that quotes what it warns about would write the secret into the very
+ *   transcript this issue is about.
+ * * It goes to **stderr** (`warn`), never stdout: a Pi extension's stdout is
+ *   its log channel, and this is a hazard hint, not a capture event.
+ * * It cannot fail the command. A store we cannot `stat` is not this check's
+ *   business — credential resolution already succeeded by reading it.
+ */
+export function warnIfCredentialStoreIsReadable(path: string): void {
+  let mode: number;
+  try {
+    mode = statSync(path).mode & 0o777;
+  } catch {
+    return; // absent / unstattable — nothing to check (never throw)
+  }
+  if ((mode & 0o077) === 0) return; // no group/other bits at all → silence
+  if (_CREDENTIAL_MODE_WARNED.has(path)) return;
+  _CREDENTIAL_MODE_WARNED.add(path);
+  warn(
+    `${path} is mode ${mode.toString(8).padStart(4, "0")} — group/other can ` +
+      `read the credential stored in it. Fix: chmod 600 ${path}`,
+  );
+}
+
 /**
  * Resolve apiUrl/apiKey: env first, then `~/.pi/agent/tortoise-config.json`.
  * The Pi install already exports both into the launching shell, so the happy
@@ -236,6 +298,10 @@ export function resolveConfig(
   const fileUrl = typeof file.apiUrl === "string" ? file.apiUrl : "";
 
   const apiKey = envKey || fileKey;
+  // #5109: a FILE-sourced key is the only case worth checking — an env key has
+  // no store on disk to have drifted. Checked here rather than in the caller
+  // because `resolveConfig` IS this runtime's credential-USE seam.
+  if (!envKey && fileKey) warnIfCredentialStoreIsReadable(configPath);
   // ENV key → env URL chain; FILE key → file URL chain (never env).
   const apiUrl = (envKey ? env.TORTOISE_API_URL : fileUrl) || DEFAULT_API_URL;
   return { apiKey, apiUrl: String(apiUrl).replace(/\/+$/, "") };
