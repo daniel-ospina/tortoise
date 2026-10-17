@@ -173,6 +173,18 @@ surfaces:
   # #3065: bounded-socket guard for the raw FalkorDB clients in the product
   # package (dual-registered with `core`, its fallback surface — see there).
   - test_bounded_raw_clients_3065.py
+  # #2969 (residual): the resolved socket bound must be the wait the caller
+  # actually gets. DUAL-REGISTERED with `core` for the reason every dual entry
+  # above exists: `tortoise/__main__.py` (the doctor probe) and
+  # `tortoise/acl_graph_users.py` (the ACL admin client) are BOTH exact `api`
+  # SOURCE_PATTERNS matches, so an `__main__.py`-only or
+  # `acl_graph_users.py`-only diff selects `api` and REPLACES the `core`
+  # fallback — without THIS entry the attempt-count/wall-clock measurements
+  # never run on a change to a site they pin. (`session_indexer.py` /
+  # `backup.py` match no named pattern, so they fall through to `core`, whose
+  # entry below covers them.) Pinned by
+  # tests/test_ci_selection.py::test_socket_bound_2969_guard_runs_on_every_spread_site.
+  - test_socket_bound_not_multiplied_2969.py
   # #2922/#2923: DB-free static guards for boot-path regressions (credential
   # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
   # Registered under `api` as well as `core` deliberately: the file it guards most
@@ -1626,6 +1638,20 @@ surfaces:
   # match no named pattern, so they fall through to `core`: without THIS entry
   # the guard would not run on a change to the site it was written for.
   - test_bounded_raw_clients_3065.py
+  # #2969 (residual): the resolved socket bound must be the wait the caller
+  # actually gets — `_bounded_server_socket_kwargs()` pins ZERO retries on the
+  # `retry=` key, because on the pinned 7.4.1 a raw `redis.Redis` inherits a
+  # 3-retry function-signature default (4 attempts / ~11.5s for a 1s bound)
+  # while `falkordb.FalkorDB` defaults to none (1 attempt / ~1.0s), and one
+  # retry would double the four FalkorDB clients' wait. The subject is
+  # `tortoise/projection/__init__.py` (a SHARED_MODULE: it selects the full
+  # matrix on its own), but the pin also guards the `retry=` key that
+  # `session_indexer.py` / `backup.py` / `__main__.py` / `acl_graph_users.py`
+  # spread. `session_indexer.py` and `backup.py` match no named pattern, so
+  # they fall through to `core`: without THIS entry the guard would not run on
+  # a change to either. `__main__.py` / `acl_graph_users.py` are `api` sources
+  # and are covered by the DUAL `api` entry (above), not by this one.
+  - test_socket_bound_not_multiplied_2969.py
   - test_boot_regressions.py
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
@@ -5625,6 +5651,7 @@ durations:
   test_vet_gate_5005.py: 0.5
   test_vocab_gating_by_graph.py: 5.1
   test_bounded_raw_clients_3065.py: 3.0
+  test_socket_bound_not_multiplied_2969.py: 7.5  # unmeasured — file ADDED BY THIS PR (#3400 trap: the refresher samples push-to-main runs only, so a new file packs at the flat 2.0s default and drops duration coverage under the 90% floor). Readings: 4.0s warm on the authoring box, 8.1s cold on a reviewer box (first import of redis/falkordb/tortoise.projection dominates); the two socket measurements themselves are ~1.0s each. Declared at the HIGHER reading so a cold leg cannot under-pack. Refresh from the first post-merge run.
   test_entity_identity.py: 4.1
   test_3589_3326_salvage.py: 4.2
   test_5388_org_enumeration_completeness.py: 2.5
