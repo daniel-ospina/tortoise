@@ -760,7 +760,8 @@ def test_a_recreated_point_is_reported_as_a_second_creation(monkeypatch, sdk_fac
         changes = sdk.poll_events()["changes"]
         kinds = _kinds(changes, first["id"])
         assert kinds == ["created", "deleted", "created"], kinds
-        recreated = [c for c in changes if c["id"] == first["id"]][0]["changes"][-1]
+        recreated = next(
+            c for c in changes if c["id"] == first["id"])["changes"][-1]
         assert "before" not in recreated, recreated
     finally:
         sdk.close()

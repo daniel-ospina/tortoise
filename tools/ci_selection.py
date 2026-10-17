@@ -1094,7 +1094,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # the `core` registration could not fix it. Pinned by
              # tests/test_ci_selection.py::test_postgres_storage_guard_runs_on_migration_or_doc_change.
              "supabase/migrations/20261015000001_postgres_storage_footprint.sql",
-             "docs/ops/postgres-storage-measurement.md")
+             "docs/ops/postgres-storage-measurement.md",
+             # #8051: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a
+             # `tools/lane_stash.py`-only change was filtered out BEFORE the
+             # "not matched -> core" fallback: `select(["tools/lane_stash.py"])`
+             # returned NO surface and the pin registered under `core`
+             # (`tests/test_lane_stash.py`) never ran on the file it guards — the
+             # #1349/#3332/#3616 silent-drop class, the same shape as the
+             # `tools/tmpdir_sweep.py` entry above. `CORE_ALSO` (not a
+             # SOURCE_PATTERNS row) is deliberate: the guard is a lane-hygiene
+             # contract about a TOOL, and `core` is the surface that already
+             # carries the other `tools/` pins (`test_collision_preflight.py`,
+             # `test_test_lane_tool.py`). Pinned by
+             # tests/test_ci_selection.py::test_lane_stash_guard_runs_on_a_tools_only_change.
+             "tools/lane_stash.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
