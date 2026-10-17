@@ -724,30 +724,94 @@ def test_prune_names_the_exact_peer_handle_it_leaves_behind(repo):
     about. A peer holding TWO pins therefore got advice that restored the other
     entry: the same "advice that can only resolve to a different entry" defect
     this PR fixes in `recover`, reintroduced in a new message (#8822 review P2).
+
+    And in the legacy DOUBLE-PIN state (this lane ALSO pins the sha — the state
+    `recover` used to mint, still held by older worktrees) the line must offer this
+    lane's own handle instead of claiming `list` here cannot show the entry, which
+    is false there (#8822 re-review P2).
     """
+    mod = _load_tool()
     repo.dirty(repo.b, "f.txt", "base\nb-one\n")
     assert repo.lane(repo.b, "push", "-m", "B one").returncode == 0
     repo.dirty(repo.b, "f.txt", "base\nb-two\n")
     assert repo.lane(repo.b, "push", "-m", "B two").returncode == 0
-    pins = repo.stash_pins()
-    assert len(pins) == 2, pins
-    key_b = next(iter(pins)).split("/")[2]
+    peers = repo.stash_pins()
+    assert len(peers) == 2, peers
+    key_b = next(iter(peers)).split("/")[2]
     assert key_b.startswith("wtB-"), key_b
+    sha_two = repo.stash_sha()
+    assert sha_two
+    key_a = mod.lane_key(repo.a)
+    repo.git("update-ref", f"refs/lane/{key_a}/stash/7", sha_two)
+    listed = repo.lane(repo.a, "list")
+    assert sha_two[:12] in listed.stdout, listed.stdout
+    before = repo.stash_pins()
 
     cp = repo.lane(repo.a, "prune", "--apply")
     assert cp.returncode == 0, _fail(cp)
     lines = [ln for ln in cp.stdout.splitlines() if ln.startswith("  remove ")]
     assert len(lines) == 2, cp.stdout
-    for ref in pins:
+    for ref in peers:
         n = ref.rsplit("/", 1)[1]
         named = [ln for ln in lines if ref in ln]
         assert len(named) == 1, (ref, cp.stdout)
         assert f"`lane_stash pop {n}`" in named[0], named[0]
     assert "stash/<n>" not in cp.stdout, cp.stdout
+    # the double-pinned row names A's OWN handle and does not claim invisibility
+    own_row = [ln for ln in lines if sha_two[:12] in ln]
+    assert len(own_row) == 1, cp.stdout
+    assert f"refs/lane/{key_a}/stash/7" in own_row[0], own_row[0]
+    assert "`lane_stash pop 7` here restores it" in own_row[0], own_row[0]
+    assert "cannot show it" not in own_row[0], own_row[0]
+    # …while the peer-only row still says where the peer's copy lives
+    peer_row = [ln for ln in lines if ln is not own_row[0]]
+    assert len(peer_row) == 1 and "cannot show it" in peer_row[0], cp.stdout
     # nothing was lost, and the printed ids really restore those very entries
-    assert sorted(repo.stash_pins()) == sorted(pins), repo.lane_refs()
+    assert sorted(repo.stash_pins()) == sorted(before), repo.lane_refs()
     assert repo.lane(repo.b, "pop", "2").returncode == 0
     assert "b-two" in (repo.b / "f.txt").read_text()
+
+
+def test_list_says_a_guard_on_a_register_entry_is_redundant(repo, monkeypatch, capsys):
+    """`list` must not call a guard "the handle" when the register handles it.
+
+    `prune --apply` releases a guard whose object the shared register still
+    enumerates, so a note presenting that guard as the last handle contradicted the
+    reap. The arm that says otherwise sat BELOW the `refs/stash` arm — and
+    `refs/stash` names the register TIP by definition — so the commonest leftover
+    guard (a dead key's guard on the newest entry) still read as the handle, and
+    deleting the arm left the whole suite green (#8822 re-review P2).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nolder\n")
+    repo.git("stash", "push", "-q", "-m", "older", cwd=repo.b)
+    older = repo.stash_sha()
+    repo.dirty(repo.b, "f.txt", "base\nnewer\n")
+    repo.git("stash", "push", "-q", "-m", "newer", cwd=repo.b)
+    tip = repo.stash_sha()
+    assert older and tip and older != tip
+    guards = [f"refs/pi-lane-prune-guard/deadlane-22222222/{s}" for s in (older, tip)]
+    for ref in guards:
+        repo.git("update-ref", ref, ref.rsplit("/", 1)[1])
+
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    assert mod.main(["list"]) == 0
+    out = capsys.readouterr().out
+    for sha in (older, tip):
+        hit = [
+            ln for ln in out.splitlines()
+            if sha[:12] in ln and "pi-lane-prune-guard" in ln
+        ]
+        assert len(hit) == 1, out
+        assert "the shared register still enumerates it" in hit[0], hit[0]
+    assert "this guard is the handle" not in out, out
+
+    assert mod.main(["prune", "--apply"]) == 0
+    left = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert left == [], f"the register names both objects, so both guards are reaped: {left}"
 
 
 def test_prune_says_a_peer_applied_record_already_restored_the_work(repo):
@@ -777,7 +841,9 @@ def test_prune_says_a_peer_applied_record_already_restored_the_work(repo):
     assert f"refs/lane/{key_b}/applied/{sha}" in cp.stdout, cp.stdout
     assert "already restored" in cp.stdout, cp.stdout
     assert "stash/<n>" not in cp.stdout, cp.stdout
-    assert "lane_stash pop" not in cp.stdout, cp.stdout
+    # no `pop` is offered for the peer: that lane holds no pin to pop
+    note = next(ln for ln in cp.stdout.splitlines() if ln.startswith("  remove "))
+    assert "lane_stash pop" not in note.split(f"lane {key_b}")[-1], note
 
 
 def test_prune_output_names_the_foreign_lane_that_still_holds_the_entry(repo):

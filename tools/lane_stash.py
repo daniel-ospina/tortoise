@@ -937,15 +937,19 @@ def _reclaim_handle_note(row: dict, key: str) -> str:
     reclaimed (#8773 review P2).
 
     The ref it names must be one that EXISTS, and the instruction must work for THIS
-    entry. Two ways the first version was wrong, both reachable (#8822 review P2):
+    entry. Three ways the first version was wrong, all reachable (#8822 review P2):
     it printed a literal ``<n>`` placeholder, and `lane_stash pop` with no id
     restores ``entries[-1]`` — so for a peer holding two pins the advice restored
-    a DIFFERENT entry (the exact defect class this PR fixes elsewhere); and a
+    a DIFFERENT entry (the exact defect class this PR fixes elsewhere); a
     ``refs/lane/<key>/applied/<sha>`` record also makes a lane a
-    :func:`_foreign_pin_owners` owner, where no pin exists to pop at all.
+    :func:`_foreign_pin_owners` owner, where no pin exists to pop at all; and it
+    appended "`list` here cannot show it" even when THIS lane pins the sha too (the
+    legacy double-pin), where `list` here does show it and `pop` here restores it —
+    the line withheld the reader's own, more direct handle.
     """
     sha = row["sha"]
     refs = _refs_pointing_at(sha)
+    own = sorted(r for r in refs if _lane_key_of_ref(r) == key and "/stash/" in r)
     notes: list[str] = []
     for owner in _foreign_pin_owners(sha, key):
         pins = sorted(r for r in refs if _lane_key_of_ref(r) == owner and "/stash/" in r)
@@ -965,7 +969,12 @@ def _reclaim_handle_note(row: dict, key: str) -> str:
         else:
             notes.append(f"a ref of lane {owner}")
     if notes:
-        return ("  (still durable under " + "; ".join(notes)
+        peer = "; ".join(notes)
+        if own:
+            return ("  (still durable under this lane's " + ", ".join(own)
+                    + f" — `lane_stash pop {own[0].rsplit('/', 1)[1]}` here restores "
+                    "it; " + peer + ")")
+        return ("  (still durable under " + peer
                 + "; `list` here cannot show it)")
     if row["pinned"]:
         return "  (still durable under this lane's ref)"
@@ -1143,16 +1152,22 @@ def cmd_list(args: argparse.Namespace) -> int:
                 # (#8822 review P2).
                 note = ("  (also held by another prune guard only — NOT durable; "
                         "either owner may release it)")
-            elif "refs/stash" in others:
-                note = ("  (refs/stash names it too, but that is NOT durable — a later "
-                        "`stash store` moves it; this guard is the handle)")
             elif sha in register_shas:
                 # The SAME retention decision `prune --apply` makes: a guard whose
                 # object the shared register still enumerates is redundant, so
                 # calling it the handle here contradicted the reap that releases
                 # it (#8822 review P2).
+                #
+                # This arm must sit ABOVE the `refs/stash` one: `refs/stash` names
+                # the register's TIP by definition, so with the two swapped this
+                # branch could never fire for the commonest leftover guard — and
+                # the tip guard kept the "this guard is the handle" claim that the
+                # reap then acted against (#8822 re-review P2).
                 note = ("  (the shared register still enumerates it, so this guard is "
                         "redundant once its owner is gone — `prune --apply` reaps it)")
+            elif "refs/stash" in others:
+                note = ("  (refs/stash names it too, but that is NOT durable — a later "
+                        "`stash store` moves it; this guard is the handle)")
             else:
                 note = ("  (no other ref names it and the register does not enumerate "
                         "it — this guard is the handle)")
