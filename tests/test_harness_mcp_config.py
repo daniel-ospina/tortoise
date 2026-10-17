@@ -27,7 +27,14 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions  # noqa: I001
+from tortoise.__main__ import (  # noqa: I001
+    _cmd_install_hooks,
+    _harness_mcp_config,
+    _harness_stdio_config,
+    _onboard_ready_lines,
+    _print_harness_instructions,
+)
+from tortoise.capture_install import PI_EXTENSION_NAME
 from tortoise.auth import API_KEY_PREFIXES
 from tortoise.oauth import ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX
 
@@ -35,6 +42,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # #984 contract (merged to main): the hosted endpoint always carries the
 # trailing slash — pinned here so a regression to the unsuffixed URL fails.
 ENDPOINT = "https://api.premiselabs.co/mcp/"
+
+#: #3502 — where an install surface names an extension: `<name> extension`
+#: (prose) or `extensions/<name>` (an install-path claim). Kept to those two
+#: shapes — rather than a bare `tortoise-…` scan — because the same surfaces
+#: legitimately name `tortoise-config.json`, `tortoise-onboarding` (a skill),
+#: `tortoise_create_point()` (a tool) and `tortoise-session-end.sh` (a shell
+#: hook). A blanket scan false-positives on all four.
+_EXTENSION_CLAIMS = (
+    re.compile(r"(?P<name>tortoise-[a-z0-9-]+(?:\.[a-z0-9]+)?) extension\b"),
+    re.compile(r"extensions/(?P<name>tortoise-[a-z0-9-]+(?:\.[a-z0-9]+)?)"),
+)
 
 
 class TestHostedHttpShapes:
@@ -478,11 +496,15 @@ class TestPrintHarnessInstructions:
     """`_print_harness_instructions` — CLI self-hosted guidance output."""
 
     def _capture(self, harness: str) -> str:
+        return self._capture_call(_print_harness_instructions, harness)
+
+    @staticmethod
+    def _capture_call(fn, *args) -> str:
         buf = io.StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            _print_harness_instructions(harness)
+            fn(*args)
         finally:
             sys.stdout = old
         return buf.getvalue()
@@ -514,6 +536,117 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+    # ── #3502 — the phantom-extension drift guard ──────────────────────
+    #
+    # These surfaces used to advertise a `tortoise-context` extension that has
+    # never existed in this repo or in agent-infra, plus a per-turn context
+    # injection Pi has no seam for (#2119 is the injection seam and is still
+    # open). The name was hardcoded prose with nothing coupling it to the
+    # shipped artifact, so nothing failed when the two drifted. The name is now
+    # DERIVED from the install contract; these tests are the CI half of the
+    # issue's fix — the drift fails the build instead of the user.
+
+    def test_pi_block_names_the_installed_extension(self):
+        """#3502: the Pi block must name the extension the installer writes.
+
+        MUTATION: restore either the `tortoise-context` name or the
+        "auto-injects context" promise → RED."""
+        out = self._capture("pi")
+        assert PI_EXTENSION_NAME in out, out
+        assert "tortoise-context" not in out, (
+            "`tortoise-context` has never existed — the Pi seam is the capture "
+            "extension declared in hook_install.ARTIFACT_CONTRACTS")
+        # The gap is Tortoise's wiring of Pi's injection seam, NOT a ceiling in
+        # Pi: Pi's extension API exposes `before_agent_start`, which injects a
+        # message (our own `skill-enforcer`/`loop-enforcer`/`cmux-session`
+        # extensions use it). So do NOT assert "auto-inject" is absent in the
+        # abstract — that would red the build for copy that is TRUE once #2119
+        # lands. Pin the honest disclosure about the SHIPPED extension instead.
+        assert "does not inject context per turn" in out, (
+            "the Pi block must disclose that the SHIPPED extension is capture "
+            "only (Tortoise's per-turn injection is #2119, still open)")
+        assert "#2119" in out, (
+            "the disclosure must point at the issue that wires the seam")
+        assert (REPO_ROOT / "tortoise" / "pi-hooks" / PI_EXTENSION_NAME).is_file(), (
+            "the advertised extension must be a real file the installer copies")
+
+    def test_every_advertised_extension_resolves_to_a_real_artifact(self):
+        """#3502: every extension an install surface names must resolve to a
+        real extension artifact.
+
+        Covers prose claims (`<name> extension`) and install-path claims
+        (`extensions/<name>`). MUTATION: hardcode any other extension name
+        into any of these surfaces → RED.
+        """
+        from types import SimpleNamespace
+
+        from tortoise.__main__ import _install_read_hook_impl
+
+        real = self._real_extension_names()
+        surfaces = {
+            f"_print_harness_instructions({harness!r})": self._capture(harness)
+            for harness in ("pi", "multiple", "claude", "codex", "cursor")
+        }
+        surfaces["onboard completion banner"] = "\n".join(_onboard_ready_lines())
+        surfaces["`tortoise install --list` catalogue"] = self._capture_call(
+            _install_read_hook_impl, SimpleNamespace(list=True, harness=None))
+        # #3502 P2/P3: the `--uninstall` message names the install path too —
+        # it was the lone retyped literal in the class this guard closes.
+        surfaces["`tortoise install pi --uninstall` message"] = self._capture_call(
+            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
+
+        advertised: set[str] = set()
+        for label, text in surfaces.items():
+            for pattern in _EXTENSION_CLAIMS:
+                for match in pattern.finditer(text):
+                    name = match.group("name")
+                    advertised.add(name)
+                    assert name in real, (
+                        f"{label} advertises the extension `{name}`, which is "
+                        f"not a real extension artifact (real names: "
+                        f"{sorted(real)}) — every Pi seam is declared once, "
+                        "in hook_install.ARTIFACT_CONTRACTS")
+        assert PI_EXTENSION_NAME in advertised, (
+            "the Pi surfaces must name the extension the installer writes; a "
+            "guard that also passes when the claim is deleted pins nothing")
+
+    def test_pi_uninstall_message_derives_the_extension_name(self, monkeypatch):
+        """#3502: `tortoise install pi --uninstall` must name the file the
+        installer writes, DERIVED — never a retyped literal.
+
+        The surface above can only prove the literal is *currently* correct
+        (the literal and the contract agree today). Moving the contract is the
+        drift this pins: with the name patched to something else, a derived
+        message follows it and a hardcoded one does not.
+
+        MUTATION: restore `tortoise-capture.ts` as a literal in
+        `_cmd_install_hooks` → the mutated name never appears → RED.
+        """
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "tortoise.capture_install.PI_EXTENSION_NAME", "tortoise-renamed.ts")
+        out = self._capture_call(
+            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
+        assert "tortoise-renamed.ts" in out, (
+            "the --uninstall message retyped the extension name instead of "
+            "deriving it from the install contract:\n" + out)
+        assert "tortoise-capture.ts" not in out, out
+
+    @staticmethod
+    def _real_extension_names() -> set[str]:
+        """Every seam name the installer may legitimately advertise, WITH and
+        WITHOUT its file suffix — read off the install contract, never
+        retyped (`tortoise-capture.ts` is the installed basename; the stem is
+        the name a user reads in prose)."""
+        from tortoise.hook_install import ARTIFACT_CONTRACTS
+
+        names: set[str] = set()
+        for contract in ARTIFACT_CONTRACTS.values():
+            names.add(contract.install_name)
+            names.add(Path(contract.install_name).stem)
+        return names
 
 
 class TestDocsPageAndSkillConfig:

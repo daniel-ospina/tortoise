@@ -331,3 +331,134 @@ class TestGraphRankerPriorOnlyParity:
                 0.5, abs=1e-4)
         finally:
             sdk.close()
+
+
+class TestAnalyzePriorOnlyParity:
+    """#3415 — the residual #2206-class surface: analyze's ``most_uncertain``
+    and ``trends`` templates reported ``coalesce(c.confidence, 0.5)``, so a
+    prior-only claim whose own α=3/β=1 columns say 0.75 printed ``conf: 0.50``
+    on analyze while annotate_ep_batch / GraphRanker / why read 0.75.
+
+    The WHERE in those templates is deliberately NOT changed: it selects
+    claims that carry persisted EP state (a prior-only baseline legitimately
+    qualifies — its variance is real and worth ranking), it is not a
+    measurement claim. The reported belief is what had to agree.
+    """
+
+    def _prior_only_decision(self, sdk, content):
+        # #2199/#2262: a decide part born without an explicit status lands
+        # LIVE with the system-default prior Beta(3,1) (mean 0.75) and NO
+        # n.confidence until an EP flush.
+        return sdk.create_point("decision", content)["id"]
+
+    def test_most_uncertain_reports_prior_mean_not_neutral(self):
+        sdk = _fresh_sdk()
+        try:
+            pid = self._prior_only_decision(
+                sdk, "Quokka patrol prioronly zzqx")
+            proj = sdk._get_proj()
+            # Fixture shape: persisted prior, never flushed.
+            stored = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.confidence, n.ep_alpha, "
+                "n.ep_beta, n.posterior_alpha",
+                params={"id": pid},
+            ).result_set[0]
+            assert stored[0] is None, stored
+            assert stored[1] == pytest.approx(3.0), stored
+            assert stored[2] == pytest.approx(1.0), stored
+            assert stored[3] is None, stored
+            # The parity oracle.
+            assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == \
+                pytest.approx(0.75, abs=1e-4)
+
+            from tortoise.analyze import analyze
+            # entity_subgraph_ids pins the result set to this claim — the
+            # template's own LIMIT 20 would otherwise be filled by the rest
+            # of this file's shared graph.
+            res = analyze("weakest", proj=proj,
+                          entity_subgraph_ids={pid}, use_llm=False)
+            assert res["pattern"] == "most_uncertain", res
+            rows = [r for r in res["raw"] if r[0] == pid]
+            assert rows, f"claim missing from most_uncertain raw: {res['raw']}"
+            # THE regression: pre-fix this was "0.5" (the neutral fallback).
+            assert float(rows[0][2]) == pytest.approx(0.75, abs=1e-4), rows[0]
+            assert "conf: 0.75" in res["answer"], res["answer"]
+        finally:
+            sdk.close()
+
+    def test_trends_reports_prior_mean_not_neutral(self):
+        sdk = _fresh_sdk()
+        try:
+            pid = self._prior_only_decision(
+                sdk, "Quokka prioronly timeline zzqx")
+            proj = sdk._get_proj()
+            from tortoise.analyze import analyze
+            res = analyze("how has prioronly changed", proj=proj,
+                          entity_subgraph_ids={pid}, use_llm=False)
+            assert res["pattern"] == "trends", res
+            rows = [r for r in res["raw"] if r[0] == pid]
+            assert rows, f"claim missing from trends raw: {res['raw']}"
+            assert float(rows[0][2]) == pytest.approx(0.75, abs=1e-4), rows[0]
+            assert "conf=0.75" in res["answer"], res["answer"]
+        finally:
+            sdk.close()
+
+    def test_most_uncertain_reports_float_div_for_integer_baseline(self):
+        """FalkorDB ``/`` is INTEGER division when both operands are ints
+        (unlike Python's ``/``), so a prior persisted as ints — e.g.
+        ``set_point_baseline(2, 1)``, or the legacy ``tier_map`` written by
+        commit 49705bf6e — must not truncate to ``conf: 0.00`` on analyze.
+        The belief expression coerces with ``toFloat`` exactly as
+        ``annotate_ep_batch`` does for its contention ratio. Pre-fix
+        ``a / (a + b)`` reported 0 beside α=2/β=1; the parity oracle
+        (annotate_ep_batch, Python float division) says 0.6667."""
+        sdk = _fresh_sdk()
+        try:
+            pid = _make_point(sdk, "Quokka integerprior weakest zzqx")["id"]
+            sdk.set_point_baseline(pid, 2, 1)  # ints — no float cast
+            proj = sdk._get_proj()
+            stored = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta, "
+                "n.posterior_alpha, n.confidence",
+                params={"id": pid},
+            ).result_set[0]
+            assert int(stored[0]) == 2 and int(stored[1]) == 1, stored
+            assert stored[2] is None and stored[3] is None, stored
+            # Parity oracle — Python float division, never truncating.
+            expected = annotate_ep_batch(proj.g, [pid])[pid].confidence_mean
+            assert expected == pytest.approx(2 / 3, abs=1e-4), expected
+
+            from tortoise.analyze import analyze
+            res = analyze("weakest", proj=proj,
+                          entity_subgraph_ids={pid}, use_llm=False)
+            assert res["pattern"] == "most_uncertain", res
+            rows = [r for r in res["raw"] if r[0] == pid]
+            assert rows, f"claim missing from most_uncertain raw: {res['raw']}"
+            got = float(rows[0][2])
+            # THE regression: integer division truncated 2/3 to 0.
+            assert got != 0.0, rows[0]
+            assert got == pytest.approx(expected, abs=1e-4), rows[0]
+        finally:
+            sdk.close()
+
+    def test_trends_reports_float_div_for_integer_baseline(self):
+        """The identical integer-division defect in ``trends`` (see
+        test_most_uncertain_reports_float_div_for_integer_baseline)."""
+        sdk = _fresh_sdk()
+        try:
+            pid = _make_point(sdk, "Quokka integerprior timeline zzqx")["id"]
+            sdk.set_point_baseline(pid, 2, 1)
+            proj = sdk._get_proj()
+            expected = annotate_ep_batch(proj.g, [pid])[pid].confidence_mean
+            assert expected == pytest.approx(2 / 3, abs=1e-4), expected
+            from tortoise.analyze import analyze
+            res = analyze("how has integerprior changed", proj=proj,
+                          entity_subgraph_ids={pid}, use_llm=False)
+            assert res["pattern"] == "trends", res
+            rows = [r for r in res["raw"] if r[0] == pid]
+            assert rows, f"claim missing from trends raw: {res['raw']}"
+            got = float(rows[0][2])
+            assert got != 0.0, rows[0]
+            assert got == pytest.approx(expected, abs=1e-4), rows[0]
+        finally:
+            sdk.close()

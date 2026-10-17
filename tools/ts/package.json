@@ -1,0 +1,14 @@
+{
+  "name": "tortoise-ts-tooling",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Repo TypeScript tooling that is NOT part of the deployed site (must not live under website/ — see tsconfig.website-functions.json).",
+  "scripts": {
+    "typecheck:website-functions": "tsc -p tsconfig.website-functions.json"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261014.1",
+    "typescript": "5.9.3"
+  }
+}

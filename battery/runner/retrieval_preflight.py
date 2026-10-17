@@ -47,6 +47,15 @@ WHO CALLS IT, AND WHEN (the claim above is exact, not aspirational)
   trace-based rather than availability-based because the lane's own
   ``recall`` already emits the trace, so there is no reason to probe the
   embedder separately.
+* The **dedicated perf lane's instrument**
+  (``tests/test_perf_lane_volunteer_context.py``, #3992) calls
+  ``require_hybrid_retrieval()`` BEFORE it measures anything, so the p95 it
+  reports always describes the hybrid read. An unavailable embedder degrades the
+  read to keyword-only, which does LESS work and would let a latency assertion
+  pass vacuously — hence the fail-closed gate rather than a skip. That file is
+  in ``config/ci-surfaces.yml``'s `on_demand:` lane and runs from
+  ``.github/workflows/perf-lane.yml`` and ``evals-on-demand.yml``, both of which
+  provision the pinned model before it runs.
 
 ``merge_leg_trace`` below is the one interpreter of the product's trace
 shape, shared by both lanes so they record identically.

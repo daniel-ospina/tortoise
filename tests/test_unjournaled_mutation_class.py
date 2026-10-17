@@ -25,16 +25,16 @@ lane closes the two that share a seam and cites the other two:
      ⚠️ The producer covers all five labels; whether the FOLD can match them
      depends on the CREATION door. `Document` creation via
      `create_entity(type="document")` / `create_document` goes through
-     `_create_entity`, which writes **neither** a JSONL record **nor** a
-     `DocumentCreated` :GraphEvent (`DocumentCreated` is not in
-     `_GRAPH_EVENT_TYPES`) — so a mutation of a Document created THAT way journals
-     an `EntityMutated label="Document"` whose fold can only warn, and a rebuild
-     destroys the Document. Pre-existing and tracked by **#2296**. (The
-     ingest/frontmatter route DOES journal `DocumentCreated`, and a Document
-     created that way folds fine — so this is a caveat about the creation door,
-     not about the label.) Disclosed, not fixed here;
-     `test_non_point_labels_share_the_one_seam` names it rather than claiming
-     five universally-working labels.
+     `_create_entity`, which — **since #2296** — journals `DocumentCreated`
+     (it is not in `_GRAPH_EVENT_TYPES`, so it is a JSONL-only record): the
+     creation is durable, the node survives a rebuild, and a later mutation is
+     addressed by the node's canonical `:Source` label (a document IS a
+     `:Source`, D10) so it folds. Before #2296 that door wrote no record, the
+     node was live-only, and a rebuild destroyed it — the residual this
+     docstring used to carry. (`DocumentCreated` is still absent from
+     `_GRAPH_EVENT_TYPES`; the ingest/frontmatter route journals it too.)
+     `test_non_point_labels_share_the_one_seam` exercises the two labels whose
+     mutation it drives rather than claiming five universally-working labels.
   2. **One event type, two live end-states.** ``delete_point`` hard-deletes,
      ``retract_point`` tombstones, and BOTH emitted
      ``_emit_event("PointRetracted", …, id=id)``. The fold has exactly one
@@ -60,7 +60,7 @@ THE DESIGN (one seam, not two patches):
         * a key set to ``None`` is REMOVED live, so ``properties(n)`` omits it;
           a snapshot-based replay would resurrect it (``test_removal_…``);
         * a snapshot also carries props the write never touched, and
-          ``properties(n)`` returns a ``VectorF32`` as a plain list, so
+          ``properties(n)`` returns a ``Vectorf32`` as a plain list, so
           re-applying it DEMOTES the vector and silently breaks dense
           retrieval (``test_state_keys_are_exactly_the_writes_keys``).
 
@@ -98,6 +98,9 @@ from tortoise.projection import (
     _ENTITY_MUTATION_OPS,
     _ENTITY_MUTATION_PENDING_OPS,
     _ENTITY_MUTATION_STATE_OPS,
+    # #7951 §17.1: a hand-built journal record folded here is a REPLAY, so the
+    # fold declares the replay scope.
+    _replay_write_scope,
     classify_entity_mutation_op,
 )
 from tortoise.projection.nonfolded import NonFoldedEventsError
@@ -315,7 +318,7 @@ class TestPropertyMutationRoundTrip:
         """C1's other half: no snapshot, so nothing the write did not touch.
 
         A snapshot ``state`` carries every prop, and ``properties(n)`` returns
-        a ``VectorF32`` as a plain ``list`` — re-applying it demotes the
+        a ``Vectorf32`` as a plain ``list`` — re-applying it demotes the
         vector and silently breaks dense retrieval (``run_vector_query`` →
         ``[]`` / ``query_failed``). Asserting key-exactness rules that out
         transitively, without needing an embedding model in CI.
@@ -376,17 +379,17 @@ class TestPropertyMutationRoundTrip:
             pytest.approx(0.25)
 
     def test_non_point_labels_share_the_one_seam(self, env, caplog):
-        """Two of the five labels on the one seam — and a named CAVEAT.
+        """Two of the five labels on the one seam — the others are covered too.
 
-        The producer journals for all five non-`Point` labels, but only FOUR of
-        them can fold: `Document` creation goes through `_create_entity`, which
-        writes **neither** a JSONL record **nor** a `DocumentCreated`
-        :GraphEvent (`DocumentCreated` is not in `_GRAPH_EVENT_TYPES`;
-        pre-existing, #2296). A `Document` mutation therefore journals an
-        `EntityMutated label="Document"` whose fold can only ever warn, and a
-        rebuild destroys the Document. That is #2296's disclosed residual, NOT
-        something this seam fixes — so this test asserts the labels it actually
-        exercises and does not claim five.
+        The producer journals for all five non-`Point` labels. `Document`
+        creation goes through `_create_entity`, which — **since #2296** —
+        journals `DocumentCreated` (a JSONL-only record; it is not in
+        `_GRAPH_EVENT_TYPES`), so the node survives a rebuild and a later
+        mutation is addressed by its canonical `:Source` label (a document IS
+        a `:Source`, D10) and folds. (#2296 is the home; the earlier residual
+        — a live-only creation destroyed by `rebuild_all` — is closed.) This
+        test asserts the two labels whose mutation it actually drives and does
+        not claim coverage for the rest.
         """
         sdk, events = env
         sub = sdk.create_subject("Topic")
@@ -650,10 +653,17 @@ class TestPointDeleteTwoStore:
             "which is the wrong meaning for a hard delete")
 
     def test_subscriber_surface_unchanged(self, env):
-        """The ``:GraphEvent`` row — and therefore ``events_poll`` — is intact.
+        """The ``:GraphEvent`` row — and therefore ``poll_events`` — is intact.
 
         This is the property that makes the split acceptable: the fix changes
-        which store carries the *replay* meaning, not what subscribers see.
+        which store carries the *replay* meaning, not the fact that subscribers
+        see a point-delete row.
+
+        #2353 adds ONE key to that row. The hard-delete payload carries
+        ``deleted: true`` so the semantic change feed can tell this producer
+        from ``retract_point``'s tombstone. It is written UNCONDITIONALLY: the
+        marker records what the WRITE PATH did, so gating it on the reading
+        process's switch folded an unswitched writer's deletes as tombstones.
         """
         sdk, _events = env
         pid = sdk.create_point("observation", "x")["id"]
@@ -662,9 +672,10 @@ class TestPointDeleteTwoStore:
         types = [r[0] for r in sdk._get_proj().g.query(
             "MATCH (e:GraphEvent) RETURN e.type").result_set]
         assert "PointRetracted" in types
-        polled = sdk.events_poll(after=None)["events"]
+        polled = sdk.poll_events(after=None)["events"]
         assert any(e["type"] == "PointRetracted"
-                   and e["payload"] == {"id": pid} for e in polled)
+                   and e["payload"] == {"id": pid, "deleted": True}
+                   for e in polled)
 
     def test_retract_still_tombstones(self, env, caplog):
         """The CONTRAST row: splitting delete must not change retract.
@@ -864,7 +875,7 @@ class TestNonFoldedSet:
         sdk, _events = env
         proj = sdk._get_proj()
         caplog.clear()
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("WARNING"), _replay_write_scope():
             proj.apply({"type": _REC, "op": "rename", "label": "Object",
                         "id": "obj-never-existed", "state": {"name": "x"},
                         "event_id": "e1"})
@@ -887,7 +898,7 @@ class TestNonFoldedSet:
         other = sdk.create_entity("object", name="sibling",
                                   objectKind="k")["node"]["id"]
         caplog.clear()
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("WARNING"), _replay_write_scope():
             sdk._get_proj().apply({
                 "type": _REC, "op": "rename",
                 "label": "Object) DETACH DELETE n //",

@@ -12,6 +12,8 @@ inconclusive read (defer, never file, never discard).
 """
 from __future__ import annotations
 
+import itertools
+
 import pytest
 
 from tortoise.session_confirm import (
@@ -392,3 +394,205 @@ def test_the_no_receipt_set_is_independent_of_the_retry_classifier():
     assert sorted(_NO_RECEIPT_REFUSAL_STATUSES) == [402, 403, 503]
     for status in (429, 500, 502, 504, None):
         assert status not in _NO_RECEIPT_REFUSAL_STATUSES, status
+
+
+# ── #5394 — the client/server redaction-table skew must not defer forever ──
+
+SECRET = "sk-proj-" + "A" * 64
+
+
+def test_an_older_client_against_an_upgraded_server_still_confirms(monkeypatch):
+    """#5394 — the redaction table is DEPLOYED INDEPENDENTLY on the two sides.
+
+    Model an OLDER client (installed before a rule the server now has) by
+    emptying its table. The served turn carries a marker the client would never
+    have produced, so the EXACT comparison fails. The served body is still the
+    client's RAW body with a redaction span, so the verdict must be TERMINAL.
+    Returning TURNS_MISSING here is the defect: that verdict is retryable, so
+    ``capture_spool`` defers the entry with backoff forever and ``session
+    drain`` never reaches ``filed N, deferred 0``.
+
+    MUTATION THAT REDS THIS: delete the ``_turns_survive_redaction_skew`` branch
+    from ``confirm_capture`` (or restrict it to the client's own expectation).
+    """
+    import tortoise.sdk as sdk
+    monkeypatch.setattr(sdk, "redact_secrets", lambda text: (text, {}))
+    rows = [{"role": "user", "content": f"key: {SECRET}"}]
+    served = _detail(turns=rows, contents=["key: [REDACTED:openai_api_key]"])
+    # The client's own model really does differ (the skew is live)...
+    assert expected_turns(SESSION, rows)[f"{SESSION}_t0"] == \
+        ("user", f"key: {SECRET}")
+    # ...and the confirmation still terminalises.
+    assert _confirm(_reader([served]), turns=rows) == FILED
+
+
+def test_an_upgraded_client_against_an_older_server_still_confirms(monkeypatch):
+    """The OTHER direction: the client knows a shape the server stored VERBATIM.
+
+    A rollback, a mixed fleet, or a rule the client carries first. The client's
+    expectation holds a marker the server never wrote; the served body is the
+    raw text. Comparing against the client's RAW model matches — which is why
+    the tolerance is built on the raw pair and not on the redacted expectation.
+    """
+    import tortoise.sdk as sdk
+
+    def redact(text):
+        if "TOPSEKRIT" in text:
+            return (text.replace("TOPSEKRIT", "[REDACTED:test_kind]"),
+                    {"test_kind": text.count("TOPSEKRIT")})
+        return text, {}
+
+    monkeypatch.setattr(sdk, "redact_secrets", redact)
+    rows = [{"role": "user", "content": "note TOPSEKRIT here"}]
+    served = _detail(turns=rows)                    # stored verbatim
+    assert expected_turns(SESSION, rows)[f"{SESSION}_t0"] == \
+        ("user", "note [REDACTED:test_kind] here")
+    assert _confirm(_reader([served]), turns=rows) == FILED
+
+
+def test_a_marker_cannot_excuse_a_difference_outside_its_span():
+    """The loosened guard must still reject a DIFFERENT transcript.
+
+    A marker may absorb the one span the table disagrees about; it may not
+    absorb the rest of the body. The suffix differs, so this is not our turn.
+
+    MUTATION THAT REDS THIS: make the marker wildcard unbounded on both sides
+    (e.g. compare ``set(turn_points)`` or wildcard the whole body).
+    """
+    rows = [{"role": "user", "content": f"key: {SECRET} keep"}]
+    served = _detail(turns=rows,
+                     contents=["key: [REDACTED:openai_api_key] CHANGED"])
+    assert _confirm(_reader([served]), turns=rows) == TURNS_MISSING
+
+
+def test_a_marker_must_stand_for_at_least_one_raw_character():
+    """A marker replaces a NON-EMPTY span (every ``_SECRET_SHAPES`` rule has a
+    body floor of at least one character), so an empty raw body cannot be
+    covered by a marker-only served body.
+
+    MUTATION THAT REDS THIS: use ``.*`` (zero-or-more) at the marker instead of
+    the non-empty span, which would let a bare ``[REDACTED:…]`` match any raw
+    text — including one it never redacted.
+    """
+    rows = [{"role": "user", "content": ""}]
+    served = _detail(turns=rows, contents=["[REDACTED:openai_api_key]"])
+    assert _confirm(_reader([served]), turns=rows) == TURNS_MISSING
+
+
+def test_the_skew_tolerance_still_rejects_a_grown_or_missing_set():
+    """The key SET must be identical: the ids are positional, so a superset or
+    subset is a different transcript (#4675). Marker tolerance is per row and
+    applies only after the sets already agree."""
+    rows = [{"role": "user", "content": f"key: {SECRET}"}]
+    grown = _detail(turns=[*rows, {"role": "assistant", "content": "extra"}],
+                    contents=["key: [REDACTED:openai_api_key]", "extra"])
+    assert _confirm(_reader([grown]), turns=rows) == TURNS_MISSING
+    two = [*rows, {"role": "assistant", "content": "second"}]
+    partial = _detail(turns=rows,
+                      contents=["key: [REDACTED:openai_api_key]"])
+    assert _confirm(_reader([partial]), turns=two) == TURNS_MISSING
+
+
+def test_a_redacted_ROLE_survives_the_skew_too(monkeypatch):
+    """The role is scrubbed and delimiter-neutralized by the same writer, so it
+    is version-sensitive too. A redacted role is SERVED as
+    ``(REDACTED:<kind>)`` (square brackets never survive the neutralization),
+    and that form must be recognised."""
+    import tortoise.sdk as sdk
+    monkeypatch.setattr(sdk, "redact_secrets", lambda text: (text, {}))
+    rows = [{"role": f"sk-proj-{'A' * 64}", "content": "hi"}]
+    served = _detail(turns=rows, roles=["(REDACTED:openai_api_key)"])
+    assert _confirm(_reader([served]), turns=rows) == FILED
+
+
+def test_a_PAREN_marker_in_a_BODY_is_literal_not_a_wildcard():
+    """Only the ROLE is delimiter-neutralized; a body's marker is always
+    ``[REDACTED:<kind>]``. Treating ``(REDACTED:…)`` as a marker in a body
+    would wildcard text the user literally typed."""
+    rows = [{"role": "user", "content": "(REDACTED:foo) secret text"}]
+    served = _detail(turns=rows, contents=["(REDACTED:foo) DIFFERENT"])
+    assert _confirm(_reader([served]), turns=rows) == TURNS_MISSING
+
+
+def test_the_raw_model_is_the_stored_text_before_the_client_scrub():
+    """Drift guard: ``raw_windowed_turns`` is the writer's frame BEFORE the
+    client's scrub, and ``expected_turns`` is the same frame AFTER it. The two
+    must differ exactly by redaction — which is what makes the tolerant branch
+    reachable on a skew and inert otherwise."""
+    from tortoise.session_confirm import raw_windowed_turns
+
+    rows = [{"role": "user", "content": f"key: {SECRET}"}]
+    assert raw_windowed_turns(SESSION, rows)[f"{SESSION}_t0"] == \
+        ("user", f"key: {SECRET}")
+    assert expected_turns(SESSION, rows)[f"{SESSION}_t0"] == \
+        ("user", "key: [REDACTED:openai_api_key]")
+
+
+@pytest.mark.parametrize("raw,stored,expected", [
+    ("abc", "abc", True),                                        # identity
+    ("key sk-proj-AAAA", "key [REDACTED:openai_api_key]", True),  # one span
+    ("sk-proj-AAAA tail", "[REDACTED:openai_api_key] tail", True),
+    ("head sk-proj-AAAA", "head [REDACTED:openai_api_key]", True),
+    ("", "[REDACTED:openai_api_key]", False),                     # non-empty
+    ("x", "[REDACTED:openai_api_key]", True),
+    ("key sk-proj-AAAA keep", "key [REDACTED:openai_api_key] CHANGED", False),
+    ("aa", "a", False),                                           # trailing raw
+    ("ab", "a", False),
+    ("a", "[REDACTED:x][REDACTED:y]", False),                     # two spans
+    ("ab", "[REDACTED:x][REDACTED:y]", True),
+    ("abc", "abd", False),                                        # no marker
+])
+def test_the_redaction_tolerant_predicate(raw, stored, expected):
+    from tortoise.session_confirm import (
+        _BODY_REDACTION_MARKER,
+        _stored_is_raw_with_markers,
+    )
+    assert _stored_is_raw_with_markers(
+        raw, stored, _BODY_REDACTION_MARKER) is expected
+
+
+def test_the_tolerant_predicate_matches_its_own_property_exhaustively():
+    """The hand-rolled walk is an OPTIMISATION of one property, so it is
+    checked against that property's direct transcription — markers become
+    ``.+``, literals are escaped, and the whole must ``fullmatch`` — over an
+    exhaustive small domain. A disagreement here means the optimisation is
+    wrong, and the exhaustive domain is small enough to keep the check cheap.
+    """
+    import re
+
+    from tortoise.session_confirm import (
+        _BODY_REDACTION_MARKER,
+        _stored_is_raw_with_markers,
+    )
+
+    def reference(raw: str, stored: str) -> bool:
+        if raw == stored:
+            return True
+        if _BODY_REDACTION_MARKER.search(stored) is None:
+            return False
+        parts: list[str] = []
+        last = 0
+        for mt in _BODY_REDACTION_MARKER.finditer(stored):
+            parts.append(re.escape(stored[last:mt.start()]))
+            parts.append(".+")
+            last = mt.end()
+        parts.append(re.escape(stored[last:]))
+        return re.fullmatch("".join(parts), raw, re.DOTALL) is not None
+
+    def strings(alpha: str, maxlen: int):
+        for n in range(maxlen + 1):
+            for tup in itertools.product(alpha, repeat=n):
+                yield "".join(tup)
+
+    marker = "[REDACTED:k]"
+    for raw in strings("ab", 6):
+        for stored in strings("ab", 6):
+            assert _stored_is_raw_with_markers(
+                raw, stored, _BODY_REDACTION_MARKER) is reference(raw, stored), \
+                (raw, stored)
+        for n in range(4):
+            for tup in itertools.product([marker, "a", "", "b"], repeat=n):
+                stored = "".join(tup)
+                assert _stored_is_raw_with_markers(
+                    raw, stored, _BODY_REDACTION_MARKER) is reference(raw, stored), \
+                    (raw, stored)

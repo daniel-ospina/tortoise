@@ -91,12 +91,21 @@ def _store(tmp_path, name: str):
 def test_ep_deliberation_logic_matrix(tmp_path):
     """Owner challenge lock (2026-09-08): the EP engine must calculate the
     outcome of a deliberation LOGICALLY on properly wired graphs —
-    (1) contradiction STRENGTH is monotone (low < medium < high < gold
-    pull harder); (2) contradiction COUNT accumulates (1 < 2 strong);
+    (1) contradiction STRENGTH: the credibility WORD no longer varies it
+    (#398 owner ruling 2026-10-12 — the word is a validated LABEL, and every
+    authored word is the SAME one weak evidence body; see the pin below);
+    (2) contradiction COUNT accumulates (1 < 2);
     (3) the owner's exact case — weak/medium support vs TWO strong
     contradictions — resolves the claim BELOW neutral 0.50; (4) direction:
     support raises, contradiction lowers (checked implicitly: baseline
-    starts at the seeded mean and every NAND lowers it)."""
+    starts at the seeded mean and every NAND lowers it).
+
+    RE-PINNED (#398 / #6151): assertion (1) used to require the ladder prior
+    the word names (``low < medium < high < gold``), i.e. the word acting as
+    the claim's strength — the superseded rule. The ruled behaviour is ONE
+    weak weight, identical for every word, so the four runs must now be
+    EQUAL. The count and the below-neutral outcome are unchanged.
+    """
     import tempfile
     outs: dict[str, float] = {}
     with tempfile.TemporaryDirectory() as ns:
@@ -112,9 +121,20 @@ def test_ep_deliberation_logic_matrix(tmp_path):
             c0, two = _posterior_after(st, 2, "high")
         finally:
             st.close()
-    assert c0 > 0.70  # seeded support baseline (sanity)
-    # (1) strength monotone: higher credibility pulls the target lower
-    assert outs["low"] > outs["medium"] > outs["high"] > outs["gold"]
+    from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
+    _weak_mean = (1.0 + AUTHOR_ASSERTION_WEAK_PC) / (2.0 + AUTHOR_ASSERTION_WEAK_PC)
+    # Tolerance 0.01, NOT 0.1: the seeded weak mean (0.5238) is only 0.0238
+    # above neutral, so a 0.1 window would pass even if the weak body vanished.
+    assert c0 == pytest.approx(_weak_mean, abs=0.01)  # seeded support baseline (sanity)
+    # (1) #398 owner ruling 2026-10-12: the word is a LABEL, not a strength —
+    # every authored word is the SAME one weak evidence body (these points
+    # carry an explicit status, so no #2199 default applies). The old
+    # low < medium < high < gold monotonicity was the ladder prior acting as
+    # the claim's strength, which the ruling supersedes; the four runs must
+    # now be equal.
+    assert outs["low"] == pytest.approx(outs["medium"])
+    assert outs["medium"] == pytest.approx(outs["high"])
+    assert outs["high"] == pytest.approx(outs["gold"])
     # (2) count accumulates: two high < one high
     assert two < outs["high"]
     # (3) two strong contradictions against the weak/medium support resolve

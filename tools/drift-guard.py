@@ -1,12 +1,40 @@
 #!/usr/bin/env python3
 """drift-guard — silent-revert gate, reporting base distance (#1531, #4174, #4764).
 
-Fails when a merge of the branch into main would not keep main's content for a
-path main moved since the merge base AND the merge is conflict-free (#4174,
+Fails when a conflict-free merge of the branch into main would leave a path
+main moved since the merge base with a blob that is not main's (#4174,
 corrected by #7455). That arm is the conflict-free revert: because git surfaces
 a textual conflict of its own, the clean case — where the merge result's blob
 for the path is not main's — is what a conflict check cannot see, so the arm
-reports the affected paths and line counts.
+reports the affected paths and line counts. The predicate is BLOB IDENTITY, not
+"main's content was dropped": see the ❗ note below.
+
+❗WHAT THE VERDICT MEASURES, STATED BECAUSE IT IS EASY TO MISREAD (#1431). The
+arm's predicate is BLOB IDENTITY: a path is flagged when the merge result's
+blob differs from main's. A UNION satisfies that too — main adds two
+registrations to a shared file, the branch adds its own, the merge keeps both,
+and the bytes are still not main's — so a red does NOT by itself mean main's
+content was lost. Each reported path therefore also carries `lost`: the number
+of lines `git diff <merge-base> <main>` ADDED that the merge result does not
+carry. `lost == 0` means every line main added is present and the red is
+byte-identity (a union, or a diff3 combination); `lost > 0` means an added line
+of main's is genuinely absent; `lost == null` means the path is binary and
+could not be measured. A main-side DELETION is NOT folded into this count:
+line content alone cannot distinguish a deleted line the merge kept from an
+identical line the branch added elsewhere, and reporting the latter as loss
+was a false "content IS lost" on a merge that applied main's deletion (#1431
+review). ⚠️ A zero `lost` is NOT a proof of
+preservation when the branch touched the same lines main moved: this repo
+unions `config/ci-surfaces.yml` (`.gitattributes`), and a union resolves an
+overlapping delete/modify WITHOUT a conflict, keeping the other side's line and
+dropping main's deletion — so that case is reported UNPROVEN (the path is
+`contested`), never as "content kept" (#1431 review). It is main's CONTRIBUTION
+that is compared, never main's whole
+file: a line the branch legitimately rewrote is not loss, and a whole-file
+comparison reports it as loss — measured against #7455's own fixture, where
+main's `M` survives and only the BRANCH's `A`→`F` line reads as missing. This
+field changes NO verdict: tightening the predicate itself to `lost > 0` would
+reverse #7455's ruling and needs that decision revisited, not a quiet edit.
 
 It also REPORTS, but no longer fails on, how far behind origin/main the branch
 is (#1531's threshold arm, relaxed by #4764). The count was a PROXY for "the
@@ -37,7 +65,9 @@ The check's two arms are independent:
     against max and advisory since #4764 — it never fails the gate;
   * revert arm (SILENT REVERT): the paths main moved since the merge base
     whose merged content differs from main's, where the merge is
-    conflict-free — i.e. merging the branch would not keep main's version.
+    conflict-free. The verdict is BLOB IDENTITY, so it also fires on a union
+    that kept main's content; `lost` (see above) measures which it is
+    (#1431).
     Measured by ONE virtual merge (`git merge-tree`), so it fails
     REGARDLESS of the commit count and cannot fire on a path only main
     touched (which a 3-way merge preserves by construction, #7455).
@@ -97,6 +127,7 @@ import argparse
 import json
 import os
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 DEFAULT_MAX_BEHIND = 20
@@ -121,6 +152,36 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
         # exit 2 for an unmeasurable arm, and leaves the arm unmeasured.
         errors="surrogateescape",
     )
+
+
+def _git_raw(root: Path, *args: str) -> subprocess.CompletedProcess:
+    """Like :func:`_git` but byte-exact: NO universal-newline translation.
+
+    `lost` compares line CONTENT between main's contribution and the merge, so
+    a `\\r` in a CRLF line is content, not a line terminator. `_git`'s text
+    mode strips it (universal newlines), which made main's `M\\r` compare equal
+    to a merged `M` and reported the merge as keeping a line whose bytes it
+    does not carry — while the arm's own verdict is byte identity (#1431
+    review).
+    """
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True, text=False, check=False,
+    )
+
+
+def _raw_lines(data: bytes) -> list[str]:
+    """Split byte-exact git output on `\\n`, keeping `\\r` as content.
+
+    `str.splitlines()` — and `_git`'s text decoding — treat `\\r` as a line
+    boundary; splitting the raw bytes on `\\n` alone preserves it, so a CRLF
+    line's bytes are compared as bytes. A single trailing empty element (the
+    final `\\n`) is dropped.
+    """
+    lines = data.decode("utf-8", "surrogateescape").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def _safe_text(text: str) -> str:
@@ -326,6 +387,221 @@ def _tree_blobs(root: Path, tree: str) -> dict[str, str]:
     return blobs
 
 
+def _blob_lines(root: Path, oid: str) -> list[str] | None:
+    """The lines of a blob, or None when it is not text.
+
+    None is "unmeasurable", never "no lines": a binary blob's lines cannot be
+    counted, and a caller reading None as zero would report content loss as no
+    loss. Read byte-exact (no universal-newline translation), so a CRLF line's
+    `\\r` is part of its content — this measurement feeds a byte-identity
+    verdict. Raises :class:`MeasurementError` on a failed read.
+    """
+    r = _git_raw(root, "cat-file", "blob", oid)
+    if r.returncode != 0:
+        detail = _raw_lines(r.stderr or r.stdout)
+        raise MeasurementError(
+            f"git cat-file blob {oid} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    if b"\0" in r.stdout:
+        return None
+    return _raw_lines(r.stdout)
+
+
+def _renamed_from(root: Path, mb: str, base: str, path: str) -> str | None:
+    """The merge-base path main RENAMED to `path`, or None.
+
+    `git merge-tree` (the merge simulation this arm keys on) uses rename
+    detection by default, but a per-path `git diff --no-renames` reports the
+    RENAME DESTINATION as a newly added whole file. Measuring main's
+    contribution that way made a pure rename look like a whole-file add, so a
+    merge that kept every line of main's contribution (the rename survived;
+    only the branch's own edit changed the bytes) printed "main's content IS
+    lost" (#1431 review). Detecting the rename here lets `_main_diff_lines`
+    diff the rename SOURCE against the destination instead.
+
+    Raises :class:`MeasurementError` on a failed read.
+    """
+    r = _git(root, "diff", "-M", "--name-status", "-z", mb, base)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git diff -M --name-status {mb}..{base} failed "
+            f"(rc {r.returncode}): {detail[0] if detail else 'no detail'}"
+        )
+    fields = r.stdout.split("\0")
+    i = 0
+    while i < len(fields):
+        status = fields[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in ("R", "C"):
+            if i + 2 >= len(fields):
+                break
+            old, new = fields[i + 1], fields[i + 2]
+            i += 3
+            if new == path:
+                return old
+        else:
+            i += 2
+    return None
+
+
+def _diff_lines_of(root: Path, spec: list[str]) -> tuple[list[str], list[str]] | None:
+    """(added, deleted) from `git diff <spec>`, or None when it is binary.
+
+    `spec` is either `[<a>, <b>, "--", <path>]` or two blob-ish object names
+    (`<rev>:<path>`). Binary is decided STRUCTURALLY (`--numstat`'s `-`, git's
+    own signal) and NOT by scanning the diff TEXT: a textual path whose added
+    line merely contains the phrase "Binary files" is not binary, and treating
+    it as one reported a measurable path as unmeasurable (#1431 review).
+
+    The line lists come from the diff's HUNK structure, not from a prefix
+    filter over the whole output: a `+` line is collected only inside a `@@`
+    hunk, so the `+++ b/<path>` file header cannot leak in, and an added
+    content line that itself begins with `++` (`++i;` renders as `+++i;`) is
+    kept rather than dropped (#1431 review).
+    """
+    ns = _git(root, "diff", "--no-renames", "--numstat", "-z", *spec)
+    if ns.returncode != 0:
+        detail = (ns.stderr or ns.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git diff --numstat {' '.join(spec)} failed "
+            f"(rc {ns.returncode}): {detail[0] if detail else 'no detail'}"
+        )
+    for rec in ns.stdout.split("\0"):
+        if not rec:
+            continue
+        fields = rec.split("\t", 2)
+        # git prints `-` for both counts on a binary path — git's own binary
+        # signal, unlike a substring scan of the patch text.
+        if len(fields) == 3 and fields[0] == "-" and fields[1] == "-":
+            return None
+
+    r = _git_raw(root, "diff", "--no-renames", "--unified=0", *spec)
+    if r.returncode != 0:
+        detail = _raw_lines(r.stderr or r.stdout)
+        raise MeasurementError(
+            f"git diff {' '.join(spec)} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    added: list[str] = []
+    deleted: list[str] = []
+    in_hunk = False
+    for ln in _raw_lines(r.stdout):
+        if ln.startswith("diff --git ") or ln.startswith("@@"):
+            in_hunk = ln.startswith("@@")
+            continue
+        if not in_hunk:
+            continue
+        if ln.startswith("+"):
+            added.append(ln[1:])
+        elif ln.startswith("-"):
+            deleted.append(ln[1:])
+    return added, deleted
+
+
+def _main_diff_lines(root: Path, mb: str, base: str,
+                     path: str) -> tuple[list[str], list[str]] | None:
+    """(added, deleted) lines main contributed to `path` since the merge base.
+
+    main's CONTRIBUTION to the path — deliberately not main's whole version,
+    which also contains lines the branch may legitimately have rewritten. When
+    main's change to `path` is a RENAME, the contribution is measured against
+    the rename SOURCE (see :func:`_renamed_from`), matching the rename
+    detection `git merge-tree` applies; otherwise it is the per-path diff of
+    `mb`..`base`. None means the path is binary.
+
+    Raises :class:`MeasurementError` on a failed read.
+    """
+    renamed = _renamed_from(root, mb, base, path)
+    if renamed is not None:
+        return _diff_lines_of(root, [f"{mb}:{renamed}", f"{base}:{path}"])
+    return _diff_lines_of(root, [mb, base, "--", path])
+
+
+def _main_added_lines(root: Path, mb: str, base: str, path: str) -> list[str] | None:
+    """Lines main ADDED to `path` — the addition half of `_main_diff_lines`."""
+    diff = _main_diff_lines(root, mb, base, path)
+    return None if diff is None else diff[0]
+
+
+def _changed_ranges(root: Path, a: str, b: str, path: str) -> list[tuple[int, int]]:
+    """Inclusive `a`-side line ranges the `a`..`b` diff of `path` touches.
+
+    Parsed from the `@@ -start[,count] +... @@` hunk headers, so a hunk is a
+    RANGE in the merge-base coordinates, not a substring of the patch. A pure
+    insertion (`count == 0`) is anchored at the line it follows. Raises
+    :class:`MeasurementError` on a failed read.
+    """
+    r = _git(root, "diff", "--no-renames", "--unified=0", a, b, "--", path)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git diff {a}..{b} -- {path} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    ranges: list[tuple[int, int]] = []
+    for ln in r.stdout.splitlines():
+        if not ln.startswith("@@"):
+            continue
+        left = ln[2:].split("@@", 1)[0].strip().split(" ")[0]
+        if not left.startswith("-"):
+            continue
+        span = left[1:].split(",", 1)
+        start = int(span[0])
+        count = int(span[1]) if len(span) == 2 else 1
+        ranges.append((start, start + max(count, 1) - 1))
+    return ranges
+
+
+def _contested(root: Path, mb: str, base: str, head: str, path: str) -> bool:
+    """Does main's change to `path` overlap a branch change on the same lines?
+
+    When both sides touch the same merge-base lines, a plain 3-way merge would
+    CONFLICT; a CLEAN merge result therefore means a driver (`merge=union` —
+    this repo's own `.gitattributes`) resolved the overlap and may have taken
+    the branch's side, silently dropping main's. The path is then CONTESTED:
+    its preservation cannot be proven even when `lost == 0`, because a dropped
+    DELETION leaves no added line to miss and no line to find (#1431 review).
+    """
+    main_ranges = _changed_ranges(root, mb, base, path)
+    branch_ranges = _changed_ranges(root, mb, head, path)
+    return any(a[0] <= b[1] and b[0] <= a[1]
+               for a in main_ranges for b in branch_ranges)
+
+
+def _lost_lines(root: Path, mb: str, base: str, path: str,
+                merged_oid: str) -> int | None:
+    """main's ADDED lines for `path` that the merge result does not carry.
+
+    The arm's verdict keys on the merged blob differing from main's, which a
+    union of two additive edits satisfies just as a revert does — so the
+    verdict alone cannot say whether main's content survived. This counts the
+    lines main ADDED that the merge result lacks. 0 means every added line
+    main contributed is present; >0 means it is not. None means unmeasurable
+    (a binary path). Counted as a multiset, so a line main added twice and the
+    merge kept once is one lost line.
+
+    A main-side DELETION is deliberately NOT counted here. Line CONTENT cannot
+    tell "the merge kept the line main deleted" from "an identical line the
+    branch added elsewhere": the branch's own appended line (or a second
+    occurrence already in the file) matched main's deleted line and reported a
+    false "main's content IS lost" on a merge that DID apply main's deletion
+    (#1431 review). A deletion main dropped is instead surfaced by
+    :func:`_contested` as preservation UNPROVEN, never as proven loss.
+    """
+    diff = _main_diff_lines(root, mb, base, path)
+    if diff is None:
+        return None
+    added, _deleted = diff
+    merged = _blob_lines(root, merged_oid)
+    if merged is None:
+        return None
+    return sum((Counter(added) - Counter(merged)).values())
+
+
 def silent_reverts(root: Path, mb: str, base: str, head: str) -> list[dict]:
     """Main's post-merge-base changes a merge of this branch would not keep.
 
@@ -363,9 +639,97 @@ def silent_reverts(root: Path, mb: str, base: str, head: str) -> list[dict]:
         return []
     counts = _numstat(root, mb, base)
     return [
-        {"path": p, "added": counts.get(p, (0, 0))[0], "deleted": counts.get(p, (0, 0))[1]}
+        {
+            "path": p,
+            "added": counts.get(p, (0, 0))[0],
+            "deleted": counts.get(p, (0, 0))[1],
+            # main's CONTRIBUTION that the merge result does not carry. The
+            # verdict above is blob identity, which a union also trips; this is
+            # the measured answer to "did main's content actually survive?"
+            # (#1431). Never read None as 0 — that is "unmeasurable".
+            "lost": _lost_lines(root, mb, base, p, merged_blobs[p]),
+            # `lost == 0` is not proof when the branch touched the same base
+            # lines: a union resolves that overlap WITHOUT a conflict and can
+            # drop main's side (a deletion leaves no added line to miss).
+            # Contested paths are reported UNPROVEN, never "content kept".
+            "contested": _contested(root, mb, base, head, p),
+        }
         for p in reverted
     ]
+
+
+def _lost_note(lost: int | None, contested: bool = False) -> str:
+    """Per-path annotation naming WHICH red this is (#1431).
+
+    The verdict is blob identity, so it fires on a union as readily as on a
+    revert; this is the measured discriminator, kept next to the
+    `+added/-deleted` pair that describes main's movement instead. `contested`
+    is true when the branch touched the same base lines main moved: under
+    `merge=union` — this repo's own `.gitattributes` — that overlap resolves
+    WITHOUT a conflict and can drop main's side, so a zero `lost` there must
+    not read "content kept" (#1431 review).
+    """
+    if lost is None:
+        return "  (main's added lines absent: UNMEASURED — binary path)"
+    if lost:
+        return f"  (main's contribution absent: {lost} — main's content lost)"
+    if contested:
+        return ("  (main's added lines absent: 0, but the branch touched the "
+                "same lines — preservation UNPROVEN under this merge)")
+    return "  (main's added lines absent: 0 — main's content kept)"
+
+
+def _lost_summary(reverts: list[dict]) -> str:
+    """The gate's closing line: WHICH red this is (#1431).
+
+    A pure function of the measured `lost` values, so every branch is testable
+    without an end-to-end fixture. No fixture in this suite is known to raise
+    the `lost > 0` aggregate — a conflict-free merge generally preserves both
+    sides' non-overlapping changes, and overlaps conflict — so that branch is
+    exercised directly. This is a COVERAGE statement, not an equivalence claim:
+    a merge driver can drop a main-added line in a conflict-free merge, and a
+    fixture that did would make the aggregate reachable (#1431 review). The
+    verdict is blob identity
+    and cannot tell a union that kept main's content from a revert that lost
+    it; this line says which, because a red whose message asserts lost content
+    is how a union gets misread as a revert.
+
+    A zero `lost` on a CONTESTED path — one whose base lines the branch also
+    touched — does not prove preservation: this repo unions
+    `config/ci-surfaces.yml` (`.gitattributes`), and a union resolves an
+    overlapping delete/modify by keeping the other side's line, dropping main's
+    deletion in a CONFLICT-FREE merge that an additions-only count cannot see.
+    That case is reported as UNPROVEN, never as "kept / not a revert" (#1431
+    review).
+    """
+    total = sum(r["lost"] or 0 for r in reverts)
+    unmeasured = sum(1 for r in reverts if r["lost"] is None)
+    if unmeasured:
+        return (
+            "    main's own added lines absent from the merge: "
+            f"{total} in total, UNMEASURED on {unmeasured} path(s) "
+            "(binary) — treat those as unproven.")
+    if total:
+        return (
+            "    main's own added lines absent from the merge: "
+            f"{total} — main's content IS lost on "
+            f"{sum(1 for r in reverts if r['lost'])} path(s).")
+    contested_paths = sum(1 for r in reverts if r.get("contested"))
+    if contested_paths:
+        return (
+            "    main's own added lines absent from the merge: 0, but "
+            f"{contested_paths} path(s) had main's change CONTESTED by an "
+            "overlapping branch change under a conflict-free merge — a driver "
+            "like `merge=union` can drop main's side, and a dropped deletion "
+            "leaves no added line to miss, so preservation is UNPROVEN there. "
+            "This red is not a proven revert; re-merging may still clear it "
+            "(#1431).")
+    return (
+        "    main's own added lines absent from the merge: 0 — every "
+        "line main contributed is present, so this red is "
+        "byte-identity (a union or a diff3 combination that keeps "
+        "main's content), not lost content. Re-merging still clears "
+        "it; it is not a revert (#1431).")
 
 
 def main() -> int:
@@ -574,12 +938,13 @@ def main() -> int:
     # line that can never fail must not read like one.
     if reverts:
         lines.append(
-            f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) where "
-            f"merging this branch into {base_label} would not keep "
-            f"{base_label}'s content "
+            f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) whose "
+            f"merged content is not {base_label}'s, where merging this branch "
+            f"into {base_label} is conflict-free "
             f"(base {freshness}, merge-base {mb[:12]}):")
         for r in reverts[:MAX_REPORTED_PATHS]:
-            lines.append(f"    {r['path']}  +{r['added']}/-{r['deleted']}")
+            lines.append(f"    {r['path']}  +{r['added']}/-{r['deleted']}"
+                         f"{_lost_note(r['lost'], r['contested'])}")
         if len(reverts) > MAX_REPORTED_PATHS:
             lines.append(f"    … and {len(reverts) - MAX_REPORTED_PATHS} more")
         lines.append(
@@ -588,6 +953,9 @@ def main() -> int:
             f"{base_label}'s version of each path, so a textual conflict "
             f"check cannot see it. Fetch and reconcile before this lands "
             f"(#4174, #7455).")
+        # Say WHICH red this is (#1431) — in a pure helper so each branch is
+        # testable without a fixture that can produce it.
+        lines.append(_lost_summary(reverts))
     return emit(report, lines, 1)
 
 

@@ -37,6 +37,12 @@ import {
 } from "../../_shared/meta-contract.ts";
 import { SLUG_MAX, SLUG_RE } from "../../_shared/slug.ts";
 import { purgeUrl } from "../../_shared/cloudflare-purge.ts";
+// Agent-key auth + rate limiting are shared with the AI SEO generator (#8293)
+// so the key check exists ONCE — two copies drift, and a drifted key check is a
+// fail-open waiting for a maintenance edit.
+import {
+  authenticate, rateLimited, type RateLimit,
+} from "../../_shared/agent-auth.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 const TITLE_MAX = 200;
@@ -46,13 +52,15 @@ const RATE_BURST = 120;
 const RATE_DAY_MS = 86_400_000;
 const RATE_DAY = 2_000;
 
+// This endpoint's budget, applied through the shared limiter.
+const POST_RATE: RateLimit = { windowMs: RATE_WINDOW_MS, burst: RATE_BURST, dayMs: RATE_DAY_MS, day: RATE_DAY };
+
 // SEO field-length contract — single source of truth (#1866): shared with the
 // AI generator (seo-constraints.ts) and locked to the editor's literals.
 
 // In-memory rate counters per isolate (Cloudflare isolates are per-request;
 // this is best-effort, unit-tested at lowered thresholds — the durable guard is
-// the per-agent key + audit trail).
-const counters = new Map<string, { burst: number[]; day: number[] }>();
+// the per-agent key + audit trail). The counters live in _shared/agent-auth.ts.
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -69,42 +77,6 @@ function err(status: number, code: string, message: string): Response {
 function validationError(errors: Record<string, string>): Response {
   const status = errors.body_422 ? 422 : 400;
   return json(errors, status);
-}
-
-async function sha256Hex(s: string): Promise<string> {
-  const data = new TextEncoder().encode(s);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-interface AgentIdentity {
-  agentName: string;
-}
-
-type AuthResult = { ok: true; identity: AgentIdentity } | { ok: false; code: 401 | 404 };
-
-async function authenticate(env: Env, request: Request): Promise<AuthResult> {
-  const key = request.headers.get("X-Agent-Key");
-  if (!key) return { ok: false, code: 401 };
-  const hash = await sha256Hex(key);
-  try {
-    const url = `${env.SUPABASE_URL ?? ""}/rest/v1/blog_agent_keys?select=agent_name,active&key_hash=eq.${hash}&limit=1`;
-    const res = await fetch(url, {
-      headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
-        Accept: "application/json",
-      },
-    });
-    if (!res.ok) throw new Error(`supabase ${res.status}`);
-    const rows = (await res.json()) as Array<{ agent_name: string; active: boolean }>;
-    const row = rows[0];
-    if (!row) return { ok: false, code: 401 };
-    if (!row.active) return { ok: false, code: 404 }; // known-but-inactive key (contract)
-    return { ok: true, identity: { agentName: row.agent_name } };
-  } catch {
-    return { ok: false, code: 401 }; // upstream unreachable — treat as unauthorized (no key info leak)
-  }
 }
 
 function balancedFences(markdown: string): boolean {
@@ -134,12 +106,26 @@ function str(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
 
+// The recorded lifecycle is draft → published → archived (plan W4). The union —
+// not a bare `string` — is what keeps an unvalidated status out of the INSERT:
+// `CreateValues.status` and `PatchValues.status` are BOTH typed by it, so the
+// only way to build either is to have narrowed the raw input into it (#4311).
+type PostStatus = "draft" | "published";
+
 function validateCreate(input: PostInput): { ok: true; value: CreateValues } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
-  if (input.status !== undefined && input.status !== null && typeof input.status !== "string") {
-    errors.status = "must be a string";
+  // Narrow ONCE, here. Below this point `status` is a valid member or the
+  // default, so no later branch can hand a raw `string` to the database.
+  let status: PostStatus = "draft";
+  if (input.status !== undefined && input.status !== null) {
+    if (typeof input.status !== "string") {
+      errors.status = "must be a string";
+    } else if (input.status === "draft" || input.status === "published") {
+      status = input.status;
+    } else {
+      errors.status = "status must be draft | published";
+    }
   }
-  const status = str(input.status);
   const title = str(input.title) ?? "";
   if (!title || title.length > TITLE_MAX) errors.title = `title required, max ${TITLE_MAX} chars`;
 
@@ -165,7 +151,6 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
   const author = str(input.author);
   if (author && author.length > 100) errors.author = "author max 100 chars";
 
-  if (status !== null && status !== "draft" && status !== "published") errors.status = "status must be draft | published";
   if (status === "published" && input.hold_for_review === true) errors.hold_for_review = "hold_for_review cannot be combined with status=published";
 
   if (input.tags !== undefined && input.tags !== null) {
@@ -192,7 +177,7 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
       meta_description: metaDesc ?? null,
       author: author ?? null,
       hold_for_review: typeof input.hold_for_review === "boolean" ? input.hold_for_review : false,
-      status: status ?? "draft",
+      status,
     },
   };
 }
@@ -208,7 +193,7 @@ interface CreateValues {
   meta_description: string | null;
   author: string | null;
   hold_for_review: boolean;
-  status: "draft" | "published";
+  status: PostStatus;
 }
 
 function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { ok: false; errors: Record<string, string> } {
@@ -299,23 +284,7 @@ interface PatchValues {
   meta_description?: string | null;
   author?: string | null;
   hold_for_review?: boolean;
-  status?: "draft" | "published";
-}
-
-// ── Rate limiting (best-effort per isolate) ─────────────────────────────────
-function rateLimited(agentName: string): boolean {
-  const now = Date.now();
-  let c = counters.get(agentName);
-  if (!c) {
-    c = { burst: [], day: [] };
-    counters.set(agentName, c);
-  }
-  c.burst = c.burst.filter((t) => now - t < RATE_WINDOW_MS);
-  c.day = c.day.filter((t) => now - t < RATE_DAY_MS);
-  if (c.burst.length >= RATE_BURST || c.day.length >= RATE_DAY) return true;
-  c.burst.push(now);
-  c.day.push(now);
-  return false;
+  status?: PostStatus;
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -336,7 +305,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const auth = await authenticate(env, request);
   if (!auth.ok) return err(auth.code, auth.code === 404 ? "inactive_agent" : "unauthorized", "invalid or missing X-Agent-Key");
   const agent = auth.identity;
-  if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
+  if (rateLimited(agent.agentName, POST_RATE)) return err(429, "rate_limited", "rate limit exceeded");
 
   const contentLength = Number(request.headers.get("content-length") ?? "0");
   if (contentLength > 150_000) return err(422, "body_too_large", "request body too large");
@@ -409,7 +378,7 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   const auth = await authenticate(env, request);
   if (!auth.ok) return err(auth.code, auth.code === 404 ? "inactive_agent" : "unauthorized", "invalid or missing X-Agent-Key");
   const agent = auth.identity;
-  if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
+  if (rateLimited(agent.agentName, POST_RATE)) return err(429, "rate_limited", "rate limit exceeded");
 
   // [[path]] catch-all: params.path = [] for /blog/api/posts (create),
   // [slug] for /blog/api/posts/{slug} (PATCH). Only the PATCH surface reads it.
@@ -556,7 +525,7 @@ export const onRequestDelete: PagesFunction<Env> = async ({ request, env, params
   const auth = await authenticate(env, request);
   if (!auth.ok) return err(auth.code, auth.code === 404 ? "inactive_agent" : "unauthorized", "invalid or missing X-Agent-Key");
   const agent = auth.identity;
-  if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
+  if (rateLimited(agent.agentName, POST_RATE)) return err(429, "rate_limited", "rate limit exceeded");
 
   const slug = ((params.path as string[] | undefined) ?? [])[0] ?? "";
   if (!SLUG_RE.test(slug)) return err(400, "validation", "invalid slug");

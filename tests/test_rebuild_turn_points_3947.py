@@ -376,7 +376,7 @@ def test_recapture_shorter_does_not_resurrect_turns_on_rebuild(tmp_path):
         # The subscriber surface saw every turn's PointAdded, so it must see
         # the hard delete too (the two-store split delete_point established).
         retracted = {e["payload"].get("id")
-                     for e in sdk.events_poll(after=None)["events"]
+                     for e in sdk.poll_events(after=None)["events"]
                      if e["type"] == "PointRetracted"}
         assert set(stale) <= retracted, (
             f"the deletion is invisible to the event surface: {sorted(set(stale) - retracted)}")

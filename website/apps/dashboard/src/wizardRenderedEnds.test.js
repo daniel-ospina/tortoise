@@ -183,8 +183,8 @@ const LITERALS = new Set(['true', 'false', 'null', 'undefined'])
 function announcementInputsAndDeps(source) {
   const { open, close } = announcementEffectBlock(source)
   const body = source.slice(open + 1, close)
-  const call = body.match(/wizardStageLabel\(\s*([A-Za-z_$][\w$]*)\s*,\s*\{([^}]*)\}/)
-  assert.ok(call, 'the effect body must build the label through wizardStageLabel(step, {...})')
+  const call = body.match(/wizard(?:StageLabel|StepAnnouncement)\(\s*([A-Za-z_$][\w$]*)\s*,\s*\{([^}]*)\}/)
+  assert.ok(call, 'the effect body must build the label through wizardStageLabel(step, {...}) or wizardStepAnnouncement(step, {...})')
   const inputs = [call[1]]
   for (const pair of call[2].split(',')) {
     const value = (pair.split(':')[1] || '').trim()
@@ -231,7 +231,7 @@ function htmlToText(html) {
 async function renderWizardEnds(source, cases) {
   const h1 = extractH1(source)
   const prefix = extractAnnouncementPrefix(source)
-  const imports = importsFromMain(source, ['wizardStageLabel'])
+  const imports = importsFromMain(source, ['wizardStageLabel', 'wizardStepAnnouncement'])
   const flagDecls = (c) => [
     `const wizardStep = ${c.step}`,
     `const welcomeHasOrg = ${c.hasOrg}`,
@@ -296,7 +296,7 @@ const CASES = []
 for (const p of PROJECTIONS) {
   const connected = harnessConnectionObserved(p.onboarding)
   for (const effectivelyPaused of [false, true]) {
-    for (const step of [0, 1, 2, 3]) {
+    for (const step of [0, 1, 2, 3, 4]) {
       // `hasOrg` only selects a different label on step 0; varying it elsewhere
       // would add identical rows.
       for (const hasOrg of step === 0 ? [false, true] : [false]) {
@@ -330,7 +330,7 @@ test('#5820: the announcement and the <h1> render the SAME stage across the #464
 // (effectivelyPaused), and the projection carries a `complete` status — the
 // grandfathered shape that a widened expression reads as "all set".
 const DISCRIMINATING = {
-  step: 3, hasOrg: false, effectivelyPaused: true, connected: false,
+  step: 4, hasOrg: false, effectivelyPaused: true, connected: false,
   buildFork: false, onboarding: { status: 'complete' },
 }
 
@@ -340,21 +340,20 @@ function patch(source, oldText, newText, label) {
   return source.replace(oldText, newText)
 }
 
-const ANNOUNCE_DECL = '    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })'
+const ANNOUNCE_CALL = 'setWizardStepAnnounce(wizardStepAnnouncement(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork }))'
 const H1_CHILD = '                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })}'
 
 test('#5820 falsifiability: a widened announcement fails without touching the helper', async () => {
-  // Shape 1: the announcement re-binds `label` AFTER the guarded call. Every AST
-  // site still binds the bare identifier; the announcement's own template still
-  // interpolates `label` verbatim. Only the rendered string moves.
-  const mutated = patch(mainJsxSrc, ANNOUNCE_DECL,
-    '    const _trueLabel = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })\n'
-    + '    const label = serverHarnessConnected ? _trueLabel : "You\'re all set"',
+  // Shape 1: the announcement's argument is an expression that widens the
+  // stage it speaks, while the shared helper is untouched. Every AST site still
+  // reads the guarded inputs; only the rendered string moves.
+  const mutated = patch(mainJsxSrc, ANNOUNCE_CALL,
+    'setWizardStepAnnounce(effectivelyPaused ? "Step " + (wizardStep + 1) + " of 5: You\'re all set" : wizardStepAnnouncement(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork }))',
     'widened announcement')
   const bad = divergences(await renderWizardEnds(mutated, [DISCRIMINATING]))
-  assert.equal(bad.length, 1, 'the rendered-end pin must catch a re-bound announcement label')
+  assert.equal(bad.length, 1, 'the rendered-end pin must catch a widened announcement')
   assert.equal(bad[0].h1, SETUP_PAUSED_NO_CONNECTION_OBSERVED)
-  assert.equal(bad[0].announcement, "Step 4 of 4: You're all set")
+  assert.equal(bad[0].announcement, "Step 5 of 5: You're all set")
 })
 
 test('#5820 falsifiability: an <h1> widened AROUND its call fails', async () => {
@@ -366,19 +365,19 @@ test('#5820 falsifiability: an <h1> widened AROUND its call fails', async () => 
   const bad = divergences(await renderWizardEnds(mutated, [DISCRIMINATING]))
   assert.equal(bad.length, 1, 'the rendered-end pin must catch a widened <h1>')
   assert.equal(bad[0].h1, "You're all set")
-  assert.equal(bad[0].announcement, `Step 4 of 4: ${SETUP_PAUSED_NO_CONNECTION_OBSERVED}`)
+  assert.equal(bad[0].announcement, `Step 5 of 5: ${SETUP_PAUSED_NO_CONNECTION_OBSERVED}`)
 })
 
 test('#5820 falsifiability: a DIFFERENT option set between the two ends fails', async () => {
   // Shape 3: both sites still pass the bare `connected`, but the announcement
   // passes `paused: false` while the <h1> passes `paused: effectivelyPaused`.
-  const mutated = patch(mainJsxSrc, ANNOUNCE_DECL,
-    '    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: false, connected: serverHarnessConnected, buildFork: isBuildFork })',
+  const mutated = patch(mainJsxSrc, ANNOUNCE_CALL,
+    ANNOUNCE_CALL.replace('paused: effectivelyPaused', 'paused: false'),
     'divergent option set')
   const bad = divergences(await renderWizardEnds(mutated, [DISCRIMINATING]))
   assert.equal(bad.length, 1, 'the rendered-end pin must catch a divergent option set')
   assert.equal(bad[0].h1, SETUP_PAUSED_NO_CONNECTION_OBSERVED)
-  assert.equal(bad[0].announcement, `Step 4 of 4: ${NO_CONNECTION_OBSERVED}`)
+  assert.equal(bad[0].announcement, `Step 5 of 5: ${NO_CONNECTION_OBSERVED}`)
 })
 
 // ── #3728: the deps pin, with its own falsifiability ────────────────────────
@@ -448,8 +447,9 @@ test('#5820: the extractors fail LOUD rather than passing vacuously', async () =
   // A prefix that reads a name this harness does not bind must REJECT, not
   // evaluate against a stale module binding: extraction that cannot model the
   // real scope fails closed.
-  const unbound = patch(mainJsxSrc, ANNOUNCE_DECL,
-    `${ANNOUNCE_DECL} + WIZARD_SCOPE_UNBOUND_SENTINEL`, 'unbound scope read')
+  const unbound = patch(mainJsxSrc, ANNOUNCE_CALL,
+    ANNOUNCE_CALL.replace('hasOrg: welcomeHasOrg', 'hasOrg: WIZARD_SCOPE_UNBOUND_SENTINEL'),
+    'unbound scope read')
   await assert.rejects(renderWizardEnds(unbound, [DISCRIMINATING]), /WIZARD_SCOPE_UNBOUND_SENTINEL/)
 })
 
@@ -472,6 +472,7 @@ async function focusCallsOverRuns(source) {
   const body = source.slice(open + 1, close)
   const [probe] = await evalExpressions([`(() => {
     const wizardStageLabel = () => 'LABEL'
+    const wizardStepAnnouncement = () => 'LABEL'
     const setWizardStepAnnounce = () => {}
     const wizardFocusInit = { current: false }
     const lastWizardStepRef = { current: -1 }

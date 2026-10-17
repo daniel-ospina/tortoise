@@ -130,6 +130,9 @@ def _install_alert_store(monkeypatch):
     A real store (not a fake) so the dedup contract under test is the store's
     own create-once behavior — same approach as tests/test_alert_store.py.
     Returns (filed_titles, telegram_texts).
+
+    #4778: the sink's seam is the ALERT-only builder, so that is what this
+    installs; the old ``_backup_config_safe`` stub is gone with the raw chain.
     """
     from tortoise import hosted_api as ha
     from tortoise.alert_store import AlertStore
@@ -150,8 +153,7 @@ def _install_alert_store(monkeypatch):
         push_telegram=pushed.append,
         repo="daniel-ospina/tortoise",
     )
-    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
-    monkeypatch.setattr(ha, "_alert_store_from", lambda cfg: store)
+    monkeypatch.setattr(ha, "_incident_alert_store", lambda *a, **k: store)
     return filed, pushed
 
 
@@ -192,11 +194,10 @@ def test_invite_failure_alert_never_raises(monkeypatch, caplog):
     """A dead alert channel must not break the invite send path."""
     from tortoise import hosted_api as ha
 
-    def boom(cfg):
+    def boom(*a, **k):
         raise RuntimeError("r2 down")
 
-    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
-    monkeypatch.setattr(ha, "_alert_store_from", boom)
+    monkeypatch.setattr(ha, "_incident_alert_store", boom)
     monkeypatch.setattr(email_notify.httpx.AsyncClient, "post", _always_503())
     with caplog.at_level(logging.WARNING):
         _invoke("Acme", "bob@example.com", "member", "t", "inv_2")

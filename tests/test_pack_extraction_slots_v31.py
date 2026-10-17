@@ -349,7 +349,7 @@ class TestCrossPackResolution:
     """
 
     @staticmethod
-    def _load(tmp_path, cues=None, templates=None):
+    def _load(tmp_path, cues=None, templates=None, raw=False):
         (tmp_path / "alpha").mkdir()
         (tmp_path / "alpha" / "manifest.yaml").write_text(
             "namespace: alpha\nname: Alpha\nontology:\n"
@@ -366,6 +366,8 @@ class TestCrossPackResolution:
         }))
         registry = PackRegistry(str(tmp_path))
         registry.load_all()
+        if raw:
+            return registry
         return [e for e in registry.errors.get("beta", [])
                 if "extraction." in e]
 
@@ -389,16 +391,24 @@ class TestCrossPackResolution:
         errors = self._load(tmp_path, cues={"ghost": ["a cue"]})
         assert any("does not resolve" in e for e in errors), errors
 
-    def test_a_dangling_namespaced_ref_is_reported(self, tmp_path):
-        errors = self._load(tmp_path, cues={"ghost:thing": ["a cue"]})
-        assert any("does not resolve" in e for e in errors), errors
+    def test_a_dangling_namespaced_ref_is_UNRESOLVED_not_fatal(self, tmp_path):
+        """#2781: a namespaced ref whose NAMESPACE is absent names a pack that is
+        not installed — it is not a typo inside a present pack, so the pack
+        loads and the reference is reported against the missing pack."""
+        reg = self._load(tmp_path, cues={"ghost:thing": ["a cue"]}, raw=True)
+        assert reg.errors.get("beta", []) == []
+        unresolved = reg.unresolved_refs.get("beta", [])
+        assert any("ghost" in e and "not loaded" in e for e in unresolved), unresolved
 
-    def test_a_dangling_template_kind_is_reported(self, tmp_path):
-        errors = self._load(tmp_path, templates=[
+    def test_a_dangling_template_kind_is_UNRESOLVED_not_fatal(self, tmp_path):
+        """#2781: same clause for the v3.1 relationTemplate slot."""
+        reg = self._load(tmp_path, templates=[
             {"predicate": "x", "mechanism": "IMPL",
-             "fromKind": "ghost:thing", "toKind": "thingB"}])
-        assert any("relationTemplates[0].fromKind" in e
-                   and "does not resolve" in e for e in errors), errors
+             "fromKind": "ghost:thing", "toKind": "thingB"}], raw=True)
+        assert reg.errors.get("beta", []) == []
+        assert any("relationTemplates[0].fromKind" in e and "ghost" in e
+                   for e in reg.unresolved_refs.get("beta", [])), \
+            reg.unresolved_refs.get("beta", [])
 
 
 class TestShapeIsPinned:

@@ -257,6 +257,13 @@ class ConversationMiner:
           - batch_reason: the W-3 failure reason when quarantined, or the
             skip explanation when not_gated
 
+        #2354 (E-review of epic #2349): the post-gate verdict sweep's report —
+        {examined, queued, auto_accepted, skipped_reviewed, batch_quarantined,
+        threshold, auto_accept, decisions}. Every undecided correction
+        conflict is stamped `reviewDecision='queued'`; auto-accept (keep) fires
+        only when TORTOISE_VERDICT_AUTO_ACCEPT is on AND the EP belief clears
+        TORTOISE_VERDICT_THRESHOLD. None when no SDK/projection.
+
         ``entity_stage`` injects a deterministic mock (EntityStageMock, plan
         §7 preamble) for tests; None → LLM stage (or rule fallback when no
         model is configured).
@@ -377,6 +384,28 @@ class ConversationMiner:
                 batch_status = "quarantined"
                 batch_reason = "W-3 gate error (pipeline wiring)"
 
+        # #2354 uncertainty-verdict sweep (E-review of epic #2349): the batch
+        # is now committed or quarantined, so a correction conflict's
+        # live-prior candidate can be put into the explicit decision state.
+        # The sweep only QUEUES, or auto-accepts (keep) a candidate whose
+        # EP belief clears the configurable threshold when the operator has
+        # opted in (default off) — it never closes or rejects a queued
+        # decision. See tortoise/review_verdicts.py.
+        verdict_sweep = None
+        verdict_sweep_error = None
+        if api.projection is not None and point_ids and sdk is not None:
+            try:
+                from .review_verdicts import VerdictLayer
+                verdict_sweep = VerdictLayer(sdk).sweep(batch_id=batch_id)
+            except Exception as exc:
+                # Surface it like the W-2 dedup block does (:337): a sweep that
+                # never ran must not be indistinguishable from "queued nothing".
+                # `verdict_sweep is None` alone is a silent limbo restatement
+                # (every candidate stays temporal_reviewed IS NULL, and the
+                # batch is already committed by the W-3 gate, so nothing retries).
+                logger.exception("verdict sweep failed for batch %s", batch_id)
+                verdict_sweep_error = f"verdict sweep failed: {exc}"
+
         return {
             "events": len(events),
             "points": len(points),
@@ -397,6 +426,8 @@ class ConversationMiner:
             "temporal_candidates": (temporal_report or {}).get("candidates", 0),
             "temporal_replacements": (temporal_report or {}).get(
                 "replacement_candidates", 0),
+            "verdict_sweep": verdict_sweep,
+            "verdict_sweep_error": verdict_sweep_error,
         }
 
     # ── Phase-4 temporal belief wiring (W-4, #786, DE2E-6) ────────
@@ -465,7 +496,7 @@ class ConversationMiner:
             # ``startedAt`` survives the ``or``). Stamping it would write
             # ``validFrom=""`` — a bound ``_covers`` cannot order against any
             # PARSEABLE query instant, so the point is invisible to every
-            # normal ``restore_point_at`` query. Precisely: it is hidden from
+            # normal ``get_historical_knowledge`` query. Precisely: it is hidden from
             # parseable queries only — an unparseable ``at_date`` still matches
             # it by lexicographic accident, the same boundary ``sdk.py``
             # records on its read path. ``""`` is neither absent nor a start,
@@ -481,7 +512,7 @@ class ConversationMiner:
             # decided on `str(...).strip()`, so storing it unstripped would
             # write `" 2026-07-01"` — an unorderable bound `_covers` cannot
             # match against any parseable query instant, hiding the point from
-            # every normal `restore_point_at` query, i.e. the same harm as the
+            # every normal `get_historical_knowledge` query, i.e. the same harm as the
             # `""` case above. Whitespace carries no meaning around an ISO
             # instant.
             vf = str(session_date).strip()
@@ -880,7 +911,12 @@ class ConversationMiner:
         }
         api.log.append(record)
         if api.projection is not None:
-            api.projection.apply(record)
+            # #7951 §17.1: journal-first door (its own envelope) — the append
+            # above is the COMMIT POINT, so the fold runs inside the
+            # live-write scope.
+            from tortoise.projection import _live_write_scope
+            with _live_write_scope("conversation_miner._emit_event"):
+                api.projection.apply(record)
 
     @staticmethod
     def _make_event(

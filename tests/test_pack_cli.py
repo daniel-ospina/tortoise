@@ -125,6 +125,51 @@ class TestPackValidate:
         assert payload["ok"] is True
         assert "mydomain" in payload["loaded"]
 
+    def test_prints_the_relation_verdict_table(self, tmp_path):
+        """#2766: `pack validate` reports each declared relation's write-path
+        verdict. A relation whose declaration binds no path is REPORTED, never a
+        failure (warn-not-block, W2) — the pack still validates clean."""
+        manifest = _scaffold("mydomain", tmp_path)
+        text = manifest.read_text().replace(
+            "  relations: []",
+            "  relations:\n"
+            "  - predicate: blocks\n"
+            "    from: Object\n"
+            "    to: Object\n"
+            "  - predicate: hasPart\n"
+            "    from: Object\n"
+            "    to: Object\n",
+        )
+        assert "predicate: blocks" in text, "template shape changed"
+        manifest.write_text(text)
+        r = _run_cli("pack", "validate", str(manifest.parent))
+        out = r.stdout + r.stderr
+        assert r.returncode == 0, out  # warn-not-block: not an error
+        assert "relation write verdicts" in out
+        assert "predicate-not-in-allowlist" in out
+        assert "mydomain.blocks" in out
+        assert "mydomain.hasPart" in out
+
+    def test_json_carries_relation_verdicts(self, tmp_path):
+        manifest = _scaffold("mydomain", tmp_path)
+        text = manifest.read_text().replace(
+            "  relations: []",
+            "  relations:\n"
+            "  - predicate: blocks\n"
+            "    from: Object\n"
+            "    to: Object\n"
+            "    declarationOnly: true\n",
+        )
+        manifest.write_text(text)
+        r = _run_cli("pack", "validate", str(manifest.parent), "--json")
+        assert r.returncode == 0, r.stdout + r.stderr
+        import json
+        payload = json.loads(r.stdout)
+        rels = payload["relation_verdicts"]["relations"]
+        assert [x["write_verdict"] for x in rels] == ["declaration-only"]
+        assert rels[0]["write_paths"] == []
+        assert payload["relation_verdicts"]["counts"] == {"declaration-only": 1}
+
 
 # ── Install→mine→mint round-trip (E2E-3 extraction minting) ────────────────
 

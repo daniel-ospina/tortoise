@@ -46,14 +46,30 @@ UNKNOWN NEVER FILES. A 404 (the abandoned handler may not have MERGEd yet), a
 retryable status on the READ, a transport error, a short or grown turn set, or
 any served role/body that differs all defer; only an exact match on the posted
 ids AND their served role and body files.
+
+THE COMPARISON SURVIVES A REDACTION-TABLE SKEW (#5394). The server scrubs what
+it stores with ITS ``_SECRET_SHAPES`` table (``tortoise.security``), and that
+table ships independently of the client's, so requiring the served text to
+equal the CLIENT's own redacted guess made the stored-text contract
+version-sensitive: an older client against an upgraded server compares unequal
+on a turn whose credential the two tables disagree about, the verdict is
+:data:`TURNS_MISSING`, and ``capture_spool`` defers the entry FOREVER because
+that verdict is retryable. The client holds the RAW turn, so the comparison is
+now two-tiered: an exact match on its own redacted expectation (the common
+case), else the served pair must be the client's RAW pair with zero or more
+spans replaced by a ``[REDACTED:<kind>]`` marker — a property that holds
+whichever table the server ran. A missing or grown turn, a truncated body, or
+any difference OUTSIDE a marker span is still :data:`TURNS_MISSING`.
 """
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from tortoise.sdk import (
+    _capture_turn_frame,
     _capture_turn_role_text,
     _capture_turn_texts,
     _capture_turn_window,
@@ -66,6 +82,7 @@ __all__ = [
     "UNKNOWN",
     "confirm_capture",
     "expected_turns",
+    "raw_windowed_turns",
     "session_extracted",
     "turn_point_id",
     "turn_points",
@@ -193,6 +210,134 @@ def session_extracted(detail: Any) -> int:
     return max(0, value)
 
 
+def raw_windowed_turns(session_id: str,
+                       turns: Sequence[dict]) -> dict[str, tuple[str, str]]:
+    """``{turn_id: (role, text)}`` for the turns about to be POSTed, PRE-scrub.
+
+    The client's RAW model of the stored pair: the same window the writer
+    applies (``sdk._capture_turn_window``), the same frame
+    (``sdk._capture_turn_frame``, which carries the #5445 role-delimiter
+    neutralization), read back through the same inverse the reader uses
+    (``sdk._capture_turn_role_text``). ``expected_turns`` is the same model
+    AFTER the client's own ``_SECRET_SHAPES`` scrub; this is the model BEFORE
+    it, and it is what makes the comparison version-independent (#5394): the
+    client holds the raw text, so it can assert the property the server's
+    output must satisfy without knowing which table the server ran.
+    """
+    windowed = _capture_turn_window([dict(t) for t in turns])
+    out: dict[str, tuple[str, str]] = {}
+    for i, turn in enumerate(windowed):
+        out[turn_point_id(session_id, i)] = _capture_turn_role_text(
+            _capture_turn_frame(turn))
+    return out
+
+
+#: A redaction marker in a SERVED BODY: ``[REDACTED:<kind>]``
+#: (``tortoise.security._REDACTION_VALUE``). A body is never
+#: delimiter-neutralized, so this is the only marker form a BODY can carry.
+_BODY_REDACTION_MARKER = re.compile(r"\[REDACTED:[^\[\]]*\]")
+#: A redaction marker in a SERVED ROLE. ``_capture_turn_frame`` neutralizes the
+#: framing delimiters in the role (#5445), so a redacted role is served as
+#: ``(REDACTED:<kind>)`` — square brackets never survive there. Recognising the
+#: square form here would treat a role the user LITERALLY typed as
+#: ``(REDACTED:foo)`` as a wildcard, so the two forms are deliberately split.
+_ROLE_REDACTION_MARKER = re.compile(r"\(REDACTED:[^()]*\)")
+
+
+def _stored_is_raw_with_markers(raw: str, stored: str,
+                                marker: re.Pattern[str]) -> bool:
+    """True when ``stored`` is ``raw`` with zero or more spans replaced by a
+    redaction marker.
+
+    #5394: the server scrubs the text it stores with ITS ``_SECRET_SHAPES``
+    table, and that table is deployed independently of the client's. Requiring
+    the served text to equal the CLIENT's own redacted guess makes the
+    comparison version-sensitive: a client installed before a rule the server
+    now has builds an expectation the server never stored, the comparison
+    fails, and ``capture_spool`` defers the entry with backoff FOREVER —
+    ``session drain`` never reaches ``filed N, deferred 0``. The client holds
+    the RAW turn, so the property it CAN assert without knowing the server's
+    table is this one.
+
+    Deliberately NOT "a marker matches anything": the literal (non-marker)
+    spans must match byte-for-byte, in order, and each marker stands for at
+    least one raw character (every rule in ``_SECRET_SHAPES`` replaces a
+    NON-EMPTY span). A missing turn, a truncated body, or any difference
+    OUTSIDE a marker span still fails — which is what keeps the
+    :data:`TURNS_MISSING` verdict honest.
+
+    Linear by construction rather than by a regex: the literal segments are
+    matched leftmost — for a sequence of literals with no upper bound but the
+    final one, leftmost leaves the most room and is therefore optimal — and
+    the LAST literal is anchored at the end of ``raw``, which is what
+    ``fullmatch`` requires. Because that is an OPTIMISATION of a one-line
+    property, it is checked against the property's direct transcription
+    (``re.escape`` around the literals, ``.+`` at each marker, ``fullmatch``)
+    over an exhaustive small domain in ``tests/test_session_confirm.py``. The
+    explicit walk is kept because the segment count is fixed by the SERVED
+    body, so the cost bound (``O(len(raw) × segments)``) is visible in the
+    code rather than delegated to the regex engine.
+    """
+    if raw == stored:
+        return True
+    if marker.search(stored) is None:
+        # No marker to absorb a difference, so identity was the only way.
+        return False
+    segments: list[tuple[bool, str]] = []
+    last = 0
+    for match in marker.finditer(stored):
+        segments.append((False, stored[last:match.start()]))
+        segments.append((True, ""))
+        last = match.end()
+    segments.append((False, stored[last:]))
+    pos = 0
+    end = len(raw)
+    final = len(segments) - 1
+    for i, (is_marker, text) in enumerate(segments):
+        if is_marker:
+            # Each marker stands for at least one raw character.
+            if pos >= end:
+                return False
+            pos += 1
+            continue
+        if i == 0:
+            if not raw.startswith(text, pos):
+                return False
+            pos += len(text)
+        elif i == final:
+            # fullmatch: the trailing literal must END the raw string.
+            return end - len(text) >= pos and raw.endswith(text)
+        else:
+            idx = raw.find(text, pos)
+            if idx < 0:
+                return False
+            pos = idx + len(text)
+    return True  # pragma: no cover — segments always end in a literal
+
+
+def _turns_survive_redaction_skew(have: dict[str, tuple[str, str]],
+                                  raw: dict[str, tuple[str, str]]) -> bool:
+    """True when EVERY served row is its raw row plus redaction markers.
+
+    The KEY SETS must be identical: a missing, extra, grown or re-windowed
+    turn is a different transcript, and accepting it would stamp ``filed`` on
+    an entry whose only copy is nowhere on the server (#4675). The count is
+    positional, so this is the check that keeps a concurrent capture from
+    satisfying our POST.
+    """
+    if set(have) != set(raw):
+        return False
+    for tid, (served_role, served_body) in have.items():
+        raw_role, raw_body = raw[tid]
+        if not _stored_is_raw_with_markers(raw_body, served_body,
+                                           _BODY_REDACTION_MARKER):
+            return False
+        if not _stored_is_raw_with_markers(raw_role, served_role,
+                                           _ROLE_REDACTION_MARKER):
+            return False
+    return True
+
+
 def confirm_capture(
     reader: Callable[..., dict[str, Any] | None],
     api_url: str,
@@ -220,6 +365,10 @@ def confirm_capture(
         # payload we never sent.
         return UNKNOWN
     want = expected_turns(session_id, rows)
+    # Computed LAZILY: the exact comparison is the common case and the raw
+    # model is only needed once it fails, which is exactly the client/server
+    # table skew this guards (#5394).
+    raw: dict[str, tuple[str, str]] | None = None
     tries = max(1, int(attempts))
     for attempt in range(tries):
         detail: dict[str, Any] | None = None
@@ -237,6 +386,18 @@ def confirm_capture(
             if have == want:
                 return FILED if session_extracted(detail) >= 1 else UNEXTRACTED
             if have:
+                # #5394: the client's expectation is built from the client's
+                # OWN ``_SECRET_SHAPES``; the server stored text scrubbed by
+                # ITS table. When the two disagree the pair still matches if
+                # every served row is the client's RAW row with redaction
+                # markers — the version-independent property. A missing or
+                # grown turn, or any difference OUTSIDE a marker span, still
+                # falls through to TURNS_MISSING.
+                if raw is None:
+                    raw = raw_windowed_turns(session_id, rows)
+                if _turns_survive_redaction_skew(have, raw):
+                    return (FILED if session_extracted(detail) >= 1
+                            else UNEXTRACTED)
                 # The server holds turns for this session but not these — a
                 # partial write, or a concurrent capture that grew / re-windowed
                 # the transcript. Not ours to call filed.

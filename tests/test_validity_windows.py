@@ -2,7 +2,7 @@
 
 T1: supersede_point/invalidate_point stamp validTo/expiredAt (contiguity,
     kwarg/read/fallback matrix); T2: when→validFrom on the create path;
-    T3: restore_point_at chain-walk (in-window, open interval, ambiguity,
+    T3: get_historical_knowledge chain-walk (in-window, open interval, ambiguity,
     honest absence).
 
 Runnable with:
@@ -171,7 +171,7 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
       * EARLIER kwarg → GAP: neither window covers the instants strictly
         between them — the predecessor's end is the kwarg instant (inclusive)
         and the successor's start is the stored one — so the uncovered region
-        is ``(kwarg, stored)`` and ``restore_point_at`` reports honest absence
+        is ``(kwarg, stored)`` and ``get_historical_knowledge`` reports honest absence
         for instants that fall in it;
       * LATER kwarg → OVERLAP: both windows cover ``[stored, kwarg]`` (both
         ends inclusive), so every instant inside it reads ``ambiguous``.
@@ -211,10 +211,10 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
     # no ambiguity.
     sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
-    at_gap = sdk.restore_point_at(new["id"], "2026-06-07")
+    at_gap = sdk.get_historical_knowledge(new["id"], "2026-06-07")
     assert at_gap["found"] is True
     assert at_gap["valid_point"]["id"] == old["id"]
-    at_overlap = sdk.restore_point_at(new["id"], "2026-06-15")
+    at_overlap = sdk.get_historical_knowledge(new["id"], "2026-06-15")
     assert at_overlap["found"] is True
     assert at_overlap.get("ambiguous") is not True
     assert at_overlap["valid_point"]["id"] == new["id"]
@@ -222,7 +222,7 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
 
 def test_supersede_valid_from_format_difference_is_agreement(sdk):
     """Instant-level, not string-level, comparison via ``_created_sort_key``
-    — the same mixed-format primitive ``restore_point_at``'s ``_covers``
+    — the same mixed-format primitive ``get_historical_knowledge``'s ``_covers``
     uses to decide coverage. A format-only difference ("…Z" vs "…+00:00")
     names the same instant and must not be refused."""
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
@@ -543,7 +543,7 @@ def test_supersede_no_kwarg_unparseable_stored_start_is_normalised(sdk):
     # The harm, measured on the read path: the predecessor must NOT be treated
     # as covering an instant after its own end. The probe is RELATIVE — see
     # ``_future_instant``.
-    out = sdk.restore_point_at(new["id"], _future_instant())
+    out = sdk.get_historical_knowledge(new["id"], _future_instant())
     assert out["found"] is False, (
         "the predecessor covered a later instant — its end is still unbounded"
     )
@@ -577,7 +577,7 @@ def test_supersede_string_kwarg_with_no_stored_start_is_normalised(sdk):
     # The predecessor must not be the point in force at a far-future instant.
     # It appears in the CHAIN legitimately (it is history), so assert on
     # ``valid_point`` rather than on the whole response.
-    out = sdk.restore_point_at(new["id"], _future_instant())
+    out = sdk.get_historical_knowledge(new["id"], _future_instant())
     assert out["valid_point"]["id"] == new["id"], (
         f"the predecessor was still in force — its end is unbounded: {out}"
     )
@@ -662,12 +662,12 @@ def test_undated_create_writes_no_valid_from(sdk):
     assert "validFrom" not in props
 
 
-# ── T3: restore_point_at chain-walk ────────────────────────────────
+# ── T3: get_historical_knowledge chain-walk ─────────────────────────────────
 
 def test_restore_in_window_hit(sdk):
     """at_date inside the CURRENT point's window → current is the answer."""
     p = _make_point(sdk, content="gym at 5pm", validFrom="2026-06-14")
-    out = sdk.restore_point_at(p["id"], "2026-07-01")
+    out = sdk.get_historical_knowledge(p["id"], "2026-07-01")
     assert out["found"] is True
     assert out["valid_point"]["id"] == p["id"]
     assert out["current"]["id"] == p["id"]
@@ -680,7 +680,7 @@ def test_restore_two_session_gym_chain(sdk):
     new = _make_point(sdk, content="gym at 5pm", validFrom="2026-06-14")
     sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
-    out = sdk.restore_point_at(new["id"], "2026-06-12")
+    out = sdk.get_historical_knowledge(new["id"], "2026-06-12")
     assert out["found"] is True
     assert out["valid_point"]["id"] == old["id"]
     assert out["valid_point"]["valid_from"] == "2026-06-10"
@@ -704,7 +704,7 @@ def test_restore_legacy_undated_old_point_covers(sdk):
         params={"id": old["id"]})
     sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
-    out = sdk.restore_point_at(new["id"], "2020-01-01")
+    out = sdk.get_historical_knowledge(new["id"], "2020-01-01")
     assert out["found"] is True
     assert out["valid_point"]["id"] == old["id"]
 
@@ -716,7 +716,7 @@ def test_restore_before_earliest_window_honest_absence(sdk):
     new = _make_point(sdk, content="gym at 5pm", validFrom="2026-06-14")
     sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
-    out = sdk.restore_point_at(new["id"], "2020-01-01")
+    out = sdk.get_historical_knowledge(new["id"], "2020-01-01")
     assert out["found"] is False
     assert "valid_point" not in out
     assert out["nearest"]["id"] == old["id"]  # closest window
@@ -739,7 +739,7 @@ def test_restore_ambiguous_overlapping_windows(sdk):
         "n.validTo='2026-06-30'",
         params={"id": a["id"]})
 
-    out = sdk.restore_point_at(b["id"], "2026-06-20")
+    out = sdk.get_historical_knowledge(b["id"], "2026-06-20")
     assert out.get("ambiguous") is True
     assert len(out["candidates"]) == 2
     assert {c["id"] for c in out["candidates"]} == {a["id"], b["id"]}
@@ -751,7 +751,7 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
     gates on presence (``vf is not None``), NOT on truthiness.
 
     Both halves below bypass the guard by hand-planting the stamps, so they
-    measure `restore_point_at` rather than `supersede_point`:
+    measure `get_historical_knowledge` rather than `supersede_point`:
 
       * successor ``validFrom = 0`` — the parseable epoch-0 instant ⇒ its
         window is ``[epoch-0, ∞)``. An instant inside the predecessor's window
@@ -780,7 +780,7 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
         "MATCH (n:Point {id:$id}) SET n.status='superseded', n.outdated=true, "
         "n.validTo='2026-06-20'",
         params={"id": old["id"]})
-    out = sdk.restore_point_at(new_zero["id"], "2026-06-15")
+    out = sdk.get_historical_knowledge(new_zero["id"], "2026-06-15")
     assert out.get("ambiguous") is True
     assert len(out["candidates"]) == 2
 
@@ -794,14 +794,14 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
         "MATCH (n:Point {id:$id}) SET n.status='superseded', n.outdated=true, "
         "n.validTo='2026-06-20'",
         params={"id": old2["id"]})
-    out2 = sdk.restore_point_at(new_empty["id"], "2026-06-15")
+    out2 = sdk.get_historical_knowledge(new_empty["id"], "2026-06-15")
     assert out2.get("ambiguous") is not True
     assert out2["found"] is True
     assert out2["valid_point"]["id"] == old2["id"]
     # … but only for PARSEABLE instants: an unparseable query keys as
     # `(1, <text>)`, which the successor's `(1, "")` is NOT greater than, so
     # the `""` successor itself DOES cover it.
-    out2b = sdk.restore_point_at(new_empty["id"], "zzz")
+    out2b = sdk.get_historical_knowledge(new_empty["id"], "zzz")
     assert out2b.get("ambiguous") is not True
     assert out2b["found"] is True
     assert out2b["valid_point"]["id"] == new_empty["id"]
@@ -809,7 +809,7 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
 
 def test_restore_missing_point(sdk):
     """Missing point → {found: false}, no crash."""
-    out = sdk.restore_point_at("pt_does_not_exist", "2026-06-12")
+    out = sdk.get_historical_knowledge("pt_does_not_exist", "2026-06-12")
     assert out["found"] is False
     assert out["chain"] == []
 
@@ -817,7 +817,7 @@ def test_restore_missing_point(sdk):
 def test_restore_requires_at_date(sdk):
     p = _make_point(sdk, content="gym at 5pm")
     with pytest.raises(ValueError):
-        sdk.restore_point_at(p["id"], "")
+        sdk.get_historical_knowledge(p["id"], "")
 
 
 def test_restore_chain_guard_bounded(sdk):
@@ -827,7 +827,7 @@ def test_restore_chain_guard_bounded(sdk):
     # v2 supersedes v1, then v3 supersedes v2 — chain v3→v2→v1
     sdk.supersede_point(pts[0]["id"], pts[1]["id"], valid_from="2026-06-02")
     sdk.supersede_point(pts[1]["id"], pts[2]["id"], valid_from="2026-06-03")
-    out = sdk.restore_point_at(pts[2]["id"], "2026-06-01")
+    out = sdk.get_historical_knowledge(pts[2]["id"], "2026-06-01")
     assert out["found"] is True
     assert out["valid_point"]["id"] == pts[0]["id"]
     assert len(out["chain"]) == 3
@@ -912,7 +912,7 @@ def test_window_end_falsey_but_present_orderable_start_is_used():
     truthiness, so it skipped ``0`` and fell back to ``successor_created_at`` —
     a value INSIDE the read path's ``[epoch 0, ∞)`` successor window.  The
     predecessor's end then landed inside the successor's window and
-    ``restore_point_at`` reported a 2-candidate ``ambiguous`` instead of the
+    ``get_historical_knowledge`` reported a 2-candidate ``ambiguous`` instead of the
     successor.
 
     Value that makes it fail: ``stored_vf = 0`` (or ``0.0``).  Pre-fix both
@@ -997,7 +997,7 @@ def test_supersede_refuses_epoch0_successor_over_a_dated_predecessor(sdk):
 
     Measured on the pre-fix code, exactly as the issue reports: the supersede
     SUCCEEDS with ``old.validTo == <successor.createdAt>``, and
-    ``restore_point_at`` then returns ``ambiguous=True`` with two candidates —
+    ``get_historical_knowledge`` then returns ``ambiguous=True`` with two candidates —
     the successor's ``[0 .. None]`` window CONTAINS the predecessor's
     ``['2026-06-01' .. createdAt]``.
 
@@ -1337,7 +1337,7 @@ def test_supersede_numeric_stored_start_no_kwarg_raw_end(sdk):
     assert isinstance(vt, float), f"numeric end was normalised: {vt!r}"
 
 
-def test_restore_point_at_forward_supersede_window_not_inverted(sdk):
+def test_get_historical_knowledge_forward_supersede_window_not_inverted(sdk):
     """Read-path control: a legitimate forward supersede leaves a well-formed
     window that an interior instant resolves to the PREDECESSOR."""
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
@@ -1345,7 +1345,7 @@ def test_restore_point_at_forward_supersede_window_not_inverted(sdk):
 
     sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
 
-    out = sdk.restore_point_at(old["id"], "2026-06-05")
+    out = sdk.get_historical_knowledge(old["id"], "2026-06-05")
     assert out["found"] is True
     assert out["valid_point"]["id"] == old["id"]
     assert out["chain"][0]["valid_to"] == "2026-06-10"
@@ -1353,7 +1353,7 @@ def test_restore_point_at_forward_supersede_window_not_inverted(sdk):
         _created_sort_key(out["chain"][0]["valid_from"])
 
 
-def test_restore_point_at_after_refusal_predecessor_window_intact(sdk):
+def test_get_historical_knowledge_after_refusal_predecessor_window_intact(sdk):
     """The read-path assertion that REDs without the guard.
 
     Pre-fix the retroactive ``supersede_point`` is ACCEPTED, inverts the
@@ -1368,7 +1368,7 @@ def test_restore_point_at_after_refusal_predecessor_window_intact(sdk):
     with pytest.raises(ValueError, match="inverted window"):
         sdk.supersede_point(old["id"], new["id"])
 
-    out = sdk.restore_point_at(old["id"], "2026-06-15")
+    out = sdk.get_historical_knowledge(old["id"], "2026-06-15")
     assert out["found"] is True, "predecessor became unreachable"
     assert out["valid_point"]["id"] == old["id"]
     entry = out["chain"][0]

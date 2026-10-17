@@ -1,0 +1,1 @@
+{"variant": "kept", "port": 16420, "index_status": "OPERATIONAL", "dump_mb": 1.46, "source_present_at_restore": true, "restore_error": "ConnectionError: Error 61 connecting to 127.0.0.1:16420. Connection refused.", "instance_alive_after": "ConnectionError: Error 61 connecting to 127.0.0.1:16420. Connection refused.", "VERDICT": "INSTANCE DEAD"}

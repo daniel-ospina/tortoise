@@ -415,8 +415,8 @@ def test_mini_pipeline_still_green_with_question_type(tmp_path, force_sparse_tfi
     2026-08 CI window in which the test was authored). With the bge
     embedder cache restored (#2573) the vector leg surfaces the missing MSR
     turn and the overall climbs to 0.6 — an embedder-state delta, not a
-    regression. Request ``force_sparse_tfidf`` (tests/conftest.py, the
-    ``test_oracle.py`` ``_force_sparse_tfidf`` pattern) so this pin is
+    regression. Request ``force_sparse_tfidf`` (tests/conftest.py, which
+    promotes #2573's ``_force_sparse_tfidf`` pattern) so this pin is
     deterministic across embedder states. NOTE: the pin covers THIS test
     only — the rest of the module still loads the live embedder whenever
     the cache is present."""

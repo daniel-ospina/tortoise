@@ -205,6 +205,30 @@ def test_incident_title_matches_rejects_prose_mentions():
     assert not gi.incident_title_matches("R2_DOWN — no [DR] prefix", "R2_DOWN")
 
 
+def test_the_two_r2_tiers_never_cross_adopt():
+    """#3147: R2_DOWN and R2_UNLISTABLE are distinct adoption tokens.
+
+    The split gives each tier its own kind string, dedup key and issue-title
+    token. The GH-search verification is `[DR] {kind}` PREFIX-anchored, so an
+    unlistable incident's title must never parse as the reachability kind (nor
+    the reverse) — otherwise resolving one would close the other's issue and
+    delete its sentinel.
+    """
+    import tortoise.github_issue as gi
+
+    assert gi.incident_title_matches(
+        "[DR] R2_UNLISTABLE — backup storage not listable", "R2_UNLISTABLE")
+    assert gi.incident_title_matches("[DR] R2_UNLISTABLE", "R2_UNLISTABLE")
+    # A title of one tier is not an incident of the other.
+    assert not gi.incident_title_matches("[DR] R2_DOWN — unreachable", "R2_UNLISTABLE")
+    assert not gi.incident_title_matches(
+        "[DR] R2_UNLISTABLE — not listable", "R2_DOWN")
+    # `R2_UNLISTABLE` is not a prefix collision of `R2_DOWN` (nor vice versa),
+    # which is the property tests/test_incident_kinds.py enforces registry-wide.
+    assert not "R2_DOWN".startswith("R2_UNLISTABLE")
+    assert not "R2_UNLISTABLE".startswith("R2_DOWN")
+
+
 def test_incident_title_matches_subject_is_an_exact_segment():
     """#2413/#2375 cross-talk guard: a bare team subject is a literal PREFIX of
     its per-graph subjects, so the subject must be the EXACT ` — ` segment."""
@@ -237,3 +261,45 @@ def test_search_open_incident_verifies_platform_scoped_titles():
         assert gi.search_open_incident("r", "t", "R2_DOWN") == [42, 43]
     finally:
         gi._request = orig
+
+
+def test_search_open_incident_scrubs_the_subject_like_the_filed_title():
+    """#3293 review: the adoption search must use the SAME subject transform as
+    ``AlertStore._title``.
+
+    The store scrubs an app-controlled subject before filing it into a PUBLIC
+    title, so building the search query from the RAW subject leaves the store
+    unable to find the issue it just filed on the placeholder / R2-unreachable
+    path — a duplicate issue for an incident that already has one open
+    (#2844/#3030 class this store exists to prevent).
+
+    RED pre-fix: the query and the ``incident_title_matches`` verifier both use
+    the raw subject, so the scrubbed title is rejected and this returns [].
+    """
+    import urllib.parse as _up
+
+    import tortoise.github_issue as gi
+    from tortoise.security import redact_for_publication
+
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # runtime-built
+    scrubbed = redact_for_publication(token)
+    seen: dict = {}
+
+    def _request(method, url, token_):
+        seen["url"] = url
+        return {"items": [
+            # What ``AlertStore._title`` actually filed: SCRUBBED subject.
+            {"number": 7, "title": f"[DR] STALE — {scrubbed}"},
+            # A raw-subject title is NOT what the store files — never adopt it.
+            {"number": 8, "title": f"[DR] STALE — {token}"},
+        ]}
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(gi, "_request", _request)
+    try:
+        assert gi.search_open_incident("r", "t", "STALE", token) == [7]
+        q = _up.unquote(seen["url"])
+        assert scrubbed in q
+        assert token not in q
+    finally:
+        monkeypatch.undo()

@@ -434,7 +434,7 @@ The full per-property table (216 rows, with the writer clause and the journal ca
 | `authoredBy` | P | projection/entities.py n.authoredBy=coalesce($ab,..) | PointAdded.point.authoredBy (`_META_KEY` handled as edge) |  |
 | `confidence` | D | projection/entities.py n.confidence=coalesce($cf,..); ep.py; dream.py | ConfidenceChanged {confidence}; ALSO written from PointAdded payload | §17.5 + §3: EP scalar 'never stored independently'. ⚠ TENSION: the fixed clause DOES persist a payload value (coalesce), so the code stores what the doc calls derived |
 | `createdAt` | P | projection/entities.py n.createdAt=coalesce($ca,..,$now) | PointAdded.point.createdAt |  |
-| `validFrom` | P | projection/entities.py | PointAdded.point.validFrom; PointSuperseded.valid_from |  |
+| `validFrom` | P | projection/entities.py | PointAdded.point.validFrom | #4021 — `PointSuperseded.valid_from` is the SUCCESSOR's window start (stored as the predecessor's `validTo`), never the predecessor's `validFrom`; it is covered by the `validTo` row |
 | `validTo` | P | projection/entities.py; sdk.py | PointSuperseded.valid_to; PointInvalidated.valid_to |  |
 | `updatedAt` | U | projection/entities.py n.updatedAt=$now | NOT carried — replay re-mints via `_now_iso`() | replay clock, not recorded instant → live≠replay; journal it or accept volatile |
 | `embedding` | P | `_upsert_point_props` (`n.embedding = CASE WHEN $embedding_clear … ELSE vecf32($embedding) END`; `REMOVE n.embedding` rides the same query, `projection/entities.py`); `stamp_journal_embedding` (`sdk.py`) | PointAdded.point.embedding + embedding_model/revision/text_hash (#5004) | §3: JOURNAL IT — re-embed is a re-run not a replay |
@@ -458,7 +458,7 @@ The full per-property table (216 rows, with the writer clause and the journal ca
 | `quote` | P | `_POINT_DECLARED_PROPS` | PointAdded.point.quote | declared payload prop |
 | `when` | P | `_POINT_DECLARED_PROPS` | PointAdded.point.when | declared payload prop |
 | `source_turn_id` | P | `_POINT_DECLARED_PROPS` | PointAdded.point.source_turn_id | declared payload prop |
-| `tags` | P | sdk.py create_point `SET n += $props` (raw list); `_POINT_LIST_PROPS` empty | PointAdded.point.tags | #2897 — raw-list half-restore refused on replay (parity gap) |
+| `tags` | P | create_point builds the node from a `CREATE (n:Point {…})` property map; update_point `SET n += $props`; `_upsert_point_props` (`n.tags=$tags`, presence-and-store gated) + pass-2 `_sync_tags` (`projection/entities.py`); `_revise_point` (`n.tags = $tags`, `n.tags = NULL` for a clear, `projection/__init__.py`) | PointAdded.point.tags; PointRevised.tags (the clear rides as an explicit null) | #2897 — CARRIED: the property plus the snapshot-derivable `:Tag`/`TAGGED` half, re-derived in pass 2 from the node's own final value |
 | `span_start` | P | `_POINT_DECLARED_PROPS` (#5007 E4) | PointAdded.point.span_start | verbatim span pointer |
 | `span_end` | P | `_POINT_DECLARED_PROPS` (#5007 E4) | PointAdded.point.span_end | verbatim span pointer |
 | `annotator_bias` | P | `_POINT_DECLARED_PROPS` (#3689); OperatorAnnotated.bias | PointAdded.point.annotator_bias; OperatorAnnotated |  |

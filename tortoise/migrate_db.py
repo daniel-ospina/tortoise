@@ -207,6 +207,22 @@ def migrate(force: bool = False) -> dict:
                     "rebuild: the migrated graph's onboarding state is NOT "
                     "confirmed intact — re-run onboarding for the affected "
                     "org(s) and see the rebuild ERROR log (#4641)")
+            # #5353: the sibling of the line above, and it is here for the same
+            # reason — a `:TeamMeta` marker that is not confirmed intact makes
+            # the `#2789` first-org guard read `count(m) == 0`, so a later
+            # provisioning call can re-mint it with the control plane's name.
+            # The collapse count alone would not distinguish that from a graph
+            # that never held a marker; only the gap/UNKNOWN pair does.
+            if rebuild_counts.get("team_meta_gap"):
+                logger.warning(
+                    "rebuild: the migrated graph's :TeamMeta first-org marker "
+                    "is NOT confirmed intact (%s) — the #2789 first-org guard "
+                    "may read 0 and a later provisioning call can re-mint it "
+                    "with the control plane's name; see the rebuild ERROR log "
+                    "(#5353)",
+                    "pre-preservation/UNKNOWN"
+                    if rebuild_counts.get("team_meta_state_unknown")
+                    else "restore gap")
 
         # Integrity verification (node-ID-set equality vs source) before marker
         target_nodes = _count_nodes(target)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shlex
 import shutil
@@ -108,6 +109,93 @@ def test_docs_scanning_gates_stay_in_tier1():
         "#2881 durability gate must stay in tier1 — same docs-only silent-drop "
         "class (#4309)"
     )
+    assert "test_7818_ontology_record.py" in tier1, (
+        "#7818 ONTOLOGY §4.7 doc↔code pin must be in tier1 — the other half of "
+        "the #7818 guard (`test_7818_boundary_ambiguity_contract.py`) is "
+        "`sdk`-registered and docker-lane, so a docs-only `docs/ONTOLOGY.md` "
+        "edit never runs it; without this hermetic pin the §4.7 coverage-rule "
+        "drift lands green (#4309 class, same as #5142/#2881)"
+    )
+    assert "test_8474_ontology_record.py" in tier1, (
+        "#8474 §4.6 rawState/rawStateAt availability doc↔code pin must be in "
+        "tier1 — `docs/` is in NON_PYTHON_PREFIXES, so a docs-only "
+        "`docs/ONTOLOGY.md` edit selects no surface and runs only tier1; "
+        "without this hermetic pin the §4.6 row's ruling/contract drift lands "
+        "green (#4309 class, same as #5142/#7818/#2881)"
+    )
+    assert "test_7818_plan_record_5362.py" in tier1, (
+        "#7818/#5362 plan-record pin must be in tier1 — the #5362 plan's "
+        "RES-1 residual and out-of-scope list are docs the drift arrives on, "
+        "and a docs-only edit runs only tier1; without this pin a re-staled "
+        "`found`-omission claim merges green (#4309 class)"
+    )
+    assert "test_fly_secret_drift.py" in tier1, (
+        "#8614: the runbook's secret-drift guards read docs/infra-runbook.md "
+        "(`docs/` is in NON_PYTHON_PREFIXES and the runbook matches no "
+        "SOURCE_PATTERNS entry), so a runbook-only diff runs tier1 only — "
+        "without this registration a re-introduced `—` in a `gh-secret:` row "
+        "or a `fly secrets set NAME=$(openssl rand …)` recipe merges green "
+        "(#4309 class)"
+    )
+    assert "test_cross_subdomain_cookie_sync.py" in tier1, (
+        "#8701 review (P1): the key-routing adapter registry-completeness gate "
+        "must be in tier1 — it scans for a new adapter copy, but a new file "
+        "under a NON_PYTHON_PREFIXES root (e.g. website/assets/) selects no "
+        "surface, so a diff that ONLY adds the copy runs tier1 only; without "
+        "this registration the fourth copy merges green (#4309 class)"
+    )
+
+
+def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
+    """#8614 review (P2): the runbook's own guards must run on the runbook.
+
+    `tests/test_fly_secret_drift.py` binds prose claims in
+    `docs/infra-runbook.md` (the Secrets Matrix GitHub column, §1/§2 never
+    giving a `gh-secret:` name a value minted on Fly, and §2's account of which
+    `workflow` names the deploy re-stages — the set grows with the file, so this
+    names the binding rather than counting it). `docs/` is in
+    NON_PYTHON_PREFIXES and `docs/infra-runbook.md` matches no SOURCE_PATTERNS
+    entry, so a runbook-only diff filtered to `changed == []` and took the
+    docs-only early return — tier1 ONLY. Registered in `core` but not in
+    `tier1`, the guards were therefore asleep on the only change that can break
+    them: the pre-#8614 state (`—` in the FASTAPI_INTERNAL_KEY /
+    TORTOISE_SECRET_PEPPER rows) would have merged green and only reddened
+    `main` post-merge. Dropping the tier1 entry re-opens that hole (#4309
+    silent-drop class).
+    """
+    r = _sel(["docs/infra-runbook.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_fly_secret_drift.py" in r["test_files"], (
+        "a docs/infra-runbook.md-only diff must select the guards that bind its "
+        "prose (`test_fly_secret_drift.py`) — otherwise a docs-only edit that "
+        "re-breaks a claim it pins merges green (#8614 review, #4309 class)"
+    )
+
+
+def test_cross_subdomain_cookie_sync_gate_runs_on_a_new_file_diff():
+    """#8701 review (P1): the adapter registry-completeness gate must run on the
+    diff that ADDS a fourth copy, even when that copy lands in a new file under
+    a NON_PYTHON_PREFIXES root.
+
+    `test_every_storage_adapter_copy_is_registered` scans product sources for a
+    storage adapter and fails on any copy not in `_ROUTER_CASES`. But a NEW file
+    under `website/assets/` matches no SOURCE_PATTERNS entry, so
+    `_keep_changed` drops it, `changed` comes back empty, and `select()` takes
+    the docs-only early return — tier1 ONLY. Registered in `api`/`onboarding`
+    but not `tier1`, the gate was asleep on the exact change it exists to catch:
+    a fourth copy would merge green and only red `main` post-merge (the
+    #1349/#3332/#3616/#4309 silent-drop class). Dropping the tier1 entry
+    re-opens that hole.
+    """
+    r = _sel(["website/assets/__probe_router_copy.js"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_cross_subdomain_cookie_sync.py" in r["test_files"], (
+        "a diff that only ADDS an adapter copy in a new website/assets/ file must "
+        "select the registry-completeness gate — otherwise the fourth copy merges "
+        "green (#8701 review P1, #4309 class)"
+    )
 
 
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
@@ -139,6 +227,39 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert r["carve_out_run"] is False
         assert r["slow_selected"] == []
         assert "test_website_docs_consistency.py" in r["test_files"], changed
+
+
+def test_the_capacity_guards_derived_source_selects_the_guard():
+    """#3329/#8492: a change to the guard's DERIVED SOURCE must select the guard.
+
+    `tests/test_capacity_page.py` derives the published write-concurrency figure
+    from `tests/test_embedded_concurrency.py`'s own loop bound. The two docs it
+    reads (`docs/capacity.md`, `docs/quickstart-selfhosted.md`) were registered
+    as `onboarding` `SOURCE_PATTERNS`, but the TEST FILE supplying the derived
+    value was not — so a diff that bumped the live test's coverage to six
+    writers and left the prose stale selected only `core`, excluded the guard,
+    and merged green. The drift then surfaced only on the `push`-event full run,
+    reddening `main` AFTER the merge — the failure mode the `#3442` guard in the
+    same workflow refuses to certify.
+
+    Asserted on the SURFACE and on the guard file, not merely "surfaces is
+    non-empty": `tests/` falls through to `core` on its own, so a bare
+    non-emptiness check passes with the wiring absent — a gate that can only
+    ever pass. Watched RED before the `SOURCE_PATTERNS` entry existed, GREEN
+    after.
+    """
+    changed = "tests/test_embedded_concurrency.py"
+    assert (REPO / changed).exists(), f"guarded derived source is gone: {changed}"
+    r = _sel([changed])
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — its guard (test_capacity_page.py) "
+        "is not selected, so a coverage bump there merges with stale prose and "
+        "reds main after the merge"
+    )
+    assert "test_capacity_page.py" in r["test_files"], (
+        f"{changed} does not select test_capacity_page.py — the derived "
+        "write-concurrency figure has no guard on the change that invalidates it"
+    )
 
 
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
@@ -439,6 +560,31 @@ def test_the_degraded_fallback_guard_runs_for_its_own_source():
     )
 
 
+def test_the_cross_surface_grid_guard_runs_for_each_side_of_its_declaration():
+    """#3513 review P1: the grid inventory test asserts BOTH directions of ONE
+    declaration — the JS grid's tile keys ↔ ``tortoise/demand.py`` ↔
+    ``config/connector_manifest.yaml``. It was registered only under
+    ``onboarding``, so the two BACKEND sources (which match no named surface and
+    select the ``core`` fallback) never ran it: a connector added to the manifest
+    with no grid tile and no mapping was green on its own PR and surfaced as an
+    unrelated red in the next dashboard PR (#1349/#7076 class).
+
+    Pinned as BEHAVIOUR, not as a YAML string: every side of the declaration
+    must select the file that asserts it.
+    """
+    for source in (
+        "website/apps/dashboard/src/integrationsGrid.js",
+        "tortoise/demand.py",
+        "config/connector_manifest.yaml",
+    ):
+        sel = _sel([source])
+        assert "test_integrations_grid_inventory.py" in sel["test_files"], (
+            f"{source} selects {sel['surfaces']} but does NOT run the guard that "
+            "asserts the tile declaration it moves (#3513 review P1) — a drift "
+            "introduced on this side of the cross-surface pair would be silent"
+        )
+
+
 def test_every_named_guard_runs_for_its_own_source():
     """The reverse of `test_every_source_pattern_is_selectable`: path -> selected.
 
@@ -726,9 +872,18 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     itself is pinned by `test_no_allowlisted_root_file_has_a_reader`. It REDs if
     the removed blanket `*.md`-at-root clause is reintroduced (it admitted
     README.md).
+
+    #8785: CHANGELOG.md, CONTRIBUTING.md and CLAUDE.md are deliberately NOT in
+    this list. They are prose whose CONTENT no test or tool reads (their only
+    mentions are docstrings, a generated-doc link, or `record-review.sh`'s
+    basename case), so they are reprieved to the tier-1 smoke by
+    `NON_CODE_DOC_PATHS` — pinned by
+    `test_non_code_doc_paths_have_no_content_reader`. Every name below IS read
+    (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
+    base-subset pin; `.gitignore` by `test_kind_index.py:290`; …) and keeps FULL.
     """
-    for name in ("README.md", "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md",
-                 "LICENSE", "MEMORY.md", "CLAUDE.md", "index.md",
+    for name in ("README.md", "AGENTS.md",
+                 "LICENSE", "MEMORY.md", "index.md",
                  ".gitignore", ".env.example", "fly.toml", "pyproject.toml",
                  ".python-version"):
         r = _sel([name])
@@ -795,6 +950,206 @@ def test_subdirectory_markdown_is_unaffected():
     assert r_tortoise["surfaces"] == ["core"]
 
 
+# ---------------------------------------------------------------------------
+# #8785: a non-Python prose diff must not reserve the FULL test surface.
+#
+# The selector classified a root-level or `.github/` prose file as an UNKNOWN
+# PATH (no NON_PYTHON_PREFIXES match, no SOURCE_PATTERNS claim) and failed
+# closed to the whole matrix. These tests pin the distinction the fix adds —
+# "no surface matched because the file is not code" (drop -> tier-1 smoke)
+# versus "no surface matched because the path is unclassified and might carry
+# code" (still FULL).
+# ---------------------------------------------------------------------------
+
+_READ_CALLS = frozenset({"open", "read_text", "read_bytes", "read",
+                         "readlines", "load", "loads", "loadtxt"})
+
+# The CI roots the selector's surface map is built on. `scripts/` is a tracked
+# SYMLINK, so it must be walked on disk, not read from `git ls-files`.
+_NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
+
+# A shell read operation. `read\b` deliberately does NOT match "reads" (word
+# boundary), so prose like "pi's loader reads AGENTS.md" is not a read op.
+_SHELL_READ_RE = re.compile(r"(?:^|[^\w])(?:cat|grep|egrep|rg|source|read)\b|<")
+
+
+def _content_read_in_shell(source: str, path: str) -> bool:
+    """Line-level read-op detector for `.sh` files (never `ast.parse`)."""
+    name = path.rsplit("/", 1)[-1]
+    for line in source.splitlines():
+        if name not in line:
+            continue
+        if _SHELL_READ_RE.search(line):
+            return True
+    return False
+
+
+def test_non_code_doc_paths_are_prose():
+    """#8785 review (B, P2): the tuple reprieves NON-CODE DOCUMENTATION.
+
+    Every member must be a prose file. Without this, a code-bearing path can be
+    added and satisfies BOTH the liveness and no-content-reader ratchets while
+    silently dropping its own guard to the tier-1 smoke — the
+    #1349/#3332/#3616 silent-drop class this tuple exists to avoid. (Measured:
+    `entrypoint.sh` passes every other new test and skips
+    `tests/test_boot_regressions.py`, which is not in tier1.)
+    """
+    for name in sorted(cs.NON_CODE_DOC_PATHS):
+        assert name.endswith(".md"), (
+            f"{name} is not a prose doc — NON_CODE_DOC_PATHS must not reprieve "
+            "a code-bearing path")
+
+
+def _content_read_in_py(source: str, path: str) -> bool:
+    """Whether `source` READS `path`'s content (not merely names it).
+
+    A literal equal to `path` (or ending in `/<path>`) anywhere inside a
+    read-call expression — including the callee's OWN receiver, which is how
+    `(ROOT / "README.md").read_text()` receives the path.
+
+    ⛔ SCOPE, stated rather than overclaimed (same honest-scope limit as the
+    #6787 mention census): this is a LITERAL-PATH read detector. It does NOT see
+    an indirect read through a parameter/parametrize value, a glob/walk, or a
+    shell `grep -r`. Before adding a member, grep the whole tree yourself.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        callee = fn.attr if isinstance(fn, ast.Attribute) else (
+            fn.id if isinstance(fn, ast.Name) else "")
+        if callee not in _READ_CALLS:
+            continue
+        for lit in ast.walk(node):
+            if (isinstance(lit, ast.Constant) and isinstance(lit.value, str)
+                    and (lit.value == path or lit.value.endswith("/" + path))):
+                return True
+    return False
+
+
+def _content_readers_of(path: str) -> list[str]:
+    """Files under the five CI roots that READ `path`'s content.
+
+    ⛔ The roots are WALKED on disk, not read from `git ls-files`: `scripts/` is
+    a tracked SYMLINK, so the listing returns the link itself and the ~70 files
+    behind it are never scanned — the same gap #6787 cycle 4 P3 found in the
+    sibling mention census. Shell files use a line-level read-op pattern, never
+    `ast.parse` (which returns False on every `.sh`).
+
+    ⚠️ SCOPE, stated rather than overclaimed (cycle-2 review P2): `scripts/` is
+    a symlink to an ABSOLUTE machine-local path, so it DANGLES on the Ubuntu CI
+    runner (`python-ci.yml` / `ci.yml` say so) and this walk silently skips that
+    root there — the root is reached only where the symlink resolves. That is
+    the SAME CI limitation the sibling `_readers_of` grep has, and it is not
+    closable from inside the repo. A future member whose ONLY reader lives under
+    `scripts/` cannot rely on this ratchet on CI: grep the whole tree before
+    adding one.
+    """
+    name = path.rsplit("/", 1)[-1]
+    out: list[str] = []
+    for root in _NON_CODE_DOC_ROOTS:
+        base = REPO / root
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=True):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            for fn in filenames:
+                if not fn.endswith((".py", ".sh", ".bash")):
+                    continue
+                f = Path(dirpath) / fn
+                rel = str(f.relative_to(REPO))
+                if rel in _SELF_NAMERS:
+                    continue
+                try:
+                    source = f.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if name not in source:
+                    continue
+                if f.suffix == ".py":
+                    if _content_read_in_py(source, path):
+                        out.append(rel)
+                elif _content_read_in_shell(source, path):
+                    out.append(rel)
+    return sorted(out)
+
+
+def test_non_code_doc_paths_exist():
+    """Liveness ratchet (#6787 review cycle 2 P3): a member absent from the
+    tree skips the matrix for nothing, so membership must name real files."""
+    for name in sorted(cs.NON_CODE_DOC_PATHS):
+        assert (REPO / name).exists(), (
+            f"{name} is a NON_CODE_DOC_PATHS member but does not exist in the "
+            "tree — a dead entry that skips the matrix for nothing")
+
+
+def test_non_code_doc_paths_have_no_content_reader():
+    """#8785: no member may be READ by a test/tool.
+
+    Reprieving a file a guard reads is the silent-hole class (#1349/#4309),
+    strictly worse than the provisioning cost the reprieve removes.
+    """
+    offenders = {name: _content_readers_of(name)
+                 for name in sorted(cs.NON_CODE_DOC_PATHS)
+                 if _content_readers_of(name)}
+    assert not offenders, (
+        "NON_CODE_DOC_PATHS member(s) are READ — dropping them to the tier-1 "
+        f"smoke would skip those guards on the PR that edits the file: {offenders}")
+
+
+def test_non_code_docs_select_tier1_not_full(monkeypatch):
+    """#8785: a prose doc no guard reads selects the tier-1 smoke, not FULL."""
+    members = sorted(cs.NON_CODE_DOC_PATHS)
+    assert members, "NON_CODE_DOC_PATHS is empty — the reprieve is inert"
+    for path in members:
+        r = _sel([path])
+        assert r["full"] is False, f"{path} must not select the full matrix: {r}"
+        assert r["surfaces"] == [], path
+        assert set(r["test_files"]) == _tier1(), path
+        assert r["slow_run"] is False and r["carve_out_run"] is False, path
+
+    # NON-VACUITY: against the pre-fix selector (no reprieve) the SAME paths are
+    # full/ALL. Disabling the tuple must therefore RED this test — that is what
+    # proves it exercises the fix rather than restating the docs-only default.
+    monkeypatch.setattr(cs, "NON_CODE_DOC_PATHS", frozenset())
+    for path in members:
+        pre = _sel([path])
+        assert pre["full"] is True and pre["test_files"] == "ALL", (
+            f"non-vacuity: {path} must be FULL without the reprieve, got {pre}")
+
+
+def test_unclassified_paths_still_fail_closed_after_the_doc_reprieve():
+    """CONTROL for the non-vacuity above: the reprieve must NOT soften the
+    unknown-path branch. A `.md` not in the census, a code-like extension, a
+    build file and a new subsystem all still reserve the FULL matrix."""
+    for name in ("NOTES.md", "some_new_thing.xyz", "mystery.conf",
+                 "mystery-dir/x.py", "Makefile", "Dockerfile", "uv.lock",
+                 "build.sh"):
+        r = _sel([name])
+        assert r["full"] is True, f"{name} must fail closed to full, got {r}"
+        assert r["test_files"] == "ALL", name
+
+
+def test_doc_reprieve_is_per_path_not_per_diff():
+    """Mixed diffs: dropping the prose must not drop the code, and a
+    docs+unknown diff must still escalate."""
+    r = _sel(["CONTRIBUTING.md", "tortoise/api.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"] and "core" in r["surfaces"]
+
+    # The measured #8726 shape: two prose files, no Python -> tier-1 smoke.
+    r2 = _sel(["CONTRIBUTING.md", ".github/pull_request_template.md"])
+    assert r2["full"] is False and r2["surfaces"] == []
+    assert r2["slow_run"] is False and r2["carve_out_run"] is False
+
+    r3 = _sel(["CONTRIBUTING.md", "mystery-dir/thing.xyz"])
+    assert r3["full"] is True
+
+
 def test_new_engine_module_maps_to_core():
     # a new file under tortoise/ is engine code → core surface (conservative,
     # 108 files — not silent under-selection)
@@ -821,6 +1176,112 @@ def test_pi_hooks_change_selects_the_capture_guard():
     assert r["full"] is False
     assert "core" in r["surfaces"]
     assert "test_pi_capture_hooks.py" in r["test_files"]
+
+
+def test_token_ts_change_selects_the_consent_bridge_guard():
+    """#3524: the guard's `token.ts` half must be selected by a `token.ts` diff.
+
+    `test_oauth_consent_bridge.py`'s task-3 assertion reads
+    `website/apps/dashboard/functions/_shared/auth/token.ts`. That path matches
+    the `onboarding` SOURCE_PATTERN `website/apps/dashboard/functions/`, NOT
+    `api` — so an `api`-only registration (which covers the file's
+    `tortoise/oauth.py` + `tortoise/hosted_api.py` subjects) left the token.ts
+    guard unrun exactly when token.ts moved: a token.ts regression shipped green
+    while the guard that exists to catch it stayed asleep. This asserts the
+    SELECTION, not the registration, so it reds on the pre-fix manifest.
+    """
+    r = _sel(["website/apps/dashboard/functions/_shared/auth/token.ts"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["onboarding"], (
+        f"token.ts selects {r['surfaces']} — the consent bridge's token.ts guard "
+        "is only reachable through the surface that path matches"
+    )
+    assert "test_oauth_consent_bridge.py" in r["test_files"], (
+        "a token.ts-only diff does not run tests/test_oauth_consent_bridge.py, "
+        "so its task-3 guard cannot fire on the change it pins (#3524)"
+    )
+
+
+def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
+    """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
+
+    `test_oauth_consent_bridge.py` also pins `docs/engineering/auth/consent-identity-bridge.md`
+    (the spec) and `docs/ops/auth-email-flows.md` (the redirect-allowlist record).
+    `docs/` is in NON_PYTHON_PREFIXES and matches (now) the `onboarding`
+    SOURCE_PATTERNS entries added with this fix, so a docs-only edit to either
+    record selects the surface that runs the guard. Before those entries a
+    docs-only edit selected `surfaces=[]` and the guard never saw the record it
+    guards — the same silent-drop class the token.ts half (#3524) fixes.
+    """
+    root = Path(__file__).resolve().parents[1]
+    subjects = (
+        "docs/engineering/auth/consent-identity-bridge.md",
+        "docs/ops/auth-email-flows.md",
+    )
+    for changed in subjects:
+        assert (root / changed).exists(), f"guarded docs record is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False
+        assert "onboarding" in r["surfaces"], (
+            f"{changed} selects {r['surfaces']} — the guard is not in tier1, so "
+            "a docs-only edit to this record runs it nowhere"
+        )
+        assert "test_oauth_consent_bridge.py" in r["test_files"], (
+            f"a docs-only edit to {changed} does not run "
+            "tests/test_oauth_consent_bridge.py, so its record guard cannot fire "
+            "on the change it pins (#3524)"
+        )
+
+
+def test_the_csp_plan_doc_guard_runs_on_its_plan_doc_too():
+    """#8334 review (P2, Finding 1): the doc guard's own subject must select it.
+
+    `test_csp_plan_doc_consistency.py` guards
+    `docs/plans/2026-09-22-3525-csp-no-store.md` — the artifact a lane reads before
+    touching the CSP. `docs/` is in NON_PYTHON_PREFIXES and is not itself a
+    SOURCE_PATTERNS pattern, so without the concrete `docs/plans/...` entry a
+    docs-only edit selects NO surface (`surfaces=[]`) and the guard never sees the
+    doc it guards — while the `config/ci-surfaces.yml` registration comment claimed
+    the coverage existed. Same silent-drop class as the #3524 docs records above.
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/plans/2026-09-22-3525-csp-no-store.md"
+    assert (root / changed).exists(), f"guarded plan doc is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — a docs-only edit to the plan doc runs "
+        "the guard nowhere"
+    )
+    assert "test_csp_plan_doc_consistency.py" in r["test_files"], (
+        f"a docs-only edit to {changed} does not run "
+        "tests/test_csp_plan_doc_consistency.py, so its doc guard cannot fire (#8334)"
+    )
+
+
+def test_the_blog_authoring_doc_guard_runs_on_its_doc_too():
+    """#8379 (finding 2): the authoring-doc guard's own subject must select it.
+
+    `test_blog_authoring_doc.py` renders `docs/blog-authoring.md` with a real
+    CommonMark parser (markdownlint cannot see an unterminated fence). `docs/` is
+    in NON_PYTHON_PREFIXES and is not itself a SOURCE_PATTERNS pattern, so without
+    the concrete `docs/blog-authoring.md` entry a docs-only edit selects NO surface
+    and the guard never sees the page it guards — the same silent-drop class as the
+    #3524 docs records and the #8334 plan doc above.
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/blog-authoring.md"
+    assert (root / changed).exists(), f"guarded docs record is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the guard is not in tier1, so a "
+        "docs-only edit to the authoring contract runs it nowhere"
+    )
+    assert "test_blog_authoring_doc.py" in r["test_files"], (
+        f"a docs-only edit to {changed} does not run tests/test_blog_authoring_doc.py, "
+        "so its render guard cannot fire on the change it pins (#8379)"
+    )
 
 
 def test_session_import_change_selects_the_window_guard():
@@ -1035,6 +1496,72 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_supabase_control_change_selects_the_org_purge_rpc_guard():
+    # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
+    # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
+    # so a supabase_control.py-only change matches `api`, REPLACES the `core`
+    # fallback in select(), and the `core`-only registration is never reached.
+    # Before the guard was dual-registered under `api`, this diff selected
+    # ['api'] and never ran test_7968_org_purge_rpc.py (the
+    # #2938/#3154/#4367 silent-drop class). Mutation check: deleting the `api`
+    # arm fails the second assert.
+    r = _sel(["tortoise/supabase_control.py"])
+    assert r["full"] is False, r
+    assert "test_7968_org_purge_rpc.py" in r["test_files"], r
+
+
+def test_record_schema_pin_runs_on_migration_or_doc_change():
+    # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
+    # the record migrations against the placement table in
+    # `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md`.
+    # Both paths are under NON_PYTHON_PREFIXES (`supabase/`, `docs/`) and match
+    # no SOURCE_PATTERNS row, so before the CORE_ALSO entries a change to either
+    # side ALONE selected NO surface: the pin's own claim ("editing either side
+    # alone turns the test red") was untestable in CI, and the edit landed with
+    # the pin never running. Mutation check: removing either CORE_ALSO entry
+    # fails the corresponding arm below (surfaces == []).
+    for changed in (
+        "supabase/migrations/20261012000003_record_epistemic.sql",
+        # #8263: the FORWARD record migration sorts outside the `2026101200000`
+        # CORE_ALSO prefix, so it carries its own entry. Both readers must run on
+        # a change to this file alone — `test_record_projection.py` reads its
+        # ALTER, `test_record_schema_placement.py` pins the record schema.
+        "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
+        "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_record_schema_placement.py" in r["test_files"], (changed, r)
+        assert "test_record_projection.py" in r["test_files"], (changed, r)
+
+
+def test_postgres_storage_guard_runs_on_migration_or_doc_change():
+    # PR #8744 review P2: `tests/test_postgres_storage.py` pins the SQL↔Python
+    # contract — the two RPC names and the `p_since`/`p_until` parameter names
+    # read from the migration text. A rename on either side makes PostgREST 404
+    # the wrapper at runtime, and the PGlite suite cannot catch it (it calls the
+    # functions positionally). Both paths are under NON_PYTHON_PREFIXES
+    # (`supabase/`, `docs/`) and match no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entries a change to either side ALONE selected NO surface and
+    # took the docs-only early return — the guard never ran on the very change
+    # it exists to catch (the #1349/#3332/#3616 silent-drop class; a name in a
+    # surface's test_files only runs when that surface is ALREADY selected, so
+    # the `core` registration could not fix it).
+    #
+    # Measured before the entries: `_sel([...])` -> surfaces=[], full=False,
+    # 43 test files, test_postgres_storage.py absent.
+    # Mutation check: removing either CORE_ALSO entry fails its arm below.
+    for changed in (
+        "supabase/migrations/20261015000001_postgres_storage_footprint.sql",
+        "docs/ops/postgres-storage-measurement.md",
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_postgres_storage.py" in r["test_files"], (changed, r)
+
+
 def test_a_linter_policy_file_at_any_depth_runs_the_full_matrix():
     # #7435 review P1 (with its round-6 correction): cli2 reads a `.markdownlint*`
     # config from ANY directory on the path to a linted file, and a more specific
@@ -1098,6 +1625,109 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_orchestrator_harness_change_selects_core_not_tier1():
+    # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
+    # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's
+    # paged enumeration, refresh-candidates.sh's pool/checked contract and
+    # orch-loop.sh's P0 merge-priority override.
+    #
+    # #8469 review P1: `operations/` is a flat NON_PYTHON_PREFIXES entry and no
+    # SOURCE_PATTERNS row matches the harness scripts, so an operations-only diff
+    # came back with `changed == []` and took the docs-only early return — the
+    # guard never ran on the file it guards. Registering the test under `core` is
+    # NOT sufficient: a name in a surface's test_files only runs when that surface
+    # is already selected, and an operations-only diff selects none.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["operations/orchestrator-harness/
+    # lane.sh"])` -> surfaces=[], full=False, test_files 33, harness test absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
+    r = _sel(["operations/orchestrator-harness/merged-not-closed.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_orchestrator_harness.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():
+    # PR #8594 review P2: tools/agent-infra-queue-dispatch.py owns
+    # tests/test_queue_dispatch_fail_closed.py and tools/fleet_state.py owns
+    # tests/test_fleet_state.py — both `core`-registered. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and neither path matches a SOURCE_PATTERNS row,
+    # so each one's own change came back with `changed == []` and took the
+    # docs-only early return — `select()` returned NO surface and the guard never
+    # ran on the file it guards (the #1349/#3332/#3616 silent-drop class).
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: both guards are
+    # hermetic and sub-second, so selecting `core` runs them at the lowest CI cost.
+    # Mutation check: removing either CORE_ALSO entry fails its assert below.
+    for path, guard in (
+        ("tools/agent-infra-queue-dispatch.py", "test_queue_dispatch_fail_closed.py"),
+        ("tools/fleet_state.py", "test_fleet_state.py"),
+    ):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r)
+        assert guard in r["test_files"], (path, r)
+        assert set(r["test_files"]) != _tier1(), (path, r)
+
+
+def test_capstone_probe_change_selects_core_not_tier1():
+    # docs/evidence/7950-capstone/probes/e2e_chain_probe.py owns
+    # tests/test_7950_capstone_probe.py (`core`): the DB-free pin asserting the
+    # probe's two reconciliation readers (`record_key_map` / `cache_key_map`)
+    # return the REAL property maps, not `{}` placeholders — two empty mappings
+    # always agree, so the pre-fix shape made `field_mismatches` structurally
+    # zero and the probe's committed log proved key-set agreement only.
+    #
+    # PR #8609 review P1: `docs/` is a flat NON_PYTHON_PREFIXES entry and no
+    # SOURCE_PATTERNS row matches the probe, so a PROBE-ONLY change came back
+    # with `changed == []` and took the docs-only early return — `select()`
+    # returned NO surface and the pin never ran on the very file whose readers
+    # it pins. Reverting the readers to the pre-fix `{}` shape would land with
+    # CI green (the #1349/#3332/#3616 silent-drop class). A SOURCE_PATTERNS
+    # entry alone cannot fix it: `_selection_relevant()` deliberately skips the
+    # `core` surface, and the guard is `core`-registered.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["docs/evidence/7950-capstone/
+    # probes/e2e_chain_probe.py"])` -> surfaces=[], full=False, test_files 39,
+    # test_7950_capstone_probe.py absent. CORE_ALSO keeps the path and selects
+    # `core`; the directory prefix covers the sibling probes too.
+    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
+    for path in (
+        "docs/evidence/7950-capstone/probes/e2e_chain_probe.py",
+        "docs/evidence/7950-capstone/probes/s1_census.py",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_7950_capstone_probe.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
+
+
+def test_supabase_config_change_selects_core_not_tier1():
+    # supabase/config.toml is the committed LOCAL-stack config and resolves its
+    # providers by `env(NAME)` substitution, so each of those names is required
+    # by a tracked file. tests/test_env_contract_covers_supabase_config.py
+    # (`core`) is the guard: every config `env(NAME)` must be declared in
+    # .env.example, the contract an operator reads.
+    #
+    # `supabase/` is a flat NON_PYTHON_PREFIXES entry and the path matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a CONFIG-ONLY change
+    # came back with `changed == []` and took the docs-only early return —
+    # `select()` returned NO surface and the guard never ran on the half of the
+    # pair it exists to hold (the #1349/#3332/#3616 silent-drop class). A
+    # SOURCE_PATTERNS entry cannot fix it: `_selection_relevant()` deliberately
+    # skips the `core` surface, and the guard is `core`-registered.
+    #
+    # Measured before the entry: `_sel(["supabase/config.toml"])` ->
+    # surfaces=[], full=False, 40 test files, the guard absent.
+    # Mutation check: removing the CORE_ALSO entry fails the assert below.
+    r = _sel(["supabase/config.toml"])
+    assert "core" in r["surfaces"], r
+    assert "test_env_contract_covers_supabase_config.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     # tools/install-queue-reconcile-schedule.sh owns
     # tests/test_install_queue_reconcile_schedule.py (hermetic cases pinning
@@ -1121,6 +1751,30 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_install_queue_reconcile_schedule.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_graph_write_repair_tool_change_selects_core_not_tier1():
+    # PR #8427 review Finding 4: tools/graph_write_repair.py and its launchd
+    # installer (tools/install-graph-write-repair-schedule.sh) own
+    # tests/test_graph_write_repair.py (`core`): the probe classification that
+    # authorises a repair, the `--quiet` count contract, and the installer's
+    # escaping / interval validation / lint-before-move / load verification.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and neither path matches a
+    # SOURCE_PATTERNS row, so without the CORE_ALSO entries an installer-only
+    # change came back with `changed == []` and took the docs-only early return:
+    # `select()` returned NO surface and the guard never ran on the file it
+    # guards (the #3261/#6138 silent-drop class).
+    #
+    # Mutation: remove either CORE_ALSO entry -> that path selects no surface, so
+    # the assertion below fails.
+    for path in ("tools/graph_write_repair.py",
+                 "tools/install-graph-write-repair-schedule.sh"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_graph_write_repair.py" in r["test_files"], (path, r)
+        assert set(r["test_files"]) != _tier1(), (path, r)
 
 
 def test_source_currency_tool_change_selects_core_not_tier1():
@@ -1245,6 +1899,34 @@ def test_ci_timing_tool_change_fails_closed_to_full():
     assert r["full"] is True
     assert r["test_files"] == "ALL"
     assert "core" in r["surfaces"]
+
+
+def test_ci_check_repair_tool_change_fails_closed_to_full():
+    # #8375 item 1: tools/ci_check_repair.py CLOSES and REOPENS pull requests, and
+    # re-runs workflow runs, on a schedule and unattended (the workflow and the
+    # launchd fallback both call it with `--apply`). Its suite lives in
+    # tests/test_ci_check_repair.py and is registered in the `ci-surfaces.yml`
+    # `core` surface — which covers edits of the TEST file, NOT of the tool. No
+    # SOURCE_PATTERNS entry matches the tool, so without the TOOL_CARVEOUTS entry
+    # the flat `tools/` prefix swallows it, `changed` comes back empty and select()
+    # takes the docs-only early return (surfaces=[], tier-1 smoke) — an early
+    # return that BYPASSES the `if not matched: matched.add("core")` fallback, so
+    # NOT ONE of the 74 guards would run on the PR that changes the tool. This was
+    # measured on the real path before the carve-out:
+    #   --changed-files tools/ci_check_repair.py -> surfaces=[] full=False
+    # `tools/ci_selection.py --integrity` cannot catch it: it only asks whether the
+    # test file is CLASSIFIED. ALL FOUR paths are asserted because all four decide
+    # whether the repair runs and what it does: the entry point (the macOS
+    # `bash -s`/TCC handoff), the local fallback, and the installer whose plist
+    # decides whether the job is ARMED. Mutation check: removing any entry filters
+    # that path out (docs-only early return) and fails the asserts below.
+    for path in ("tools/ci_check_repair.py", "tools/ci_check_repair_launchd.py",
+                 "tools/ci-check-repair-local.sh",
+                 "tools/install-ci-check-repair-schedule.sh"):
+        r = _sel([path])
+        assert r["full"] is True, (path, r)
+        assert r["test_files"] == "ALL", (path, r)
+        assert "core" in r["surfaces"], (path, r)
 
 
 def test_pr_lead_time_tool_change_fails_closed_to_full():
@@ -2924,7 +3606,12 @@ def test_pmv_job_carries_uri_manifest_guard():
     provision = next(s for s in steps
                      if str(s.get("uses", "")).endswith("falkordb-provision"))
     assert provision["with"]["uri_graph"] == "tortoise_test_matrix"
-    assert provision["with"]["image"] == "falkordb/falkordb-server:latest"
+    # #6386: this used to assert `:latest` — i.e. it GUARDED the drift instead
+    # of catching it, so the tag was free to float to engine 6.x while every
+    # other job ran the v4.20.6 pin. It must name the same immutable engine the
+    # gate uses (pinned across all provisioned jobs in
+    # tests/test_runner_ports_6673.py).
+    assert provision["with"]["image"] == "falkordb/falkordb-server:v4.20.6"
     assert provision.get("if") == "needs.dedup-check.outputs.skip != 'true'"
     assert any(str(s.get("uses", "")).endswith("falkordb-teardown")
                and s.get("if") == "always()" for s in steps), \
@@ -2961,12 +3648,14 @@ def test_pmv_job_carries_uri_manifest_guard():
 
 def test_live_required_job_runs_only_declared_live_tests():
     """cycle-8 P2-12: test-concurrency-falkor runs EXACTLY the declared
-    live-test pair — tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor
+    live-test set — as of #5379 that is THREE tests:
+    tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor,
+    tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor
     and tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes.
-    A third live test added to the job without extending this pin reds (the
+    A further live test added to the job without extending this pin reds (the
     audit's executable form — the old audit named two test files but grepped
     only test_embedded_concurrency, so a new live test in test_event_store
-    was invisible)."""
+    was invisible; #5379 added the third through this pin)."""
     wf = _load_python_ci()
     job = wf["jobs"]["test-concurrency-falkor"]
     steps = job["steps"]
@@ -2975,6 +3664,7 @@ def test_live_required_job_runs_only_declared_live_tests():
     nodeids = _re.findall(r"tests/[A-Za-z0-9_/.]+\.py::[A-Za-z0-9_]+", run["run"])
     declared = {
         "tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor",
+        "tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor",
         "tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes",
     }
     assert set(nodeids) == declared, (
@@ -2983,9 +3673,10 @@ def test_live_required_job_runs_only_declared_live_tests():
         "test-prefixed job URI, epic #1647 cycle-8 P2-12)"
     )
     # The job-level URI stays the NON-test-prefixed path — inert because
-    # both live tests pass explicit test-prefixed graph names and never
+    # all three live tests pass explicit test-prefixed graph names and never
     # bulk-wipe the URI default (verified test_embedded_concurrency
-    # L111-153 + test_event_store L165-185). If a future test adds a
+    # L111-153 + test_event_store L165-185 and the #5379 ceiling test's
+    # `test_seq_ceiling_tortoise`). If a future test adds a
     # path=/URI-default DETACH, the job URI must gain the P1-2 test-prefixed
     # path.
     assert "TORTOISE_DB_URI" not in job.get("env", {}), \
@@ -2993,6 +3684,15 @@ def test_live_required_job_runs_only_declared_live_tests():
     provision = next(s for s in steps
                      if str(s.get("uses", "")).endswith("falkordb-provision"))
     assert provision["with"]["uri_graph"] == "tortoise"
+    # The skip-fail guard must name EVERY declared live test, or a new test
+    # can skip while the regex stays green (the exact gap #5379 fixed).
+    guard_lines = [ln for ln in run["run"].splitlines() if "SKIPPED" in ln]
+    assert guard_lines, "the job must carry a skip-fail guard"
+    guard_text = "\n".join(guard_lines)
+    for nodeid in declared:
+        assert nodeid.split("::", 1)[1] in guard_text, (
+            f"the skip-fail guard must name {nodeid} — a live test missing from "
+            f"the regex can SKIP while the job stays green (vacuity)")
 
 
 def test_test_slow_job_carries_junitxml_manifest_guard():
@@ -5693,6 +6393,41 @@ def _workflow_files(wf_dir: Path) -> list[Path]:
     return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
 
 
+def _compiled_run_scalar_size(run: str) -> int:
+    """The length GitHub measures for a `run:` scalar: the script PLUS its spans.
+
+    GitHub compiles a `run:` that contains `${{ }}` and applies its 21000-byte cap
+    to the COMPILED scalar, so the expression text is charged ON TOP of the raw
+    script. Measuring the raw scalar alone under-reports: on 2026-10-16 it read
+    `ci.yml`'s `changes` gate as 20944 — "56 bytes under" — while GitHub measured
+    21010 and refused to load the workflow, so the branch ran zero jobs for eight
+    commits (#8734).
+    """
+    spans = re.findall(r"\$\{\{.*?\}\}", run)
+    return len(run.encode("utf-8")) + sum(len(s.encode("utf-8")) for s in spans)
+
+
+def test_compiled_run_scalar_measure_counts_expression_spans():
+    """The #8734 fixture: a scalar GitHub refuses must measure OVER, not under.
+
+    The pin below is worth its green only if its measure reproduces the refusal
+    it exists to prevent. This freezes the incident's exact shape — 20944 raw
+    UTF-8 bytes plus the 66 bytes of `${{ inputs.main_health }}` and
+    `${{ github.event.pull_request.base.sha }}` = 21010 — which GitHub refused
+    even though the raw count read as 56 bytes of HEADROOM. A revert to the
+    raw-only measure reddens here instead of shipping the zero-job outage again.
+    """
+    span_main = "${{ inputs.main_health }}"
+    span_base = "${{ github.event.pull_request.base.sha }}"
+    run = "x" * (20944 - len(span_main) - len(span_base)) + span_main + span_base
+    raw = len(run.encode("utf-8"))
+    compiled = _compiled_run_scalar_size(run)
+    assert raw == 20944, "fixture must reproduce the incident's raw size"
+    assert compiled == 21010, "the compiled measure must charge the expression spans"
+    assert compiled > 21000, "the fixture is a scalar GitHub actually refuses"
+    assert raw <= 21000, "the pre-#8734 raw-only measure called this safe"
+
+
 def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
     """#6253: GitHub compiles a `run:` that contains `${{ }}`, capped at 21000 bytes.
 
@@ -5705,6 +6440,13 @@ def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
     pin guards exactly the scalars GitHub compiles. actionlint catches expression
     SYNTAX but not this length (#6253), which is why the invariant is pinned here
     — a comment added to a script this size re-arms a silent full-CI outage.
+
+    Because the cap is on the COMPILED scalar, the measure must be the compiled
+    size: the 2026-10-16 incident was `ci.yml`'s `changes` gate at 20944 raw PLUS
+    66 bytes of expression spans = 21010, which a raw-only measure read as 56
+    bytes of headroom while GitHub was refusing the file and the branch ran zero
+    jobs for eight commits (#8734). Expression spans are counted here, so a
+    script cannot hide behind the difference between the two measures.
     """
     limit = 21000
     expr = "${{"
@@ -5718,7 +6460,9 @@ def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
                 run = step.get("run")
                 if not isinstance(run, str) or expr not in run:
                     continue
-                size = len(run.encode("utf-8"))
+                # The compiled scalar: the script plus every expression span, as
+                # GitHub assembles it before applying the cap.
+                size = _compiled_run_scalar_size(run)
                 if size > limit:
                     offenders.append((wf.name, job_id, step.get("name", "?"), size))
     assert not offenders, (
@@ -6706,6 +7450,63 @@ def test_the_lane_has_a_real_runner_and_reads_the_lane_from_config():
     assert on_demand_files.__name__ in wf, (
         "the workflow must resolve the lane through on_demand_files() — "
         "hardcoding a second list here lets the two drift")
+
+
+def test_the_perf_lane_runner_is_off_the_gate_and_reads_the_lane_from_config():
+    # #3992: `on_demand:` gained a SECOND runner — the dedicated perf lane
+    # (`tests/test_perf_lane_volunteer_context.py`, the file the #2080 plan
+    # names). The property the first runner is pinned for holds for the second
+    # one too, and for the same reason: a wall-clock SLO assertion must never
+    # gate a merge (the plan keeps the MECHANISM assertions blocking and the
+    # p95 in the dedicated lane), and a runner that hardcodes its file has a
+    # second list to forget.
+    #
+    # The failure this prevents, named: a future edit adding `pull_request:`
+    # to perf-lane.yml would silently put a shared-runner wall-clock number on
+    # every PR — the flake class the lane exists to separate out.
+    perf = "test_perf_lane_volunteer_context.py"
+    wf = (REPO / ".github/workflows/perf-lane.yml").read_text()
+    import yaml
+    doc = yaml.safe_load(wf)
+    triggers = doc.get("on", doc.get(True))
+    assert "pull_request" not in triggers, (
+        "the dedicated perf lane must never gate a PR — a shared-runner "
+        "wall-clock assertion on the merge path is the exact flake class "
+        "#3992's plan separates out")
+    assert "workflow_dispatch" in triggers, (
+        "the lane's manual invocation is an acceptance criterion (#3992 AC 4)")
+    assert on_demand_files.__name__ in wf, (
+        "the perf-lane workflow must resolve the lane through "
+        "on_demand_files(); a hardcoded path is a second list to forget")
+    assert perf in on_demand_files(load_manifest()), (
+        "the perf lane runs from the on_demand lane — without membership it "
+        "is excluded from the gate and claimed by nothing")
+    # `fast_pool()` returns `.py`-SUFFIXED entries, and the set below strips the
+    # suffix, so the comparison must use the bare name. The pre-fix form
+    # compared `perf` (WITH `.py`) against bare names — a value that can never
+    # be in that set — so it was satisfied by construction and the mutation it
+    # names (the file re-entering `fast_pool`) left this test green.
+    bare = perf[:-3] if perf.endswith(".py") else perf
+    assert bare not in {f[:-3] for f in fast_pool(load_manifest())}, (
+        "the lane must be filtered out of fast_pool, or the wall-clock "
+        "assertion is back on the merge gate")
+    # Non-vacuity control, ASSERTED (the sibling duration test's pattern): move
+    # the file back onto a surface and off the lane, and the assertion above
+    # must go red. This is the discriminator between the fixed form and the
+    # dead one — with `perf` (suffixed) this control passes vacuously too.
+    m = load_manifest()
+    first_surface = next(iter(m["surfaces"]))
+    on_gate = {
+        **m,
+        "on_demand": [f for f in m.get("on_demand") or [] if f != perf],
+        "surfaces": {
+            **m["surfaces"],
+            first_surface: [*m["surfaces"][first_surface], perf],
+        },
+    }
+    assert bare in {f[:-3] for f in fast_pool(on_gate)}, (
+        "control: with the file back on a surface it IS in fast_pool — if this "
+        "fails, the assertion above cannot fail for the regression it names")
 
 
 def test_the_lane_files_duration_key_is_classified_not_drift():

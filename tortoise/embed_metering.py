@@ -40,8 +40,8 @@ allocation fault on the measurement path must never fail a write. ``flush``
 absorbs every failure and reports the drops it can DETECT — a
 **window-unresolvable** window and a non-empty tally with **no resolvable org**
 — to the operator through ``metering.report_unmetered_increment``, the same
-lane-visible signal the seven swallow sites use (this module is the ``embed``
-lane). A failure of the increment RPC ITSELF is logged at WARNING and is the
+lane-visible signal the eight swallow sites use (this module is the ``embed``
+lane; #4489 added the eighth, ``retrieval``). A failure of the increment RPC ITSELF is logged at WARNING and is the
 #3824 residual, shared with every other lane (see
 ``metering.record_embedding_usage``); a note landing after the tally was
 consumed is the capture-cancellation residual. Those two are the ones this
@@ -57,9 +57,14 @@ measurement never sits between a write and its response.
 
 MEASURED VS EXCLUDED. Only :func:`tortoise.embeddings.compute_embeddings` — the
 store-vector funnel — is hooked. ``_encode``/``search_points``/``kind_index``
-pass ``show_progress_bar``, which the active encoder does not accept, so they
-raise-and-degrade to TF-IDF and run no model work today (#5321); read/query-side
-paths are out of scope. If #5321 is fixed, the same hook extends to them.
+(and ``fallback_snapshot.build_snapshot``) are NOT hooked, but they DO run model
+work: they encode through ``EmbeddingModel.get()``, which returns the loaded
+``SentenceTransformer`` itself, so the ``show_progress_bar=False`` they pass
+binds — ``_encode`` and ``_DefaultEncoder.encode`` report ``degraded=False``
+(``tests/test_5321_embedder_accessor_liveness.py`` pins each). #5321 claimed the
+opposite (a ``TypeError`` swallowed into TF-IDF); that was never true of what
+``get()`` returns, so extending this hook to those sites is a SCOPE extension
+(#5045), not a bug fix. Read/query-side paths stay out of scope.
 """
 
 from __future__ import annotations

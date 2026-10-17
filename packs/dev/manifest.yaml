@@ -228,4 +228,12 @@ extraction:
       incident: retry
 connectors: []
 tools: []
-depends_on: []
+# #2781: the cross-pack references this manifest actually makes are DECLARED.
+# `equivalentTo: issue -> pm:issue` makes `pm` a real dependency; the bare
+# `nearMisses` targets `feature` / `architecture` belong to `product-strategy`.
+# A declared dependency is consumed at registry load: when the named pack is
+# absent the reference is reported against THIS pack and the pack still loads —
+# before #2781, dropping `pm` also dropped `dev` and `product-strategy`.
+depends_on:
+- product-strategy
+- pm

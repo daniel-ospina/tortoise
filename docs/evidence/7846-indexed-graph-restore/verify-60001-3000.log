@@ -1,0 +1,9 @@
+{"start": {"label": "graph-60001 (falkordb:6.0.1) @ 3k, flushed engine", "port": 16414, "n": 3000, "redis_version": "8.10.2", "graph_module": 60001}}
+{"built_s": 1.2, "nodes": 3000}
+{"create_index": "OK", "s": 0.0}
+{"index_status": "OPERATIONAL", "index_ready_s": 3.2, "knn_before": 3}
+{"dump_mb": 1.44, "deleted": true}
+{"restore_s": 0.42, "err": null}
+{"ping_after": [{"ok": true, "ms": 3.1}, {"ok": true, "ms": 2.0}, {"ok": true, "ms": 1.8}], "bystander": {"samples": 11, "p50_ms": 1.1, "max_ms": 178.9, "errors": 0}}
+{"nodes_after": 3000, "index_after": "OPERATIONAL", "knn_after": 3}
+{"FINAL": {"label": "graph-60001 (falkordb:6.0.1) @ 3k, flushed engine", "port": 16414, "n": 3000, "redis_version": "8.10.2", "graph_module": 60001, "build_s": 1.2, "nodes_built": 3000, "create_index": "OK", "create_index_s": 0.0, "index_status": "OPERATIONAL", "index_ready_s": 3.2, "knn_before": 3, "dump_mb": 1.44, "restore_s": 0.42, "restore_error": null, "ping_after": [{"ok": true, "ms": 3.1}, {"ok": true, "ms": 2.0}, {"ok": true, "ms": 1.8}], "bystander": {"samples": 11, "p50_ms": 1.1, "max_ms": 178.9, "errors": 0}, "nodes_after": 3000, "index_after": "OPERATIONAL", "knn_after": 3, "VERDICT": "NO_WEDGE (instance alive, restore bounded)"}}

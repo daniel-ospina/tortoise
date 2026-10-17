@@ -315,6 +315,17 @@ class EmbedderUnavailableError(RuntimeError):
     runner-down or missing-extra run) or ``load_failed`` / ``load_timeout``
     (the environment had it and the load broke — a different thing to fix).
     ``model_unavailable`` is the fallback when no kind was recorded.
+
+    ⛔ Its guarantee is only as wide as the narrowest ``except`` between the
+    raise and the caller: #5275 found ``TortoiseSDK.tortoise_fts_query``
+    catching it in a blanket ``except Exception`` and converting it into the
+    designed-absence ``no_embedder`` degrade, so an ARMED process still got
+    keyword-only results with no signal. The read path now catches this class
+    BY NAME and re-raises it; ``fallback_tfidf`` does the same. Write paths
+    (``encode_for_store`` callers) and the cached-snapshot fallback tier
+    degrade on purpose and are enumerated in
+    ``tests/test_embedding_model_required.py``'s module docstring — the claim
+    is scoped to the READ path and to processes that armed the flag.
     """
 
     def __init__(self, *, failure_kind: str, model: str,
@@ -334,9 +345,11 @@ class EmbedderUnavailableError(RuntimeError):
             f"could not be loaded (failure_kind={failure_kind!r}){err} — this "
             f"process set TORTOISE_EMBEDDING_MODEL_REQUIRED, so any retrieval "
             f"result it produced would be keyword-only (FTS) while claiming to "
-            f"be the product's hybrid retrieval. Install the embedder "
-            f"(uv sync --extra embeddings) or unset the variable to allow the "
-            f"documented keyword-only degrade (#4861)."
+            f"be the product's hybrid retrieval. Install the embedder — "
+            f"`uv sync --extra embeddings --extra parity` (an explicit --extra "
+            f"list is EXACT and silently REMOVES any extra you omit — #2985; "
+            f"`uv sync --all-extras` also works) — or unset the variable to "
+            f"allow the documented keyword-only degrade (#4861)."
         )
 
 
@@ -391,15 +404,104 @@ class UnrepresentableNumberError(ValueError):
     success and stores a different number (``2**70`` is stored as
     ``9223372036854775807``; ``Decimal('0.12345678901234567890')`` is rounded).
 
-    Raised by the param-boundary seam (``tortoise.cypher_guard``) on every
+    Raised by the numeric-domain seam (``tortoise.cypher_guard``) on every
     guarded handle BEFORE the statement is sent, so a writer no longer has to be
-    on the SDK's hand-maintained call-site list to be covered (#7174). It is
-    specifically a PARAM boundary: a number written as a LITERAL in the statement
-    text still reaches the store, as does one sent through a raw vendor client
-    the package did not build. The message names the param KEY and the reason,
-    and never interpolates Cypher (same contract as
+    on the SDK's hand-maintained call-site list to be covered (#7174). The seam
+    covers TWO surfaces: a value in a ``params`` map (``SET n.v = $v``) and a
+    number written as a LITERAL in the statement text (``CREATE (n {v: 2**70})``)
+    or inlined into a ``CYPHER k=<v>`` header (#8479) — so a statement-text
+    literal no longer reaches the store. What it still does NOT cover is a number
+    sent through a raw vendor client the package did not build. The message names
+    the param KEY, or the literal's OFFSET in the statement, and the reason, and
+    never interpolates Cypher (same contract as
     :class:`UnsupportedCypherOperatorError`).
 
     Subclasses ``ValueError``: the SDK's #4647 call sites raise ``ValueError``
     for this same condition, and that call convention is kept.
     """
+
+
+class WriteNotLandedError(RuntimeError):
+    """#7209 — a write reported SUCCESS and is not in the graph.
+
+    The defect this closes is the SILENT half of #7209: ``create_point``
+    mints its Point id client-side, issues the ``CREATE``, and then reads the
+    point back — but it returned whatever that read returned, including an
+    EMPTY dict, raising nothing and logging nothing. A caller holding ``{}``
+    cannot tell a discarded write from a successful one, so a finding the
+    writer believes it recorded can be gone (the same "write that looks lost"
+    shape as the abort path in #7405 / #7685, one layer up).
+
+    The write path this guards already retries the engine's
+    graph-deleted-or-replaced abort (``TortoiseSDK._graph_write_with_retry``),
+    and that retry's own docstring records the residual it CANNOT close: the
+    retry is gated on the graph KEY being present, so a rebuild whose recreate
+    has already landed is retried INTO the rebuilt graph — and if the rebuild's
+    replay then replaces the graph again, the statement is gone while the
+    writer was told it succeeded. Separating those two fully needs an
+    engine-level identity token (#7685's escalation line).
+
+    What the SDK can do — and now does — is refuse to REPORT that success.
+    ``create_point`` verifies its own write against the read-back it already
+    performs: an unreadable Point raises this error naming the graph and the
+    id.
+
+    #7951 — TWO ARMS, and they must not be confused. Since the §17.1 outbox
+    ordering, ``create_point`` appends its ``PointAdded`` record BEFORE the
+    ``CREATE``:
+
+    * **no record was committed** (``record_committed=False``, the default) —
+      either the journal append failed (and the cache write was then skipped by
+      the §17.1 ordering), or no journal is configured, in which case the
+      read-back miss is a genuinely LOST write. Re-issuing is correct.
+    * **read-back empty after a COMMITTED append** (``record_committed=True``)
+      — the TRUTH holds the record and the cache merely has not materialised
+      it. A replay heals it (the ordering contract's replay-healable window),
+      so this must NOT be read as "the write is gone"; a blind re-issue would
+      append a SECOND ``PointAdded``. Callers that distinguish the arms key on
+      :attr:`record_committed`.
+
+    Loud by construction: a caller that sees this error knows the cache did
+    not materialise the write. It is never raised for a read-back that
+    SUCCEEDED.
+    """
+
+    def __init__(self, point_id: str, graph: str | None = None,
+                 detail: str = "", *, record_committed: bool = False) -> None:
+        self.point_id = point_id
+        self.graph = graph
+        self.detail = detail
+        self.record_committed = record_committed
+        _where = f" on graph {graph!r}" if graph else ""
+        if record_committed:
+            _cause = (
+                "the cache did not materialise the write (the graph is being "
+                "replaced/rebuilt, or it was replaced between the write and "
+                "the read-back)"
+            )
+            _contract = (
+                "The PointAdded record WAS appended before the cache write "
+                "(the #7951 §17.1 outbox ordering), so the TRUTH holds this "
+                "write and a replay will materialise it — do NOT re-issue "
+                "blindly (that would append a second record); treat the "
+                "write as COMMITTED and let the projection catch up."
+            )
+        else:
+            _cause = (
+                "no rebuild record was committed for it — the JSONL journal "
+                "append FAILED (and the #7951 §17.1 ordering then skipped the "
+                "cache write), or this SDK has no journal configured at all, so "
+                "the write has no durable home"
+            )
+            _contract = (
+                "The caller must not treat this call as successful: if the "
+                "Point is not in the cache, re-issue it (`dedup=True` is "
+                "content-hash idempotent). (A `:GraphEvent` may have been "
+                "written first by `_emit_event` — a declared residual, not a "
+                "committed rebuild record.)"
+            )
+        super().__init__(
+            f"create_point: the Point {point_id!r} was not committed{_where}: "
+            f"{_cause}. {_contract} (#7209)"
+            + (f" [{detail}]" if detail else "")
+        )

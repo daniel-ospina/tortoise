@@ -33,9 +33,48 @@ document left **OPEN** are settled — `manage_deployment` is **off the MCP**,
 target is 26**. `approved: 2026-09-18` above stays the original ruling date; this paragraph
 records the amendment.
 
+**Amended 2026-10-12** (owner ruling, recorded on **#7852**): `create_operator`
+(the SDK method) and `tortoise_create_operator` (the MCP tool) gain a
+**`semantics`** input — the Layer-2 meaning vocabulary §8 already records. The
+parameter is **additive and defaulted** (`semantics=None`), so every existing
+caller keeps its behaviour; when it is supplied the direction the edge records
+follows the declared meaning (a one-way meaning recorded `unidirectional`, a
+mutual one `bidirectional` — the runtime's interim pair at W1; since **v3.25**
+the declared meaning's own model value is recorded verbatim, see the correction
+below), and the basis the resolution used is recorded on
+the operator as **`direction_basis`** (`explicit` / `semantics` / `default`) — the token
+names the layer that produced the value (`semantics` = the declared Layer-2 meaning
+resolved it), never the Layer-3 `label` predicate, which is a different input. An
+out-of-vocabulary word **warns and the write proceeds** — it never refuses
+(warn-not-block). This is **W1** of #7852's three-layer relation model, which
+the owner approved verbatim: *"w1 yes approved"* (2026-10-09), relayed into
+this document by **PR #8283**.
+`approved: 2026-09-18` / `approval_pr: 4120` above stay the original ruling's;
+this paragraph records the amendment.
+
+> **Correction, 2026-10-12 (v3.25 — same issue #7852).** The W1 sentence above
+> describes W1's interim behaviour, when the runtime could store only the pair
+> `unidirectional` / `bidirectional`. The **four-value direction storage**
+> vocabulary that change named has since landed: the runtime records the
+> declared meaning's own model direction verbatim — `->` (one-way), `<-`
+> (reverse one-way), `<->` (mutual), `-` (none: the connection exists and no
+> confidence transfers) — and interprets it on every path (`create_operator`,
+> `create_direct_edge`, the ingest contract, EP and the analyze BFS).
+> `bidirectional` / `unidirectional` remain **accepted and readable aliases**
+> (`bidirectional` ≡ `<->`, `unidirectional` ≡ `->`); storage is verbatim, so no
+> data migration was required. The `w1 yes approved` ruling above is unchanged.
+>
 > This document is the **approval record**, not the generated baseline. The generated
 > list of what exists *today* is `docs/product/mcp-sdk-surface.md`, rendered from
 > `config/surface-manifest.yml`. This file records what the surface is *approved to become*.
+
+**Amended 2026-10-14** (owner-directed on the **#2104** write-path lane, **PR #8563**): the
+frozen baseline is re-cut for `tortoise_session_capture` because its docstring was corrected
+— the stale gate-order list that named a removed pre-#3892 provider 503 as a pre-write gate
+now records the actual order plus the separate inner extractor-provider 503. **No tool is
+added, removed or renamed; the served schema, parameters and bindings are unchanged** — only
+the description text, and hence the handler digest, changes. status: approved · principal:
+daniel-ospina · PR #8563 · date: 2026-10-14.
 
 ## Principle: reads and writes never share a tool
 

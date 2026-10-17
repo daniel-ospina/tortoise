@@ -532,19 +532,35 @@ def test_reference_fold_exempts_a_materialized_non_point_belief(caplog):
 
     #7936: recording it reds a healthy graph and, because ``non-folded`` is
     tested first, also masks a genuine content divergence on it.
+
+    #7936: and the belief is not DROPPED either — ``fold_with_entities`` holds
+    it under its ``(label, id)`` key, which is what lets the diagnostic compare
+    it (`test_content_comparison_sees_a_non_point_belief_divergence`). The
+    warning this test used to assert was the INTERIM signal that the drop was
+    not silent; now that the batch fold carries the belief there is no drop on
+    this path to warn about, and the assertion is inverted with it. The
+    one-record incremental path still warns (it has no journal to resolve the
+    label from) — pinned by
+    ``test_inmemory_rebuild_holds_a_non_point_belief_but_apply_is_bounded``.
     """
-    from tortoise.projection import fold
+    from tortoise.projection import fold, fold_with_entities
     from tortoise.projection.nonfolded import collect_non_folded, refused_events
 
     with (caplog.at_level(logging.WARNING, logger="tortoise.projection"),
           collect_non_folded() as entries):
         keys = fold(list(_NON_POINT_BELIEF_JOURNAL))
+        points, entities = fold_with_entities(list(_NON_POINT_BELIEF_JOURNAL))
 
     assert list(refused_events(entries)) == [], [str(e) for e in entries]
+    # The POINT index is unchanged (`fold`'s public contract) …
+    assert points == keys
     assert "evt-7936" not in keys, keys
-    # ...and the drop is surfaced, not silent (#7936).
-    joined = " ".join(r.getMessage() for r in caplog.records)
-    assert "#7936" in joined, [r.getMessage() for r in caplog.records]
+    # …and the belief rides the companion index, on the label the journal
+    # materialized, with the LAST write's value (`_apply_belief_props` is
+    # presence-conditional and ordered, like `_fold_confidence_changed`).
+    assert entities == {("Event", "evt-7936"): {"confidence": 0.5}}, entities
+    assert [r.getMessage() for r in caplog.records] == [], [
+        r.getMessage() for r in caplog.records]
 
 
 def test_reference_fold_still_flags_a_buried_point_belief():
@@ -1329,17 +1345,27 @@ def test_boundary_matrix_non_point_labels_all_agree():
             label, [str(e) for e in entries])
 
 
-def test_content_comparison_known_gap_non_point_belief_is_invisible(tmp_path):
-    """#7936 KNOWN GAP — this asserts the PRESENT, WRONG verdict, not a right.
+def test_content_comparison_sees_a_non_point_belief_divergence(tmp_path):
+    """#7936 — a corrupted belief on a NON-Point node is a `content` divergence.
 
-    `check_consistency`'s content leg compares a POINT-ONLY journal fold
-    against `MATCH (n:Point)` and `db_hash` fingerprints that Point-only dict,
-    so a corrupted belief on a `:Subject`/`:Object`/`:Event` is invisible.
+    The entity leg used to compare entity PRESENCE and Object/Subject `status`
+    only, and the rest of the check is Point-only by construction
+    (`MATCH (n:Point)` + a Point-only digest), so a wrong, stale or lost belief
+    on a `:Subject`/`:Object`/`:Event` was INVISIBLE: `ok=True,
+    divergence=None, hash_match=True` on a corrupted graph.
 
-    This test PINS the blind spot so it is visible in the suite and MUST be
-    deleted or inverted when #7936's `(label, id)` re-key lands: at that point
-    the verdict below becomes `ok=False, divergence="content"` and this test
-    goes RED, which is the intended signal — NOT a regression.
+    This is the inverted form of the gap pin that used to assert that blind
+    spot (`test_content_comparison_known_gap_non_point_belief_is_invisible`) —
+    its own docstring said it had to be deleted or inverted "when #7936's
+    `(label, id)` re-key lands", because it asserted the PRESENT WRONG VERDICT.
+    The belief leg lands on the already `(label, id)`-keyed entity comparison
+    (the `(label, id)` re-key of the Point view and the digest stays open on
+    #7936 and is stated in `entity_parity_bounds`).
+
+    The health assertion comes FIRST on purpose: a widened comparison that
+    reds a graph `rebuild_all` itself just produced would be a false alarm,
+    and this shape is measured healthy (`hash_match=True`) before the
+    corruption.
     """
     from tortoise.consistency import check_consistency
 
@@ -1377,11 +1403,383 @@ def test_content_comparison_known_gap_non_point_belief_is_invisible(tmp_path):
     finally:
         sdk.close()
 
-    # DOCUMENTED GAP: the corruption is NOT seen. When #7936 lands, these
-    # assertions are the ones that must flip.
-    assert after["ok"] is True, after
-    assert after["divergence"] is None, after
+    # #7936: the corruption IS seen, and it is attributed to the Event's
+    # `confidence` — the field the graph fold (`_fold_confidence_changed`)
+    # wrote and the journal still states.
+    assert after["ok"] is False, after
+    assert after["divergence"] == "content", after
     assert after["hash_match"] is True, after
+    assert [m["field"] for m in after["divergent_entities"]] == ["confidence"], \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["label"] == "Event", \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["id"] == event, \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["found"] == 0.01, \
+        after["divergent_entities"]
+    # The bounds state what the baseline still cannot see, so the widening does
+    # not imply a coverage it does not have.
+    assert after["entity_parity_bounds"]["belief_compared"], \
+        after["entity_parity_bounds"]
+
+
+def test_content_comparison_sees_a_non_point_belief_a_sharing_point_id(tmp_path):
+    """#7936 P2 (review): the non-Point belief leg must fire on the
+    DUPLICATE-ID shape too — an id carried by a ``:Point`` AND a separate
+    ``:Object``.
+
+    ``_fold_confidence_changed`` writes the belief to both carriers (its
+    four-label sweep), so a journal that registers both under one id produces
+    a graph holding ``confidence`` on each. ``_apply_one``'s Point arm used to
+    skip the companion index, so the reference fold carried no expectation for
+    the Object; ``_compare_entities`` is presence-conditional from the journal
+    side, so it skipped — and corrupting ONLY the Object's belief on a graph
+    ``rebuild_all`` had just produced stayed ``ok=True, divergence=None``, the
+    false-green class #7936 exists to remove.
+
+    Built directly (not via ``TortoiseSDK``): the journal carries no Point
+    content that needs the embedding model. Fails pre-fix on the fold
+    assertion and on every ``after`` assertion.
+    """
+    import json
+
+    from tortoise.consistency import check_consistency
+    from tortoise.projection import FalkorProjection, fold_with_entities
+
+    journal = [
+        {"type": "PointAdded",
+         "point": {"id": "X", "pointKind": "statement", "content": "p",
+                   "status": "live"}},
+        {"type": "ObjectRegistered", "id": "X", "name": "N"},
+        {"type": "ConfidenceChanged", "id": "X", "confidence": 0.5},
+    ]
+
+    # The companion index carries the NON-Point carrier's expectation even
+    # though the Point already holds the id.
+    entities = fold_with_entities(list(journal))[1]
+    assert entities == {("Object", "X"): {"confidence": 0.5}}, entities
+
+    log_path = str(tmp_path / "events.jsonl")
+    with open(log_path, "w") as fh:
+        for ev in journal:
+            fh.write(json.dumps(ev) + "\n")
+
+    proj = FalkorProjection(path=str(tmp_path / "dup-7936.db"),
+                            skip_health_check=True)
+    proj.rebuild_all(str(tmp_path), confirm_destructive=True)
+
+    healthy = check_consistency(log_path, proj, record_state=False)
+    assert healthy["ok"] is True, healthy
+
+    # Corrupt ONLY the Object carrier; the Point keeps the journaled value, so
+    # the Point-only digest still matches and only the entity leg can see it.
+    proj.g.query("MATCH (n:Object {id:'X'}) SET n.confidence=0.01")
+    assert proj.g.query(
+        "MATCH (n:Object {id:'X'}) RETURN n.confidence").result_set == [[0.01]]
+    assert proj.g.query(
+        "MATCH (n:Point {id:'X'}) RETURN n.confidence").result_set == [[0.5]]
+
+    after = check_consistency(log_path, proj, record_state=False)
+
+    assert after["ok"] is False, after
+    assert after["divergence"] == "content", after
+    assert [m["field"] for m in after["divergent_entities"]] == ["confidence"], \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["label"] == "Object", \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["id"] == "X", \
+        after["divergent_entities"]
+    assert after["divergent_entities"][0]["found"] == 0.01, \
+        after["divergent_entities"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 9b. #7936 — the non-Point belief FOLD, and the `rebuild_all` anchor gate
+# ═══════════════════════════════════════════════════════════════════
+#
+# Two halves, both measured on the real engines before the change:
+#
+# 1. `fold()` was the POINT-only `{id: point}` index, so the belief a
+#    `ConfidenceChanged` wrote to a `:Subject`/`:Object`/`:Event` was dropped
+#    while the graph fold resolved and wrote it — the `_apply_one` parity
+#    contract broken. `fold_with_entities` is the companion index that holds it,
+#    and the diagnostic's entity leg compares it.
+# 2. `rebuild_all`'s ANY-KIND re-creation anchor (`last_recreate_seq_any`) was
+#    applied to EVERY `EntityMutated` record, so a NON-delete record with a
+#    missing/non-canonical label whose id a later `PointAdded` anchors was
+#    silently SKIPPED — its lost mutation never failed the run. The three inline
+#    engines (`rebuild(log)`, `recover_from_log`, `backup.restore`) and the
+#    reference fold all refuse it, so `rebuild_all` alone reported complete a
+#    journal the other four reject (measured 4-vs-1). The anchor is the LEGACY
+#    ID-WIDE DELETE's, so it is now scoped to `op == "delete"`.
+
+
+def test_fold_with_entities_holds_the_non_point_belief():
+    """`fold()` keeps its `{id: point}` contract; the companion holds the rest.
+
+    The point index is the PUBLIC contract every existing caller indexes by
+    point id, so the belief rides `fold_with_entities` rather than a re-key.
+    """
+    from tortoise.projection import fold, fold_with_entities
+
+    journal = [
+        {"type": "PointAdded", "point": {"id": "src", "content": "s"}},
+        {"type": "EventRecorded", "id": "evt", "name": "e",
+         "eventKind": "test"},
+        {"type": "ConfidenceChanged", "id": "evt", "confidence": 0.5,
+         "posterior_alpha": 2.0},
+        {"type": "ConfidenceChanged", "id": "evt", "confidence": 0.7},
+    ]
+    points, entities = fold_with_entities(journal)
+
+    # The point index is EXACTLY what `fold` returns (one fold, two views).
+    assert points == fold(journal)
+    assert set(points) == {"src"}
+    # Order matters: the LAST write wins, exactly as `_fold_confidence_changed`
+    # sets it at each record's own position. `posterior_beta` was never stated,
+    # so it is never invented (presence-conditional).
+    assert entities == {("Event", "evt"): {
+        "confidence": 0.7, "posterior_alpha": 2.0}}, entities
+
+
+def test_fold_with_entities_holds_a_non_point_belief_under_a_sharing_point_id():
+    """#7936 P2 (review): the companion index must be filled even when a
+    ``:Point`` carries the SAME id.
+
+    ``_fold_confidence_changed`` sweeps all four epistemic labels and writes
+    EVERY carrier, so on the reachable duplicate-id shape
+    (``PointAdded X`` + ``ObjectRegistered X`` — pinned by
+    ``test_fold_confidence_changed_sweeps_every_label_not_just_the_first``)
+    the graph holds the belief on both the Point AND the Object. ``_apply_one``
+    took the ``if p:`` (Point) arm and never wrote the companion index, so the
+    reference fold carried no expectation for the non-Point carrier — and
+    ``_compare_entities``, presence-conditional from the journal side, skipped
+    it: a corrupted Object belief stayed a false green.
+
+    Fails pre-fix: ``entities`` was ``{}`` because the Point arm did not fold
+    the reference-fold labels.
+    """
+    from tortoise.projection import fold_with_entities
+
+    # One id, three carriers: a Point and both reference-fold labels.
+    journal = [
+        {"type": "PointAdded", "point": {"id": "X", "content": "p"}},
+        {"type": "ObjectRegistered", "id": "X", "name": "N"},
+        {"type": "SubjectAdded", "id": "X", "name": "N"},
+        {"type": "ConfidenceChanged", "id": "X", "confidence": 0.5,
+         "posterior_alpha": 2.0},
+    ]
+    points, entities = fold_with_entities(journal)
+
+    assert set(points) == {"X"}, points
+    # EVERY reference-fold label the id EXISTS under, not just the first, and
+    # not only when no Point shares the id.
+    assert entities == {
+        ("Object", "X"): {"confidence": 0.5, "posterior_alpha": 2.0},
+        ("Subject", "X"): {"confidence": 0.5, "posterior_alpha": 2.0},
+    }, entities
+
+    # Negative half: a Point-only id must NOT invent a reference-fold key.
+    point_only = fold_with_entities([
+        {"type": "PointAdded", "point": {"id": "Y", "content": "p"}},
+        {"type": "ConfidenceChanged", "id": "Y", "confidence": 0.5},
+    ])
+    assert point_only[1] == {}, point_only[1]
+
+
+def test_inmemory_rebuild_holds_a_non_point_belief_but_apply_is_bounded(
+        tmp_path):
+    """`InMemoryProjection.rebuild` keeps the belief; one-record `apply` cannot.
+
+    The bound is real and is asserted, not implied: a one-record fold has no
+    journal to say which reference-fold label an unknown id is, so it must not
+    guess — and it must not manufacture a `non-folded` record the batch path
+    would not. What it must NOT do is stay silent about the drop.
+    """
+    import json
+
+    from tortoise.log import EventLog
+    from tortoise.projection import InMemoryProjection
+    journal = [
+        {"type": "PointAdded", "point": {"id": "src", "content": "s"}},
+        {"type": "EventRecorded", "id": "evt", "name": "e",
+         "eventKind": "test"},
+        {"type": "ConfidenceChanged", "id": "evt", "confidence": 0.5},
+    ]
+    log_dir = tmp_path / "events"
+    log_dir.mkdir()
+    for ev in journal:
+        with open(log_dir / "events.jsonl", "a") as fh:
+            fh.write(json.dumps(ev) + "\n")
+
+    proj = InMemoryProjection()
+    proj.rebuild(EventLog(str(log_dir / "events.jsonl")), confirm_destructive=True)
+    assert proj.entities == {("Event", "evt"): {"confidence": 0.5}}, \
+        proj.entities
+    assert list(proj.points) == ["src"], proj.points
+
+    # The one-record path: no belief, and no invented non-folded record.
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    one = InMemoryProjection()
+    with collect_non_folded() as entries:
+        one.apply({"type": "ConfidenceChanged", "id": "evt",
+                   "confidence": 0.5})
+    assert one.entities == {}, one.entities
+    assert list(refused_events(entries)) == [], [str(e) for e in entries]
+
+
+def _replay_verdicts(events, tmp_path):
+    """``{engine: refused?}`` for the four separately-threaded replay engines.
+
+    Each engine gets its OWN db dir AND its own event dir: the embedded lane
+    auto-recovers a 0-node graph from a `*.jsonl` ADJACENT to the db
+    (`FalkorProjection._find_local_jsonl_dir`), which would replay the journal
+    through `recover_from_log` during OPEN — before the engine under test runs —
+    and mask the verdict.
+    """
+    import json
+    import shutil
+
+    from tortoise.backup import restore
+    from tortoise.consistency import recover_from_log
+    from tortoise.log import EventLog
+    from tortoise.projection import FalkorProjection
+    from tortoise.projection.nonfolded import NonFoldedEventsError
+
+    log_dir = tmp_path / "verdict-events"
+    log_dir.mkdir()
+    with open(log_dir / "events.jsonl", "w") as fh:
+        for ev in events:
+            fh.write(json.dumps(ev) + "\n")
+    out: dict = {}
+
+    def _db(tag):
+        d = tmp_path / f"verdict-{tag}"
+        d.mkdir()
+        return str(d / "tortoise.db")
+
+    proj = FalkorProjection(path=_db("all"), skip_health_check=True)
+    try:
+        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+        out["rebuild_all"] = False
+    except NonFoldedEventsError:
+        out["rebuild_all"] = True
+    finally:
+        proj.close()
+
+    proj = FalkorProjection(path=_db("rebuild"), skip_health_check=True)
+    try:
+        proj.rebuild(EventLog(str(log_dir / "events.jsonl")),
+                     confirm_destructive=True)
+        out["rebuild(log)"] = False
+    except NonFoldedEventsError:
+        out["rebuild(log)"] = True
+    finally:
+        proj.close()
+
+    proj = FalkorProjection(path=_db("recover"), skip_health_check=True)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        res = recover_from_log(str(log_dir), proj)
+        # `recovered=False` has two causes: the belief/state boundary refusing
+        # (the signal) and a journal whose final graph is EMPTY (an orthogonal
+        # discriminator). Only the former is a refusal.
+        out["recover_from_log"] = bool(
+            not res["recovered"] and res.get("non_folded_events"))
+    finally:
+        proj.close()
+
+    backup = tmp_path / "verdict-backup"
+    backup.mkdir()
+    shutil.copy2(log_dir / "events.jsonl", backup / "events.jsonl")
+    (backup / "manifest.json").write_text(
+        '{"backed_up_at":"2026-01-01","db":"tortoise.db",'
+        '"events":"events.jsonl"}')
+    restore_events = tmp_path / "verdict-restore-events"
+    restore_events.mkdir()
+    try:
+        restore(str(backup), db_path=_db("restore"),
+                events_path=str(restore_events / "events.jsonl"),
+                into_falkor=True)
+        out["backup.restore"] = False
+    except NonFoldedEventsError:
+        out["backup.restore"] = True
+    return out
+
+
+_ANCHORED_MUTATION_SHAPES = [
+    # A record whose LABEL is non-canonical, or absent, and whose id a LATER
+    # `PointAdded` re-materializes. `_fold_entity_mutation` can never fold any
+    # of them (an allowlisted label is the only one that reaches the Cypher
+    # label position), so the record's mutation is LOST — which is what the
+    # non-folded set exists to fail the run for.
+    ("non-canonical label", {"type": "EntityMutated", "op": "rename",
+                             "label": "Widget", "id": "n-a",
+                             "state": {"name": "nb"}}),
+    ("absent label", {"type": "EntityMutated", "op": "rename",
+                      "label": None, "id": "n-a",
+                      "state": {"name": "nb"}}),
+    ("unknown op", {"type": "EntityMutated", "op": "retype",
+                    "label": None, "id": "n-a"}),
+]
+
+
+@pytest.mark.parametrize("desc,mutation", _ANCHORED_MUTATION_SHAPES,
+                         ids=[d for d, _ in _ANCHORED_MUTATION_SHAPES])
+def test_a_lost_mutation_anchored_by_a_later_creation_fails_every_engine(
+        tmp_path, desc, mutation):
+    """#7936 — the ANY-KIND anchor is the legacy id-wide DELETE's, not every op.
+
+    `last_recreate_seq_any` exists so a delete record with a missing/non-canonical
+    label — which folds ID-WIDE — cannot destroy a legitimate
+    delete→recreate `:Point`. Applied to a NON-delete record it instead silenced
+    a refusal: `rebuild_all` reported the journal complete while
+    `rebuild(log)` / `recover_from_log` / `backup.restore` and the reference
+    fold all refused it. Measured before the fix: 4-vs-1 on every shape below.
+
+    The DELETE half is asserted here too, because the narrowing must not change
+    it: a 0-row delete is the EXEMPT `delete-miss` either way, so the skip can
+    stay where it is load-bearing.
+    """
+    from tortoise.consistency import _fold_journal, _fold_journal_entities
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    journal = [dict(mutation),
+               {"type": "PointAdded", "point": {"id": "n-a"}}]
+    with collect_non_folded() as entries:
+        _fold_journal([dict(e) for e in journal])
+    with collect_non_folded() as entries2:
+        _fold_journal_entities([dict(e) for e in journal])
+    reference = bool(refused_events(entries) or refused_events(entries2))
+    assert reference is True, (
+        desc, [str(e) for e in (*entries, *entries2)])
+
+    for engine, refused in _replay_verdicts(journal, tmp_path).items():
+        assert refused is True, f"{desc}: {engine} did not fail the run"
+
+
+def test_a_delete_anchored_by_a_later_creation_still_folds(tmp_path):
+    """The narrowing is scoped to non-delete ops: the delete skip is unchanged.
+
+    A delete whose id a later `PointAdded` re-materializes is the shape the
+    any-kind anchor exists for, and its verdict is `accept` on every engine —
+    before and after the change (a 0-row delete records the EXEMPT
+    `delete-miss`, which does not fail the run).
+    """
+    from tortoise.consistency import _fold_journal, _fold_journal_entities
+    from tortoise.projection.nonfolded import collect_non_folded, refused_events
+
+    journal = [{"type": "EntityMutated", "op": "delete", "id": "n-a"},
+               {"type": "PointAdded", "point": {"id": "n-a"}}]
+    with collect_non_folded() as entries:
+        _fold_journal([dict(e) for e in journal])
+    with collect_non_folded() as entries2:
+        _fold_journal_entities([dict(e) for e in journal])
+    assert list(refused_events(entries)) == [], [str(e) for e in entries]
+    assert list(refused_events(entries2)) == [], [str(e) for e in entries2]
+    for engine, refused in _replay_verdicts(journal, tmp_path).items():
+        assert refused is False, f"{engine} refused a delete→recreate journal"
 
 
 # ═══════════════════════════════════════════════════════════════════

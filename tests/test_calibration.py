@@ -10,6 +10,7 @@ import shutil
 import pytest
 from tortoise.sdk import TortoiseSDK
 from tortoise.sdk import BASELINE_SOURCE_INHERITED
+from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
 from tortoise.exceptions import CalibrationError
 
 
@@ -170,12 +171,20 @@ def test_calibrate_summary_source_hint(sdk):
 # ── create_point credibility ────────────────────────────────────
 
 def test_create_point_credibility(sdk):
-    """credibility='gold' sets ep_alpha=10, ep_beta=1 on node."""
+    """credibility='gold' stamps the WEAK authored-assertion body, not T0.
+
+    CHANGED ASSERTION (pre-existing, main): this used to pin gold -> Beta(10,1).
+    The #398 owner ruling (2026-10-12) supersedes that: the declared word is a
+    LABEL, not the claim's strength, and an authored unsourced assertion is ONE
+    evidence body at the weakest registered weight. A weak refutation must be
+    able to move it — a 10:1 self-declared prior could not (0.9091 -> 0.8992).
+    """
     p = sdk.create_point("statement", "Gold tier claim", credibility="gold")
     point = sdk.get_point(p["id"])
-    assert point.get("ep_alpha") == 10
+    assert point.get("ep_alpha") == pytest.approx(1.0 + AUTHOR_ASSERTION_WEAK_PC)
     assert point.get("ep_beta") == 1
     assert point.get("baseline_set") is True
+    assert point.get("credibility") == "T0"  # the word, kept as a label
 
 
 def test_create_point_dedup_no_overwrite(sdk):
@@ -185,7 +194,10 @@ def test_create_point_dedup_no_overwrite(sdk):
     p2 = sdk.create_point("statement", "X", credibility="unverified", dedup=True)
     assert p1["id"] == p2["id"]
     point = sdk.get_point(p1["id"])
-    assert point.get("ep_alpha") == 10  # original gold baseline preserved
+    # original authored-assertion body preserved (same weak body for every word,
+    # so this asserts the marker/label rather than a word-specific number)
+    assert point.get("ep_alpha") == pytest.approx(1.0 + AUTHOR_ASSERTION_WEAK_PC)
+    assert point.get("credibility") == "T0"
 
 
 def test_create_point_no_credibility(sdk):

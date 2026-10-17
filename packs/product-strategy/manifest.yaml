@@ -202,4 +202,8 @@ extraction:
       userJourney: retry
 connectors: []
 tools: []
-depends_on: []
+# #2781: `manifests: dev:incident -> ...:customerProblem` is a namespaced
+# cross-pack reference into `dev` — declared, so a missing `dev` is reported
+# against this pack (naming `dev`) instead of a bare "does not resolve".
+depends_on:
+- dev

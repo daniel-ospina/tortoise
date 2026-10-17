@@ -13,6 +13,7 @@ from tortoise.security import (
     resolve_under_base,
     ingest_dir_is_safe,
     redact_error,
+    redact_for_publication,
     validate_document_id,
     validate_entity_type,
     validate_filter_key,
@@ -216,3 +217,90 @@ class TestRedactError:
     def test_generic_message(self):
         out = redact_error(RuntimeError("boom"))
         assert out == "RuntimeError: boom"
+
+
+# ── redact_for_publication (#3293) ─────────────────────────────────────────
+
+#: A credential-SHAPED value, assembled at RUNTIME: a literal token in the
+#: source trips GitHub push protection and the repo's secret scanners, while the
+#: value under test stays byte-identical (the #4911 file documents the trick).
+_FAKE_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+
+class TestRedactForPublication:
+    """The boundary control for PUBLIC sinks (issue bodies, chat messages)."""
+
+    def test_redacts_credential_shaped_token(self):
+        out = redact_for_publication(f"R2 config error: SECRET_ACCESS_KEY={_FAKE_TOKEN}")
+        assert _FAKE_TOKEN not in out
+        assert "[REDACTED:github_token]" in out
+
+    def test_redacts_signed_url_query_parameter(self):
+        # The shape the #3293 blast radius names: a storage error echoing a
+        # SIGNED URL. ``redact_secrets`` alone does NOT cover this (its table is
+        # anchored vendor shapes, with no query-parameter rule).
+        out = redact_for_publication(
+            "upload failed: https://acct.r2.cloudflarestorage.com/b/k"
+            "?X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261005"
+            "&X-Amz-Signature=deadbeefdeadbeef1234"
+        )
+        assert "AKIAIOSFODNN7EXAMPLE" not in out
+        assert "deadbeefdeadbeef1234" not in out
+        assert "X-Amz-Credential=<redacted>" in out
+        assert "X-Amz-Signature=<redacted>" in out
+
+    def test_redacts_generic_query_secret(self):
+        out = redact_for_publication("GET https://host/x?token=abc123&format=json")
+        assert "abc123" not in out
+        assert "format=json" in out  # only the named parameter is touched
+
+    def test_redacts_uri_userinfo_and_telegram_token_shape(self):
+        out = redact_for_publication(
+            "connect s3://user:s3cr3t@bucket/x; push "
+            "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+        )
+        assert "s3cr3t" not in out
+        assert "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw" not in out
+
+    def test_plain_text_is_byte_identical(self):
+        msg = "no eligible nested archive across teams"
+        assert redact_for_publication(msg) == msg
+
+    def test_dr_triage_fields_survive(self):
+        """The boundary must NOT eat what a DR incident exists to carry.
+
+        ``backup_key`` is the field the RTO-breach incident names so a triager
+        knows which artifact to restore. The bash publication scrubbers end with
+        a bare ``[A-Za-z0-9+/_.=-]{20,}`` catch-all that WOULD destroy it; this
+        table deliberately omits that rule and the key-NAME-anchored rule. The
+        error-message path rules in ``_REDACT_PATTERNS`` would ALSO rewrite a
+        ``/data/`` (or ``/tmp/``) segment to ``/***`` — which is why
+        ``alert_store._body`` scrubs its detail with ``redact_paths=False``.
+        This exercises that exact composition with a path the rules CAN hit,
+        rather than a ``default`` segment that dodges them (#3293 review).
+        """
+        body = ('{\n  "backup_key": "backups/team_x/data/'
+                '2026-10-05T12-00-00Z/dump.enc",\n  "org_id": "team_x"\n}')
+        assert redact_for_publication(body, redact_paths=False) == body
+
+    def test_redact_paths_default_still_interns_filesystem_paths(self):
+        """The flag is load-bearing, not decorative.
+
+        The DEFAULT (used by the drill call site, ``_title`` and
+        ``_telegram_text``) still interns a filesystem path, so
+        ``redact_paths=False`` at the issue-body boundary is a deliberate,
+        narrow opt-out for the ``backup_key`` field rather than a silent
+        weakening of the scrubber.
+        """
+        body = '{"backup_key": "backups/team_x/data/dump.enc"}'
+        assert redact_for_publication(body) == '{"backup_key": "backups/***"}'
+
+    def test_is_idempotent(self):
+        once = redact_for_publication(
+            f"https://h/x?X-Amz-Signature=deadbeefdeadbeef1234 key={_FAKE_TOKEN}"
+        )
+        assert redact_for_publication(once) == once
+
+    def test_never_returns_non_str(self):
+        assert redact_for_publication(None) == ""  # type: ignore[arg-type]
+        assert isinstance(redact_for_publication(12345), str)  # type: ignore[arg-type]

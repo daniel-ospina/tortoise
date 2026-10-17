@@ -1,0 +1,20 @@
+cachedir: .pytest_cache
+rootdir: /Users/danielospina/Documents/GitHub/tortoise/.worktrees/7950-capstone
+configfile: pyproject.toml
+plugins: playwright-0.9.0, xdist-3.8.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 8 items
+
+tests/test_residency_marker.py::TestReadPathEndToEnd::test_a_partial_store_marks_a_nonexistent_node_not_hot PASSED [ 12%]
+tests/test_residency_marker.py::TestReadPathEndToEnd::test_a_complete_store_marks_a_nonexistent_node_hot PASSED [ 25%]
+tests/test_residency_marker.py::TestApplyResidency::test_not_hot_never_stands_in_for_empty PASSED [ 37%]
+tests/test_residency_marker.py::TestApplyResidency::test_a_consulted_record_makes_empty_a_real_finding PASSED [ 50%]
+tests/test_residency_router.py::TestRouteResidency::test_residency_outranks_sufficiency PASSED [ 62%]
+tests/test_residency_router.py::TestRouteResidency::test_a_down_cache_is_a_residency_miss_not_an_absence PASSED [ 75%]
+tests/test_residency_router.py::TestVocabulary::test_the_route_names_are_not_status_terms PASSED [ 87%]
+tests/test_7951_enforce_atomic_write.py::test_a_direct_fold_on_a_journal_backed_projection_is_refused PASSED [100%]
+
+============================== 8 passed in 5.72s ===============================

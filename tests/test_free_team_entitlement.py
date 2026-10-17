@@ -468,6 +468,38 @@ class TestCreateTeamEntitlement:
         assert "already created" in r.json()["detail"]
 
 
+class TestCrossLaneFreeOrgInvariant:
+    """#2810 — the cross-lane invariant the issue asks for.
+
+    "One free organization per person" is enforced through ONE chokepoint
+    (`hosted_api._assert_free_org_allowance`), consulted by every lane that can
+    result in a new owned free org: `POST /v1/organizations` (both
+    control-plane lanes), `POST /v1/onboarding/team`, and the two anon-claim
+    lanes. The two remaining org-owning lanes were declared
+    invariant-preserving in #2789 and are pinned here rather than merely
+    believed: `POST /v1/register` (idempotent on email — this file) and
+    `supabase/functions/tenant-provision` (deterministic per-user org id —
+    pinned at runtime in `tests/test_tenant_provision_cors.mjs`).
+    """
+
+    def test_register_twice_with_the_same_email_mints_one_org(self, client,
+                                                              monkeypatch):
+        """`POST /v1/register` is a second org-MINTING lane; its idempotency
+        (email-keyed, `409 already_registered`) is what keeps one person from
+        accumulating orgs there. Two calls ⇒ ONE org row."""
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        tc, fake = client
+        body = {"email": "repeat@example.com", "password": "password123"}
+        r1 = tc.post("/v1/register", json=body)
+        assert r1.status_code == 200, r1.text
+        r2 = tc.post("/v1/register", json=body)
+        assert r2.status_code == 409, r2.text
+        assert r2.json()["detail"]["message"] == "already_registered"
+        rows = [o for o in fake.tables.get("organizations", [])
+                if o.get("email") == "repeat@example.com"]
+        assert len(rows) == 1, rows
+
+
 # ── Registry lane (selfhost) ────────────────────────────────────────────────
 
 

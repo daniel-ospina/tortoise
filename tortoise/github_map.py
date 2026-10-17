@@ -182,6 +182,9 @@ def _norm_pr(pr: dict) -> dict:
     return {
         "number": number,
         "title": str(_get("title", default="") or ""),
+        # #8010: the PR body must reach `_item_state` exactly as an issue's does,
+        # or a body-only PR edit is the same false `current` the issue path had.
+        "body": str(_get("body", default="") or ""),
         "state": state,
         "created_at": str(_get("createdAt", "created_at", default="") or ""),
         "closed_at": closed_at or None,
@@ -195,6 +198,23 @@ def _norm_pr(pr: dict) -> dict:
 
 
 # ── The canonical item-state projection (the digest's ONLY input) ──
+
+def _body_digest(body: str) -> str:
+    """#8010: sha256 of the item's FULL text body — the edit signal the version
+    digest needs, with nothing copied.
+
+    A GitHub issue/PR body is not fetched by any producer today, so a
+    body-only edit left the `:Source` version untouched and every derivation
+    read `current` — the false-`current` direction ONTOLOGY §4.6 forbids. The
+    body itself must NOT become a node property (#3998/D30: the graph is the
+    index of the raw, not its store), so only its digest enters the projection.
+    A DIGEST (not a bounded prefix) is the honest form: a prefix would miss
+    every edit past the bound and re-introduce the false `current`; a hash is
+    exact (modulo collision) and copies nothing — §9.6 already bounds a version
+    at *"windows and hashes only, never content copies"*.
+    """
+    return hashlib.sha256((body or "").encode("utf-8")).hexdigest()
+
 
 def _item_state(n: dict, *, kind: str) -> dict:
     """The canonical item-state projection a connector content version is a
@@ -210,11 +230,20 @@ def _item_state(n: dict, *, kind: str) -> dict:
     the normalisers) and, for PRs, `merged` as its own field — the signal that
     used to ride only in the producer-stamped `eventKind` — so excluding that
     label cannot make two genuinely different states hash equal.
+
+    #8010: `body_digest` closes the last false `current` on this path. Every
+    producer must supply the body (gh-CLI `--json …body`, the webhook member's
+    `body`, the REST item's `body`), since a producer that omitted it would hash
+    a different digest for ONE unchanged item — the producer-divergence class
+    #8019 fixed for labels/assignees. The digest is a hash of the raw text, so
+    the text never reaches this projection or any node.
     """
     return {
         "kind": kind,
         "number": n["number"],
         "title": n["title"],
+        # #8010: an edit signal, never the text itself.
+        "body_digest": _body_digest(n.get("body", "")),
         "state": n["state"],
         "labels": n["labels"],
         "assignees": n["assignees"],
@@ -297,8 +326,9 @@ def issue_to_event(issue: dict, repo: str,
         "object": f"{repo}#{n['number']}",
         # #8019: the digest's input is the canonical item-state projection, not
         # the producer-shaped event envelope — so the title/labels/assignees
-        # content rides HERE and the record id / action label never do. The body
-        # is absent on purpose: the poll path does not fetch it (#8010).
+        # content rides HERE and the record id / action label never do. #8010:
+        # the body rides here too, as a digest — a body-only edit advances the
+        # version while no raw body byte reaches this envelope or any node.
         "itemState": _item_state(n, kind="issue"),
         "startedAt": n["created_at"],
         "endedAt": n["closed_at"] if state == "closed" else None,
@@ -324,6 +354,7 @@ def pr_to_event(pr: dict, repo: str) -> dict | None:
         # #8019: same canonical projection as the issue mapper — the PR's
         # title/labels/assignees and its `merged` distinction are content, so a
         # PR label/assignee change (the R1-F2 mirror) now moves the digest.
+        # #8010: the PR body's digest rides the same projection.
         "itemState": _item_state(n, kind="pr"),
         "startedAt": n["created_at"],
         "endedAt": n["merged_at"] or (n["closed_at"] if n["state"] == "closed" else None),

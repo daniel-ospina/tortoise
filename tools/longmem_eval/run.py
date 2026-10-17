@@ -156,6 +156,7 @@ from .retrieve import (
     _query_with_deadline,
     folded_pool_rows,
     resolve_answer_session_indices,
+    resolve_rerank_arm_pool_limit,
     retrieve_for_question,
     run_integrity_gate,
 )
@@ -436,8 +437,10 @@ def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
     rerank is ON — a baseline run must be completely unaffected by the
     TORTOISE_LME_RERANK_CAP/LAMBDA/POOL env vars (only ``rerank_enabled``
     reads TORTOISE_LME_RERANK itself). ``pool_size`` is the EFFECTIVE
-    APPLIED pool (the ``max(ks)``-adjusted value — a baseline run records
-    ``max(ks)``, never the nominal env default 40). Returns a dict with the
+    APPLIED pool — a baseline run records ``max(ks)``, never the nominal
+    env default 40; a rerank run records the depth ``retrieve_for_question``
+    actually fetches (the rerank-pool knob FLOORED at the #1947 baseline,
+    #2992 — never the bare 40 default). Returns a dict with the
     report/fingerprint ``config`` and the per-question retrieve kwargs.
     """
     rerank_on = rerank_enabled(rerank)
@@ -461,7 +464,12 @@ def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
     model = (rerank_model
              or os.environ.get("TORTOISE_LME_RERANK_MODEL")
              or RERANK_MODEL_DEFAULT)
-    applied = max(pool, max_k)
+    # #2992: the recorded/fingerprinted applied pool is the depth the
+    # retrieve path ACTUALLY fetches — the rerank-pool knob floored at the
+    # #1947 baseline (``retrieve.resolve_rerank_arm_pool_limit``), never the
+    # bare 40 default. Recording ``max(pool, max_k)`` here would say 40
+    # while ``retrieve_for_question`` fetched 120 (methodology != actual).
+    applied = resolve_rerank_arm_pool_limit(rerank_pool=pool, max_k=max_k)
     return {
         "rerank_on": True,
         "config": {"enabled": True, "model": model, "lambda_": lam,
@@ -4693,6 +4701,13 @@ def run_evaluation(
                         # points AND chunks in the FULL reader context) —
                         # wired end-to-end alongside reader_evidence@k.
                         "reader_surface@k": ret.get("reader_surface@k"),
+                        # #2516 (C1, amended): the FACT-GRAIN answer-evidence
+                        # leg (binary: the assembled context shares >=3
+                        # contiguous verbatim words with the gold answer;
+                        # N/A on questions with no gold answer) — wired
+                        # end-to-end so the report's aggregate and the
+                        # per-category rows are live, not inert.
+                        "answer_evidence@k": ret.get("answer_evidence@k"),
                         # Task 0 (#1745): ranked ids + evidence-turn matches
                         # populated for BOTH arms (the pilot's context composition
                         # was unreconstructable — 0/50); ranked_ids_pre_boost is
@@ -5414,6 +5429,11 @@ def outcomes_to_report(
                 # carries it — pre-#1948 checkpoints resume without
                 # KeyError).
                 "reader_surface@k",
+                # #2516 (C1, amended): the fact-grain answer-evidence leg
+                # rides the projection (read via o.get — absent until the
+                # outcome carries it, so a pre-#2516 checkpoint resumes
+                # without KeyError).
+                "answer_evidence@k",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",
@@ -6112,8 +6132,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rerank-pool", type=_positive_int, default=None,
                    help="rerank pool depth (env TORTOISE_LME_RERANK_POOL; "
                         "default 40; honored with rerank OFF too — the "
-                        "pool-only isolation arm, OQ5; >= 1; the effective "
-                        "applied pool is max(pool, max(k)))")
+                        "pool-only isolation arm, OQ5; >= 1; with rerank ON "
+                        "the applied pool is max(pool, baseline, max(k)) "
+                        "with baseline = TORTOISE_LME_POOL_SIZE when set "
+                        "(default 120), itself floored at max(k) — "
+                        "the knob can only RAISE the depth; the rerank-OFF "
+                        "pool-only arm is max(pool, max(k)))")
     p.add_argument("--rerank-cap", type=_positive_int, default=None,
                    help="per-session MMR cap (env TORTOISE_LME_RERANK_CAP; "
                         "default 2; >= 1; E2E-10 caps per-session context "

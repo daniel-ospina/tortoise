@@ -107,6 +107,11 @@ _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 _ORG_BASE_SELECT = [
     "id", "name", "tier", "max_users", "max_graphs", "graph_size_cap",
     "ops_allowance", "email", "deleted_at", "graph_name",
+    # #3376: the org's backup flag rides the BASE read (0006 column, NOT an
+    # additive tier) so the dashboard can tell an ineligible team from one
+    # whose sweep simply has not run — the sweep predicate is
+    # ``tier != 'free' AND backup_enabled = true`` (backup_sweep.py).
+    "backup_enabled",
 ]
 # Additive orgs columns, separately migrated after 0006 (0015 abuse state;
 # 20260813000005 dashboard_key_login; 20260817000001 import ledger + points
@@ -1095,6 +1100,10 @@ def resolve_api_key(cp, token: str) -> dict | None:
         # column either, and no constant supplies one.
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": None,
+        # #3376: per-org backup eligibility, read off the orgs row (base 0006
+        # column). None when the row predates/omits it — the client renders
+        # the NEUTRAL empty state rather than a definite "not enabled".
+        "backup_enabled": org_row.get("backup_enabled"),
         # additive metadata (not part of the registry dict contract)
         "key_prefix": key_prefix,
         "created_via": created_via,
@@ -2190,8 +2199,16 @@ def user_identity_inventory(cp, user_id: str) -> dict:
     Returns the login-method inventory: methods (provider/provider_id list),
     has_password, email_method, login_methods, keys_tier, banner.show.
     Raises RuntimeError (fail-closed) on control-plane failure.
+
+    ⛔ ``rpc_value``, not ``rpc``: the function RETURNS jsonb, and
+    ``Prefer: return=minimal`` (what ``rpc`` sends) does not echo a VOLATILE
+    SECURITY DEFINER body — ``rpc`` returns ``None`` in production, and the
+    caller then read ``None`` as the inventory. Found while fixing #3025, which
+    hit the identical shape in the OAuth mint; the same-double change that
+    models the transport reddened the three ``TestIdentitySeam`` tests that had
+    been passing only because the double echoed the body.
     """
-    return cp.rpc("user_identity_inventory", {"p_user_id": user_id})
+    return cp.rpc_value("user_identity_inventory", {"p_user_id": user_id})
 
 
 def reserve_unlink(cp, user_id: str, identity_id: str) -> dict:
@@ -2201,9 +2218,12 @@ def reserve_unlink(cp, user_id: str, identity_id: str) -> dict:
     >= 2 (the partial unique index is the two-tab backstop). Raises
     ClaimError (409) on floor violations / unknown identities; RuntimeError
     (fail-closed) on control-plane failure.
+
+    ⛔ ``rpc_value`` for the same transport reason as
+    :func:`user_identity_inventory` — the function RETURNS jsonb.
     """
     try:
-        return cp.rpc("reserve_unlink", {
+        return cp.rpc_value("reserve_unlink", {
             "p_user_id": user_id, "p_identity_id": identity_id})
     except RuntimeError as e:
         msg = str(e)
@@ -2432,6 +2452,30 @@ def connector_by_org(cp, org_id: str) -> list[dict]:
         filters=[("org_id", "eq", org_id)],
         order="created_at",
     )
+
+
+def connector_by_org_source(cp, org_id: str, source_type: str) -> dict | None:
+    """Read THE connector for ``(org_id, source_type)`` — at most one row.
+
+    The migration declares ``idx_connectors_org_source`` UNIQUE on
+    ``(org_id, source_type)``, so this pair names exactly one connector — the
+    identity an OAuth completion uses to ROTATE a credential in place rather
+    than insert a second row (which the index rejects as a 23505 → HTTP 409).
+    Returns None when the org has no connector for that source yet, i.e. the
+    create path.
+
+    Filters on BOTH terms, like every helper here: the service-role key
+    bypasses RLS, so the WHERE clause is the tenancy boundary. The explicit
+    ``select`` keeps ``credential_enc`` out of the returned row — the projection
+    callers get never carries a ciphertext.
+    """
+    rows = cp.query(
+        "connectors",
+        select=_CONNECTOR_PUBLIC_SELECT,
+        filters=[("org_id", "eq", org_id),
+                 ("source_type", "eq", source_type)],
+    )
+    return rows[0] if rows else None
 
 
 def connector_by_id(cp, org_id: str, connector_id: str) -> dict | None:
@@ -2761,11 +2805,34 @@ def purge_org_control_plane(cp, org_id: str) -> None:
     ``_purge_registry_org``. Only called once the soft-delete grace
     window has elapsed. Raises on failure (fail-closed) — the purge sweep
     logs and skips, never crashes.
+
+    The orgs row goes through the SECURITY DEFINER RPC
+    ``purge_org_record`` (migration 20261012000005), NOT a raw table
+    DELETE: the organizations -> graphs -> journal_event cascade fires
+    the append-only trigger on every journal row, and the trigger
+    refuses unless ``app.record_journal_purge='on'`` — a GUC a PostgREST
+    table DELETE cannot set. The RPC sets it transaction-locally and then
+    deletes the row (review of PR #8179 P2: without this, the erasure
+    would fail closed once the journal is populated and the org would
+    never be purged).
+
+    ``analytics_events`` is DELIBERATELY absent from this list — do not
+    "complete" the erasure by adding it. The owner decided (#3843,
+    2026-09-17) to keep the per-capture / per-team usage record
+    (``capture_cost`` rows), and ruled (#3853) that product-usage
+    analytics "can't be fully deleted but gets decoupled from your
+    identity (which is fully deleted)". The decoupling IS this identity
+    deletion: ``analytics_events`` has no FK to ``organizations``, so no
+    cascade reaches it, and the hard-deleted ``organizations`` row is what
+    carried the name. The surviving row keeps only a random ``org_id``.
+    Guarded by
+    ``tests/test_retention_promise.py::test_usage_record_is_retained_decoupled_on_purge``;
+    the disposition is recorded in ``docs/retention-and-deletion.md``.
     """
     cp.query("api_keys", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("org_memberships", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("invitations", method="DELETE", filters=[("org_id", "eq", org_id)])
-    cp.query("organizations", method="DELETE", filters=[("id", "eq", org_id)])
+    cp.rpc("purge_org_record", {"p_org_id": org_id})
 
 
 # ── Task 8 writer inventory: keys + members + provisioning (#765) ────────────
@@ -4408,6 +4475,75 @@ def metering_increment_embedding(cp, org_id: str, period_start: str,
          "p_model": model, "p_revision": revision,
          "p_identity_mixed": identity_mixed},
     )
+
+
+def metering_increment_retrieval(cp, org_id: str, period_start: str,
+                                 period_end: str, *, queries: int = 0,
+                                 leg_runs: int = 0, leg_degraded: int = 0,
+                                 wall_ms: float = 0.0, leg_fts: int = 0,
+                                 leg_vector: int = 0,
+                                 leg_structural: int = 0) -> None:
+    """Increment the org's RETRIEVAL workload for the window
+    ``[period_start, period_end)`` (#4489) via the
+    ``metering_increment_retrieval`` SQL RPC — the retrieval-side mirror of
+    ``metering_increment_embedding`` (atomic under Postgres row locking;
+    best-effort by contract — the caller swallows exceptions).
+
+    The per-leg counters are the RECORDED vocabulary (fts / vector /
+    structural); the total ``p_leg_runs`` may exceed their sum, because a leg
+    name outside the vocabulary advances the total and no per-leg column.
+
+    #3825: the window, not a month label, is the row key. The RPC is DROPPED
+    and recreated by its migration rather than replaced in place: a new
+    argument list would otherwise be an OVERLOAD, leaving the old signature
+    callable — the silent second path #3825 removes.
+    """
+    cp.rpc(
+        "metering_increment_retrieval",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_queries": queries,
+         "p_leg_runs": leg_runs, "p_leg_degraded": leg_degraded,
+         "p_wall_ms": wall_ms, "p_leg_fts": leg_fts,
+         "p_leg_vector": leg_vector,
+         "p_leg_structural": leg_structural},
+    )
+
+
+def metering_get_retrieval_usage(cp, org_id: str, period_start: str) -> dict:
+    """Retrieval workload for an org's window STARTING at *period_start*
+    (#4489) — the supabase-mode READ path for ``get_retrieval_usage``. Returns
+    the ``retrieval_*`` columns as a dict (all ZEROS when the row is absent —
+    the ledger row is created by whichever lane writes FIRST, and a fresh org
+    has none, P2-14).
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
+    rows = cp.query(
+        "metering_records",
+        select=["retrieval_queries", "retrieval_leg_runs",
+                "retrieval_leg_degraded", "retrieval_wall_ms",
+                "retrieval_leg_fts", "retrieval_leg_vector",
+                "retrieval_leg_structural"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return {"retrieval_queries": 0, "retrieval_leg_runs": 0,
+                "retrieval_leg_degraded": 0, "retrieval_wall_ms": 0.0,
+                "retrieval_leg_fts": 0, "retrieval_leg_vector": 0,
+                "retrieval_leg_structural": 0}
+    row = rows[0]
+    return {
+        "retrieval_queries": int(row.get("retrieval_queries") or 0),
+        "retrieval_leg_runs": int(row.get("retrieval_leg_runs") or 0),
+        "retrieval_leg_degraded": int(
+            row.get("retrieval_leg_degraded") or 0),
+        "retrieval_wall_ms": float(row.get("retrieval_wall_ms") or 0.0),
+        "retrieval_leg_fts": int(row.get("retrieval_leg_fts") or 0),
+        "retrieval_leg_vector": int(row.get("retrieval_leg_vector") or 0),
+        "retrieval_leg_structural": int(
+            row.get("retrieval_leg_structural") or 0),
+    }
 
 
 def metering_set_graph_storage(cp, org_id: str, period_start: str,

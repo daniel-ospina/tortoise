@@ -1,6 +1,6 @@
 """The schema↔app co-move window (#3627) — guard for the Supabase deploy path.
 
-``.github/workflows/supabase-deploy.yml`` applies migrations, deploys the two
+``.github/workflows/supabase-deploy.yml`` applies migrations, deploys the three
 edge functions and, until #3627, STOPPED there: flipping the Fly app
 (``deploy-hosted.yml``) was a SECOND operator dispatch. The tenancy rename
 (``supabase/migrations/20260915000001_tenancy_team_to_org.sql``, #3543) is a
@@ -62,6 +62,7 @@ _REF_GUARD_STEP = "Refuse a non-main dispatch (the co-move is main-only)"
 _APPLY_STEP = "Apply migrations"
 _FUNCTION_STEPS = (
     "Deploy waitlist-subscribe edge function",
+    "Deploy deck-view edge function",
     "Deploy tenant-provision edge function",
 )
 

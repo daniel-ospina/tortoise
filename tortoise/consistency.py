@@ -59,6 +59,7 @@ from .projection import (
     _ENTITY_ID_PROP,
     _ENTITY_MUTATION_STATE_OPS,
     _REFERENCE_FOLD_ENTITY_LABELS,
+    WipePreconditionRefused,
     _annotator_value_ok,
     _apply_one,
     _creation_entity_id_from_record,
@@ -68,21 +69,30 @@ from .projection import (
     _norm,
     _object_hard_deleted_ids,
     _promotion_point_with_operator,
+    _replay_write_scope,  # #7951 §17.1: replay folds are authorized, live ones are not
     _writable_id,
+    entities,
+    fold_with_entities,
     hard_deleted_pairs,
     journal_epistemic_existence,
     journal_first_materialization,
     journal_hard_delete_seqs,
     journal_object_surviving_keys,
+    journal_recreate_seqs,
     plan_point_restamp_folds,
     prewipe_snapshot_path,
 )
 from .projection.entities import (
+    BELIEF_BOOL_PROPS,
+    BELIEF_PROPS,
     _EntityHandlers,
     _is_persistable_prop_value,
+    _store_holds_prop_value,
     _usable_instant,
     _writable_journalled_vector,
+    flatten_search_keys_prop,
     is_non_operator_payload,
+    promote_status_applies,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
@@ -104,6 +114,12 @@ logger = logging.getLogger(__name__)
 _POINT_HANDLED: frozenset = _EntityHandlers._POINT_HANDLED
 _POINT_LIST_PROPS: frozenset = _EntityHandlers._POINT_LIST_PROPS
 _POINT_DENY: frozenset = _EntityHandlers._POINT_DENY
+# #8006: the props the SHARED Point writer normalizes from a payload LIST into
+# the graph's flat STRING (`flatten_search_keys_prop`). Read from the writer's
+# own declaration for the same reason as the three above: `_uncarried` must not
+# call such a value "the projection cannot hold this" when it now carries it,
+# and the canonical view must compare the WRITER'S form, not the payload's.
+_POINT_FLATTEN_LIST_PROPS: frozenset = entities._POINT_FLATTEN_LIST_PROPS
 
 
 # ── #5011: the projection's declared content schema ───────────────────────
@@ -212,14 +228,17 @@ _EXCLUSION_REASONS = {
 # `_uncarried`) because the loss has its own issue and its own reason. They are
 # excluded from the comparison PER POINT, by `_uncarried` — not statically — so a
 # graph-only value is still compared and can still be reported as a divergence.
-_UNCARRIED_CONTENT_PROPS: dict[str, str] = {
-    "tags": (
-        "#2897 — the live writer stores the raw list (`SET n += $props`), the "
-        "REPLAYED writer refuses it (`_POINT_LIST_PROPS` is empty, #2795), so "
-        "live and replay disagree by construction; the loss is REPORTED, not "
-        "treated as a divergence"
-    ),
-}
+#
+# EMPTY since #2897 landed: `tags` was the only entry, and it is now CARRIED
+# (`_POINT_HANDLED`, with its own node-property clause plus the pass-2
+# `:Tag`/`TAGGED` sync), so the checker COMPARES it instead of exempting it —
+# which is what makes a future regression on that door visible instead of
+# silently tolerated. ⚠️ That widening also moves the graph FINGERPRINT for
+# every baseline whose graph holds a tag, which is why
+# `_PROJECTION_STATE_FORMAT` went to 2 in the same change. The dict is kept
+# (rather than deleted) because the mechanism is the right home for the next
+# declared live/replay asymmetry.
+_UNCARRIED_CONTENT_PROPS: dict[str, str] = {}
 
 # A key whose EXISTENCE legitimately depends on the payload, so a one-sided
 # presence is a representation asymmetry rather than content the journal
@@ -318,9 +337,38 @@ _UNCARRIED_NON_PERSISTABLE = (
     "a value FalkorDB rejects as a node property (map/dict at any depth, bytes, "
     "set) — `_is_persistable_prop_value` filters it before the SET"
 )
+# #8317 review round 3: the `tags` carriage question asks the writer's EFFECTIVE
+# predicate (transport gate + numeric domain), not the shape allowlist — so a
+# value that passes the shape test but is nulled by the `#7369` transport gate
+# (a non-finite float, a NUL/surrogate string, a null inside an array) or
+# CLAMPED by a 4.16–4.20 engine / refused at parameter parse by a 6.x one (an
+# int outside INT64) gets its own, accurate reason.
+_UNCARRIED_TAGS_UNWRITABLE = (
+    "a `tags` value the store cannot hold as stated — the `#7369` transport "
+    "gate nulls what `_value_ok` refuses (non-finite float, NUL/surrogate "
+    "string, null inside an array, map/bytes/set) and an int outside INT64 is "
+    "clamped or refused (`_store_holds_prop_value`)"
+)
+# ⚠️ BOUND, stated rather than implied, on the `tags` branch that reads the
+# reason above (#8317 review round 4):
+#   * an `_uncarried` key is skipped on BOTH sides (journal AND graph) and left
+#     out of `_graph_fingerprint`, so a GRAPH-only `tags` on a point whose
+#     JOURNAL value is unwritable goes uncompared. That is PRE-EXISTING
+#     `_uncarried` semantics (every `_UNCARRIED_*` reason behaves this way), not
+#     something the `tags` case introduces — `_UNCARRIED_LIST` and
+#     `_UNCARRIED_NULL` are the PRE-EXISTING cases with this exact behaviour, and
+#     pre-#2897 `tags` was one too (see the reason text above). Recorded on the
+#     `tags` branch because carrying `tags` made the hole observable through a
+#     property `check_consistency` now COMPARES;
+#   * the verdict deliberately differs from the #5011 numeric contract for a
+#     GENERIC prop, where an over-range number is a DIVERGENCE
+#     (`test_an_over_range_int_is_a_divergence_not_a_crash`): `tags` has a
+#     declared carriage rule whose writer states "no property" for that value,
+#     so naming the drop is the accurate verdict. The generic rule is untouched.
 _UNCARRIED_LIST = (
     "list-valued prop the REPLAYED writer refuses (`_POINT_LIST_PROPS` is empty, "
-    "#2795); the live path may still write it (#2897 class)"
+    "#2795); the live path may still write it raw — the live/replay asymmetry "
+    "class (`tags` was the named instance until #2897 replayed it)"
 )
 
 
@@ -431,6 +479,16 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     OWN explicit-False identity therefore outranks the descriptor, exactly as
     it does in ``projection/entities.py::_upsert_point_props``.
 
+    #8006: the ``_POINT_FLATTEN_LIST_PROPS`` keys are normalized to the graph's
+    canonical STRING form on BOTH sides, through the writer's own function. The
+    journal records E3's ``list[str]`` while the node holds the space-joined
+    string, so comparing the raw values would report a FALSE content divergence
+    on every faithfully replayed point that carries one — and the graph's
+    legacy ARRAY form (#5444, which the writer's fixup repairs) normalizes too,
+    so a legitimate repair is not reported as a divergence. Presence is still
+    compared: a journal list with NO graph value reports the key, which is the
+    coverage the pre-#8006 ``uncarried`` classification did not have.
+
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
     so the exclusion stays visible instead of becoming a silent hole.
@@ -441,6 +499,9 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
         k: v for k, v in props.items()
         if k not in _NOT_COMPARED and k not in skip and v is not None
     }
+    # The writer's OWN normalization, so the checker's view of a point matches
+    # what the writer makes of it (#8006).
+    flatten_search_keys_prop(out)
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
         out["provenanceSource"] = prov["source_id"]
@@ -488,6 +549,12 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
     (`_POINT_HANDLED`) or one already excluded with its own reason is not a
     "loss", and anything else that `_persist_extra_props` would drop (null,
     non-persistable value, undeclared list) is.
+
+    #8006: a list-valued `_POINT_FLATTEN_LIST_PROPS` key is NOT a loss — the
+    shared writer flattens it to the graph's string form, so the journal's list
+    is carried (in its canonical form) rather than dropped. Excluding it here
+    is what lets `_canonical_point_fields` compare it: leaving it out would have
+    made the checker blind to a future regression on that very door.
     """
     out: dict[str, dict[str, str]] = {}
     for pid, props in journal_by_id.items():
@@ -495,10 +562,37 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
             continue
         found: dict[str, str] = {}
         for k, v in props.items():
+            if k == "tags":
+                # #2897: the one `_POINT_HANDLED` key whose carriage depends on
+                # the VALUE's type rather than the key's presence. Its writer's
+                # clause is presence+`_store_holds_prop_value` gated
+                # (`_stated_tags`), so a value the store cannot HOLD AS STATED
+                # is genuinely uncarried and must be NAMED — the `_POINT_HANDLED`
+                # short-circuit below would swallow it, and an unnamed drop
+                # surfaced as an UNCLEARABLE `divergence="content"` whose
+                # `action` ("replay the journal") produces exactly the graph that
+                # is already there (#8317 review round 2 with a map; round 3 with
+                # `[nan]`/`[NUL]`/`[2**70]`, all reproduced). The predicate is
+                # the writer's EFFECTIVE one, NOT `_is_persistable_prop_value`:
+                # the shape allowlist admits a non-finite float and a huge int,
+                # which the transport gate nulls and a 4.16–4.20 engine clamps
+                # (6.x refuses it at parameter parse) respectively. (Deliberately
+                # a NARROW `tags` case, not a reorder
+                # of the generic list/persistable tests above the
+                # `_POINT_HANDLED` check: `provenance` is also
+                # handled-and-dict-valued, and a generic reorder would newly flag
+                # it.)
+                if v is not None and not _store_holds_prop_value(v):
+                    found[k] = _UNCARRIED_TAGS_UNWRITABLE
+                continue
             if k in _POINT_HANDLED or k in _NOT_COMPARED:
                 continue
             if v is None:
                 found[k] = _UNCARRIED_NULL
+            elif k in _POINT_FLATTEN_LIST_PROPS:
+                # Carried in canonical form — not uncarried, whatever its
+                # payload type (a list flattens, a str is already canonical).
+                continue
             elif isinstance(v, list) and k not in _POINT_LIST_PROPS:
                 found[k] = _UNCARRIED_CONTENT_PROPS.get(k, _UNCARRIED_LIST)
             elif not _is_persistable_prop_value(v):
@@ -670,8 +764,8 @@ def _graph_fingerprint(graph_by_id: dict,
 
     It reads ONLY the graph, but it is NOT independent of the journal: one skip
     set below (`uncarried`) is journal-derived, deliberately — a digest that
-    ignored it would move on every legitimate repair of a #2897 `tags` list and
-    report that repair as an unrecorded mutation. The journal dependence is
+    ignored it would move on every legitimate repair of an uncarried list prop
+    and report that repair as an unrecorded mutation. The journal dependence is
     therefore narrow and declared, not absent.
 
     The keys the COMPARISON declares undecidable are dropped here too, because a
@@ -681,9 +775,9 @@ def _graph_fingerprint(graph_by_id: dict,
       * the one-sided parity keys — a live-only `speaker`/`embedding_verbatim`;
       * `_GRAPH_DEFAULTED_PROPS` — the non-deterministic writer fallbacks the
         journal never states (the baseline is what catches a rewrite of those);
-      * the per-point `uncarried` keys — a `tags` list survives on a LIVE graph
-        and is DROPPED by the replayed writer (#2897), so without this a repair
-        reads as an unrecorded mutation for ever;
+      * the per-point `uncarried` keys — an undeclared list survives on a LIVE
+        graph and is DROPPED by the replayed writer (#2795), so without this a
+        repair reads as an unrecorded mutation for ever;
       * the operator `content`/`pointKind` (#548) — the live node lacks them and
         a replayed one has them.
 
@@ -733,7 +827,36 @@ def _graph_fingerprint(graph_by_id: dict,
 # deployment shape, and the journal is the reconstruction source the invariant
 # names.
 _PROJECTION_STATE_SUFFIX = ".projection-state.json"
-_PROJECTION_STATE_FORMAT = 1
+# The format HISTORY, oldest first. `_PROJECTION_STATE_FORMAT` is its LAST
+# entry; every earlier one is a KNOWN PREDECESSOR the migration below
+# re-baselines instead of refusing for ever.
+#
+# ⛔ BUMPING THE FORMAT MEANS APPENDING HERE. A new format whose predecessor is
+# not appended makes that predecessor an UNKNOWN format, which falls back to the
+# pre-migration reading (UNTRUSTED, baseline inert for ever) — the fail-safe
+# direction, and the suite's `_PROJECTION_STATE_FORMAT - 1` predecessor fixture
+# reds loudly when it happens, so the omission cannot ship silently.
+#
+# v1 → v2 (#2897): the per-point canonical view widened by `tags`. It left
+# `_UNCARRIED_CONTENT_PROPS` so the field-aware comparison would SEE it, and the
+# same view feeds `_graph_fingerprint` — so `projection_hash_sha256` MOVES for
+# every existing baseline whose graph holds a tag. Without a migration the next
+# run would find `journal_moved=False, graph_moved=True` and report
+# `unrecorded-mutation` on a healthy graph — an `action` telling the operator to
+# hunt an unjournalled writer that does not exist.
+#
+# #8268/#7936: the bump ALONE was the precursor, and it was not enough. A
+# superseded format was read as untrusted, and `record_projection_state` is
+# gated on `state_error is None` — so the baseline half stayed INERT for ever
+# and the migration was unreachable. Recognising a well-formed predecessor and
+# re-baselining it is what makes a digest widening landable at all, and it is
+# the prerequisite #7936's `(label, id)` re-key names: that is a SECOND widening
+# of the same digest and needs `_PROJECTION_STATE_FORMAT` → 3 (append `3`; `2`
+# then migrates too, exactly like `1` does now).
+_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2)
+_PROJECTION_STATE_FORMAT: int = _PROJECTION_STATE_FORMAT_HISTORY[-1]
+_PROJECTION_STATE_SUPERSEDED_FORMATS: frozenset[int] = frozenset(
+    _PROJECTION_STATE_FORMAT_HISTORY[:-1])
 
 
 def projection_state_path(log_path) -> str:
@@ -742,13 +865,93 @@ def projection_state_path(log_path) -> str:
     return str(log_path) + _PROJECTION_STATE_SUFFIX
 
 
+def baseline_warning(result: dict, log_path) -> str | None:
+    """The operator-visible warning for a STRANDED baseline, or ``None``.
+
+    #2897 review round 2: ``check_consistency`` can return ``ok=True`` while the
+    BASELINE half of the invariant is inert. An untrusted sidecar — a torn file,
+    a planted FIFO/symlink, a malformed watermark — makes
+    :func:`read_projection_state` error, so ``stored`` is ``None`` and every run
+    ADOPTS. ``state_recorded`` is gated on ``state_error is None``
+    (deliberately: recording over an untrusted state would destroy the only
+    evidence of what the graph looked like before), so the state is never
+    replaced either. The green verdict says nothing about any of that, which is
+    how an inert guard reads as a healthy graph — so the surface names it, with
+    the recovery, instead of leaving it to a field the CLI never printed.
+
+    #8268/#7936: a WELL-FORMED predecessor format is no longer in that class —
+    it is MIGRATED (re-baselined at the current format) on a healthy recording
+    run, so it is reported as the migration it is, not as an inert/stranded
+    guard. The only remaining inert case is a read-only run
+    (``record_state=False``), where the predecessor is still awaiting its
+    re-baseline.
+
+    A function rather than inline prose in ``__main__`` so the surface is
+    PINNED by a test without needing a live URI (the CLI's ``--db`` resolves
+    only ``docker``/``redis``/``rediss``).
+    """
+    superseded = result.get("state_superseded_format")
+    if superseded is not None and not result.get("state_error"):
+        if result.get("state_recorded"):
+            return (
+                f"projection baseline MIGRATED (format {superseded} -> "
+                f"{_PROJECTION_STATE_FORMAT}) — the recorded digest was written "
+                "by an older format, so it was re-baselined on this healthy "
+                "run. A graph write that bypassed the journal BEFORE this run "
+                "cannot be seen by the new baseline."
+            )
+        return (
+            f"projection baseline SUPERSEDED (format {superseded} -> "
+            f"{_PROJECTION_STATE_FORMAT}) and the baseline half is INERT until a "
+            "RECORDING run re-baselines it — a graph write that bypasses the "
+            "journal cannot be detected while it is inert. Re-run with recording "
+            "enabled to migrate it."
+        )
+    error = result.get("state_error")
+    if not error:
+        return None
+    return (
+        f"projection baseline UNTRUSTED ({error}) — the baseline check is INERT "
+        "until it is re-baselined, so a graph write that bypasses the journal "
+        "cannot be detected on this graph. Confirm no unjournalled writer "
+        f"exists, then remove {projection_state_path(log_path)} and re-run to "
+        "record a fresh baseline."
+    )
+
+
 def read_projection_state(log_path) -> tuple[dict | None, str | None]:
     """Read ``(state, error)`` for a journal.
 
-    ``(None, None)`` means "never baselined" — the ADOPTION case, which is
-    normal. ``(None, "<why>")`` means a baseline exists but cannot be trusted;
-    the caller must not treat that as a divergence, and must not silently adopt
+    ``(None, None)`` means "no TRUSTED baseline" — never baselined (the normal
+    ADOPTION case), OR a well-formed predecessor format awaiting migration
+    (:func:`read_projection_state_detail` reports that predecessor separately;
+    this view collapses it to "no trusted baseline" so a caller that cannot
+    migrate still adopts rather than mistaking version skew for corruption).
+    ``(None, "<why>")`` means a baseline exists but cannot be trusted; the
+    caller must not treat that as a divergence, and must not silently adopt
     over it either, so the reason is reported.
+    """
+    state, error, superseded = read_projection_state_detail(log_path)
+    if superseded is not None:
+        return None, None
+    return state, error
+
+
+def read_projection_state_detail(
+        log_path) -> tuple[dict | None, str | None, int | None]:
+    """``(state, error, superseded_format)`` for a journal.
+
+    The third element is the format of a WELL-FORMED predecessor sidecar
+    (#8268/#7936) — version skew, not evidence of corruption. It is reported so
+    ``check_consistency`` can MIGRATE it (re-baseline at the current format on
+    the next healthy run) instead of reading it as untrusted and leaving the
+    baseline half of the invariant inert for ever.
+
+    A malformed sidecar (a bad watermark/digest, a FIFO, a symlink, a torn
+    file, an UNKNOWN format) keeps ``superseded_format = None`` and stays
+    exactly as untrusted as it was: "never overwrite a baseline we could not
+    read" is unchanged for anything that is not a known, well-formed
+    predecessor.
     """
     path = projection_state_path(log_path)
     try:
@@ -758,23 +961,42 @@ def read_projection_state(log_path) -> tuple[dict | None, str | None]:
         # writable), and both are cheap to refuse.
         st = os.lstat(path)
     except FileNotFoundError:
-        return None, None
+        return None, None, None
     except OSError as e:
-        return None, f"projection state unreadable: {e}"
+        return None, f"projection state unreadable: {e}", None
     if not stat.S_ISREG(st.st_mode):
-        return None, "projection state is not a regular file"
+        return None, "projection state is not a regular file", None
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception as e:  # any unreadable sidecar is untrusted
-        return None, f"projection state unreadable: {e}"
+        return None, f"projection state unreadable: {e}", None
     if not isinstance(data, dict):
-        return None, "projection state is not a JSON object"
+        return None, "projection state is not a JSON object", None
     seq = data.get("last_applied_seq")
     digest = data.get("projection_hash_sha256")
-    if data.get("format_version") != _PROJECTION_STATE_FORMAT:
-        return None, (f"projection state format {data.get('format_version')!r} "
-                      f"is not {_PROJECTION_STATE_FORMAT}")
+    fmt = data.get("format_version")
+    # The FORMAT gate runs first so its message is the one reported, but a known
+    # predecessor is NOT thereby exempt from the structural gate below:
+    # `superseded_format` is a verdict on a WELL-FORMED older sidecar, never a
+    # bypass of the malformed/tampered checks. An unknown format (0, 99, a
+    # string, `true`, `1.0`, a FUTURE version written by newer code) is
+    # untrusted — an older build must never overwrite a newer baseline.
+    #
+    # `isinstance(fmt, bool)`/`not isinstance(fmt, int)` FIRST, before the
+    # membership test: `_PROJECTION_STATE_SUPERSEDED_FORMATS` is a frozenset of
+    # ints and `in` binds by `==`/`hash`, so `True in frozenset({1})` and
+    # `1.0 in frozenset({1})` are BOTH True. Without the type check a boolean
+    # or float `format_version` is coerced into the known-predecessor set and
+    # MIGRATED (re-baselined and OVERWRITTEN) instead of refused — the one
+    # class the docstring above promises is still treated as untrusted. Same
+    # strict-bool rule as the watermark and `_values_equal`, on the path that
+    # reads operator-planted sidecars.
+    if isinstance(fmt, bool) or not isinstance(fmt, int) \
+            or (fmt != _PROJECTION_STATE_FORMAT
+                and fmt not in _PROJECTION_STATE_SUPERSEDED_FORMATS):
+        return None, (f"projection state format {fmt!r} "
+                      f"is not {_PROJECTION_STATE_FORMAT}"), None
     # `isinstance(seq, bool)` first: `isinstance(True, int)` is true, so a
     # boolean watermark would otherwise be accepted as a valid baseline (and
     # `True == 1` would then trust it against a 1-event journal). Same strict
@@ -783,13 +1005,16 @@ def read_projection_state(log_path) -> tuple[dict | None, str | None]:
     if isinstance(seq, bool) or not isinstance(seq, int) \
             or not isinstance(digest, str) \
             or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        return None, f"projection state malformed (seq={seq!r})"
+        return None, f"projection state malformed (seq={seq!r})", None
+    if fmt != _PROJECTION_STATE_FORMAT:
+        return None, (f"projection state format {fmt!r} is a superseded "
+                      f"predecessor of {_PROJECTION_STATE_FORMAT}"), fmt
     return {
         "last_applied_seq": seq,
         "content_hash": digest,
-        "format_version": data.get("format_version"),
+        "format_version": fmt,
         "updatedAt": data.get("updatedAt"),
-    }, None
+    }, None, None
 
 
 def record_projection_state(log_path, *, last_applied_seq: int,
@@ -939,6 +1164,11 @@ def _fold_journal(events: list[dict]) -> dict:
     # side of the write, so the reference verdict would disagree with
     # `rebuild_all`.
     _epistemic_existence = journal_epistemic_existence(events)
+    # #8317 review round 3: the re-creation boundary, so `_apply_one` preserves a
+    # prop (`tags`) the payload states no WRITABLE value for on a bare re-emit,
+    # and drops it on a real delete→recreate — the writer's own MERGE-vs-wipe
+    # semantics.
+    _recreate_seqs = journal_recreate_seqs(events)
     by_id: dict = {}
     for seq, ev in enumerate(events):
         # Same normalisation the writer applies (`_apply_one`/`apply`): the
@@ -956,7 +1186,23 @@ def _fold_journal(events: list[dict]) -> dict:
                 entry = by_id.get(p["id"])
                 if isinstance(entry, dict):
                     merged = dict(entry)
-                    merged.update(p)
+                    if (t == "PointPromoted"
+                            and not promote_status_applies(
+                                entry.get("status"))):
+                        # #6239: live's promote emitters are gated on a
+                        # ``draft``/status-less Point, so a ``PointPromoted``
+                        # replayed over a terminal status (a supersede is
+                        # status-TERMINAL) is a status NO-OP — fold the rest of
+                        # the snapshot, withhold the status column. Without
+                        # this the reference fold re-lived the Point while the
+                        # rebuilt graph kept it terminal, and
+                        # ``check_consistency`` red a faithful replay. Same
+                        # predicate as the graph engines, so the two cannot
+                        # drift (see ``promote_status_applies``).
+                        merged.update({k: v for k, v in p.items()
+                                       if k != "status"})
+                    else:
+                        merged.update(p)
                     # The writer's NON-coalesce SET clauses: an omitted key is
                     # RESET, not preserved (`n.content=$content` with
                     # `p.get("content", "")`; `n.is_operator=$isop` /
@@ -1077,6 +1323,19 @@ def _fold_journal(events: list[dict]) -> dict:
             if t in ("PointSuperseded", "PointInvalidated"):
                 entry["outdated"] = True
                 entry["validTo"] = ev.get("valid_to")
+                # #2350: `validToPrecision` rides the SAME node the live writers
+                # stamp (`sdk.py` `invalidate_point`/`supersede_point` SET
+                # `n.validToPrecision`, and the graph/replay folds restore it).
+                # Mirroring `validTo` keeps this reference (the ground truth
+                # `check_consistency` compares the graph against) able to state
+                # it: without this the key was graph-ONLY, in neither
+                # `_EXCLUSION_REASONS` nor `_ONE_SIDED_REASONS`, so a health
+                # check reddened every precision-carrying terminalizer with a
+                # divergence its own advice could not clear — the #5048/#3817
+                # class. A `None` value is dropped by `_canonical_point_fields`
+                # (the writer cannot persist a null property), so the legacy
+                # no-precision path stays symmetric-absent.
+                entry["validToPrecision"] = ev.get("valid_to_precision")
                 # Only when the journal states it: the writer falls back to a
                 # wall-clock `_now_iso()`, which the journal cannot state.
                 if ev.get("expired_at"):
@@ -1085,7 +1344,8 @@ def _fold_journal(events: list[dict]) -> dict:
         _apply_one(by_id, ev,
                    journal_first_materialized=_first_materialized,
                    journal_seq=seq,
-                   journal_existence=_epistemic_existence)
+                   journal_existence=_epistemic_existence,
+                   journal_recreate=seq in _recreate_seqs)
         # #4208: a content EDIT re-derives the vector. The live `update_point`
         # and the replay's `_revise_point` both re-encode from the new content,
         # so the journal states no vector for the edited point — yet the entry
@@ -1176,13 +1436,28 @@ def _fold_journal(events: list[dict]) -> dict:
 #     graph reports `divergence="content"` for that one field where the same
 #     journal checked against a `rebuild_all` graph is `ok/None`. This is the
 #     SAME class as the deliberately-deferred
-#     `DirectEdgeCreated`/`DirectEdgeRepoint` folds (A10 #1048): a STATED
-#     bound, not a hidden caveat. Closing it means re-implementing the sweep's
+#     `DirectEdgeRepoint` fold in the one-record `apply()` engine (A10 #1048):
+#     a STATED bound, not a hidden caveat. (`DirectEdgeCreated` is no longer in
+#     that class for `rebuild_all` — #8499 landed its pass-2b fold — but the
+#     `apply()` engine still does not fold either type, so the parity bound
+#     below holds for that engine on both.) Closing it means re-implementing
+#     the sweep's
 #     after-creations pass + #4743 state re-fold inside the apply engines —
 #     the larger change this lane declines in favour of one canonical sweep.
 #     The invariant this leg enforces is accept/refuse; the content bound is
 #     named here, in the `apply()` branch's STATED PARITY BOUND comment, and in
 #     the PR body.
+#   * NO event-driven status fold is modelled (#8652). This reference fold
+#     carries the creation default (`live`), the `status`-writing state ops
+#     and `ObjectSuperseded` — not the built-in connector fold
+#     (`github.issue.closed` → `completed`) nor the #2729 pack-declared
+#     per-kind fold (`venture:disbursement` → `released`). `check_consistency`
+#     therefore reports `divergence="content"` for an Object whose `status` an
+#     `EventRecorded` folded, on a faithful journal — the #3311 class. The
+#     shape PRE-EXISTS #2729 (the built-in fold already hit it); #2729 widens
+#     the kinds it can hit. Closing it means teaching this fold the fold
+#     vocabulary AND the ownership rule (a lifecycle-declaring kind suppresses
+#     the built-in connector fold), which is its own change (#8652).
 _ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
     (label, _ENTITY_ID_PROP[label])
     for label in ("Object", "Subject", "Event")
@@ -1218,6 +1493,30 @@ _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
 #: `_upsert_object` alone) and `_graph_entities` indexes EVERY label, so
 #: neither can share this constant without changing what it means.
 _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
+
+#: #7936 — the belief properties the entity leg COMPARES, read from the
+#: writer's own declarations (``_fold_confidence_changed`` writes exactly this
+#: set), so a key added to the writer cannot silently stay outside the check.
+#: Before this the entity leg compared entity PRESENCE and Object/Subject
+#: ``status`` only, so a wrong, stale or lost belief on a ``:Subject`` /
+#: ``:Object`` / ``:Event`` was invisible to the whole durability gate: the
+#: Point-only ``_compare_views`` never sees the id, and (being graph-only) the
+#: Point-only fingerprint could not move either. Measured: corrupting an
+#: ``:Event``'s ``confidence`` left ``ok=True, divergence=None``.
+#:
+#: STATED BOUND: the leg still runs journal→graph only, so a graph-only belief
+#: write on a non-Point node with NO ``ConfidenceChanged`` anywhere in the
+#: journal (an unjournalled producer — the #4240 class) remains invisible here.
+#: The ``db_hash`` baseline is deliberately NOT widened to cover it: the digest
+#: covers the Point view, and folding the entity view into it would move
+#: ``content_hash`` for every existing baseline, which the check reports as an
+#: ``unrecorded-mutation``. That is no longer a dead end (#8268/#7936): widening
+#: the digest needs a ``format_version`` bump — append the new format to
+#: ``_PROJECTION_STATE_FORMAT_HISTORY`` — and the old format then becomes a KNOWN
+#: PREDECESSOR that is MIGRATED (re-baselined) on the next healthy recording run
+#: instead of reporting for ever.
+_ENTITY_BELIEF_FIELDS: tuple[str, ...] = tuple(BELIEF_PROPS) + tuple(
+    BELIEF_BOOL_PROPS)
 
 
 def _creation_entity_id(t: str, ev: dict) -> object:
@@ -1700,6 +1999,15 @@ def _graph_entities(projection) -> tuple[dict, dict]:
             eid = props.get(prop)
             if isinstance(eid, str) and eid:
                 rec = {"status": props.get("status")}
+                # #7936: carry the belief properties too — the comparison's
+                # non-Point content leg is what makes a corrupted/stale belief
+                # on this node a divergence (`_ENTITY_BELIEF_FIELDS`). Only
+                # keys the node actually has are copied, so a node with no
+                # belief at all keeps `rec` at `{"status": …}` and the
+                # comparison stays presence-conditional.
+                for _bk in _ENTITY_BELIEF_FIELDS:
+                    if _bk in props:
+                        rec[_bk] = props[_bk]
                 out[(label, eid)] = rec
                 name = props.get("name")
                 if isinstance(name, str) and name:
@@ -1750,24 +2058,44 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
         # clobbering it), so a superseded team/role/person is exactly the
         # "buried behind a live status" shape this leg exists to catch.
         # `Event` carries `eventStatus` under a different name and its
-        # lifecycle has no such fold, so the comparison stays bounded to the
+        # lifecycle has no such fold, so the STATUS leg stays bounded to the
         # families that model the field. Presence is compared for every kind.
         # (The Object-only `ambiguous_status` bound is unaffected: a Subject
         # name-only ref is REFUSED as never-guess, so it never becomes
         # ambiguous.)
-        if label not in ("Object", "Subject") or ambiguous_status:
-            continue
-        jv = rec.get("status")
-        if jv is None:
-            continue
-        gv = g.get("status")
-        if gv != jv:
-            count += 1
-            if len(mismatches) < _MAX_DIVERGENT_POINTS:
-                mismatches.append({
-                    "id": eid, "label": label, "field": "status",
-                    "expected": jv, "found": gv,
-                })
+        if label in ("Object", "Subject") and not ambiguous_status:
+            jv = rec.get("status")
+            if jv is not None:
+                gv = g.get("status")
+                if gv != jv:
+                    count += 1
+                    if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                        mismatches.append({
+                            "id": eid, "label": label, "field": "status",
+                            "expected": jv, "found": gv,
+                        })
+        # #7936: the BELIEF leg — every reference-fold label, `Event` included
+        # (the belief fold matches it on its `id` property exactly like the
+        # other three, so `eventStatus`'s separate lifecycle is irrelevant
+        # here). Presence-conditional from the JOURNAL side, like the Point
+        # leg: only a key the journal's own fold carries can state an
+        # expectation, and a journal-side `None` is "absent" rather than a
+        # value (`_canonical_point_fields`'s rule — the writer cannot persist a
+        # null property, so the graph removes it).
+        for field in _ENTITY_BELIEF_FIELDS:
+            if field not in rec:
+                continue
+            jv = rec.get(field)
+            if jv is None:
+                continue
+            gv = g.get(field)
+            if not _values_equal(jv, gv):
+                count += 1
+                if len(mismatches) < _MAX_DIVERGENT_POINTS:
+                    mismatches.append({
+                        "id": eid, "label": label, "field": field,
+                        "expected": jv, "found": gv,
+                    })
     for key in deleted:
         if key in graph_entities:
             count += 1
@@ -1811,6 +2139,16 @@ def check_consistency(log_path: str, projection, *,
                                           cannot be trusted (distinct from
                                           "never baselined"); reported, never
                                           treated as a divergence
+      state_superseded_format           — the format of a WELL-FORMED
+                                          predecessor baseline this run
+                                          OBSERVED (#8268/#7936); version skew,
+                                          not corruption — so it is NOT a
+                                          divergence and NOT a state_error.
+                                          The migration is APPLIED only when
+                                          `state_recorded` is True: a read-only
+                                          or non-healthy run reports the
+                                          predecessor and leaves the
+                                          re-baseline to the next recording run
       excluded_fields                   — {key: reason} for every field the
                                           comparison did NOT decide but saw
       one_sided_fields                  — {key: reason} for a field present on
@@ -1843,28 +2181,49 @@ def check_consistency(log_path: str, projection, *,
     non_folded = list(_nf_entries)
     non_folded_refused = refused_events(non_folded)
 
+    # #7936: the non-Point BELIEF leg. `_fold_journal` above is the point-only
+    # index and `_fold_journal_entities` models the entity LIFECYCLE (creation /
+    # rename / collapse / supersede) but folds no belief, so before this the
+    # whole check was blind to a belief on a `:Subject`/`:Object`/`:Event`.
+    # ONE authority folds it — `projection.fold_with_entities`, through the very
+    # `_apply_belief_props` the Point arm uses — and the result is merged onto
+    # the records `_compare_entities` already reads (a record the entity fold
+    # does not model is NOT invented here: presence stays the entity fold's
+    # question). Called OUTSIDE the non-folded collector on purpose: this walk
+    # visits every record, so an unknown/unimplemented type would be recorded a
+    # SECOND time and the diagnostic's own count would double.
+    for _key, _belief in fold_with_entities(events)[1].items():
+        _rec = journal_entities.get(_key)
+        if isinstance(_rec, dict):
+            _rec.update(_belief)
+
     # The COUNT is read from the graph directly, NOT from `len(graph_by_id)`.
     # `graph_by_id` is keyed by `n.id`, so two nodes sharing an id (or a node
     # whose id is not a string) would COLLAPSE and the size check would pass
     # while the graph holds more nodes than the journal — a fail-open. The
     # comparison still uses `graph_by_id`; the count does not.
     #
-    # ⛔ #7936 KNOWN GAP (content leg): both the journal side
-    # (`journal_by_id = _fold_journal(events)`) and the graph side below are
-    # POINT-ONLY, and `db_hash` is a digest of this Point-only dict. So a wrong,
-    # stale, or unjournaled BELIEF on a `:Subject`/`:Object`/`:Event`
-    # (`confidence` / `posterior_alpha` / `posterior_beta` / `lastDreamedAt` /
-    # `outdated`) is INVISIBLE here: `_compare_views` never sees the id, the
-    # non-Point leg (`_compare_entities`) compares presence and Object `status`
-    # only, and the Point-only fingerprint cannot move. `check_consistency`
-    # therefore returns `ok=True` for a graph whose non-Point belief diverges.
-    # The non-folded exemption above (`projection._reference_fold_non_point_target`)
-    # correctly STOPS reporting a HEALTHY non-Point belief as a miss, but this
-    # content blind spot is the other half of #7936 and is NOT contained here —
-    # it needs the `(label, id)` re-key of both sides and of the fingerprint.
-    # Pinned as a DOCUMENTED GAP (not as correct) by
-    # `tests/test_7853_confidence_label_propagation.py::
-    # test_content_comparison_known_gap_non_point_belief_is_invisible`.
+    # ⛔ #7936 CLOSED (content leg): the non-Point BELIEF blind spot is removed.
+    # `journal_by_id`/`db_hash` below are still POINT-ONLY by construction, but
+    # the entity leg (`_fold_journal_entities` + `_compare_entities`) now folds
+    # and compares the belief properties (`_ENTITY_BELIEF_FIELDS`) on every
+    # `:Subject`/`:Object`/`:Event`, so a wrong, stale or lost belief there is a
+    # `divergence="content"` instead of `ok=True`. Measured before/after on the
+    # shape `rebuild_all` had just produced (`hash_match=True`): corrupting the
+    # Event's `confidence` read `ok=True, divergence=None`; it now reports
+    # `ok=False, divergence="content"` with the `confidence` field named.
+    # Pinned by `tests/test_7853_confidence_label_propagation.py::
+    # test_content_comparison_sees_a_non_point_belief_divergence` (the inverted
+    # form of the gap pin that used to assert the blind spot).
+    #
+    # The `(label, id)` re-key of THIS Point view and of `db_hash` — one index
+    # deriving `log_points`/`db_points`/`_compare_views`/the fingerprint — stays
+    # open on #7936: widening the digest moves `content_hash` for every existing
+    # baseline, so it needs a `format_version` bump first — append the new format
+    # to `_PROJECTION_STATE_FORMAT_HISTORY`. That is no longer a dead end
+    # (#8268/#7936): a known predecessor is MIGRATED (re-baselined at the current
+    # format) on the next healthy recording run, so the re-key is landable
+    # without stranding the baseline.
     count_rows = projection.query("MATCH (n:Point) RETURN count(n)").result_set
     db_count = 0
     if count_rows and len(count_rows[0]) > 0:
@@ -1905,7 +2264,20 @@ def check_consistency(log_path: str, projection, *,
     # itself is the field-aware comparison above, never a digest equality.
     db_hash = _digest(_graph_fingerprint(graph_by_id, uncarried))
 
-    stored, state_error = read_projection_state(log_path)
+    stored, state_error, state_superseded_format = (
+        read_projection_state_detail(log_path))
+    # #8268/#7936: a WELL-FORMED predecessor format is version skew, not
+    # corruption — so it must NOT keep reading as `state_error`. The gate below
+    # (`state_recorded = ... and state_error is None`) is what made the
+    # migration unreachable: a predecessor sidecar raised the error on EVERY
+    # run, so the re-record was refused for ever and the baseline half stayed
+    # INERT. Clearing the error here lets THIS healthy run re-baseline at the
+    # current format, and `state_superseded_format` on the verdict reports what
+    # was migrated. The MALFORMED/tampered case still sets `state_error`, so
+    # "never overwrite a baseline we could not read" is unchanged where the
+    # state is evidence rather than skew.
+    if state_superseded_format is not None:
+        state_error = None
     # Both halves of the invariant are checked. The field-aware comparison
     # catches a graph that disagrees with the journal; the BASELINE catches a
     # graph that moved while the journal did NOT — the case the field-aware
@@ -1945,7 +2317,10 @@ def check_consistency(log_path: str, projection, *,
     # Adoption is a property of the RUN, not of whether we were allowed to write
     # the baseline: a read-only probe against a pre-existing graph is still the
     # first healthy sighting of it.
-    adopted = ok and stored is None
+    # A MIGRATED predecessor is a re-baseline of a graph we already knew about,
+    # not a first sighting — so it is not "adopted" (`adopted` stays the
+    # first-healthy-run signal); `state_superseded_format` names it instead.
+    adopted = ok and stored is None and state_superseded_format is None
     state_recorded = False
     if ok and record_state and state_error is None:
         # Never overwrite a baseline we could not read: recording over a
@@ -2008,7 +2383,16 @@ def check_consistency(log_path: str, projection, *,
         "entity_parity_ambiguous_count": len(entity_ambiguous_excluded),
         "entity_parity_bounds": {
             "direction": "journal->graph",
-            "status_compared": ["Object"],
+            "status_compared": ["Object", "Subject"],
+            # #7936: the non-Point belief leg. `fields` are the properties
+            # compared on every reference-fold label; the digest bound names
+            # what the BASELINE still cannot see (it covers the Point view
+            # only), so the check states its own blind spot instead of implying
+            # a coverage it does not have.
+            "belief_compared": list(_ENTITY_BELIEF_FIELDS),
+            "baseline_digest_covers": (
+                "Point-only (the entity beliefs are compared journal->graph, "
+                "not fingerprinted)"),
             "name_keyed": ["Object", "Subject"],
             "identity": {"Object": "name", "Subject": "name",
                          "Event": "eventId"},
@@ -2027,6 +2411,14 @@ def check_consistency(log_path: str, projection, *,
         "adopted": adopted,
         "state_recorded": state_recorded,
         "state_error": state_error,
+        # #8268/#7936: the format of a WELL-FORMED predecessor baseline this
+        # run OBSERVED (None when there was none). `state_recorded` says whether
+        # the migration was APPLIED (a read-only run, or a non-healthy run —
+        # `state_recorded` is gated on `ok` — reports the predecessor and leaves
+        # the re-baseline to the next recording healthy run). Distinct from
+        # `state_error`, which now only ever names an UNTRUSTED
+        # (malformed/tampered/unknown-format) sidecar.
+        "state_superseded_format": state_superseded_format,
         "excluded_fields": excluded_seen,
         "one_sided_fields": one_sided_seen,
         "uncarried_journal_fields": sorted(
@@ -2106,6 +2498,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
     store would be strictly worse, so the signal is PROPAGATED for the caller
     to branch on rather than swallowed into a success-shaped result.
 
+    #5353 adds the `:TeamMeta` first-org marker on the SAME four-part shape —
+    `team_meta_gap`, `team_meta_state_unknown`, and their own additive `reason`
+    clauses — because the class is the entire `#2789` first-org guard: a marker
+    the rebuild did not carry back leaves that guard reading 0, so the next
+    provisioning call re-mints it with the control plane's name and a fresh
+    `created`. The two classes report SEPARATELY (neither aggregate absorbs the
+    other) for the same reason the three onboarding shapes do.
+
     ATOMICITY on refusal (#7929): the refusals this function can only reach
     AFTER the replay has landed (the non-folded set and a non-empty `ok: False`
     verdict) are UNDONE before the `recovered: False` result is returned — the
@@ -2129,6 +2529,16 @@ def recover_from_log(events_dir: str, projection) -> dict:
     Without this the store was left partially populated and the NEXT open's
     `db_count > 0` refusal ("graph already has nodes — no rebuild") destroyed
     the retry path, serving a store that was neither empty nor correct.
+
+    #3044 adds the one refusal that is NOT rolled back, because it happens
+    BEFORE the wipe: the pending-snapshot route's ``rebuild_all`` is called
+    with ``require_empty=True``, so it re-validates the 0-node probe this
+    function took before the journal parse. If the graph gained nodes in that
+    window the wipe is refused with :class:`WipePreconditionRefused` and the
+    graph is returned to the caller UNTOUCHED — rolling back there would be
+    the very destruction the refusal exists to prevent (the nodes present were
+    not created by a declined replay, which is the only shape the rollback is
+    sound for).
     """
     import os
 
@@ -2294,13 +2704,51 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # this call site. Safe here because this branch is reached only
         # with db_count == 0 (the early return above) — the wipe is a
         # no-op on an empty graph, but the token is still required.
+        #
+        # #3044: `require_empty=True` makes that safety RE-VALIDATED at the
+        # wipe instead of assumed from the probe ~200 lines above (which
+        # happens before the whole journal parse). A graph that gained nodes
+        # since is refused, not wiped — see the ATOMICITY note above.
         try:
             counts = projection.rebuild_all(events_dir,
-                                            confirm_destructive=True)
+                                            confirm_destructive=True,
+                                            require_empty=True)
             nodes = int(counts.get("nodes") or 0)
             events = int(counts.get("events") or 0)
             edges = int(counts.get("edges") or 0)
+        except WipePreconditionRefused as e:
+            # #3044: nothing was wiped, so there is nothing to roll back — and
+            # a rollback would BE the destruction this refusal exists to
+            # prevent. `_roll_back_declined_replay` is sound only when every
+            # node present was created by the declined replay; no replay ever
+            # ran here. Report the guard's OWN measurement, which travels on
+            # the exception: re-querying with `_node_count()` would flatten
+            # the UNMEASURABLE shape (an absent/NULL count row) to 0 and so
+            # describe a store that was never observed as EMPTY, contradicting
+            # the refusal's own "could not be MEASURED" message in the very
+            # line `_auto_health_recover` reads. `None` = UNMEASURABLE.
+            return {"recovered": False, "log_points": 0,
+                    "db_points": getattr(e, "db_points", None),
+                    "reason": ("rebuild from the pending pre-wipe snapshot "
+                               f"refused: {e}")}
         except Exception as e:
+            # #3044 review (P1): the rollback is bound to the ONE shape it is
+            # sound on. `rebuild_all` exposes `_rebuild_wiped`, set only as its
+            # destructive statement is issued; a failure BEFORE that point ran
+            # no wipe and applied no replay, so every node present — including
+            # one a writer landed in the #3044 window (the seconds-long journal
+            # parse IS that window) — came from somewhere other than a declined
+            # replay. `_roll_back_declined_replay`'s entry invariant is
+            # therefore false on this shape, and its `MATCH (n) DETACH DELETE n`
+            # would destroy the very node this route's `require_empty` guard
+            # exists to protect. Return untouched instead. Absent attribute
+            # (a projection whose `rebuild_all` is a test double) keeps the
+            # pre-existing rollback behaviour.
+            if getattr(projection, "_rebuild_wiped", True) is False:
+                return {"recovered": False, "log_points": 0,
+                        "db_points": _node_count(),
+                        "reason": ("rebuild from the pending pre-wipe snapshot "
+                                   f"failed before the wipe: {e}")}
             # #7929: `rebuild_all` wipes before it can raise, so this refusal
             # can land on a partially replayed graph. Roll it back ONLY while
             # the sidecar still exists — a post-replay `NonFoldedEventsError`
@@ -2383,6 +2831,38 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     "from an earlier interrupted rebuild — so this graph's "
                     "onboarding state is UNKNOWN (not confirmed absent) — "
                     "see #4641")
+        # #5353: the `:TeamMeta` first-org marker, reported separately for the
+        # same reason as the onboarding legs — its gap key is a max over three
+        # shapes (a confirmed loss, an unverified restore, a pre-preservation
+        # UNKNOWN), so a caller must read the shape it needs rather than infer
+        # it from the aggregate. A marker that did not come back leaves the
+        # `#2789` guard reading 0, which is the whole reason the class is
+        # carried.
+        team_meta_gap = int(counts.get("team_meta_gap") or 0)
+        if team_meta_gap:
+            result["team_meta_gap"] = team_meta_gap
+            if counts.get("team_meta_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the :TeamMeta post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's first-org marker "
+                    "is UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — see #5353")
+            elif (counts.get("team_meta_expected")
+                  and not counts.get("team_meta_restored")):
+                result["reason"] += (
+                    "; WARNING: the pre-wipe :TeamMeta first-org marker was "
+                    "NOT restored, so the #2789 guard reads 0 and a later "
+                    "provisioning call can re-mint it with the control "
+                    "plane's name — see the rebuild ERROR log (#5353)")
+            if counts.get("team_meta_state_unknown"):
+                result["team_meta_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot does not carry "
+                    "a usable :TeamMeta record — it either predates marker "
+                    "preservation or inherits a state-UNKNOWN marker from an "
+                    "earlier interrupted rebuild — so whether this graph's "
+                    "first-org marker was destroyed CANNOT be determined — "
+                    "see #5353")
         return result
 
     if not files:
@@ -2570,9 +3050,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
                         deferred_corrects.append(edge)
                 else:
                     if _pass_seq:
-                        projection.apply(ev, journal_seq=seq, **apply_kwargs)
+                        with _replay_write_scope():
+                            projection.apply(ev, journal_seq=seq, **apply_kwargs)
                     else:
-                        projection.apply(ev, **apply_kwargs)
+                        with _replay_write_scope():
+                            projection.apply(ev, **apply_kwargs)
                 applied += 1
             except UnrepresentableNumberError as exc:
                 refused += 1

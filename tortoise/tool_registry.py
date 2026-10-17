@@ -491,7 +491,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.create_operator",
         writes=True,
         description="Create an operator connecting Points. "
-                    "op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps.",
+                    "op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps. "
+                    "semantics: the Layer-2 meaning (addresses, supports, refutes, "
+                    "mutuallyExclusive, hasPart, related, …) — it resolves the direction.",
         annotations=_idem(),
         http_policy=True,
         sdk_method="create_operator",
@@ -588,13 +590,16 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_events_poll",
         id="surface.events_poll",
         description="Poll graph/claim events after an opaque cursor (at-least-once). "
-                    "Returns {events, next_cursor}. Event types: 11 registered claim "
+                    "Returns {events, next_cursor}. Event types: 12 registered claim "
                     "types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, "
                     "OperatorAnnotated, PointPromoted, OperatorPromoted, DedupeRecorded, "
-                    "DedupeRejected, ObjectSuperseded, PointInvalidated).",
+                    "DedupeRejected, ObjectSuperseded, PointInvalidated, PointRevised). "
+                    "PointRevised reaches the store, and the response adds `changes` "
+                    "(per-claim before→after deltas), only while TORTOISE_CHANGE_FEED "
+                    "is enabled.",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="events_poll",
+        sdk_method="poll_events",
     ),
     ToolDefinition(
         name="tortoise_retract_point",
@@ -708,7 +713,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "the same id mints zero new nodes). Only call this when the team has "
                     "session recording enabled (the dashboard 'Memory sources > Agent sessions' "
                     "toggle); if the call fails, tell the user it wasn't filed and do NOT "
-                    "retry. Requires hosted mode — stdio/self-hosted returns an honest error "
+                    "retry. Consent: this tool runs server-side and cannot read the caller's "
+                    "TORTOISE_CAPTURE, so calling it IS the agreement to record the session "
+                    "(#3662, Option 1 — connecting the agent is the agreement); tell the user "
+                    "you are filing the session before you call, so they can decline. Requires "
+                    "hosted mode — stdio/self-hosted returns an honest error "
                     "(no local fallback that bypasses the capture pipeline).",
         annotations=_rw(),
         http_policy=True,
@@ -756,7 +765,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.ingest_corpus",
         writes=True,
         description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
-                    "from .md files, create/update Document nodes. "
+                    "from .md files, create/update document Sources "
+                    "(D10: a document is a :Source). "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         annotations=_rw(),
         http_policy=False,
@@ -797,7 +807,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_taxonomy",
         id="surface.taxonomy",
         description="Count entities by node label. "
-                    "Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.",
+                    "Returns {Point: N, Event: N, Subject: N, Object: N, Source: N} "
+                    "(D10: a document is a Source, not a :Document node).",
         annotations=_ro(),
         http_policy=True,
         sdk_method="taxonomy",
@@ -947,8 +958,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_index_files",
         id="surface.index_files",
         writes=True,
-        description="Index a corpus directory of .md files as Sources + Events/"
-                    "Documents (the unified index path — replaces "
+        description="Index a corpus directory of .md files as Sources + Events "
+                    "(D10: a document is a Source) (the unified index path — replaces "
                     "tortoise_index_sessions + tortoise_ingest_corpus file semantics "
                     "for local corpora). Returns the honest summary (file_count, "
                     "indexed, updated, skipped, failed, aborted, ignored, errors[], "
@@ -972,7 +983,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_document",
         id="surface.create_document",
         writes=True,
-        description="Create a Document node (research, planDoc, meetingNotes, etc.).",
+        description="Create a document — a :Source keyed by url (research, planDoc, "
+                    "meetingNotes, etc.).",
         annotations=_idem(),
         http_policy=True,
         sdk_method="create_document",
@@ -1058,8 +1070,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         writes=True,
         description="Create an entity — type: subject|object|event|document. "
                     "Event entities wire about* edges from aboutSubject/aboutObject/"
-                    "aboutPoint/aboutDocument props. Returns {node, nudges} — nudges "
-                    "suggest IMPL/NAND/mitigate connections to related Points (advisory).",
+                    "aboutPoint/aboutDocument props. Returns {node, nudges, "
+                    "advisories?} — nudges suggest IMPL/NAND/mitigate connections "
+                    "to related Points; advisories notes a write that declared no "
+                    "source and no provenance (advisory only, never a block). "
+                    "For type='document', declaring extractedFrom materializes "
+                    "the :Source (#8171); on subject/object/event it is inert "
+                    "and an extracted_from_inert advisory is returned.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="create_entity",

@@ -31,6 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_async_client, verdict_client
 from tortoise import email_notify
 from tortoise.hosted_api import app, get_current_user
 
@@ -64,7 +65,7 @@ def client():
         # clear-without-close copy reds the test-lint tripwire at collection.
         with patched_tortoise_sdk(db_path):
             try:
-                with TestClient(app) as tc:
+                with verdict_client(app) as tc:
                     yield tc
             finally:
                 app.dependency_overrides.clear()
@@ -699,7 +700,6 @@ class TestConcurrentAcceptSingleUse:
         OTP-verified mismatch user (v2 fuse) on the SAME token — exactly ONE
         accept wins; the loser 409s; exactly ONE active membership exists
         (never a second from the losing request)."""
-        import httpx
         inv = _invite(client, reg, org_id="team-race1", email="bob@example.com")
         # Alice mints + captures the OTP (mismatch override needs it)
         _as_user(_U_ALICE, "alice@example.com")
@@ -721,18 +721,16 @@ class TestConcurrentAcceptSingleUse:
 
         async def _accept_bob():
             _actor.set({"user_id": _U_BOB, "email": "bob@example.com"})
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                            base_url="http://test") as ac:
                 # email match → legacy one-click accept (no v2 header)
                 return await ac.post("/v1/invites/accept",
                                      json={"token": inv["token"]})
 
         async def _accept_alice():
             _actor.set({"user_id": _U_ALICE, "email": "alice@example.com"})
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                            base_url="http://test") as ac:
                 return await ac.post("/v1/invites/accept",
                                      json={"token": inv["token"],
                                            "path": "fuse", "otp": code},
@@ -775,7 +773,6 @@ class TestConcurrentAcceptSingleUse:
         (double-click / client retry). Exactly one wins; the loser 409s on the
         authoritative claim and NEVER reaches the membership write (pre-fix it
         minted a duplicate — registry has no (user,team) unique constraint)."""
-        import httpx
         inv = _invite(client, reg, org_id="team-race2", email="bob@example.com")
         _as_user(_U_ALICE, "alice@example.com")
         captured = {}
@@ -794,9 +791,8 @@ class TestConcurrentAcceptSingleUse:
 
         async def _accept_alice():
             _actor.set({"user_id": _U_ALICE, "email": "alice@example.com"})
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                            base_url="http://test") as ac:
                 return await ac.post("/v1/invites/accept",
                                      json={"token": inv["token"],
                                            "path": "fuse", "otp": code},
@@ -830,3 +826,29 @@ class TestConcurrentAcceptSingleUse:
         ).result_set[0]
         assert row[0] is not None and row[1] == _U_ALICE
         app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/invites/accept`` is
+    the route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/invites/accept")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post("/v1/invites/accept", json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/invites/accept", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/invites/accept answered" in message

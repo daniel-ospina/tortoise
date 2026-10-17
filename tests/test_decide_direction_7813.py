@@ -12,8 +12,10 @@ These tests prove:
 2. the unset default still stores `"bidirectional"` — i.e. #807/#753/#86 were not
    reversed (`test_default_omits_direction_kwarg` + the live
    `test_default_stores_bidirectional_live`);
-3. accepted values are not widened — only the two `create_operator` values are
-   legal (`test_direction_choices_stay_sdk_bounded`; widening is #7852).
+3. accepted values are the Layer-1 direction vocabulary — the model's four
+   values plus the two legacy aliases (#7852 widened this from the legacy pair);
+   a genuine typo is still refused (`test_direction_choices_accept_model_vocabulary`
+   + `test_direction_typo_is_refused`).
 """
 
 from __future__ import annotations
@@ -154,13 +156,28 @@ def _run_expecting_refusal(argv: list[str]) -> int:
     return rc
 
 
-def test_direction_choices_stay_sdk_bounded(fake_sdk, tmp_path):
-    """Only the two values `create_operator` accepts are legal.
+def test_direction_choices_accept_model_vocabulary(fake_sdk, tmp_path):
+    """The Layer-1 four-value vocabulary is legal now (#7852 widened the
+    previously-bounded pair) and reaches every call site."""
+    for value in ("->", "<-", "<->", "-"):
+        calls = _run_decide(_write_input(tmp_path), [f"--direction={value}"])
+        assert len(calls) == 4, calls
+        for call in calls:
+            assert call["kwargs"].get("direction") == value, call
 
-    Widening the accepted set (`->`, `<-`, `<->`, `-`) is #7852, not this fix;
-    a typo must be refused rather than silently persisted.
-    """
-    rc = _run_expecting_refusal(["decide", "--input", _write_input(tmp_path), "--direction", "->"])
+
+def test_direction_legacy_aliases_stay_legal(fake_sdk, tmp_path):
+    """The two legacy tokens remain accepted (byte-compatible callers)."""
+    for value in ("bidirectional", "unidirectional"):
+        calls = _run_decide(_write_input(tmp_path), ["--direction", value])
+        for call in calls:
+            assert call["kwargs"].get("direction") == value, call
+
+
+def test_direction_typo_is_refused(fake_sdk, tmp_path):
+    """A token outside the vocabulary is still refused rather than persisted."""
+    rc = _run_expecting_refusal(
+        ["decide", "--input", _write_input(tmp_path), "--direction", "sideways"])
     assert rc != 0
     # Refused at the parser, before any SDK write: nothing was persisted.
     assert not _FakeSDK.instances

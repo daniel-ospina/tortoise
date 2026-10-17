@@ -1,0 +1,9 @@
+{"start": {"label": "graph-60001 @ 90k (~116MB-class, issue's failed scale)", "port": 16414, "n": 90000, "redis_version": "8.10.2", "graph_module": 60001}}
+{"built_s": 51.5, "nodes": 90000}
+{"create_index": "OK", "s": 0.01}
+{"index_status": "OPERATIONAL", "index_ready_s": 12.7, "knn_before": 3}
+{"dump_mb": 43.19, "deleted": true}
+{"restore_s": 53.32, "err": "TimeoutError: Timeout reading from socket"}
+{"ping_after": [{"ok": true, "ms": 16.1}, {"ok": true, "ms": 7.4}, {"ok": true, "ms": 3.2}], "bystander": {"samples": 4, "p50_ms": 26.9, "max_ms": 7295.8, "errors": 3}}
+{"nodes_after": 90000, "index_after": "OPERATIONAL", "knn_after": 3}
+{"FINAL": {"label": "graph-60001 @ 90k (~116MB-class, issue's failed scale)", "port": 16414, "n": 90000, "redis_version": "8.10.2", "graph_module": 60001, "build_s": 51.5, "nodes_built": 90000, "create_index": "OK", "create_index_s": 0.01, "index_status": "OPERATIONAL", "index_ready_s": 12.7, "knn_before": 3, "dump_mb": 43.19, "restore_s": 53.32, "restore_error": "TimeoutError: Timeout reading from socket", "ping_after": [{"ok": true, "ms": 16.1}, {"ok": true, "ms": 7.4}, {"ok": true, "ms": 3.2}], "bystander": {"samples": 4, "p50_ms": 26.9, "max_ms": 7295.8, "errors": 3}, "nodes_after": 90000, "index_after": "OPERATIONAL", "knn_after": 3, "VERDICT": "NO_WEDGE (instance alive, restore bounded)"}}

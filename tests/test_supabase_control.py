@@ -190,6 +190,18 @@ class TestResolveApiKey:
         assert team["key_id"] is None  # no api_keys row to point at
         assert team["tier"] == "free"
 
+    def test_resolve_api_key_carries_backup_enabled(self, fake):
+        """#3376: the per-org backup flag rides the BASE orgs read (0006), so
+        /v1/team can tell an ineligible team from one whose sweep has not run
+        yet. An absent column reads None (the client keeps the neutral copy);
+        a present False must survive verbatim — never normalized away."""
+        fake.seed("org_memberships", [_membership_row()])
+        assert resolve_api_key(fake, TOKEN)["backup_enabled"] is None
+        fake.tables["organizations"][0]["backup_enabled"] = True
+        assert resolve_api_key(fake, TOKEN)["backup_enabled"] is True
+        fake.tables["organizations"][0]["backup_enabled"] = False
+        assert resolve_api_key(fake, TOKEN)["backup_enabled"] is False
+
     def test_revoked_twin_rejects_even_when_membership_matches(self, fake):
         """P1-2: api_keys.revoked_at is AUTHORITATIVE — a revoked twin rejects
         even when the org_memberships row is active."""

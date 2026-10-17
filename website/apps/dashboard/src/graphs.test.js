@@ -9,7 +9,11 @@ import {
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
   graphMintBody,
+  graphRecordingBody,
+  graphRecordingLabel,
+  graphRecordingState,
   graphsMeter,
+  GRAPH_RECORDING_STATES,
   isDefaultGraph,
   sortedGraphRows,
   sortedTrashRows,
@@ -194,4 +198,41 @@ test('deleteTypedMatches: only the literal word "delete" passes', () => {
   assert.equal(deleteTypedMatches(null), false)
   assert.equal(deleteTypedMatches(' x delete'), false)  // prefix fails
   assert.equal(deleteTypedMatches('delete x'), false)   // suffix fails
+})
+
+// ── #2650 per-graph recording override (C6 #2115 / #2302) ────────────────
+test('graphRecordingState: true→on, false→off, null/absent→inherit', () => {
+  assert.equal(graphRecordingState({ recording: true }), 'on')
+  assert.equal(graphRecordingState({ recording: false }), 'off')
+  assert.equal(graphRecordingState({ recording: null }), 'inherit')
+  assert.equal(graphRecordingState({ graph_id: 'g-a' }), 'inherit') // older payload: no field
+  assert.equal(graphRecordingState({}), 'inherit')
+  assert.equal(graphRecordingState(null), 'inherit')
+  assert.equal(graphRecordingState(undefined), 'inherit')
+})
+
+test('graphRecordingState: a truthy non-boolean is NOT read as an override', () => {
+  // The server's field is a strict bool|null; anything else is anomalous and
+  // must fall to 'inherit' rather than fabricate an on/off claim.
+  assert.equal(graphRecordingState({ recording: 'true' }), 'inherit')
+  assert.equal(graphRecordingState({ recording: 1 }), 'inherit')
+  assert.equal(graphRecordingState({ recording: 0 }), 'inherit')
+})
+
+test('graphRecordingState/label: three-state vocabulary is stable', () => {
+  assert.deepEqual(GRAPH_RECORDING_STATES, ['inherit', 'on', 'off'])
+  assert.equal(graphRecordingLabel({ recording: true }), 'On')
+  assert.equal(graphRecordingLabel({ recording: false }), 'Off')
+  assert.equal(graphRecordingLabel({ recording: null }), 'Inherit')
+  assert.equal(graphRecordingLabel(null), 'Inherit')
+})
+
+test('graphRecordingBody: select value → strict PATCH body (null clears the override)', () => {
+  assert.deepEqual(graphRecordingBody('on'), { recording: true })
+  assert.deepEqual(graphRecordingBody('off'), { recording: false })
+  assert.deepEqual(graphRecordingBody('inherit'), { recording: null })
+  // The select's value space round-trips through the body: body(select) → the
+  // server value; an unknown value must NOT silently become an off/on write.
+  assert.deepEqual(graphRecordingBody(''), { recording: null })
+  assert.deepEqual(graphRecordingBody(undefined), { recording: null })
 })

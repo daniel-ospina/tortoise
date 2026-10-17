@@ -372,9 +372,12 @@ def _hook_byte_sources(harness: str, root: Path, command: str) -> list[Path]:
 
     The file a registered command names is resolved through the installer's
     OWN classifier — ``hook_install._invokes_script``, the same predicate
-    ``detect_install``/``registered_commands`` use.  A token the classifier
-    matched by its ``$VAR`` suffix form is NOT resolvable here, so it
-    contributes no source either.
+    ``detect_install``/``registered_commands`` use.  A ``$VAR``-prefixed token
+    still contributes no source: this helper does not expand variables, so it
+    cannot name the file a shell would run.  The classifier DOES resolve
+    ``$PWD``/``$CLAUDE_PROJECT_DIR`` to ``root`` (any other variable is
+    rejected), so such a hit is knowingly not contributed here rather than
+    unclassifiable.
     """
     import tortoise.hook_install as hook_install
 
@@ -575,8 +578,9 @@ def test_guard_unresolvable_var_token_never_keys_on_a_guessed_path(
         monkeypatch, tmp_path):
     """A ``$VAR``-form command keys on its marker, never on a guessed path.
 
-    ``_invokes_script`` accepts a ``$VAR`` token via its suffix branch, but the
-    variable's value is unknowable to ``_hook_byte_sources``, so the token must
+    ``_invokes_script`` accepts a ``$VAR`` token only when the variable IS the
+    project root (``$CLAUDE_PROJECT_DIR``/``$PWD``); its value is still
+    unknowable to ``_hook_byte_sources`` at fingerprint time, so the token must
     contribute NO source.  Mapping the hit to ``root/<hooks_dir>/<script>``
     would hash a file bash may never run and stay blind to the file ``$VAR``
     really names — the rr9-1 silent skip.  Tampering the guessed file must
@@ -599,7 +603,9 @@ def test_guard_unresolvable_var_token_never_keys_on_a_guessed_path(
     hook = root / "hooks" / "tortoise-session-end.sh"
     assert hook.is_file()
 
-    var_command = "$OTHER_DIR/hooks/tortoise-session-end.sh"
+    # A known project-root variable: the classifier accepts it (the value is
+    # still NOT expanded by ``_hook_byte_sources``, which must not guess).
+    var_command = "$PWD/hooks/tortoise-session-end.sh"
     assert hook_install._invokes_script(
         var_command, "tortoise-session-end.sh", "hooks", root) is True
 

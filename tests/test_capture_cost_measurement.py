@@ -28,6 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from tests._verdict import require_answered  # noqa: E402
 from tests.test_extractor_reliability import _conv  # noqa: E402
 from tools.longmem_eval import costing  # noqa: E402
 from tortoise import extractor_v2 as v2  # noqa: E402
@@ -1440,9 +1441,11 @@ def test_hosted_capture_emits_that_session_s_measured_cost_row(
     model = DistinctStageCostModel()
     monkeypatch.setattr(sdk_mod, "_V2SessionMock", lambda: model)
 
-    resp = _b7_capture_client.post("/v1/sessions", json={
-        "conversation": _conv(), "harness": "pi",
-        "session_id": "sess-b7-attrib"})
+    resp = require_answered(
+        _b7_capture_client.post("/v1/sessions", json={
+            "conversation": _conv(), "harness": "pi",
+            "session_id": "sess-b7-attrib"}),
+        what="POST /v1/sessions answered")
     assert resp.status_code == 200, resp.text
     # the extractor really ran all three stages we are measuring (the call
     # COUNT/order is extractor_v2's chunking property, not the emission

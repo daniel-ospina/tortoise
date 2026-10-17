@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import json
 import re
 import shutil
 import subprocess
@@ -141,6 +142,279 @@ def inconclusive_on_timeout(
             deadline_s=deadline_s,
             diagnosis=diagnosis or f"({type(exc).__name__}: {exc})",
         )
+
+
+# ── rule 1, product side: the transport wait-bound refusal ────────────────
+# The hosted API wraps every non-exempt route in `WaitBoundMiddleware` and
+# answers a request that outlives `mcp_auth._TRANSPORT_WAIT_BOUND_S` with a
+# refusal (#3834, owner ruling 2026-09-20). The refusal's shape differs by
+# surface, and the product emits exactly two:
+#
+#   * REST — status 504, body `{"detail": mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE}`
+#     (`hosted_api._send_wait_bound_refusal`);
+#   * JSON-RPC / MCP — a `{code, message, data}` error mapping carrying
+#     `mcp_auth.ERR_TIMEOUT` + the same message, on status 504 for the `/mcp`
+#     route and inside a `CallToolResult(isError=True)` on the SSE arm (HTTP
+#     200), the SDK having collapsed a raised `McpError` into that shape — see
+#     `mcp_server._await_under_mcp_wait_bound`. The SSE `data:` payload is a
+#     JSON-RPC RESPONSE, so the `CallToolResult` sits one level down at
+#     `result`, and the mapping is homed at `result.structuredContent.error`
+#     (no wrap envelope) or `result._meta.tortoise_error` (a wrap-envelope tool
+#     — #8482). (`test_transport_wait_bound.py` reads the real wire the same
+#     way: `_parse_sse(r.text)` then `body["result"]`.)
+#
+# That refusal is the LEGIBLE REFUSAL the ruling requires — it is the product
+# saying "no answer yet", not an answer. A test that reads it as a FAIL is
+# therefore reading the host's load, which is exactly what rule 1 forbids; the
+# property under test was never observed.
+#
+# ⛔ The detection is the refusal ENVELOPE, never the message text alone. A bare
+# substring test classified ANY response whose body merely CONTAINED the
+# message — a genuine 4xx/5xx error included — as a non-answer, so a true red
+# was reported INCONCLUSIVE and silently not reported (#8579 review: a 500 and a
+# 200 whose bodies carried the message both returned `True`). Each arm is gated
+# on the surface's own shape above. Everything that is not this refusal —
+# including every other error status, and any body that merely mentions the
+# message — is returned untouched, so a genuine product failure still FAILs the
+# caller.
+
+
+def _body_text(response: Any) -> str:
+    """The response body as text, whatever the client exposes it on."""
+    body = getattr(response, "text", None)
+    if isinstance(body, str):
+        return body
+    content = getattr(response, "content", b"")
+    if isinstance(content, bytes):
+        return content.decode("utf-8", "replace")
+    return str(content)
+
+
+def transport_wait_bound_s() -> float:
+    """The product's transport wait bound, resolved lazily (rule 2: name the budget).
+
+    Imported inside the call so this module stays stdlib+pytest at import time
+    (it is imported at `tests/conftest.py` module level).
+    """
+    from tortoise import mcp_auth
+
+    return float(mcp_auth._TRANSPORT_WAIT_BOUND_S)
+
+
+def _json_objects(response: Any) -> list[dict]:
+    """Every JSON object the response body carries.
+
+    A REST/JSON response carries one; the MCP arm's SSE stream carries its
+    ``data:`` payloads. Parsing the STRUCTURE — not searching the text — is what
+    lets the refusal be identified by its envelope rather than by a substring.
+    """
+    as_json = getattr(response, "json", None)
+    if callable(as_json):
+        try:
+            parsed = as_json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            return [parsed]
+    text = _body_text(response).strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        return [parsed]
+    objects: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload:
+            continue
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            objects.append(parsed)
+    return objects
+
+
+def _refusal_error_mapping(body: dict) -> dict | None:
+    """The ``{code, message}`` mapping a JSON-RPC/MCP refusal carries.
+
+    JSON-RPC homes it at ``error``. The MCP SSE arm's ``data:`` payload is a
+    JSON-RPC *response*, so the ``CallToolResult`` is one level down at
+    ``result`` and the same mapping lives at ``result.structuredContent.error``
+    (no wrap envelope) or ``result._meta.tortoise_error`` (the wrap-envelope
+    repair, #8482). Both levels are probed: the `/mcp` pre-SSE 504 carries the
+    mapping at the TOP level, the SSE frame carries it under ``result``.
+    """
+    layers: list[dict] = [body]
+    result = body.get("result")
+    if isinstance(result, dict):
+        layers.append(result)
+    for layer in layers:
+        homes: list[Any] = [layer.get("error")]
+        structured = layer.get("structuredContent")
+        if isinstance(structured, dict):
+            homes.append(structured.get("error"))
+        meta = layer.get("_meta")
+        if isinstance(meta, dict):
+            homes.append(meta.get("tortoise_error"))
+        for home in homes:
+            if isinstance(home, dict):
+                return home
+    return None
+
+
+def is_transport_wait_bound_refusal(response: Any) -> bool:
+    """True when ``response`` is the product's transport wait-bound refusal.
+
+    Gated on the refusal ENVELOPE per surface — never on the message alone, which
+    classified a genuine error that merely mentioned the message as a non-answer
+    and reported a true red as INCONCLUSIVE (#8579 review). The accepted shapes
+    are the two the product actually emits (see the block comment above), so a
+    conforming caller catches the refusal on every surface while every other
+    response reaches its own assertion.
+    """
+    from tortoise import mcp_auth
+
+    status = getattr(response, "status_code", None)
+    message = mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE
+    for body in _json_objects(response):
+        # REST arm: 504 whose body is exactly the refusal.
+        if status == 504 and body == {"detail": message}:
+            return True
+        # JSON-RPC / MCP arm: the product's error code AND message, on either
+        # the `/mcp` route's 504 or the SSE arm's 200.
+        error = _refusal_error_mapping(body)
+        if (
+            status in (200, 504)
+            and error is not None
+            and error.get("code") == mcp_auth.ERR_TIMEOUT
+            and error.get("message") == message
+        ):
+            return True
+    return False
+
+
+def require_answered(response: Any, *, what: str) -> Any:
+    """Return an ANSWERED response; a transport wait-bound refusal is INCONCLUSIVE.
+
+    This is the product-side exit for rule 1: the request was refused by a
+    wall-clock bound with no answer, so the property was never observed. The
+    verdict is an INCONCLUSIVE skip that names the bound — never a bare FAIL
+    (which reads as a product defect) and never a silent pass.
+
+    Every other response — including a non-504 error, and any response that
+    merely mentions the refusal message without its envelope — is returned
+    unchanged.
+    """
+    if is_transport_wait_bound_refusal(response):
+        inconclusive(
+            what,
+            deadline_s=transport_wait_bound_s(),
+            diagnosis=(
+                "The product's transport wait bound refused the request instead "
+                "of answering it (#3834); the refusal's status differs by "
+                "surface (REST 504, MCP 200 with an isError result), so it is "
+                "named by neither — the property under test was never observed."
+            ),
+        )
+    return response
+
+
+# ── rule 1, product side: the client seam that covers every caller ────────
+# #8579 routed `require_answered` through the *named* seams it could reach (a
+# `_commit`, a `_poll_until`, a `_post_signed`). The residual is the callers
+# that sit behind no shared request helper, where a bare
+# `assert r.status_code == 200` reads the refusal as a product FAIL (#8582).
+#
+# Every one of those callers still builds a client, and every response it reads
+# comes back through that client — so the client construction is the seam that
+# covers them all, and one conversion per construction replaces a per-read
+# sweep (the plan doc's "convert the seam, not the leaf",
+# `docs/plans/2026-09-26-5049-verdicts-from-conditions.md`). The check sits at
+# the request boundary — after the response is fetched, before it is returned —
+# which is httpx's own documented home for a shared per-response decision
+# (https://www.python-httpx.org/advanced/event-hooks/).
+#
+# ⛔ The seam converts only the REFUSAL ENVELOPE (`require_answered`'s rule), so
+# a genuine answered 4xx/5xx still reaches the caller's own assertion, and a
+# test that deliberately pins the refusal must build a plain client (a converted
+# seam SKIPs before its assertion is reached).
+
+
+def _answered(request: Any, response: Any) -> Any:
+    """Route one client response through `require_answered`, naming the request.
+
+    ``what`` names the method and route that was refused, so the INCONCLUSIVE
+    reason points at the request rather than at the seam that observed it.
+    """
+    return require_answered(
+        response, what=f"{request.method} {request.url.path} answered")
+
+
+def _already_read(response: Any) -> bool:
+    """True when the body is available without consuming the caller's stream.
+
+    httpx leaves ``is_stream_consumed`` False until ``read()``/``aread()`` is
+    called, so a response returned with ``stream=True`` is still unread when it
+    reaches the seam; reaching for ``.text`` there would raise
+    `httpx.ResponseNotRead` and break the caller. Such a response is left
+    untouched — the seam cannot inspect a body it must not consume.
+
+    ⛔ This is a known limit, not coverage: a streamed refusal is not converted.
+    No converted seam streams (there is no ``.stream(`` call site in any of
+    them), and `test_the_verdict_client_seam_does_not_consume_a_streamed_response`
+    pins the pass-through so the limit stays visible rather than silently
+    widening.
+    """
+    return getattr(response, "is_stream_consumed", True) is not False
+
+
+def verdict_client(app: Any, **kwargs: Any) -> Any:
+    """A `TestClient` whose every response passes the #5049 contract (#8582).
+
+    The seam, not the leaf: a route behind `WaitBoundMiddleware` that refuses a
+    too-long request is a NON-ANSWER, so it becomes the contract's INCONCLUSIVE
+    skip instead of a load-dependent `assert 504 == 200` FAIL.
+
+    Imported inside the call so this module stays stdlib+pytest at import time
+    (it is imported at `tests/conftest.py` module level).
+    """
+    from starlette.testclient import TestClient
+
+    class _VerdictTestClient(TestClient):
+        def send(self, request: Any, **send_kwargs: Any) -> Any:
+            response = super().send(request, **send_kwargs)
+            if not _already_read(response):
+                return response
+            return _answered(request, response)
+
+    return _VerdictTestClient(app, **kwargs)
+
+
+def verdict_async_client(app: Any, **kwargs: Any) -> Any:
+    """The async twin of `verdict_client` — an `httpx.AsyncClient` ASGI seam.
+
+    For the call sites that build their own client around
+    `httpx.ASGITransport(app=...)` rather than going through `TestClient`.
+    """
+    import httpx
+
+    class _VerdictAsyncClient(httpx.AsyncClient):
+        async def send(self, request: Any, **send_kwargs: Any) -> Any:
+            response = await super().send(request, **send_kwargs)
+            if not _already_read(response):
+                return response
+            return _answered(request, response)
+
+    kwargs.setdefault("transport", httpx.ASGITransport(app=app))
+    return _VerdictAsyncClient(**kwargs)
 
 
 @dataclasses.dataclass(frozen=True)

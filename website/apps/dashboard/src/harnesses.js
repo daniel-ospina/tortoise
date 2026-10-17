@@ -86,11 +86,17 @@ export const WORKFLOWS_PROMPT =
 //            IDE-ONLY: cloud agents have no editor-lifetime session boundary.
 // No other harness has a seam: claude-desktop is backfill-import only, and
 // web/chatgpt are cloud-hosted.
+// #2120: OpenClaw's seam is a native plugin (its per-turn hook surface is
+// `before_prompt_build` → `prependContext`, an in-process registration —
+// OpenClaw has NO shell-hook surface), so the declared artifact is the
+// plugin's ENTRY file, the one the version contract grades and
+// `tortoise install openclaw` writes to ~/.openclaw/extensions/tortoise/.
 export const HARNESS_CAPTURE_SEAM = {
   claude: 'tortoise/claude-hooks/session-end.sh',
   codex: 'tortoise/codex-hooks/session-end.sh',
   cursor: 'tortoise/cursor-hooks/session-end.sh',
   pi: 'tortoise/pi-hooks/tortoise-capture.ts',
+  openclaw: 'tortoise/openclaw-plugin/index.mjs',
 }
 
 const CAPTURE_SEAM_HARNESSES = new Set(Object.keys(HARNESS_CAPTURE_SEAM))
@@ -106,6 +112,10 @@ export const HARNESS_CAPTURE_SUPPORT = {
   // surface, not encoded as a false here.
   cursor: CAPTURE_SEAM_HARNESSES.has('cursor'),
   pi: CAPTURE_SEAM_HARNESSES.has('pi'),
+  // #2120: installing the OpenClaw plugin IS the opt-in (same class as Pi's
+  // extension — the installer writes it and nothing auto-registers), so the
+  // seam is registered in the map and the per-machine gate does not apply.
+  openclaw: CAPTURE_SEAM_HARNESSES.has('openclaw'),
   chatgpt: false,        // #1701: cloud-hosted — no server-visible filing signal
 }
 
@@ -494,6 +504,29 @@ ${PI_CAPTURE_INSTALL}
   // the connector steps live in HARNESS_STEPS / HARNESS_INTRO above the
   // snippet (never in the copied text).
   chatgpt: () => WORKFLOWS_PROMPT,
+  // #2120: OpenClaw — reference-only (this map is reachable only from the
+  // archived LEGACY_WIZARD_ARCHIVED render; see the reachability note above).
+  // The live install path is `tortoise install openclaw`, which copies the
+  // whole plugin directory and enables it in openclaw.json; the manual steps
+  // below are the fallback for a machine where the CLI is unavailable. There
+  // is deliberately NO capture copy in HARNESS_CAPTURE_INSTALL: the plugin is
+  // both halves, so no per-machine opt-in sentence applies (#3661).
+  openclaw: () =>
+    `# OpenClaw has no shell-hook surface — the seam is a native plugin.
+# Preferred: install it with the product (writes the plugin AND enables it):
+tortoise install openclaw
+
+# Manual fallback from your Tortoise checkout (github.com/daniel-ospina/tortoise):
+mkdir -p ~/.openclaw/extensions/tortoise
+cp <path-to-tortoise>/tortoise/openclaw-plugin/index.mjs ~/.openclaw/extensions/tortoise/index.mjs
+cp <path-to-tortoise>/tortoise/openclaw-plugin/openclaw.plugin.json ~/.openclaw/extensions/tortoise/openclaw.plugin.json
+cp <path-to-tortoise>/tortoise/openclaw-plugin/package.json ~/.openclaw/extensions/tortoise/package.json
+# then merge into ~/.openclaw/openclaw.json:
+# { "plugins": { "entries": { "tortoise": { "enabled": true } } } }
+# Restart the OpenClaw gateway (or run 'openclaw plugins reload tortoise'),
+# then file the captured sessions (one spool FILE per session):
+#   for f in ~/.openclaw/tortoise/turns/*.jsonl; do tortoise sessions import \
+#     --harness openclaw "$f"; done`,
 }
 
 // #1643: the official skill installer — served from the product site. Its

@@ -15,6 +15,7 @@
 // A plain module with no JSX and no side effects makes all of that a
 // rendered-value assertion instead (#4365 review, cycle 11).
 import {
+  HARNESS_NAMES,
   MCP_URL,
   ONBOARDING_INSTRUCTIONS_URL,
   SKILLS_INSTALL_URL,
@@ -41,6 +42,14 @@ export function wizardPromptText(harness, step, key, mode) {
   const docs = 'Docs: https://tortoise.premiselabs.co/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
+  // #3232: the M1 restart cue. ONE authored sentence for every config-writing
+  // leaf, named from HARNESS_NAMES — the same vocabulary the step-3 caption
+  // (`Restart ${HARNESS_NAMES[…]} and verify`) interpolates, so the cue in the
+  // prompt and the caption above the verify block cannot drift. The cue states
+  // what the USER does; it never claims what the client can or cannot do — the
+  // config-reload behaviour is documented-flow-supported, not reproduced, so a
+  // capability claim could outlive the fact.
+  const restartCue = (h) => `${twoStepNote} ${HARNESS_NAMES[h]}.`
 
   // #2827: every body starts at its first actionable instruction. The step
   // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
@@ -63,18 +72,29 @@ export function wizardPromptText(harness, step, key, mode) {
     // sit BEFORE the skills line, so an agent following the prompt in order
     // would restart Pi (loading the skills directory) and only then install
     // the skills — requiring a second reload for them to appear.
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Pi.\n${docs}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${restartCue('pi')}\n${docs}`
     if (step === 2) return WIZARD_STEP2_TEXT
   }
   if (harness === 'cursor') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${twoStepNote} Cursor.\n${docs}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${restartCue('cursor')}\n${docs}`
     if (step === 2) return WIZARD_STEP2_TEXT
   }
   if (harness === 'claude') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
+    // #3232: the same two-block handshake Pi/Cursor use. Both server-dependent
+    // calls used to ride the SAME prompt that writes the MCP config — the
+    // session cannot have loaded a server configured after it started, so the
+    // first `tortoise_health` could only fail (or hit a stale tool list) and the
+    // checkpoint never landed. Step 1 now ends at the restart cue; the verify and
+    // the memory write are step 2's block, after the client has read the config.
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${restartCue('claude')}\n${docs}`
+    if (step === 2) return WIZARD_STEP2_TEXT
   }
   if (harness === 'codex') {
-    return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\nThen call tortoise_health and tortoise_create_point to file my first memory.\n${docs}`
+    // #3232: as `claude`. Codex additionally persists the credential to the
+    // shell profile (M2) before the restart; Claude Code's adding shell expands
+    // the header, so it carries no mechanism sentence.
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…).\nThen install the Tortoise skills (${SKILLS_LIST}) from ${SKILLS_INSTALL_URL}.\n${onboardingInstructions}\n${restartCue('codex')}\n${docs}`
+    if (step === 2) return WIZARD_STEP2_TEXT
   }
   // #2827: both filesystem-less harnesses (Claude Desktop/Web) need only the
   // verify/file step in the conversation; the workflows body rides
@@ -112,6 +132,5 @@ export const WIZARD_CAPTIONS = {
   keyPrivate: 'Your API key is inside the block below — keep it private.',
   connectLabel: 'Copy the connect prompt',
   verifyLabel: 'Copy the verify prompt',
-  promptLabel: 'Copy prompt',
   workflowsLabel: 'Copy the workflows prompt',
 }

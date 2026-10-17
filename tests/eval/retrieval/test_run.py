@@ -167,6 +167,39 @@ def test_no_model_skips_injection():
     m.assert_not_called()
 
 
+def test_eval_tfidf_arm_pins_the_sparse_leg(monkeypatch):
+    """#2678: the ``tfidf`` arm must pass ``force_sparse=True``.
+
+    The arm is the sparse strategy by definition, but the default scorer
+    resolves the embedder and becomes a second semantic arm whenever one is
+    cached — silently duplicating ``vector`` and diverging from the
+    token-overlap arm the oracle tests prove. Hermetic: the graph and the
+    strategy chain are stubbed, so this pins the CALL CONTRACT, not a
+    retrieval result.
+    """
+    from tortoise import search_engine
+
+    seen: dict[str, object] = {}
+
+    def _fallback(query, points, limit=10, *, force_sparse=False):
+        seen["force_sparse"] = force_sparse
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(search_engine, "degradation_chain", lambda *a, **k: {})
+    monkeypatch.setattr(search_engine, "fallback_tfidf", _fallback)
+
+    ranked = run_module.retrieve_per_strategy(
+        None, "alpha", None, None, [], True, 7, depth=7)
+
+    assert seen["force_sparse"] is True, (
+        "the eval's tfidf arm must pin the sparse leg — a cached embedder "
+        "would otherwise turn it into a second semantic arm (#2678)"
+    )
+    assert seen["limit"] == 7
+    assert ranked["tfidf"] == []
+
+
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
 def test_model_injection_failure_aborts_run(tmp_path):
     """--model HARD-FAIL contract: a candidate that cannot load must abort

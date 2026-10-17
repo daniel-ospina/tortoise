@@ -1269,6 +1269,187 @@ def test_github_provenance_tolerates_a_pre_provenance_cache() -> None:
         "measured": False, "error": "x"}
 
 
+# ---------------------------------------------------------------------------
+# the LANE ROSTER's provenance — a FAILED registry read is not an empty fleet
+# ---------------------------------------------------------------------------
+
+def test_load_registry_reports_an_unreadable_file_instead_of_an_empty_roster(tmp_path) -> None:
+    """The regression: `load_registry` swallowed the OSError into `[]`, so an
+    unreadable registry enumerated ZERO lanes and every consumer answered "no free
+    lane" / "no lane holds it" from a read that never happened."""
+    rows = fs.load_registry(tmp_path / "missing-dir" / "lane-registry.tsv")
+    assert list(rows) == []
+    assert rows.measured is False
+    assert rows.error, "a failed read must NAME its cause"
+    assert "lane-registry.tsv" in rows.error
+
+
+def test_load_registry_is_measured_for_a_readable_but_empty_registry(tmp_path) -> None:
+    """Control: an EMPTY registry is an ANSWER. Only a FAILED read is unmeasured —
+    over-refusing here would wedge the fleet on a legitimately empty file."""
+    p = tmp_path / "lane-registry.tsv"
+    p.write_text("# lane-registry.tsv — label<TAB>workspace-uuid\n\n")
+    rows = fs.load_registry(p)
+    assert list(rows) == []
+    assert rows.measured is True
+    assert rows.error == ""
+
+
+def test_load_registry_reads_real_rows(tmp_path) -> None:
+    p = tmp_path / "lane-registry.tsv"
+    p.write_text("# comment\nA\tWS-A\tlabel-a\nB\tWS-B\n")
+    rows = fs.load_registry(p)
+    assert list(rows) == [("A", "WS-A", "label-a"), ("B", "WS-B", "")]
+    assert rows.measured is True
+
+
+def test_registry_provenance_tolerates_a_pre_provenance_cache() -> None:
+    """Same tolerant reading as `github_provenance`: only an EXPLICIT failure makes
+    a reader refuse, so a legacy cache cannot wedge the fleet."""
+    assert fs.registry_provenance({}) == {"measured": True, "error": ""}
+    assert fs.registry_provenance({"reconciliation": {}}) == {"measured": True, "error": ""}
+    assert fs.registry_provenance(
+        {"reconciliation": {"registry_measured": False, "registry_error": "denied"}}
+    ) == {"measured": False, "error": "denied"}
+
+
+def test_build_state_records_the_registry_provenance(monkeypatch) -> None:
+    measured_now = _fleet_build(monkeypatch, registry=[], live={}, measured=True)
+    assert measured_now["reconciliation"]["registry_measured"] is True
+    assert measured_now["summary"]["registry_measured"] is True
+
+    _fleet_build(monkeypatch, registry=[], live={}, measured=True)  # re-arm the other sources
+    monkeypatch.setattr(
+        fs, "load_registry",
+        lambda: fs.RegistryRows(measured=False, error="PermissionError: denied"),
+    )
+    unread = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0,
+                            do_pane=False)
+    assert unread["reconciliation"]["registry_measured"] is False
+    assert unread["reconciliation"]["registry_error"] == "PermissionError: denied"
+    assert fs.registry_provenance(unread) == {"measured": False, "error": "PermissionError: denied"}
+
+
+def _unread_registry_state(**extra):
+    """The board READ, the ROSTER not: a state whose `github_measured` is True and
+    whose `registry_measured` is False."""
+    st = _unread_state(**extra)
+    st["reconciliation"] = {
+        "workspaces_measured": True, "github_measured": True, "github_error": "",
+        "registry_measured": False,
+        "registry_error": "FileNotFoundError: lane-registry.tsv could not be read",
+    }
+    return st
+
+
+def test_free_refuses_when_the_registry_is_unreadable(monkeypatch, capsys) -> None:
+    """`free` is an INVITATION TO DISPATCH. An unreadable roster enumerates zero
+    lanes, so answering would report a fully-busy fleet from a read that failed."""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state())
+    assert fs.cmd_free(argparse.Namespace(json=False)) == 2
+    cap = capsys.readouterr()
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err
+    assert "no genuinely free lane" not in cap.out, "an empty roster is not an answer"
+
+
+@pytest.mark.parametrize(
+    ("cmd_name", "args", "false_answer"),
+    [
+        ("who", argparse.Namespace(number=1234, json=False), "no lane holds it"),
+        ("orphans", argparse.Namespace(json=False), "none"),
+        ("conflicts", argparse.Namespace(json=False), "no ownership conflicts"),
+        ("violations", argparse.Namespace(json=False), "none"),
+    ],
+)
+def test_roster_derived_answers_refuse_an_unreadable_registry(
+    monkeypatch, capsys, cmd_name, args, false_answer
+) -> None:
+    """PR #8594 review P1: EVERY roster-derived answer refuses, not only `free`.
+
+    An unreadable registry enumerates ZERO lanes, so `index` is empty ("no lane
+    holds it"), `conflict_claimants` is empty ("no ownership conflicts") and no PR
+    has an owner (orphans report from the roster too). Each is the same false
+    negative `_registry_readable`'s own docstring names — a lane shown work another
+    lane already holds — and each was answered from a read that never happened.
+    """
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state())
+    rc = getattr(fs, f"cmd_{cmd_name}")(args)
+    cap = capsys.readouterr()
+    assert rc == 2, f"{cmd_name} answered from an unread roster: {cap.out!r}"
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err, cmd_name
+    assert false_answer not in cap.out, (
+        f"{cmd_name} manufactured {false_answer!r} from an unread roster"
+    )
+
+
+def test_lane_and_bind_never_assert_absence_from_an_unreadable_registry(
+    monkeypatch, capsys
+) -> None:
+    """PR #8594 review P2: the LAST two roster-derived readers must refuse too.
+
+    `cmd_lane`'s `no lane matching ...` is an EXISTENCE verdict and `cmd_bind --all`'s
+    `nothing to bind` is an all-clear. Both search `state["lanes"]`, which an unread
+    registry leaves empty -- so both answered a negative from a read that never happened.
+    This is the repro shape of the review: an unreadable registry enumerates ZERO lanes.
+    """
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state(lanes=[]))
+    rc = fs.cmd_lane(argparse.Namespace(lane="HANG", json=False))
+    cap = capsys.readouterr()
+    assert rc == 2, f"`lane` answered from an unread roster: {cap.out!r}"
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err
+    assert "no lane matching" not in (cap.out + cap.err), (
+        "`lane` manufactured an existence verdict from an unread roster"
+    )
+
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: _unread_registry_state(lanes=[]))
+    rc = fs.cmd_bind(argparse.Namespace(
+        all=True, json=False, dry_run=True, workspace=None, session=None,
+        label=None, cwd=None, pi=None,
+    ))
+    cap = capsys.readouterr()
+    assert rc == 2, f"`bind --all` answered from an unread roster: {cap.out!r}"
+    assert "UNREADABLE" in cap.err and "lane-registry" in cap.err
+    assert "nothing to bind" not in (cap.out + cap.err), (
+        "`bind --all` reported an all-clear from an unread roster"
+    )
+
+
+def test_lane_and_bind_still_answer_from_a_measured_empty_roster(monkeypatch, capsys) -> None:
+    """OVER-FIX GUARD: a roster that was READ and has zero lanes is a real answer."""
+    empty = _unread_registry_state(lanes=[])
+    empty["reconciliation"]["registry_measured"] = True
+    empty["reconciliation"]["registry_error"] = ""
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: empty)
+    rc = fs.cmd_lane(argparse.Namespace(lane="HANG", json=False))
+    assert rc == 1, "a measured empty roster still means 'no such lane'"
+    assert "no lane matching" in capsys.readouterr().err
+
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: empty)
+    rc = fs.cmd_bind(argparse.Namespace(
+        all=True, json=False, dry_run=True, workspace=None, session=None,
+        label=None, cwd=None, pi=None,
+    ))
+    cap = capsys.readouterr()
+    assert rc == 0, f"a measured empty roster has nothing to bind: {cap.out!r}"
+    assert "nothing to bind" in cap.out
+
+
+def test_build_refuses_to_cache_a_state_with_an_unreadable_registry(tmp_path, monkeypatch,
+                                                                   capsys) -> None:
+    """A cached zero-lane state would be served as a FRESH fleet for the whole TTL."""
+    fake = _unread_registry_state(
+        generated_at=_stamp(0), lanes=[], terminal=[], orphans=[], violations=[],
+        conflict_claimants={}, summary={},
+    )
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    out = tmp_path / "fleet-state.json"
+    rc = fs.cmd_build(argparse.Namespace(out=str(out), state=str(out), json=False))
+    assert rc == 2, "an unread roster must not be reported as a successful build"
+    assert not out.exists(), "a failed read must never be written as fact"
+    err = capsys.readouterr().err
+    assert "NOT CACHED" in err and "lane registry" in err
+
+
 def test_cmd_build_refuses_to_cache_an_unread_board(tmp_path, monkeypatch, capsys) -> None:
     """#7957 H5: a failed read is never CACHED. Writing it would replace the last good
     state with an empty fleet and free every lane into capacity on the next read."""
@@ -1299,6 +1480,7 @@ def _unread_state(**extra):
         "lanes": [{"identity": {"lane": "BUSY-REALLY"}, "free": True,
                    "session": {"sid": "a" * 36}}],
         "orphans": [],
+        "violations": [],
         "reconciliation": {"workspaces_measured": True, "github_measured": False,
                            "github_error": "gh pr list timed out"},
         **extra,
@@ -1411,3 +1593,56 @@ def test_payload_freshness_is_computed_from_the_state_not_trusted_from_prose() -
     assert annotated["stale"] is False and annotated["rebuilt"] is True
 
     assert fs.payload_freshness(3)["stale"] is True, "a non-state is never current"
+
+
+# ---------------------------------------------------------------------------
+# #8175 — was the OPEN-ISSUE read WIDE ENOUGH to prove a negative?
+# ---------------------------------------------------------------------------
+
+def _issues_build(monkeypatch, rows: int):
+    """Build a state whose open-issue read returned exactly `rows` rows."""
+    monkeypatch.setattr(fs, "load_registry", lambda: [])
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {"WS": {"cwd": "/tmp/a"}}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(
+        fs, "open_issues",
+        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+            [{"number": n + 1} for n in range(rows)], measured=True))
+    return fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                          sample_s=0.0, do_pane=False)
+
+
+def test_an_open_issue_read_at_the_cap_is_stamped_as_truncated(monkeypatch) -> None:
+    """`attribute_claims` gates every attribution on membership in the open-issue
+    read, so a read that hit the cap cannot support "no lane is attributed to issue
+    N" for an N it never saw. Exactly-at-limit is indistinguishable from truncated,
+    so it is stamped as truncated — and the board carries the numbers a refusing
+    reader prints (#8175)."""
+    st = _issues_build(monkeypatch, fs.OPEN_ISSUES_LIMIT)
+    rec = st["reconciliation"]
+    assert rec["open_issues_truncated"] is True
+    assert rec["open_issues_read"] == fs.OPEN_ISSUES_LIMIT
+    assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
+
+
+def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
+    """The normal case (989 open issues against a limit of 2000 on 2026-10-14):
+    absence from `index.issues` IS a measured "nobody", so the flag must be exactly
+    False — not merely absent — because `collision_preflight._board_can_answer`
+    refuses a board that does not stamp its coverage."""
+    st = _issues_build(monkeypatch, 3)
+    rec = st["reconciliation"]
+    assert rec["open_issues_truncated"] is False
+    assert rec["open_issues_read"] == 3
+    assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
+    assert fs.OPEN_ISSUES_LIMIT > 989, (
+        "the limit must clear this repo's open-issue count, or every board is "
+        "truncated and every absent issue refuses"
+    )

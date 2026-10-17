@@ -1,0 +1,11 @@
+{
+  "name": "tortoise-openclaw-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Tortoise volunteering-memory seam for OpenClaw (epic #2080, #2120).",
+  "license": "MIT",
+  "openclaw": {
+    "extensions": ["./index.mjs"]
+  }
+}

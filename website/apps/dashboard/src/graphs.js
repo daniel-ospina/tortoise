@@ -43,6 +43,14 @@ export const GRAPH_KEY_SCOPES = Object.freeze(['graphs:read', 'graphs:write'])
 // tier-blocked — its create form stays until the 409 quota gate fires.
 export const LIMITED_TIERS = Object.freeze(['free', 'anon'])
 
+// #3376 (2): the shared LOADING FLOOR for every backups surface. A hung
+// `/v1/backups` must not render an eternal skeleton/`…` — past this window
+// the UI resolves to the honest unavailable state. ONE constant so the
+// Graphs Last-backup column and the API-Keys BackupsCard can never resolve
+// on different clocks (the pre-#3376 disagreement: card `—` at 15s while the
+// column stayed `…` indefinitely).
+export const BACKUP_LOADING_FLOOR_MS = 15_000
+
 export function tierCreateLocked(tier) {
   return LIMITED_TIERS.includes(tier)
 }
@@ -60,6 +68,49 @@ export function graphCanDelete(g) {
 
 export function isDefaultGraph(g) {
   return !!(g && g.kind === 'default')
+}
+
+// ── #2650: per-graph session-recording override (C6 #2115 / #2302) ─────────
+//
+// GET /v1/graphs rows carry `recording: true | false | null`:
+//   true  → this graph records even when the team default is off
+//   false → this graph never records
+//   null  → no override — inherit the team default
+//     (onboarding_state.session_recording, the #1927 flag)
+// The write surface is PATCH /v1/graphs/{graph_id} with the strict body
+// `{recording: true|false|null}` (team:manage key or owner/admin session),
+// and `tortoise_graph_set_recording` is its MCP twin (both share
+// `_apply_graph_recording_override`). A null/absent field on an older row
+// payload reads as 'inherit' — never as a fabricated 'off'.
+//
+// The state vocabulary is deliberately three-valued and lives HERE (pure,
+// node --test-covered) so the label, the select value and the PATCH body can
+// never drift into a two-state reading that loses the inherit case.
+export const GRAPH_RECORDING_STATES = Object.freeze(['inherit', 'on', 'off'])
+
+export function graphRecordingState(g) {
+  if (!g) return 'inherit'
+  if (g.recording === true) return 'on'
+  if (g.recording === false) return 'off'
+  return 'inherit'
+}
+
+// The human label for the read-only (non-owner/admin) cell. 'Inherit' states
+// the absence of an override; it never claims the team flag is on or off.
+export function graphRecordingLabel(g) {
+  switch (graphRecordingState(g)) {
+    case 'on': return 'On'
+    case 'off': return 'Off'
+    default: return 'Inherit'
+  }
+}
+
+// Select value → PATCH body. `null` is the override-CLEAR (inherit) value;
+// the server's strict-bool validator accepts exactly true/false/null.
+export function graphRecordingBody(state) {
+  if (state === 'on') return { recording: true }
+  if (state === 'off') return { recording: false }
+  return { recording: null }
 }
 
 // ── #2784: per-graph "last backup" for the Graphs table ─────────────────
@@ -116,17 +167,47 @@ export function graphBackupSummary(backups) {
   return out
 }
 
+// #3376 (1): is this team's work eligible for the backup sweep at all?
+// The sweep predicate (tortoise/backup_sweep.py::enumerate_eligible_orgs) is
+// `tier != 'free' AND backup_enabled = true` — a PER-TEAM fact, not a
+// per-graph one. `tier` alone proves ineligibility only for free/anon (the
+// sweep requires tier != free); a PAID team with backups switched off is
+// indistinguishable from an eligible team whose sweep has not run — that is
+// why the dashboard reads `backup_enabled` off the team payload (/v1/team →
+// OrgInfoResponse.backup_enabled, fed from the orgs row / Team node in every
+// control-plane lane) rather than gating on tier.
+//
+// Returns true | false | null (null = UNKNOWN). null intentionally keeps the
+// NEUTRAL 'None recorded' reading: an absent flag (an older payload, or an
+// additive read that degraded) must never masquerade as a definite "not
+// enabled". The sweep never targets free regardless of the flag, so tier is
+// authoritative for that half of the predicate.
+export function teamBackupsEnabled(team) {
+  if (!team) return null
+  if (team.tier === 'free' || team.tier === 'anon') return false
+  if (team.backup_enabled === true) return true
+  if (team.backup_enabled === false) return false
+  return null
+}
+
 // One Graphs-table cell state. Precedence matters: an UNKNOWN window
 // (loading / list unavailable) must never render as a negative claim about
 // the graph — /backups 503s terminally on storage failure (#1923: the '—'
 // surface must not read as a previous team's count, nor as "no backups").
 // The known-empty copy is deliberately NEUTRAL ("None recorded"): the
 // listing cannot prove "never" — per-graph retention prunes manifests
-// (~35 objects/pool) and sweep eligibility is a per-team flag the dashboard
-// cannot read. No staleness verdict is computed here: the authoritative
-// threshold is server-side and internal-auth only (backup_watcher).
-export function graphBackupCellState(g, summary, backupsStatus, nowMs) {
-  if (backupsStatus === 'loading') {
+// (~35 objects/pool). No staleness verdict is computed here: the
+// authoritative threshold is server-side and internal-auth only
+// (backup_watcher).
+//
+// #3376: `backupsEnabled` is teamBackupsEnabled(team) (true/false/null) and
+// `loadingFloorHit` is the shared BACKUP_LOADING_FLOOR_MS window elapsing.
+// Both are OPTIONAL so existing callers keep their behaviour.
+export function graphBackupCellState(g, summary, backupsStatus, nowMs, backupsEnabled, loadingFloorHit) {
+  // #3376 (2): the loading state has a TERMINAL floor — past it the cell
+  // resolves to the honest unavailable state (the same shape a failed list
+  // renders), never an eternal `…`.
+  if (backupsStatus === 'loading' && !loadingFloorHit) {
     return { kind: 'loading', label: '…', title: 'Loading backup status…', at: null, count: 0 }
   }
   if (backupsStatus !== 'ok') {
@@ -138,6 +219,17 @@ export function graphBackupCellState(g, summary, backupsStatus, nowMs) {
   const key = graphBackupBucketKey(g)
   const b = key ? (summary || {})[key] : null
   if (!b || b.count === 0) {
+    // #3376 (1): an ineligible team can never record a backup, so the neutral
+    // "None recorded" (which reads as "nothing has run yet") is the wrong
+    // claim for it. Reserve that copy for eligible/unknown teams and state the
+    // team-level fact instead — the same answer on every row, because
+    // eligibility is a per-team fact.
+    if (backupsEnabled === false) {
+      return {
+        kind: 'disabled', label: 'Not enabled',
+        title: "Backups aren't enabled for this team.", at: null, count: 0,
+      }
+    }
     return {
       kind: 'none', label: 'None recorded',
       title: 'No backup recorded for this graph.', at: null, count: 0,
@@ -254,11 +346,21 @@ export function trashEraseLabel(deletedAt, nowIso) {
 }
 
 // ── #2701 delete-modal derivations (pure) ────────────────────────────────
-// The type-to-confirm gate: the user must literally TYPE the word "delete"
-// (case-insensitive after trim) before the destructive Confirm enables — a
-// strong accidental-delete deterrent on top of the 7-day Trash window.
-export function deleteTypedMatches(typed) {
-  return (typed || '').trim().toLowerCase() === 'delete'
+// The type-to-confirm gate: the user must literally TYPE the word the dialog
+// DISPLAYS (case-insensitive after trim) before the destructive Confirm
+// enables — a strong accidental-delete deterrent on top of the 7-day Trash
+// window. The word is a PARAMETER (default 'delete', the graph modal's
+// literal) rather than a second hardcoded literal, so a dialog that renders
+// its required word from a shared constant can pass that same constant here
+// (#3885 e). Two independent literals — one rendered, one required — can drift,
+// and a drift silently makes the destructive path unreachable: the dialog
+// tells the user to type one word while the gate demands another.
+export function deleteTypedMatches(typed, word = 'delete') {
+  // A word must be PROVIDED and non-empty: silently falling back to the graph
+  // modal's literal would let an emptied constant keep passing here while the
+  // dialog renders no instruction at all (review P3-3).
+  if (!word) return false
+  return (typed || '').trim().toLowerCase() === String(word).trim().toLowerCase()
 }
 
 // #2307 (post-#2083 C7 review): role-aware [Keys] panel empty copy ─────────

@@ -86,8 +86,18 @@ def _infer_format(filepath: Path) -> str:
 
 # ── #133 upgrade helpers ────────────────────────────────────────────
 
+#: The belief write-back families ``TortoiseEP`` routes through its ``emit``
+#: callable and this seam therefore journals. #2884 added the node arm
+#: (``ConfidenceChanged``); #5380 added the edge-message arm
+#: (``EdgeMessageChanged``). A type outside this set is a foreign event and is
+#: ignored — the seam is a belief write-back journal, not a general sink.
+_JOURNALED_BELIEF_TYPES = ("ConfidenceChanged", "EdgeMessageChanged")
+
+
 def _belief_emitter(api):
-    """#2884 FIX-5: a ``TortoiseEP`` emitter that journals belief write-backs.
+    """#2884 FIX-5 / #5380: a ``TortoiseEP`` emitter that journals belief
+    write-backs — the node family (``ConfidenceChanged``) and the
+    edge-message family (``EdgeMessageChanged``).
 
     ``_run_ep_propagation`` builds a bare ``TortoiseEP`` with NO emitter, so
     every posterior/confidence it wrote was durable only until the next JSONL
@@ -100,12 +110,20 @@ def _belief_emitter(api):
     graph write committed. An earlier revision hand-built a THIRD envelope
     here; routing through the api removes that second implementation of the
     record shape.
+
+    #5380: ``TortoiseEP`` calls this same callable for BOTH belief families,
+    so the allow-list below is load-bearing. Dropping the edge type is the
+    silent half-loss #5380 removes, re-introduced on the ingest/upgrade EP
+    lane: the graph still gets all four edge slots (``_flush_cache`` writes
+    them live) but the journal records none, so a rebuild of that journal
+    loses the edge-level belief state. The raw ``FalkorProjection`` this CLI
+    holds folds the record through ``apply()``'s arm.
     """
     if api is None:
         return None
 
     def emit(type_: str, **payload) -> None:
-        if type_ != "ConfidenceChanged":
+        if type_ not in _JOURNALED_BELIEF_TYPES:
             return  # this seam journals belief write-backs ONLY
         api.emit_belief(type_, **payload)
 

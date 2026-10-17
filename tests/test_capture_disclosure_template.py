@@ -92,7 +92,7 @@ class TestSingleSourceOfTruth:
         into `tortoise/onboarding/SKILL.md`.
 
         ONE exemption, named rather than implied: the `first_capture_line` is
-        ALSO quoted in SKILL.md §7 because `test_onboarding_variants.py` pins
+        ALSO quoted in SKILL.md §8 because `test_onboarding_variants.py` pins
         that literal as the W2 copy contract (#2002). It is exempt ONLY in the
         two SKILL copies, and the test below asserts the quote is byte-equal
         to the render — so the exemption is a pinned equality, not a hole.
@@ -120,15 +120,15 @@ class TestSingleSourceOfTruth:
     def test_the_w2_pinned_line_in_the_skill_equals_the_template(self):
         """The one exemption above is a PINNED EQUALITY, not a hole.
 
-        SKILL.md §7 quotes the W2 copy contract literal (#2002). If either
+        SKILL.md §8 quotes the W2 copy contract literal (#2002). If either
         side is edited alone the two diverge and this reds — so the quote
         cannot drift away from the template it is supposed to render.
-        Mutation: change the template wording without editing SKILL.md §7.
+        Mutation: change the template wording without editing SKILL.md §8.
         """
         rendered = cd.render_first_capture_line(
             harness="claude", hosted=True, api_host=None)
         assert f'> "{rendered}"' in SKILL.read_text(encoding="utf-8"), (
-            "SKILL.md §7 no longer quotes the template's first_capture_line "
+            "SKILL.md §8 no longer quotes the template's first_capture_line "
             f"verbatim (template renders: {rendered!r})")
         assert rendered in MIRROR.read_text(encoding="utf-8")
 
@@ -188,6 +188,39 @@ class TestRuntimeDrivenRender:
             "an unread flag must be its OWN wording — not the ON default in "
             "disguise")
 
+    def test_the_DECLINE_sentence_follows_the_live_flag_too(self):
+        """#8686: the decline branch hard-coded "currently OFF" and never read
+        the flag.
+
+        The decline confirmation is the sentence a user reads after saying no,
+        and it used to assert "nothing will be recorded ... currently OFF"
+        UNCONDITIONALLY — so a user whose recording was still ON was told the
+        opposite of the truth, in the one message that exists to tell them what
+        our recording state is. The caller already passed the live flag; the
+        template simply never used it.
+
+        Mutation: render `decline_state_off` unconditionally (drop the
+        `recording is True` branch) -> the ON case claims OFF and this reds.
+        """
+        on = cd.render_declined_confirmation(
+            harness="pi", hosted=False, recording=True)
+        assert "is ON" in on and "still being recorded" in on, on
+        assert "currently OFF" not in on, (
+            "a declined user whose recording is still ON is told it is OFF — "
+            "the #8686 defect")
+        assert "Nothing will be recorded" not in on, (
+            "the decline asserts nothing will be recorded while recording is "
+            "ON — a false promise in the same sentence")
+        off = cd.render_declined_confirmation(
+            harness="pi", hosted=False, recording=False)
+        assert "is OFF" in off and "Nothing will be recorded" in off, off
+        unknown = cd.render_declined_confirmation(
+            harness="pi", hosted=False, recording=None)
+        assert "could not read" in unknown, (
+            "an unread flag must be its OWN wording — not the OFF default in "
+            "disguise")
+        assert "currently OFF" not in unknown, unknown
+
     def test_the_rendered_facts_name_where_sessions_go_and_where_to_stop(self):
         """Every fact the user needs is present: what is recorded, the beacon,
         the destination, the off-switch and the view/delete home."""
@@ -199,7 +232,7 @@ class TestRuntimeDrivenRender:
             assert fact in text, f"the disclosure omits {fact!r}: {text}"
 
     def test_the_first_capture_line_is_the_pinned_w6_wording(self):
-        """The once-per-org line (§7) keeps the shipped wording while its home
+        """The once-per-org line (§8) keeps the shipped wording while its home
         moves into the JSON. Mutation: paraphrase the template."""
         assert cd.render_first_capture_line(
             harness="pi", hosted=True, api_host="api.example.com") == (
@@ -440,3 +473,97 @@ class TestCliRender:
             "a keyless install must not claim the hosted variant")
         assert body["kind"] == "disclosure"
         assert body["text"] == body["disclosure"]
+
+
+class TestSelfHostedStateShape:
+    """#8741: the CLI must read BOTH state shapes.
+
+    The hosted route wraps its projection in an ``"onboarding"`` envelope. The
+    self-hosted route returns it FLAT — there is no control-plane envelope to
+    wrap — and its operational keys are nested under ``"operational"``.
+
+    Reading only the hosted shape made the reader fall through to the default
+    (ON, #1927) and tell a self-hosted user their recording was ON while the
+    stored setting said OFF. That is the exact false statement this disclosure
+    exists to prevent, reintroduced by a shape mismatch rather than by a lie.
+    """
+
+    class _Resp:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    @pytest.fixture()
+    def selfhosted(self, tmp_path, monkeypatch):
+        for var in ("TORTOISE_API_KEY", "TORTOISE_MCP_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "test-key")
+        monkeypatch.setenv("TORTOISE_API_URL", "http://127.0.0.1:9")
+        return tmp_path
+
+    def _serve(self, monkeypatch, body: dict):
+        import json as _json
+        import urllib.request as _url
+
+        payload = _json.dumps(body).encode()
+        monkeypatch.setattr(_url, "urlopen",
+                            lambda req, timeout=None: self._Resp(payload))
+
+    def _invoke(self, capsys, **argv):
+        import argparse
+
+        from tortoise.__main__ import _cmd_session_disclosure
+
+        args = argparse.Namespace(**{"harness": "claude", "kind": "disclosure",
+                                     "json": True, **argv})
+        rc = _cmd_session_disclosure(args)
+        out, _err = capsys.readouterr()
+        return rc, out
+
+    def test_a_flat_selfhost_read_shows_the_real_setting(
+            self, selfhosted, capsys, monkeypatch):
+        """Mutation: revert to `body.get("onboarding") or {}` and this reads
+        session_recording=True — the user told ON while the store says OFF."""
+        self._serve(monkeypatch, {
+            "org_id": "selfhost", "fork": "self",
+            "operational": {"session_recording": False},
+        })
+        rc, out = self._invoke(capsys, kind="declined")
+        import json as _json
+        assert rc == 0
+        assert _json.loads(out)["session_recording"] is False, out
+        assert "OFF" in _json.loads(out)["text"], out
+
+    def test_a_graph_down_operational_read_is_unknown_never_ON(
+            self, selfhosted, capsys, monkeypatch):
+        """'unavailable' is a VALUE, not an empty dict — and it must not decay
+        into the default ON, which would assert a state nobody observed."""
+        self._serve(monkeypatch, {
+            "org_id": "selfhost", "fork": "unavailable",
+            "operational": "unavailable",
+        })
+        rc, out = self._invoke(capsys, kind="disclosure")
+        import json as _json
+        assert rc == 0
+        assert _json.loads(out)["session_recording"] is None, out
+        assert _json.loads(out)["state_read"] == "unavailable", out
+
+    def test_the_hosted_envelope_still_reads(self, selfhosted, capsys, monkeypatch):
+        """The shape that already worked must not regress: the hosted route
+        wraps the projection in "onboarding"."""
+        self._serve(monkeypatch, {
+            "onboarding": {"session_recording": False},
+        })
+        rc, out = self._invoke(capsys, kind="declined")
+        import json as _json
+        assert rc == 0
+        assert _json.loads(out)["session_recording"] is False, out

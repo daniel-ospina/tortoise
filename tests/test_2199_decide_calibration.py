@@ -5,7 +5,10 @@ criteria/findings → mitigate → rank) gets a ranking on the FIRST attempt:
 decision parts (option/criterion/evidence/decision) filed through the decide
 tooling are born LIVE with an explicit, provenance-recorded starting belief
 ('medium' = Beta(3,1) stamped ``system-default``) unless the author passes a
-custom ``credibility`` (stamped ``set-by-author``). The old hidden
+custom ``credibility`` (stamped ``set-by-author``) — a validated LABEL under the
+#398 owner ruling (2026-10-12), which ADDS one weak authored-assertion body to
+the point's baseline (the #2199 default for a decide part) rather than
+replacing it or selecting the ladder tier the word names. The old hidden
 promote/calibrate chores are gone and the CalibrationError fail-closed gate
 (#344/#1212) still fires ONLY where a live evidence point genuinely has no
 baseline (e.g. document-extracted claims whose source is untiered).
@@ -37,6 +40,7 @@ from tortoise.sdk import (
     DECIDE_DEFAULT_CREDIBILITY,
     TortoiseSDK,
 )
+from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
 
 # The graph-scripts dir has a dash — import the migration under test via
 # importlib (same pattern as tests/test_remove_context_migration.py).
@@ -144,11 +148,17 @@ class TestIngestAutoPreservesDecideBaseline:
         """#1088 (review P1): ingest must NOT inject a status into a no-status
         DECIDE-PART item under auto — an injected status sets explicit_status
         in create_point and silently disables the #2199 system-default
-        baseline. A non-decide-part no-status item gets no injected status
-        either, and is born live under the #1088 owner ruling.
+        baseline. The non-decide-part item is the operator connection's
+        SOURCE, so it gets no injected status either and is born live under
+        the #1088 owner ruling.
 
-        MUTATION THAT REDS THIS TEST: inject a status into a decide-part item
-        (which would set explicit_status and drop the system-default
+        MUTATION THAT REDS THIS TEST: dropping the
+        ``DECIDE_PART_KINDS | GOAL_KINDS`` exemption from the auto
+        target-draft branch. The operator connection below makes ``opt`` an
+        ``_auto_target``, so the exemption is the ONLY thing keeping it out
+        of the injected-draft arm — without it ``opt`` reads draft and gets
+        no baseline (the injected status sets explicit_status in
+        create_point, which silently disables the #2199 system-default
         baseline).
         """
         bundle = {
@@ -157,43 +167,73 @@ class TestIngestAutoPreservesDecideBaseline:
                 {"ref": "plain", "kind": "statement",
                  "content": "a plain no-status claim"},
             ],
+            # The connection is what makes `opt` an `_auto_target`; with no
+            # connection the exemption branch is never reached and the
+            # mutation above survives (issue #7981 row 1).
+            "connections": [
+                {"from": "plain", "to": "opt", "operator": "IMPL"},
+            ],
         }
         res = sdk.ingest(bundle, promotion_policy="auto")
         opt_id, plain_id = res["ids"]["points"]
         opt = sdk.get_point(opt_id)
-        assert opt["status"] == "live"
+        assert opt["status"] == "live", "a decide-part target is exempt (#7856)"
         assert opt["baseline_set"] is True
         assert opt["ep_alpha"] == 3
         assert opt["ep_beta"] == 1
         assert opt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
-        # The non-decide-part item is not a connection source and gets no
-        # injected status under auto — born live per the #1088 ruling.
+        # The non-decide-part item is the connection SOURCE, so under auto
+        # it gets no injected status — born live per the #1088 ruling.
         assert sdk.get_point(plain_id)["status"] == "live"
 
 
 # ── Custom override → set-by-author (indicator 2) ─────────────────
 
 class TestCustomCredibility:
-    def test_ladder_word_stamps_set_by_author(self, sdk):
+    def test_ladder_word_stamps_set_by_author_weak_body(self, sdk):
+        """CHANGED ASSERTION (pre-existing, main): this used to pin gold -> (10,1).
+        #398 owner ruling 2026-10-12 makes the word a LABEL, not a strength, so
+        an authored assertion is ONE weak body. That body is a SOURCE — it ADDS
+        to the decide part's #2199 default Beta(3,1) rather than replacing it,
+        so gold -> 3 + weak body. The ladder word is still kept on the
+        ``credibility`` property and the provenance token is unchanged.
+        """
         p = sdk.create_point("criterion", "Security", credibility="gold")
         pt = sdk.get_point(p["id"])
         assert pt["status"] == "live"
-        assert pt["ep_alpha"] == 10 and pt["ep_beta"] == 1  # gold = (10,1)
+        assert pt["ep_alpha"] == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC)
+        assert pt["ep_beta"] == 1
         assert pt["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
+        assert pt["credibility"] == "T0"  # the declared word, kept as a label
 
-    def test_ladder_word_equals_default_betas_still_set_by_author(self, sdk):
-        """credibility='medium' == the default Beta(3,1) — but the provenance
-        differs: an explicit statement is set-by-author, not system-default."""
+    def test_word_adds_to_the_system_default_never_below_it(self, sdk):
+        """The word is a SOURCE: it ADDS one weak evidence body ON TOP of the
+        #2199 system default Beta(3,1) and never subtracts. A labelled decide
+        part is therefore always >= the same part unlabelled — this is the
+        inversion the correction removes (medium used to REPLACE the default and
+        land at 0.5238, below the unlabelled 0.75). Provenance still differs: an
+        explicit word is set-by-author, the no-word default system-default.
+        """
         p = sdk.create_point("option", "Opt", credibility="medium")
         pt = sdk.get_point(p["id"])
-        assert (pt["ep_alpha"], pt["ep_beta"]) == (3, 1)
+        assert pt["ep_alpha"] == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC)
         assert pt["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
+        d = sdk.create_point("option", "Opt with no word")
+        dt = sdk.get_point(d["id"])
+        assert (dt["ep_alpha"], dt["ep_beta"]) == (3, 1)
+        assert dt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
+        # the owner ruling: a labelled claim is never weaker than an unlabelled one
+        assert pt["ep_alpha"] >= dt["ep_alpha"]
 
     def test_tier_and_numeric_aliases_accepted(self, sdk):
+        """All ladder spellings stay ACCEPTED and validated — they now all
+        weigh the same weak body ADDED to the decide default (CHANGED: main
+        pinned T2 -> 3, low -> 2; the first #398 pass replaced the default)."""
         p_t = sdk.create_point("evidence", "via T2", credibility="T2")
         p_n = sdk.create_point("evidence", "via 3", credibility=3)
-        assert sdk.get_point(p_t["id"])["ep_alpha"] == 3
-        assert sdk.get_point(p_n["id"])["ep_alpha"] == 2  # low=(2,1)
+        for p in (p_t, p_n):
+            assert sdk.get_point(p["id"])["ep_alpha"] == pytest.approx(
+                3.0 + AUTHOR_ASSERTION_WEAK_PC)
 
     def test_unknown_word_fails_loud_before_any_write(self, sdk):
         """A typo'd ladder word raises — never the pre-#2199 silent Beta(1,1)."""
@@ -346,7 +386,14 @@ class TestDocumentedDecideFlowFirstTry:
         assert mit2["id"] == mit["id"]
         pt2 = sdk.get_point(mit["id"])
         assert pt2["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
-        assert pt2["ep_alpha"] == 2 and pt2["ep_beta"] == 1
+        # CHANGED ASSERTION (pre-existing, main): the word ADDS to the
+        # mitigation's #2199 system default Beta(3,1) rather than replacing it
+        # — main pinned low -> Beta(2,1); the first #398 pass replaced the
+        # default and left 1.1 (0.5238), BELOW the 3.0 (0.75) unlabelled case.
+        # Every authored word now leaves a mitigation at 3 + the weak body.
+        assert pt2["ep_alpha"] == pytest.approx(
+            3.0 + AUTHOR_ASSERTION_WEAK_PC)
+        assert pt2["ep_beta"] == 1
 
     def test_remitigating_legacy_uncalibrated_mitigation_heals_it(self, sdk):
         """Re-mitigating a PRE-#2199 mitigation (live statement, no baseline)

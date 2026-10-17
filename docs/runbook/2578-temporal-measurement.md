@@ -154,9 +154,25 @@ pairs, 6–0), with admission-attributed failures 52 → 30, refusal rate
 also lifts (answerable 0 → 5 of 52; p=0.0625, 5–0) — it is the same
 rerank family with the pool left at 40. `tr_top_k` 16, `tr_top_k20`, `c2-on`
 and `pool-only-isolation` are all null on answerable-correct (0/52).
-`pool-only-isolation` is the clean isolation result — widening the pool
-WITHOUT reranking changes nothing, answerable-correct byte-identical to
-baseline (0/52). `tr_top_k24` sits at the edge: 1/52 answerable-correct
+⛔ **`pool-only-isolation` is NOT a clean isolation result — its conclusion
+is RETRACTED (#2992 defect 2).** Since #1947 the baseline already fetches 120,
+so the arm's pre-registered depth control (`--rerank-pool 120`, rerank OFF)
+resolves to the **same fetch depth** as `A-default`: `pool_depth.requested`
+is 120 on both arms, the `gold_admitted` vector is identical and the
+`context_tokens` mean is 94.9 on both. The two arms are separate runs, so
+they are **not** byte-identical: the per-row `answer` text differs on 51 of
+55 rows, the deduped `pool_depth.pool_size` on 22 of 55, and one
+`reader_refusal` (`gpt4_fe651585_abs`). The retraction rests on the DEPTH
+equality — the same applied fetch depth — which is what makes the arm a
+no-op. "Widening the pool
+WITHOUT reranking changes nothing" therefore carries **no evidence** — the
+pool-depth lever is *untested on this slice*, not null. A valid depth control
+needs a baseline at a shallower fetch depth (`TORTOISE_LME_POOL_SIZE` below
+the arm) or an arm deeper than the baseline (e.g. 240). The generated
+gate output carries the retraction in its "⛔ Retracted arms" section —
+emitted only when that run's own measured depth confirms the no-op — and
+`tests/longmem_eval/test_temporal_admission_trace.py` pins the vacuity.
+`tr_top_k24` sits at the edge: 1/52 answerable-correct
 (one question), 1 discordant pair, p=1.0000 — reported as a single-question
 movement, not an effect.
 
@@ -189,6 +205,30 @@ movement, not an effect.
 5. Conversion is NOT observable in the 133-Q baseline: gold was admitted
    on 0 of 133 questions, so the channel is empty by construction (0
    conv-refusal / 0 conv-wrong is "not measurable", not "not binding").
+6. ⛔ **`cap3-only`'s fetch depth was 40, not the baseline 120 (#2992
+   defect 1 — FIXED at HEAD).** The committed `cap3-only` receipt (rerank
+   ON, no explicit `--rerank-pool`) shows `pool_depth.requested = 40`
+   because the rerank branch replaced the #1947 baseline with the 40-item
+   rerank default instead of taking `max(rerank_pool, baseline)`. The arm's
+   own pre-registered intent was "per-session rerank cap 2→3 at pool 40",
+   so its published result stands, but the defect is real for ANY
+   reranker-on configuration that omits `--rerank-pool`: it silently
+   discarded the deepened pool. Fixed by flooring the arm at the resolved
+   baseline (`tools/longmem_eval/retrieve.py::resolve_rerank_arm_pool_limit`;
+   `tools/longmem_eval/run.py::_resolve_rerank` records the SAME floored
+   depth, so methodology == actual == fingerprint). The committed receipts
+   are historical and are NOT regenerated. **Design consequence (recorded,
+   #2992 review P2):** the floor also collapses the pre-registered
+   `cap3-only` arm (`--rerank --rerank-cap 3`, no `--rerank-pool`) into
+   `applied-rerank` (`--rerank --rerank-pool 120 --rerank-cap 3`) — both
+   resolve to the identical effective config (pool 120, cap 3), so
+   `applied-rerank`'s explicit `--rerank-pool 120` is redundant and
+   `cap3-only` no longer isolates the cap from pool depth. A re-run of
+   `cap3-only` is therefore **not** a distinct control; the committed
+   40-vs-120 depth contrast is historical, and any future depth control must
+   use a shallower baseline (`TORTOISE_LME_POOL_SIZE` below the arm) or an
+   explicitly deeper `--rerank-pool`. Pinned by
+   `tests/test_longmem_rerank.py::test_cap3_only_arm_collapses_into_applied_rerank`.
 
 ## 0/13 annotation
 

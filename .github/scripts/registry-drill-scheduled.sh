@@ -15,6 +15,19 @@
 # the scheduled job green/red.
 set -euo pipefail
 
+# #3293 review: the API response is app-controlled (a failed restore echoes a
+# signed URL / credential) and this body is echoed into a PUBLIC Actions log.
+# Scrub it at this boundary — the same rule registry-cron.sh applies with its
+# redact() — so the echo never publishes a credential even if the server-side
+# detail scrub is bypassed. Mirrors tortoise/security.redact_for_publication.
+redact_response() { # text -> text safe for a public Actions log
+  printf '%s' "$1" | sed -E \
+    -e 's#([?&](token|key|secret|sig|signature|api_key|apikey|access_token|credential|password|passwd|x-amz-signature|x-amz-credential|x-amz-security-token)=)[^&"[:space:]<>]*#\1<redacted>#Ig' \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^@[:space:]]*@#\1<redacted>@#g' \
+    -e 's#(^|[^A-Za-z0-9_])(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|AKIA|ASIA|sk-)[A-Za-z0-9_]+#\1\2<redacted>#g' \
+    -e 's#[0-9]{6,12}:[A-Za-z0-9_-]{30,}#<redacted>#g' || true
+}
+
 API="${INTERNAL_API_URL:-}"
 KEY="${FASTAPI_INTERNAL_KEY:-}"
 
@@ -33,7 +46,7 @@ rm -f "$TMP"
 STATUS="$(printf '%s' "$RESP" | jq -r '.status // "error"' 2>/dev/null || echo error)"
 DUR="$(printf '%s' "$RESP" | jq -r '.duration_s // empty' 2>/dev/null || true)"
 echo "[drill-cron] http=$HTTP status=$STATUS duration=${DUR:-n/a}s"
-echo "[drill-cron] $RESP"
+echo "[drill-cron] $(redact_response "$RESP")"
 
 case "$HTTP" in
   429)

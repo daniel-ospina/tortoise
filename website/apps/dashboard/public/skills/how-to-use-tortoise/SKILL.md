@@ -408,23 +408,38 @@ A 500ms timeout caps all strategies. If all FalkorDB strategies fail, the system
 
 ## Creating Relationships with Semantic Labels
 
-When connecting Points with operators, use the `label` parameter to add domain context. **Direction is an explicit flag, not derived from the label** (ONTOLOGY v3.1 §3.1, §8 — #189):
+A relationship has **three layers** (ONTOLOGY §8): the **mechanism** (`IMPL` / `NAND`) and the
+**direction** it records; the **semantics** (the meaning vocabulary); and the **predicate** — the
+specific verb, which is the `label` parameter. **Declare the meaning and the write path resolves the
+direction** — the model's chain step that used to have no way to run (#7852 W1):
 
-| Semantic Type | Mechanism | Typical Direction | When to Use |
+| semantics (Layer 2) | mechanism | resolves to | When to Use |
 |--------------|-----------|-------------------|-------------|
-| **hasPart** | IMPL | bidirectional (parts↔whole) | Composition — "Epic hasPart Issue", "Product hasPart Feature" |
 | **addresses** | IMPL | unidirectional (A→B) | "Feature addresses Need", "Task implements Feature" |
-| **opposes** | NAND | unidirectional (A→B) | "Feature competesWith Competitor", "Issue blocks Issue" |
+| **supports** | IMPL | unidirectional (A→B) | Evidence bears on a claim |
+| **refutes** | NAND | unidirectional (A→B) | The directed attack — attacker's truth penalizes the target, no back-pressure |
+| **mutuallySupportive** | IMPL | bidirectional (A↔B) | Each reinforces the other |
+| **mutuallyExclusive** | NAND | bidirectional (A↔B) | "A and B can't both be true" — "Feature competesWith Competitor" |
+| **hasPart** | IMPL | bidirectional (parts↔whole) | Composition — "Epic hasPart Issue", "Product hasPart Feature" |
+| **related** / **transacts** | — | `-` in the model; the runtime records the caller/default direction | Neutral association. The model says no confidence transfers — but the runtime stores no `-` value yet, so the write path falls through and records `bidirectional` (unless you pass `direction=`). The four-value **storage** migration is the open half of #7852; for a genuinely transfer-free association use the plain (operator-less) `related` edge. |
 
-**Direction is explicit, not label-derived.** `create_operator(..., direction="bidirectional"|"unidirectional")` controls EP back-propagation: `bidirectional` (default) propagates both ways; `unidirectional` is source→target only. The `label` carries domain semantics only — EP reads `direction`, never the label. NAND defaults to bidirectional but also supports unidirectional. (Hosted: `tortoise_create_operator`; self-hosted: `sdk.create_operator`.)
+**`semantics` is resolved by the write path, and the basis it used is recorded** on the operator as
+`direction_basis` (`explicit` = the caller stated a non-default direction, `semantics` = the declared
+meaning resolved it, `default` = neither). An explicit non-default `direction=` still outranks the
+meaning; the signature default (`bidirectional`) does not. `label` is a **different input** — the
+Layer-3 predicate (the domain verb: `fixes`, `deploysTo`, `bearsOn`) — and it does not affect the
+direction. An unknown word **warns and the write proceeds** (warn-not-block, never refuses); a retired
+word (e.g. `opposes`) resolves to its canonical replacement. (Hosted: `tortoise_create_operator`;
+self-hosted: `sdk.create_operator`.)
 
 **Backward compatibility:** existing operators without a `direction` property default to bidirectional in EP (with a warning log). Self-hosted: run `graph-scripts/migrate_direction.py` to backfill `direction` on existing operators per their old semantics (NAND / hasPart / part-of → bidirectional; other IMPL → unidirectional). Hosted tenants do not run graph-scripts — the hosted API does not expose them.
 
 **Strength:** Set via `set_point_baseline(operator_id, alpha, beta)` (hosted: `tortoise_set_point_baseline`; self-hosted: `sdk.set_point_baseline`). High alpha = strong support. High beta = strong contradiction.
 
 ```python
-# Create a relationship with semantic context + explicit direction
-op = sdk.create_operator("IMPL", feature_id, [need_id], label="addresses", direction="unidirectional")
+# The meaning resolves the direction — no need to state it
+op = sdk.create_operator("IMPL", feature_id, [need_id],
+                         semantics="addresses", label="implements")
 sdk.set_point_baseline(op["id"], alpha=10, beta=1)  # strong support
 ```
 
@@ -597,7 +612,7 @@ and terminal statuses too). The sanctioned promotion routes:
 - `promotion_policy="auto"` opts into #131 parity (source auto-promotion on
   first edge write) — the migration path from the old default.
 
-The response carries `warnings` (never fatal) — see the ELEVEN-key table.
+The response carries `warnings` (never fatal) — see the TWELVE-key table.
 
 ## Idempotent resubmission
 
@@ -621,9 +636,24 @@ by the retry (content+kind fallback scan), never duplicated.
 
 | Connection | Route | Result |
 |---|---|---|
-| Plain `operator: IMPL/NAND` | Direct edge (operator-less) | `{"direct_edge", "from", "to", "deduped"}` |
+| Plain `operator: IMPL/NAND` — **any endpoint is a plain `:Point`** | Operator point | `{"operator_id", "deduped"}` |
+| Plain `operator: IMPL/NAND` — **both endpoints non-Point** (e.g. `Object↔Object`) | Direct edge (operator-less) | `{"direct_edge", "from", "to", "deduped"}` |
 | `mitigation` / `reify: true` | Operator point | `{"operator_id", "deduped"}` |
 | `relation` | Structural edge | `{"relation", "from", "to", "deduped"}` |
+
+⛔ **Point↔Point relations are operator-mediated** (owner ruling 2026-10-13, tortoise #8499) — an
+operator-less edge carries no operator node, so it can be neither mitigated nor annotated, and it
+cannot carry the epistemic weighting a Point's relations claim. (Durability was the ruling's
+original third argument — plain direct edges were journaled but never replayed, so `rebuild_all`
+lost them — but #8499 landed the `DirectEdgeCreated` replay fold, so they survive a rebuild now
+too; the ruling does not rest on that argument any more.) The direct shape is reserved for
+`Object↔Object`, where no epistemic weighting is claimed. Write `reify: true` to say the operator
+route explicitly; a plain spelling that gets re-routed is reported as the `point_mediated_route`
+warning. Note `ingest`'s connection contract admits only plain `:Point` endpoints today (sole
+carve-out: an `Event` on the operator route), so in practice every plain `IMPL`/`NAND` in a bundle
+is operator-mediated and returns the bare operator-id string — the `{direct_edge, from, to}`
+descriptor is what `create_direct_edge` returns for an `Object↔Object` pair, while `create_edge`
+writes a *relation* edge (`{relation, from, to}`) instead.
 
 Multi-item `to` on a plain IMPL/NAND connection: use `reify:true` /
 mitigation (the operator route) or split into singular connections.
@@ -638,7 +668,7 @@ mitigation (the operator route) or split into singular connections.
   rejections — migrate via `reify:true` ×2 (the operator route preserves
   both labels).
 
-## Warnings — the ELEVEN keys (closed set)
+## Warnings — the TWELVE keys (closed set)
 
 `warnings` entries are key-prefixed strings. A key outside this table is a
 divergence — report it:
@@ -647,7 +677,8 @@ divergence — report it:
 · `mitigation_drift_duplicate` · `nfc_straddle_duplicate` ·
 `mitigation_strength_change` · `partial_operator_residue` ·
 `operator_absorb_completed` · `label_dropped_resubmit` ·
-`direction_dropped_resubmit` · `direction_changed_resubmit`
+`direction_dropped_resubmit` · `direction_changed_resubmit` ·
+`point_mediated_route`
 
 ## Query-back verification (J8 exit state)
 

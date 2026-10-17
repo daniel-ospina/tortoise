@@ -402,9 +402,10 @@ emit_codex_agents_block() {
   being asked to: after a decision or a research finding, file it; search the graph
   before answering from memory; say plainly when nothing relevant is stored.
 - When the user says \"Set up Tortoise\", follow the onboarding instructions at
-  $SKILLS_BASE/tortoise-onboarding/SKILL.md and verify with tortoise_health
-  before reporting done. Onboarding is delivered as INSTRUCTIONS, not as an
-  installed skill.
+  $SKILLS_BASE/tortoise-onboarding/SKILL.md. Write the MCP config, restart the
+  client so the new session reads it, then verify with tortoise_health before
+  reporting done. Onboarding is delivered as INSTRUCTIONS, not as an installed
+  skill.
 - First-time MCP calls may prompt for approval — tortoise_health and the read tools
   are safe to allow.
 ${me}" > "$block"

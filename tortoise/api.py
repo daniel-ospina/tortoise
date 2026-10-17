@@ -13,7 +13,9 @@ import logging
 
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
-from .projection import fold
+
+# #7951 §17.1: the live-write scope the journal-first doors open around the fold.
+from .projection import _live_write_scope, fold
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,10 @@ class EventAPI:
             event["actor_user_id"] = actor
         self.log.append(event)
         if self.projection is not None:
-            self.projection.apply(event)
+            # #7951 §17.1: journal-first door — the append above is the COMMIT
+            # POINT, so the fold runs inside the live-write scope.
+            with _live_write_scope("event_api._emit"):
+                self.projection.apply(event)
         return event
 
     def emit_belief(self, type_: str, **payload) -> None:
@@ -457,7 +462,7 @@ class EventAPI:
         indexer passes the real ``corpus://`` Source url so no phantom Source
         is merged — the override rides the JOURNALED event, so replay honors
         it); ``domain`` is persisted as ``d.domain`` via ``_persist_extra_props``
-        (intentionally NOT in ``_DOC_RETIRED`` — the persistence IS the
+        (intentionally NOT in ``_DOC_PASSTHROUGH_HANDLED`` — the persistence IS the
         intent); ``suppress_embedding`` skips the unconditional embedding call
         (new-path docs; the legacy branch computes as today — SC4).
         #5422: ``content_hash`` is the document's **version anchor** on the

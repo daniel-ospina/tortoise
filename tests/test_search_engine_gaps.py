@@ -358,7 +358,8 @@ class TestFallbackTfidf:
         mock_results = [{"id": "p0", "content": "c0", "similarity": 0.5, "snippet": "c0"}]
         with mock.patch("tortoise.embeddings.search_points", return_value=mock_results) as sp:
             fallback_tfidf("query", points, limit=3)
-            sp.assert_called_once_with("query", points, threshold=0.0, limit=3)
+            sp.assert_called_once_with("query", points, threshold=0.0, limit=3,
+                                       force_sparse=False)
 
     def test_heavy_imports_are_serialized(self, monkeypatch):
         """#5718: the sparse sklearn import and the embedder's torch import

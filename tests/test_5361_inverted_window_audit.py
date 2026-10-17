@@ -1,7 +1,7 @@
 """#5361 — ``audit_graph`` must report Points with an INVERTED validity window.
 
 A persisted window whose END precedes its START (``validTo < validFrom``)
-covers no instant: ``restore_point_at``'s ``_covers`` requires
+covers no instant: ``get_historical_knowledge``'s ``_covers`` requires
 ``validFrom <= t <= validTo``, so such a Point is silently invisible to every
 temporal query while surfaces report honest absence. The audit must surface how
 many Points carry one.

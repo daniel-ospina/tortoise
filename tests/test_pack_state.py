@@ -25,6 +25,7 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 import pytest  # noqa: I001
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered
 from tortoise.pack_state import (
     DEFAULT_STARTER_PACKS, ensure_tenant_packs, get_tenant_packs,
 )
@@ -235,7 +236,12 @@ class TestGetTenantPacks:
                 self._fail_next = True
 
             def query(self, *a, **kw):
-                if self._fail_next:
+                # #2728/#8648: fail the first PackInstall MERGE specifically —
+                # `ensure_tenant_packs` now READS the ``:PackSelection`` marker
+                # first, and a bare "first query" failure would trip that read
+                # instead of the namespace activation this test is about.
+                cypher = str(a[0]) if a else str(kw.get("cypher", ""))
+                if self._fail_next and "MERGE" in cypher:
                     self._fail_next = False
                     raise RuntimeError("simulated MERGE failure")
                 return self._g.query(*a, **kw)
@@ -533,7 +539,8 @@ class TestGetV1Packs:
         tc, _, _ = supabase_client
         app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "team-free-001", "key_id": "k1", "tier": "free"}
-        r = tc.get("/v1/packs")
+        r = require_answered(tc.get("/v1/packs"),
+                             what="GET /v1/packs answered")
         assert r.status_code == 200, r.text
         packs = r.json()["packs"]
         # get_current_org override team has no graph data yet → self-heal
@@ -548,7 +555,8 @@ class TestGetV1Packs:
         tc, _, _ = supabase_client
         app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "team-free-001", "key_id": "k1", "tier": "free"}
-        r = tc.get("/v1/packs")
+        r = require_answered(tc.get("/v1/packs"),
+                             what="GET /v1/packs answered")
         assert r.status_code == 200, r.text
         assert r.json() == {"packs": []}
 

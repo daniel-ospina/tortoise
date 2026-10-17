@@ -592,7 +592,7 @@ def event_retention_interval() -> int:
     ``asyncio.sleep(0)``/``sleep(-1)`` return immediately, hammering
     ``_sweep_events``/``_purge_deleted_orgs`` with no delay; in the SDK lazy
     purge the gate ``now - _EVENT_PURGE_LAST < interval`` is always false, so
-    every ``events_poll`` issued a DELETE. A non-numeric value also raised out
+    every ``poll_events`` issued a DELETE. A non-numeric value also raised out
     of the SDK poll. Anything that is not a positive whole number of seconds
     falls back to ``EVENT_RETENTION_INTERVAL_DEFAULT_S`` with a warning.
     """
@@ -611,7 +611,7 @@ def event_retention_interval() -> int:
             "TORTOISE_EVENT_RETENTION_INTERVAL=%r is not a positive number "
             "of seconds — using %ds; a zero/negative interval makes "
             "asyncio.sleep() return immediately and the SDK purge gate always "
-            "false (a DELETE on every events_poll)",
+            "false (a DELETE on every poll_events)",
             raw, EVENT_RETENTION_INTERVAL_DEFAULT_S)
         return EVENT_RETENTION_INTERVAL_DEFAULT_S
     return value
@@ -671,6 +671,46 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
     "Audit events that reached no durable sink (#7924 review)",
     ["reason"],
 )
+# #4095: an allowlist-dropped telemetry key — the same loss class as the audit
+# drop above, and the exact defect #3821 fixed half-way. #3821's choke point
+# (``hosted_api._report_unregistered``) counts, warns once per site and never
+# forwards, but its ``_TELEMETRY_DROP_COUNTS`` structure had NO production
+# reader: it is process-local, lost on every deploy, and was read only by
+# ``tests/test_telemetry_registration.py``. So the "always counts" guarantee
+# was observable in tests and nowhere else — #3677's loss class ("a signal with
+# no channel") re-created one layer up, exactly the D5a lesson from #3997.
+#
+# Single writer: ``record_telemetry_drop`` (the #501/#3677 house shape — the
+# emit path never touches the metric object directly), so the label shape lives
+# in one place. It rides ``metrics()`` for the SAME reason #7924's audit drop
+# does: the HOSTED app exposes no ``/metrics`` route, so the health dict is the
+# surface the fleet actually serves (``mcp_server.tortoise_health`` →
+# ``monitoring.metrics``), and ``/metrics`` carries the text form wherever a
+# scrape exists (``tortoise health-server``).
+TELEMETRY_DROP_COUNT = Counter(
+    "tortoise_telemetry_drops_total",
+    "Telemetry keys dropped by an allowlist filter, by site (#4095)",
+    ["site"],
+)
+# BOUNDED CARDINALITY, owned HERE and not delegated to the caller: the label is
+# rendered by ``hosted_api`` from a code-literal ``(where, subject)`` pair at
+# every call site TODAY, but one of them feeds request-body FIELD NAMES into the
+# fingerprint, and a future site could derive the whole label from traffic. Past
+# the cap every further site folds into ONE shared child, so an authenticated
+# caller cannot grow the Prometheus child set (a scrape-cost bug) by sending
+# unique unknown field names — the ``EGRESS_*`` doctrine.
+TELEMETRY_DROP_MAX_SITES = 64
+#: Where excess site labels fold. A real label can never RENDER as this value:
+#: ``hosted_api._telemetry_drop_site_label`` always joins two parts with ``|``,
+#: so every admitted label contains one and this sentinel is unreachable by
+#: construction (unlike the compute twin's ``__other__``, whose collision with a
+#: legitimate label the #5420 comment has to reason about).
+TELEMETRY_DROP_OTHER = "<other>"
+#: Sites admitted so far. Membership IS the cap registry, so a warm site costs
+#: one set lookup with no lock (the common case: drops are rare, and the same
+#: few sites repeat); the lock is taken only while ADMITTING a new site.
+_TELEMETRY_DROP_SITES: set[str] = set()
+_TELEMETRY_DROP_SITE_LOCK = threading.Lock()
 # #3498 item 1: event-loop LAG = how late each heartbeat tick actually fired
 # relative to its requested interval. The heartbeat (below) already proves the
 # loop is SCHEDULING; this histogram records HOW FAR off schedule it is, so a
@@ -1260,6 +1300,76 @@ def audit_fallback_drop_counts() -> dict[str, int]:
     return _collect_by_label(AUDIT_FALLBACK_DROP_COUNT, "reason")
 
 
+def _admit_telemetry_drop_site(label: str) -> str:
+    """Admit ``label`` as a telemetry-drop metric child, folding past the cap.
+
+    The bounded-admission form for the #4095 drop dimension. It is hard-bound to
+    ``_TELEMETRY_DROP_SITE_LOCK`` and is therefore a THIRD lock-bound twin beside
+    ``_admit_egress_label`` (#5315) and ``_admit_bounded_label``
+    (#4490/#5420), NOT a generic helper: each admits under its OWN module lock,
+    so one shared body would make one dimension's admission block on another's
+    and let a change to one lock change the other's behaviour — the reason the
+    compute twin records itself as "COMPUTE-BOUND, NOT GENERIC". It carries the
+    compute twin's unlocked folded-label short-circuit (the egress twin lacks
+    it): a label already folded must never take the lock again, or every later
+    drop at that site pays a module-global lock for the process lifetime.
+
+    The FILTER is deliberately NOT copied — ``record_telemetry_drop`` reuses the
+    shared ``_utf8_safe`` sanitizer, per #5420's lesson (a duplicated
+    security-relevant filter drifts on a one-sided edit).
+    """
+    if label in _TELEMETRY_DROP_SITES:
+        return label
+    # The sentinel is unreachable as a real label (every rendered label carries
+    # the ``|`` the join inserts), so this branch cannot misfile a legitimate
+    # site the way the compute twin's ``__other__`` collision could.
+    if len(_TELEMETRY_DROP_SITES) >= TELEMETRY_DROP_MAX_SITES:
+        return TELEMETRY_DROP_OTHER
+    with _TELEMETRY_DROP_SITE_LOCK:
+        if label in _TELEMETRY_DROP_SITES:
+            return label
+        if len(_TELEMETRY_DROP_SITES) >= TELEMETRY_DROP_MAX_SITES:
+            _TELEMETRY_DROP_SITES.add(TELEMETRY_DROP_OTHER)
+            return TELEMETRY_DROP_OTHER
+        _TELEMETRY_DROP_SITES.add(label)
+        return label
+
+
+def record_telemetry_drop(site: str) -> None:
+    """Count one allowlist-dropped telemetry key by site (#4095).
+
+    ``site`` is the ``hosted_api._telemetry_drop_site_label`` rendering of a
+    drop site, which is what the internal ``/status`` block keys on too, so the
+    two published surfaces cannot disagree about which site a drop belongs to.
+
+    The label space is bounded HERE rather than trusted from the caller (see
+    ``_admit_telemetry_drop_site``): once ``TELEMETRY_DROP_MAX_SITES`` distinct
+    sites are admitted, every further one folds into ``TELEMETRY_DROP_OTHER``
+    for the process lifetime. Admission is first-come and permanent — eviction
+    would either drop already-counted drops (removing the child) or grow the
+    child set without bound (keeping it).
+
+    A non-``str`` label is coerced rather than refused, but this is NOT a
+    never-raises contract: a raising label reaches the caller, which contains it
+    (``hosted_api._telemetry_count_drop``) because it must not widen
+    ``_report_unregistered``'s raise contract.
+    """
+    label = _admit_telemetry_drop_site(
+        _utf8_safe(site if isinstance(site, str) else str(site)))
+    TELEMETRY_DROP_COUNT.labels(site=label).inc()
+
+
+def telemetry_drop_counts() -> dict[str, int]:
+    """In-process snapshot of ``TELEMETRY_DROP_COUNT``, keyed by site (#4095).
+
+    ``/metrics`` carries the Prometheus text form of the same counter; this is
+    the readable form, published on ``metrics()`` (the surface the hosted app
+    and the MCP ``tortoise_health`` tool serve) so the drops are observable in
+    production instead of only in tests.
+    """
+    return _collect_by_label(TELEMETRY_DROP_COUNT, "site")
+
+
 def record_cost(team: str, cents: int) -> None:
     """Set a team's ALLOCATED fixed/shared SaaS cost for the current month.
 
@@ -1833,6 +1943,59 @@ CONTROL_PLANE_OFFLOAD_LATENCY = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
              CONTROL_PLANE_OFFLOAD_TIMEOUT_S, 30.0),
 )
+# ── #5328: WHICH op a refusal was charged to, not just how many -----------
+#
+# #5840 made saturation COUNTABLE (``CONTROL_PLANE_OFFLOAD_COUNT`` by
+# pool+outcome) and every terminal state RECORDED. That answers "is the pool
+# refusing work". It does not answer "which caller lost its work" — and for
+# this seam those are different remediation, not different wording: the
+# ``best_effort=True`` sites all share the ``telemetry`` pool with
+# irreconcilable consequences per op (``billing_notify`` is an UNRECOVERABLE
+# drop; ``data_source_demand_read`` degrades to a user-visible 503;
+# ``update_last_used`` / ``analytics_event`` / ``github_repos_count`` are
+# display-and-telemetry only). A rising refusal rate at pool granularity
+# cannot tell an operator whether payments are being lost or a display
+# counter is stale, so every site stays blind in exactly the way #5328
+# describes — the op is known only to the bounded ``_CP_OFFLOAD_RECORDS``
+# ring, which nothing reads in production and which evicts.
+#
+# A SEPARATE COUNTER, not an ``op`` label on ``CONTROL_PLANE_OFFLOAD_COUNT``.
+# Adding a label to a published metric changes the series identity of every
+# existing child (dashboards and recording rules are written against
+# pool+outcome), and it would multiply with outcome anyway — the op dimension
+# is only ever needed on the refusal. Keeping it here leaves the #5840
+# contract untouched and bounds this child set to ops that ACTUALLY refuse.
+#
+# WHAT IT COUNTS: only ``bound_miss_refused`` — the terminal state where the
+# callable did not and will not run, i.e. a genuine DROP. ``bound_miss_running``
+# is deliberately NOT counted: the bound abandoned only the await, the worker
+# still completes the callable, and delivery was preserved (the #5840
+# distinction, which exists precisely so the two are not collapsed).
+CONTROL_PLANE_OFFLOAD_REFUSED_COUNT = Counter(
+    "tortoise_control_plane_offload_refusals_total",
+    "Control-plane offload submissions the pool REFUSED, by op and pool "
+    "(#5328) — the callable never ran, so the work is LOST",
+    ["op", "pool"],
+)
+#: Bounded op vocabulary, owned HERE and not trusted from the caller. ``op``
+#: is a code literal at every call site on this tree, so traffic cannot add a
+#: child TODAY — the cap is headroom for that, not a tight fit, because
+#: ``record_control_plane_offload`` accepts any ``str`` and the writer is the
+#: only place that can enforce the bound (the ``TELEMETRY_DROP_MAX_SITES``
+#: doctrine). Past the cap every further op folds into ONE shared child.
+CONTROL_PLANE_OFFLOAD_REFUSED_MAX_OPS = 128
+#: Where excess op labels fold. A real op cannot render as this: every ``op``
+#: on this tree is a code literal of identifiers and dots
+#: (``update_last_used``, ``check_org_limit.points``) and none contains ``<``
+#: or ``>``, so the bucket cannot collide with a legitimate op — the
+#: unreachable-sentinel property ``TELEMETRY_DROP_OTHER`` holds by
+#: construction.
+CONTROL_PLANE_OFFLOAD_REFUSED_OTHER = "<other>"
+#: Ops admitted so far; membership IS the cap registry, so a warm op costs one
+#: set lookup with no lock (the common case: refusals are rare and the same few
+#: ops repeat). The lock is taken only while ADMITTING a new op.
+_CONTROL_PLANE_REFUSED_OPS: set[str] = set()
+_CONTROL_PLANE_REFUSED_OP_LOCK = threading.Lock()
 #: Bounded per-call ``(duration_s, thread_name)`` record for the CONTROL-PLANE
 #: CLIENT itself (#3498 item 2 — the falsifier). Recorded at the httpx choke
 #: point in ``supabase_control.SupabaseControlPlane``, so a call that ran on
@@ -1908,6 +2071,43 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     raise ValueError(f"unknown control-plane pool {pool!r}")
 
 
+def _admit_control_plane_refusal_op(op: str) -> str:
+    """Admit ``op`` as a refusal-counter child, folding past the cap (#5328).
+
+    The bounded-admission form for the refusal dimension. It is hard-bound to
+    ``_CONTROL_PLANE_REFUSED_OP_LOCK`` and is therefore a FOURTH lock-bound
+    twin beside ``_admit_telemetry_drop_site`` (#4095), ``_admit_egress_label``
+    (#5315) and ``_admit_bounded_label`` (#4490/#5420), NOT a generic helper:
+    each admits under its OWN module lock, so one shared body would make one
+    dimension's admission block on another's. It carries the folded-label
+    short-circuit: an op already folded must never take the lock again, or
+    every later refusal at that op pays a module-global lock for the process
+    lifetime.
+
+    Admission is first-come and PERMANENT. Eviction would either drop
+    already-counted refusals (removing the child) or grow the child set
+    without bound (keeping it) — the same choice the telemetry-drop twin
+    records, and not this counter's to make.
+
+    The FILTER is deliberately NOT copied — the writer reuses the shared
+    ``_utf8_safe`` sanitizer, per #5420's lesson (a duplicated
+    security-relevant filter drifts on a one-sided edit).
+    """
+    if op in _CONTROL_PLANE_REFUSED_OPS:
+        return op
+    if len(_CONTROL_PLANE_REFUSED_OPS) >= CONTROL_PLANE_OFFLOAD_REFUSED_MAX_OPS:
+        return CONTROL_PLANE_OFFLOAD_REFUSED_OTHER
+    with _CONTROL_PLANE_REFUSED_OP_LOCK:
+        if op in _CONTROL_PLANE_REFUSED_OPS:
+            return op
+        if (len(_CONTROL_PLANE_REFUSED_OPS)
+                >= CONTROL_PLANE_OFFLOAD_REFUSED_MAX_OPS):
+            _CONTROL_PLANE_REFUSED_OPS.add(CONTROL_PLANE_OFFLOAD_REFUSED_OTHER)
+            return CONTROL_PLANE_OFFLOAD_REFUSED_OTHER
+        _CONTROL_PLANE_REFUSED_OPS.add(op)
+        return op
+
+
 def record_control_plane_offload(
     op: str, duration_s: float, *, outcome: str, pool: str
 ) -> None:
@@ -1920,6 +2120,12 @@ def record_control_plane_offload(
     ``outcome`` is clamped to ``CONTROL_PLANE_OFFLOAD_OUTCOMES`` so a future
     caller cannot grow the metric's child set without bound (the doctrine at
     the metric definitions above).
+
+    #5328: a REFUSAL additionally moves ``CONTROL_PLANE_OFFLOAD_REFUSED_COUNT``
+    by ``(op, pool)``, so the op that lost its work is attributable and not
+    only the pool that lost it. The RECORD above keeps the true ``op`` even
+    when the metric's label folds at the cap — the ring is the forensic
+    artifact, the counter is the measurement.
     """
     if outcome not in CONTROL_PLANE_OFFLOAD_OUTCOMES:
         # NOT silent. A caller-side typo (`"complete"` for `"completed"`) would
@@ -1940,6 +2146,14 @@ def record_control_plane_offload(
     CONTROL_PLANE_OFFLOAD_LATENCY.labels(pool=pool, outcome=outcome).observe(
         duration_s
     )
+    if outcome == "bound_miss_refused":
+        # #5328: the seam-wide refusal, charged to the OP that lost its work.
+        # Only the drop counts (see the metric's definition); the record above
+        # keeps the true ``op`` even when this label folds at the cap.
+        op_label = _admit_control_plane_refusal_op(
+            _utf8_safe(op if isinstance(op, str) else str(op)))
+        CONTROL_PLANE_OFFLOAD_REFUSED_COUNT.labels(
+            op=op_label, pool=pool).inc()
 
 
 def control_plane_offload_records() -> list[tuple[str, float, str, str]]:
@@ -1951,6 +2165,37 @@ def control_plane_offload_records() -> list[tuple[str, float, str, str]]:
     """
     with _CP_RECORDS_LOCK:
         return list(_CP_OFFLOAD_RECORDS)
+
+
+def control_plane_offload_refusal_counts() -> dict[str, dict[str, int]]:
+    """In-process snapshot of ``CONTROL_PLANE_OFFLOAD_REFUSED_COUNT`` (#5328).
+
+    Nested ``{op: {pool: count}}`` — the two labels answer two different
+    questions (WHICH caller lost work, on WHICH pool) and a composite string
+    key would make them indistinguishable in a client-supplied op.
+
+    ``/metrics`` carries the Prometheus text form of the same counter; this is
+    the readable form, published on ``metrics()`` (the surface the hosted app
+    and the MCP ``tortoise_health`` tool serve) so a refusal is observable in
+    production instead of only in tests — the hosted app exposes no
+    ``/metrics`` route, so a collector alone is the #3677 "signal with no
+    channel" this closes (#4095's ``telemetry_drops`` is the precedent).
+
+    An op whose label folded at ``CONTROL_PLANE_OFFLOAD_REFUSED_MAX_OPS``
+    appears under ``CONTROL_PLANE_OFFLOAD_REFUSED_OTHER``; the op-level TOTAL is
+    exact regardless, because the fold aggregates rather than drops.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    for family in CONTROL_PLANE_OFFLOAD_REFUSED_COUNT.collect():
+        for sample in family.samples:
+            if not sample.name.endswith("_total"):
+                continue
+            op = sample.labels.get("op")
+            pool = sample.labels.get("pool")
+            if op is None or pool is None:
+                continue
+            counts.setdefault(op, {})[pool] = int(sample.value)
+    return counts
 
 
 def record_control_plane_client_call(duration_s: float, thread_name: str) -> None:
@@ -3998,7 +4243,8 @@ def _reset_graph_size_worker() -> None:
 
 def metrics(sdk=None, setup_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
-    errors, journal_write_failures, audit_fallback_drops, uptime}.
+    errors, journal_write_failures, audit_fallback_drops, telemetry_drops,
+    offload_refusals, uptime}.
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
@@ -4125,6 +4371,25 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # app exposes its own health dict and has no `/metrics` route, so a
         # drop there is counted here but not surfaced by that endpoint.
         "audit_fallback_drops": audit_fallback_drop_counts(),
+        # #4095: an allowlist-dropped telemetry key is the same "signal with no
+        # channel" class as the audit drop above, and #3821's counter had no
+        # production reader at all. It rides THIS payload for the same reason:
+        # the hosted app exposes no `/metrics` route, so `metrics()` (served by
+        # the MCP `tortoise_health` tool and `monitoring.serve_health`) is where
+        # the "always counts" guarantee becomes observable. Keyed by drop SITE
+        # only — never by the dropped key names, which can be caller-supplied
+        # (see `hosted_api._telemetry_drop_block`).
+        "telemetry_drops": telemetry_drop_counts(),
+        # #5328: a REFUSED control-plane offload is the same "signal with no
+        # channel" class as the telemetry drop above — and for this seam the
+        # loss is the WORK, not a label. #5840's counter answers the pool-rate
+        # question with no op dimension, and the only op-keyed artifact is the
+        # bounded ``_CP_OFFLOAD_RECORDS`` ring, which nothing reads in
+        # production. Published HERE (not only on ``/metrics``) because the
+        # hosted app exposes no ``/metrics`` route, so this is the surface the
+        # fleet actually serves. Only genuine DROPS are counted; a bound miss
+        # that left the work RUNNING is not one.
+        "offload_refusals": control_plane_offload_refusal_counts(),
         "uptime": round(time.monotonic() - _start, 2),
     }
 

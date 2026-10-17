@@ -316,6 +316,7 @@ BEGIN
     FOREACH fn IN ARRAY ARRAY['metering_increment', 'metering_increment_ask',
                               'metering_increment_capture_cost',
                               'metering_increment_embedding',
+                              'metering_increment_retrieval',
                               'metering_set_graph_storage'] LOOP
         SELECT count(*) INTO n
           FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
@@ -369,6 +370,17 @@ BEGIN
             'EXECUTE') THEN
         RAISE EXCEPTION
             'metering_increment_embedding: anon/authenticated must not execute';
+    END IF;
+    IF has_function_privilege('anon',
+            'public.metering_increment_retrieval(text, timestamptz, timestamptz, '
+            'integer, integer, integer, double precision, integer, integer, '
+            'integer)', 'EXECUTE')
+       OR has_function_privilege('authenticated',
+            'public.metering_increment_retrieval(text, timestamptz, timestamptz, '
+            'integer, integer, integer, double precision, integer, integer, '
+            'integer)', 'EXECUTE') THEN
+        RAISE EXCEPTION
+            'metering_increment_retrieval: anon/authenticated must not execute';
     END IF;
     IF has_function_privilege('anon',
             'public.metering_set_graph_storage(text, timestamptz, timestamptz, '

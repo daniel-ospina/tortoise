@@ -16,6 +16,7 @@ documented, deliberate decision for these consumers.
 import pytest
 
 from tortoise.ids import content_hash
+from tortoise.live import is_terminal_status
 from tortoise.sdk import TortoiseSDK
 
 
@@ -135,6 +136,60 @@ def test_apply_supersessions_skipped_lists_only_unapplied_records(sdk):
     assert _props(sdk, good_old["id"]).get("validTo") == "2026-06-10"
 
 
+def test_apply_supersessions_dead_sibling_makes_the_ref_a_noop(sdk):
+    """#7822: the pt_ terminal pre-check scans EVERY node carrying the ref id.
+
+    The pre-#7822 ``{r[0]: (status, outdated)}`` comprehension was
+    last-row-wins, so a duplicate ref id with one live and one terminal node
+    made this pre-check disagree with the guard ``sdk.supersede`` runs (which
+    refuses on ANY terminal row): the pre-check said "not terminal", attempted
+    the write, and the guard's refusal turned the documented idempotent no-op
+    into a warned, recorded skip.
+
+    The dead sibling is written FIRST (a raw CREATE — a later property write
+    moves a node to the end of the scan order), and the live one SECOND, so the
+    LAST row the fold's statement returns is LIVE and the pre-fix fold read it
+    — the failure is deterministic here, and the premise assertion below reds
+    loudly if that order ever changes.
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    content = "dupsib old"
+    old_id = f"pt_{content_hash(content)}"
+    new_id = f"pt_{content_hash(content)}_new"
+    proj.g.query(
+        "CREATE (n:Point {id:$id, content:'dupsib dead sibling', "
+        "pointKind:'statement', status:'retracted'})", params={"id": old_id})
+    sdk.create_point("statement", content, id=old_id, status="live",
+                     validFrom="2026-06-01")
+    sdk.create_point("statement", content + " new", id=new_id,
+                     status="live", validFrom="2026-06-10")
+    dup_states = [s for s in proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids "
+        "RETURN n.id, n.status, coalesce(n.outdated, false)",
+        params={"ids": [old_id, new_id]}).result_set if s[0] == old_id]
+    assert len(dup_states) == 2, dup_states
+    assert any(is_terminal_status(s[1], bool(s[2])) for s in dup_states), \
+        dup_states
+    # Premise, asserted rather than assumed: the LIVE duplicate is the LAST row,
+    # so the pre-#7822 last-row-wins fold would have said "not terminal".
+    assert not is_terminal_status(dup_states[-1][1], bool(dup_states[-1][2])), \
+        dup_states
+
+    warns: list = []
+    skipped: list = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": old_id, "supersedes_by": new_id,
+          "evidence": "duplicate id"}],
+        session_id="sess_5365_dup", warn=warns.append, skipped=skipped)
+    assert applied == 0
+    assert skipped == [], (
+        f"a dead sibling is the documented idempotent no-op, not an unapplied "
+        f"record: {skipped!r}")
+
+
 def test_apply_supersessions_summary_warn_sizes_the_skips(sdk):
     """ONE summary warn carries the applied/skipped counts.
 
@@ -178,3 +233,45 @@ def test_promote_point_reports_a_supersede_skipped_in_its_result(sdk):
         "promote_point no longer reports an unapplied supersession"
     assert "supersede_skipped_count" in src, \
         "promote_point must size the skip, not only list it"
+
+
+def test_promote_point_skips_a_temporal_target_with_a_dead_sibling(sdk):
+    """#7822: promote_point's temporal-target probe scans EVERY node carrying
+    the target id.
+
+    The pre-#7822 probe read ``trow[0]``, so a duplicate target id whose LIVE
+    node was returned first NAND-wired a target the shared lifecycle predicate
+    calls dead — and that the guard would refuse to supersede. The fixture
+    writes the LIVE duplicate first, so a first-row-only read sees it: the
+    failure is deterministic here, and the premise assertion below reds loudly
+    if that order ever changes.
+    """
+    proj = sdk._get_proj()
+    g = proj.g
+    tgt = "pt_temporal_dup_7822"
+    g.query(
+        "CREATE (n:Point {id:$id, content:'live sibling', "
+        "pointKind:'statement', status:'live'})", params={"id": tgt})
+    g.query(
+        "CREATE (n:Point {id:$id, content:'dead sibling', "
+        "pointKind:'statement', status:'retracted'})", params={"id": tgt})
+    rows = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, coalesce(n.outdated, false)",
+        params={"id": tgt}).result_set
+    assert len(rows) == 2, rows
+    # The premise, asserted rather than assumed: a first-row-only read sees the
+    # LIVE sibling.
+    assert not is_terminal_status(rows[0][0], bool(rows[0][1])), rows
+    draft = sdk.create_point(
+        "statement", "draft candidate", status="draft",
+        temporal_candidate=True, temporal_reviewed="merge",
+        temporal_target_ids=[tgt])["id"]
+
+    result = sdk.promote_point(draft)
+
+    assert result["promoted"] is True, result
+    assert "temporal_wired" not in result, result
+    assert g.query(
+        "MATCH (op:Point {is_operator:true})-[:NAND]->(:Point {id:$t}) "
+        "RETURN count(*)", params={"t": tgt}).result_set[0][0] == 0, (
+        "a target with a terminal sibling must not be NAND-wired")

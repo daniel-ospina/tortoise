@@ -99,6 +99,63 @@ def test_relationships_empty_when_no_operators(sdk):
     hit = next(r for r in results if r["id"] == p["id"])
     assert hit["relationships"] == []
     assert "status" in hit
+    # #6971: empty BECAUSE the point is sparse — and that is said by the
+    # ABSENCE of the failure marker, not by an empty list alone.
+    assert "relationships_unavailable" not in hit
+
+
+def test_failed_decoration_is_labelled_on_the_wire(sdk, monkeypatch):
+    """#6971 — a decoration query that RAISED must not read as 'no edges'.
+
+    The all-empty seed used to be returned verbatim from the ``except``, so
+    ``relationships: []`` meant both "this point is genuinely sparse" and "the
+    read failed", and only a ``logger.warning`` (below the API surface) said
+    which. The batch now carries ``relationships_unavailable``, so the two
+    states are distinguishable on the wire.
+    """
+    import tortoise.search_engine as se
+
+    p = sdk.create_point("statement", "claim whose decoration read failed")
+
+    def failing(graph, point_ids, **kw):
+        rels = se.RelationshipDecoration({pid: [] for pid in point_ids})
+        rels.decoration_error = "RuntimeError: boom"
+        return rels
+
+    monkeypatch.setattr(se, "get_relationships_bounded", failing)
+    results = _scan(sdk)
+    hit = next(r for r in results if r["id"] == p["id"])
+    assert hit["relationships"] == []
+    assert hit["relationships_unavailable"].startswith(
+        se.RELATIONSHIPS_UNAVAILABLE), hit["relationships_unavailable"]
+    assert "RuntimeError: boom" in hit["relationships_unavailable"], (
+        "the marker must carry the actual failure, not just a generic label"
+    )
+
+
+def test_failed_decoration_does_not_break_retrieval(sdk, monkeypatch):
+    """D1: decoration is default-on and must never turn a search into a failure.
+
+    The fix labels the failure rather than raising it, so the hits still come
+    back — with the same order the healthy decoration produced.
+    """
+    import tortoise.search_engine as se
+
+    pts = [sdk.create_point("statement", f"claim {i}") for i in range(5)]
+    healthy = [r["id"] for r in _scan(sdk)]
+
+    def failing(graph, point_ids, **kw):
+        rels = se.RelationshipDecoration({pid: [] for pid in point_ids})
+        rels.decoration_error = "RuntimeError: boom"
+        return rels
+
+    monkeypatch.setattr(se, "get_relationships_bounded", failing)
+    degraded = _scan(sdk)
+    assert [r["id"] for r in degraded] == healthy, (
+        "labelling the failure must not change which hits are returned"
+    )
+    assert {r["id"] for r in degraded} == {p["id"] for p in pts}
+    assert all("relationships_unavailable" in r for r in degraded)
 
 
 # ── Task 4: expand_relationships (SDK + MCP + registry) ─────────────────
@@ -209,6 +266,56 @@ def test_marker_strings_via_full_scan_decoration(sdk):
 
     new_hit = next(r for r in results if r["id"] == new["id"])
     assert "[valid since 2026-06-14]" in _validity_marker(new_hit)
+
+
+def test_marker_distinguishes_still_open_from_ended_unknown(sdk):
+    """#2350: the reader-facing ``[valid …]`` marker must not relabel an
+    ended-unknown window as still-true.
+
+    Both points share a start; one is still open, the other is closed at an
+    un-datable time (``validToPrecision='unknown'``, no ``validTo``). The
+    marker is interpolated into the agent's evidence, so byte-identical
+    markers would assert the ended claim is still true — the fabricated-
+    coverage anti-pattern the 3-state end exists to prevent.
+    """
+    from tools.longmem_eval.retrieve import _validity_marker
+
+    still = sdk.create_point("statement", "still true",
+                             validFrom="2026-06-14")
+    ended = sdk.create_point("statement", "ended, un-datable",
+                             validFrom="2026-06-14",
+                             validToPrecision="unknown")
+
+    hits = {r["id"]: r for r in _scan(sdk)}
+    still_hit, ended_hit = hits[still["id"]], hits[ended["id"]]
+    # non-vacuous: the distinction is on the promoted hit dict
+    assert still_hit["end_state"] == "open"
+    assert ended_hit["end_state"] == "unknown"
+    assert ended_hit["valid_to_precision"] == "unknown"
+    assert "valid_to" not in ended_hit
+
+    assert _validity_marker(still_hit) == "[valid since 2026-06-14]"
+    assert _validity_marker(ended_hit) == \
+        "[valid since 2026-06-14; end unknown]"
+    assert _validity_marker(ended_hit) != _validity_marker(still_hit)
+
+
+def test_eval_annotation_forwards_the_end_state_for_the_marker(sdk):
+    """#2350: the eval lane rebuilds each hit into a fixed key set, so
+    ``_annotate_hits`` must forward the precision/end-state keys or
+    ``render_context`` cannot render the distinction on that surface."""
+    from tools.longmem_eval.retrieve import _annotate_hits, _validity_marker
+
+    ended = sdk.create_point("statement", "ended, un-datable",
+                             validFrom="2026-06-14",
+                             validToPrecision="unknown")
+    hits = _scan(sdk, include_terminal=True)
+    annotated = _annotate_hits(hits, {}, [])
+    entry = next(e for e in annotated if e["id"] == ended["id"])
+    assert entry["end_state"] == "unknown"
+    assert entry["valid_to_precision"] == "unknown"
+    assert _validity_marker(entry) == \
+        "[valid since 2026-06-14; end unknown]"
 
 
 def test_provenance_flag_is_absent_by_default_and_additive_when_on(sdk, monkeypatch):

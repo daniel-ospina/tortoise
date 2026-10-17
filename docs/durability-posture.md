@@ -99,9 +99,10 @@ accept the file and wipe over a class it cannot see. The reserved numbers are
 `:Session` pair #3947 added to v1 without a bump), `2` = `1` +
 `config_snapshot` (#2814),
 `3` **contested** (#5327 claims it for `event_meta` and #5241 for
-`graph_identity`), and `4` = `2` + `onboarding_snapshot` / `onboarding_step_links`
+`graph_identity`), `4` = `2` + `onboarding_snapshot` / `onboarding_step_links`
 (#4641) — a **distinct** integer taken *because* `3` is contested, deliberately
-carrying neither sibling's section. Two rules follow. **The constant may only
+carrying neither sibling's section — `5` = `4` + `event_meta` (#4653), and
+`6` = `5` + `team_meta` (#5353). Two rules follow. **The constant may only
 increase**, and a payload shape that is not a superset of the previous one
 takes a **new integer** — reusing a number for a disjoint payload is the
 failure the gate exists to prevent, and a build that reuses one reopens the
@@ -119,8 +120,11 @@ build whose read set excludes it refuses on a retired file until it is deleted.
 |---|---|
 | `:PackInstall` | `namespace` |
 | `:PackManifest` | `namespace` |
+| `:Pipeline` | `pipelineKey` |
+| `:PipelineStage` | `stageKey` (composite `pipelineKey\|stageId` — the declared `stageId` is pack-local, so two pipelines may share one) |
 | `:Meta{key:'calibration_milestone'}` | `key` |
 | `:Meta{key:'config_reset'}` | `key` |
+| `:Meta{key:'residency'}` | `key` |
 <!-- config-registry:end -->
 
 The `config_reset` entry is the **third state**: a sticky marker distinguishing
@@ -128,6 +132,11 @@ The `config_reset` entry is the **third state**: a sticky marker distinguishing
 a never-configured graph looks like, so absence can never encode it. It is
 **not** a "tombstone" — that is a controlled term in `docs/ONTOLOGY.md` for a
 retracted `Point`.
+
+The `residency` entry (#7952) is the completeness marker's declared known-hot
+set: graph-only operator metadata. Without it, a whole-graph rebuild would
+silently revert a declared-`partial` store to the `complete` default, under
+which the §17.2 marker cannot fire.
 
 <!-- config-registry:not-preserved -->
 - `:EpMeta` — a monotonic epoch that must be re-baselined with the Points;
@@ -178,6 +187,30 @@ property). It gets its own declared sidecar sections instead:
   `session_snapshot` / `session_point_links` sections (**#3947** × **#3010**),
   for the same reason: the live turn loop's container write is raw and is not
   re-derived by `projection`.
+- `:TeamMeta` — the first-org marker, preserved by the `team_meta` section
+  (**#5353**). It uses a bare `CREATE (:TeamMeta {name, created})` with **no
+  identity property at all** (five writers: `sdk.org_create`,
+  `__main__._cmd_key_create`, and `hosted_api`'s registration / create-org /
+  eager-provision lanes), so it fits neither the registry above (whose rows are
+  keyed on one identity property — a row would have to invent one) nor the
+  container/link sections (which key on `id`). It is **not bookkeeping**: its
+  very presence is the `#2789` first-org guard, which is exactly
+  `_eager_provision_org_graph`'s `MATCH (m:TeamMeta) RETURN count(m)` probe. A
+  rebuilt graph that lost the marker reads **0**, so the next provisioning call
+  re-mints it with the control plane's name and a fresh `created` — replacing
+  the graph's own team identity on a rebuild the operator asked for. The class
+  is **at-most-one by intent** (that probe is the invariant), so the section
+  carries at most one entry even though the capture reads every node the graph
+  holds: the **earliest `created`** wins, deterministically, and the collapse is
+  reported rather than silent — a union that concatenated the leftover and fresh
+  legs would *manufacture* a second marker on the sidecar-recovery path, which
+  is the state `#2789` exists to prevent. The restore is an idempotent `MERGE`,
+  so a partially-restored graph cannot accumulate a duplicate on retry, and the
+  post-restore check requires the captured `name`/`created` back **exactly** — a
+  concurrent re-provision cannot make the run report a marker it did not
+  restore. A marker that came back absent is reported (never a silent success),
+  and a rescue file written before this class had a vehicle reports
+  `team_meta_state_unknown` instead of assuming the class was never there.
 <!-- config-registry:end -->
 
 ### The one carried high-water mark: `:GraphEventMeta`
@@ -217,7 +250,7 @@ loudly afterwards rather than coerced into a value the node does not hold.
 from the surviving log either — the rebuild replays points, not `:GraphEvent`
 rows (#4664), so the log comes back EMPTY and `first_seq` is derived as
 `last_seq + 1`. That is the truthful floor once the stream is truncated, and it
-makes `events_poll` answer 410 instead of returning `[]` forever to a subscriber
+makes `poll_events` answer 410 instead of returning `[]` forever to a subscriber
 parked above the fresh counter (the pre-fix behaviour). Carrying `first_seq`
 would only relabel the same truncation. The pre-wipe purge floor is therefore
 LOST, which is why the backup/restore sibling
@@ -291,26 +324,30 @@ window and every non-racing path; it cannot close this one, which is inherent to
 replacing a graph with a full wipe+replay.
 
 <!-- config-registry:unenrolled -->
-- `:TeamMeta` — written with a bare `CREATE` and no uniqueness guarantee
-  (`sdk.py`, `hosted_api.py`), so a graph can legitimately hold several and
-  none is addressable by a single identity key — it fits neither the registry
-  (whose rows are keyed) nor the container/link sections (which key on `id`).
-  Its presence is the whole `#2789` first-org guard, so its loss is
-  load-bearing, not bookkeeping. Preserving an at-most-one-per-graph,
-  label-wide class is its own design step — declared deliberately **not
-  preserved here**, with the class as a known residual. **#5353**
+*(none)* — every class this section has ever named now has a declared vehicle
+above: the onboarding state machine in **#4641** (the `onboarding_snapshot` /
+`onboarding_step_links` sections), the event-log high-water mark in **#4653**
+(the `event_meta` section), and the last entry — the first-org marker, filed
+by #4641 as "its own design step" — in **#5353** (the `team_meta` section). The
+block is kept, empty, as the declared home for the next known loss that has no
+carrier yet: a class belongs here only while it has NO vehicle, and an entry
+here is itself the claim that the rebuild destroys it — which is exactly what
+the three issues above removed. (The labels are deliberately not re-named in
+this note: the doc-consistency pin asserts that no declared class appears in
+this block, so naming one here would read as re-enrolling it.)
 <!-- config-registry:end -->
 
 **Operator audit** — read-only; it enumerates the configuration classes the
 registry declares, the container nodes the declared sidecar sections preserve
-(`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), and the one
-carried counter (`:GraphEventMeta`) by the query's last leg, so an operator
-can tell what survived a rebuild and the query cannot silently under-report
-after a class is added. The onboarding rows are pinned by the
-doc-consistency test (a section's classes must appear here); the container
-rows are hand-maintained there too, but as a presence check — the test does
-not prove the list is exhaustive, and the per-Point membership edges
-(`batch_point_links`, `session_point_links`) are not enumerated here.
+(`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), the carried
+first-org marker (`:TeamMeta`), and the one carried counter
+(`:GraphEventMeta`) by the query's last legs, so an operator can tell what
+survived a rebuild and the query cannot silently under-report after a class is
+added. The onboarding rows are pinned by the doc-consistency test (a section's
+classes must appear here); the container rows are hand-maintained there too,
+but as a presence check — the test does not prove the list is exhaustive, and
+the per-Point membership edges (`batch_point_links`, `session_point_links`) are
+not enumerated here.
 
 <!-- config-registry:audit-query -->
 ```cypher
@@ -318,7 +355,11 @@ MATCH (p:PackInstall) RETURN 'PackInstall' AS cls, p.namespace AS ident
 UNION ALL
 MATCH (m:PackManifest) RETURN 'PackManifest' AS cls, m.namespace AS ident
 UNION ALL
-MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset']
+MATCH (p:Pipeline) RETURN 'Pipeline' AS cls, p.pipelineKey AS ident
+UNION ALL
+MATCH (s:PipelineStage) RETURN 'PipelineStage' AS cls, s.stageKey AS ident
+UNION ALL
+MATCH (x:Meta) WHERE x.key IN ['calibration_milestone', 'config_reset', 'residency']
 RETURN 'Meta' AS cls, x.key AS ident
 UNION ALL
 MATCH (b:Batch) RETURN 'Batch' AS cls, b.id AS ident
@@ -332,6 +373,10 @@ RETURN 'OnboardingStep' AS cls, s.org_id + '/' + s.step_id AS ident
 UNION ALL
 MATCH (m:GraphEventMeta)
 RETURN 'GraphEventMeta' AS cls, toString(m.last_seq) AS ident
+UNION ALL
+MATCH (t:TeamMeta)
+RETURN 'TeamMeta' AS cls,
+       coalesce(t.name, '') + '@' + coalesce(t.created, '') AS ident
 ```
 <!-- config-registry:end -->
 
@@ -399,8 +444,9 @@ false):
 | `url` | **RECORDED** | The merge key — the node's identity (§9.4: a canonicalised URL, never an embedding). `_upsert_source`/the fold resolve it through the shared `resolve_source_key`, so a variant spelling replays onto the ONE node. |
 | `id` | RECORDED | Identity companion. |
 | `canonicalUrl`, `urlAliases` | **RECOMPUTABLE** | Reproduced from the record sequence by the shared resolver (`normalize_source_url` + the #5012 S0b alias append), so a URL variant replays onto the ONE canonical node with the same alias list. Not *stored* — there is no separate record for them. |
-| **`contentHash`** | **RECORDED** | **The version anchor — and the reason this is not a class-level claim.** A re-fetch *changes* it by definition, so “recompute it” would recompute the thing the record is keyed on. **#3998**, still open, **proposes** raw-absent/erased as a third value on the same record. |
+| **`contentHash`** | **RECORDED** | **The version anchor — and the reason this is not a class-level claim.** A re-fetch *changes* it by definition, so “recompute it” would recompute the thing the record is keyed on. The raw-availability axis (**#3998**, landed) is a third value on the same record. |
 | `version` | RECORDED | The live writer's own ordinal. Counting prior records instead would be a second derivation with its own failure modes. |
+| `rawState`, `rawStateAt` | **RECORDED** | **The raw-availability axis** (§4.6; **#3998**, landed — owner ruling Option A, 2026-10-14). `rawState` is the recorded act (`present` / `deleted`) and `rawStateAt` is the instant it was recorded — minted on every state-carrying write, not only a deletion. Written by `create_source`/`_upsert_source` and replayed from the `SourceCreated` / `SourceVersioned` records. A `deleted` marker is bounded by `raw_state.RAW_DELETION_MARKER_TTL` (10 days; window registered in `docs/retention-and-deletion.md`). |
 | `updatedAt` | **RECORDED** | The instant the transition happened. Minted **once** by the producer and carried on the record; a replay that read `_now_iso()` diverged live vs rebuilt (measured ...57.016262 vs ...57.079810). Legacy records without it `coalesce` to the replay clock. |
 | `ingestedAt` | **RECORDED** | The pipeline-arrival instant (§4.6: the documented proxy for the evidence-age clock). Same divergence, same fix (measured ...56.751580 vs ...57.047168). |
 | `sourceKind`, `title`, `externalId`, `sourcePath` | RECORDED | Caller-asserted. `sourcePath` is the sanctioned `source_path=` route only (§4.1). |
@@ -442,7 +488,7 @@ exemptions from R1; they are orthogonal to R2 and are not widened here.
 |---|---|---|---|
 | **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** for *entitled* graphs (`tier ≠ free` AND `backup_enabled`; `tortoise/backup_sweep.py:248-272`) *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). An **unentitled** graph has **no periodic archive** — its window is unbounded. With the sweep **off** the same holds; the Pro on-demand backup endpoint (`POST /backups`, `tortoise/hosted_api.py`) and the vendor snapshot below remain. | **Checksum + on-path restore verification; the drill is NOT yet clean.** The live restore path verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`) — that gate is what caught the incomplete dump. A **restore drill was attempted once and FAILED** (2026-09-17, `workflow_dispatch`): `Edge restore incomplete: 9687/10000 linked — dump references missing nodes` (#3894; export defect fixed by #3921, `_DUMP_REVISION = 2` — #3895 stays open tracking a successful re-drill of a real artifact). The scheduled monthly drill (`registry-drill-cron.yml`, #2317) has **not yet run**. Until a real archive restores end-to-end this row is **not drilled to success**; the sweep producing archives is covered by the freshness watcher (#2790 / #2922). |
 | **Hosted — vendor platform persistence** (FalkorDB Cloud) | Vendor-managed. Off-box **snapshots every 12 h, 7-day retention** (Startup & Pro); snapshots deleted after 14 days. **Restore creates a NEW instance.** | **≤ 12 h** off-box. In-box persistence (AOF) is **contested** — see below; until settled, treat in-box persistence as unverified. | **Existence only — not drilled.** The cadence and retention are vendor-documented; no restore of a vendor snapshot has been performed by us. |
-| **Self-hosted (Docker Compose sidecar)** | FalkorDB sidecar with AOF + named volume (`README.md` self-host path, `docker-compose.yml`) — **on-box only**. | AOF `everysec` = **≤ 1 s** on a clean host; **total loss** if the host or volume is lost. The documented compose path ships **no off-box copy**; `scripts/daily-backup.sh` is a host-specific RDB copy (issue #101) that is not wired into the compose path or its docs — the general off-box copy is **#2880 (pending)**. | **Not drilled.** AOF is a live on-box artifact, not a backup, and no restore of a self-hosted archive has been performed. |
+| **Self-hosted (Docker Compose sidecar)** | FalkorDB sidecar with AOF + named volume (`README.md` self-host path, `docker-compose.yml`) — **on-box only**. Since **#8543** the off-box target is an explicit SETUP-PATH decision (`docker-compose.yml`, `docs/quickstart-selfhosted.md` §Option A2, `website/self-hosted.html`): declare the COMPLETE target (`R2_*` **and** `TORTOISE_BACKUP_KEY`), or set `TORTOISE_OFFBOX_BACKUP_DECLINED=1`; an UNDECIDED (or PARTIAL) target is reported loudly at daemon startup (`tortoise/selfhost.py`). Since **#8544** a complete target also **arms the driver** (`tortoise/selfhost_backup.py`): the daemon sweeps `org_selfhost` to that target on the `TORTOISE_OFFBOX_BACKUP_INTERVAL_SECONDS` cadence (default 1 h, floor 60 s) with the read-back-verified logical dump (`hosted_backup.create_backup` — the same per-graph primitive the hosted sweep calls), and prunes under the shared retention triple (24 h + 7 d + 4 w). A failed run is logged on **every** attempt. `scripts/daily-backup.sh` is a host-specific RDB copy (issue #101) that is not wired into the compose path or its docs. | AOF `everysec` = **≤ 1 s** on a clean host; **total loss** if the host or volume is lost. With a complete declared target the archive window is **≤ 1 h** once the first run lands (the **first run is one interval after boot**, so a deployment that restarts inside that interval has none). A declined/undecided deployment's window is **unbounded** — it produces no archive. | **Not drilled.** AOF is a live on-box artifact, not a backup. The archive *writer* is the production-verified one (sha256 manifest + per-object ledger + read-back coverage proof), but no restore of a **self-hosted** archive has been performed end-to-end. |
 | **Embedded (redisLite — eval only)** | RDB file; **AOF off by default** (`TORTOISE_EMBEDDED_AOF=1` opts in — `tortoise/projection/__init__.py:36-45` (`_embedded_aof_enabled`), `:1157-1181`, `:1831`, `:1865`). Single-writer; concurrent writers lose data. | AOF on: **≤ 1 s**. AOF off: **up to the next RDB save or a clean close** — RDB snapshots may never fire for a small graph (#915, #2879). | **Not drilled** (and not a production path). AOF's on-disk artifact is measured when opted in (`tests/test_embedded_durability_claim.py`) — presence, not a restore. |
 
 > These rows describe **data-plane durability**. Deletion and retention windows
@@ -480,14 +526,39 @@ gate in `tests/test_durability_posture.py` fails the build if a
 `log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
 `is [the] truth` — outside this file.
 
+**The gate's roots are the contract surfaces plus `graph-scripts/` (#4308).**
+The owner's §6 root list (`tortoise/`, the five docs, README) left the two
+runnable `graph-scripts/` scripts outside the scan, and both still asserted the
+JSONL was the source of truth. They are *executable* statements —
+`add_convergence_evidence.py` writes its research claims into the graph — not
+archive records, so the rule binds them: they now carry the reconstruction
+framing, and the directory is a scan root so the gate-visible claim cannot
+return. Because the gate matches a claim SHAPE inside a 40-char window (below),
+the two sentinels are also pinned window-independently
+(`test_graph_scripts_sentinels_carry_no_source_of_truth`) — the pre-fix
+`add_convergence_evidence.py` residual sat outside that window. Archive
+records (`docs/plans/`, `docs/scoping/`, `docs/epics/`) and the test suite's
+session-journal vocabulary stay out of scope — the former are point-in-time
+records, the latter is a real non-durability claim (the file journal **is** the
+source of truth for a test session's created-graph ownership).
+
+**The gate matches a CLAIM SHAPE, not durability claims in general.** It fires on
+a `log`/`journal`/`jsonl`/`event stream` bound to `source of truth` / `is [the]
+truth`; a *mechanism promise* — e.g. a managed store "provides AOF durability" —
+does not match it, and is corrected by hand (`docs/infra-runbook.md` §1 did this
+under **#2968**). That seam is not this gate's to close: the general binding from
+a written claim to the system it describes is **#5063**.
+
 ## Open items
 
 - **#2814 residual** — the preserved set is a **declared** registry, not a
   completeness gate. For a class nobody enrolled, `rebuild_all` captures
   nothing and refuses nothing: the byte-identical unconditional wipe (which
   #2814 does **not** change, by owner decision — the surface belongs to PR
-  #2996) destroys it exactly as before. The live instance is the
-  `unenrolled` list above (#5353).
+  #2996) destroys it exactly as before. The `unenrolled` list above is
+  currently **empty** — every class it has ever named now has a declared
+  vehicle — but it stays as the declared home for the next known loss that
+  has no carrier.
 - **#4641 residual** — within an interrupted-rebuild window a **pending**
   (non-retired) pre-wipe sidecar keeps the leftover `onboarding_snapshot`
   node map and the leftover `onboarding_step_links` pairs, so a mutation made
@@ -596,21 +667,24 @@ gate in `tests/test_durability_posture.py` fails the build if a
   converge — run `graph-scripts/4125_migrate_legacy_session_sources.py` (the
   same function, idempotent) to make the two agree.
 
-- **#2880** — the self-hosted off-box copy. Until it ships, the self-hosted row
-  is on-box only and the rule above is not yet met there. `README.md`'s
-  "durable" for the compose path means *persistent on-box, multi-writer* (as
-  opposed to the single-writer embedded eval path), not an off-box-copy promise.
-  `docs/quickstart-selfhosted.md:57` carries the same wording and is enumerated
-  here for the same reason — it is a gate-scanned surface that does not yet
-  link this document.
-- **#2968** — `docs/infra-runbook.md:29` still states "FalkorDB Cloud (managed)
-  — provides AOF durability", the exact claim this document marks CONTESTED.
-  Tracked there; the gate's pattern does not match an `AOF … durability` claim,
-  so it is not silently tolerated, it is a named residual.
-- **`graph-scripts/`** — `add_convergence_evidence.py` and `baseline_scan.py`
-  still describe the JSONL as the "source of truth" for graph convergence. This
-  document's gate is scoped to the contract surfaces (`tortoise/`, the five
-  docs, README); the archival/operation scripts are a separate, open residual.
+- **#8544 — the self-hosted off-box copy has a DRIVER** (the residual closed for
+  self-host, with one piece explicitly still owed). #2880 — the earlier "no
+  off-box copy" defect — is **closed** (consolidated into #5062), and its
+  docs-and-recipe-only ruling was **superseded** by the **#8543** owner decision
+  (2026-10-13) for durability **parity**: the target is now a step of the
+  self-host setup path, and an UNDECIDED target is reported loudly at daemon
+  startup (`tortoise/selfhost.py::off_box_backup_state`). #8544 added the
+  **execution** half the #8543 lane recorded as missing:
+  `tortoise/selfhost_backup.py` arms an in-process driver off the same resolved
+  state and, for a COMPLETE target, sweeps `org_selfhost` to the declared store
+  on an interval with the read-back-verified logical dump. Declaring is
+  therefore no longer inert, and "configured" now means a complete target
+  (`R2_*` + `TORTOISE_BACKUP_KEY`) — a partial one is reported UNDECIDED with
+  the missing variables named. **Still owed, and named rather than implied: no
+  self-hosted archive has been restored end-to-end, so the driver's output is
+  verified as a WRITE (ledger read-back) and not as a RECOVERY.** `README.md`
+  and `docs/quickstart-selfhosted.md` state the AOF-scoped guarantee and link
+  this document.
 - **#3895** — the logical dump's edge export *was* unfiltered (fixed by #3921, `_DUMP_REVISION = 2`; `tortoise/hosted_backup.py:387` now restricts edges to the exported node set). #3895 stays open for AC-1's remaining evidence: a fresh drill restoring a real production-sized artifact end-to-end. The one restore drill ever attempted (2026-09-17) failed on exactly this (`9687/10000 linked — dump references missing nodes`); the hosted row above is **not drilled to success** until a real archive restores.
 - **#2826 row A2** — the register row recommending the journal be authoritative.
   The #2881 design round (§7) recommends reversing it to store-authoritative.

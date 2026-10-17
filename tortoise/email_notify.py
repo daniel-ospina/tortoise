@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+from tortoise.incident_kinds import KIND_INVITE_SEND_FAILED
 from tortoise.notify import file_incident, redact_safe
 
 logger = logging.getLogger(__name__)
@@ -44,8 +45,9 @@ logger = logging.getLogger(__name__)
 RESEND_URL = "https://api.resend.com/emails"
 
 # Ops incident kind (the alert_store sink) for a failed invite DELIVERY — not
-# an invite event; see notify.file_incident for the dedup contract.
-_INVITE_SEND_FAILED_KIND = "INVITE_SEND_FAILED"
+# an invite event; see notify.file_incident for the dedup contract. The VALUE is
+# declared once in ``tortoise.incident_kinds`` (#4780): it is an R2 dedup key.
+_INVITE_SEND_FAILED_KIND = KIND_INVITE_SEND_FAILED
 
 # Shared concurrency cap for all sends (volume is tiny; this bounds blast radius
 # if a send storms during a replay — not a rate limiter).

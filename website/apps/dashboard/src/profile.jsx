@@ -4,6 +4,7 @@
 // screen markup (the third copy — now shared).
 import React from 'react'
 import { bannerCopy, unlinkAllowed } from './identity.js'
+import { applyBackgroundInert, containTabFocus } from './dialogFocus.js'
 
 // ── RecoveryBanner ─────────────────────────────────────────────────────────
 // Persistent security notice — .recovery-banner (protect-banner family),
@@ -86,6 +87,16 @@ export function AddLoginMethodButtons({ busy, onOAuth, onEmail, error }) {
 // REAUTH_REQUIRED + the change-email + unlink gates.
 export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, error, providers, passwordMode }) {
   const [password, setPassword] = React.useState('')
+  // #2577 (a11y): APG modal containment — inert background + a Tab wrap at the
+  // dialog boundary. Declared BEFORE the `!open` early return so the hook order
+  // is stable across open/close.
+  const dialogRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!open || typeof document === 'undefined') return undefined
+    const el = dialogRef.current
+    if (!el) return undefined
+    return applyBackgroundInert(el, document)
+  }, [open])
   if (!open) return null
   const available = providers && providers.length ? providers : []
   const hasPasswordMethod = providers.includes('email')
@@ -96,8 +107,14 @@ export function ReauthDialog({ open, busy, onClose, onPassword, onProvider, erro
   return (
     <div className="modal-backdrop" onClick={() => { if (!busy) onClose() }}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="Confirm it's you"
+           ref={dialogRef}
+           tabIndex={-1}
            onClick={(e) => e.stopPropagation()}
-           onKeyDown={(e) => { if (e.key === 'Escape' && !busy) onClose() }}>
+           onKeyDown={(e) => {
+             // #2577: APG modal containment (see dialogFocus.js).
+             if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+             else if (e.key === 'Escape' && !busy) onClose()
+           }}>
         <h2>Confirm it's you</h2>
         <p className="dim">{passwordMode
           ? 'You re-authenticated — now choose your new password.'

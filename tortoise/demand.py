@@ -75,7 +75,11 @@ DEMAND_SEND_TIMEOUT_S = 5.0
 #: The budget the CLICK REQUEST must answer 2xx within even while a send is
 #: parked (the hung-transport row). The send is dispatched off the request path
 #: and never awaited, so this is a budget on the record write + the response,
-#: not on the ping.
+#: not on the ping. It is NOT a claim about a slow STORE: the record write and
+#: the response's click-count read each ride their own offload wait bound, so a
+#: hung PostgREST sink extends the response rather than parking the event loop
+#: (the read ran inline — stalling every tenant — before the #3514 review P2
+#: fix; it is now routed through ``_demand_store_rows_off_loop``).
 DEMAND_REQUEST_BUDGET_S = 2.0
 
 #: ``integration_key`` bounds. The charset is deliberately narrow (lowercase

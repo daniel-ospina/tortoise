@@ -122,11 +122,19 @@
       letter-spacing: -0.02em;
       color: #fff;
     }
+    /* The subtitle is the page's one-line positioning statement, not a
+       footnote: at 0.9rem in --text-dim it read as a caption beneath the
+       title. It now renders at subtitle size in the primary text colour —
+       still a clear step below the serif h1, so the hierarchy is unchanged
+       while the claim itself carries weight.
+       KEEP IDENTICAL to the rule on the investor one-pager: these are two
+       documents with two stylesheets, and drift between them is invisible
+       until the two are read side by side. */
     .doc-sub {
-      margin-top: 0.9rem;
-      font-size: 0.9rem;
-      line-height: 1.65;
-      color: var(--text-dim);
+      margin-top: 1rem;
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: var(--text);
     }
     .doc-sub strong { color: var(--accent); font-weight: 400; }
 
@@ -215,11 +223,17 @@
     /* ── Profile — label above value, two columns, no boxes ───────────── */
     .profile { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem 3rem; }
     .profile h3, .more h3 {
-      font-weight: 500;
-      font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--text-dim); margin-bottom: 0.7rem;
+      font-weight: 600;
+      font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
+      color: #fff; margin-bottom: 0.7rem;
     }
     .profile p { font-size: 0.9rem; }
+    /* The sibling one-pager carries this on the same block, and this page needs
+       it: without it the first profile sentence ends on the lone word
+       "workflows." at 1280px (and the third cell on "knowledge"), and at 320px
+       on "workflows." and "systems.". Measured at 320, 390, 768, 1280 and
+       1600px: no paragraph's line count or cell height changes. */
+    .profile p { text-wrap: pretty; }
     .profile p strong { color: #fff; font-weight: 600; }
 
     /* ── More info ────────────────────────────────────────────────────── */
@@ -339,10 +353,10 @@
       </div>
     </div>
 
-    <!-- ══ The problem ═════════════════════════════════════════════════ -->
+    <!-- ══ The Problem ═════════════════════════════════════════════════ -->
     <section id="problem">
       <div class="wrap">
-        <h2>The problem</h2>
+        <h2>The Problem</h2>
         <p>Agents are increasingly capable, but fundamentally <span class="hl">struggle with complex work that unfolds over time</span>. They forget previous decisions, lose important variables as context grows, sub-optimise, and can be disproportionately influenced by the latest information.</p>
         <p>Regular memory systems are filing cabinets, providing retrieval of facts but unable to provide an understanding of how the pieces of a company, product, or technical system work together.</p>
       </div>
@@ -352,13 +366,13 @@
     <section id="how-it-works">
       <div class="wrap">
         <h2>How it works</h2>
-        <p>Tortoise provides <span class="hl">“computational” memory</span>: it connects state (what is), events (when), evidence (sources), and beliefs (why) through logical chains (support, contradict, etc) and quantifies the relationships: as new evidence arrives, the system learns by propagating confidence. This enables agents to align with the bigger picture, reason around tradeoffs, and understand downstream consequences.</p>
+        <p>Tortoise provides <span class="hl">“computational” memory</span>: it connects state (what is), events (when), evidence (sources), and beliefs (why) through logical chains (support, contradict, mitigates) and quantifies the relationships. As new evidence arrives, the system learns by propagating confidence. This enables agents to align with the bigger picture, reason around tradeoffs, and understand downstream consequences.</p>
 
         <div class="outcomes">
           <ul class="up">
             <li><span class="a">↑</span><span>Agent Autonomy</span></li>
-            <li><span class="a">↑</span><span>Token Efficiency</span></li>
-            <li><span class="a">↑</span><span>Complex Reasoning</span></li>
+            <li><span class="a">↑</span><span>Token efficiency</span></li>
+            <li><span class="a">↑</span><span>Decision quality</span></li>
           </ul>
           <ul class="down">
             <li><span class="a">↓</span><span>Sub-optimisation</span></li>

@@ -6,11 +6,13 @@ factor-extraction time EP would propagate drafts into live posteriors
 (nuclear-risk mitigation R1/R7/R8, insight-mining epic §4.5).
 
 Terminal Points (``retracted`` / ``superseded`` / ``archived`` / ``outdated``
-status, or the legacy ``outdated=true`` flag that ``invalidate_point`` writes
-without touching status) must NEVER contribute — a dead claim's ghost must
-not vote (eval-spec P6.3; ontology §5 terminal states; #2422). The terminal
-exclusion is UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only,
-never terminal points.
+status, the legacy ``deprecated`` status, or the legacy ``outdated=true`` flag
+that ``invalidate_point`` writes without touching status) must NEVER
+contribute — a dead claim's ghost must not vote (eval-spec P6.3; ontology §5
+terminal states; #2422). The canonical set is ``TERMINAL_EXCLUDED_STATUSES``
+(``TERMINAL_STATUS_VALUES | {"deprecated"}``). The terminal exclusion is
+UNCONDITIONAL: ``include_draft=True`` re-includes DRAFTS only, never terminal
+points.
 
 The predicate is shared across ALL FOUR call sites so ``include_draft=True``
 re-includes drafts identically everywhere:
@@ -32,6 +34,14 @@ from __future__ import annotations
 # audit_beta_gate, 1714_dedup_observation) and a superseded/outdated claim was
 # then served as the CURRENT statement. Import ``TERMINAL_EXCLUDED_STATUSES``
 # from HERE instead.
+#
+# The partition has TWO canonical halves, and BOTH are imported, never
+# re-spelled: the terminal DENY-list (``TERMINAL_EXCLUDED_STATUSES`` /
+# ``_terminal_excluded``) and the CURRENT allow-list
+# (``CURRENT_POINT_STATUS_VALUES`` / ``_current_status_clause``). A hand-written
+# ``IN ['draft', 'live']`` at a call site is the allow-list's mirror of the same
+# defect — a status added to the vocabulary is silently DROPPED — and three
+# such literals lived in ``tortoise/sdk.py`` until #4058.
 #
 # live.py is the LEAF status module: ``tortoise/sdk.py`` imports it (sdk.py:
 # ``from .live import TERMINAL_EXCLUDED_STATUSES``), so the module can be
@@ -176,15 +186,40 @@ def _terminal_expression(clause: str) -> str:
     Composes the SAME vocabulary as ``_terminal_excluded`` (status in
     TERMINAL_EXCLUDED_STATUSES OR the legacy ``outdated=true`` flag) but in
     the POSITIVE direction, usable in RETURN projections, CASE conditions and
-    WHERE OR-chains. ``_terminal_excluded`` is a keep-filter whose
-    NULL-status handling (legacy nodes = live) means its bare negation is
-    safe to use here: legacy nodes with no status are NOT terminal.
+    WHERE OR-chains.
+
+    It is the EXACT De Morgan dual of ``_terminal_excluded`` — by
+    construction, not by hand-written correspondence: the flag half below is
+    ``coalesce(flag, false) <> false``, the negation of that predicate's
+    ``coalesce(flag, false) = false``, and the status half negates its
+    ``(status IS NULL OR status <> '…')`` NULL-guard. ``_alive_flag`` (this
+    expression negated) therefore cannot report ALIVE a node the keep-filter
+    drops, on any stored value (#7075). Before #7075 the flag half was
+    ``= true``, which is NOT ``NOT (… = false)``: FalkorDB compares types
+    strictly, so a non-boolean ``outdated`` matched NEITHER comparison and
+    such a node was simultaneously "not terminal" here and "not live" in
+    ``_terminal_excluded`` — an excluded middle. ``= true`` and ``<> false``
+    agree on every boolean and on NULL, so in-contract graphs are unaffected.
+
+    ⚠️ ``outdated`` is contractually a BOOLEAN: it is server-managed (#2491),
+    ``_sanitize_props`` refuses it on the props passthrough, and the journal
+    fold enforces the type (``_belief_bool_value_ok``). Only a hand-edited or
+    pre-#2491 graph can hold a non-boolean. The Python mirror
+    ``is_terminal_status`` reads that flag by ``bool()`` truthiness, so it
+    agrees with this expression on every boolean, NULL, non-empty string and
+    non-zero number. The two can still differ when Python's ``bool()`` is
+    falsy while ``coalesce(v, false) <> false`` holds — e.g. numeric
+    ``0``/``0.0`` or the empty string ``""``, which are terminal here (and in
+    ``_terminal_excluded``) but live in the Python mirror. Out of contract; no
+    in-repo writer can produce such a value. This is a stated
+    contract, NOT a promise that arbitrary hand-edited data is interpreted
+    consistently.
     """
     alias = clause.split(".", 1)[0] if "." in clause else clause
     members = " OR ".join(
         f"{alias}.status = '{s}'" for s in sorted(TERMINAL_EXCLUDED_STATUSES))
     return (f"(({alias}.status IS NOT NULL AND ({members})) "
-            f"OR coalesce({alias}.outdated, false) = true)")
+            f"OR coalesce({alias}.outdated, false) <> false)")
 
 
 def _alive_flag(clause: str) -> str:
@@ -197,6 +232,29 @@ def _alive_flag(clause: str) -> str:
     in a single parenthesized boolean, safe to negate).
     """
     return f"(CASE WHEN {_terminal_expression(clause)} THEN false ELSE true END)"
+
+
+def _current_status_clause(clause: str) -> str:
+    """Cypher predicate: the node's status is CURRENT (or absent).
+
+    The ALLOW-LIST half of the #2901 partition — the exact counterpart of
+    ``_terminal_excluded``'s deny-list — derived from
+    ``CURRENT_POINT_STATUS_VALUES``. A status added to the Point vocabulary and
+    classified current by the parity test in
+    ``tests/test_terminal_status_vocabulary.py`` is admitted here with no second
+    edit; a hand-written ``IN ['draft', 'live']`` at a call site silently DROPS
+    it (the mirror image of the #2901 defect — three such literals lived in
+    ``tortoise/sdk.py`` until #4058).
+
+    An ABSENT status is current (legacy nodes — the same NULL handling as
+    ``_terminal_excluded``). The allow-list is deliberately NOT the negation of
+    the deny-list: an UNKNOWN status (neither declared current nor terminal) is
+    dropped here but admitted by ``NOT _terminal_excluded``, so the two are not
+    interchangeable — a caller that wants "not terminal" must call
+    ``_terminal_excluded``.
+    """
+    members = ", ".join(f"'{s}'" for s in sorted(CURRENT_POINT_STATUS_VALUES))
+    return f"({clause} IS NULL OR {clause} IN [{members}])"
 
 
 def is_draft_status(status) -> bool:
@@ -213,8 +271,68 @@ def is_terminal_status(status, outdated: bool = False) -> bool:
     """Python mirror of the Cypher terminal predicate (status in the
     terminal vocab OR the legacy ``outdated=true`` flag). NULL/absent status
     is LIVE (the entity write path defaults ``coalesce($st, n.status,
-    'live')``) — mirrors ``_terminal_excluded``'s NULL handling."""
+    'live')``) — mirrors ``_terminal_excluded``'s NULL handling.
+
+    ``outdated`` is contractually a BOOLEAN (server-managed since #2491; the
+    journal fold enforces the type). This mirror reads it by ``bool()``
+    truthiness while ``_terminal_expression`` negates
+    ``coalesce(outdated, false) = false``; the two agree on every boolean,
+    NULL, non-empty string and non-zero number, and can differ when Python's
+    ``bool()`` is falsy while ``coalesce(v, false) <> false`` holds — e.g.
+    numeric ``0``/``0.0`` or the empty string ``""`` (live here, terminal in
+    Cypher). Out of contract; no in-repo writer can produce such a value
+    (#7075)."""
     return (status or "") in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
+
+
+#: The ONE statement that reads a Point id's lifecycle fan-out. It is run by
+#: the write-side guard (``TortoiseSDK._assert_lifecycle_guard``), by the
+#: hosted commit-receiver pre-check (``hosted_api._terminal_state`` — which
+#: must stay in LOCKSTEP with the guard, #3366), and by the promotion-time
+#: temporal-target probe. Kept here, next to the terminal vocabulary it feeds,
+#: so a second copy cannot drift (#7822).
+LIFECYCLE_FANOUT_QUERY = (
+    "MATCH (n:Point {id:$id}) "
+    "RETURN n.is_operator, n.status, coalesce(n.outdated, false)"
+)
+
+
+def classify_lifecycle_fanout(rows) -> tuple:
+    """Classify EVERY node an id's ``LIFECYCLE_FANOUT_QUERY`` MATCH returned.
+
+    Point ids are NOT unique (the duplicate fan-out is a tested,
+    graph-reachable shape: ``create_point(..., id=X)`` twice) and every
+    lifecycle writer's stamp is a bare ``MATCH (n:Point {id:$id}) SET …`` that
+    binds EVERY matching node. A verdict read off ``rows[0]`` is therefore
+    server-row-order dependent (#7822): on an id carrying one dead and one live
+    node the same call passed or refused depending on which the server happened
+    to return first. The scan is over the WHOLE fan-out:
+
+      - any ``is_operator`` node → ``"operator"`` (outranks terminal, matching
+        the pre-#7822 single-row precedence)
+      - else any terminal node → ``"terminal"``
+      - else every node is a non-terminal statement point → ``"ok"``
+      - no rows at all → ``"absent"``
+
+    Returns ``(kind, status, outdated)``. ``status``/``outdated`` are the
+    offending node's state for ``"operator"``/``"terminal"`` and the
+    representative live state for ``"ok"``. The representative is picked by a
+    STABLE key (status text, then flag), never by position: these values reach
+    error messages and the MCP preview's ``status.from``, and server row order
+    is not a contract.
+    """
+    rows = [(bool(is_op), status, bool(outdated))
+            for is_op, status, outdated in rows]
+    if not rows:
+        return ("absent", None, False)
+    rows.sort(key=lambda r: (str(r[1] or ""), r[2]))
+    for _is_op, status, outdated in rows:
+        if _is_op:
+            return ("operator", status, outdated)
+    for _is_op, status, outdated in rows:
+        if is_terminal_status(status, outdated):
+            return ("terminal", status, outdated)
+    return ("ok", rows[0][1], rows[0][2])
 
 
 def _live_only(clause: str, include_draft: bool = False) -> str:
@@ -292,3 +410,110 @@ def epistemic_label_queries(template: str) -> list[str]:
     on an id-anchored node so the per-(label, property) range index is used.
     """
     return [template.replace("{label}", label) for label in EPISTEMIC_LABELS]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #7852 — the Layer-1 direction vocabulary: the model's four values, plus the
+# two legacy aliases that remain readable.
+#
+# ONTOLOGY §8 records direction on the write with FOUR values:
+#   ``->``  source → target    (confidence flows forward only)
+#   ``<-``  target → source    (confidence flows backward only)
+#   ``<->`` both ways
+#   ``-``   neither — the connection exists and NO confidence transfers
+#
+# Before this change the runtime stored only the two legacy tokens
+# (``unidirectional`` ≡ ``->``, ``bidirectional`` ≡ ``<->``) and compared them
+# by NAME at each call site. The legacy tokens stay accepted (existing callers
+# are byte-compatible and existing rows keep the token they were written with
+# — there is NO data migration) and every READ boundary normalizes through
+# ``direction_flows``, so a ``<-`` edge is never silently read as its opposite
+# and a ``-`` edge transfers nothing.
+#
+# ONE declaration, imported by every reader — the same rule the status
+# partition above is under. Do NOT re-spell these sets at a call site.
+# ══════════════════════════════════════════════════════════════════════════
+
+#: The model's four Layer-1 direction values (ONTOLOGY §8).
+DIRECTION_VALUES = frozenset({"->", "<-", "<->", "-"})
+
+#: The pre-#7852 runtime tokens — still accepted on the write and still read.
+LEGACY_DIRECTION_VALUES = frozenset({"unidirectional", "bidirectional"})
+
+#: Every token a write boundary accepts (the four model values + the two legacy
+#: aliases). ``create_operator`` / ``create_direct_edge`` / the ingest contract
+#: / the ``decide`` CLI all validate against THIS set.
+ACCEPTED_DIRECTION_VALUES = DIRECTION_VALUES | LEGACY_DIRECTION_VALUES
+
+#: Legacy token → the model value it means. ``unidirectional`` is source→target
+#: (``->``); ``bidirectional`` is both ways (``<->``).
+DIRECTION_ALIASES = {"unidirectional": "->", "bidirectional": "<->"}
+
+
+def canonical_direction(value: str | None) -> str | None:
+    """Normalize an accepted direction token to the model's four-value form.
+
+    ``None`` stays ``None`` (absent — the caller canonicalizes per ``op_type``).
+    A legacy token maps through ``DIRECTION_ALIASES``; an unrecognised token
+    returns ``None`` so the caller decides (never a silent default).
+    """
+    if value is None:
+        return None
+    if value in DIRECTION_VALUES:
+        return value
+    return DIRECTION_ALIASES.get(value)
+
+
+def direction_flows(value: str | None) -> tuple[bool, bool]:
+    """``(source→target, target→source)`` for a stored direction token.
+
+    This is the ONE read-side normalizer: every reader — EP's factor-message
+    gating and back-message filters, the analyze BFS, the dedup comparison —
+    asks here, so the four model values and the two legacy aliases cannot be
+    interpreted differently in two places (the divergence that would read a
+    ``<-`` edge as its opposite, or a ``-`` edge as a propagating one).
+
+    ``->``/``unidirectional`` flow forward only; ``<-`` flows backward only;
+    ``<->``/``bidirectional`` flow both ways; ``-`` flows neither (the
+    connection exists and NO confidence transfers). Absent/unknown defaults
+    to both ways — the runtime's historical default for a missing direction.
+    """
+    canonical = canonical_direction(value)
+    if canonical is None:
+        return (True, True)
+    return (canonical in ("->", "<->"), canonical in ("<-", "<->"))
+
+
+def is_default_direction(value: str | None) -> bool:
+    """True when ``value`` does not DIFFERENTIATE from the mutual default.
+
+    The signature default (``bidirectional``) and its model spelling (``<->``)
+    both mean "not declared"; an absent direction does too. Used to decide
+    whether a declared Layer-2 ``semantics`` may resolve the direction: the
+    meaning outranks a non-declaration, never a value the caller differentiated.
+    """
+    canonical = canonical_direction(value)
+    # `value is None` is the ONE "no direction was supplied" case; any other
+    # token the vocabulary does not recognise must NOT read as default —
+    # otherwise a caller's typo (`sideways`) would be silently overwritten by a
+    # declared `semantics` before validation could refuse it.
+    return value is None or canonical == "<->"
+
+
+def direction_spellings(value: str | None) -> frozenset[str]:
+    """Every stored token equivalent to ``value`` (canonical + legacy alias).
+
+    Storage is VERBATIM (no migration), so one meaning may be spelled two ways
+    on disk. A reader that compares a direction against stored values as a
+    string must compare against the whole equivalence class — otherwise a
+    ``->`` operator written after this change is invisible to a legacy-token
+    lookup, and the idempotent ingest path mints a silent DUPLICATE.
+    """
+    canonical = canonical_direction(value)
+    if canonical is None:
+        canonical = "<->"
+    return frozenset(
+        {canonical}
+        | {legacy for legacy, canon in DIRECTION_ALIASES.items()
+           if canon == canonical}
+    )

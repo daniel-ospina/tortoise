@@ -53,12 +53,17 @@ const snapshot = JSON.parse(readFileSync(join(here, 'wizardRenderedCopy.snapshot
 // The reviewed population, as a census of (family, kind) — pinned by HAND, never
 // derived from the render. A new paragraph in ANY family changes its count here.
 const PROSE_CENSUS = {
-  'wizard-caption:data': 6,
+  'wizard-caption:data': 5,
   'wizard-caption:inline': 3,
   'wizard-note:expression': 1,
   'wizard-note:inline': 2,
   'wizard-note:local-const': 3,
-  'snippet:expression': 2,
+  // #4915: was 2. The second `snippet:expression` node was the Memory-sources
+  // row's `<pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>`, which
+  // moved with its row into `harnessStatusCard.jsx` — this census is the prose
+  // written IN main.jsx, so it follows the node out. Its rendered copy is pinned
+  // by `harnessDisclosureDom.test.jsx` (the DOM lane) instead of by name here.
+  'snippet:expression': 1,
   'snippet:inline': 1,
   'snippet:local-const': 1,
 }

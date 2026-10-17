@@ -17,7 +17,7 @@
     "lychee": "lychee 0.24.2",
     "population": "git ls-files '*.md' (minus vendored) \u2014 772 files",
     "counts": {
-      "markdownlint": 3300,
+      "markdownlint": 3299,
       "lychee": 46,
       "relative_links": 0
     },
@@ -2217,7 +2217,6 @@
     "docs/research/2026-08-31-gbrain-learnings/research-brief.md|MD037|89|Spaces inside emphasis markers [Context: \"; _\"]",
     "docs/research/2026-09-01-gbrain-learnings/delivery-shape.md|MD037|291|Spaces inside emphasis markers [Context: \"_ k\"]",
     "docs/research/2026-09-01-gbrain-learnings/delivery-shape.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
-    "docs/research/2026-09-01-gbrain-learnings/platform-seams.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
     "docs/research/2026-09-01-gbrain-learnings/ux-research.md|MD038|295|Spaces inside code span elements [Context: \"...o model context (Claude Code `\"]",
     "docs/research/2026-09-01-gbrain-learnings/ux-research.md|MD038|325|Spaces inside code span elements [Context: \"`, OpenClaw `\"]",
     "docs/research/2026-09-01-gbrain-learnings/ux-research.md|MD038|366|Spaces inside code span elements [Context: \"`. Constants: `\"]",

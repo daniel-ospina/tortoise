@@ -36,6 +36,14 @@ def test_onboard_completion_prints_prompt_url(capsys):
     # than a skill to install. Reverting it left every test green.
     assert "Onboarding instructions" in captured.out, (
         "`tortoise onboard` must present onboarding as instructions")
+    # #3502: the completion banner advertises an extension, so it must name the
+    # one the installer actually ships. DERIVED, never retyped — the phantom
+    # `tortoise-context` name lived in this banner too.
+    from tortoise.capture_install import PI_EXTENSION_NAME
+
+    assert f"{PI_EXTENSION_NAME} extension" in captured.out, (
+        "the onboard banner must name the real capture extension")
+    assert "tortoise-context" not in captured.out
 
 
 def test_init_prints_onboarding_as_instructions_not_a_skill(capsys, tmp_path, monkeypatch):

@@ -108,11 +108,19 @@ def assert_copies_parity(canonical: Path, mirror: Path) -> None:
     to catch. Both sides are asserted to EXIST before either is read, so a
     missing file raises a named failure instead of a bare FileNotFoundError from
     the comparison — the difference between a diagnosis and a traceback.
+
+    The comparison is over BYTES, not decoded text (#3673 Target: "byte-identical"
+    and "0 fail-open paths"). `Path.read_text()` opens with universal-newline
+    translation, so `b"a\n"` and `b"a\r\n"` read EQUAL — a CRLF mirror passed
+    this gate while the bytes actually served differed from the canonical.
+    Measured: those two payloads are unequal as bytes and equal via `read_text`.
+    `read_bytes()` is the same one-line read with no normalisation step left to
+    fail open. A binary read also keeps the DIR / absent cases failing (OSError /
+    a named AssertionError), which is the fail-closed behaviour asserted below.
     """
     assert canonical.exists(), f"canonical copy missing: {canonical}"
     assert mirror.exists(), f"deploy mirror missing: {mirror}"
-    assert mirror.read_text(encoding="utf-8") == canonical.read_text(
-        encoding="utf-8"), (
+    assert mirror.read_bytes() == canonical.read_bytes(), (
         f"parity broken: {mirror} drifted from {canonical}")
 
 
@@ -154,6 +162,27 @@ def test_parity_gate_fails_closed_on_a_missing_or_unreadable_copy(tmp_path):
     mirror.unlink()
     mirror.mkdir()
     with pytest.raises(OSError):
+        assert_copies_parity(canon, mirror)
+
+
+def test_parity_gate_compares_bytes_not_newline_normalised_text(tmp_path):
+    """#3673 Target "0 fail-open paths": the contract is BYTE-identity.
+
+    A gate that reads TEXT cannot see a line-ending difference: `read_text()`
+    applies universal-newline translation, so a mirror committed with CRLF read
+    EQUAL to an LF canonical while the bytes served differed. That is not the
+    comparison the gate claims to make, so it is a fail-open path and not a
+    nicety. The payloads below differ ONLY by line ending — provably unequal as
+    bytes and equal as text — so this test is what stops `assert_copies_parity`
+    reverting to `read_text()`.
+    """
+    canon = tmp_path / "canonical.md"
+    mirror = tmp_path / "mirror.md"
+    canon.write_bytes(b"line one\nline two\n")
+    mirror.write_bytes(b"line one\r\nline two\r\n")
+    assert canon.read_text(encoding="utf-8") == mirror.read_text(
+        encoding="utf-8"), "precondition: the payloads differ only by newline"
+    with pytest.raises(AssertionError, match="drifted"):
         assert_copies_parity(canon, mirror)
 
 
@@ -851,3 +880,50 @@ def test_key_never_interpolated_into_env_blocks():
         # cursor pins env: expansion; the EXACT pi token is owned by #1729
         # (plain form — pi's mcp-client has no env: prefix support).
         assert "${env:TORTOISE_API_KEY}" in _extract_js_block(html, "CURSOR_MCP_CONFIG_ENV")
+
+
+# ── #3232: the MCP session boundary in the installer + generic copy ─────────
+#
+# The wizard prompts now cross the session boundary before they call the
+# server (#3232). The installer-written surfaces carry the SAME ordering
+# requirement, but with a different failure mode: the AGENTS.md standing block
+# is written into every provisioned repo and re-read by the agent in EVERY
+# later session, so a block that says "verify with tortoise_health before
+# reporting done" with no restart step re-creates the defect in every future
+# session of that repo. The two generic restart lines are pinned so a future
+# edit cannot make them contradict the per-harness credential mechanisms.
+QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
+
+
+def test_3232_agents_standing_block_orders_the_restart_before_the_verify():
+    """The AGENTS.md heredoc must carry the corrected ORDER, not merely lack
+    the old demand: deleting the verify sentence would satisfy "no bad order"
+    while removing the only checkpoint cue the block has."""
+    src = _installer_text()
+    # The heredoc writes its delimiters via ${ms}/${me}, so the LITERAL markers
+    # only appear in the variable assignments — slice the block by its own first
+    # and last content lines instead.
+    block = src[src.index("# Tortoise — agent memory"):
+                src.index('${me}" > "$block"')]
+    flat = " ".join(block.split())
+    assert ("restart the client so the new session reads it, then verify with "
+            "tortoise_health before reporting done") in flat, (
+        "the AGENTS.md block must write the config, RESTART the client, and "
+        "only then verify — the standing block is re-read every session, so a "
+        "verify-before-restart order re-creates #3232 for the whole repo")
+
+
+def test_3232_generic_restart_lines_are_exact():
+    """The installer's stdout cue and the quickstart line are the two generic,
+    non-per-harness restart statements. Each is pinned against its exact
+    string so an edit that contradicts a harness's own mechanism (a new shell
+    for Pi/Codex CLI, a registry + relaunch for Codex Desktop) is visible."""
+    src = _installer_text()
+    assert ('echo "Next: restart your agent, then confirm the skills are '
+            'listed:"') in src, (
+        "the installer's closing cue must restart, THEN confirm/list the "
+        "skills — the skills directory is read at agent start")
+    quick = QUICKSTART.read_text(encoding="utf-8")
+    assert "Restart your client." in quick, (
+        "docs/quickstart-cloud.md must keep its restart cue before the "
+        "tools-appear sentence")

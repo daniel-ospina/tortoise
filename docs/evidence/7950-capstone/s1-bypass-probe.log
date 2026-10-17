@@ -1,0 +1,7 @@
+journal_backed (guard armed): True
+FOLD LANE (proj.apply):          refused (DirectCacheWriteRefused)
+PUBLIC RAW LANE (proj.query):    refused (DirectCacheWriteRefused)
+RAW HANDLE LANE (proj.g.query):   SUCCEEDED (write reached the cache)
+cache rows for :S1Probe after all three attempts: ['raw-handle']
+journal records after all three attempts: 0
+S1 VERDICT: BYPASS CONFIRMED

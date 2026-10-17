@@ -209,14 +209,19 @@ _NAMED_CONSTANT_MODULES = {
     "tortoise/backup_config.py",
 }
 
-# Large modules that merely USE the constants — exempt ONLY on lines that name
-# a constant or link the canonical doc. A whole-file exemption on a ~24k-line
-# module hid a new independent literal (#4179 review).
+# Large modules (and the canonical ONTOLOGY doc) that merely USE the constants —
+# exempt ONLY on lines that name a constant or link the canonical doc. A
+# whole-file exemption on a ~24k-line module hid a new independent literal
+# (#4179 review). `docs/ONTOLOGY.md` is here rather than in SCATTER_ALLOWLIST so
+# its other window prose stays gated: only the §4.6 row that names
+# `RAW_DELETION_MARKER_TTL` is exempt.
 _NAMED_CONSTANT_USER_FILES = {
     "tortoise/backup_sweep.py",
     "tortoise/hosted_api.py",
     "tortoise/sdk.py",
     "tortoise/supabase_control.py",
+    "tortoise/raw_state.py",
+    "docs/ONTOLOGY.md",
 }
 
 # The canonical constant names. A claim line in a user file is exempt when it
@@ -224,7 +229,8 @@ _NAMED_CONSTANT_USER_FILES = {
 _NAMED_CONSTANT_RE = re.compile(
     r"\b(?:RESTORE_WINDOW_(?:DAYS|HOURS)|_GRAPH_PURGE_GRACE_DAYS"
     r"|_TRASH_GRACE_DAYS|TEAM_DELETE_GRACE_HOURS|USER_ACCOUNT_DELETE_GRACE_HOURS"
-    r"|LOCK_DAYS_MAX|retention_(?:hourly|daily|weekly))\b"
+    r"|LOCK_DAYS_MAX|RAW_DELETION_MARKER_TTL"
+    r"|retention_(?:hourly|daily|weekly))\b"
 )
 
 
@@ -245,6 +251,7 @@ _WINDOW_NOUN = (
 # promise-bearing copy (#4179 review).
 _WINDOW_RE = (
     r"(?:\b7\s*-?\s*d(?:ays?)?\b"
+    r"|\b10\s*-?\s*d(?:ays?)?\b"
     r"|\b168\s*-?\s*h(?:ours?|rs?|r)?\b"
     r"|\b24\s*-?\s*h(?:ours?|rs?|r)?\b"
     r"|\b28\s*-?\s*days?\b"
@@ -347,6 +354,8 @@ def test_claim_regex_covers_new_forms_and_rejects_unrelated_numbers():
         "backups are retained for 24 hours",
         "the trash grace is 7d",
         "restore it for 7 days",
+        "the deletion marker is bounded for 10 days",
+        "the trash grace is 10d",
     ):
         assert _CLAIM_RE.search(claim), f"scan misses a real claim: {claim!r}"
     for unrelated in (
@@ -375,3 +384,51 @@ def test_canonical_doc_exists_and_names_the_constants():
     assert "_GRAPH_PURGE_GRACE_DAYS" in text
     assert "retention_hourly" in text
     assert "restore window" in text.lower()
+
+
+# ── 6. the product-usage record is retained decoupled on purge (#3843) ──────
+
+def test_usage_record_is_retained_decoupled_on_purge():
+    """#3843: the per-capture / per-team usage record is RETAINED on an org
+    erasure, decoupled from the identity instead of deleted.
+
+    The owner decided (#3843, 2026-09-17) to keep the per-capture record, and
+    later the same day ruled (#3853) that product-usage analytics "can't be
+    fully deleted but gets decoupled from your identity (which is fully
+    deleted)". The decoupling is the IDENTITY deletion, not a scrub of the
+    record: ``purge_org_control_plane`` hard-deletes the rows that name the
+    team and never touches ``analytics_events`` (which has no FK to
+    ``organizations`` to cascade through). The record the decision exists for is
+    therefore preserved rather than destroyed by an "erasure completion"
+    change — this test is that guard.
+    """
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise.supabase_control import purge_org_control_plane
+
+    cp = FakeControlPlane()
+    cp.seed("organizations", [{"id": "org_1", "name": "Acme"}])
+    cp.seed("org_memberships", [{"org_id": "org_1", "user_id": "u1",
+                                 "status": "active"}])
+    cp.seed("analytics_events", [
+        {"org_id": "org_1", "event_name": "capture_cost",
+         "properties": {"session_id": "s1", "harness": "claude-code"}},
+    ])
+    # A fault injected on an analytics DELETE makes any such delete fatal, so
+    # the record survives because the purge never issues one — not by luck.
+    cp.fail_query(
+        table="analytics_events", method="DELETE",
+        exc=RuntimeError("the decided usage record must not be deleted"))
+
+    purge_org_control_plane(cp, "org_1")
+
+    assert all(r["id"] != "org_1" for r in cp.tables.get("organizations", [])), \
+        "the identity layer (the organizations row) is hard-deleted"
+    assert not [m for m in cp.tables.get("org_memberships", [])
+                if m.get("org_id") == "org_1"], \
+        "memberships are part of the deleted identity layer"
+    retained = [r for r in cp.tables.get("analytics_events", [])
+                if r.get("org_id") == "org_1"]
+    assert retained, (
+        "the decided per-capture usage record is retained (decoupled), never "
+        "deleted by the erasure"
+    )

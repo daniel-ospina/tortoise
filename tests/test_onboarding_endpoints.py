@@ -15,6 +15,7 @@ import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import require_answered, verdict_client
 from tortoise.hosted_api import app, _make_sdk
 from tortoise.sdk import TortoiseSDK
 
@@ -69,7 +70,7 @@ def client(tmp_path):
             # JWT auth; tests seed it here).
             "session_user_id": "user-1",
         }
-        with TestClient(app) as tc:
+        with verdict_client(app) as tc:
             yield tc
 
 
@@ -79,7 +80,7 @@ def unauth_client(tmp_path):
     fixture_db_path = str(tmp_path / "unauth.db")
     # #2127 wave 2: shared helper (see the client fixture — the fixture was
     # already canonical; the helper now owns the patch/pin/close cycle).
-    with patched_tortoise_sdk(fixture_db_path), TestClient(app) as tc:
+    with patched_tortoise_sdk(fixture_db_path), verdict_client(app) as tc:
         yield tc
 
 
@@ -297,7 +298,7 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
             "legacy_full_access": True,
     }
     try:
-        with TestClient(_app) as tc:
+        with verdict_client(_app) as tc:
             r = tc.patch("/v1/onboarding/state",
                          json={"session_recording": True, "capture_revised": True})
             assert r.status_code == 200, r.text
@@ -485,7 +486,8 @@ def test_off_switch_patch_stops_capture_409(client, monkeypatch):
     assert r0.status_code == 200, r0.text
     conv = [{"role": "user", "content": "we decided to ship the memory capture slice"},
             {"role": "assistant", "content": "agreed — capture is default-on now"}]
-    r1 = client.post("/v1/sessions", json={"conversation": conv})
+    r1 = require_answered(client.post("/v1/sessions", json={"conversation": conv}),
+                          what="POST /v1/sessions answered")
     assert r1.status_code == 200, r1.text
     sessions_after_on = _make_sdk(namespace="test-team-1")._get_proj().g.query(
         "MATCH (s:Session) RETURN count(s)").result_set[0][0]
@@ -765,12 +767,24 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
     "session_capture_receipt_codex": ("session_capture_receipt_codex", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_cursor": ("session_capture_receipt_cursor", "2026-08-25T00:00:00Z"),
     "session_capture_receipt_pi": ("session_capture_receipt_pi", "2026-08-25T00:00:00Z"),
+    # #2120: OpenClaw joins the harness vocabulary, so its two derived
+    # server-owned keys need their PATCH field here — the coverage guard in
+    # test_capture_verification_keys_not_client_writable is what reds when a
+    # harness is added without them (no PATCH field ⇒ the 403 refusal for that
+    # key can never be asserted, and the key would be silently untested).
+    "session_capture_receipt_openclaw": ("session_capture_receipt_openclaw", "2026-08-25T00:00:00Z"),
+    # #2121: Hermes joins the vocabulary for the same reason as OpenClaw above
+    # — its derived server-owned keys need a PATCH field or the 403 refusal for
+    # them can never be asserted (the coverage guard below is what reds).
+    "session_capture_receipt_hermes": ("session_capture_receipt_hermes", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude": ("session_capture_last_error_claude", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-desktop": ("session_capture_last_error_claude_desktop", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_claude-web": ("session_capture_last_error_claude_web", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_codex": ("session_capture_last_error_codex", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_cursor": ("session_capture_last_error_cursor", "2026-08-25T00:00:00Z"),
     "session_capture_last_error_pi": ("session_capture_last_error_pi", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_openclaw": ("session_capture_last_error_openclaw", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_hermes": ("session_capture_last_error_hermes", "2026-08-25T00:00:00Z"),
     "install_probe_claude": ("install_probe_claude", "2026-08-25T00:00:00Z"),
     "install_probe_pi": ("install_probe_pi", "2026-08-25T00:00:00Z"),
     # #1893: persisted source-scope keys (short repo names / {repo, branch}).
@@ -1283,12 +1297,19 @@ def test_cross_surface_harness_vocab_contract():
 
     # 1. server-side subset contract (analytics ⊆ SessionRequest Literal).
     assert _HARNESS_ANALYTICS_VALUES <= _SESSION_HARNESS_VALUES
-    # both server surfaces stay exactly the pinned 6-harness vocabulary.
+    # The analytics vocabulary is the DASHBOARD copy-attribution beacon's set —
+    # it must stay exactly the wizard's leaf population (asserted below), so it
+    # is unchanged.  The SessionRequest vocabulary is a SUPERSET: #2120 added
+    # OpenClaw and #2121 added Hermes, neither of which ships a live dashboard
+    # copy row (both install through `tortoise sessions import`, and no
+    # HARNESS_INSTALL entry is rendered for them), so there is no copy to
+    # attribute and no leaf to add.
     assert set(_HARNESS_ANALYTICS_VALUES) == {
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }
     assert frozenset({
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+        "openclaw", "hermes",
     }) == _SESSION_HARNESS_VALUES
 
     # 2. the WIZARD contract (#2936). The client declares only the EXCEPTIONS
@@ -1456,3 +1477,29 @@ def test_operational_keys_not_client_writable(client):
         assert after.get(state_key) == before.get(state_key), (
             f"{state_key} CHANGED despite the 403: "
             f"{before.get(state_key)!r} -> {after.get(state_key)!r}")
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``/v1/onboarding/state`` is the
+    route every fixture in this file reads and it is not exempt from the bound.
+    The plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("GET", "/v1/onboarding/state")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.get("/v1/onboarding/state").status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get("/v1/onboarding/state")
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /v1/onboarding/state answered" in message

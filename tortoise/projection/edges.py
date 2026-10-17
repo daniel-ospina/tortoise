@@ -256,6 +256,22 @@ _VALID_EDGE_PREDICATES = frozenset({
 })
 
 
+# Every structural predicate a WRITER accepts — the union of the three
+# structural write surfaces this module owns:
+#   * create_edge            -> `_VALID_EDGE_PREDICATES`
+#   * create_about_edge      -> the about* set, whose keys are
+#                               `STRUCTURAL_REL_LABELS` (it accepts `aboutPoint`,
+#                               which the generic create_edge set misses #391)
+#   * TortoiseSDK.ingest     -> `_VALID_EDGE_PREDICATES`, plus an explicit
+#                               `extractedFrom` exemption (sdk.py)
+# Consumers that ask "can the runtime write this predicate?" (the #2766
+# write-path verdict) read THIS set, not one of the three subsets, so a
+# predicate added to any single writer moves the answer with it.
+STRUCTURAL_WRITE_PREDICATES = frozenset(
+    _VALID_EDGE_PREDICATES | set(STRUCTURAL_REL_LABELS)
+)
+
+
 def about_document_target_reason(label: str | None,
                                  properties: dict | None) -> str | None:
     """Why this node cannot be an ``aboutDocument`` target, or ``None`` when
@@ -687,7 +703,8 @@ class _EdgeHandlers:
                 # (``EventAPI.add_point(**fields)``), so descriptor-alone minted
                 # the edge for a payload that was never a mitigation, while a
                 # present-but-malformed strength is either dropped by the writer
-                # or poisons every weight read. ``is False`` also excludes the
+                # or ignored at read time (#6151: the read degrades an unusable
+                # strength to the fallback rather than raising). ``is False`` also excludes the
                 # SDK's generic operator (``is_operator: true``) and
                 # ``rebuild_all``'s #548 graph-only synthesis, whose
                 # ``op_type``-bearing node may carry no flag.
@@ -729,6 +746,109 @@ class _EdgeHandlers:
                     "MERGE (s)-[:INPUT {idx:$idx}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
+
+    def _sync_tags(self, point_id: str, tags) -> None:
+        """Reconcile `TAGGED` edges for a point against a tags value (#485).
+
+        ONE routine for BOTH writers (#2897): the SDK live path
+        (`create_point` / `update_point`) delegates here, and the replay fold
+        (`_upsert_point_edges` pass 2, and `_revise_point` for a tag EDIT)
+        calls it too — so live and replay can never drift into the raw-list
+        half-restore the old replay refused. The `:Tag`/`TAGGED` half is
+        SNAPSHOT-DERIVABLE from the Point's own `tags` property, exactly like
+        `extractedFrom` → `_link_source` (#2489); it is never journaled
+        separately.
+
+        Idempotent: MERGE creates any missing :Tag nodes + TAGGED edges, and
+        edges to tags no longer in the list are deleted.
+
+        The normalisation is TOTAL for the shapes the signature allows — a
+        `list`, or a `tuple` (the engine stores both as an array, cf.
+        `_is_persistable_prop_value`) — and a FALSY value, which both callers
+        normalise to `[]` with the same `or []` expression (`props["tags"] or
+        []` live, `ev["tags"] or []` in `_revise_point`), so `None`/`""` CLEAR
+        the edges. The live create/update gates accept a tuple as well as a
+        list (#8317 review R2), so a tuple round-tripping through the journal
+        as a list does not make the replay invent edges live never wrote.
+
+        ⚠️ BOUND, stated rather than implied — a TRUTHY NON-ARRAY (`tags` set to
+        a number, a string, a dict). The PROPERTY halves AGREE (`_stated_tags`
+        writes a persistable scalar verbatim; `_revise_point` clears a value the
+        store cannot hold, which is what `#7369`'s null-degradation leaves the
+        live write too), but the EDGE halves DIFFER, in this direction:
+
+          * LIVE KEEPS the node's EXISTING edges — this guard returns early.
+            That is deliberate and PINNED:
+            `tests/test_sdk.py::test_update_non_list_tags_no_crash` ("Non-list
+            tag values match create_point: property set, no edge sync") asserts
+            the old edge is still there.
+          * A `rebuild_all` REMOVES them: the graph is wiped, and the DEFERRED
+            derived pass (`_upsert_point_edges`) reads only the node's FINAL
+            value, so it mints none and a membership the live graph still
+            answers for is gone.
+          * `rebuild(EventLog)` KEEPS them: it wipes too, but it replays
+            record-by-record through `apply`, so the creation's list-sync runs
+            BEFORE the edit turns the property into a non-array and no later
+            sweep revisits it.
+
+        So on this input the two replay arms disagree with each other AND with
+        live; #8333 owns both halves. The three-arm test in
+        `test_3817_tags_rebuild_durability.py` covers the tag-LIST shape only.
+
+        Which half is right is not in doubt. The `tags` PROPERTY is the SOURCE
+        of this derived half (that is what "snapshot-derivable" means, #2489's
+        shape), so a non-array derives NO edges and the rebuilt graph is the
+        self-consistent one — LIVE is the half carrying a stale derived
+        artifact. That is the same stale-edge class #485 fixed for a list
+        ("update_point previously set the property but left edges stale, so
+        query_points_by_tag missed updated points"), left in place for the
+        non-list case.
+
+        The tightest fix is HERE and is one line — normalise a non-array to `[]`
+        instead of returning early, making the edge half a pure function of the
+        NORMALISED property value on every path (live create, live update,
+        replay revise, the derived pass) — so `create_point` is unaffected (a
+        fresh point has no edges to clear). It is deliberately NOT taken here:
+        it alters a LIVE write for an input the public signature excludes
+        (`tags: list[str] | None`) and reverses a pinned test, which is not a
+        change to bundle into a durability fix. Filed with the measurement as
+        **#8333**, which owns it and the pin.
+
+        The drop is REPORTED, not silent: for a value the store cannot hold,
+        `check_consistency` names `tags` in `uncarried_journal_fields` (see
+        `consistency._uncarried`), so the check stays green on a byte-faithful
+        replay without hiding that the property half was not carried.
+        """
+        if not isinstance(tags, (list, tuple)):
+            return
+        for tag in tags:
+            self.g.query(
+                "MATCH (p:Point {id:$pid}) "
+                "MERGE (t:Tag {name:$tag}) "
+                "MERGE (p)-[:TAGGED]->(t)",
+                params={"pid": point_id, "tag": tag},
+            )
+        # Delete edges to tags no longer in the list (diff via graph read to
+        # avoid list-parameter IN-clause portability concerns on FalkorDB).
+        stale = self.g.query(
+            "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) RETURN t.name",
+            params={"pid": point_id},
+        ).result_set
+        removed = 0
+        for row in stale:
+            if row[0] not in tags:
+                self.g.query(
+                    "MATCH (p:Point {id:$pid})-[r:TAGGED]->(t:Tag {name:$tag}) "
+                    "DELETE r",
+                    params={"pid": point_id, "tag": row[0]},
+                )
+                removed += 1
+        # GC orphaned :Tag nodes when the sync actually removed edges — tag
+        # removal can leave a Tag with no TAGGED referrers (#485). Skipped on
+        # create_point (no stale edges there), so new-point creation never pays
+        # the scan.
+        if removed:
+            self.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
 
     def _create_about_edges(self, source_id: str, entity_name: str) -> None:
         """Link entity (Point, Document, Event, or Object) to a named entity.
@@ -902,10 +1022,26 @@ class _EdgeHandlers:
         it here would record a FALSE current. Absent / empty ⇒ no property at
         all (``ON CREATE SET r.sourceVersion = NULL`` is a no-op), never ``''``.
         """
-        refs = [source_ref] if isinstance(source_ref, str) else list(source_ref)
+        # #8171 (review P1): a ref that is neither a string nor a list/tuple of
+        # them is NOT a source identity. `list(source_ref)` on a DICT yielded
+        # its KEYS, and each key was minted as its own `:Source` — an INVENTED
+        # provenance, which "is worse than none" (design contract #3). Measured
+        # pre-fix: `{"url": ..., "kind": ...}` minted Sources named `url` and
+        # `kind`, each with an `extractedFrom` edge. A per-member type check
+        # cannot catch this — the keys ARE strings — so the gate has to be on
+        # the CONTAINER. The doors that can validate ATOMICALLY do
+        # (`create_entity`, `create_point`) and raise pre-write; this choke
+        # point guarantees the remaining callers cannot fabricate whatever
+        # they pass.
+        if isinstance(source_ref, str):
+            refs = [source_ref]
+        elif isinstance(source_ref, (list, tuple)):
+            refs = list(source_ref)
+        else:
+            return
         versions = source_versions or {}
         for raw_ref in refs:
-            if not raw_ref:
+            if not raw_ref or not isinstance(raw_ref, str):
                 continue
             # #7951 R2-P2: a `session:<id>` edge whose ORIGINATING record
             # precedes a later `SessionDeleted` belongs to the incarnation the

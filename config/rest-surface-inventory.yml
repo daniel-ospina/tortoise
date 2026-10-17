@@ -161,6 +161,22 @@ routes:
   - method: POST
     path: /v1/data-sources/demand
     class: tenant
+  # #2081 (epic #2080 W4 phase 2): the PUSH half of the delivery path —
+  # register/list/delete webhook subscriptions over the durable event stream,
+  # plus the per-subscription delivery receipts. Four tenant routes added with
+  # the feature, declared here so the third surface grows VISIBLY (#3875).
+  - method: POST
+    path: /v1/context/subscriptions
+    class: tenant
+  - method: GET
+    path: /v1/context/subscriptions
+    class: tenant
+  - method: DELETE
+    path: /v1/context/subscriptions/{sub_id}
+    class: tenant
+  - method: GET
+    path: /v1/context/subscriptions/{sub_id}/deliveries
+    class: tenant
   - method: POST
     path: /v1/demo
     class: tenant
@@ -193,6 +209,12 @@ routes:
     class: tenant
   - method: PATCH
     path: /v1/graphs/{graph_id}
+    class: tenant
+  - method: GET
+    path: /v1/graphs/{graph_id}/packs
+    class: tenant
+  - method: PUT
+    path: /v1/graphs/{graph_id}/packs
     class: tenant
   - method: POST
     path: /v1/index/docs
@@ -255,6 +277,16 @@ routes:
     class: control-plane
   - method: POST
     path: /v1/internal/reconcile
+    class: control-plane
+  # #3839 (lane B7): the retention indicator over the WHOLE fleet, behind
+  # `_check_internal` (FASTAPI_INTERNAL_KEY). Control-plane because the
+  # denominator IS the fleet — it enumerates every ENUMERABLE org (live OR
+  # soft-deleted/churned: churned teams are IN the denominator, and a
+  # `deleted_at IS NULL` filter would bias the rate upward), which a tenant key
+  # cannot do — and it is read-only aggregation, never a data-retention window
+  # (binding guard D12-b).
+  - method: GET
+    path: /v1/internal/retention/cohort
     class: control-plane
   - method: GET
     path: /v1/invites

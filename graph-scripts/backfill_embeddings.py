@@ -5,6 +5,18 @@ Computes 384-dim embeddings via BAAI/bge-small-en-v1.5 (tortoise.embeddings,
 EMBEDDING_MODEL) and writes them as vecf32 so the HNSW vector index has data
 to query.
 
+Width (#4289): this is a Point/vector WRITE path, so it obeys the same rule
+as the SDK's — the STORE declares the width it can hold
+(``FalkorProjection.required_embedding_dim``, #4280) and every row is encoded
+through ``embeddings.encode_for_store``. On a store with a Point HNSW index a
+wrong-width encoder yields NO vector (the row is skipped, never written); on
+the index-less brute-force lanes (embedded / engine < 4.x / failed index
+creation) the encoder's own width governs and is kept.
+
+The width is a PER-GRAPH fact, so it is resolved for the graph being written
+(``_required_dim_for_graph``), not once from the URI (``--all-tenants`` and
+``--graph <other>`` diverge — see ``_connect_falkordb``).
+
 Two operating modes:
 - Default (NULL-only): only nodes where `embedding IS NULL` are touched, so
   re-running after a partial failure is safe and never recomputes existing
@@ -26,6 +38,13 @@ re-embed just-purged meetings.
 
 URI support: docker://, redis://, rediss:// (FalkorDB Cloud) via
 FalkorProjection.from_uri().
+
+The sweep covers embedding SURFACES, not node labels (#5126): D10
+(ONTOLOGY v3.15 §4.4) retired the ``:Document`` node label, so the ``Document``
+surface sweeps ``:Source`` with a non-NULL ``documentKind`` (its text is the
+node's own ``_searchText``) while the ``Source`` surface sweeps the provenance
+Source (``documentKind`` NULL, text = ``url``, #448). Runs print
+``Document [:Source]`` so the two are never confused for one another.
 
 Multi-tenant: --all-tenants queries the registry graph for team IDs and
 iterates org_{org_id} graphs. Per-tenant backfill, one team at a time.
@@ -66,31 +85,231 @@ from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
 DEFAULT_URI = "docker://:falkordb@127.0.0.1:16379/tortoise"
 DEFAULT_BATCH = 500
 
-# Entity types to embed + their text property (what gets vectorized) and
-# id property (what the MATCH/SET Cypher uses as the node key).
-# #448: Source canonical key is url, not id.
+# Embedding SURFACES — the unit the sweep and the completeness marker count.
+# Each spec names:
+#   ``label``     — the Cypher NODE label the MATCH targets. It is NOT always
+#                   the surface key: D10 (ONTOLOGY v3.15 §4.4) retired the
+#                   ``:Document`` label, so the ``Document`` SURFACE sweeps
+#                   ``:Source``.
+#   ``text_prop`` — the node property vectorized (overridden by ``text_expr``).
+#   ``id_prop``   — the property the MATCH/SET Cypher uses as the node key
+#                   (#448: a Source's canonical key is ``url``, not ``id``).
+#   ``kind_pred`` — the discriminator separating two surfaces that share ONE
+#                   node label.
+#   ``text_expr`` — the Cypher expression vectorized, when a bare property is
+#                   not enough.
+#   ``text_pred`` — an optional "has non-empty text" predicate, when
+#                   ``IS NOT NULL`` is not the live run's own test (``''`` is
+#                   non-NULL in Cypher) — kept in ONE place so the dry run and
+#                   the live run cannot disagree (#5126).
 LABEL_CONFIG: dict[str, dict[str, str]] = {
-    "Point":    {"text_prop": "content", "id_prop": "id"},
-    "Event":    {"text_prop": "subject", "id_prop": "eventId"},
-    "Document": {"text_prop": "title",   "id_prop": "id"},
-    "Source":   {"text_prop": "url",     "id_prop": "url"},
-    "Object":   {"text_prop": "name",    "id_prop": "id"},
-    "Subject":  {"text_prop": "name",    "id_prop": "id"},
+    "Point":    {"label": "Point", "text_prop": "content", "id_prop": "id"},
+    "Event":    {"label": "Event", "text_prop": "subject", "id_prop": "eventId"},
+    # #5126 / D10 (ONTOLOGY v3.15 §4.4): a document IS a ``:Source``. The
+    # pre-fix entry named the retired ``:Document`` LABEL and read the retired
+    # ``content`` prop, so the surface matched 0 rows in every graph while the
+    # completeness marker reported ``Document: 0`` — which reads as "no
+    # documents" rather than "this sweep cannot see documents". The text is the
+    # node's OWN search surface, ``_searchText`` (#3518 — the field the document
+    # FTS leg reads), with the SAME ``title`` fallback the write path applies
+    # (``_upsert_document``: ``s._searchText=coalesce($st, s._searchText,
+    # s.title)``), so a pre-#125 document Source is still swept rather than
+    # silently skipped. NEVER ``content``: ONTOLOGY §4.4 — "``content`` is not a
+    # graph property"; it is scrubbed from the node on every write.
+    # ``documentKind IS NOT NULL`` is the SAME document predicate the vector leg
+    # filters on (``search_engine.run_vector_query``) and the one
+    # ``about_document_target_reason``/``backfill_document_search_text``
+    # enforce — the sweep must cover exactly the nodes the read can return.
+    "Document": {"label": "Source", "text_prop": "_searchText", "id_prop": "url",
+                 "kind_pred": "n.documentKind IS NOT NULL",
+                 "text_expr": "coalesce(n._searchText, n.title)",
+                 # The dry run and the live run must agree on "has text", or
+                 # `--dry-run` (the operator's counts-first gate) over-reports:
+                 # the live run drops an empty-after-trim text (`not
+                 # text.strip()`), and `''` is NON-NULL in Cypher, so
+                 # `coalesce('', title)` returns `''` and `IS NOT NULL` counts
+                 # it. The repo itself writes that shape
+                 # (`projection/__init__.py::backfill_document_search_text`
+                 # sets `_searchText = coalesce(title, '')` on a title-less
+                 # document). `trim(x) <> ''` is NULL-falsy, so it subsumes
+                 # the IS NOT NULL arm.
+                 "text_pred": "trim(coalesce(n._searchText, n.title)) <> ''"},
+    # #448: the provenance Source embeds its ``url`` (the canonical key, #149).
+    # The discriminator is load-bearing: before #5126 ONE branch served both
+    # Source surfaces, so a document was embedded as its own URL string.
+    "Source":   {"label": "Source", "text_prop": "url", "id_prop": "url",
+                 "kind_pred": "n.documentKind IS NULL"},
+    "Object":   {"label": "Object", "text_prop": "name", "id_prop": "id"},
+    "Subject":  {"label": "Subject", "text_prop": "name", "id_prop": "id"},
 }
+
+#: Node labels this script must NEVER match (D10, ONTOLOGY v3.15 §4.4). A MATCH
+#: on one is a permanent zero-row query that makes the sweep claim success over
+#: nothing — exactly how #5126 hid for as long as it did.
+RETIRED_NODE_LABELS: dict[str, str] = {
+    "Document": "the ':Document' label is RETIRED — a document is a ':Source' "
+                "with a non-NULL documentKind, which the 'Document' SURFACE "
+                "(label Source) already sweeps",
+}
+
+
+def _validate_config() -> None:
+    """Fail LOUDLY on a config that cannot mean what it says.
+
+    Two invariants, each one half of the #5126 defect:
+
+    1. no surface may target a RETIRED node label — that is a permanent
+       zero-row MATCH dressed up as a sweep; and
+    2. two surfaces sharing ONE node label must carry DISJOINT, non-empty
+       discriminators — one branch cannot serve a document Source and a
+       provenance Source (different text surfaces), so undeclared sharing is a
+       silent mis-sweep, never a shortcut.
+
+    Raises ``SystemExit`` (the script's own failure channel, already used for
+    the interpreter guard and the missing-embedder check) rather than
+    ``assert``, so the guard is live under ``python -O`` too.
+    """
+    by_label: dict[str, list[str]] = {}
+    for surface, cfg in LABEL_CONFIG.items():
+        label = cfg["label"]
+        if label in RETIRED_NODE_LABELS:
+            raise SystemExit(
+                f"FATAL: embedding surface {surface!r} targets the retired node "
+                f"label {label!r} — {RETIRED_NODE_LABELS[label]}. A MATCH on it "
+                f"returns 0 rows in every graph, so the sweep would report "
+                f"success over nothing (#5126)."
+            )
+        by_label.setdefault(label, []).append(surface)
+    for label, surfaces in by_label.items():
+        if len(surfaces) < 2:
+            continue
+        for surface in surfaces:
+            if not LABEL_CONFIG[surface].get("kind_pred"):
+                raise SystemExit(
+                    f"FATAL: surfaces {surfaces} share the node label "
+                    f"{label!r}, but {surface!r} declares no kind_pred "
+                    f"discriminator — the two would sweep the same rows (#5126)."
+                )
+        preds = [LABEL_CONFIG[s]["kind_pred"] for s in surfaces]
+        if len(set(preds)) != len(preds):
+            raise SystemExit(
+                f"FATAL: surfaces {surfaces} on node label {label!r} declare "
+                f"IDENTICAL kind_pred discriminators — they would sweep the "
+                f"same rows twice (#5126)."
+            )
+
+
+def _require_surface(surface: str) -> dict[str, str]:
+    """The spec for ``surface`` — or a LOUD exit naming what to use instead.
+
+    The pre-#5126 failure mode was a surface that matched nothing and said
+    nothing; an unknown name must therefore abort, not fall through to a
+    generic branch that reads the wrong column.
+    """
+    cfg = LABEL_CONFIG.get(surface)
+    if cfg is None:
+        retired = RETIRED_NODE_LABELS.get(surface)
+        hint = f"\n  {surface}: {retired}" if retired else ""
+        raise SystemExit(
+            f"FATAL: unknown embedding surface {surface!r} — known surfaces: "
+            f"{', '.join(LABEL_CONFIG)}.{hint}"
+        )
+    return cfg
+
+
+def _surface_title(surface: str) -> str:
+    """``surface`` for a human reader, naming the node label when they differ.
+
+    ``Document [ :Source ]`` is the line that would have made #5126 visible in
+    a run's own output.
+    """
+    cfg = LABEL_CONFIG[surface]
+    return surface if cfg["label"] == surface else f"{surface} [:{cfg['label']}]"
 
 
 def _connect_falkordb(uri: str):
     """Connect to FalkorDB via FalkorProjection.from_uri().
 
     Supports docker:// (local), redis:// and rediss:// (FalkorDB Cloud).
-    Returns (FalkorDB client, resolved_graph_name).
+    Returns (FalkorDB client, resolved_graph_name, required_embedding_dim).
+
+    ``required_embedding_dim`` (#4289) is the width the STORE declares, read
+    off the projection so this sweep applies the SAME width guard the SDK
+    write paths do (#4280). It is derived from whether the store has a Point
+    HNSW vector index — ``None`` on the index-less lanes (embedded / engine
+    < 4.x / failed index creation), which is exactly where the read path
+    brute-force scans and any self-consistent width is storable.
+
+    ⛔ It is a PER-GRAPH fact, NOT a deployment-wide one (#4289 review):
+    ``required_embedding_dim`` is read off ``self._vector_index_api``, which
+    ``FalkorProjection._ensure_vector_index_api`` resolves by issuing the
+    create-index DDL against the projection's OWN graph (``self.g``). The
+    value returned here therefore describes **the URI's graph only**. A sweep
+    whose target graph differs (``--graph <other>``, or any ``org_{id}``
+    iteration of ``--all-tenants``) must ask THAT graph instead — see
+    :func:`_required_dim_for_graph`. Reusing this value for another graph is
+    wrong in BOTH directions:
+
+      * URI graph indexed, target graph not → the target's brute-force read
+        lane can hold the encoder's own width, yet the URI graph's
+        ``EMBEDDING_DIM`` guard would silently DROP those vectors — the #4280
+        regression shape;
+      * URI graph index-less, target graph indexed → ``None`` here hands a
+        wrong-width vector to ``vecf32`` for an INDEXED Point — the #4289 hole
+        left unguarded for that target.
     """
     from tortoise.projection import FalkorProjection
 
     proj = FalkorProjection.from_uri(uri)
     # proj.db (public FalkorDB client) + proj.graph_name (public) — NOT the
     # private _db/_graph_name (code-review P0 fix: _db doesn't exist).
-    return proj.db, proj.graph_name
+    return proj.db, proj.graph_name, proj.required_embedding_dim
+
+
+def _required_dim_for_graph(uri: str, graph_name: str, *,
+                            default_graph: str | None = None,
+                            default_dim: int | None = None) -> int | None:
+    """Resolve the STORE-declared vector width for ONE target graph (#4289).
+
+    ``FalkorProjection.required_embedding_dim`` is a PER-GRAPH fact (see
+    :func:`_connect_falkordb`): the property is read off the projection's own
+    graph, which ``_ensure_vector_index_api`` probes/creates the Point HNSW
+    index on. So the width a sweep must obey is the width of the graph it is
+    about to WRITE, not the URI's.
+
+    ⛔ This is a WRITE-SCOPED PROBE, not a read. ``FalkorProjection.from_uri(
+    uri, graph_name=...)`` CONSTRUCTS the projection, and
+    ``FalkorProjection.__init__`` runs ``_ensure_indexes()`` on THAT graph
+    (``tortoise/projection/__init__.py``). Resolving the width for a target
+    therefore issues the schema DDL sweep there and CREATES the Point HNSW
+    vector index when it is missing — which is exactly why the property has a
+    value at all (it is derived from ``_vector_index_api``, set only by that
+    create-index probe), so no per-graph resolution can avoid the DDL. On a
+    graph whose legacy Point FTS migration is still owed, ``_ensure_indexes``
+    can also run the one-time ``search_keys`` data fixup (a stored-property
+    write). This side effect is DELIBERATE: it matches the SDK, which runs
+    the same sweep on any open, and the exchange is that the guard and the
+    write agree on the width. It also means each ``--all-tenants`` iteration
+    pays ``_ensure_indexes`` on its own target graph. A genuinely read-only
+    probe was rejected because deriving the width from ``CALL db.indexes()``
+    here would be a SECOND home for the width rule, which #4280
+    deliberately single-sourced on ``required_embedding_dim``.
+
+    ``default_graph`` / ``default_dim`` short-circuit the common single-graph
+    run: when the target IS the URI's graph the value already read by
+    :func:`_connect_falkordb` is correct, so no second connection — and no
+    second ``_ensure_indexes`` — is opened.
+    """
+    if default_graph is not None and graph_name == default_graph:
+        return default_dim
+
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection.from_uri(uri, graph_name=graph_name)
+    try:
+        return proj.required_embedding_dim
+    finally:
+        proj.close()
 
 
 # ── Index-time text composition (composition parity, #1349 T12) ────
@@ -98,9 +317,24 @@ def _connect_falkordb(uri: str):
 # The text vectorized at backfill MUST equal the index-time composition so a
 # backfill-encoded vector equals an index-time vector for the same content.
 # Event non-meeting = subject + eventKind + object (projection/entities.py
-# :484-488); Document = title + content (:363); AgentSession =
-# session_embedding_text(name, summary, keywords, topics) with the summary
-# parsed from the stored content_metadata JSON.
+# :484-488); AgentSession = session_embedding_text(name, summary, keywords,
+# topics) with the summary parsed from the stored content_metadata JSON.
+# Document = the node's stored ``_searchText`` (#5126 / D10): the document fold
+# composes that field with ``_build_search_text(title, summary, topics)`` —
+# ``content`` is retired (ONTOLOGY §4.4: "``content`` is not a graph property")
+# and the ``:Document`` label no longer exists. Reading the stored value, rather
+# than re-deriving it, is what makes the FTS parity byte-exact by construction
+# for this one surface.
+#
+# The VECTOR parity is exact only on the index path (``_doc_write``, which sets
+# ``suppress_embedding=True`` and so writes no vector — the sweep is the only
+# producer). On the legacy ``create_document`` /
+# ``create_entity(type='document')`` path ``_upsert_document`` STILL stores a
+# vector composed from ``title + content`` whenever ``suppress_embedding`` is
+# absent (``projection/entities.py::_upsert_document``), so a
+# ``--force-re-embed`` MOVES such a node's vector to its ``_searchText``
+# composition. That is a known, separately filed residual (#8419) — this
+# surface does NOT give byte-exact vector parity on every write path.
 
 # Index-time meeting suppression (projection/entities.py:483) — meetings
 # never receive embeddings. Cypher `eventKind <> 'meeting'` is NULL-falsy for
@@ -134,12 +368,28 @@ def _summary_from_metadata(content_metadata) -> str:
     return s if isinstance(s, str) else str(s)
 
 
+def _text_expr(label: str) -> str:
+    """The Cypher expression whose value is vectorized for ``label``.
+
+    Defaults to the surface's ``text_prop``. A surface overrides it (via
+    ``text_expr``) when a bare property is not enough — the Document surface's
+    ``coalesce(n._searchText, n.title)`` mirrors the write path's own fallback
+    so a document Source that never got a ``_searchText`` is still swept.
+    """
+    cfg = _require_surface(label)
+    return cfg.get("text_expr") or f"n.{cfg['text_prop']}"
+
+
 def _row_text(label: str, branch: str, row: tuple) -> str:
     """Index-time-composition text for a fetched row.
 
     Byte-identical to the index-time ``" ".join(filter(None, [...]))`` joins
     (entities.py) — NULL/None parts drop exactly like ``""`` defaults there.
+    The Document surface is the exception by construction: it reads the stored
+    ``_searchText`` the write path already composed, so there is no join here to
+    drift from the index-time one (#5126).
     """
+    _require_surface(label)  # loud before a generic read picks the wrong column
     if label == "Event":
         if branch == "AgentSession":
             # row = (eventId, name, keywords, topics, content_metadata)
@@ -150,10 +400,8 @@ def _row_text(label: str, branch: str, row: tuple) -> str:
             )
         # row = (eventId, subject, eventKind, object) — non-meeting only
         return " ".join(filter(None, [row[1], row[2], row[3]]))
-    if label == "Document":
-        # row = (id, title, content)
-        return " ".join(filter(None, [row[1], row[2]]))
-    # row = (id_prop, text_prop)
+    # row = (id_prop, text_expr) — the aliased ``_id``/``_text`` pair. Every
+    # non-Event surface (incl. Document) is the same two-column shape.
     return row[1]
 
 
@@ -170,30 +418,39 @@ def _label_branches(label: str, *, force: bool) -> list[tuple[str, str, str]]:
     summary/filename), but session_embedding_text(None, ...) composes
     summary+keywords+topics safely — a name-less AgentSession is
     index-time-embeddable, so the session branch does not gate on name.
+
+    A surface's ``kind_pred`` discriminator rides in EVERY branch's WHERE: two
+    surfaces share the Source node label (document vs provenance), and a branch
+    that lost its discriminator would sweep the other surface's rows
+    (``_validate_config`` refuses a config where that is undeclared).
     """
-    cfg = LABEL_CONFIG[label]
+    cfg = _require_surface(label)
     null_pred = "" if force else "n.embedding IS NULL AND "
+    kind_pred = f"{cfg['kind_pred']} AND " if cfg.get("kind_pred") else ""
     if label == "Event":
         return [
             ("AgentSession",
-             f"{null_pred}n.eventKind = 'AgentSession'",
+             f"{kind_pred}{null_pred}n.eventKind = 'AgentSession'",
              "n.eventId AS _id, n.name AS _name, n.keywords AS _keywords, "
              "n.topics AS _topics, n.content_metadata AS _cm"),
             ("other",
-             f"{null_pred}{_MEETING_EXCLUSION} AND "
+             f"{kind_pred}{null_pred}{_MEETING_EXCLUSION} AND "
              "(n.eventKind IS NULL OR n.eventKind <> 'AgentSession') "
              f"AND n.{cfg['text_prop']} IS NOT NULL",
              "n.eventId AS _id, n.subject AS _subject, n.eventKind AS _kind, "
              "n.object AS _object"),
         ]
-    if label == "Document":
-        # text surface = title + content (index-time composition needs both)
-        return [("all", f"{null_pred}n.title IS NOT NULL",
-                 "n.id AS _id, n.title AS _title, n.content AS _content")]
-    # Aliased columns: Source's id_prop == text_prop == url would otherwise
-    # RETURN n.url, n.url ("Multiple result columns with the same name").
-    return [("all", f"{null_pred}n.{cfg['text_prop']} IS NOT NULL",
-             f"n.{cfg['id_prop']} AS _id, n.{cfg['text_prop']} AS _text")]
+    # Aliased columns: Source's id_prop == url AND its text is the url too, so a
+    # bare ``RETURN n.url, n.url`` is "Multiple result columns with the same
+    # name". The text is an EXPRESSION, not necessarily a bare property — the
+    # Document surface's is ``coalesce(_searchText, title)`` (#5126).
+    text = _text_expr(label)
+    # A surface may tighten "has text" beyond ``IS NOT NULL`` (``text_pred``) so
+    # the dry run and the live run share ONE predicate — the live run drops an
+    # empty-after-trim text, and ``''`` is non-NULL in Cypher (#5126).
+    text_pred = cfg.get("text_pred") or f"{text} IS NOT NULL"
+    return [("all", f"{kind_pred}{null_pred}{text_pred}",
+             f"n.{cfg['id_prop']} AS _id, {text} AS _text")]
 
 
 def _purge_meeting_embeddings(g, *, dry_run: bool = False) -> int:
@@ -224,19 +481,28 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
     already-embedded rows ARE re-embedded by force, so they count; meetings
     and text-less rows are the unaffected set and are NOT counted. Dry-run
     never computes embeddings and never writes.
+
+    "Text-less" is taken from ``_label_branches``' predicate, so the count and
+    the live pass agree BY CONSTRUCTION wherever a surface declares a
+    ``text_pred`` (the Document surface does: ``''`` is non-NULL in Cypher, so
+    a bare ``IS NOT NULL`` counted rows the live pass skipped — #5126).
+    Residual, recorded rather than silently over-reported: a surface with only
+    a bare property still uses ``IS NOT NULL``, so a *non-empty-check* miss is
+    limited to a whitespace-only value on those surfaces.
     """
     g = db.select_graph(graph_name)
     total = 0
     for label in labels:
+        cfg = _require_surface(label)
         n = 0
         for _, where, _ in _label_branches(label, force=force):
             rows = g.query(
-                f"MATCH (n:{label}) WHERE {where} RETURN count(n)"
+                f"MATCH (n:{cfg['label']}) WHERE {where} RETURN count(n)"
             ).result_set
             n += rows[0][0] if rows else 0
         if n:
             verb = "rows would be re-embedded" if force else "missing embeddings"
-            print(f"  {label}: {n} {verb}")
+            print(f"  {_surface_title(label)}: {n} {verb}")
             total += n
     purged = 0
     if force:
@@ -252,27 +518,46 @@ def _dry_run(db, graph_name: str, labels: list[str], *,
 
 def _backfill_graph(db, graph_name: str, labels: list[str],
                     limit: int, batch_size: int, *,
-                    force: bool = False) -> dict:
+                    force: bool = False,
+                    required_dim: int | None) -> dict:
     """Backfill one graph.
 
     force=False: NULL-only repair (only ``embedding IS NULL`` rows).
     force=True: ALL rows re-embedded (T12) with index-time composition; the
     meeting exclusion applies in both modes.
 
+    ``required_dim`` (#4289) is the STORE-declared width this sweep must obey
+    — ``FalkorProjection.required_embedding_dim`` for **this** graph, threaded
+    in by :func:`main` from :func:`_required_dim_for_graph`. Every row is
+    encoded through
+    :func:`tortoise.embeddings.encode_for_store`, so this operator write path
+    applies the same width guard as the SDK write paths (#4280): a vector the
+    store's index cannot hold becomes ``None`` (counted as ``skipped``; the
+    row is not written) instead of being handed to ``vecf32``. ``None`` means
+    the store has no width-fixing index, so the encoder's own width governs
+    and nothing is dropped — the index-less brute-force read lane is
+    dimension-agnostic by contract (see ``search_engine.run_vector_query``).
+    This was the one Point writer with no width guard before #4289.
+
+    ``required_dim`` is keyword-only and REQUIRED (no default): a default of
+    ``None`` would collapse "the store measured as index-less" with "the
+    caller omitted the width", and a future caller that omitted it would
+    silently re-open the #4289 hole on an indexed store (#4289 review, P3).
+
     Returns stats: scanned/updated/skipped counts, per_label updated counts,
-    agent_sessions sub-count (Event label only).
+    agent_sessions sub-count (Event surface only).
     """
     g = db.select_graph(graph_name)
 
-    from tortoise.embeddings import compute_embedding
+    from tortoise.embeddings import encode_for_store
 
     total = updated = skipped = 0
-    # Seed ALL 6 label keys at 0 so the completeness marker is unambiguous:
-    # a zero-count label means "no rows re-embedded", not "never processed".
+    # Seed ALL 6 surface keys at 0 so the completeness marker is unambiguous:
+    # a zero-count surface means "no rows re-embedded", not "never processed".
     per_label: dict[str, int] = {label: 0 for label in LABEL_CONFIG}
     agent_sessions = 0
     for label in labels:
-        cfg = LABEL_CONFIG[label]
+        cfg = _require_surface(label)
         label_updated = 0
 
         # Collect (branch, row) in bounded queries — avoids re-pagination
@@ -282,7 +567,7 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
             offset = 0
             while True:
                 rows = g.query(
-                    f"MATCH (n:{label}) WHERE {where} "
+                    f"MATCH (n:{cfg['label']}) WHERE {where} "
                     f"RETURN {returns} SKIP $skip LIMIT $limit",
                     params={"skip": offset, "limit": batch_size},
                 ).result_set
@@ -297,7 +582,7 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
         if not rows_all:
             continue
         verb = "rows re-embedded" if force else "missing embeddings"
-        print(f"  {label}: {len(rows_all)} {verb}")
+        print(f"  {_surface_title(label)}: {len(rows_all)} {verb}")
 
         # Compute + write in batches. UNWIND avoids N+1 SET queries.
         for start in range(0, len(rows_all), batch_size):
@@ -310,7 +595,7 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
                     # computing (entities.py) — empty text never embeds.
                     skipped += 1
                     continue
-                emb = compute_embedding(str(text))
+                emb = encode_for_store(str(text), required_dim)
                 if emb is None:
                     skipped += 1
                     continue
@@ -322,7 +607,7 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
             if batch:
                 g.query(
                     f"UNWIND $batch AS row "
-                    f"MATCH (n:{label} {{{cfg['id_prop']}: row.id}}) "
+                    f"MATCH (n:{cfg['label']} {{{cfg['id_prop']}: row.id}}) "
                     + clear_then_set_prefix("n", "row.emb")
                     + "SET " + set_embedding_clause("n", "row.emb"),
                     params={"batch": batch},
@@ -354,18 +639,23 @@ def _merge_stats(agg: dict, stats: dict) -> dict:
 
 
 def _force_reembed_graph(db, graph_name: str, labels: list[str],
-                         limit: int, batch_size: int) -> dict:
+                         limit: int, batch_size: int, *,
+                         required_dim: int | None) -> dict:
     """Force-mode flow for one graph: NULL-only repair → meeting purge →
     all-rows pass (#1349 T12).
 
-    Ordering is load-bearing: the NULL-only repair pass applies the SAME
-    meeting exclusion and runs BEFORE the purge leg, so a repair-after-purge
-    can never re-embed just-purged meetings. Returns aggregate stats for the
-    completeness marker (per-label re-embedded counts, purge count, repair
-    skips).
+    ``required_dim`` (#4289) is the width of THIS graph (resolved per target by
+    :func:`_required_dim_for_graph`) and is threaded into both passes so
+    neither leg can bypass the store's width guard. It is REQUIRED (no
+    default) for the same reason as :func:`_backfill_graph`'s. Ordering is
+    load-bearing:
+    the NULL-only repair pass applies the SAME meeting exclusion and runs BEFORE the purge
+    leg, so a repair-after-purge can never re-embed just-purged meetings.
+    Returns aggregate stats for the completeness marker (per-label re-embedded
+    counts, purge count, repair skips).
     """
     repair = _backfill_graph(db, graph_name, labels, limit, batch_size,
-                             force=False)
+                             force=False, required_dim=required_dim)
     # The repair leg re-embeds the NULL subset once, then the all-rows pass
     # re-embeds everything INCLUDING that subset. The overlap is intentional:
     # the plan (Task 12) mandates the NULL-only repair pass runs BEFORE the
@@ -376,7 +666,7 @@ def _force_reembed_graph(db, graph_name: str, labels: list[str],
     g = db.select_graph(graph_name)
     purged = _purge_meeting_embeddings(g)
     force = _backfill_graph(db, graph_name, labels, limit, batch_size,
-                            force=True)
+                            force=True, required_dim=required_dim)
     return {
         "scanned": repair["scanned"] + force["scanned"],
         "updated": repair["updated"] + force["updated"],
@@ -409,9 +699,19 @@ def _print_completeness(stats: dict) -> None:
 def _repair_legacy_event_embeddings(g, *, dry_run: bool, limit: int) -> int:
     """Rewrite plain-list Event embeddings into vecf32 (per-node, idempotent).
 
-    Pre-#244 _upsert_event stored embeddings as plain Python lists;
-    vec.euclideanDistance then fails the whole MATCH ("expected Null or
-    Vectorf32 but was List") — one legacy node poisons Event vector search.
+    Pre-#244 _upsert_event stored embeddings as plain Python lists. Before
+    #8316 such a node made `vec.euclideanDistance` fail the whole MATCH
+    ("expected Null or Vectorf32 but was List") — one legacy node poisoned
+    Event vector search. The read boundary now normalises a right-width
+    numeric `List` (#8316), so this repair serves SHAPE CONSISTENCY — every
+    stored Event embedding typed the way this repo's own writers produce them
+    (the typed shape the Point index cohort requires, #8429; a verbatim
+    caller-supplied Point embedding is deliberately a plain `List` — PR
+    #3018 — and is not this repair's business). A wrong-width or non-numeric `List`
+    still aborts a read (#8430), and the two halves differ HERE: `vecf32()`
+    DOES retype a wrong-width numeric `List`, so it lands in the `rewritten`
+    count without curing the dimension mismatch, while a non-numeric `List`
+    makes the rewrite itself raise and is counted as skipped.
     vecf32() on an already-vecf32 node errors, so each node is rewritten in a
     try/except and failures are counted (expected on fully-migrated DBs).
 
@@ -459,8 +759,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--repair-embeddings", action="store_true",
         help="Rewrite Event embeddings stored as plain lists into vecf32 "
-        "(pre-#244 _upsert_event wrote plain lists; a single such node poisons "
-        "brute-force vector search for the whole Event label).",
+        "(pre-#244 _upsert_event wrote plain lists). Shape consistency: every "
+        "stored EVENT embedding typed the way this repo's own writers produce "
+        "them — a verbatim caller-supplied Point embedding is deliberately a "
+        "plain List (PR #3018) and is not this repair's business. A right-width "
+        "numeric List is normalised at read time since #8316, while a wrong "
+        "width or a non-numeric List still aborts one (#8430).",
     )
     ap.add_argument(
         "--force-re-embed", action="store_true",
@@ -471,9 +775,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    db, default_graph = _connect_falkordb(args.uri)  # noqa: RUF059
+    # #5126: refuse a config that cannot mean what it says (a retired node
+    # label, or two surfaces sharing a label with no discriminator) BEFORE
+    # connecting — the pre-fix config matched 0 rows and silently no-opped.
+    _validate_config()
 
-    # Resolve which labels to embed — all entity types with embedding support.
+    db, default_graph, default_dim = _connect_falkordb(args.uri)
+
+    # Resolve which surfaces to embed — every entity surface with embedding
+    # support. These are SURFACE keys, not node labels (#5126): ``Document``
+    # sweeps ``:Source``.
     labels = list(LABEL_CONFIG)
 
     # ── Dry run ──────────────────────────────────────────────────────
@@ -540,18 +851,26 @@ def main(argv: list[str] | None = None) -> int:
                 org_id = row[0]
                 graph_name = f"org_{org_id}"
                 print(f"\n── Team: {org_id} → {graph_name} ──")
+                required_dim = _required_dim_for_graph(
+                    args.uri, graph_name,
+                    default_graph=default_graph, default_dim=default_dim)
                 _merge_stats(
                     stats,
                     _force_reembed_graph(db, graph_name, labels,
-                                         args.limit, args.batch_size),
+                                         args.limit, args.batch_size,
+                                         required_dim=required_dim),
                 )
         else:
             graph_name = args.graph
             print(f"Backfill (force-re-embed): {graph_name}")
+            required_dim = _required_dim_for_graph(
+                args.uri, graph_name,
+                default_graph=default_graph, default_dim=default_dim)
             _merge_stats(
                 stats,
                 _force_reembed_graph(db, graph_name, labels,
-                                     args.limit, args.batch_size),
+                                     args.limit, args.batch_size,
+                                     required_dim=required_dim),
             )
         _print_completeness(stats)
         print(f"\nDone: {stats['scanned']} scanned, {stats['updated']} re-embedded, "
@@ -573,16 +892,24 @@ def main(argv: list[str] | None = None) -> int:
             org_id = row[0]
             graph_name = f"org_{org_id}"
             print(f"\n── Team: {org_id} → {graph_name} ──")
+            required_dim = _required_dim_for_graph(
+                args.uri, graph_name,
+                default_graph=default_graph, default_dim=default_dim)
             s = _backfill_graph(db, graph_name, labels,
-                                args.limit, args.batch_size)
+                                args.limit, args.batch_size,
+                                required_dim=required_dim)
             grand_scanned += s["scanned"]
             grand_updated += s["updated"]
             grand_skipped += s["skipped"]
     else:
         graph_name = args.graph
         print(f"Backfill: {graph_name}")
+        required_dim = _required_dim_for_graph(
+            args.uri, graph_name,
+            default_graph=default_graph, default_dim=default_dim)
         s = _backfill_graph(db, graph_name, labels,
-                            args.limit, args.batch_size)
+                            args.limit, args.batch_size,
+                            required_dim=required_dim)
         grand_scanned += s["scanned"]
         grand_updated += s["updated"]
         grand_skipped += s["skipped"]

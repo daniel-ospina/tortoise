@@ -25,6 +25,7 @@ the suite.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 import time
 
@@ -54,6 +55,14 @@ _GATE_GUARD_S = 30.0
 #: elevated cap. The elevated column was never the flake site; the censored
 #: column is (see the module docstring).
 _ELEVATED_RELEASE_AFTER_S = 3 * (DEFAULT_CAP_MS / 1000.0)
+
+#: The collective cap used by the post-deadline-rescan test (ms). Smaller than
+#: the default only to keep this file's wall clock down: the CONTRACT under test
+#: (the rescan collects a leg that is done by the time it looks, and does not
+#: seal a timeout for it) is the same code path at any cap, and the post-deadline
+#: window is HELD by the harness rather than raced for (#6842), so the cap value
+#: cannot move the verdict.
+_RESCAN_CAP_MS = 50
 
 
 class _ReleaseOnTimeout(list):
@@ -175,6 +184,93 @@ def test_elevated_timeout_collects_more_than_censored(monkeypatch):
         seen == [DEFAULT_CAP_MS, ELEVATED_CAP_MS]
         for seen in seen_timeout_ms.values()
     ), seen_timeout_ms
+
+
+def test_post_deadline_rescan_collects_a_late_leg(monkeypatch):
+    """#6851: the collective cap bounds the WAIT, not the COLLECTION.
+
+    A leg that was NOT done at the deadline but IS done by the post-deadline
+    rescan is COLLECTED — and is NOT recorded as ``timeout``. The pre-#6851
+    comment in the ``except TimeoutError`` arm claimed such a future was
+    "discarded AND self-recorded as timeout"; the loop beneath it collects it.
+    That misreading is what let #6842 assert a deterministic boundary the
+    product never promised, so the contract is pinned here rather than left to
+    prose — a later "make the code match the old comment" change now has to
+    break a test, i.e. be deliberate.
+
+    ⛔ THE ORDERING IS HELD, NOT RACED. "Finished after the deadline but before
+    the rescan" is a window of scheduling overshoot, and #6842 is the proof that
+    a margin cannot be relied on to land inside it. So the REAL ``as_completed``
+    still fires the REAL deadline here — the wait, the timeout and the partial
+    yield are all the product's own code path — and the wrapper only HOLDS that
+    boundary, inside its own ``except TimeoutError`` (exactly where production
+    gains its overshoot, and before the product's arm runs), until the
+    straggler's future is provably done: ``result()`` returns only once it is,
+    so the rescan is guaranteed to look at a done future whichever way the
+    scheduler goes.
+    """
+    gate = threading.Event()
+    real_as_completed = concurrent.futures.as_completed
+
+    def gated_fts(graph, query, entity_type="point", limit=20,
+                  timeout_ms=DEFAULT_CAP_MS, excluded_statuses=None,
+                  keep_numeric=False, leg_trace=None):
+        """A leg that cannot finish until the held deadline releases it."""
+        assert gate.wait(timeout=_GATE_GUARD_S), (
+            "the fts gate was never opened — the harness is at fault"
+        )
+        if leg_trace is not None:
+            # Mirror the real runners: the worker records into its PRIVATE list
+            # as it finishes, and the merge relays that list ONLY for a leg that
+            # was collected rather than discarded as timed out.
+            leg_trace.append({"leg": "fts", "reason": "ok", "count": 1})
+        return [("p1", 1.0)]
+
+    def fast_structural(graph, kind, entity_type="point", limit=20,
+                        timeout_ms=DEFAULT_CAP_MS, excluded_statuses=None,
+                        leg_trace=None):
+        return [("p3", 0.5)]
+
+    def held_deadline(fs, timeout=None):
+        """The product's own wait, with the post-deadline window held open."""
+        futures = list(fs)
+        try:
+            yield from real_as_completed(futures, timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            pending = [f for f in futures if not f.done()]
+            assert pending, (
+                "the deadline fired with nothing pending — the harness is at "
+                "fault"
+            )
+            # Release the straggler(s) and block until each is DONE. Not a
+            # sleep: result() is the synchronisation, so there is no window in
+            # which the rescan could sample a not-yet-done future.
+            gate.set()
+            for future in pending:
+                future.result(timeout=_GATE_GUARD_S)
+            raise
+
+    monkeypatch.setattr("tortoise.search_engine.run_fts_query", gated_fts)
+    monkeypatch.setattr("tortoise.search_engine.run_structural_query",
+                        fast_structural)
+    monkeypatch.setattr("concurrent.futures.as_completed", held_deadline)
+
+    trace: list[dict] = []
+    collected = degradation_chain(
+        graph=None, query="q", kind="claim", query_vec=None,
+        strategies={"fts": True, "structural": True},
+        elevated_timeout_ms=_RESCAN_CAP_MS, leg_trace=trace,
+    )
+
+    # The straggler was provably still running when the deadline fired (only
+    # the held deadline could release it) and is nonetheless in the result…
+    assert set(collected) == {"fts", "structural"}, collected
+    # …and it was collected, NOT censored: no timeout entry was sealed for it,
+    # and its own late private-list entry was merged. This is the half the
+    # pre-#6851 comment denied.
+    assert [e for e in trace if e.get("reason") == "timeout"] == [], trace
+    assert any(e.get("leg") == "fts" and e.get("reason") == "ok"
+               for e in trace), trace
 
 
 def test_elevated_timeout_is_default_off(monkeypatch):

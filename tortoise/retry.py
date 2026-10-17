@@ -11,12 +11,61 @@ re-exports ``retryable_transient`` / ``call_with_predicate`` /
 ``WriteStageRetriesExhausted`` unchanged from ``tools/longmem_eval/errors.py``
 and keeps its own run knobs (``INGEST_WRITE_RETRIES`` etc.) eval-side.
 
-⚠️ PARTIALLY WIRED (#7405): ``TortoiseSDK._graph_write_with_retry`` retries
-``create_point``'s two direct writes through ``retryable_aborted_write``.
-Wiring the remaining write surfaces — ``_post_commit`` (tortoise/sdk.py) and
-the capture/commit graph writes — is separate work (audit G8); those paths'
-robustness today remains idempotent-MERGE + ``client_commit_id`` replay +
-server-side dedup.
+⚠️ PARTIALLY WIRED (#7405): Wired:
+
+  * ``create_point``'s direct writes — the ``CREATE (:Point)``, the
+    ``TAGGED`` edges (``_sync_tags``) and the ``extractedFrom`` edge
+    (``_link_source``);
+  * ``_advance_ep_version``'s ``MERGE (:EpMeta)``;
+  * ``_mark_dirty`` — the ``ep_dirty``/``ep_dirty_at`` persist SET and the
+    terminal ``ep_dirty`` clear SET (both absolute SETs under the statement's
+    own WHERE);
+  * ``delete_point`` — the ``DETACH DELETE`` and the orphan-``:Tag`` GC;
+  * ``promote_point`` — the CAS ``status draft → live`` SET;
+  * ``create_operator`` — the ``CREATE (:Point)`` node, the per-input
+    typed-edge + ``INPUT`` mirror statement, and the never-set-status source
+    promote SET;
+  * ``mitigate_operator`` — the mitigation ``CREATE (:Point)`` and the
+    ``IMPL``/``mitigated_by`` edge pair;
+  * ``create_entity``'s document ``extractedFrom`` leg and
+    ``create_document``'s ``extractedFrom`` leg (both ``_link_source``);
+  * the capture lane's graph writes, all in ``tortoise/sdk.py`` — the
+    ``:Session`` MERGE (``_write_session_and_turns``), the batched
+    ``UNWIND $turns`` turn store and the stale-turn ``DETACH DELETE`` sweep
+    (``_write_capture_turns``), and ``TortoiseSDK.capture_session``'s
+    follow-up provenance/state stamps (the minted-point ``eventId`` stamp,
+    the operator ``eventId`` stamps, the ``retry_failed_capture`` provenance
+    heal, the ``entity_links_*`` counters, and the
+    ``capture_ok``/``capture_extractor`` SET);
+  * ``_post_commit`` — the ``POST /v1/sessions/commit`` transmission — on
+    ``retryable_transient`` (the transport-class predicate; it is not a graph
+    write, so the graph-state-gated ``retryable_aborted_write`` does not
+    apply). Re-issuing is safe by construction: the same deterministic
+    ``client_commit_id`` rides every attempt and the server serializes on it
+    atomically (``CommitRecordStore.acquire``).
+
+⛔ NOT covered — the ``proj.apply`` FOLDS a live write reaches
+(``_apply_and_journal``, ``_create_entity``, ``_doc_write``): a fold is a
+multi-statement sequence over an open event-type space, so a mid-fold abort
+leaves the earlier statements landed and re-issuing the whole fold is a
+RE-APPLICATION, not a re-issue — ``retryable_aborted_write``'s "the statement
+did not land" guarantee is per-statement and does not extend to the enclosing
+fold. Also unwired: ``supersede_point`` (its statements are individually
+idempotent — ``MERGE`` / DELETE by ``ID(r)`` / ``SET r += $attrs`` — but the
+multi-statement transfer is deliberately left to a separate increment),
+``update_point`` (and therefore ``annotate_operator``, which delegates to it),
+and the remaining direct ``proj.g.query`` write sites across ``tortoise/``.
+``merge_points`` is not a direct graph write at all: it is an ``EventAPI``
+journal emit (``tortoise/api.py``) whose graph effect is the ``proj.apply``
+fold above. A write abort at any of these still raises (or is downgraded by the
+caller's own ``except``) exactly as before; those paths' robustness today
+remains idempotent-MERGE + server-side dedup.
+
+Re-issuing is only safe for a statement whose abort means it DID NOT LAND.
+That is what ``retryable_aborted_write`` proves and what makes it admissible
+on a bare ``CREATE``; the transport-class ``retryable_transient`` does NOT
+prove it (a lost reply is not a lost write) and must never be pointed at a
+non-idempotent statement — see that predicate's docstring.
 """
 from __future__ import annotations
 

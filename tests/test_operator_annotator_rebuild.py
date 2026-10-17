@@ -47,7 +47,7 @@ import logging
 
 import pytest
 
-from tortoise.projection import fold
+from tortoise.projection import _replay_write_scope, fold
 from tortoise.projection.nonfolded import NonFoldedEventsError
 from tortoise.sdk import TortoiseSDK
 
@@ -471,11 +471,14 @@ def test_apply_annotator_accepts_short_names(sup):
     pure fold) — a raw producer journaling the documented payload."""
     _, _, sdk = sup
     op = _operator(sdk)
-    sdk._get_proj().apply({
-        "type": "OperatorAnnotated", "id": op,
-        "bias": 0.7, "precision": 0.6, "consistency": 0.5,
-        "directness": 0.4,
-    })
+    # #7951 §17.1: a raw producer journaling the documented payload — a REPLAY
+    # fold, so it declares the replay scope.
+    with _replay_write_scope():
+        sdk._get_proj().apply({
+            "type": "OperatorAnnotated", "id": op,
+            "bias": 0.7, "precision": 0.6, "consistency": 0.5,
+            "directness": 0.4,
+        })
     assert _dims(sdk, op) == {
         "annotator_bias": 0.7, "annotator_precision": 0.6,
         "annotator_consistency": 0.5, "annotator_directness": 0.4,
@@ -791,12 +794,12 @@ def test_operator_annotated_graph_event_payload_unchanged(sup):
 
     Distinct dim values: identical values (0.5 ×4) pin only the KEY names and
     cannot detect a transposition of the four values in the emit dict — a real
-    regression for every ``events_poll`` consumer (#3689 review P2).
+    regression for every ``poll_events`` consumer (#3689 review P2).
     """
     _, _, sdk = sup
     op = _operator(sdk)
     sdk.annotate_operator(op, 0.11, 0.22, 0.33, 0.44)
-    evs = sdk.events_poll(types=["OperatorAnnotated"])["events"]
+    evs = sdk.poll_events(types=["OperatorAnnotated"])["events"]
     assert len(evs) == 1
     payload = evs[0]["payload"]
     assert payload["id"] == op

@@ -48,31 +48,46 @@ test('#2784 tripwire: the anchors resolve to real regions (non-vacuity guard)', 
   assert.ok(cellStart !== -1 && cellBody.length > 0, 'GraphBackupCell body slice non-empty')
 })
 
-test('#2784 tripwire: the Graphs table declares exactly six columns, Last backup before Actions', () => {
+test('#2784 tripwire: the Graphs table declares exactly seven columns, Last backup before Recording before Actions', () => {
   const header = mainJsx.slice(tableStart, mainJsx.indexOf('</thead>', tableStart))
   const ths = header.match(/<th[ >]/g) || []
-  assert.equal(ths.length, 6, `expected 6 <th>, got ${ths.length}`)
+  assert.equal(ths.length, 7, `expected 7 <th>, got ${ths.length}`)
   assert.match(header, /<th scope="col">Last backup<\/th>/, 'Last backup header present')
   assert.ok(header.indexOf('Last backup') > header.indexOf('Keys'),
     'Last backup sits AFTER Keys — the three e2e locators index the Keys cell positionally (nth(3))')
+  // #2650: the per-graph Recording column sits AFTER Last backup, so the
+  // positional Keys (nth(3)) and Last-backup locators keep their indices.
+  assert.match(header, /<th scope="col">Recording<\/th>/, 'Recording header present (#2650)')
+  assert.ok(header.indexOf('Recording') > header.indexOf('Last backup'),
+    'Recording sits AFTER Last backup — inserting it earlier would shift the Keys cell the e2e suite indexes at nth(3)')
   assert.match(header, /<span className="sr-only">Actions<\/span><\/th><\/tr>$/, 'Actions stays last')
   const scoped = header.match(/<th scope="col">/g) || []
-  assert.equal(scoped.length, 6, `every Graphs <th> must carry scope="col" (got ${scoped.length})`)
+  assert.equal(scoped.length, 7, `every Graphs <th> must carry scope="col" (got ${scoped.length})`)
 })
 
-test('#2784 tripwire: all four empty-state rows carry colSpan="6" and none is left at 5', () => {
+test('#2784 tripwire: all four empty-state rows carry colSpan="7" and none is left at 6', () => {
+  const spans7 = graphsTable.match(/colSpan="7"/g) || []
   const spans6 = graphsTable.match(/colSpan="6"/g) || []
-  const spans5 = graphsTable.match(/colSpan="5"/g) || []
-  assert.equal(spans6.length, 4, `expected 4 colSpan="6" rows (loading/denied/error/empty), got ${spans6.length}`)
-  assert.equal(spans5.length, 0, 'no empty-state row may keep the 5-column span')
+  assert.equal(spans7.length, 4, `expected 4 colSpan="7" rows (loading/denied/error/empty), got ${spans7.length}`)
+  assert.equal(spans6.length, 0, 'no empty-state row may keep the 6-column span (#2650)')
 })
 
 test('#2784 tripwire: the data row renders the cell from the row object (identity join, not an index)', () => {
-  assert.match(graphsTable, /<GraphBackupCell g=\{g\} summary=\{graphBackups\} status=\{backupsStatus\} \/>/,
+  assert.match(graphsTable, /<GraphBackupCell g=\{g\} summary=\{graphBackups\} status=\{backupsStatus\} backupsEnabled=\{teamBackupsEnabled\(team\)\} \/>/,
     'the cell is fed the row object g — positionally/index-precomputed wiring would mis-attribute every row')
   // The cell sits between the Keys cell and the actions cell.
   assert.ok(graphsTable.indexOf('GraphBackupCell') < graphsTable.indexOf('graph-actions'),
     'the Last-backup cell precedes the actions cell')
+})
+
+test('#3376 tripwire: team eligibility comes from the pure teamBackupsEnabled(), not a tier literal', () => {
+  // Gating on `team.tier === 'free'` inline would be the rejected cheap fix (it
+  // cannot see a paid team with backups disabled) AND would duplicate the
+  // predicate. The cell is fed the derived value from graphs.js.
+  assert.match(graphsTable, /backupsEnabled=\{teamBackupsEnabled\(team\)\}/,
+    'the eligibility signal is derived once, in the pure module')
+  assert.ok(!/team\.tier\s*===?\s*['"]free['"]/.test(graphsTable),
+    'no inline tier literal may gate the cell — that is the rejected cheap fix (#3376)')
 })
 
 test('#2784 tripwire: the neutral empty copy is produced ONLY by the pure state function', () => {
@@ -81,14 +96,48 @@ test('#2784 tripwire: the neutral empty copy is produced ONLY by the pure state 
   // outage). The component must never contain the literal.
   assert.ok(!/None recorded/.test(cellBody),
     'GraphBackupCell must not hard-code the empty-state copy — it comes from graphBackupCellState')
-  assert.match(cellBody, /graphBackupCellState\(g, summary, status, now\)/, 'the cell renders the derived state')
+  assert.match(cellBody, /graphBackupCellState\(g, summary, status, now, backupsEnabled, loadingFloorHit\)/, 'the cell renders the derived state')
   assert.ok(!/stale|Stale|threshold/i.test(cellBody),
     'no client-computed staleness verdict — the authoritative threshold is server-side + internal-auth only')
+  assert.ok(!/Not enabled/.test(cellBody),
+    'the disabled copy comes from graphBackupCellState, never a hard-coded literal')
 })
 
-test('#2784 tripwire: the cell keeps its own relative-time ticker (never an App-scope interval)', () => {
-  assert.match(cellBody, /setInterval\(\(\) => setNow\(Date\.now\(\)\), 30_000\)/, 'component-local 30s ticker (#1894 pattern)')
-  assert.match(cellBody, /clearInterval\(t\)/, 'ticker cleanup')
+test('#3376 tripwire: ONE shared now-tick drives every Last-backup cell (no per-row intervals)', () => {
+  // #2784 gave each cell its own setInterval(30_000); #3376 replaced that with
+  // the module-level useNowTick() store — ONE interval for the whole app, also
+  // consumed by MemorySources. A per-row interval must never come back.
+  assert.match(cellBody, /useNowTick\(\)/, 'the cell reads the shared clock')
+  assert.ok(!/setInterval|clearInterval/.test(cellBody),
+    'the cell must not own an interval — N rows must not mean N timers (#3376)')
+  // The shared clock itself is one module-level interval with a refcounted
+  // subscription (start on first consumer, clear on last).
+  assert.match(mainJsx, /const NOW_TICK_MS = 30_000/)
+  assert.match(mainJsx, /function subscribeNowTick/)
+  assert.match(mainJsx, /clearInterval\(nowTickTimer\)/, 'the shared clock tears down')
+  // And the duplicated copy in MemorySources is gone.
+  const msStart = mainJsx.indexOf('function MemorySources(')
+  const msBody = mainJsx.slice(msStart, mainJsx.indexOf('\nfunction ', msStart + 1))
+  assert.match(msBody, /const now = useNowTick\(\)/, 'MemorySources shares the one clock (#3376 item 3)')
+  assert.ok(!/setInterval/.test(msBody), 'no second interval in MemorySources')
+})
+
+test('#3376 tripwire: the loading state resolves on the shared floor and announces itself', () => {
+  // The column's loading window is bounded by the SAME constant the API-Keys
+  // BackupsCard uses, so the two backups surfaces cannot disagree (a hung list
+  // used to leave the column on `…` forever while the card showed `—`).
+  assert.match(cellBody, /useLoadingFloor\(status === 'loading'\)/,
+    'the cell uses the shared loading floor')
+  assert.match(mainJsx, /const stale = useLoadingFloor\(status === 'loading'\)/,
+    'the BackupsCard uses the SAME floor hook — not a second 15s timer')
+  assert.match(mainJsx, /function useLoadingFloor\(active, ms = BACKUP_LOADING_FLOOR_MS\)/,
+    'one floor implementation, parameterized by the shared constant')
+  // The glyph-only labels (`…` / `—`) are aria-hidden and the state's full
+  // explanation is repeated in an sr-only span, so assistive tech reads the
+  // claim rather than the punctuation.
+  assert.match(cellBody, /aria-hidden="true"/, 'the glyph is hidden from AT')
+  assert.match(cellBody, /<span className="sr-only">\{state\.title\}<\/span>/,
+    'the explanation is announced as text')
 })
 
 test('#2784 tripwire: loadBackups retains the payload and the pool is grouped once per payload', () => {
@@ -139,6 +188,7 @@ test('#2784 tripwire: the built dist bundle ships the CURRENT column copy (build
   const literals = [
     // Labels come from the live module, so a copy change without a rebuild fails.
     graphBackupCellState(row, {}, 'ok', now).label,                                    // 'None recorded'
+    graphBackupCellState(row, {}, 'ok', now, false).label,                             // 'Not enabled'
     graphBackupCellState(row, {}, 'loading', now).label,                               // '…'
     graphBackupCellState(row, {}, 'error', now).label,                                 // '—'
     graphBackupCellState(row, graphBackupSummary([{ ...row, created_at: 'garbage' }]), 'ok', now).label,  // 'No timestamp'
@@ -146,6 +196,7 @@ test('#2784 tripwire: the built dist bundle ships the CURRENT column copy (build
     // interpolated values that never appear in a bundle).
     'Loading backup status…',
     'Backup list unavailable — retry in a moment.',
+    "Backups aren't enabled for this team.",
     'Last backup: ',
     'No readable backup timestamp for this graph',
   ]

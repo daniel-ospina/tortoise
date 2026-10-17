@@ -157,6 +157,12 @@ HEADLESS_FIRABLE: dict[str, bool] = {
     "codex": True,
     "cursor": False,
     "pi": False,
+    # #2120: OpenClaw's seam is a native PLUGIN loaded in-process by the
+    # OpenClaw gateway (``before_prompt_build`` / ``llm_output`` hooks) — there
+    # is no command this verifier can execute and present as "OpenClaw fired
+    # it".  Same ruling class as Pi's extension: not firable BY THIS COMMAND,
+    # not untestable.
+    "openclaw": False,
 }
 
 #: Why a non-firable harness's links are UNVERIFIABLE.  Named per harness so
@@ -187,6 +193,26 @@ UNVERIFIABLE_REASON: dict[str, str] = {
         "loaded and fired by that test file's node probe (into a temp HOME); the "
         "residual — a real pi process loading the installed extension "
         "against the live API — is manual-only."),
+    # #2120: scoped and plain, exactly like Pi's — the plugin IS the seam, and
+    # it is graded hermetically by ``tortoise/openclaw-plugin/index.test.mjs``
+    # (run by ``tests/test_openclaw_seam.py``), which fires the real
+    # ``before_prompt_build`` / ``llm_output`` handlers the installed copy
+    # registers.  The residual — a live OpenClaw gateway loading the installed
+    # plugin — is manual-only.
+    "openclaw": (
+        "OpenClaw's seam is a native plugin loaded in-process by the OpenClaw "
+        "gateway "
+        # openclaw_home() already ENDS in the plugin dirname: appending it again
+        # rendered ~/.openclaw/extensions/tortoise/tortoise/index.mjs — a path
+        # that does not exist, in a user-visible reason string.
+        f"({capture_install.openclaw_home('~')}/"
+        f"{capture_install.OPENCLAW_ENTRY_NAME}), "
+        "not a command this verifier can execute; the install leg is therefore "
+        "not firable by this command. The seam's handler logic is exercised "
+        "hermetically by tortoise/openclaw-plugin/index.test.mjs (run by "
+        "tests/test_openclaw_seam.py), and the installed artifact is loaded and "
+        "fired by that test file (into a temp HOME); the residual — a live "
+        "OpenClaw gateway loading the installed plugin — is manual-only."),
 }
 
 #: The capture EVENT each harness registers (the SessionStart seam is Claude's

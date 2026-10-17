@@ -3855,7 +3855,23 @@ def test_changes_job_honours_main_health():
     changes = _load_workflow("ci.yml")["jobs"]["changes"]
     step = next(s for s in changes["steps"] if s.get("id") == "gate")
     run = step["run"]
-    assert "inputs.main_health" in run, "changes must short-circuit main_health"
+    # The main_health inputs are bound in the step's `env`, not written into the
+    # `run:` body: GitHub compiles a `run:` containing `${{ }}` under a 21000-byte
+    # cap, and this scalar crossed it (20944 raw + 66 expression bytes = 21010),
+    # so GitHub refused to LOAD the workflow and it ran zero jobs — no required
+    # `docs`/`legal-e2e`/`license-surface`/`pricing-artifact`/`test-isolation`
+    # context could be produced (#8734). The two assertions below are the pair:
+    # the binding that makes the short-circuit work, and the invariant that keeps
+    # the scalar uncompiled.
+    assert (step.get("env") or {}).get("MAIN_HEALTH") == "${{ inputs.main_health }}", (
+        "changes must short-circuit main_health"
+    )
+    assert "${{" not in run, (
+        "keep expression spans OUT of this `run:` — GitHub compiles it under the "
+        "21000-byte cap and refuses to load the workflow (zero jobs). Bind any "
+        "context value in `env:` and read the shell variable."
+    )
+    assert '"$MAIN_HEALTH" = "true"' in run, "the short-circuit must test the bound value"
     assert "exit 0" in run
 
 

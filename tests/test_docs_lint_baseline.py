@@ -1712,8 +1712,14 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     exactly as the two list digests force an append, a delete or a swap out loud.
     """
     baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+    # 2026-10-11 (#2120): these rows were REMOVED, not appended. This branch fixes
+    # the MD040 it had recorded in platform-seams.md (the bare fence now says
+    # `text`) and the MD018 in the openclaw plugin README, so the ceiling is
+    # burned DOWN by one. Removing an entry changes the snapshot exactly as much
+    # as adding one, which is why this digest moves — and it is the direction the
+    # doctrine wants (`update` after every fix; the count may only fall).
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "9236d7c46202671a9162f48dc7599c7ccf01bbf019a4ebc13b918c79620ca8fa"
+        "1cc55fcd90f4cea146b6d546bc4b79fdebeef2e86defad9305f0ad87fe9fea17"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "42efc6c28d6efc385ad49dc59c443f2954220ca9b5eb34e9e66b9f71de38c2db"

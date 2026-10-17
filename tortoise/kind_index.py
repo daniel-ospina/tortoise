@@ -8,6 +8,11 @@ to ``data/kind_index/<sha256(manifest-hash+core-version+embedder-id)>.npz``,
 recomputed on hash change (a pack install or core-vocabulary change rotates
 the cache key), and loaded on demand.
 
+The directory is a DERIVED cache: every file can be regenerated from its
+spec, so a wholesale delete is always safe and the persisted set is bounded
+(``_MAX_PERSISTED_INDEXES``, evicted least-recently-used on every ``persist``
+— #7351). It is not customer data and carries no retention window.
+
 Design constraints (from the plan):
 
 - **No torch at module level** — the encoder (sentence-transformers via
@@ -64,10 +69,26 @@ _MAX_MEMOIZED_INDEXES = 16
 #: covers this cache's targeted pop (the degraded-index path). Eviction drops
 #: the in-memory copy only; a later ``load`` re-reads or rebuilds it.
 #:
-#: The persisted ``data/kind_index/*.npz`` files are STILL unbounded on disk —
-#: one per distinct gate, and nothing sweeps them — tracked by #7351. Do not
-#: read this memo's cap as covering the disk.
+#: The persisted ``data/kind_index/*.npz`` set has the SAME tenant-growable
+#: key space ON DISK and is bounded separately (``_MAX_PERSISTED_INDEXES``,
+#: swept on every ``persist`` — #7351). Do not read this memo's cap as
+#: covering the disk: the memo is per-process and dies with the process,
+#: while the npz set is shared across workers and survives restarts.
 _INDEX_CACHE = GateMemo(maxsize=_MAX_MEMOIZED_INDEXES)
+
+#: Cap on the number of PERSISTED indexes in the cache directory (#7351).
+#: Mirrors ``_MAX_MEMOIZED_INDEXES`` because the key space is the same one:
+#: #5163 threads ``installed_namespaces`` into the spec, so every distinct
+#: gate is its own content-addressed key, and ``persist`` wrote a new npz for
+#: each one — with no ``unlink`` anywhere in this module, the directory grew
+#: until ENOSPC. That host is ``/app/data/kind_index`` (``DEFAULT_CACHE_DIR``),
+#: NOT the Fly ``/data`` volume, and ``auto_stop_machines = "off"`` never
+#: discards the rootfs. An index is ~0.3 MB today (99 kinds × 384-dim
+#: float64), so the cap holds the directory at ≈5 MB regardless of how many
+#: gates a tenant mints. Eviction costs a re-EMBED on the next build of that
+#: gate — never a wrong answer — so the lever is safe to raise if the host's
+#: live gate count ever justifies it.
+_MAX_PERSISTED_INDEXES = 16
 
 
 def _memoize_index(key: str, idx: KindIndex) -> None:
@@ -117,6 +138,75 @@ def _reset_tfidf() -> None:
     global _TFIDF
     with _TFIDF_LOCK:
         _TFIDF = None
+
+
+# ── persisted-set retention (#7351) ────────────────────────────────────────
+
+def _touch_index(path: Path) -> None:
+    """Refresh a persisted index's mtime, so the retention sweep evicts by
+    least-recently-USED rather than least-recently-WRITTEN (#7351): a gate
+    that is read on every boot but written once must not lose its npz to a
+    burst of one-off gates (the cache's whole value is surviving restarts).
+
+    Best-effort: a read-only mount or a file the sweep just removed is not an
+    error on a read path."""
+    with contextlib.suppress(OSError):
+        os.utime(path, None)
+
+
+def _sweep_persisted_indexes(
+    directory: Path, *, keep_path: Path, max_files: int | None = None
+) -> list[Path]:
+    """Evict the least-recently-used persisted indexes beyond the cap
+    (#7351), oldest first; returns the paths actually removed.
+
+    A persisted index is content-addressed and purely derived — always
+    regenerable from its spec — so eviction cannot lose data; the cost is one
+    re-embed the next time that gate's index is built. Two properties make it
+    safe to run on the capture write path:
+
+    * **The just-written file is never a candidate** (``keep_path``): the
+      caller persists and THEN sweeps, and its own file is the newest —
+      asserted explicitly rather than inferred from the clock, so a coarse
+      mtime granularity (many ties) can never make ``persist`` evict the file
+      it just wrote and re-embed on every call.
+    * **In-flight temps are never candidates**: the per-writer save temp is
+      dot-prefixed (``.<key>.<pid>.<uuid>.tmp.npz``) and dot-names are
+      skipped — unlinking another writer's temp mid-save would break the
+      atomic rename it is about to do.
+
+    Everything is best-effort: an unreadable directory, an unstattable entry
+    or an ``unlink`` lost to a concurrent sweep is skipped, never raised. A
+    host that already accumulated an unbounded directory is trimmed to the cap
+    on the FIRST ``persist`` after this ships, in one pass.
+    """
+    limit = _MAX_PERSISTED_INDEXES if max_files is None else max_files
+    try:
+        entries = [p for p in directory.iterdir()
+                   if p.suffix == ".npz" and not p.name.startswith(".")
+                   and p.is_file()]
+    except OSError:
+        return []
+    if len(entries) <= limit:
+        return []
+
+    def _recency(path: Path) -> tuple[float, str]:
+        try:
+            return (path.stat().st_mtime, path.name)
+        except OSError:
+            # Unstattable ⇒ oldest, so it is evicted before a usable file.
+            return (0.0, path.name)
+
+    evicted: list[Path] = []
+    for path in sorted(entries, key=_recency, reverse=True)[limit:]:
+        if path == keep_path:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue  # already gone (concurrent sweep) or unremovable
+        evicted.append(path)
+    return evicted
 
 
 class _DefaultEncoder:
@@ -228,7 +318,15 @@ class KindIndex:
         path = cls._path_for(key, cache_dir)
         if not path.exists():
             return None
-        with np.load(path, allow_pickle=False) as data:
+        try:
+            data = np.load(path, allow_pickle=False)
+        except FileNotFoundError:
+            # The retention sweep (#7351) evicted this file between the
+            # exists() check and the open. A miss, not an error: the caller
+            # rebuilds (one re-embed), so a racing sweep can never surface as
+            # a failure out of the classifier.
+            return None
+        with data:
             if bool(data.get("degraded", False)):
                 # A persisted index built while the embedder was DOWN
                 # (degraded vectors) is never trusted — return None so the
@@ -243,6 +341,7 @@ class KindIndex:
                 json.loads(str(data["metadata"])),
                 degraded=False,
             )
+        _touch_index(path)  # access recency for the retention sweep (#7351)
         _memoize_index(key, idx)
         return idx
 
@@ -267,6 +366,11 @@ class KindIndex:
         forced 0600 would have narrowed it. The umask is never read: it is
         process-global, so an ``os.umask(0)``/restore dance on this path either
         races across the capture pool or leaks umask 0 on an interrupt.
+
+        Bounded set (#7351): after a SUCCESSFUL replace, the directory is swept
+        down to ``_MAX_PERSISTED_INDEXES`` least-recently-used files. This is
+        the only place the persisted set grows, so it is the only place it
+        needs bounding; a FAILED save evicts nothing.
         """
         key = cache_key_for(self._spec_of())
         path = self._path_for(key, cache_dir)
@@ -297,6 +401,9 @@ class KindIndex:
             if tmp.exists():
                 with contextlib.suppress(OSError):
                     tmp.unlink()
+        # #7351 — bound the set at its single growth point. Reached only after
+        # the replace above succeeded, so a failed save never evicts a peer.
+        _sweep_persisted_indexes(path.parent, keep_path=path)
         return path
 
     def _spec_of(self) -> dict:

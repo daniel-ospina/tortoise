@@ -736,26 +736,29 @@ def test_falkor_live_point_write_preserves_unknown_prop():
 
 def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
     """#2795 (D2 mechanic 1): an UNDECLARED list prop is never written raw —
-    including `tags`, whose raw list would half-restore a node without its
-    TAGGED edges (#2897) — and the drop is REPORTED (indicator 4)."""
+    and the drop is REPORTED (indicator 4).
+
+    ``tags`` used to be this test's exemplar. #2897 replayed it (its own clause
+    plus the pass-2 :Tag/TAGGED sync), so the generic undeclared-list policy is
+    pinned on ``custom_list`` and the tag restore is asserted in
+    ``tests/test_3817_tags_rebuild_durability.py``."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
     import logging
     api, log = _api()
     pid = api.add_point("list prop", provenance("d.txt", [0, 5], "q"),
-                        custom_list=["a", "b"], tags=["alpha"])
+                        custom_list=["a", "b"])
     proj = _shared_proj()
     try:
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
             proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
-            "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
+            "MATCH (n:Point {id:$id}) RETURN n.custom_list", id=pid
         ).result_set
         assert row and row[0][0] is None, row
-        assert row[0][1] is None, row
         assert any("undeclared list props" in r.getMessage()
-                   and "tags" in r.getMessage()
+                   and "custom_list" in r.getMessage()
                    for r in caplog.records), caplog.text
     finally:
         pass  # shared session projection — module helper owns close
@@ -2046,6 +2049,57 @@ def test_minted_source_stub_does_not_clobber_the_document_anchor(live_proj):
     assert int(edge[0][0]) == 1, "extractedFrom edge not wired to the document Source"
 
 
+# ── #5082: the document :Source's TYPE axis (sourceKind) ───────────────────
+# §4.6 marks `sourceKind` REQUIRED on every `:Source`, and #5013 Q2 rules
+# that a document is `sourceKind: document` **and** carries a `documentKind`
+# genre (the two axes are different questions). `_upsert_document` wrote no
+# `sourceKind`, so a document node carried NULL until this write landed.
+
+def _doc_axes(proj, url: str):
+    rows = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.sourceKind, s.documentKind",
+        params={"u": url},
+    ).result_set
+    return list(rows[0]) if rows else None
+
+
+def test_document_source_carries_source_kind_document(live_proj):
+    """#5082 + ONTOLOGY §4.6 + #5013 Q2: a document `:Source` carries the TYPE
+    axis (`sourceKind='document'`) beside its GENRE axis (`documentKind`) —
+    before this it carried `sourceKind = NULL`, a declared-but-unwritten
+    REQUIRED field."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk1", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk1") == ["document", "brief"]
+
+
+def test_document_source_kind_is_create_only_398(live_proj):
+    """#398 never-overwrite: a `:Source` that already carries an authoritative
+    `sourceKind` keeps it when a document write MERGEs the same `url` — the
+    #5082 write is a `coalesce`, never a clobber."""
+    proj = live_proj
+    proj.apply({"type": "SourceCreated", "url": "doc-sk2",
+                "sourceKind": "agentSession", "title": "session"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk2", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk2") == ["agentSession", "brief"]
+
+
+def test_document_source_kind_matches_the_stub_mint_default(live_proj):
+    """#5082: the two writers of a document `:Source` agree. `_mint_source_stub`
+    (`projection/edges.py`) already defaults a non-`session:` url to
+    `'document'`; a stub minted BEFORE the document fold must leave the fold
+    with nothing to change."""
+    proj = live_proj
+    prov = provenance("doc-sk3", [0, 10], "a claim", extracted_by="test@0")
+    _api(projection=proj)[0].add_point("a claim in the doc", prov,
+                                       extractedFrom="doc-sk3")
+    proj.apply({"type": "DocumentCreated", "id": "doc-sk3", "title": "V1",
+                "document_kind": "brief"})
+    assert _doc_axes(proj, "doc-sk3") == ["document", "brief"]
+
+
 def test_add_document_journals_the_anchor_and_replays_identically(live_proj):
     """#5422: the anchor rides the JOURNALED event, so replay reproduces it.
 
@@ -2118,21 +2172,64 @@ def test_upsert_event_uses_dict_kind(live_proj):
 
 
 def test_upsert_event_produces_document(live_proj):
-    """#125: objectType='Document' → produces→real Document node, no Object clone."""
+    """#125: objectType='Document' → produces→real Document node, no Object clone.
+
+    #5082: the minted document `:Source` must carry the **TYPE** axis
+    (`sourceKind='document'`) beside its genre — §4.6 marks `sourceKind`
+    REQUIRED on every `:Source`, and pre-fix this writer created the node with
+    `sourceKind = NULL` (the gap the four `_required_sweep` harnesses pin).
+    """
     proj = live_proj
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-2", "eventKind": "sessionCaptured",
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
         "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
     rows = proj.g.query(
-        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) RETURN d.id"
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) "
+        "RETURN d.id, d.sourceKind, d.documentKind"
     ).result_set
     assert rows and rows[0][0] == "doc-1", rows
+    assert list(rows[0][1:]) == ["document", "transcript"], rows
     # No Object clone
     rows2 = proj.g.query(
         "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(o:Object) RETURN count(o)"
     ).result_set
     assert rows2[0][0] == 0, rows2
+
+
+def test_upsert_event_document_source_kind_is_create_only_398(live_proj):
+    """#398 never-overwrite: the event-document write MERGEs an existing
+    `:Source` that an authoritative writer already stamped — the `coalesce`
+    must leave that kind alone (#5082). A plain `SET` mutation is caught here."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'doc-sk-evt2'}) "
+        "SET s.sourceKind='agentSession', s.documentKind='transcript'")
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-sk-2", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-sk-evt2",
+        "objectType": "Document"}})
+    assert _doc_axes(proj, "doc-sk-evt2") == ["agentSession", "transcript"]
+
+
+def test_upsert_event_document_source_kind_repairs_a_pre_fix_null(live_proj):
+    """#5082: a document `:Source` minted by THIS writer before the fix (or
+    replayed from an old journal line) carries `sourceKind = NULL`. The write
+    must FILL it on the match arm — an `ON CREATE`-only write leaves the
+    pre-existing node NULL forever (re-review P3 on 59e5d44d6), and the
+    `coalesce` keeps an authoritative kind intact."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'doc-sk-evt3'}) "
+        "SET s.documentKind='transcript'")
+    pre = proj.g.query(
+        "MATCH (s:Source {url:'doc-sk-evt3'}) RETURN s.sourceKind").result_set
+    assert pre and pre[0][0] is None, pre
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-sk-3", "eventKind": "sessionCaptured",
+        "subject": "agent-pi", "object": "doc-sk-evt3",
+        "objectType": "Document"}})
+    assert _doc_axes(proj, "doc-sk-evt3") == ["document", "transcript"]
 
 
 def test_upsert_event_legacy_string_uses_still_works(live_proj):
@@ -2150,19 +2247,23 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
 
 
 def test_falkor_subject_stub_resolves_canonical_id():
-    """#1918: a Subject stub minted with a random-ulid id (webhook
-    name-stub) must adopt the canonical id when SubjectAdded lands — parity
-    with the #1155 Object fix (_upsert_object ON MATCH
+    """#1918: a Subject stub minted before the canonical registration (the
+    webhook name-stub) must adopt the canonical id when SubjectAdded lands —
+    parity with the #1155 Object fix (_upsert_object ON MATCH
     o.id=coalesce($id, o.id)). Pre-fix: _upsert_subject ON MATCH only set
     subjectKind/embedding, so MATCH (s:Subject {id:$sid}) wiring silently
-    matched nothing."""
+    matched nothing. #7936: the stub's OWN id is now the canonical
+    `sub-<sha256>` value; this test's canonical spelling (`subject:alice`) is
+    deliberately different, so the ON MATCH id write is what heals it."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()  # wipes all graphs on every call
 
-    # EventRecorded lands FIRST → mints a Subject name-stub with a RANDOM
-    # ulid id (the webhook path, _event_plain_merge). The canonical id is
-    # not yet present on any node.
+    # EventRecorded lands FIRST → mints a Subject name-stub under the
+    # deterministic `sub-<sha256>` id (#7936; the webhook path,
+    # _event_plain_merge). The CANONICAL id below is a DIFFERENT spelling
+    # (`subject:alice`), so it is not yet present on any node — which is the
+    # point: the ON MATCH id write, not the stub value, does the healing.
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-1918", "eventKind": "meeting.held",
         "subject": "alice", "object": "",
@@ -2716,6 +2817,88 @@ def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
         f"non-retired `topics` dropped by the deny-set (over-reach): {rows[9]!r}"
     assert rows[10] == "active", \
         f"non-retired `status` dropped by the deny-set (over-reach): {rows[10]!r}"
+
+
+def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch):
+    """#5135 root cause: ONE declared registry for the retired document
+    fields, so a member added to it cannot be silently missed by a stale
+    per-path copy IN THE CLASS THAT DECLARES IT. It is consulted by the generic
+    entity surface, the document open passthrough and the promotion scrub.
+    Scope, stated so the claim is not read as broader than it is: two further
+    graph-side doors deny the retirement by a DIFFERENT route and are
+    deliberately NOT driven here — `_upsert_source`'s closed allowlist
+    (`_SOURCE_HANDLED` ∪ `_SOURCE_EXTRA_PROPS`) and the `EntityMutated` fold's
+    declared `_SOURCE_NODE_PROPS` surface — and the record mirror in
+    `record_projection.py` keeps its own literal `drop` on `DocumentCreated`.
+
+    The specific #5135 door (`update_entity`) is already closed by the
+    target-aware guard. What this pins is the property whose absence let that
+    door stand open while two sibling doors were closed: the retirement used
+    to be spelled in four places (`_DOCUMENT_HANDLED`'s incidental `content`/
+    `doc_status`/`objectKind`, the doc passthrough skip-set `_DOC_RETIRED`, the
+    promotion `REMOVE` literal, and `_DOC_RETIRED_KEYS`). The check is
+    therefore behavioural, not structural: add a key to the ONE registry and
+    each door this test drives must deny it.
+
+    Mutation (scratch copy, pre-consolidation code): the document passthrough
+    and the promotion `REMOVE` are separate copies, so the probe key is
+    PERSISTED by door 2 and INHERITED by door 3 — this test goes red. The fold
+    door (4, `_fold_entity_mutation` -> `rebuild_all`) drops any undeclared
+    key by construction and is covered independently by
+    `test_3998_raw_absent_state.py::
+    test_rebuild_drops_a_payload_carried_by_an_entity_mutated_record`.
+    """
+    from tortoise.projection.entities import _EntityHandlers
+
+    probe = "zzRetiredProbe"
+    monkeypatch.setattr(
+        _EntityHandlers, "_DOC_RETIRED_KEYS",
+        _EntityHandlers._DOC_RETIRED_KEYS | {probe})
+
+    sdk = sdk_factory()
+    proj = sdk._get_proj()
+
+    # Door 1 — the generic entity surface (#5135 itself); reads the registry
+    # directly at the boundary.
+    doc = sdk.create_document("Registry1", "report")
+    with pytest.raises(ValueError, match="retired field"):
+        sdk.update_entity(doc["id"], **{probe: "FORGED"})
+
+    # Door 2 — the document open passthrough (`_upsert_document`). The only
+    # way to deny a key absent from the historical `_DOCUMENT_HANDLED` base is
+    # the registry union at the call site.
+    d2 = sdk.create_document("Registry2", "report", **{probe: "FORGED"})
+    got2 = proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) RETURN s.{probe}",
+        params={"u": d2["id"]}).result_set[0][0]
+    assert got2 is None, (
+        f"document passthrough wrote a member of the single registry: {got2!r}")
+
+    # Door 3 — the promotion scrub: a node that inherited the key, then became
+    # a document, must lose it. Seeded by raw Cypher because the write paths
+    # no longer produce such a node.
+    sdk.create_source("corpus://reg3", "document")
+    proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) SET s.{probe}='INHERITED'",
+        params={"u": "corpus://reg3"})
+    assert proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) RETURN s.{probe}",
+        params={"u": "corpus://reg3"}).result_set[0][0] == "INHERITED", \
+        "precondition: the inherited value was seeded"
+    proj.apply({"type": "DocumentCreated", "id": "corpus://reg3",
+                "title": "Registry3", "document_kind": "report"})
+    got3 = proj.g.query(
+        f"MATCH (s:Source {{url:$u}}) RETURN s.{probe}",
+        params={"u": "corpus://reg3"}).result_set[0][0]
+    assert got3 is None, (
+        f"promotion scrub missed a member of the single registry: {got3!r}")
+
+    # Contrast — the union did not turn the passthrough into a no-op: a key it
+    # does NOT list still rides through (the #228 pin).
+    d4 = sdk.create_document("Registry4", "report", domain="legal")
+    assert proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.domain",
+        params={"u": d4["id"]}).result_set[0][0] == "legal"
 
 
 # ── #214: Vocabulary edge cleanup ──────────────────────────────────────

@@ -470,7 +470,7 @@ class TestCallSiteObservation:
 
     def test_decision_kind_point_write_claims_a_decision(self, handler_env):
         """The documented EP decide protocol: `kind="decision"`
-        (tortoise/onboarding/SKILL.md §6)."""
+        (tortoise/onboarding/SKILL.md §7)."""
         _sdk, recorded = handler_env
         res = mcp.tortoise_create_point("decision", "Decision: Postgres")
         assert "error" not in res, res
@@ -518,7 +518,7 @@ class TestDecideProtocolKinds:
     protocols.
 
     Two shipped protocols file the SAME node (the option set) under two
-    different labels: ``tortoise/onboarding/SKILL.md`` §6 files one ``decision``
+    different labels: ``tortoise/onboarding/SKILL.md`` §7 files one ``decision``
     point per option, while the ``tortoise-decide`` skill files each option as
     ``option`` (its anti-pattern list forbids storing the decision itself as a
     Point). Keying the observation on one label made it a FALSE NEGATIVE for
@@ -570,7 +570,7 @@ class TestDecideProtocolKinds:
 
     def test_onboarding_protocol_decision_write_observes_a_decision(
             self, handler_env):
-        """Protocol A — `tortoise/onboarding/SKILL.md` §6 files one
+        """Protocol A — `tortoise/onboarding/SKILL.md` §7 files one
         `decision` point per option."""
         sdk, recorded = handler_env
         res = mcp.tortoise_create_point("decision", "Decision: Postgres")

@@ -293,19 +293,16 @@ class TestPromotionPolicy:
         op_id = res["ids"]["connections"][0]
         assert sdk.get_point(pA)["status"] == "live"   # source promoted
         assert sdk.get_point(pB)["status"] == "draft"  # target stays draft
-        # #5089: this connection carries no `reify`, so `_connection_route`
-        # returns 'direct' and NO operator node is minted — `ids["connections"]
-        # [0]` is the direct-edge descriptor, not an id. Assert the NODE ABSENCE
-        # with a graph query. (Round 5: the previous form here,
-        # `assert sdk.get_point(op_id) == {}`, was STILL unfalsifiable —
-        # `get_point` returns `{}` for any unknown input, so it held even when a
-        # mutation minted a real operator node. Proved by mutation, not argued.)
-        assert _operator_count(sdk) == 0, (
-            "a direct-route connection must not mint an operator node"
-        )
-        # And the entry is the direct-edge DESCRIPTOR, not a node id (which is
-        # what made a `get_point(op_id) == {}` assertion unable to fail).
-        assert isinstance(op_id, dict) and op_id.get("direct_edge") == "IMPL"
+        # #8499 endpoint-kind gate (owner ruling 2026-10-13): a plain IMPL
+        # between two :Points is REIFIED, so `ids["connections"][0]` is a real
+        # operator NODE id and the promotion asymmetry is observable on it.
+        # (Before the ruling this arm asserted `_operator_count == 0` plus a
+        # direct-edge DESCRIPTOR — the operator-less contract the ruling
+        # reverses. Inverted deliberately, not dropped.)
+        assert _operator_count(sdk) == 1
+        op_id = res["ids"]["connections"][0]
+        assert isinstance(op_id, str)
+        assert sdk.get_point(op_id)["status"] == "live"
 
     def test_auto_nand_promotes_source_live(self, sdk):
         # Promotion is op-type-agnostic: NAND wires the same #131 path
@@ -430,6 +427,63 @@ class TestPromotionPolicy:
             "asked for draft"
         )
 
+    def test_auto_relation_point_target_is_born_live(self, sdk):
+        """#1088: a point that is the `to` of a RELATION connection is NOT an
+        operator-connection TARGET, so under auto nothing asks for draft —
+        it is born live by create_point's default.
+
+        The relation branch of the scan contributes no target (the
+        ``if not (isinstance(_conn, dict) and "operator" in _conn): continue``
+        guard). Mutation that reds this test: dropping that guard, which
+        sweeps the relation connection's point `to` into ``_auto_targets``
+        and injects status="draft" on it — p2 reads draft.
+        """
+        bundle = {
+            "points": [
+                {"ref": "p1", "kind": "claim", "content": "A references B"},
+                {"ref": "p2", "kind": "claim", "content": "B"},
+            ],
+            "connections": [
+                {"from": "p1", "to": "p2", "relation": "references"},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        p1, p2 = res["ids"]["points"]
+        assert sdk.get_point(p1)["status"] == "live"
+        # A relation connection has no promotion path at all — neither
+        # endpoint is status-injected, so the target is born live.
+        assert sdk.get_point(p2)["status"] == "live", (
+            "a relation connection's `to` is not a promotion target (#1088)"
+        )
+
+    def test_auto_list_to_operator_targets_are_draft(self, sdk):
+        """#3263 (review P1): `to` is a LIST on a many-to-many operator
+        connection, and EVERY element must be collected as an
+        ``_auto_target`` — only the scalar form was, so the list endpoints
+        were misclassified as STANDALONE points and inherited the live
+        default under auto while the scalar shape wrote them draft.
+
+        Mutation that reds this test: deleting the
+        ``elif isinstance(_to, list)`` branch of the target collection —
+        pB/pC then read live instead of the contract's draft.
+        """
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A implies B and C"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+                {"ref": "pC", "kind": "claim", "content": "C"},
+            ],
+            "connections": [
+                {"from": "pA", "to": ["pB", "pC"], "operator": "IMPL",
+                 "reify": True},
+            ],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA, pB, pC = res["ids"]["points"]
+        assert sdk.get_point(pA)["status"] == "live"   # source promoted
+        assert sdk.get_point(pB)["status"] == "draft"  # list-`to` target
+        assert sdk.get_point(pC)["status"] == "draft"  # list-`to` target
+
     def test_auto_granular_parity(self, sdk):
         # E2E-5 discriminating cell: auto holds in granular mode — the
         # promote flag must not be dropped on the granular code path.
@@ -442,14 +496,14 @@ class TestPromotionPolicy:
         }
         res = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
         pA, pB = res["ids"]["points"]
-        op_id = res["ids"]["connections"][0]
         assert sdk.get_point(pA)["status"] == "live"
         assert sdk.get_point(pB)["status"] == "draft"
-        # #5089: no `reify` → 'direct' route → no operator node. Assert the node
-        # absence by GRAPH QUERY: `get_point(op_id) == {}` would also hold for an
-        # unknown input, so it cannot fail (round 5).
-        assert _operator_count(sdk) == 0
-        assert isinstance(op_id, dict) and op_id.get("direct_edge") == "IMPL"
+        # #8499: reified on the granular path too — the gate lives in the SHARED
+        # connection loop, so bulk and granular cannot diverge here.
+        assert _operator_count(sdk) == 1
+        op_id = res["ids"]["connections"][0]
+        assert isinstance(op_id, str)
+        assert sdk.get_point(op_id)["status"] == "live"
 
     def test_keyword_only_enforced(self, sdk):
         # Q2-lock: positional auto-promotion must NOT silently opt in — a
@@ -858,11 +912,21 @@ class TestLocalRefs:
 # ── reification rule ────────────────────────────────────────────────
 
 class TestReificationRule:
-    def test_operator_connection_creates_operator(self, sdk):
-        """§8 routing (A3, plan §5.3 line 513): a PLAIN {operator: IMPL}
-        connection is OPERATOR-LESS — a direct edge, no operator node. The
-        reify:true variant is the explicit-anchor path that creates the
-        operator (asserted separately below)."""
+    def test_plain_point_connection_is_reified(self, sdk):
+        """§8 routing (A3) + the endpoint-kind gate (#8499): a PLAIN
+        {operator: IMPL} connection between two :Points is REIFIED into an
+        operator — NOT the operator-less direct edge.
+
+        ⛔ Owner ruling 2026-10-13 (#8499; reverses A3's plain-IMPL arm and
+        #1061's operator-less Point→Point arm): Point↔Point relations are
+        operator-mediated — an operator-less edge can be neither mitigated nor
+        annotated, so it cannot carry the epistemic weighting a Point relation
+        claims. (Durability was the original third argument — such an edge was
+        journaled but never replayed, A10 #1048 — but #8499 landed the
+        ``DirectEdgeCreated`` fold, so it now survives ``rebuild_all`` too.)
+        ``create_direct_edge`` remains the explicit operator-less surface (see
+        tests/test_8499_point_mediated_routing.py).
+        """
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "supports"},
@@ -871,19 +935,30 @@ class TestReificationRule:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
         }
         res = sdk.ingest(bundle, granularity="granular")
-        # direct edge exists; NO operator node (operator-less per §8)
-        assert _edge_count(sdk, "IMPL") == 1
-        assert _operator_count(sdk, "IMPL") == 0
+        # REIFIED: one operator node, an IMPL edge per input, no bare edge.
+        assert _operator_count(sdk, "IMPL") == 1
+        assert _edge_count(sdk, "IMPL") == 2
         assert _count(
-            sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 0
-        # the direct-edge conn_result shape (plan §5.5 route matrix, cycle-22)
+            sdk,
+            "MATCH (a:Point)-[r:IMPL]->(b:Point) "
+            "WHERE coalesce(a.is_operator,false)=false "
+            "AND coalesce(b.is_operator,false)=false RETURN count(r)",
+        ) == 0
+        assert _count(
+            sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 1
+        # `ids["connections"][0]` is a real operator NODE id, and the conn_result
+        # is the operator entry — the direct-edge descriptor shape is gone
+        # (plan §5.5 route matrix, cycle-22).
+        op_id = res["ids"]["connections"][0]
+        assert isinstance(op_id, str)
+        assert sdk.get_point(op_id)["is_operator"] is True
         conn_entry = next(e for e in res["results"]
                           if e["section"] == "connections")
-        result = conn_entry["result"]
-        assert set(result.keys()) == {"direct_edge", "from", "to", "deduped"}
-        assert result["direct_edge"] == "IMPL"
-        assert result["deduped"] is False
+        assert set(conn_entry["result"].keys()) == {"operator_id", "deduped"}
+        assert conn_entry["result"]["deduped"] is False
         assert res["created"]["connections"] == 1
+        # The override is reported, never silent.
+        assert any("point_mediated_route" in w for w in res["warnings"])
 
     def test_reify_connection_creates_operator(self, sdk):
         """§8 routing: {operator: IMPL, reify:true} is the EXPLICIT-ANCHOR
@@ -919,9 +994,9 @@ class TestReificationRule:
         ) == 0
 
     def test_nand_operator_connection(self, sdk):
-        """§8 routing: a plain {operator: NAND} connection is OPERATOR-LESS
-        (direct edge with the CYCLE-25 extraction default — direction-absent
-        NAND = unidirectional on the edge)."""
+        """§8 routing + the #8499 gate: a plain {operator: NAND} connection
+        between :Points is REIFIED, and CYCLE-25's direction-absent default
+        ('unidirectional') now lands on the OPERATOR node."""
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A"},
@@ -929,13 +1004,11 @@ class TestReificationRule:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
         }
-        res = sdk.ingest(bundle)  # noqa: F841
-        assert _edge_count(sdk, "NAND") == 1
-        assert _operator_count(sdk, "NAND") == 0
-        # direction-absent NAND = unidirectional on the edge (extraction default)
-        d = sdk._get_proj().g.query(
-            "MATCH ()-[r:NAND]->() RETURN r.direction").result_set
-        assert d and d[0][0] == "unidirectional"
+        res = sdk.ingest(bundle)
+        assert _operator_count(sdk, "NAND") == 1
+        # direction-absent NAND = unidirectional, carried by the operator node
+        op = sdk.get_point(res["ids"]["connections"][0])
+        assert op["direction"] == "unidirectional"
 
     def test_connection_with_both_relation_and_operator_raises(self, sdk):
         bundle = {
@@ -1289,12 +1362,24 @@ class TestBatchId:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestA3DirectEdgeRouting:
-    """§8 connection-routing (A3): a PLAIN {operator: IMPL|NAND} connection
-    is OPERATOR-LESS — a direct edge with label/direction/batch_id on the
-    edge, no operator node; the reify:true / mitigation paths still create
-    the operator."""
+    """§8 connection-routing (A3) UNDER the endpoint-kind gate (#8499).
 
-    def test_plain_impl_is_operator_less_direct_edge(self, sdk):
+    ⛔ Owner ruling 2026-10-13 (#8499; reverses A3's plain-IMPL/NAND arm and
+    #1061's operator-less Point→Point arm): a plain {operator: IMPL|NAND}
+    connection between two :Points is REIFIED into an operator — the OPERATOR
+    node, not the edge, carries label / direction / batch_id. An operator-less
+    edge can be neither mitigated nor annotated, so it cannot carry the
+    epistemic weighting a Point relation claims. (Its old loss on
+    ``rebuild_all`` — A10 #1048 — is retired: #8499 landed the
+    ``DirectEdgeCreated`` fold, so it survives a rebuild now.)
+
+    ``create_direct_edge`` is untouched and remains the explicit operator-less
+    surface — the Object↔Object carve-out, and the migration path for existing
+    operator-less relations
+    (tests/test_8499_point_mediated_routing.py::TestDirectEdgeWriterUnchanged).
+    """
+
+    def test_plain_impl_point_pair_is_reified(self, sdk):
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A supports B"},
@@ -1304,26 +1389,26 @@ class TestA3DirectEdgeRouting:
                               "label": "supports"}],
         }
         res = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
-        assert _edge_count(sdk, "IMPL") == 1
-        assert _operator_count(sdk, "IMPL") == 0
-        # label + batch_id on the EDGE (not a node)
-        row = sdk._get_proj().g.query(
-            "MATCH ()-[r:IMPL]->() RETURN r.label, r.batch_id").result_set
-        assert row[0][0] == "supports"
-        assert row[0][1] == res["batch_id"]
-        # direct-edge conn_result shape (plan §5.5 route matrix, cycle-22)
+        assert _operator_count(sdk, "IMPL") == 1
+        # label + batch_id on the OPERATOR NODE (not the edge)
+        op = sdk.get_point(res["ids"]["connections"][0])
+        assert op["label"] == "supports"
+        assert op["batch_id"] == res["batch_id"]
+        # conn_result shape (plan §5.5 route matrix, cycle-22): the direct-edge
+        # descriptor is replaced by the operator entry.
         conn = next(e for e in res["results"] if e["section"] == "connections")
-        assert set(conn["result"].keys()) == {"direct_edge", "from", "to", "deduped"}
+        assert set(conn["result"].keys()) == {"operator_id", "deduped"}
         assert conn["result"]["deduped"] is False
-        # idempotent re-ingest → deduped, one edge
+        assert any("point_mediated_route" in w for w in res["warnings"])
+        # idempotent re-ingest → deduped, still exactly ONE operator
         r2 = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
-        assert _edge_count(sdk, "IMPL") == 1
+        assert _operator_count(sdk, "IMPL") == 1
         conn2 = next(e for e in r2["results"] if e["section"] == "connections")
         assert conn2["result"]["deduped"] is True
 
-    def test_plain_nand_direction_default_unidirectional(self, sdk):
-        """CYCLE-25: a direction-absent plain NAND direct edge carries the
-        extraction default 'unidirectional' on the edge."""
+    def test_plain_nand_direction_default_moves_to_the_operator(self, sdk):
+        """CYCLE-25's direction-absent extraction default survives the gate —
+        it now lands on the OPERATOR node (the edge carries no direction)."""
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A"},
@@ -1331,11 +1416,10 @@ class TestA3DirectEdgeRouting:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
         }
-        sdk.ingest(bundle)
-        row = sdk._get_proj().g.query(
-            "MATCH ()-[r:NAND]->() RETURN r.direction").result_set
-        assert row[0][0] == "unidirectional"
-        assert _operator_count(sdk, "NAND") == 0
+        res = sdk.ingest(bundle)
+        assert _operator_count(sdk, "NAND") == 1
+        op = sdk.get_point(res["ids"]["connections"][0])
+        assert op["direction"] == "unidirectional"
 
 
 class TestA3OperatorDedupRicherReturn:

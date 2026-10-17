@@ -364,6 +364,37 @@ class TestTheDocumentedOrderIsTheSafeOrder:
                 "(B2), not a consent ritual, and there is no second key")
 
 
+class TestTheDataSourceSectionNamesTheRealToggle:
+    """#3513 review P2: §6's per-source enable write must name the TOGGLE tool.
+
+    The section first named `tortoise_session_capture` — the FILING tool, whose
+    contract is the opposite of an enable intent and which returns 409 exactly
+    when the team disabled recording (``tortoise/tool_registry.py``). A
+    self-hosted agent following §6 in order would have been pointed at the one
+    tool that refuses when recording is off, while the same document names the
+    correct switch (`tortoise_onboarding_session_recording`) elsewhere.
+    """
+
+    def _data_sources_section(self) -> str:
+        text = SKILL.read_text(encoding="utf-8")
+        start = text.index("## 6. Choose what Tortoise remembers")
+        end = text.index("## 7. Next steps", start)
+        section = text[start:end]
+        assert len(section) > 500, "the §6 data-sources section was not found"
+        return section
+
+    def test_the_enable_write_names_the_toggle_tool_not_the_filing_tool(self):
+        """Mutation: replace the toggle with `tortoise_session_capture` and
+        this reds — the agent would file/refuse instead of enabling."""
+        section = self._data_sources_section()
+        assert "tortoise_onboarding_session_recording" in section, (
+            "§6 does not name the tool that actually writes the per-source "
+            "enable intent (the onboarding-state toggle)")
+        assert "tortoise_session_capture" not in section, (
+            "§6 names the FILING tool — it returns 409 when capture is off, "
+            "which is the opposite of writing an enable intent (#3513 review)")
+
+
 class TestDisclosureStepAccounting:
     """The pushed-down plan-review finding (epic plan §8): the disclosure's
     step/state accounting is #3517's, and `capture-disclosed` must never be

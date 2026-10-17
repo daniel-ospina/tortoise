@@ -100,18 +100,16 @@ def gh_issue_event(*, event_id: str | None = None, kind: str | None = None,
 def slack_event(*, url: str | None = SLACK_PERMALINK,
                 text: str = "deploy is green",
                 ts: str = "1690000000.123456") -> dict:
-    ev = {
-        "type": "EventRecorded",
-        "eventId": f"slack-msg-C01-{ts.replace('.', '-')}",
-        "eventKind": "slack.message",
-        "subject": "slack:C01:U123",
-        "object": text[:200],
-        "startedAt": "2026-07-10T10:00:00Z",
-        "endedAt": None,
-        "source": SLACK_CONTAINER,
-        "sourceKind": "slack_message",
-        "participants": ["U123"],
-    }
+    """A REAL `SlackConnector._message_to_event` record (channel C01, user U123).
+
+    Built through the producer — never hand-spelled — so the digest reads the
+    connector's OWN payload, including the #8010 `textDigest`. The optional
+    `url` models the permalink enrichment (`_enrich_source_urls`).
+    """
+    from tortoise.connectors.slack import SlackConnector
+
+    ev = SlackConnector(config={"channel_id": "C01"})._message_to_event(
+        {"text": text, "ts": ts, "user": "U123"})
     if url is not None:
         ev["sourceUrl"] = url
     return ev
@@ -1248,4 +1246,203 @@ def test_backfill_legacy_closed_stays_honestly_unanchored():
                            "github-issue-test/repo-42-closed")
         assert anchored is None or anchored[0] is None, (
             f"the backfilled derivation must anchor nothing, got {anchored!r}"
+        )
+
+
+# ── 9. #8010: the item TEXT reaches the version (GitHub body + Slack >200) ──
+
+def test_a_body_only_edit_advances_the_version():
+    """#8010: the digest was a function of the payload, and the GitHub payload
+    carried no body — so a body-only edit left `contentHash`/`version` untouched
+    and every derivation read `current` (the false-`current` §4.6 forbids).
+
+    FAILS IF `_item_state` drops `body_digest` (the pair is byte-identical) or
+    if the mapper reads the body from the wrong key."""
+    issue = {
+        "number": 42, "title": "Fix login bug", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "html_url": GH_URL, "body": "The bug is in the parser.",
+        "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
+    }
+    a = gm.issue_to_event(dict(issue), "test/repo")
+    b = gm.issue_to_event(dict(issue, body="The bug is in the lexer now."),
+                          "test/repo")
+    assert a["eventId"] == b["eventId"], (
+        "a body edit mints no transition — the version, not the id, carries it"
+    )
+    assert _connector_content_hash(a) != _connector_content_hash(b), (
+        "a body-only issue edit is item content and must be in the digest"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(a)
+        v1 = _source(proj, GH_URL)
+        proj.apply(b)
+        v2 = _source(proj, GH_URL)
+        assert v2[0] != v1[0], "a body edit must move the contentHash"
+        assert v2[1] == v1[1] + 1, (
+            f"the ordinal must advance with the hash: {v1[1]} -> {v2[1]}"
+        )
+
+    # The PR half of the same defect: `_norm_pr` must surface the body too.
+    pr = {
+        "number": 7, "title": "PR title", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "merged_at": None, "html_url": PR_URL, "body": "Original description.",
+    }
+    pa = gm.pr_to_event(dict(pr), "test/repo")
+    pb = gm.pr_to_event(dict(pr, body="Rewritten description."), "test/repo")
+    assert _connector_content_hash(pa) != _connector_content_hash(pb), (
+        "a body-only PR edit is item content and must be in the digest"
+    )
+
+
+def test_the_poll_cli_requests_the_body_for_issues_and_prs(monkeypatch):
+    """#8010: the digest now covers the body, so EVERY live gh-CLI fetch must
+    request it. A producer that omits `body` hashes a different digest for ONE
+    unchanged item — the producer-divergence class that advanced the version on
+    every poll↔indexer alternation (#8019).
+
+    FAILS IF any `gh issue list`/`gh pr list` argv in `GitHubConnector` drops
+    `body` from its `--json` set."""
+    import subprocess as sp
+
+    from tortoise.connectors.github import GitHubConnector
+
+    seen: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        seen.append([str(a) for a in args])
+        return sp.CompletedProcess(args=args, returncode=0, stdout="[]")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    connector = GitHubConnector(config={"repo": "test/repo"})
+    connector.poll()
+    connector.poll_raw_issues()  # the entity path's own fetch (ingest)
+
+    def _json_fields(cmd: list[str]) -> set[str]:
+        return set(cmd[cmd.index("--json") + 1].split(","))
+
+    issue_cmds = [c for c in seen if "issue" in c]
+    pr_cmds = [c for c in seen if "pr" in c]
+    assert issue_cmds and pr_cmds, "poll must fetch issues and PRs"
+    missing = [c for c in issue_cmds + pr_cmds if "body" not in _json_fields(c)]
+    assert not missing, (
+        "every gh-CLI poll must request the body the digest covers: "
+        f"{missing!r}"
+    )
+
+
+def test_the_body_and_its_digest_never_reach_the_event_node():
+    """#8010 acceptance: the body (or its digest) must NOT land as a node
+    property (#3998/D30 — the graph indexes the raw, it does not store it). The
+    digest rides the `itemState` dict, which `_is_persistable_prop_value`
+    refuses to write, so neither the text nor the hash appears on the Event.
+
+    FAILS IF a producer puts `body`/`body_digest` on the Event envelope, or if
+    `_EVENT_HANDLED` stops naming `itemState`."""
+    issue = {
+        "number": 42, "title": "Fix login bug", "state": "open",
+        "created_at": "2026-07-10T10:00:00Z", "closed_at": None,
+        "html_url": GH_URL, "body": "The bug is in the parser.",
+        "labels": [{"name": "bug"}], "assignees": [{"login": "alice"}],
+    }
+    ev = gm.issue_to_event(issue, "test/repo")
+    assert "body" not in ev, "the raw body must not ride the Event envelope"
+    assert isinstance(ev["itemState"].get("body_digest"), str)
+    assert len(ev["itemState"]["body_digest"]) == 64
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(ev)
+        props = proj.g.query(
+            "MATCH (e:Event {eventId: $e}) RETURN properties(e)",
+            params={"e": ev["eventId"]},
+        ).result_set[0][0]
+        leaked = {"body", "body_digest", "itemState"} & set(props)
+        assert not leaked, f"body content leaked onto the Event node: {sorted(leaked)}"
+
+
+def test_a_slack_edit_past_the_200_char_bound_advances_the_version():
+    """#8010: the Slack payload's `object` is capped at 200 chars, so the digest
+    (which reads the payload) could not see an edit past the cap — the same
+    false `current`. The full text's hash rides `textDigest`, so the edit moves
+    the version while the stored `object` stays bounded.
+
+    FAILS IF `_message_to_event` drops `textDigest`."""
+    head = "x" * 200
+    a = slack_event(text=head + " tail one")
+    b = slack_event(text=head + " tail two")
+    assert a["object"] == b["object"] == head, (
+        "the display cap must be unchanged (both first-200 chars are identical)"
+    )
+    assert _connector_content_hash(a) != _connector_content_hash(b), (
+        "an edit past the 200-char cap is item content and must be in the digest"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(a)
+        v1 = _source(proj, SLACK_PERMALINK)
+        proj.apply(b)
+        v2 = _source(proj, SLACK_PERMALINK)
+        assert v2[0] != v1[0], "a post-cap edit must move the contentHash"
+        assert v2[1] == v1[1] + 1
+        props = proj.g.query(
+            "MATCH (e:Event {eventId: $e}) RETURN properties(e)",
+            params={"e": a["eventId"]},
+        ).result_set[0][0]
+        assert "textDigest" not in props, (
+            "the full-text hash is an edit signal, not node content"
+        )
+
+
+def test_a_linear_description_edit_advances_the_version():
+    """#8010: the same root cause on the third connector in the issue's table.
+    The Linear poll already fetches `description`, but the payload carried only
+    the title (capped at 200), so a description-only edit left the version
+    untouched — a false `current`. `textDigest` covers the FULL title +
+    description.
+
+    FAILS IF `_issue_to_event` drops `textDigest`, or hashes only the capped
+    `object`."""
+    from tortoise.connectors.linear import LinearConnector
+
+    url = "https://linear.app/test/issue/TEAM-42"
+    base = {
+        "identifier": "TEAM-42", "title": "Fix login flow",
+        "state": {"name": "In Progress"}, "team": {"key": "TEAM"},
+        "assignee": None, "createdAt": "2026-07-15T10:00:00Z",
+        "updatedAt": "2026-07-19T12:00:00Z", "completedAt": None,
+        "canceledAt": None, "url": url,
+        "description": "The auth handshake drops the nonce.",
+    }
+    lc = LinearConnector(config={"api_key": "lin_api_test", "team_id": "team-1"})
+    a = lc._issue_to_event(dict(base))
+    b = lc._issue_to_event(dict(base, description="The auth handshake drops the token."))
+    assert a["object"] == b["object"], "the display title is unchanged"
+    assert _connector_content_hash(a) != _connector_content_hash(b), (
+        "a description-only Linear edit is item content and must be in the digest"
+    )
+    # A title edit past the 200-char display cap is invisible to `object`, so the
+    # full-text digest must cover it too.
+    long_title = "T" * 200
+    c = lc._issue_to_event(dict(base, title=long_title + " one"))
+    d = lc._issue_to_event(dict(base, title=long_title + " two"))
+    assert c["object"] == d["object"] == long_title
+    assert _connector_content_hash(c) != _connector_content_hash(d), (
+        "a title edit past the cap must still be in the digest"
+    )
+    with fresh_sdk() as sdk:
+        proj = sdk._get_proj()
+        proj.apply(a)
+        v1 = _source(proj, url)
+        proj.apply(b)
+        v2 = _source(proj, url)
+        assert v2[0] != v1[0], "a description edit must move the contentHash"
+        assert v2[1] == v1[1] + 1
+        props = proj.g.query(
+            "MATCH (e:Event {eventId: $e}) RETURN properties(e)",
+            params={"e": a["eventId"]},
+        ).result_set[0][0]
+        assert "textDigest" not in props, (
+            "the full-text hash is an edit signal, not node content"
         )

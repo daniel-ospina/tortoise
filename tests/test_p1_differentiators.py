@@ -96,7 +96,7 @@ class TestTemporal:
         # passes through verbatim (it still does — the fix narrows pass-through
         # to well-formed windows, it does not remove it). #5359 adds the
         # complement: an INVERSION is refused rather than persisted, because
-        # `restore_point_at`'s `_covers` would then cover no instant and the
+        # `get_historical_knowledge`'s `_covers` would then cover no instant and the
         # point would be silently unreachable from every temporal query.
         with pytest.raises(ValueError):
             sdk.create_point("statement", "time-bound claim",

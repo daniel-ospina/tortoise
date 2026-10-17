@@ -1408,7 +1408,7 @@ def test_event_retention_interval_rejects_nonpositive_in_sdk(monkeypatch):
     """Round-4 review P2 (PRE-EXISTING): ``TORTOISE_EVENT_RETENTION_INTERVAL``
     was parsed with a bare ``int()``, so ``0``/``-1`` made the gate
     ``now - _EVENT_PURGE_LAST < interval`` always false — a purge DELETE on
-    every ``events_poll``. The validated interval must keep the gate closed.
+    every ``poll_events``. The validated interval must keep the gate closed.
 
     #3416: ``time.monotonic()`` is seconds since BOOT, so it is a few hundred
     on a CI runner booted minutes ago and millions on a long-lived dev box.

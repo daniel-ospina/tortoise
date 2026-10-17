@@ -255,6 +255,88 @@ def test_rate_limit_lockout_guards_present() -> None:
     # above, which is now the single login surface.
 
 
+# ── #4161: a 200 must never claim an email was sent ────────────────────────
+
+
+def test_the_accepted_copy_never_claims_delivery() -> None:
+    """#4161: the reset/resend SUCCESS copy must be CONDITIONAL, not a delivery claim.
+
+    A 200 on these routes means "accepted", never "delivered": GoTrue answers 200
+    for an address with no account (its own non-enumeration defense) and the BFF
+    folds a provider refusal into the same 200 (#4104). So "Reset link sent" /
+    "Resent" asserted delivery the page could not know — and a throttled user
+    waited for an email that was never sent. The conditional shape is the only one
+    TRUE in every case, and it is the copy the recovery flow already uses.
+
+    Both halves are pinned: the conditional literal is present, and the two
+    unconditional claims it replaced are GONE. Absence alone would pass on a page
+    that dropped the copy entirely, and presence alone would pass with the old
+    claim left beside it.
+    """
+    code = _strip_html_comments(SIGNUP)
+    assert "If an account exists for that email, a reset link is on its way" in code
+    assert "If your address still needs confirming, a new link is on its way" in code
+    for claimed_sent in ("Reset link sent —", "Resent — check your inbox"):
+        assert claimed_sent not in code, (
+            f"signup.html still claims delivery with {claimed_sent!r} on a 200 — a 200 "
+            "means accepted, not sent (#4161)"
+        )
+
+
+def _js_function_body(html: str, name: str) -> str:
+    """The full source of `async function <name>(…) { … }`, brace-matched.
+
+    Brace-matched (not "up to the next function") so a nested block inside the
+    handler cannot end the slice early. The handlers this serves contain no
+    braces inside string literals, so the count tracks code braces only.
+    """
+    start = html.index(f"async function {name}(")
+    open_brace = html.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(html)):
+        if html[i] == "{":
+            depth += 1
+        elif html[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start : i + 1]
+    raise AssertionError(f"unbalanced braces in {name}()")
+
+
+def test_the_reset_429_does_not_charge_the_login_lockout() -> None:
+    """#4161: the BFF's caller-scoped mail throttle must not disable SIGN-IN.
+
+    The `/auth/reset` 429 branch became reachable with the BFF throttle. On that
+    branch the modal used to call `setLoginRateLimitLockout`, which applies the
+    1h email tier to the LOGIN bucket — `applyLoginRateLimitLockout()` disables
+    `#btn-submit` while the page is in login mode. A caller who asked for a
+    password reset six times was therefore locked out of signing in for an hour,
+    under copy about signups. Neither describes what happened: the throttle is
+    per-caller and per-route, and a recovery request says nothing about the
+    user's password. It must also not show `EMAIL_BUCKET_RATE_LIMIT_COPY`
+    ("Signup emails are temporarily exhausted…") for a password reset.
+    """
+    body = _js_function_body(SIGNUP, "modalForgotPassword")
+    assert "MAIL_RATE_LIMIT_COPY" in body, (
+        "the reset 429 must show the flow-neutral mail-throttle copy"
+    )
+    assert "setLoginRateLimitLockout" not in body, (
+        "a /auth/reset refusal charges the LOGIN lockout — six reset clicks would "
+        "disable sign-in for an hour (#4161)"
+    )
+    assert "humanizeAuthError" not in body and "EMAIL_BUCKET_RATE_LIMIT_COPY" not in body, (
+        "the reset 429 still shows the signup-bucket copy for a password reset"
+    )
+    match = re.search(r'const MAIL_RATE_LIMIT_COPY = "([^"]+)"', SIGNUP)
+    assert match, "signup.html has no MAIL_RATE_LIMIT_COPY constant"
+    copy = match.group(1)
+    assert copy == "Email limit reached — try again in about an hour.", copy
+    assert "signup" not in copy.lower(), f"the copy names a flow: {copy!r}"
+    # The resend note reads the same constant, so the two 429 surfaces cannot
+    # drift into different wording (the resend branch's copy was already neutral).
+    assert "MAIL_RATE_LIMIT_COPY" in _js_function_body(SIGNUP, "resendConfirmation")
+
+
 def test_recovery_flow_present() -> None:
     """#863: the recovery request-link flow — now on the single auth page's
     login modal (email + forgot-password, POST /auth/v1/recover surface via

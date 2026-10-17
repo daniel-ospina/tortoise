@@ -50,6 +50,11 @@ DETAIL = {
     # outcome, the `outcome not recorded` qualifier.
     "extraction": {"status": "stored-and-processed", "extractor": "v2",
                    "outcome_known": True},
+    # #3516: the capture-provenance triplet is part of the declared projection,
+    # so the fixture must carry it — that is what the binding below is for.
+    "client_captured_at": 1700000000.0,
+    "client_captured_at_source": "cli_observed",
+    "capture_lane": "hook",
     "turn_points": [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -71,6 +76,10 @@ ROW = (
     "claude-sonnet-4",             # s.model
     True,                          # s.capture_ok         (NEW, #3520)
     "v2",                          # s.capture_extractor  (NEW, #3520)
+    # #3516: appended, so the r[0..7] positions above are unchanged.
+    1700000000.0,                  # s.client_captured_at
+    "cli_observed",                # s.client_captured_at_source
+    "hook",                        # s.capture_lane
 )
 
 

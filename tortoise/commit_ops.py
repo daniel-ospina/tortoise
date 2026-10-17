@@ -1075,8 +1075,18 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 "RETURN n.id, n.status, coalesce(n.outdated, false)",
                 params={"ids": [ref, supersedes_by]},
             ).result_set
-            state_by_id = {r[0]: (r[1], bool(r[2])) for r in rows}
-            if ref not in state_by_id:
+            # #7822: the verdict is over EVERY node carrying the id. The
+            # pre-#7822 last-row-wins dict made it depend on server row order
+            # — and disagree with the guard the ``sdk.supersede`` below runs,
+            # which refuses on ANY terminal row (point ids are not unique, and
+            # a bare MATCH binds every matching node).
+            present: set[str] = set()
+            terminal: set[str] = set()
+            for r in rows:
+                present.add(r[0])
+                if is_terminal_status(r[1], bool(r[2])):
+                    terminal.add(r[0])
+            if ref not in present:
                 warn(f"point supersession ref {ref!r} not found — "
                      f"skipped (fail-open)")
                 _skip(ref, supersedes_by, "ref not found")
@@ -1086,7 +1096,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # `outdated` / `deprecated` / flag-dead ref fall through to
             # sdk.supersede, which now RAISES, turning this documented
             # idempotent no-op into a spurious warning.
-            if is_terminal_status(*state_by_id[ref]):
+            if ref in terminal:
                 # already terminal — idempotent re-ingest no-op
                 continue
             try:

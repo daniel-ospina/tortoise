@@ -46,8 +46,12 @@ class CreatePointRequest(BaseModel):
     # client writes a LIVE point that ``/v1/dream`` then refuses (the
     # fail-closed #344/#1157 gate) and can never make it EP-able. Resolved
     # into the ep_alpha/ep_beta baseline, NOT stored as a Point prop (unlike
-    # confidence/authoredBy above); on a dedup hit ``create_point`` drops it
-    # with a logged warning.
+    # confidence/authoredBy above). A dedup hit is the DEFAULT path here
+    # (``dedup`` defaults True, unlike the hosted mirror), so #7980 matters
+    # more on this surface: ``create_point`` now applies the authored prior to
+    # the existing point when it carries no baseline yet, and preserves the
+    # one it already has (with a logged warning) otherwise — never a silent
+    # drop.
     credibility: str | int | float | None = None
 
     @field_validator("kind")
@@ -193,8 +197,37 @@ def _init_selfhost_onboarding(sdk, target: str) -> None:
     _sh.ensure_selfhost_onboarding_once(sdk, target=target)
 
 
+def selfhost_journal_path() -> str | None:
+    """The per-graph JSONL rebuild journal for the self-host deployment (#8497).
+
+    The REST door (`/v1/*`) built every SDK with NO ``event_log_path``, so it
+    was journal-less EVEN WHEN ``TORTOISE_EVENT_LOG_BASE_DIR`` was set — arming
+    the env var alone armed the MCP door and left this one writing an
+    unrecorded graph (a partial journal looks like a record and is not one).
+    Arm the deployment default first (``config.ensure_selfhost_event_log``),
+    then derive through ``config._resolve_event_log_path`` — the ONE derivation
+    of (namespace, graph_name) → journal, so this cannot key the journal to a
+    graph the SDK does not open (the #4240 review's divergence class).
+
+    The namespace is ``mcp_auth.SELFHOST_ORG_ID``, not a literal: the MCP door
+    keys its journal off that constant, and a literal here would silently split
+    the two doors' journals the day the constant changes — the very divergence
+    the single derivation exists to prevent.
+    """
+    from tortoise.config import _resolve_event_log_path, ensure_selfhost_event_log
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+
+    ensure_selfhost_event_log()
+    return _resolve_event_log_path(namespace=SELFHOST_ORG_ID, graph_name=None)
+
+
 def _sdk():
     from tortoise.sdk import TortoiseSDK
+
+    # #8497: resolve ONCE and thread the SAME path into the anchor and every
+    # per-request SDK (a path mismatch would defeat the keepalive and, worse,
+    # leave one of them unarmed on the §17.1 guard).
+    event_log_path = selfhost_journal_path()
     if not os.environ.get("TORTOISE_DB_URI"):
         # Embedded mode: hold the server alive across requests (see above).
         db_path = _resolve_embedded_db_path()
@@ -219,7 +252,8 @@ def _sdk():
                     _SELFHOST_KEEPALIVE.pop(db_path, None)
                     anchor = None
                 if anchor is None:
-                    anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
+                    anchor = TortoiseSDK(db_path=db_path, namespace="selfhost",
+                                         event_log_path=event_log_path)
                     try:  # noqa: SIM105
                         anchor._get_proj()  # eager: hold the connection so the server survives
                     except Exception:
@@ -230,10 +264,11 @@ def _sdk():
                     _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
         # Thread the SAME resolved path into the request SDK so anchor and
         # request share one server (path mismatch would defeat keepalive).
-        sdk = TortoiseSDK(db_path=db_path, namespace="selfhost")
+        sdk = TortoiseSDK(db_path=db_path, namespace="selfhost",
+                          event_log_path=event_log_path)
         _init_selfhost_onboarding(sdk, db_path)
         return sdk
-    sdk = TortoiseSDK(namespace="selfhost")
+    sdk = TortoiseSDK(namespace="selfhost", event_log_path=event_log_path)
     _init_selfhost_onboarding(sdk, os.environ.get("TORTOISE_DB_URI", ""))
     return sdk
 

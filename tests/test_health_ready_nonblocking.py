@@ -846,6 +846,11 @@ _ONBOARDING_BLOCKING_HELPERS = frozenset({
     "_open_org_graph_sdk",         # opens the org graph
     "_graph_available",            # graph-exists probe
     "_write_org_email",            # the org-email PATCH
+    # #3514 review P2: the coming-soon demand read — a sync PostgREST GET plus
+    # an unbounded local JSONL read, reached by four async handlers. It is
+    # routed off-loop by ``_demand_store_rows_off_loop``; this entry makes the
+    # NEXT inline call site fail the #4625 guard instead of stalling the loop.
+    "_demand_store_rows",
 })
 
 #: The off-loop wrappers that ARE the seam for those helpers — a call through
@@ -880,6 +885,14 @@ _KNOWN_ONBOARDING_INLINE_RESIDUAL = frozenset({
     "_record_capture_last_error",   # the last-error WRITE chain
     "_reconcile_capture_receipts",  # reached inline from delete_session
     "_get_onboarding_state", "_update_onboarding_state",
+    # #8686: their sync registry legs. `_update_onboarding_state` and
+    # `_get_onboarding_state` are declared above; these two are the legs they
+    # call, and the self-hosted branch added for #8686 reaches `_org_proj` from
+    # them, so the guard sees them as on-loop sites in their own right. Same
+    # construction, same envelope, same remediation — offload with the paths
+    # above, not separately. Declared (not silently allowed) so the on-loop cost
+    # stays visible.
+    "_read_onboarding_state_and_version", "_write_onboarding_state",
     "_get_onboarding_projection", "_maybe_apply_completion",
     # the onboarding REST routes — every remaining entry is a WRITE path (a
     # bounded wait_for abandons a worker mid-write, CPython #87185 / #2863).

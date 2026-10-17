@@ -1,0 +1,20 @@
+#4997: vector search on test_cap7950_e2e is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) — those reads silently full-scan. This is the gap that decision V1 (STORAGE-ARCHITECTURE.md §12.1c) governs; indexing those labels is NOT done here.
+journal records read: 39
+record projection: replayed 39 journal records → 60 record mutations (0 declared no-op)
+record row counts: {'journal_event': 39, 'source': 2, 'event': 1, 'session': 0, 'object': 1, 'subject': 1, 'point': 2, 'relation': 2, 'node_identity': 7}
+read_record_view -> 7 nodes, 2 relations
+record view by label: {'Point': 2, 'Event': 1, 'Subject': 1, 'Object': 1, 'Source': 2}
+cache projection report: {'nodes_written': 7, 'relations_written': 2, 'statements': 9, 'record_nodes': 7, 'record_relations': 2, 'coverage': 'complete', 'declared_keys': 0, 'source': 'record'}
+cache node counts (live read): [('Event', 1), ('Meta', 1), ('Object', 1), ('Point', 2), ('Source', 2), ('Subject', 1)]
+hot read for Point 'p1': [['p1']]
+bounded rebuild declaration: coverage=partial
+unwritten record key 'Point:p1' covered-by-declaration=False → residency=not-hot
+RECONCILE (after a record-sourced rebuild): record vs cache: 1 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=1)
+ARMED FOLD (proj.apply):          refused (DirectCacheWriteRefused)
+ARMED RAW HANDLE (proj.g.query):  SUCCEEDED (direct cache write)
+RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1)
+second-writer signature -> extra_in_cache=1
+ARMED RAW HANDLE MUTATION:        Point:p1 gained an unauthorized property (Point.second_writer_marker)
+RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=2)
+field-mutation signature -> field_mismatches=2
+CHAIN RESULT: journal -> record -> cache COMPLETED with the shipped modules

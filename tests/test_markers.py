@@ -71,6 +71,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
+    # #2728: `_seed_org` / `_seed_member` seed the Team + Graph/Membership
+    # control-plane nodes through the CANONICAL `registry` namespace the new
+    # per-graph pack routes resolve (`_resolve_graph_data_namespace` reads the
+    # registry graph's `graph_list`), so the literal IS the namespace PROD code
+    # resolves — same `prod-coupled` class as test_github_connect. A `test_*`
+    # rename would seed a DIFFERENT graph than the routes under test read.
+    "test_pack_selection_by_graph.py": {"registry": "prod-coupled"},
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
     # #3553: the CAS concurrency tests provision + tear down REAL Team nodes in
@@ -87,6 +94,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # construction. (Reviewer read: without this entry the new test file reds
     # test_markers→test-slow (b)→python-ci-gate, blocking the change.)
     "test_session_capture_status.py": {"registry": "prod-coupled"},
+    # #3516: `_seed_team_graphs(sdk, org, ...)` seeds the Team through
+    # `_make_sdk(namespace="registry")._get_registry()`, i.e. the CANONICAL
+    # namespace PROD code resolves for the registry control plane — the same
+    # construction and the same seed→resolution coupling as
+    # test_session_capture_status / test_github_connect / test_agent_signup.
+    # A `test_*` rename would seed a DIFFERENT graph than the endpoint under
+    # test reads. Same `prod-coupled` class as its neighbours above.
+    "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`
@@ -145,6 +160,9 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # canonical registry namespace IS that coupling. A test_* rename would seed
     # a different graph than the writer resolves.
     "test_embed_metering.py": {"registry": "prod-coupled"},
+    # #4489: same class as test_metering — the fixture pins TORTOISE_DB_PATH so
+    # the registry-lane writer and reader address the dbs the SDK uses.
+    "test_retrieval_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
@@ -155,6 +173,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # lane end to end — a `test_*` rename would exercise a namespace prod
     # never resolves.
     "test_onboarding_selfhost_w12.py": {"selfhost": "prod-coupled"},
+    # #8544: same `selfhost` literal class as test_onboarding_selfhost_w12
+    # above. The driver's guard constructs `TortoiseSDK(db_path=…,
+    # namespace="selfhost")` to dump the graph the self-host daemon actually
+    # opens, and `selfhost_graph_name()` must equal `org_<SELFHOST_ORG_ID>` —
+    # a `test_*` rename would archive a graph prod never resolves. The named
+    # equality assertion fails LOUDLY on a decoupling rather than passing.
+    "test_selfhost_backup.py": {"selfhost": "prod-coupled"},
     # #3517 parity: `_provision_org` seeds the registry Team node directly
     # (`_ha._make_sdk(namespace="registry")._get_registry()`) because the
     # onboarding state the surfaces under test write lives ON that node — a
@@ -606,6 +631,9 @@ def test_no_redirect_stems_registry_exact():
         # #2814: authoritative-config durability across rebuild_all (embedded
         # carve-out — see config/ci-surfaces.yml `carve_out:`).
         "test_rebuild_config_preservation",
+        # #2792: per-graph storage + stage movement over the embedded
+        # EntityMutated journal/rebuild replay (see carve_out).
+        "test_pipeline_2792",
         "test_redis_guard",
         "test_smoke_embedded",
         # #3644: the version-window pins construct embedded stores and assert
@@ -686,6 +714,66 @@ def test_no_redirect_stems_registry_exact():
         # the addition is the pin working as designed, so the stem is DECLARED
         # here rather than exempted (the #4921 shape).
         "test_4521_revise_point_embedding",
+        # #4520 residual: the module-level `embedded_only` plain-list embedding
+        # guard asserts the EMBEDDED engine's stored type (`Vectorf32` -> `List`
+        # on a bare `+=` embedding write) and the clear-then-set seam that fixes
+        # it, so it reads `typeof()` back off a real embedded store. Under a URI
+        # the hook SKIPS the whole module (it never runs); a redirected
+        # construction would run against the server lane, which lands the same
+        # plain-list write, so the assertion would certify nothing. The third leg
+        # of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS already carried the stem — this pin reding on
+        # the addition is the pin working as designed, so the stem is DECLARED
+        # here rather than exempted (the #4521/#4921 shape).
+        "test_update_point_derived_embedding_4520",
+        # #7852 W1: the Layer-2 `semantics` write-path guard builds
+        # `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay to
+        # prove `derived = replay(journal)` for `direction_basis`. The module
+        # carries NO module-level `embedded_only` marker, so the load-bearing
+        # reason it needs the exemption is the REDIRECT, not a skip: a URI-set
+        # lane would discard the path and connect the construction to the
+        # server, so the embedded replay this file exists to prove would never
+        # happen. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS were
+        # registered with the PR — this pin reding on the addition is the pin
+        # working as designed, so the stem is DECLARED here rather than
+        # exempted (the #4921/#4521 shape, minus their module-level marker).
+        "test_semantics_write_path_7852",
+        # #7852 v3.25: the four-value direction STORAGE vocabulary. The fixture
+        # builds `TortoiseSDK(<tmpfile>)` and reads EP message state off the live
+        # graph. As with the W1 entry above, the file carries NO module-level
+        # `embedded_only` marker, so the load-bearing reason it needs the
+        # exemption is the REDIRECT: a URI-set lane would connect the
+        # construction to the server and the embedded assertions would certify a
+        # lane the file does not target. The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS were
+        # registered with the PR — this pin reding on the addition is the pin
+        # working as designed, so the stem is DECLARED here rather than exempted.
+        "test_direction_storage_7852",
+        # #6871: the operator's INPUT set (`idx=0` source, `idx>=1` targets) and
+        # the canonical evidence read that never surfaces a point as its own
+        # supporter. The fixture builds `TortoiseSDK(<tmpfile>)` and the file
+        # carries NO module-level `embedded_only` marker, so the load-bearing
+        # reason it needs the exemption is the REDIRECT, not a skip: a URI-set
+        # lane would connect the construction to the server and the embedded
+        # read under test would certify a lane the file does not target. The
+        # third leg of the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding
+        # on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_6871_operator_input_set",
+        # #8316: the VERBATIM (caller-supplied) embedding read seam. The module
+        # carries module-level `embedded_only` AND drives a real embedded store,
+        # so the exemption's load-bearing reason is the SKIP *and* the REDIRECT:
+        # a URI-set lane would either skip every case, or — for the cases that
+        # construct `TortoiseSDK(<tmpfile>)` — connect the construction to the
+        # server, where the plain-`List` stored shape and the read seam that
+        # tolerates it would certify nothing. The third leg of the three-way
+        # mirror: config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS
+        # were registered with the PR — this pin reding on the addition is the
+        # pin working as designed, so the stem is DECLARED here rather than
+        # exempted.
+        "test_verbatim_embedding_read_8316",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

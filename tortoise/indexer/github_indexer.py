@@ -45,7 +45,10 @@ projection loop, which never yields).
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
 from typing import Any
 
@@ -60,6 +63,86 @@ logger = logging.getLogger(__name__)
 _GITHUB_API = "https://api.github.com"
 _MAX_ITEMS_PER_RUN = 500
 _PAGE_SIZE = 100
+
+#: #4709: the index job's OWN worker pool for its long / stallable work — the
+#: per-repo projection walk (``_project_items``) here, and the onboarding-state
+#: writes that ``hosted_api._run_indexing`` used to run on the loop.
+#:
+#: Why a DEDICATED pool and not ``asyncio.to_thread``: that seam submits to the
+#: loop's SHARED default executor, where the auth middleware's abuse hooks
+#: (``_abuse_post_auth`` et al.) and ~160 other ``to_thread`` sites run. A walk
+#: holds a worker almost continuously for a whole job, and prod's 2 vCPU gives
+#: that pool ``min(32, cpu+4) == 6`` workers — so a multi-repo run starves
+#: every other tenant of the pool. The doctrine is the one stated at
+#: ``hosted_api._CAPTURE_EXECUTOR`` (#3060): long or stallable work gets its
+#: OWN pool, so it can only ever starve itself.
+#:
+#: The walk is the "long" class by measurement, not by assertion: a 500-item
+#: run was measured at ~47 s under concurrent host load (see the poll-budget
+#: note in ``tests/test_github_index_lifecycle.py``); an idle-lane fixture is
+#: seconds.
+#:
+#: NO at-exit dispose hook, deliberately — and NOT for the ``cancel_futures``
+#: reason it is easy to assume. ``shutdown(wait=False, cancel_futures=True)``
+#: cancels the QUEUED futures only; a worker already inside the walk is NOT
+#: interruptible and the stdlib's ``threading._shutdown`` join still waits for
+#: it (the LIMITATION ``hosted_api._dispose_capture_executor`` states verbatim,
+#: and ``operator_alert._shutdown_pool`` repeats: "cancel_futures only cancels
+#: the QUEUED ones; the running ones are abandoned to interpreter exit").
+#: So a hook could not "abandon a worker mid-write" — it would only cancel
+#: work that has NOT started. The real trade is the opposite one: with a hook,
+#: a cursor persist or walk still QUEUED at exit is DROPPED; without one, it
+#: is allowed to COMPLETE and the exit join waits. This pool's queued work is
+#: a graph MUTATION plus the persisted resume point, and a silently-cancelled
+#: write is exactly the unobservable failure #2863 names — so completing it is
+#: the side of the trade chosen here. The cost accepted is that a long walk
+#: delays interpreter exit; the orchestrator's kill timeout, not this pool, is
+#: what bounds that. NOTE the departure: TWO of the three sibling pools install
+#: a ``threading._register_atexit`` dispose hook
+#: (``hosted_api._CAPTURE_EXECUTOR`` and ``_DEMAND_PING_EXECUTOR``);
+#: ``operator_alert._POOL`` uses plain ``atexit.register`` instead — the
+#: pattern ``hosted_api._dispose_capture_executor``'s own note documents as
+#: "STRUCTURALLY ALWAYS TOO LATE" for executor work, because a plain ``atexit``
+#: hook runs after the stdlib has already joined the pool. This pool
+#: deliberately installs NEITHER, for the reason above.
+_INDEX_THREAD_PREFIX = "tortoise-index"
+_INDEX_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix=_INDEX_THREAD_PREFIX,
+)
+
+
+def _submit_index_off_loop(fn, /, *args, **kwargs):
+    """Submit the index job's blocking work to ``_INDEX_EXECUTOR`` (#4709).
+
+    Contextvars are preserved exactly as ``asyncio.to_thread`` preserves them
+    (a bare ``run_in_executor`` does NOT — cpython#78195): the caller's context
+    is copied in the CALLING thread and the worker runs under that copy. The
+    walk and the onboarding writes both read caller-context state.
+
+    RECORDED, not fixed: this pair mirrors ``hosted_api._submit_off_loop`` /
+    ``_run_off_loop`` body-for-body, differing only in the bound executor. The
+    obvious dedup goes the wrong way on the dependency graph — ``hosted_api``
+    imports THIS module (lazily, inside its handlers), and the indexer is also
+    reached from the standalone GitHub-index CLI, so importing the hosted app
+    module here would invert the layering and drag the whole app into the CLI.
+    The clean home is a shared leaf module for the generic pair; deferred to
+    avoid growing this change, and to avoid cloning it a second time.
+    """
+    ctx = contextvars.copy_context()
+    return _INDEX_EXECUTOR.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+
+
+async def _run_index_off_loop(fn, /, *args, **kwargs):
+    """Await one ``_submit_index_off_loop`` hand-off.
+
+    Deliberately UNBOUNDED: callers must NOT wrap this in
+    ``asyncio.wait_for``. A bound cancels only the await, never the worker
+    (CPython #87185), so on a MUTATING region it would abandon a worker
+    mid-write and claim a retryable state it cannot observe (#2863).
+    """
+    return await asyncio.wrap_future(_submit_index_off_loop(fn, *args, **kwargs))
+
 
 # #3539 §D progress-beat granularity for the caller's liveness heartbeat.
 # The beat is the JOB's last sign of progress, so a long-but-live walk must
@@ -1109,13 +1192,15 @@ class GitHubIndexer:
         #1895: a 0-processed run that did NOT cap/quota-cut mints a CLEAN
         boundary cursor from the input (drops ``truncated``) so a fully-
         drained backlog exits DRAIN — see the cursor-mint below.
+
+        #4709: the synchronous projection walk + cursor mint run in ONE
+        worker hand-off (``_project_items``). The projection ATTACH stays on
+        the caller's loop (tortoise#7500 — a pooled worker resolves the store
+        path from a stale test stem) and the attached handle rides the
+        hand-off.
         """
         client = await self._get_client()
         proj = sdk._get_proj()
-        # #7951 P2-a: read the journal's registrations ONCE per run so the
-        # entity door can backfill a node a pre-fix binary wrote (graph only)
-        # and skip re-journaling one already recorded.
-        journal_ids = self._journal_registered_entities(sdk)
         stats: dict[str, Any] = {
             "repo": repo,
             "total_fetched": 0,
@@ -1137,6 +1222,67 @@ class GitHubIndexer:
             await self._fetch_items(
                 client, repo, cursor, cap, on_progress=on_progress))
         stats["total_fetched"] = len(items)
+        # #4709: the projection walk is SYNCHRONOUS graph I/O (``proj.apply`` /
+        # ``proj.g.query`` per item) and it runs in ONE worker hand-off. The
+        # hand-off covers the WHOLE synchronous region — the per-item loop AND
+        # the cursor/truncation/DRAIN mint below — deliberately: the region was
+        # ACCIDENTALLY atomic when it ran inline (the single-threaded loop
+        # serialized it), and a per-item hand-off would ADD interleaving points
+        # between statements the original ran uninterleaved.
+        #
+        # The seam is the index job's OWN pool (``_run_index_off_loop``), never
+        # ``asyncio.to_thread``: the latter is the loop's SHARED default
+        # executor, and a walk holds one of its few workers for the whole job.
+        #
+        # It carries NO BOUND: the wait cannot abandon the worker. A bounded
+        # ``wait_for`` cancels only the await, never the thread (CPython
+        # #87185), so it would abandon a worker MID-WRITE of the graph — the
+        # #2863 hazard #4625's bounded-mutation rule exists to prevent. This
+        # walk MUTATES (objects/events + the persisted cursor), so the decision
+        # is deliberately no bound.
+        #
+        # ``quota_check`` rides the SAME hand-off (it is re-checked per item);
+        # its ``QuotaCheckError`` fail-closed re-raise and the
+        # ``QuotaExceededError`` → ``quota_hit`` break keep their semantics — a
+        # raise in the worker propagates out of the await unchanged.
+        await _run_index_off_loop(
+            self._project_items, sdk, proj, repo, items, stats, cursor,
+            quota_check, on_progress, total_estimate, cap_hit, walk_complete,
+            boundary_stop)
+        await self._close()
+        return stats
+
+    def _project_items(self, sdk, proj, repo: str, items: list[dict],
+                       stats: dict[str, Any], cursor: dict | None,
+                       quota_check, on_progress,
+                       total_estimate: int | None, cap_hit: bool,
+                       walk_complete: bool, boundary_stop: bool) -> None:
+        """#4709: the SYNCHRONOUS half of ``index_repo``.
+
+        The per-item projection loop plus the cursor/truncation/DRAIN mint,
+        run as ONE worker hand-off by ``index_repo`` so neither the loop nor
+        the mint can park the hosted event loop. Mutates ``stats`` in place and
+        raises exactly what the inline region raised (``QuotaCheckError`` /
+        ``QuotaExceededError`` semantics unchanged).
+
+        ``proj`` is the handle ``index_repo`` attached ON THE LOOP. The attach
+        must stay there: ``FalkorProjection.__init__`` resolves the store path
+        from the CONSTRUCTING thread's test stem, so a pooled worker (reused
+        across tests, its inherited stem stale) would resolve a DIFFERENT store
+        and split reader from writer — tortoise#7500, the defect that reverted
+        #4645's hand-offs. Using the already-attached handle from the worker is
+        the established cross-thread shape
+        (``_capture_session_probe_off_loop``, the dream pools).
+
+        #7951 P2-a / #4709: the journal registration read is the FIRST
+        statement here, not on the loop. ``_journal_registered_entities``
+        loops ``EventLog.read_all()``, which is O(file) over the WHOLE,
+        unbounded journal; it used to run inline immediately above this
+        hand-off and parked the event loop for the legacy-org read on every
+        repo (the failure class #4709 exists to remove). It feeds this walk's
+        entity door (``journal_ids``), so it rides the SAME hand-off.
+        """
+        journal_ids = self._journal_registered_entities(sdk)
         last: dict | None = None
         # #1989 review round 2: track the NEWEST processed item too — a
         # multi-second run whose walk completes uncapped mints the boundary
@@ -1289,8 +1435,6 @@ class GitHubIndexer:
                     # complete drain (plan §Follow-ups gap audit).
                     "gap_audit_required": True,
                 }
-        await self._close()
-        return stats
 
 
 def _content_hash(text: str) -> str:

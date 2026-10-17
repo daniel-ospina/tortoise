@@ -51,6 +51,11 @@ double-index smoke (SC3) cannot run here — recorded as a named follow-up
 (F-900-1/T11 on a host with the production corpus). Fixture-scale idempotency
 is proven by E2E-4/E2E-8/E2E-16(ii) (all green).
 
+**Status update (2026-10-11): DISCHARGED.** The real corpus is present on this
+machine (5,411 `*.md` files, 39 MB) and the live-corpus double-index smoke ran —
+all four SC3 indicators PASS. See `t11-live-corpus-smoke.md` (issue #1037). The
+paragraph above is retained as the historical record at the time of writing.
+
 ## Indicator 6 — JOINT-E2E green
 
 `tests/test_joint_index_ingest.py` (#1032, merged PR #1279): ONE graph + BOTH
@@ -62,6 +67,8 @@ zero sweep mutation, stub-Source exception class. Green.
 Zero P0/P1. Two named residuals:
 
 1. **T11 live-corpus smoke** — blocked on the production corpus host.
+   **Discharged 2026-10-11** — the corpus is present here; see
+   `t11-live-corpus-smoke.md`.
 2. **hosted_api #909 bridge** still passes explicit `contentHash=""` on
    no-hash writes (the joint preserve semantics don't cover it) — scoped to
    #909's plan gate, noted in PR #1279.

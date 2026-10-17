@@ -117,17 +117,20 @@ def _count(g, cypher, params=None) -> int:
 
 def _required_sweep_clean(g) -> int:
     """REQUIRED-set invariant sweep (plan §7, I9): zero Sources with
-    null/empty url or ingestedAt, and zero PROVENANCE Sources (sourceKind
-    present) with null/empty sourceKind/contentHash.
+    null/empty url or ingestedAt, zero Sources missing `sourceKind`, and zero
+    PROVENANCE Sources (`documentKind` absent) with null/empty `contentHash`.
 
-    D10 (#5026): a document Source carries `documentKind` + `url` +
-    `ingestedAt` but no `sourceKind`/`contentHash` — its version anchor lives
-    on the corpus Source. So the contentHash half is scoped to provenance
-    Sources; the url + ingestedAt invariant holds for EVERY Source.
+    D10 (#5026) + #5082: a document Source carries `documentKind` + `url` +
+    `ingestedAt` + `sourceKind='document'` — but NOT necessarily a
+    `contentHash`: the #5422 anchor is written on the path that actually
+    READS content (the extraction ingest), while `--capture-metadata` and the
+    #900 index path deliberately emit no hash. So the `contentHash` clause is
+    scoped to PROVENANCE Sources; the `sourceKind` clause now holds for EVERY
+    Source (before #5082 a document node carried `sourceKind = NULL`).
     """
     return _count(g, "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR "
-                     "s.ingestedAt IS NULL OR "
-                     "(s.sourceKind IS NOT NULL AND "
+                     "s.ingestedAt IS NULL OR s.sourceKind IS NULL OR "
+                     "(s.documentKind IS NULL AND "
                      " (s.contentHash IS NULL OR s.contentHash='')) "
                      "RETURN count(s)")
 

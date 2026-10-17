@@ -18,6 +18,15 @@ from typing import Any, Literal
 
 from .env_truthy import is_truthy
 from .security import entity_label, validate_entity_type
+from .validity import window_read_fields  # #2350: ONE read-projection home
+# #8316: the READ half of the stored-embedding shape seam. A caller-supplied
+# embedding is stored VERBATIM as a plain Cypher `List` (PR #3018's recorded
+# decision) and a read spelled `<alias>.embedding` makes
+# `vec.euclideanDistance` raise for the WHOLE `MATCH` — one such node degrades
+# the entire dense leg. Every dense read that can MEET a stored `List` must
+# normalise through this helper (the HNSW index arm cannot meet one: a `List`
+# node is not in the index at all — that cohort gap is #8429).
+from .vector_write import stored_embedding_vector_expr
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -45,6 +54,10 @@ from .commit_ops import SUBJECT_TERMINAL_STATUSES  # #1423: the Subject family
 # — without binding the legs to the caller's metering context, a capture's
 # off-thread FTS/vector/structural reads are never counted.
 from .graph_ops import bind_metering_context
+# #4489: the per-leg retrieval meter. The legs note their OWN executions here
+# (trace-INDEPENDENT by design), so a read that never opted into ``leg_trace``
+# still reports which legs ran. Stdlib-only at import, so no cycle.
+from . import retrieval_metering as _retrieval_metering
 from .live import (
     TERMINAL_EXCLUDED_STATUSES,
     _terminal_excluded,
@@ -275,10 +288,29 @@ def ep_baseline_cypher(alias: str) -> str:
     return f"coalesce({alias}.baseline_set, false)"
 
 
+def ep_prior_only_cypher(alias: str) -> str:
+    """Cypher boolean: ``alias`` is PRIOR-ONLY — the ``'baseline'`` state of
+    :func:`ep_measurement_state` (#3415).
+
+    The third predicate of the three-state vocabulary: a declared #2199
+    baseline with NO EP measurement. NOT the same as "unmeasured" — an
+    unmeasured claim carries no persisted prior at all (Beta(1,1) neutral),
+    while a prior-only claim's confidence_mean IS the declared PRIOR mean.
+
+    Kept textually in step with the Python twin: for every combination of
+    (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
+    ``ep_measurement_state(...) == 'baseline'`` — including the rows where
+    ``baseline_set`` is true and ``ep_alpha`` is NULL (the twin calls those
+    prior-only too, since ``baseline_set`` alone disqualifies "measured").
+    """
+    return (f"({alias}.posterior_alpha IS NULL "
+            f"AND coalesce({alias}.baseline_set, false))")
+
+
 def ep_measurement_state(*, posterior_alpha, ep_alpha,
                          baseline_set: bool) -> str:
-    """Python twin of :func:`ep_measured_cypher`: 'measured' | 'baseline' |
-    'unmeasured' (#3276).
+    """Python twin of :func:`ep_measured_cypher` / :func:`ep_prior_only_cypher`:
+    'measured' | 'baseline' | 'unmeasured' (#3276).
 
     Pure measurement predicate — it does NOT know about the #2490 terminal
     override, which each read surface applies on top (a terminal claim is
@@ -568,6 +600,15 @@ class SearchResult:
                          "session"] = "rrf"
     ep: EpBreakdown | None = None
     relationships: list[dict] = field(default_factory=list)  # SDK compat (sdk.py passes it; non-point = empty)
+    # #6971: the fail-loud counterpart to an all-empty ``relationships`` list.
+    # The bounded decoration seeds every requested point with ``[]`` and fills
+    # it afterwards; when the decoration query RAISES, the caller used to get
+    # that seeded dict back verbatim — so "this point has no IMPL/NAND edges"
+    # and "the edges could not be read" were the same wire shape. Set by the
+    # search path when ``RelationshipDecoration.decoration_error`` is non-empty
+    # (the unavailability is a property of the BATCH, so every hit carries it).
+    # Empty ⇒ absent from the wire (additive, byte-identical default).
+    relationships_unavailable: str = ""
     # #125 capture metadata (document entity_type) — optional, empty for non-docs
     topics: list = field(default_factory=list)
     summary: str = ""
@@ -591,6 +632,15 @@ class SearchResult:
     valid_from: str = ""
     valid_to: str = ""
     expired_at: str = ""
+    # #2350 (E-prec): the additive per-end precision layer + the 3-state end
+    # (``open`` | ``known`` | ``unknown``). Empty means the precision was not
+    # declared (legacy window — ``valid_from``/``valid_to`` read as day
+    # precision, the pre-#2350 default); ``end_state`` is emitted whenever the
+    # point carries ANY window information, so an ended-unknown window is
+    # distinguishable from a still-true one on the wire.
+    valid_from_precision: str = ""
+    valid_to_precision: str = ""
+    end_state: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
     # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
     # when the whole batch resolved no subject AND the graph has no
@@ -668,12 +718,34 @@ class SearchResult:
             d["valid_to"] = self.valid_to
         if self.expired_at:
             d["expired_at"] = self.expired_at
+        # #2350 (E-prec): the precision block, emitted only when the point
+        # carries window information at all — undated points stay byte-
+        # identical (no keys), a dated point states its end state so a
+        # still-true window (``open``) is never confused with one whose end is
+        # un-datable (``unknown``). ``valid_from_precision`` is INCLUDED in the
+        # gate: a falsey-but-present start (``""``) is a real bound for the
+        # ONE read-projection home, so the resolved ``day`` must reach the
+        # wire — gating on a truthy ``valid_from`` alone silently dropped the
+        # block on that surface only (the cross-surface drift of #2350).
+        if (self.valid_from or self.valid_to or self.valid_to_precision
+                or self.valid_from_precision):
+            if self.valid_from_precision:
+                d["valid_from_precision"] = self.valid_from_precision
+            if self.valid_to_precision:
+                d["valid_to_precision"] = self.valid_to_precision
+            if self.end_state:
+                d["end_state"] = self.end_state
         if self.subject:
             d["subject"] = self.subject
         # #4889: loud counterpart to the absent ``subject`` key above — only
         # set when the Subject layer's producer is missing entirely.
         if self.subject_unavailable:
             d["subject_unavailable"] = self.subject_unavailable
+        # #6971: the same contract for ``relationships`` — emitted only when
+        # the bounded decoration query actually raised, so the seed-and-fill
+        # all-empty shape can never again read as "genuinely no edges".
+        if self.relationships_unavailable:
+            d["relationships_unavailable"] = self.relationships_unavailable
         # A5 (#2070): additive evidence mark — emitted ONLY when known
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
@@ -1065,6 +1137,11 @@ def run_fts_query(
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
+        # #4489: the ledger note is UNCONDITIONAL (unarmed → no-op), placed
+        # ahead of the opt-in trace so a default product read still records the
+        # leg. Mutation: moving it inside the ``leg_trace`` gate → the read
+        # funnel's leg count stays 0.
+        _retrieval_metering.note_leg("fts", ran=ran, degraded=degraded)
         if leg_trace is not None:
             leg_trace.append(_trace_entry("fts", ran=ran, degraded=degraded,
                                           reason=reason, count=count))
@@ -1230,7 +1307,18 @@ def run_vector_query(
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
-    query_vec must be a 384-dim embedding matching the index dimension.
+    ``query_vec``'s required width is the STORE's, never a literal. The index
+    path needs a vector matching the width the index was created with — the
+    one ``FalkorProjection.required_embedding_dim`` declares (#4280) — while
+    the brute-force branch below (the embedded lane, an old FalkorDB, or any
+    lane whose index query fails) is DIMENSION-AGNOSTIC: it is
+    ``vec.euclideanDistance`` over ``vecf32``-wrapped values with no width
+    literal anywhere. An index-less store therefore reads back whatever width
+    its own encoder produced, and that is DELIBERATE — pinning the
+    brute-force lane to 384 re-introduces the #4280 regression (an
+    index-less store silently loses usable vectors) rather than fixing
+    anything. ``required_embedding_dim`` is the ONE home of the width rule;
+    do not mint a second one here.
 
     R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
     at every exit branch. The empty-embedding case is an EXPLICIT zero-row
@@ -1238,8 +1326,10 @@ def run_vector_query(
     raising — the exception-only catch never fires for the real empty case):
     {0-row result set with zero embedded points → ``no_embeddings``},
     {0-row result set with embedded points present → ``empty_results``},
-    {malformed plain-list embedding node (the vecf32 MATCH throws per-row)
-    or driver exception → ``query_failed``}. Default None = no trace.
+    {an embedding the distance expression cannot read — a non-numeric value, or
+    a width the query vector cannot pair with (a plain ``List`` of the RIGHT
+    width is normalised by ``vector_write.stored_embedding_vector_expr``, #8316)
+    — or a driver exception → ``query_failed``}. Default None = no trace.
 
     In Docker/server mode (is_embedded=False), uses the HNSW vector index
     via CALL db.idx.vector.queryNodes — with both known argument orders
@@ -1325,6 +1415,10 @@ def run_vector_query(
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int, mechanism: str | None = None,
                 failure: bool = False) -> None:
+        # #4489: noted with the RAW ran/degraded the leg reports, BEFORE the
+        # opt-in trace's ``_scope_hollow`` re-labelling below — the ledger is a
+        # fact about the leg execution, not a derived declaration.
+        _retrieval_metering.note_leg("vector", ran=ran, degraded=degraded)
         if leg_trace is None:
             return
         if _scope_hollow and ran and not degraded:
@@ -1629,8 +1723,11 @@ def run_vector_query(
         # ("expected Null or Vectorf32 but was List") in embedded FalkorDBLite
         # and whenever the HNSW index is unavailable — wrap the param in
         # vecf32() so vector search actually runs. Stored embeddings must be
-        # vecf32-encoded too (a single plain-list node poisons the whole
-        # MATCH — see _upsert_event / session indexers).
+        # readable too (one unreadable node poisons the whole MATCH) — the
+        # STORED side is normalised by the shared read seam rather than assumed
+        # to be typed, because a caller-supplied embedding is stored VERBATIM
+        # as a plain `List` by a recorded decision (PR #3018) — see
+        # `stored_embedding_vector_expr` (#8316).
         # #689: retracted Points must not leak into vector results.
         # D10 (#5026): discriminate the document Source from the
         # corpus/provenance Source in the MATCH's WHERE — the brute-force
@@ -1650,7 +1747,7 @@ def run_vector_query(
             f"MATCH (n:{label}) "
             "WHERE n.embedding IS NOT NULL" + bf_status_clause +
             " WITH vecf32($query_vec) AS _qv, n "
-            "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
+            f"WITH n, vec.euclideanDistance({stored_embedding_vector_expr('n')}, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             # #3019: a distance tie (equal values, or repeated rows) must not fall
@@ -1753,6 +1850,9 @@ def run_structural_query(
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
                 count: int) -> None:
+        # #4489: unconditional ledger note (see the fts leg's comment).
+        _retrieval_metering.note_leg("structural", ran=ran,
+                                     degraded=degraded)
         if leg_trace is not None:
             leg_trace.append(_trace_entry("structural", ran=ran,
                                           degraded=degraded,
@@ -2119,6 +2219,24 @@ def degradation_chain(
     ``reason="timeout", ran=True, degraded=True`` (never absent). Default
     None = no trace (byte-identical behavior).
 
+    #6851 — what the cap does NOT promise. ``elevated_timeout_ms`` (default
+    500ms) bounds the WAIT, never the COLLECTION, so it is not a hard edge on
+    what a call returns: a leg that finished AFTER the deadline can still be
+    returned. Two measured windows admit one. (a) ``as_completed``'s own wait
+    wakes on a future's completion as well as on the deadline, so it can
+    overshoot the cap and then yield that future as if it had arrived on time.
+    The overshoot is SCHEDULING noise, not a budget: measured over a 30-run
+    sample against the 500ms cap, the ``TimeoutError`` raise landed a median
+    ~100ms late, with a worst case of ~270ms (0.501s–0.772s). That is why
+    #6842's 100ms stub margin was never enough — a 100ms margin sits at the
+    median of the overshoot it has to outrun, and the red was this window, not
+    a logic error. (b) The post-deadline rescan collects every
+    future that is ``done()`` by the time it runs. Only a worker STILL running
+    at that rescan is discarded, and only that one is recorded as ``timeout``.
+    A leg discarded this way is not a relevance verdict (see ``floored_legs``).
+    Pinned by ``tests/bench/test_degradation_chain.py::
+    test_post_deadline_rescan_collects_a_late_leg``.
+
     min_vector_similarity (#4028): optional COSINE relevance floor for the
         vector leg, forwarded to :func:`run_vector_query`. A nearest
         neighbour below it carries no relevance signal and is dropped rather
@@ -2169,9 +2287,15 @@ def degradation_chain(
         # #1391: the caller's exclusion applies uniformly (best-match AND
         # full-scan). Full-scan completeness callers (the #1353 supersede-
         # structure surface) opt in via excluded_statuses=() (include_terminal).
+        # #4489: the retrieval tally lives in a ContextVar too, and a NEW thread
+        # does not inherit ContextVars (CPython) — so each leg is wrapped with
+        # the retrieval binder AS WELL as the graph-ops one, or the leg half of
+        # the retrieval figure would be permanently, silently zero. Both binders
+        # are identity when their context is unarmed.
         if strategies.get("fts") and query:
             futures[executor.submit(
-                bind_metering_context(run_fts_query), graph, query,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_fts_query)), graph, query,
                 entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 keep_numeric=keep_numeric,
@@ -2192,7 +2316,8 @@ def degradation_chain(
                 # byte-identical submit kwargs).
                 _vec_kwargs["scope_kinds"] = scope_kinds
             futures[executor.submit(
-                bind_metering_context(run_vector_query), graph, query_vec,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_vector_query)), graph, query_vec,
                 limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
                 vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
@@ -2201,7 +2326,8 @@ def degradation_chain(
 
         if strategies.get("structural"):
             futures[executor.submit(
-                bind_metering_context(run_structural_query), graph, kind,
+                bind_metering_context(_retrieval_metering.bind_worker_context(
+                    run_structural_query)), graph, kind,
                 entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
                 **_runner_kwargs("structural"),
@@ -2227,11 +2353,23 @@ def degradation_chain(
                 "Strategies timed out (500ms) — collected %d/%d, cancelling remaining",
                 len(results), len(futures),
             )
-            # R3 (#1542) D4: a future not completed by the deadline is
-            # discarded AND self-recorded as ``timeout`` (never absent). The
-            # merge reads only done futures via result(timeout=0) — a
-            # still-running worker is never joined past the deadline; its
-            # late private-list entries are discarded (timed_out skip below).
+            # R3 (#1542) D4 (#6851): THE CAP BOUNDS THE WAIT, NOT THE
+            # COLLECTION. A future is discarded only if it is STILL not done
+            # HERE. One that finished after the deadline but before this
+            # rescan runs is COLLECTED, exactly like a leg that finished on
+            # time, and its private-list entries are merged normally — it is
+            # NOT recorded as ``timeout``. (The pre-#6851 wording claimed such
+            # a future was "discarded AND self-recorded as timeout"; this loop
+            # has never done that, and that claim is what let #6842 read the
+            # cap as a deterministic boundary.) The read stays non-blocking:
+            # result(timeout=0) on a done future, cancel() on the rest, never
+            # a join — so a worker still running here is not waited for, and
+            # its late private-list entries are discarded (timed_out skip
+            # below). Note cancel() cannot stop a thread that has already
+            # started, so a cancelled worker runs to completion regardless:
+            # the ThreadPoolExecutor.__exit__ join below is what actually
+            # bounds this call's wall-clock duration. The caller therefore
+            # pays a straggler's own latency, never the cap.
             for f in list(futures):
                 strategy_name = futures[f]
                 if strategy_name in results:
@@ -2506,7 +2644,34 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         cypher = (
             "MATCH (n:Point) "
             "WHERE n.id IN $ids "
-            "OPTIONAL MATCH (n)<-[r:IMPL]-(:Point) "
+            # #6871: `impl_count` is an INCOMING EVIDENCE count, and an
+            # operator's typed edges are its input set — idx 0 is the
+            # operator's SOURCE, idx >= 1 its targets. IMPL pairs are ALWAYS
+            # source -> target (`ep.py::_update_nary_factor` takes the
+            # `input_ids[0]` arm unconditionally for IMPL), so an idx=0 edge is
+            # the operator's own input and never evidence pointing AT it.
+            # Unguarded, a source with nothing supporting it reported
+            # impl_count=1 and a diluted `contention` (nand/(impl+nand)) on the
+            # wire. So the ONE edge excluded is the operator's input: idx = 0 ON
+            # an operator. Everything else counts, including an operator-less
+            # direct edge — `create_direct_edge` writes it with NO `idx`, so it
+            # can never carry a role and is evidence by definition.
+            #
+            # `c.is_operator IS NULL` is NOT the same as "not an operator": the
+            # canonical identity is `bool(is_operator or op_type)`
+            # (graph-scripts/backfill_is_operator.py, which stamps exactly that
+            # legacy class), and five sites match
+            # `(is_operator = true OR op_type IS NOT NULL)`. Treating a NULL on
+            # a legacy operator as operator-less fails OPEN — its idx=0 edge
+            # counts again for its own source, the very symptom being fixed.
+            #
+            # ⛔ NAND is deliberately NOT guarded here: its pairs depend on the
+            # operator's `direction` (`-` = no pairs, directed = source ->
+            # targets, mutual — the `create_operator` DEFAULT — = all pairs),
+            # which this count cannot express. Filed as its own root: #8460.
+            "OPTIONAL MATCH (n)<-[r:IMPL]-(c:Point) "
+            "WHERE NOT (coalesce(r.idx, -1) = 0 "
+            "           AND (c.is_operator = true OR c.op_type IS NOT NULL)) "
             "WITH n, count(r) AS impl_count "
             "OPTIONAL MATCH (n)<-[r2:NAND]-(:Point) "
             "WITH n, impl_count, count(r2) AS nand_count "
@@ -2645,6 +2810,48 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     return rels
 
 
+#: #6971 — the fail-loud reason a search hit's ``relationships`` list is empty
+#: because the DECORATION FAILED, not because the point is sparse.
+#:
+#: ``get_relationships_bounded`` seeds ``{pid: []}`` for every requested point
+#: and fills it afterwards. Before #6971 the ``except Exception`` returned that
+#: seed untouched, so a caller could not tell "this point has no IMPL/NAND
+#: edges" from "the decoration query raised" — a silent wrong answer
+#: (contradicting the point's own ``ep.evidence`` counts in the same payload),
+#: with only a ``logger.warning`` below the API surface. Decoration stays
+#: default-on and MUST NOT break retrieval (D1), so the failure is not raised —
+#: it is LABELLED, and the label rides the wire additively.
+RELATIONSHIPS_UNAVAILABLE = (
+    "the bounded relationship decoration query raised, so 'relationships' is "
+    "empty because the edges could not be read — NOT because this point has "
+    "none. Retrieval is otherwise intact. The failure and its traceback were "
+    "logged; re-read the point (or inspect the graph) to recover the "
+    "decoration."
+)
+
+
+class RelationshipDecoration(dict):
+    """``{point_id: [entry, …]}`` plus the decoration's own health (#6971).
+
+    A plain ``dict`` to every existing consumer — equality, ``.get``,
+    ``set(out)``, iteration and ``values()`` are unchanged, so the one
+    production caller (the SDK search assembly) and the 25 test call sites in
+    ``tests/test_relationships_bounded.py`` need no rewriting. The one addition is
+    ``decoration_error``: ``""`` on success, and ``"<ExcType>: <message>"``
+    when the query body raised. This is what makes ``get_relationships_bounded``
+    distinguishable from an empty result without changing its return CONTRACT
+    (a mapping of requested id → entries), which is why a typed mapping was
+    chosen over re-raising: decoration is default-on (D1) and must never turn
+    a search into a failure, and it must never leave the caller guessing.
+
+    ``decoration_error`` is a CLASS attribute default, so a caller can read it
+    unconditionally (``getattr(rels, "decoration_error", "")`` also tolerates
+    a plain ``dict`` from a stand-in/monkeypatch, e.g. tests).
+    """
+
+    decoration_error: str = ""
+
+
 def get_relationships_bounded(
     graph,
     point_ids: list[str],
@@ -2690,11 +2897,21 @@ def get_relationships_bounded(
 
     get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
     needs full NAND completeness for disputed-pair detection.
+
+    Returns a ``RelationshipDecoration`` mapping (requested id → entries).
+    #6971: when the query body raises, the mapping is RESET to the all-empty
+    seed — so a consumer that ignores the extra attribute stays safe, and the
+    marker's claim ("'relationships' is empty because the edges could not be
+    read") is TRUE for every requested point — but ``.decoration_error`` is
+    non-empty and the caller MUST NOT present the emptiness as "no
+    relationships". The search assembly labels the batch through
+    ``SearchResult.relationships_unavailable``.
     """
     if not point_ids:
-        return {}
+        return RelationshipDecoration()
 
-    rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
+    rels: RelationshipDecoration = RelationshipDecoration(
+        {pid: [] for pid in point_ids})
 
     try:
         # Q1a: operator edges per point (bounded by point degree).
@@ -3003,7 +3220,25 @@ def get_relationships_bounded(
                         entries.append({"predicate": "", "mechanism": mech, "count": leftover})
 
             rels[pid] = entries
-    except Exception:
+    except Exception as exc:
+        # #6971: before this the seed (which the fill loop below mutates in
+        # place, ``rels[pid] = entries``) was returned as if it were a real
+        # (empty) decoration. Record WHY on the result so the caller can label
+        # the batch instead of asserting "no relationships". Decoration
+        # failure must not break retrieval (D1), so the exception is still
+        # absorbed — it is just no longer indistinguishable from a genuinely
+        # sparse point.
+        #
+        # The fill loop assigns point-by-point INSIDE this ``try``, so an
+        # exception raised while assembling one point leaves every point
+        # BEFORE it filled. Returning that partial mapping would make the
+        # relayed marker assert "'relationships' is empty because the edges
+        # could not be read" on hits that carry real entries — the payload
+        # contradicting itself. Reset to the all-empty seed the marker's
+        # wording (and D15) describes: "the read failed" replaces the whole
+        # batch, it never leaves a half-decorated one.
+        rels = RelationshipDecoration({pid: [] for pid in point_ids})
+        rels.decoration_error = f"{type(exc).__name__}: {exc}"
         logger.warning("Bounded relationship query failed", exc_info=True)
 
     return rels
@@ -3148,7 +3383,11 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "  coalesce(n.outdated, false), "
             # #1423: the Subject's own lifecycle status, appended AFTER #2294's
             # index-18 flag so neither addition shifts the other's mapping.
-            "  s.status, es.status",
+            "  s.status, es.status, "
+            # #2350 (E-prec): the per-end precision declaration, appended
+            # LAST so every index above is untouched. Read into the additive
+            # precision block by ``window_read_fields`` below.
+            "  n.validFromPrecision, n.validToPrecision",
             params={"ids": point_ids},
             timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
@@ -3168,6 +3407,24 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             st.setdefault("valid_from", row[2] or None)
             st.setdefault("valid_to", row[3] or None)
             st.setdefault("expired_at", row[4] or None)
+            # #2350 (E-prec): the additive precision block, resolved by the ONE
+            # read-projection home so search/recall annotation cannot drift
+            # from ``get_historical_knowledge``/``assembly``. The bounds are
+            # passed RAW: ``window_read_fields``' presence gate is
+            # ``is not None`` (a falsey-but-present bound — ``""``, ``0`` —
+            # is a REAL bound, matching ``_covers`` and
+            # ``_assert_window_start_not_inverted``). Pre-normalizing with
+            # ``or None`` here made the same stored window read ``day`` in
+            # assembly / ``get_historical_knowledge`` and ``None`` here — the
+            # exact cross-surface drift this module exists to prevent.
+            _wf = window_read_fields(
+                row[2], row[3],
+                row[21] if len(row) > 21 else None,
+                row[22] if len(row) > 22 else None,
+            )
+            st.setdefault("valid_from_precision", _wf["valid_from_precision"])
+            st.setdefault("valid_to_precision", _wf["valid_to_precision"])
+            st.setdefault("end_state", _wf["end_state"])
             old_id, old_content, old_created = row[5], row[6], row[7]
             new_id, new_status, new_content, new_created = row[8], row[9], row[10], row[11]
             if old_id and old_id not in {s["id"] for s in st["supersedes"]}:
@@ -3316,7 +3573,8 @@ def filter_by_traversal_predicate(
         return []
 
 
-def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict]:
+def fallback_tfidf(query: str, points: list[dict], limit: int = 10,
+                   *, force_sparse: bool = False) -> list[dict]:
     """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
 
     points should be dicts with at least 'id', 'content', 'pointKind'.
@@ -3328,7 +3586,20 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     dicts from ``self.query`` carry ``search_keys`` when present (additive;
     absent → byte-identical to the pre-R2 path). The returned payload keeps
     the REAL content (the alias text is index-only, never surfaced).
+
+    #2678: ``force_sparse=True`` forwards to ``search_points`` so the caller
+    gets the DETERMINISTIC token-overlap scorer and the ``match_source="tfidf"``
+    label is true even when an embedder is cached. The default (``False``) is
+    the production contract and is UNCHANGED — ``search_points`` resolves the
+    embedder and the #5275 armed refusal is raised while it does.
+
+    #5275: under ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` this function
+    PROPAGATES :class:`~tortoise.exceptions.EmbedderUnavailableError` instead
+    of logging it into ``[]`` — an empty result is a read result too, and the
+    quietest possible outcome is indistinguishable from "nothing matched".
+    With the flag unset the historical degrade is unchanged.
     """
+    from .exceptions import EmbedderUnavailableError
     try:
         from tortoise.embeddings import search_points
 
@@ -3341,7 +3612,8 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
             {**p, "content": index_text(p.get("content"), p.get("search_keys"))}
             for p in points
         ]
-        results = search_points(query, indexed, threshold=0.0, limit=limit)
+        results = search_points(query, indexed, threshold=0.0, limit=limit,
+                                force_sparse=force_sparse)
         for r in results:
             r["content"] = real_content.get(r["id"], r["content"])
         return [
@@ -3362,6 +3634,14 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
             ).to_dict()
             for r in results
         ]
+    except EmbedderUnavailableError:
+        # #5275: this tier's rows ARE a read result, so a REQUIRED process
+        # must not be handed the quietest possible outcome — an empty list.
+        # ``search_points`` resolves the embedder without a handler, so under
+        # ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` the named refusal lands here;
+        # re-raise it ahead of the generic handler instead of logging it into
+        # ``[]`` (which is indistinguishable from "nothing matched").
+        raise
     except Exception as e:
         logger.error("TF-IDF fallback failed: %s", e)
         return []

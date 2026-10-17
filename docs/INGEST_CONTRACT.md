@@ -20,9 +20,10 @@ wrong thing.
 
 **How to read this doc.** The ingest surface is extended by epic #902 (this
 release): the response gains `batch_id` and `warnings`, the tool gains the
-`promotion_policy` parameter, plain IMPL/NAND connections become
-**operator-less direct edges**, and validation moves to a deterministic
-zero-mutation Phase-1 pass. Where a behavior is pinned in the epic plan but
+`promotion_policy` parameter, connection routing is **endpoint-kind aware**
+(a plain IMPL/NAND between `:Point` endpoints is **operator-mediated**; the
+operator-less direct edge is reserved for non-Point pairs), and validation
+moves to a deterministic zero-mutation Phase-1 pass. Where a behavior is pinned in the epic plan but
 not yet visible in the shipped code at the time of writing, this doc says
 **planned:** explicitly. Everything else is shipped behavior you can rely on.
 
@@ -87,8 +88,10 @@ with identical contracts.
 }
 ```
 
-The `direction` values accepted today are `bidirectional` and `unidirectional` — see the direction
-model and its *Transition state* note in `docs/ONTOLOGY.md` (§8).
+The `direction` values accepted are the model's four — `->` (source→target), `<-` (target→source),
+`<->` (both ways), `-` (none: the connection exists and no confidence transfers) — plus the legacy
+aliases `unidirectional` ≡ `->` and `bidirectional` ≡ `<->`. See the direction model and its
+*Transition state* note in `docs/ONTOLOGY.md` (§8).
 
 Rules that hold regardless of granularity or policy:
 
@@ -122,7 +125,7 @@ Rules that hold regardless of granularity or policy:
     "entities": ["…", "…"],
     "sources": ["…"],
     "connections": [
-      {"direct_edge": "IMPL", "from": "01J8…", "to": "01J8…"},
+      "01J8…",
       {"relation": "extractedFrom", "from": "01J8…", "to": "…"}
     ],
     "refs": {"pA": "01J8…", "pB": "01J8…", "src1": "…"}
@@ -141,16 +144,25 @@ Key points:
 - **`created` / `deduped`** each count `{points, entities, sources, connections}`.
   Re-submitting the identical bundle returns the same ids with everything in
   `deduped`.
-- **`ids["connections"]`** — the connection descriptor contract (shipped
-  today: operator-requiring connections append the bare operator-id string;
-  relation connections append `{relation, from, to, deduped}`). **This
-  release** re-routes plain IMPL/NAND connections to operator-less **direct
-  edges** with the stable descriptor `{direct_edge, from, to}` — `deduped` is
-  deliberately not part of it (reported in the aggregate) so identical
-  resubmissions compare equal. The operator path (`mitigation`/`reify:true`)
-  keeps the bare operator-id string.
+- **`ids["connections"]`** — the connection descriptor contract. A connection
+  routed to an **operator** appends the bare operator-id string:
+  `mitigation`/`reify:true`, and — since #8499 — **any plain IMPL/NAND whose
+  endpoints include a plain `:Point`**. A connection routed to an operator-less
+  **direct edge** appends `{direct_edge, from, to}` (`deduped` is deliberately
+  not part of it — reported in the aggregate — so identical resubmissions
+  compare equal). A **relation** connection appends
+  `{relation, from, to, deduped}`.
+
+  ⛔ **Point↔Point connections are operator-mediated** (owner ruling
+  2026-10-13, tortoise #8499): an operator-less edge carries no operator node,
+  so it can be neither mitigated nor annotated, and it cannot carry the
+  epistemic weighting a Point's relations claim. The direct shape is reserved
+  for `Object↔Object`, where no such weighting is claimed. Pass `reify: true`
+  to state the operator route explicitly; a plain spelling that gets re-routed
+  is reported as the `point_mediated_route` warning
+  ([§3.2](#32-warnings--the-twelve-keys)).
 - `nudges` is advisory, never enforced; `warnings` names divergences the
-  engine noticed (see [§3.2](#32-warnings--the-eleven-keys)).
+  engine noticed (see [§3.2](#32-warnings--the-twelve-keys)).
 
 ### 2.3 Both granularities
 
@@ -183,8 +195,8 @@ Granular `results[].result` shapes per connection route:
 
 | Route | `results[].result` |
 |---|---|
-| Operator route (mitigation / `reify:true`) | `{"operator_id": "<id>", "deduped": bool}` |
-| Direct-edge route (plain IMPL/NAND) | `{"direct_edge": "IMPL", "from": "<pid>", "to": "<pid>", "deduped": bool}` |
+| Operator route (mitigation / `reify:true` / **plain IMPL/NAND with a plain `:Point` endpoint**) | `{"operator_id": "<id>", "deduped": bool}` |
+| Direct-edge route (operator-less — **no `:Point` endpoint**) | `{"direct_edge": "IMPL", "from": "<pid>", "to": "<pid>", "deduped": bool}` |
 | Relation route | `{"relation": "<pred>", "from": "<id>", "to": "<id>", "deduped": bool}` |
 
 ### 2.4 Both policies
@@ -221,11 +233,11 @@ policy):
 
 | Route | Descriptor |
 |---|---|
-| Direct edge (plain IMPL/NAND) | `{"direct_edge": op_type, "from": id, "to": id}` — stable across re-ingest |
+| Direct edge (operator-less — requires a non-`:Point` endpoint) | `{"direct_edge": op_type, "from": id, "to": id}` — stable across re-ingest |
 | Operator | bare operator-id string (identical across created / dedup-hit / absorb) |
 | Relation | `{"relation": pred, "from": id, "to": id, "deduped": bool}` |
 
-### 3.2 Warnings — the ELEVEN keys
+### 3.2 Warnings — the TWELVE keys
 
 `warnings` entries carry a `key` (the table below), the affected ids, and any
 context (old/new values, candidate lists). The key set is a **closed
@@ -244,10 +256,13 @@ enumeration** — a warning key outside this table is a divergence; report it.
 | 9 | `label_dropped_resubmit` | A resubmission omitted a label its run-1 operator carried; strict matching treated it as a NEW operator (naming both). | Re-add the label to dedup, or supersede the extra operator. |
 | 10 | `direction_dropped_resubmit` | A resubmission omitted a direction its run-1 operator carried; strict matching created a second operator (naming both). | Re-add the direction, or accept the extraction default (see [§12](#12-authoring-guidance-cycle-25)). |
 | 11 | `direction_changed_resubmit` | The declared direction changed vs the stored operator on the same pair — a distinct semantic, committed as separate. | Confirm intent; supersede the stale direction variant if not wanted. |
+| 12 | `point_mediated_route` | A plain `IMPL`/`NAND` connection whose endpoints include a plain `:Point` was **reified into an operator** rather than written as an operator-less direct edge (#8499, owner ruling 2026-10-13: Point↔Point relations are operator-mediated; the direct shape is reserved for Object↔Object). Names both endpoints and the operator type. | None if you wanted the contracted route. To say it explicitly, write `reify: true`. ⚠️ If you read `ids["connections"]` positionally, the entry is now the **operator-id string**, not the `{direct_edge, from, to}` descriptor — that descriptor is still what an `Object↔Object` direct edge returns. |
 
 > A12 note: this table is the conformance anchor for the warning contract —
 > every key in the closed set must appear here, and no key outside it is
-> emitted.
+> emitted. The set was extended from ELEVEN to TWELVE keys by #8499 (the
+> `point_mediated_route` row above); that amendment is deliberate, and is
+> recorded here and pinned in `tests/test_ingest_conformance.py`.
 
 ---
 
@@ -324,7 +339,7 @@ Three recovery tools, in order of preference:
 
 | Situation | Tool | Semantics |
 |---|---|---|
-| A point's **content is wrong** and a corrected version exists | `supersede_point(old_id, new_id)` (SDK) / `tortoise_supersede` | Atomically replaces the old point: `CORRECTS` edge, `outdated:true`, **all edges transferred** to the new point (operator edges both directions, structural edges), preserving type/direction/confidence/weight/label/`batch_id`. The old point keeps only the CORRECTS edge as provenance. *(Current v1 behavior — the #2421 restatement-vs-correction policy will replace the universal transfer with a per-edge carry/drop/pend triage for semantic edges; see ONTOLOGY §3.1.)* **Rebuild parity (#2489):** the 2b structural-edge transfer (snapshot-derivable rel set — `extractedFrom` + `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint`) is journaled as flat `DirectEdgeRepoint` descriptors and replayed by pass-2b, so `rebuild_all` reproduces the live transfer state (successor keeps the edges, old does not resurrect them). The no-self-edge guard (target node == successor) journals a `delete_only` descriptor instead. Descriptors exist only for post-deploy supersedes — a pre-fix journal rebuild does not repair old resurrections (see ONTOLOGY §3.1). |
+| A point's **content is wrong** and a corrected version exists | `supersede_point(old_id, new_id)` (SDK) / `tortoise_supersede` | Atomically replaces the old point: `CORRECTS` edge, `outdated:true`, **all edges transferred** to the new point (operator edges both directions, structural edges), preserving type/direction/confidence/weight/label/`batch_id`. The old point keeps only the CORRECTS edge as provenance. *(Current v1 behavior — the restatement-vs-correction policy (designed in `#2421`, CLOSED `COMPLETED`) will replace the universal transfer with a per-edge carry/drop/pend triage for semantic edges; that triage is not implemented and has no open tracker. See ONTOLOGY §3.1.)* **Rebuild parity (#2489):** the 2b structural-edge transfer (snapshot-derivable rel set — `extractedFrom` + `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint`) is journaled as flat `DirectEdgeRepoint` descriptors and replayed by pass-2b, so `rebuild_all` reproduces the live transfer state (successor keeps the edges, old does not resurrect them). The no-self-edge guard (target node == successor) journals a `delete_only` descriptor instead. Descriptors exist only for post-deploy supersedes — a pre-fix journal rebuild does not repair old resurrections (see ONTOLOGY §3.1). |
 | A point should **not exist** | `retract_point(id)` (SDK) / `tortoise_retract_point` | Terminal `status="retracted"` tombstone; default query surfaces exclude it (`include_retracted=True` to see it). |
 | An **operator / mitigation** was wrongly ingested | see operator disposition below | `supersede_point` rejects operators (supersession is for statement points) — disposition is explicit, never silent. |
 
@@ -599,10 +614,14 @@ Combined cross-epic upgrade notes (epic #902 ingest + epic #900 index).
 
 **Behavior changes (this release):** the seven breaks in
 [§13](#13-acceptance-surface-breaks--migration-lines), the default-policy
-flip to `gated`, the response additions (`batch_id`, `warnings`), and the
-direct-edge connection routing (plain IMPL/NAND connections become
-operator-less direct edges — operator Points are created only for
-`mitigation`/`reify:true`).
+flip to `gated`, the response additions (`batch_id`, `warnings`), and
+**endpoint-kind-aware connection routing** — a plain IMPL/NAND between
+`:Point` endpoints is now **operator-mediated** (a plain spelling is reified
+and reported as the `point_mediated_route` warning,
+[§2.2](#22-bulk--gated-the-default--expected-response)); the operator-less
+direct edge is reserved for `Object↔Object`. Operator Points are still
+created for `mitigation`/`reify:true`/part-whole, and now also for any
+Point-bearing pair.
 
 ---
 

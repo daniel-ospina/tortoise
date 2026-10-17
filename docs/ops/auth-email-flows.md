@@ -69,6 +69,7 @@ Supabase matches redirect URLs by **string match, with `*` wildcards allowed whe
 | `https://app.premiselabs.co/**` | the app's own navigations; the session origin |
 | `https://tortoise.premiselabs.co` | legacy links; `website/_redirects` 301s the auth paths to the app origin |
 | `https://tortoise.premiselabs.co/welcome.html` | pre-#4054 welcome links still in inboxes |
+| **`https://api.premiselabs.co/**`** | **the MCP consent page's provider sign-in return** (#3524 task 5) — `tortoise/oauth.py` sets `signInWithOAuth({redirectTo: window.location.origin + "/oauth/authorize"})`, whose origin is `api.premiselabs.co` (the AS). GoTrue refuses an unrecognised `redirect_to`, so without this entry GitHub/Google sign-in on the consent page is refused. **This row is what the table was missing**; `tests/test_oauth_consent_bridge.py::test_the_redirect_allowlist_record_covers_the_consent_page` fails if the origin goes unaddressed again. The bridge (#3524) makes the entry unnecessary by moving provider sign-in to `app.*/auth`, which `https://app.premiselabs.co/**` already covers — remove the row **only** with that record. |
 
 `mailer_autoconfirm = False` (email confirmations ON) is a prerequisite for the signup-confirmation flow to
 exist at all. The hosted signup path creates accounts with `email_confirm=true` by default and sends NO email
@@ -98,6 +99,8 @@ the Management API with `SUPABASE_ACCESS_TOKEN`. Record the result on #3528.
 - [ ] **Confirm signup** template builds `…?token_hash={{ .TokenHash }}&type=email`.
 - [ ] **Change email address** template builds `…?token_hash={{ .TokenHash }}&type=email_change`.
 - [ ] Additional Redirect URLs contain `/auth/confirm` on the app origin (§3).
+- [ ] Additional Redirect URLs contain **`https://api.premiselabs.co/**`** (§3, #3524 task 5) — or the consent
+      page no longer signs in off-origin. Record which, on #3524.
 - [ ] Email confirmations are ON (`mailer_autoconfirm = False`) if the signup-confirmation flow is meant to fire.
 
 > **Magic link is out of this audit.** `/auth/start?provider=email` starts a PKCE flow and GoTrue redirects to

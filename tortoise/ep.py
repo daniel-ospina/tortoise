@@ -17,6 +17,7 @@ from .live import (
     EPISTEMIC_LABELS,
     _live_only,
     _terminal_excluded,
+    direction_flows,
     epistemic_disjunction,
     epistemic_label_queries,
     TERMINAL_EXCLUDED_STATUSES,
@@ -184,7 +185,8 @@ class TortoiseEP:
             for _q in epistemic_label_queries(
                 "MATCH (a)-[r:IMPL|NAND]->(b:{label}) "
                 f"WHERE {epistemic_disjunction('a')} "
-                "AND coalesce(r.direction, 'bidirectional') = 'bidirectional' "
+                "AND coalesce(r.direction, 'bidirectional') IN "
+                "['bidirectional', '<->', '<-'] "
                 "AND (a.id IN $ids OR b.id IN $ids) "
                 "RETURN a.id, b.id, type(r), "
                 "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)"
@@ -277,14 +279,24 @@ class TortoiseEP:
                     # #7853: o is id-anchored (the operator); drop the child's
                     # label and filter the traversal with the disjunction —
                     # no index is lost (the edge is reached FROM o).
-                    self.g.query(
+                    result = self.g.query(
                         f"UNWIND $params AS p "
                         f"MATCH (o:Point {{id: p.oid}})-[r:{rel}]->(c) "
                         f"WHERE {epistemic_disjunction('c')} "
                         "AND c.id = p.cid "
-                        "SET r.msg_alpha = p.a, r.msg_beta = p.b",
+                        "SET r.msg_alpha = p.a, r.msg_beta = p.b "
+                        "RETURN p.oid, p.cid, p.a, p.b",
                         params={"params": params_list},
                     )
+                    # #5380: journal EXACTLY the edges this statement
+                    # committed. ``RETURN`` makes the journal set the committed
+                    # set — a parameter whose edge vanished mid-run is NOT
+                    # journaled as a write (the node arm's `RETURN n.id`
+                    # discipline, above).
+                    for _oid, _cid, _a, _b in result.result_set:
+                        self._emit_edge_message(
+                            _oid, _cid, rel, self.EDGE_MESSAGE_FWD_SLOTS,
+                            (_a, _b))
 
         if getattr(self, "_back_cache", None):
             for rel in ("IMPL", "NAND"):
@@ -303,9 +315,16 @@ class TortoiseEP:
                         f"MATCH (o:{{label}} {{id:p.src}})-[r:{rel}]->(c) "
                         f"WHERE {epistemic_disjunction('c')} "
                         "AND c.id = p.tgt "
-                        "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b"
+                        "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b "
+                        "RETURN p.src, p.tgt, p.a, p.b"
                     ):
-                        self.g.query(_q, params={"params": params_list})
+                        _res = self.g.query(
+                            _q, params={"params": params_list})
+                        # #5380: one record per committed edge, per label.
+                        for _s, _t, _a, _b in _res.result_set:
+                            self._emit_edge_message(
+                                _s, _t, rel,
+                                self.EDGE_MESSAGE_BACK_SLOTS, (_a, _b))
         return True
 
     def _clear_caches(self) -> None:
@@ -313,6 +332,67 @@ class TortoiseEP:
         for _attr in ("_node_cache", "_msg_cache", "_back_cache"):
             if hasattr(self, _attr):
                 delattr(self, _attr)
+
+    # ── #5380: edge-message durability journaling ────────────────
+    # The four edge-resident EP message slots, paired by direction. The emit
+    # sites below pass the two PAIR constants — never a literal — and
+    # `tests/test_4503_edge_relationship_accounting.py` pins the flat
+    # `EDGE_MESSAGE_SLOTS` equal to the projection fold's
+    # `projection.entities.EDGE_MESSAGE_PROPS` and to
+    # `tools.edge_census.EP_EDGE_SLOTS`, so a fifth slot added to one copy of
+    # the vocabulary reds that pin instead of drifting silently.
+    EDGE_MESSAGE_FWD_SLOTS: tuple = ("msg_alpha", "msg_beta")
+    EDGE_MESSAGE_BACK_SLOTS: tuple = ("back_msg_alpha", "back_msg_beta")
+    EDGE_MESSAGE_SLOTS: tuple = (EDGE_MESSAGE_FWD_SLOTS
+                                 + EDGE_MESSAGE_BACK_SLOTS)
+
+    def _emit_edge_message(self, src: str, tgt: str, rel: str,
+                           keys: tuple, values: tuple) -> None:
+        """Journal ONE committed edge-message write (#5380).
+
+        ``_emit`` is ``None`` on a journal-less lane, so the graph-only path
+        stays byte-identical to the pre-#5380 behaviour (no emission, no
+        extra read). The record carries the edge IDENTITY
+        (``src``/``tgt``/``rel`` — the edge has no node id of its own, the
+        same flat composite ``DirectEdgeCreated`` uses) plus the slot values
+        actually committed, mirroring the node arm's ``RETURN n.id``
+        discipline above: the journal set IS the committed set.
+
+        Called ONCE per committed edge, never per EP iteration — the caches
+        are the batched accumulator (#6761's load→flush boundary).
+        """
+        if self._emit is None:
+            return
+        self._emit("EdgeMessageChanged", op="set",
+                   id=f"{src}->{tgt}:{rel}", src=src, tgt=tgt, rel=rel,
+                   **dict(zip(keys, values, strict=True)))
+
+    def _emit_edge_message_clear(self, scope: str,
+                                 point_ids: list | None = None) -> None:
+        """Journal ONE committed edge-message INVALIDATION (#5380).
+
+        A BULK record, deliberately not one-per-edge: the live clear is a
+        single Cypher ``REMOVE`` over a whole scope, and enumerating its edges
+        to journal per-edge records would turn a documented-cheap full drop
+        into an O(#edges) result-set materialization on a hot write path
+        (``create_point`` with a baseline reaches the full-graph drop).
+        ``scope`` names the live query the replay fold re-runs; a record is
+        emitted whenever the live statement MATCHED at least one edge. Its
+        ``RETURN count`` is the matched-edge count, NOT the number of edges
+        that actually carried message state — a topology change that merely
+        touches a bare edge still emits a record.
+
+        Without this leg the fold would RESURRECT seeds the live graph had
+        dropped — the #330 live/replay parity break, arriving the moment the
+        write leg above starts journaling: pre-#5380 a rebuild produced bare
+        edges, which happened to agree with a post-clear live graph.
+        """
+        if self._emit is None:
+            return
+        payload: dict = {"op": "clear", "scope": scope}
+        if point_ids is not None:
+            payload["point_ids"] = [p for p in point_ids if isinstance(p, str)]
+        self._emit("EdgeMessageChanged", id="edge-messages-clear", **payload)
 
     # ── Cached read/write ────────────────────────────────────────
 
@@ -388,12 +468,20 @@ class TortoiseEP:
         if _cache is not None:
             _cache[key] = (msg_alpha, msg_beta)
             return
-        self.g.query(
+        result = self.g.query(
             f"MATCH (o:Point {{id:$oid}})-[r:{rel_type}]->(c) "
             f"WHERE {epistemic_disjunction('c')} AND c.id = $cid "
-            "SET r.msg_alpha=$a, r.msg_beta=$b",
+            "SET r.msg_alpha=$a, r.msg_beta=$b RETURN c.id",
             params={"oid": op_id, "cid": claim_id, "a": msg_alpha, "b": msg_beta},
         )
+        # #5380: the DIRECT (no-cache) path is a committed write — journal it
+        # here; the cached path defers to ``_flush_cache``'s batched emit.
+        # Guard on the MATCH, exactly as ``_write_node`` does: a missing edge
+        # committed nothing.
+        if result.result_set:
+            self._emit_edge_message(op_id, claim_id, rel_type,
+                                    self.EDGE_MESSAGE_FWD_SLOTS,
+                                    (msg_alpha, msg_beta))
 
     # ── Operator-less direct-edge back-messages (#888 W5) ──────────
     # The back-message of a direct edge (src)-[r]->(tgt) lives ON the edge
@@ -433,10 +521,16 @@ class TortoiseEP:
         for _q in epistemic_label_queries(
             f"MATCH (o:{{label}} {{id:$oid}})-[r:{rel_type}]->(c) "
             f"WHERE {epistemic_disjunction('c')} AND c.id = $cid "
-            "SET r.back_msg_alpha=$a, r.back_msg_beta=$b"
+            "SET r.back_msg_alpha=$a, r.back_msg_beta=$b RETURN c.id"
         ):
-            self.g.query(_q, params={
+            _res = self.g.query(_q, params={
                 "oid": src_id, "cid": tgt_id, "a": msg_alpha, "b": msg_beta})
+            # #5380: journal the committed write (direct, no-cache path).
+            if _res.result_set:
+                self._emit_edge_message(
+                    src_id, tgt_id, rel_type,
+                    self.EDGE_MESSAGE_BACK_SLOTS,
+                    (msg_alpha, msg_beta))
 
     # ── Natural parameter helpers ─────────────────────────────────
 
@@ -521,9 +615,10 @@ class TortoiseEP:
 
         # NAND uses the standard symmetric contradiction potential for the
         # target message. DIRECTION is enforced structurally by the
-        # back-message guard below: for explicitly-'unidirectional' operators
-        # the source/attacker receives NO factor message (the Dung-style
-        # directed attack an agent opts into). Default is bidirectional
+        # back-message guard below: for a forward-only direction (`->` /
+        # `unidirectional`) the source/attacker receives NO factor message (the
+        # Dung-style directed attack an agent opts into), and for `-` neither
+        # endpoint does. Default is bidirectional
         # (mutual contradiction) per product owner (#753).
         phi = phi_nand if op_type == "NAND" else phi_impl
         mom_a, mom_b = tilted_moments(
@@ -538,10 +633,13 @@ class TortoiseEP:
         raw_eta_a = (new_eta_a[0] - cav_eta_a[0], new_eta_a[1] - cav_eta_a[1])
         raw_eta_b = (new_eta_b[0] - cav_eta_b[0], new_eta_b[1] - cav_eta_b[1])
 
-        # Determine if this operator is bidirectional.
-        # Direction is an explicit operator flag (ONTOLOGY v3.1 §3.1, §8).
-        # Default and missing → bidirectional.
-        bidirectional = (direction == "bidirectional")
+        # Determine how this operator flows (#7852). DIRECTION is the Layer-1
+        # four-value vocabulary with the two legacy aliases: `->` /
+        # `unidirectional` (source→target), `<-` (target→source), `<->` /
+        # `bidirectional` (both), `-` (neither — the connection exists and NO
+        # confidence transfers). `direction_flows` is the ONE normalizer, so
+        # the four model values cannot be misread as their opposite here.
+        fwd, bwd = direction_flows(direction)
 
         # Proportional boost: breaks EP fixed-point symmetry that forces
         # messages to near-zero for unevidenced targets. Fades as evidence
@@ -576,8 +674,14 @@ class TortoiseEP:
         damped_b = (max(min(damped_b[0], 1000), -1000),
                     max(min(damped_b[1], 1000), -1000))
 
-        self._write_message(op_id, id_b, *damped_b, op_type)
-        if bidirectional:
+        # Persist the message(s) the direction actually flows. The factor math
+        # above is direction-agnostic (the potential is symmetric); direction
+        # selects WHICH endpoint receives. `->` writes the target message;
+        # `<-` writes the SOURCE message (the reverse of the legacy default);
+        # `<->` both; `-` neither.
+        if fwd:
+            self._write_message(op_id, id_b, *damped_b, op_type)
+        if bwd:
             if direct:
                 self._write_back_message(id_a, id_b, *damped_a, op_type)
             else:
@@ -589,19 +693,30 @@ class TortoiseEP:
                             direction: str = "bidirectional") -> None:
         # input_ids are sorted by idx (source=0, targets=1..N).
         # IMPL: source→target pairs only (skip target↔target).
-        # NAND bidirectional (default): all pairwise combinations (mutual
+        # NAND mutual (default): all pairwise combinations (mutual
         # contradiction — at-most-one-true over all members).
-        # NAND unidirectional (agent-chosen directed attack): source→each-target
+        # NAND one-way (agent-chosen directed attack): source→each-target
         # attacks ONLY — target↔target pairwise edges would otherwise create
         # arbitrary directed attacks between targets (review P2, #795).
+        #
+        # #7852 — direction is the Layer-1 four-value vocabulary (with the two
+        # legacy aliases): `->`/`unidirectional` flows source→target, `<-`
+        # target→source, `<->`/`bidirectional` both, `-` NEITHER. `direction_flows`
+        # is the ONE normalizer; a `-` factor contributes nothing (never a
+        # silent mutual default).
         n = len(input_ids)
         if n < 2:
             return
+        fwd, bwd = direction_flows(direction)
+        mutual = fwd and bwd
+        if not (fwd or bwd):
+            # `-`: the connection exists and NO confidence transfers.
+            return
         if op_type == "IMPL":
             pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
-        elif op_type == "NAND" and direction != "bidirectional":
-            # Directed NAND: the source attacks each target; targets do not
-            # attack each other.
+        elif op_type == "NAND" and not mutual:
+            # Directed NAND: the source (and, for `<-`, the receiving end)
+            # pairs with each target only; targets do not attack each other.
             pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
         else:
             pairs = [(input_ids[i], input_ids[j])
@@ -628,7 +743,6 @@ class TortoiseEP:
         # pairs is O(arity) instead of O(|cache|).
         overlay_base = {k: v for k, v in saved.items()
                         if k[0] == op_id and k[2] == op_type}
-        bidirectional = (direction == "bidirectional")
         orig_damping = self.damping
         acc: dict[str, tuple[float, float]] = {c: (0.0, 0.0) for c in input_ids}
         touched: set[str] = set()
@@ -637,13 +751,16 @@ class TortoiseEP:
             for a, b in pairs:
                 self._msg_cache = dict(overlay_base)  # clean per-pair state
                 self._update_factor(op_id, op_type, [a, b], weight, label, direction)
-                # _update_factor writes the target's message always, and the
-                # source's only for bidirectional operators. Accumulate ONLY
-                # freshly written claims — never the pre-factor state (a stale
-                # source message must not be re-accumulated as if fresh, #326
-                # directed-path corruption).
+                # _update_factor persists the messages this direction flows:
+                # `a` (the pair's source slot) for backward flow, `b` (the
+                # target slot) for forward flow, both for mutual, neither for
+                # `-`. Accumulate ONLY freshly written claims — never the
+                # pre-factor state (a stale message must not be re-accumulated
+                # as if fresh, #326 directed-path corruption).
                 for c in (a, b):
-                    if c == a and not bidirectional:
+                    if c == a and not bwd:
+                        continue
+                    if c == b and not fwd:
                         continue
                     msg = self._msg_cache.get((op_id, c, op_type))
                     if msg is not None:
@@ -671,17 +788,20 @@ class TortoiseEP:
         # + each target), matching the binary factor's total at the same
         # weight. Star targets are diluted 1/(n-1) (evidence dilution across
         # siblings).
-        is_star = (op_type != "NAND") or not bidirectional
+        is_star = (op_type != "NAND") or not mutual
         scale = (1.0 / (n - 1)) if is_star else (2.0 / (n * (n - 1)))
         d = self.damping
         for c in input_ids:
             if c not in touched:
-                # Directed-star source: no message by design — clear any stale
-                # persisted source message so unidirectional semantics hold.
+                # An endpoint this direction does NOT reach gets no message by
+                # design — clear any stale persisted message so the direction
+                # holds. For a star, the non-receiving end is the source for
+                # `->` and every target for `<-`; for `-` nothing receives.
                 # Cache mode: only when a stale entry exists (don't create a
-                # zero entry for a never-messaged source). Graph mode: the
+                # zero entry for a never-messaged endpoint). Graph mode: the
                 # MATCH…SET is a no-op when no edge exists, so write always.
-                if not bidirectional and c == input_ids[0]:  # noqa: SIM102
+                receives = bwd if c == input_ids[0] else fwd
+                if not receives:  # noqa: SIM102
                     if cache is None or saved.get((op_id, c, op_type)) is not None:
                         self._write_message(op_id, c, 0.0, 0.0, op_type)
                 continue
@@ -735,7 +855,8 @@ class TortoiseEP:
                     f"MATCH (a:Point)-[r:{rel}]->(b) "
                     "WHERE a.id = $cid "
                     f"AND {epistemic_disjunction('b')} "
-                    "AND coalesce(r.direction, 'bidirectional') = 'bidirectional' "
+                    "AND coalesce(r.direction, 'bidirectional') IN "
+                    "['bidirectional', '<->', '<-'] "
                     "RETURN coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)",
                     params={"cid": claim_id},
                 ).result_set
@@ -1316,7 +1437,7 @@ class TortoiseEP:
             stripped = len(full_inputs) - len(input_ids)
             if stripped:
                 skip_reason = None
-                if (direction != "bidirectional"
+                if (not all(direction_flows(direction))
                         and op_idx_known[op_id]
                         and full_inputs
                         and not op_input_live[op_id][0]):
@@ -1419,14 +1540,37 @@ class TortoiseEP:
         # #2490: terminal claims (status in the terminal vocab OR the legacy
         # outdated flag) are EXCLUDED — their posterior decays to vacuity at
         # the terminalizing write, so include-terminal surfaces must not list
-        # them as contested. Deliberately NO has_ep gate: an unmeasured LIVE
-        # claim (coalesce → Beta(1,1), variance 1/12 > 0.04) MUST list as
-        # contested (test_agent_ops_supersede:169 pin — the post-supersede
-        # unmeasured successor surfaces until a successful dream resolves it).
+        # them as contested.
+        #
+        # #3415: PRIOR-ONLY baselines are excluded too. A #2199 declared
+        # baseline (``baseline_set=true``, no ``posterior_alpha``) is the
+        # canonical 'baseline' state of ``ep_measurement_state`` — its
+        # variance is the WIDTH OF THE DECLARED PRIOR, not a measured
+        # contention, and it reads ``contested=False`` on every other
+        # canonical surface (annotate_ep_batch / why / rankers /
+        # ``sdk._review_prune``). Applying the 0.04 posterior bar to a prior
+        # width listed the same node as contested here while those four read
+        # it unmeasured — the residual #2206/#3276-class disagreement THIS
+        # gate closes (an explicitly declared prior wider than the bar, e.g.
+        # ``set_point_baseline(2, 1)`` Beta(2,1) v=0.0556, used to surface;
+        # the system default Beta(3,1) v=0.0375 stays under the bar either
+        # way — and since #6151 an authored word is one weak body on top of
+        # that default, so ``credibility='low'`` is now Beta(3.1,1)
+        # v=0.03616, also under the bar).
+        #
+        # Deliberately STILL NO measured gate: a genuinely UNMEASURED live
+        # claim (no persisted prior at all -> coalesce to Beta(1,1), v=1/12)
+        # MUST list (test_agent_ops_supersede:169 pin — the post-supersede
+        # unmeasured successor surfaces until a successful dream resolves
+        # it). Only the declared-baseline state is removed; ``unmeasured``
+        # keeps its deliberate listing. See ``sdk._review_prune`` for the
+        # sibling scan that ALSO requires measurement.
+        from .search_engine import ep_prior_only_cypher
         rows = self.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
             f"  AND {_terminal_excluded('n.status')} "
+            f"  AND NOT {ep_prior_only_cypher('n')} "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
@@ -1458,7 +1602,12 @@ class TortoiseEP:
                 "       r.back_msg_alpha, r.back_msg_beta "
                 "RETURN count(r)"
             ).result_set
-            return int(rows[0][0]) if rows else 0
+            count = int(rows[0][0]) if rows else 0
+            # #5380: the drop is committed state — journal it, or a rebuild
+            # resurrects the seeds the live graph just dropped.
+            if count:
+                self._emit_edge_message_clear("all")
+            return count
         if not point_ids:
             return 0
         rows = self.g.query(
@@ -1469,7 +1618,10 @@ class TortoiseEP:
             "RETURN count(DISTINCT r)",
             params={"ids": list(point_ids)},
         ).result_set
-        return int(rows[0][0]) if rows else 0
+        count = int(rows[0][0]) if rows else 0
+        if count:
+            self._emit_edge_message_clear("touching", point_ids)
+        return count
 
     def invalidate_factor_messages(self, point_ids: list[str]) -> int:
         """Drop messages on ALL edges of every operator connected to a point.
@@ -1502,7 +1654,10 @@ class TortoiseEP:
             "RETURN count(DISTINCT r)",
             params={"ids": list(point_ids)},
         ).result_set
-        return int(rows[0][0]) if rows else 0
+        count = int(rows[0][0]) if rows else 0
+        if count:
+            self._emit_edge_message_clear("operator-neighbourhood", point_ids)
+        return count
 
     def run(self, operator_ids: list[str], max_hops: int | None = 2,
             evidence: dict[str, tuple[float, float]] | None = None,

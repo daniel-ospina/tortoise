@@ -292,6 +292,20 @@ def _redact(uri: str) -> str:
         # ...and a recognised-safe target still prints, masked, intact.
         ("rediss://u:pw@host:6379/db", "rediss://:***@host:6379/db"),
         ("rediss://u:pw@[::1]:6379/db", "rediss://:***@[::1]:6379/db"),
+        # #5267: the authority cut set is not only whitespace, so the region the
+        # predicate judges is only the fragment UP TO the first delimiter — a
+        # credential in a LATER fragment used to ride past both maskers.
+        ("rediss://u:pw@h:1 :S3nPw", "<uri-redacted-unrecognised-shape>"),
+        ('rediss://u:pw@h:1":S3nPw', "<uri-redacted-unrecognised-shape>"),
+        ("rediss://u:pw@h:1\t:S3nPw", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://u:pw@h:1#:S3nPw", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://u:pw@h:1/:S3nPw", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://u:pw@host\r:S3nPw", "<uri-redacted-unrecognised-shape>"),
+        # No '@' at all: the authority region is empty, so the fragment after the
+        # space is the only candidate text there is.
+        ("rediss:// :S3nPw/db", "<uri-redacted-unrecognised-shape>"),
+        # A non-empty user past the boundary (the port-retaining copy-paste).
+        ("rediss://u:pw@h:1 user:S3nPw:6379", "<uri-redacted-unrecognised-shape>"),
     ],
 )
 def test_redactor_masks_userinfo_and_keeps_the_target(uri: str, expected: str):
@@ -302,6 +316,147 @@ def test_redactor_masks_userinfo_and_keeps_the_target(uri: str, expected: str):
     still hides most of the password while logging its tail.
     """
     assert _redact(uri) == expected
+
+
+# #5267: the delimiter that ends the judged authority region is not only
+# whitespace — a quote, '#', '?', '/', a lone '\r' or a second credential
+# fragment all end it — and everything BEYOND that boundary used to be echoed
+# verbatim. (`text=True` in the helpers below translates a '\r' in the
+# subprocess stdout to '\n', so a CR case whose output still carries the CR is
+# not a parity case; every value here fails closed, so no CR survives.)
+_FRAGMENT_BEYOND_THE_AUTHORITY = [
+    # (value, expected output)
+    ("rediss://u:pw@h:1 :S3nPw", "<uri-redacted-unrecognised-shape>"),
+    ('rediss://u:pw@h:1":S3nPw', "<uri-redacted-unrecognised-shape>"),
+    ("rediss://u:pw@h:1\t:S3nPw", "<uri-redacted-unrecognised-shape>"),
+    ("rediss://u:pw@h:1\v:S3nPw", "<uri-redacted-unrecognised-shape>"),
+    ("rediss://u:pw@h:1\f:S3nPw", "<uri-redacted-unrecognised-shape>"),
+    ("rediss://u:pw@h:1#:S3nPw", "<uri-redacted-unrecognised-shape>"),
+    ("rediss://u:pw@h:1?:S3nPw", "<uri-redacted-unrecognised-shape>"),
+    ("rediss://u:pw@h:1/:S3nPw", "<uri-redacted-unrecognised-shape>"),
+    # A LONE CR is not a line break in either implementation (`read` and
+    # `split('\n')` both break on LF only) — it is a cut character, so the tail
+    # beyond it is a fragment like any other.
+    ("rediss://u:pw@host\r:S3nPw", "<uri-redacted-unrecognised-shape>"),
+    # No '@' anywhere: the bounded authority region is empty and the fragment
+    # after the space is the whole of the candidate text.
+    ("rediss:// :S3nPw/db", "<uri-redacted-unrecognised-shape>"),
+    # ...including a malformed/empty scheme (treated as "no scheme" in both).
+    ("1://h:1 :S3nPw", "<uri-redacted-unrecognised-shape>"),
+    # A NON-empty user past the boundary — the port-retaining copy-paste, which
+    # the ':'-led tell alone does not catch.
+    ("rediss://u:pw@h:1 user:S3nPw:6379", "<uri-redacted-unrecognised-shape>"),
+    (
+        "rediss://u:pw@h:1\nuser:S3nPw:6379",
+        "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    _FRAGMENT_BEYOND_THE_AUTHORITY,
+)
+def test_both_maskers_fail_closed_on_a_fragment_beyond_the_boundary(uri, expected):
+    """#5267 — a credential fragment past the authority delimiter is judged.
+
+    Class B: (1) this fails on any VALUE that still prints `S3n`/`tinel` or
+    diverges between the two maskers; (2) reachable — the boot block prints
+    whatever `TORTOISE_DB_URI` holds (a multi-line env var included) and every
+    CLI error path prints `_mask_uri_userinfo(str(e))`, so each shape is one
+    copy-paste away. Before the fix BOTH maskers emitted the credential: the
+    judged region stopped at the first cut character and the tail was never
+    examined.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    shell = _redact(uri)
+    canonical = _mask_uri_userinfo(uri)
+    for out, label in ((shell, "shell"), (canonical, "canonical")):
+        assert "S3n" not in out, f"{label} leaked {uri!r} -> {out!r}"
+        assert "tinel" not in out, f"{label} leaked {uri!r} -> {out!r}"
+        assert out == expected, f"{label} on {uri!r}: {out!r} != {expected!r}"
+    assert shell == canonical, (
+        f"maskers disagree on {uri!r}: shell={shell!r} canonical={canonical!r}"
+    )
+
+
+# #5267 — the other half of the contract: the fragment rule must NOT fail closed
+# on prose. The first three are the shapes the issue names; the rest are the
+# shapes an exception or boot line actually takes when it embeds a URI, and a
+# timestamp/path/`key: value` must keep printing (the tell is deliberately
+# narrower than the authority predicate for exactly these).
+_PROSE_THAT_MUST_PRINT = [
+    ("error:", "error:"),
+    ("12:30:45", "12:30:45"),
+    ("warn: bad", "warn: bad"),
+    ("C:\\foo", "C:\\foo"),
+    # a fragment whose colon has an EMPTY tail is prose, not a credential
+    (
+        "rediss://u:pw@host:6379 could not connect: timeout",
+        "rediss://:***@host:6379 could not connect: timeout",
+    ),
+    (
+        "rediss://u:pw@host:6379 failed: connection refused",
+        "rediss://:***@host:6379 failed: connection refused",
+    ),
+    # ...as is a shared-arity timestamp (three ':'-fields, no ASCII letter)
+    (
+        "rediss://u:pw@host:6379 at 12:30:45",
+        "rediss://:***@host:6379 at 12:30:45",
+    ),
+    # ...a single-colon path
+    (
+        "rediss://u:pw@host:6379 C:\\foo",
+        "rediss://:***@host:6379 C:\\foo",
+    ),
+    # ...and a bare word (no colon at all): the DOCUMENTED residual — text after
+    # an ASCII space is not bounded as an authority by either implementation, and
+    # a bare word is not credential-shaped.
+    (
+        "rediss://u:pw@host:6379 S3nPw",
+        "rediss://:***@host:6379 S3nPw",
+    ),
+    # a genuine path/query after the authority keeps printing
+    ("rediss://u:pw@host:6379/db?ssl=true", "rediss://:***@host:6379/db?ssl=true"),
+    # A scheme-less line is judged as a continuation ONLY when the value carries
+    # a scheme — and even then only a credential tell fails it closed. A
+    # `key: value` prose tail must not take the line down with it.
+    (
+        "rediss://u:pw@host:6379\nConnection refused by peer",
+        "rediss://:***@host:6379\nConnection refused by peer",
+    ),
+    (
+        "rediss://u:pw@host:6379\nError 111 connecting to host:6379",
+        "rediss://:***@host:6379\nError 111 connecting to host:6379",
+    ),
+    # ...while the SAME prose with no scheme anywhere in the value is untouched
+    # (a `user:pw:6379` line in an exception is not a credential).
+    ("ConnectionError: Error 111 connecting to host:6379. Refused.",
+     "ConnectionError: Error 111 connecting to host:6379. Refused."),
+]
+
+
+@pytest.mark.parametrize(("value", "expected"), _PROSE_THAT_MUST_PRINT)
+def test_prose_beyond_the_boundary_is_not_failed_closed(value, expected):
+    """#5267 — the fragment rule must not take the diagnostic down with it.
+
+    Class B: (1) this fails on any prose line either masker turns into the
+    sentinel, and on any divergence; (2) each shape is what an error path or the
+    boot block prints around a URI, so an over-broad tell costs the host name,
+    the port and the reason from the log line that exists to carry them.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    shell = _redact(value)
+    canonical = _mask_uri_userinfo(value)
+    assert shell == expected, f"shell over-redacted {value!r} -> {shell!r}"
+    assert canonical == expected, (
+        f"canonical over-redacted {value!r} -> {canonical!r}"
+    )
+    assert shell == canonical, (
+        f"maskers disagree on {value!r}: shell={shell!r} canonical={canonical!r}"
+    )
 
 
 # The canonical Python implementation of the same control. Two maskers for one
@@ -374,6 +529,28 @@ _BARE_URI_CORPUS = [
     # bare word there is indistinguishable from prose — `h:1 <word>` is a shape
     # connection errors take). Parity holds; the word is not masked.
     "rediss://u:pw@h:1 S3nPw",
+    # #5267: a credential fragment BEYOND the authority boundary. Every
+    # delimiter in the cut set ends the judged region, and the fragments after
+    # it are now judged by `_credential_tell` in both maskers — these pin that
+    # they agree (parity) on the new rule as well as on the leak.
+    "rediss://u:pw@h:1 :S3nPw",
+    'rediss://u:pw@h:1":S3nPw',
+    "rediss://u:pw@h:1\t:S3nPw",
+    "rediss://u:pw@h:1#:S3nPw",
+    "rediss://u:pw@h:1?:S3nPw",
+    "rediss://u:pw@h:1/:S3nPw",
+    "rediss://u:pw@h:1\v:S3nPw",
+    "rediss://u:pw@h:1\f:S3nPw",
+    "rediss://u:pw@h:1 user:S3nPw:6379",
+    "rediss://u:pw@h:1\nuser:S3nPw:6379",
+    "rediss:// :S3nPw/db",
+    # ...and the prose the rule must leave alone, so a future widening of the
+    # tell is caught by the parity corpus as well.
+    "rediss://u:pw@host:6379 could not connect: timeout",
+    "rediss://u:pw@host:6379 at 12:30:45",
+    "rediss://u:pw@host:6379 C:\\foo",
+    "rediss://u:pw@host:6379\nConnection refused by peer",
+    "ConnectionError: Error 111 connecting to host:6379. Refused.",
 ]
 
 
@@ -556,6 +733,13 @@ _MALFORMED_VALUE_CORPUS = [
     "r\u00e9diss://user:S3ntinel",
     "r\u00e9diss://user:S3ntinel@host:6379",
     "rediss://[::1]:\u0660",
+    # #5267: a credential fragment BEYOND the authority boundary — both maskers
+    # must agree here too (the fragment tell is a second predicate, and a second
+    # predicate is a second place for them to diverge).
+    "rediss://u:pw@h:1 :S3ntinel",
+    "rediss://u:pw@h:1 user:S3ntinel:6379",
+    "rediss:// :S3ntinel/db",
+    "1://h:1 :S3ntinel",
 ]
 
 
@@ -651,11 +835,32 @@ def test_neither_masker_emits_a_no_at_credential():
         "rediss://host:6379 rediss://user:S3ntinel",
         "rediss://host rediss://:S3ntinel",
         "rediss://host:6379\trediss://:S3ntinel",
+        # #5267: a credential in a delimiter-bounded fragment AFTER the authority
+        # region. The region stopped at the delimiter and the tail was never
+        # examined, so BOTH maskers echoed it: a space, a quote, '#', '?', '/',
+        # a lone CR (not a line break in either implementation), and the
+        # port-retaining continuation whose user field is NON-empty.
+        "rediss://u:pw@h:1 :S3ntinel",
+        'rediss://u:pw@h:1":S3ntinel',
+        "rediss://u:pw@h:1\t:S3ntinel",
+        "rediss://u:pw@h:1#:S3ntinel",
+        "rediss://u:pw@h:1?:S3ntinel",
+        "rediss://u:pw@h:1/:S3ntinel",
+        "rediss://u:pw@host\r:S3ntinel",
+        "rediss:// :S3ntinel/db",
+        "rediss://u:pw@h:1 user:S3ntinel:6379",
+        "rediss://u:pw@h:1\nuser:S3ntinel:6379",
+        "rediss://u:pw@host\nuser:S3ntinel:6379",
     ]
-    # NOT asserted: a continuation line with a NON-empty user (`user:pw:6379`).
-    # `_mask_uri_userinfo` cannot tell it from ordinary prose (`C:\foo`, an
-    # exception containing a colon), so both maskers leave it — a recorded
-    # residual, not a silent one (see the #2987 follow-up issue).
+    # #5267 residual, recorded here rather than hidden: the fragment tell requires
+    # the port-retaining form's LAST field to be digits, because a two-field
+    # `user:pw` fragment (or a `user:pw:notaport` tail) is lexically
+    # indistinguishable from prose (`C:\foo`, `key:value`, `config:app:prod`), and
+    # failing closed on those would drop the diagnostic. `rediss://:S3ntinel`
+    # (empty user) and `rediss://user:S3ntinel:6379` (numeric port) are both
+    # caught; `rediss://u:pw@h:1 user:S3ntinel:notaport` is NOT — a recorded
+    # residual, not a silent one. The AUTHORITY form is still caught by
+    # `_credential_shaped` (`rediss://user:S3ntinel:notaport` fails closed).
     for value in shapes:
         for label, out in (
             ("shell", _redact(value)),
@@ -663,6 +868,61 @@ def test_neither_masker_emits_a_no_at_credential():
         ):
             assert "S3n" not in out, f"{label} leaked {value!r} -> {out!r}"
             assert "tinel" not in out, f"{label} leaked {value!r} -> {out!r}"
+
+
+# #5267: every character in the authority cut set ends the judged region, so
+# every one of them is a place a credential fragment can hide BEYOND it. The
+# sweep is enumerated rather than a spot-check list, over the authority shapes a
+# target can take. The authorities here carry NO marker themselves: the marker
+# lives only in the appended fragment, so a leak assertion is meaningful (two
+# documented residuals — a BARE word after a delimiter, and a two-field or
+# non-numeric-port `user:*` tail — are not credential-shaped to the tell, and
+# are recorded in the corpus tests instead).
+_DELIMITERS = [" ", "\t", "\v", "\f", "\r", '"', "'", "#", "?", "/", "\n"]
+_SWEEP_AUTHORITIES = [
+    "",
+    "host",
+    "host:1",
+    "host:1/db",
+    "host:1?x",
+    "host:1#y",
+    "host:1'x",
+    "[::1]",
+    "[::1]:1",
+    "u:pw@host:1",
+    ":pw@host:1",
+    "user:6379",
+]
+
+
+def test_no_delimiter_lets_a_credential_fragment_ride_past_either_masker():
+    """#5267 — parity and the leak bar over the whole cut set.
+
+    Class B: (1) this fails on any (authority, delimiter, fragment) combination
+    where a masker still prints the `S3n`/`tinel` marker, or where the two
+    maskers disagree; (2) each combination is a value an operator can put in
+    `TORTOISE_DB_URI` (or that an error path can print) — the delimiter is the
+    whole point of the defect, so leaving any of them out of the sweep is what
+    let the original boundary assumption survive.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    values = [
+        f"rediss://{authority}{delimiter}{fragment}"
+        for authority in _SWEEP_AUTHORITIES
+        for delimiter in _DELIMITERS
+        for fragment in (":S3ntinelpw", "user:S3ntinelpw:6379")
+    ]
+    shells = _redact_many(values)
+    assert len(shells) == len(values)
+    for value, shell in zip(values, shells, strict=True):
+        canonical = _mask_uri_userinfo(value)
+        for out, label in ((shell, "shell"), (canonical, "canonical")):
+            assert "S3n" not in out, f"{label} leaked {value!r} -> {out!r}"
+            assert "tinel" not in out, f"{label} leaked {value!r} -> {out!r}"
+        assert shell == canonical, (
+            f"maskers disagree on {value!r}: shell={shell!r} canonical={canonical!r}"
+        )
 
 
 def _extract_boot_db_block(source: str) -> str:

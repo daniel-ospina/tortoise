@@ -1,0 +1,6 @@
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/test_7951_enforce_atomic_write.py::test_create_point_is_apply_first_a_recorded_deviation PASSED [100%]
+
+============================== 1 passed in 5.95s ===============================

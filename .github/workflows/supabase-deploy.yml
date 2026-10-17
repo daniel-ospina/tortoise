@@ -15,7 +15,7 @@
 #      creds: TORTOISE_DB_URI SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY
 #      bash .github/scripts/verify-cutover --live).
 #   2. DISPATCH this workflow (migrations + waitlist-subscribe +
-#      tenant-provision Edge Functions) — the Supabase side of the flip.
+#      tenant-provision + deck-view Edge Functions) — the Supabase side of the flip.
 #   3. deploy-hosted (the app flip: reads Supabase, #767) — DISPATCHED BY THIS
 #      RUN, as its final step (`Dispatch deploy-hosted (the app flip)`). Step 3
 #      is no longer a second operator action: this file performs steps 2 and 3
@@ -44,8 +44,8 @@
 # leave the app stale while the run looked closed, which is the exact defect
 # #3627 exists to remove (see the step's own comments).
 #
-# Guarded: the DEPLOY steps (verify-secrets, apply, both edge functions, and the
-# app-flip dispatch) run only when the SUPABASE_ACCESS_TOKEN secret is set
+# Guarded: the DEPLOY steps (verify-secrets, apply, the three edge functions,
+# and the app-flip dispatch) run only when the SUPABASE_ACCESS_TOKEN secret is set
 # (if: env.SUPABASE_ACCESS_TOKEN != '' — GitHub does not allow secrets in if:
 # conditions). Every step that WRITES or comes after one is gated, so without
 # the secret no migration is applied and no app flip is dispatched; the ungated
@@ -200,6 +200,13 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         run: |
           supabase functions deploy waitlist-subscribe \
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+      - name: Deploy deck-view edge function
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
+        # --no-verify-jwt: the gated /investors page POSTs from the browser with
+        # no user JWT (#8732), same as waitlist-subscribe above.
+        run: |
+          supabase functions deploy deck-view \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
       - name: Deploy tenant-provision edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''

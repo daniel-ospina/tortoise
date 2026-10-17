@@ -376,6 +376,36 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # embedded-only in practice (the bulk-wipe guard refuses non-test graphs in
     # server mode), so its survival pins must never flip to the server lane.
     "test_rebuild_config_preservation",
+    # #2792: per-graph pipelines — the state pins build a real embedded store and
+    # drive the `EntityMutated` journal + `rebuild_all` replay, so the carve-out
+    # is load-bearing (a URI-set lane would redirect the construction). Mirror of
+    # the `carve_out:` entry in config/ci-surfaces.yml.
+    "test_pipeline_2792",
+    # #7852 W1: the Layer-2 `semantics` write path resolves the direction from the
+    # declared meaning and records the basis as `direction_basis`. The fixture
+    # builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all` replay, so
+    # the carve-out is load-bearing — a URI-set lane would redirect the
+    # construction to the server and the embedded replay would be gone. Mirror of
+    # the `carve_out:` entry in config/ci-surfaces.yml; the two registries are one
+    # set in two homes (tests/test_ci_selection.py::
+    # test_carve_out_mirrors_test_no_redirect_stems).
+    "test_semantics_write_path_7852",
+    # #7852 v3.25: the four-value direction STORAGE vocabulary. The fixture builds
+    # `TortoiseSDK(<tmpfile>)` and reads EP message state off the live graph, so a
+    # URI-set lane would redirect the construction to the server and the embedded
+    # assertions would be gone. Mirror of the `carve_out:` entry in
+    # config/ci-surfaces.yml; the two registries are one set in two homes
+    # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+    "test_direction_storage_7852",
+    # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets), the source
+    # edge being EP's factor source slot, and the canonical evidence read never
+    # surfacing a point as its own supporter. The fixture builds
+    # `TortoiseSDK(<tmpfile>)`, so a URI-set lane would redirect the construction
+    # to the server and the embedded graph under test would be gone. Mirror of
+    # the `carve_out:` entry in config/ci-surfaces.yml; the two registries are one
+    # set in two homes (tests/test_ci_selection.py::
+    # test_carve_out_mirrors_test_no_redirect_stems).
+    "test_6871_operator_input_set",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
@@ -395,6 +425,22 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # carve_out list in config/ci-surfaces.yml (the two are one set in two
     # homes; tests/test_ci_selection.py pins the equality).
     "test_vecf32_overwrite_seams_4524",
+    # #4520 residual: the module-level `embedded_only` plain-list embedding
+    # guard asserts the EMBEDDED engine's type flip (`Vectorf32` -> `List` on a
+    # bare `+=` embedding write) and the seam that fixes it, so it must
+    # construct a real embedded store — a redirected construction would run
+    # against the server and certify nothing. Registered with the carve_out
+    # list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality).
+    "test_update_point_derived_embedding_4520",
+    # #8316: the module-level `embedded_only` guard for the VERBATIM
+    # (caller-supplied) embedding's dense read asserts the EMBEDDED store's
+    # plain-`List` shape and the read seam that tolerates it, so it must
+    # construct a real embedded store — a redirected construction would run
+    # against the server and certify nothing. Registered with the carve_out
+    # list in config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py pins the equality).
+    "test_verbatim_embedding_read_8316",
     # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
     # (it constructs a real embedded store), so it is a permanently green,
     # permanently unexecuted gate on main unless this stem is routed to the
@@ -1615,8 +1661,8 @@ def _owned_survivors(journal_names, live_names, default_graph) -> set[str]:
     return _owned_names(journal_names, default_graph) & set(live_names)
 
 
-def _team_sweep_allowed(uri: str) -> bool:
-    """#1686 (review P1-1): may the product-namespace stray pass run on `uri`?
+def _team_sweep_allowed() -> bool:
+    """#1686 (review P1-1): may the product-namespace stray pass run?
 
     The product's own mint namespace (hosted parity: real tenant graphs) is
     the _PRODUCT_GRAPH_PREFIXES family — `org_` since the tenancy rename
@@ -1645,29 +1691,37 @@ def _team_sweep_allowed(uri: str) -> bool:
     reads an empty namespace, gate red). A test-named path on a shared
     server is NOT an ownership record; the explicit opt-in is (CI's
     dedicated docker containers are fresh per job, so nothing accumulates
-    there without the pass)."""
-    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
-    # This gate requires the exact value "1": it is the SOLE authorization for an
-    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant
-    # org_*/team_* namespace (the `uri` parameter is dead — the #1884 URI inference
-    # was retracted — so no containment check compensates), and widening a
-    # destructive opt-in surface is not a vocabulary-coherence win. The refusal is
-    # logged with the exact required spelling, so the narrowing is discoverable.
-    # Pinned by tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
+    there without the pass).
+
+    #4128: it takes NO uri (the parameter was dead — the #1884 retraction left
+    the env var as the SOLE gate, and a signature still holding a `uri` invites
+    a reader to believe URI containment compensates). Callers that log the
+    target hold the uri themselves; see `_sweep_team_strays`."""
+    # OVERRIDES (#4128): the truthy-set parsing declared in #4097. This gate requires
+    # the exact value "1": it is the SOLE authorization for an irreversible
+    # journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant org_*/team_*
+    # namespace (the #1884 URI inference was retracted and the `uri` parameter is gone,
+    # so no containment check compensates), and widening a destructive opt-in surface is
+    # not a vocabulary-coherence win. The refusal is logged with the exact required
+    # spelling, so the narrowing is discoverable. Pinned by
+    # tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
     return os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1"
 
 
 def _sweep_team_strays(proj, uri: str) -> list[str]:
     """Drop journal-blind stray product-namespace graphs (#1686 closure).
 
-    Matches _PRODUCT_GRAPH_PREFIXES. Guarded by _team_sweep_allowed(uri) —
+    Matches _PRODUCT_GRAPH_PREFIXES. Guarded by _team_sweep_allowed() —
     never on a shared/dev docker (explicit opt-in only since #1884; the
     URI-path "test" inference retracted — see _team_sweep_allowed).
     DETACH+DELETE per graph, log-and-continue; returns the dropped names.
     Runs AFTER wipe_server in _leftover_sweep (journaled product-namespace
     names were already dropped by _sweep_drop; this closes the
-    raw-select_graph class)."""
-    if not _team_sweep_allowed(uri):
+    raw-select_graph class).
+
+    `uri` is kept HERE (not in the gate) only for the refusal log, so an
+    operator can see which target was skipped."""
+    if not _team_sweep_allowed():
         logging.getLogger(__name__).info(
             "leftover %s pass SKIPPED — %r (set "
             "TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)",

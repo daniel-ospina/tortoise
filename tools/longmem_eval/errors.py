@@ -80,15 +80,17 @@ RESUME_ATTEMPTS_CAP = 2
 # fix/invert-retrieval-to-product) — this module RE-EXPORTS it unchanged,
 # so the eval's ingest write path behaves identically while the product
 # owns the capability.
-#   Product default: NO bounded retry on the SDK write path yet —
-#       ``_post_commit`` is a single POST (tortoise/sdk.py:15240-15252) and
-#       graph writes are un-retried; robustness = idempotent MERGE keys +
-#       client_commit_id replay (sdk.py:1849-1857) + server-side
-#       CommitRecordStore dedup + fail-closed error surfacing. The retry
-#       PRIMITIVE is now a product module.
-#   Follow-up (NOT this PR): wiring ``tortoise.retry`` into the SDK write
-#       path (commit/capture writes) is the audit G8 candidate — the
-#       module is the reusable bounded-retry primitive for that decision.
+#   Product default (#7405): ⛔ The exact COVERAGE LIST lives in exactly one
+#       place — ``tortoise/retry.py``'s "PARTIALLY WIRED" header — and is
+#       deliberately NOT enumerated here, so this note cannot drift into a
+#       second, stale claim (the failure #7405's header exists to prevent).
+#       Read it there. The SDK's OTHER mutating surfaces remain un-retried:
+#       they are pure GRAPH writers (no ``client_commit_id``, no
+#       ``CommitRecordStore`` involvement), so their robustness is still
+#       idempotent-MERGE + server-side dedup.
+#   Eval role: this module RE-EXPORTS the product primitive unchanged; the
+#       eval's outer phase loop is unchanged, so its behaviour is identical
+#       and its retry-budget knobs stay eval-side.
 # ═════════════════════════════════════════════════════════════════════════
 
 

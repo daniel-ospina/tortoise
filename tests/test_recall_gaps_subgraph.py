@@ -1,8 +1,9 @@
 """Tests for UC2 "gaps" recall + UC3 "subgraph" recall (#898 Wave B).
 
 Unit coverage: GapsRanker math (load/support formula, zero-load is not a gap,
-high support collapses the score, embedded-signal contract, input immutability)
-and SubgraphExpander validation + empty-seed behavior.
+high support collapses the score, embedded-signal contract, input immutability,
+and the #2598 draft-honesty contract: a draft gap is badged, uncomputed, ranked
+after live) and SubgraphExpander validation + empty-seed behavior.
 
 Integration coverage (embedded FalkorDBLite): gaps golden set (a
 load-bearing-but-unsourced claim IS returned; a well-supported claim is NOT;
@@ -103,6 +104,63 @@ def test_gap_uncalibrated_confidence_neutral():
     rr = out[0]["gaps_ranking"]
     assert rr["confidence"] == NEUTRAL_CONFIDENCE
     assert rr["confidence_source"] == "neutral"
+
+
+# ── Unit: #2598 draft honesty on the gaps surface (no DB) ─────────────────
+
+
+def test_gaps_draft_without_measured_belief_renders_uncomputed():
+    """#2598: a DRAFT is EP-inert, so a gaps breakdown must show "no belief
+    computed" — never the fabricated neutral 0.5 that reads as a measurement.
+    The consumer need not know the status vocabulary: the row carries the
+    explicit ``draft: True`` badge."""
+    out = GapsRanker().rerank([
+        {"id": "d", "status": "draft", "gaps_outgoing_impl": 1},
+    ])
+    rr = out[0]["gaps_ranking"]
+    assert rr["confidence"] is None
+    assert rr["confidence_source"] == "uncomputed"
+    assert rr["draft"] is True
+
+
+def test_gaps_measured_draft_keeps_its_measured_number():
+    """A draft that DOES carry a persisted posterior (demoted after a real EP
+    run) keeps its measured number: the number is real, only the staging is
+    the news. It is still badged and still demoted below live."""
+    out = GapsRanker().rerank([
+        {"id": "d", "status": "draft", "gaps_outgoing_impl": 1,
+         "gaps_confidence": 0.75, "gaps_has_ep": True},
+    ])
+    rr = out[0]["gaps_ranking"]
+    assert rr["confidence"] == 0.75
+    assert rr["confidence_source"] == "posterior"
+    assert rr["draft"] is True
+
+
+def test_gaps_live_rows_unchanged_by_the_draft_gate():
+    """No live row changes: no ``draft`` key, the same numeric confidence, the
+    same source. An uncalibrated LIVE claim keeps the documented #898 neutral
+    0.5 — a recorded decision this change does NOT reopen."""
+    out = GapsRanker().rerank([
+        {"id": "live", "status": "live", "gaps_outgoing_impl": 1},
+    ])
+    rr = out[0]["gaps_ranking"]
+    assert rr["confidence"] == NEUTRAL_CONFIDENCE
+    assert rr["confidence_source"] == "neutral"
+    assert "draft" not in rr
+
+
+def test_gaps_draft_sorts_after_live_regardless_of_score():
+    """#2598 ordering: drafts sort AFTER every live gap by an EXPLICIT status
+    tiebreaker. The second assertion pins that this is NOT a score effect —
+    the draft's own structural score is the HIGHER of the two."""
+    out = GapsRanker().rerank([
+        {"id": "draft", "status": "draft", "gaps_outgoing_impl": 3},
+        {"id": "live", "status": "live", "gaps_outgoing_impl": 1},
+    ])
+    assert [r["id"] for r in out] == ["live", "draft"]
+    by_id = {r["id"]: r["gaps_ranking"] for r in out}
+    assert by_id["draft"]["score"] > by_id["live"]["score"]
 
 
 def test_gaps_ranker_inputs_not_mutated():
@@ -213,6 +271,55 @@ def test_gaps_golden_set_integration():
         assert rr["load"] == 1 and rr["support"] == 0
         assert rr["score"] == pytest.approx(1.0)
         assert rr["confidence_source"] == "neutral"  # uncalibrated
+        assert "draft" not in rr  # ...and LIVE, not staged
+    finally:
+        sdk.close()
+
+
+def test_gaps_draft_recalled_after_live_uncomputed_end_to_end():
+    """#2598 indicator 2 on the gaps surface, end-to-end on the real graph:
+    ``recall_gaps`` does NOT exclude drafts, so a DRAFT gap is RECALLED (never
+    hidden), badged (row ``status`` + ``gaps_ranking.draft``), shows "no belief
+    computed" (``confidence`` None / ``confidence_source`` "uncomputed") instead
+    of a 0.5, and is ranked AFTER the live gap even though its own structural
+    score is the higher of the two."""
+    sdk = _fresh_sdk()
+    try:
+        other = sdk.create_point("statement", "zephyr launch derivative requirement")
+        live_gap = sdk.create_point("statement", "zephyr q3 launch load-bearing live gap")
+        draft_gap = sdk.create_point(
+            "statement", "zephyr q3 launch load-bearing draft gap", status="draft")
+        # live_gap: load 1, support 1 (the draft's operator targets it).
+        # draft_gap: load 2, support 0 — it out-SCORES the live gap (2.0 > 0.5).
+        sdk.create_operator("IMPL", live_gap["id"], [other["id"]])
+        sdk.create_operator("IMPL", draft_gap["id"], [live_gap["id"]])
+        sdk.create_operator("IMPL", draft_gap["id"], [other["id"]])
+
+        results = sdk.recall_gaps(kind="statement", limit=20)
+        ids = [r["id"] for r in results]
+        by_id = {r["id"]: r for r in results}
+        assert live_gap["id"] in ids and draft_gap["id"] in ids
+
+        # (b) ranked after every live gap — a status tiebreaker, not a score
+        # coincidence (the draft's own score is higher, pinned below).
+        assert ids[-1] == draft_gap["id"]
+        assert by_id[draft_gap["id"]]["gaps_ranking"]["score"] > \
+            by_id[live_gap["id"]]["gaps_ranking"]["score"]
+
+        # (a) visibly badged draft.
+        assert by_id[draft_gap["id"]]["status"] == "draft"
+        assert by_id[draft_gap["id"]]["gaps_ranking"]["draft"] is True
+
+        # (c) no computed belief — never the neutral 0.5.
+        draft_rr = by_id[draft_gap["id"]]["gaps_ranking"]
+        assert draft_rr["confidence"] is None
+        assert draft_rr["confidence_source"] == "uncomputed"
+
+        # Live rows are untouched: numeric neutral + no draft badge.
+        live_rr = by_id[live_gap["id"]]["gaps_ranking"]
+        assert live_rr["confidence"] == NEUTRAL_CONFIDENCE
+        assert live_rr["confidence_source"] == "neutral"
+        assert "draft" not in live_rr
     finally:
         sdk.close()
 

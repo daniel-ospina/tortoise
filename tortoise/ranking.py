@@ -73,8 +73,46 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # W4-b (issue #2102): the bounded contested-relevance boost, in graph-boost
 # space (weighted by graph_boost_weight in the final score).  Small by
 # design — it tips relevance-matched contested claims ABOVE their
-# uncontested twins (E2E-1, pinned twin deltas < the boost effect), it does
-# not reorder the tail.  Strictly > 0 so a boost never lowers a score.
+# uncontested twins (E2E-1) while the twins' FUSED relevance difference stays
+# BELOW the boost's final-score contribution
+# (W4_CONTESTED_BOOST × graph_boost_weight = 0.0175); it does not reorder the
+# tail.  Strictly > 0 so a boost never lowers a score.
+#
+# THAT CONDITION IS NOT GUARANTEED ON A FUSED READ (#7704).  Content-identical
+# twins tie on EVERY leg, and each leg's own ``ORDER BY score DESC,
+# node.<id> ASC`` tie-break (#3019) hands the lower-ULID twin rank 0.  RRF is
+# rank-based (``1/(k + rank + 1)``), so the post-fusion min-max normalization
+# converts that ONE-rank difference into a relevance gap that grows as the
+# pool shrinks — measured on the shipped hybrid path: 0.0188 of final score on
+# the 4-row E2E-1 fixture (just above the 0.0175 boost, so the contested twin
+# ranks BELOW its twin), 0.254 on a 3-row pool.  The guarantee therefore holds
+# on a SINGLE-LEG read (where both twins score identically and the boost is
+# the sole differentiator), and on a fused read only while the fused relevance
+# delta stays under the boost effect.  Sizing the boost, changing the fusion
+# tie semantics, or restating the promise is a product decision — tracked on
+# #7704, not decided here.
+#
+# AND THE RANKER'S POOL IS THE PAGE, NOT THE CORPUS (#7704, re-measured
+# 2026-10-15).  ``tortoise_fts_query`` truncates the fused candidate list to
+# ``limit`` (``result_ids[:limit]``, before ``rerank`` normalizes it), so the
+# fused relevance delta the boost must clear is a function of the caller's
+# ``limit`` — the promise's truth is a property of the READ SHAPE.  Same
+# graph, same query, 404 points, dense leg live: the contested twin ranks
+# BELOW its twin at limit=4 (delta 0.0157) and at the shipped default limit=10
+# (delta 0.0013), and ABOVE it at limit>=40 (delta -0.0041), the gap shrinking
+# as the page grows.  On the fixture with 40 filler rows (a 44-point graph) it
+# ranks below at every limit 2..40 (+0.0056 at limit=40).  Raising the boost
+# does not repair this: the required magnitude is unbounded as the page shrinks
+# — a 2-row page normalizes the two rows to similarity 0.0 and 1.0, needing a
+# graph-boost increment > 1.43 where ``graph_boost`` is capped at 1.0 (measured
+# delta 0.4825 of final score).
+#
+# Every listed remedy is blocked by a RECORDED decision, which is why this is
+# reported rather than enacted: (1) boost inside fusion = score-based fusion,
+# the open owner ruling on #4210; (2) raise the boost = unbounded (above);
+# (3) tie on the contested signal = reverses #3019's id tie-break, which
+# ``temporal_leg.py`` consumes positionally; (4) restate the promise = the
+# recorded #2102 E2E-1 indicator, also the owner's.
 W4_CONTESTED_BOOST = 0.05
 # Significant-token floor: query/counter-claim overlap needs tokens ≥ this
 # many alphanumerics (1-3 char function words and subword noise never count;
@@ -922,12 +960,22 @@ class StateRanker:
 # min_load / max_support thresholds that define a "gap" are enforced by the
 # caller (recall_gaps), mirroring recall_state's min_confidence floor.
 #
+# #2598 — DRAFT HONESTY applies to this ranker too, and for the same reason.
+# ``recall_gaps`` does NOT exclude drafts (a draft is CURRENT, not terminal —
+# see ``live.py``), so ``tortoise_recall mode=gaps`` can return one. It is
+# EP-inert, so no belief was computed for it, and the diagnostic must say so:
+# badged ``draft: True``, ``confidence: null`` +
+# ``confidence_source: "uncomputed"`` instead of the neutral 0.5, and sorted
+# after every live gap by an explicit status tiebreaker. ``mode=gaps`` has its
+# OWN ranker (this one), which is why the StateRanker fix did not reach it.
+#
 # ``projection`` may be None for pure unit testing — graph signals are then
 # read from the result dicts themselves (keys ``gaps_outgoing_impl``,
 # ``gaps_outgoing_nand``, ``gaps_incoming_impl``, ``gaps_incoming_nand``,
 # ``gaps_source_count``, ``gaps_confidence``, ``gaps_has_ep``,
-# ``gaps_variance``, ``gaps_contested``). Absent keys degrade to zero/neutral
-# — never a penalty.
+# ``gaps_variance``, ``gaps_contested``) plus the row's own unprefixed
+# ``status`` column (#2598 — the staged state). Absent keys degrade to
+# zero/neutral — never a penalty.
 
 # Default gap thresholds (enforced by recall_gaps, not the ranker).
 DEFAULT_GAPS_MIN_LOAD = 1       # load-bearing: ≥1 outgoing IMPL/NAND edge
@@ -963,6 +1011,9 @@ class GapsRanker:
 
         ``{outgoing_impl, outgoing_nand, load, incoming_impl, incoming_nand,
           source_count, support, confidence, confidence_source, score}``
+        plus, on a DRAFT row only, ``draft: True`` (#2598 — see the module note
+        above the class). ``confidence`` is ``float | None``: null means "no
+        belief was computed for this staged row".
         """
         if not results:
             return results
@@ -998,8 +1049,24 @@ class GapsRanker:
             support = incoming_impl + source_count
             score = load / (1.0 + support)
             confidence, conf_source = self._confidence_of(r, sig)
+            # #2598: the row's STAGED state, read from the batch signal when the
+            # graph was queried and from the row itself otherwise — the same two
+            # reads (and the same ``n.status`` column) StateRanker uses, so the
+            # two rankers cannot disagree on what a draft is.
+            draft = sig.get("draft")
+            if draft is None:
+                draft = is_draft_status(r.get("status"))
+            draft = bool(draft)
+            # #2598: EP has not measured a draft (it is EP-inert at every
+            # factor-extraction call site), so there is no belief to report —
+            # never the fabricated neutral 0.5. Only a DRAFT is gated here: an
+            # uncalibrated LIVE claim keeps the documented #898 neutral 0.5 +
+            # ``confidence_source: "neutral"``. A draft that DOES carry a
+            # persisted posterior keeps its measured number — there the number is
+            # real and only the staging is the news.
+            uncomputed = draft and not self._has_ep(r, sig)
             copy = dict(r)
-            copy["gaps_ranking"] = {
+            ranking: dict[str, object] = {
                 "outgoing_impl": outgoing_impl,
                 "outgoing_nand": outgoing_nand,
                 "load": load,
@@ -1007,29 +1074,56 @@ class GapsRanker:
                 "incoming_nand": incoming_nand,
                 "source_count": source_count,
                 "support": support,
-                "confidence": round(confidence, 6),
-                "confidence_source": conf_source,
+                "confidence": None if uncomputed else round(confidence, 6),
+                "confidence_source": (
+                    UNCOMPUTED_CONFIDENCE_SOURCE if uncomputed else conf_source),
                 "score": round(score, 6),
             }
+            if draft:
+                # Additive, emitted only when true (the #1353 D8 / #2294 rule):
+                # every live gap stays byte-identical.
+                ranking["draft"] = True
+            copy["gaps_ranking"] = ranking
             if "variance" in sig:
                 copy["gaps_ranking"]["variance"] = round(sig["variance"], 6)
                 copy["gaps_ranking"]["contested"] = sig.get("contested", False)
             ann.append(copy)
 
-        ann.sort(key=lambda r: r["gaps_ranking"]["score"], reverse=True)
+        # #2598: drafts sort AFTER every live gap. Ordering is an EXPLICIT
+        # status tiebreaker — ``(is_draft, -score)`` — not a score side effect:
+        # the structural score says nothing about staging, so a draft's score
+        # (however high) is not an acceptable basis for placing it first. The
+        # same contract StateRanker states for recall_state.
+        ann.sort(key=lambda r: (
+            1 if r["gaps_ranking"].get("draft") else 0,
+            -r["gaps_ranking"]["score"],
+        ))
         return ann
 
     # ── Signal computation ────────────────────────────────────────────
+
+    def _has_ep(self, result: dict, signals: dict) -> bool:
+        """Whether EP has MEASURED this claim (#3276 semantics).
+
+        The graph signal (``has_ep``) wins when the batch read returned the id;
+        the embedded ``gaps_has_ep`` is the projection=None unit-path fallback.
+        Extracted so :meth:`_confidence_of` and #2598's uncomputed-draft gate
+        cannot drift on the same question — the same seam StateRanker carries.
+        """
+        has_ep = signals.get("has_ep")
+        if has_ep is None:
+            has_ep = bool(result.get("gaps_has_ep", False))
+        return bool(has_ep)
 
     def _confidence_of(self, result: dict, signals: dict) -> tuple[float, str]:
         """Confidence (posterior mean) + source label for one result.
 
         Uncalibrated points fall back to the documented neutral 0.5 — same
         convention as StateRanker (absence of measurement is NOT low support;
-        the STRUCTURE is what makes a gap)."""
-        has_ep = signals.get("has_ep")
-        if has_ep is None:
-            has_ep = bool(result.get("gaps_has_ep", False))
+        the STRUCTURE is what makes a gap). For a DRAFT the caller replaces
+        both with null/``"uncomputed"`` (#2598) — this method reports the read,
+        the staging gate lives in :meth:`rerank`."""
+        has_ep = self._has_ep(result, signals)
         if "confidence" in signals:
             conf = float(signals["confidence"])
             return conf, ("posterior" if has_ep else "neutral")
@@ -1123,7 +1217,10 @@ class GapsRanker:
         for row in rows:
             pid, alpha, beta, has_ep = row[0], float(row[1]), float(row[2]), bool(row[3])
             # #2490: terminal rows never surface as measured/contested EP (len
-            # guard — see GraphRanker).
+            # guard — see GraphRanker). #2598: the len guard also covers the test
+            # fakes' 4-tuple row shape, so an absent status column reads as "not a
+            # draft" rather than raising.
+            status = row[4] if len(row) > 4 else ""
             if len(row) > 5 and is_terminal_status(row[4], bool(row[5])):
                 has_ep = False
             variance = _beta_variance(alpha, beta)
@@ -1131,12 +1228,22 @@ class GapsRanker:
                 "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,
                 "has_ep": has_ep,
                 "variance": variance,
+                # #2598: the staged state rides the SAME batch read EP already
+                # needs — no extra query on the recall path.
+                "status": status or "",
+                "draft": is_draft_status(status),
                 "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
             }
         return out
 
     def _embedded_signals(self, results: list[dict]) -> dict[str, dict]:
-        """Read gaps signals embedded in result dicts (projection=None)."""
+        """Read gaps signals embedded in result dicts (projection=None).
+
+        Keys: gaps_* load/support/confidence signals plus the row's own
+        ``status`` (and the ``draft`` predicate derived from it, #2598 — this
+        path exists precisely because there is no graph to query). Absent keys
+        degrade to zero/neutral, never a penalty.
+        """
         out = {}
         for r in results:
             rid = r.get("id")
@@ -1153,6 +1260,10 @@ class GapsRanker:
             if isinstance(r.get("gaps_variance"), (int, float)):
                 sig["variance"] = float(r["gaps_variance"])
                 sig["contested"] = bool(r.get("gaps_contested", False))
+            # #2598: the staged state, read from the row's own status column
+            # (this path exists precisely because there is no graph to query).
+            sig["status"] = r.get("status") or ""
+            sig["draft"] = is_draft_status(sig["status"])
             out[rid] = sig
         return out
 

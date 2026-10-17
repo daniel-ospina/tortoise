@@ -7,7 +7,7 @@ status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
 summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-10-11
+updated: 2026-10-14
 allowed-tools: read write bash
 ---
 
@@ -46,7 +46,9 @@ follows after you run or paste it — nothing is installed into a skills dir.
 ## 1. Read OnboardingState first (resume, never restart)
 
 Before installing anything, read the organization's onboarding state so you
-resume where the flow left off — onboarding is stateful and idempotent:
+resume where the flow left off — onboarding is stateful and idempotent.
+(**Self-hosted only:** your daemon must already be up, because it is what
+serves the read — install first, see the self-hosted bullet below.)
 
 - **Hosted, MCP-connected agents:** call `tortoise_onboarding_state` (the MCP
   read tool) when it is listed. It returns the FLOW projection: `fork`
@@ -66,11 +68,26 @@ resume where the flow left off — onboarding is stateful and idempotent:
   only:** a ChatGPT connector never takes this header and has no key to send —
   if you are ChatGPT, ignore this bullet and the #1701 note beneath the harness
   table applies instead.
-- **Self-hosted:** there is no hosted onboarding REST surface — skip the
-  state read and checkpoint steps. Install the SUPPORTED path first —
-  Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
-  verify. Embedded without Docker is the EVAL-ONLY fallback (section 3a),
-  never a durable setup. W12's self-hosted init owns the onboarding node
+- **Self-hosted:** install the SUPPORTED path FIRST —
+  Docker Compose daemon + FalkorDB sidecar (section 3a). Embedded without Docker
+  is the EVAL-ONLY fallback (section 3a), never a durable setup. The daemon is
+  what SERVES the state read, so it has to be up before you can read anything.
+  **Then READ the state and resume, never restart:** the daemon serves the
+  state read and the seed — `GET /v1/onboarding/state`
+  and `POST /v1/onboarding/seed` (`org_name` + `person_name`, both required) —
+  authorized with `Authorization: Bearer $TORTOISE_API_KEY` (required once the
+  daemon has a key set; optional while it stays loopback-bound with none,
+  section 3a). **Those two are all it serves:** the other hosted onboarding
+  routes — `PATCH /v1/onboarding/state`, `session-recording`, the GitHub
+  connect/status routes, and the checkpoint — have NO self-hosted twin, so
+  §5's `PATCH` guidance is hosted-only. **The session-recording MCP tool is
+  LISTED on the self-hosted daemon, but its write does NOT land there** — the
+  self-hosted deployment has no control-plane `Team` node for it to write, and
+  the write is a `MATCH`-no-op that still reports success — so do not rely on
+  it to change the setting self-hosted.
+  Do NOT checkpoint: the daemon serves no checkpoint route, and
+  the self-hosted lane records `harness-connected` / `first-points-filed`
+  server-side itself. The self-hosted init owns the onboarding node
   (`fork='self'` default, no fork card).
 
 Branch on what you find:
@@ -225,6 +242,15 @@ and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 > `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
 > (Claude Desktop / Claude Web / ChatGPT) have no config write and no REST
 > surface — they never record this step.**
+>
+> **Self-hosted: do NOT POST this step.** The hosted URL above would 401 — a
+> self-hosted session's key belongs to its OWN daemon, and the daemon serves no
+> checkpoint route (`tortoise/selfhost_api.py`). The self-hosted lane records
+> `harness-connected` / `first-points-filed` server-side itself
+> (`tortoise/onboarding/selfhost.py`), so there is nothing for the client to
+> checkpoint. `connection-written` is never written self-hosted, so §1's
+> `restart_pending` **`true`** row cannot fire there — the `'unavailable'` row
+> still does, on a graph-down read.
 
 ### Claude Code (self-install)
 
@@ -282,7 +308,10 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
 ```
 
 Persist the export in your shell profile — if it is version-controlled, use a
-non-committed include instead. The skill installer writes Codex
+non-committed include instead. Then **start Codex from a new shell**:
+`--bearer-token-env-var` is read from the launching process's environment, so a
+client started from the old shell (before the export) sends an empty bearer
+token and every call fails to authenticate. The skill installer writes Codex
 skills to `.agents/skills` (Codex's documented skill root — NOT `.codex/skills`,
 which Codex never loads) and adds a repo-root AGENTS.md standing-instructions
 block:
@@ -504,10 +533,22 @@ Guide the human through:
 
 1. Call `tortoise_health` (MCP tool, all 6 harnesses once connected). It
    must report the graph reachable + your organization context.
-2. On failure: retry once; then give an honest diagnostic — config write
-   invalid (harness broken)? Offer the teach-human fallback (the connector
-   steps for Desktop/Web) or re-run the
-   universal command. Never claim connected on a failed `tortoise_health`.
+2. On failure: retry once, then diagnose against these THREE outcomes, in
+   this order — the first is the commonest and the easiest to misread:
+   - **The session has not loaded the server yet** — the `tortoise_*` tools
+     are absent from `tools/list`, or the call failed before any auth
+     exchange. This is NOT a broken config. Have the human restart the
+     client, then retry `tortoise_health` in the NEW session: a session
+     started after the config write reads the config on disk. Never route
+     this outcome to a different connector.
+   - **Credential rejected** — a 401, an empty `Authorization: Bearer`, or a
+     different organization than you expect. The key, or the environment the
+     client was launched with, is wrong: re-check the key, and on Pi / Codex
+     CLI confirm it was exported in the shell that LAUNCHED the client.
+   - **Unsupported / the config write is invalid** — offer the teach-human
+     fallback (the connector steps for Desktop/Web) or re-run the universal
+     command.
+   Never claim connected on a failed `tortoise_health`.
 3. On success — **write the harness-connected checkpoint** (idempotent
    first-write-wins keyed-MERGE; replay is a no-op, so re-running this write
    is safe):
@@ -543,8 +584,9 @@ connection verify fails → retry with diagnostic + honest error (never a
 silent skip); self-hosted daemon unreachable → the compose stack is not up
 (or TORTOISE_DB_URI points at a dead sidecar) — run `docker compose up -d`
 (section 3a) and re-verify, never silently "fix" it by pointing at
-embedded; state read unavailable (self-hosted) → skip checkpoint (W12 owns
-the self-hosted node).
+embedded; state read unavailable (self-hosted) → re-read before acting, and do
+NOT checkpoint — the daemon serves no checkpoint route, and the self-hosted
+lane records `harness-connected` / `first-points-filed` server-side itself.
 
 ## 5. Capture setup — ask, then install in the prompt (#3517)
 
@@ -597,6 +639,11 @@ setting, even after an earlier decline (see the re-enable pin below).
    - CLI agent (no MCP tool listed yet): `PATCH /v1/onboarding/state` with
      `{"session_recording": true}`
    Both write `session_recording` + `capture_revised`, and nothing else.
+   **Self-hosted: the MCP tool path works (#8686).** The write lands on the
+   deployment's own `:OnboardingState` node (create-on-write), and the state
+   read reports it under `operational`. The daemon still serves no `PATCH`
+   route, so the CLI path is hosted-only — use the MCP tool self-hosted. You
+   may report the setting as changed.
 4. **Fire the install probe BEFORE you report success.**
    `tortoise session probe --harness <harness>` (the existing
    `POST /v1/sessions/install-probe` route — no new endpoint). Without this the
@@ -620,10 +667,14 @@ setting, even after an earlier decline (see the re-enable pin below).
    `PATCH /v1/onboarding/state` with `{"session_recording": false}`). That is
    `session_recording=false` + `capture_revised=true`, exactly the yes-branch
    key set with the opposite value — never a different set of keys.
+   **Self-hosted: the decline persists (#8686)** — the MCP tool writes the same
+   key set as hosted, onto the deployment's own node. You may confirm it took.
 3. **Confirm honestly** with
    `tortoise session disclosure --harness <harness> --kind declined`: nothing was
-   installed, nothing will be recorded, and the setting stays visible where the
-   user can turn it back on.
+   installed, and the rendered text selects its state sentence from the LIVE
+   `session_recording` flag — OFF only when it is off, ON when it is on, and its
+   own wording when the flag could not be read. Print it as rendered; do NOT
+   assert the recording state from the user's answer alone.
 
 ### The re-enable path is pinned
 
@@ -632,6 +683,10 @@ regardless of `capture_revised`** — a user who declined can re-enable at any
 time through the tool, through the dashboard toggle, or by answering this ask
 yes. An implementation that short-circuits on `capture_revised` would strand
 them, so the parity test asserts the re-enable write lands.
+
+**Self-hosted, this path works too (#8686)** — the re-enable write lands on the
+same owned node, so the tool, the dashboard toggle and a "yes" to this ask all
+reach the one state path.
 
 ### The off-switch is ONE shared fact, never re-typed
 
@@ -644,7 +699,54 @@ rendered from there by both this prompt and the dashboard; the same file names
 the `settings-memory-heading` anchor so a UI rename cannot silently drift the
 sentence a user reads. **Do not re-type the path anywhere** — print the render.
 
-## 6. Next steps (do NOT do them in this session unless asked)
+## 6. Choose what Tortoise remembers (data sources — #3513)
+
+The hosted wizard asks this at step 3, before `done`. The self-hosted prompt
+asks the **same question, in the same order**, so the two surfaces expose
+**equivalent** capture behaviour (epic #1714 R12/J8). Ask it as a setting, not
+a consent gate — every source is optional and reversible, and the user can
+change it any time from `Settings → Memory sources`.
+
+> **Self-hosted caveat:** the question is asked the same way, and the FIRST tile
+> (`session_recording`, section 5) is a **real, observable switch** on a
+> self-hosted install — the write lands, and the state read reports the stored
+> operational keys under `operational` (`tortoise_onboarding_state` /
+> `GET /v1/onboarding/state`), so reversibility **may** be promised for that
+> tile (#8686). Self-hosted the OTHER tiles still have no write path: their
+> only writer is the dashboard `PATCH /v1/onboarding/state`, which the daemon
+> does not mount, and `tortoise_onboarding_github_connect` has no self-hosted
+> team context — so do not promise changes to those.
+
+The pinned order and the per-source state keys are the dashboard's tile
+inventory (`website/apps/dashboard/src/integrationsGrid.js`, one declaration
+shared with the demand keys in `tortoise/demand.py`):
+
+| Tile (pinned order) | What it does | State key |
+|---|---|---|
+| **Agent session recording** | sessions captured on this machine (see section 5) | `session_recording` |
+| **GitHub issues** | issues become work items with a lifecycle record | `issues_enabled` |
+| **GitHub documents** | the repos' `docs/` folders are indexed as Sources | `docs_enabled` |
+
+GitHub's two sources are **separately enable-able** and share **one OAuth
+connect** — turning issues off never disconnects GitHub for documents (the
+`github_connected` key is the connection, never a per-source toggle).
+
+- **Ask, then honour the answer.** A "no" writes nothing (a source absent from
+  the projection is off, not enabled); a "yes" writes the per-source enable
+  intent through the same tool surface the hosted wizard uses
+  (`tortoise_onboarding_session_recording` / the onboarding-state path) — one state path,
+  never a second copy of the flag. **Self-hosted: this tile's write lands
+  (#8686)** — the agent-session-recording toggle writes through the owned
+  onboarding-state node, so you may report the answer as applied.
+- **An unbuilt integration is never faked.** Anything not in the inventory
+  above is **coming soon**: say so plainly, honour a "yes" as interest rather
+  than as a setup step, and **never** present it as available or connect it.
+- **The delete path is named, never promised blind.** Captured sessions are
+  viewed and deleted in `Settings → Captured sessions` (the
+  `id="settings-capture-heading"` home). Print that path; do not describe a
+  deletion route that does not exist.
+
+## 7. Next steps (do NOT do them in this session unless asked)
 
 - **Seed** (files your Organization + User as Subjects, linked `memberOf`) —
   owned by the W3 seed skill; the Setup guide card asks when it is that
@@ -653,7 +755,7 @@ sentence a user reads. **Do not re-type the path anywhere** — print the render
   MCP-tool decide protocol below. It requires NO local skill file (works on
   all 6 harnesses); the local `tortoise-decide` skill is a convenience, not
   a prerequisite.
-- **Capture disclosure** — see the copy contract in section 7 (fired at the
+- **Capture disclosure** — see the copy contract in section 8 (fired at the
   user's first capture, not during install).
 
 ### Enabling a data source (thin UI, capable backend, agent-addressable — #3540)
@@ -662,13 +764,22 @@ The dashboard's job is to **show** what exists and its state; the **wiring**
 (connect, enable, scope, start an index) lives in the backend and is reachable
 from the **tool surface**, so an agent can do it without any per-integration UI
 flow. Each integration this document covers is enable/connectable **and**
-state-readable from that surface:
+state-readable from that surface — **with ONE exception: the daemon serves no
+onboarding *enable/connect* write route at all, so none of the connect legs
+below works self-hosted** (agent-session recording does, because it writes
+through the owned onboarding-state node, not a connect route — #8686). (It does
+serve the onboarding FLOW: read it with `tortoise_onboarding_state`, and file
+the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
 
 - **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
   `tortoise_onboarding_github_index`; read `tortoise_onboarding_github_status`
   (or `tortoise_onboarding_state`).
 - **Agent-session recording** — `tortoise_onboarding_session_recording`
-  (`enabled`); read it back from `tortoise_onboarding_state`.
+  (`enabled`); read it back from `tortoise_onboarding_state`, which reports the
+  stored operational keys under `operational` (#8686). **Self-hosted this is the
+  ONE connect-style leg that works** — both the write and the read-back land on
+  the deployment's own node. Both were fixed by #8686; before it, the write
+  no-opped and reported success anyway.
 - **GitHub documents** — the enable route (`POST /v1/index/docs`) and its job
   status have **no MCP tool yet**; adding one expands the agent-facing surface
   and needs owner approval plus a `config/surface-manifest.yml` re-cut
@@ -756,7 +867,7 @@ cannot reach the graph (never decide against a dead connection):
    *why*: the top edges that moved each option. Run `tortoise_check_structure`
    to confirm no orphaned operators.
 
-## 7. Capture-announcement COPY CONTRACT (W6 implements the trigger)
+## 8. Capture-announcement COPY CONTRACT (W6 implements the trigger)
 
 Owned here (epic #1976 §3 + §8 timing pin). At the user's FIRST capture —
 the first time a session/conversation is filed to the graph — the agent says

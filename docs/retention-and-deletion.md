@@ -19,6 +19,10 @@ related:
     note: "Team-account soft delete → grace → hard purge."
   - issue: 3925
     note: "Owner ruling: account memory is the ACCOUNT's property — a person's erasure deletes the identity layer and severs the analytics linkage, and never reaches into the account's memory. The account-side PII filter / selective delete is DEFERRED (not prioritised); this document carries the boundary so a well-meaning adjacent change cannot quietly reverse it."
+  - issue: 8032
+    note: "Auth-session-store GC grace registered 2026-10-12: the D1 `sessions` table keeps a dead row for a grace past its own `expires_at` before deleting it. An implementation window for an internal credential store — registered here because this document is where a window may be stated, but it is NOT one of the deletion promise's windows and changes no customer-facing wording."
+  - issue: 7351
+    note: "Derived kind-index cache registered 2026-10-15: `data/kind_index/*.npz` is regenerable from its spec — bounded LRU (a named constant), never user content, and carrying no retention window. Registered so an ops reader can see that deleting it is always safe."
 ---
 
 # Retention and Deletion — the one promise
@@ -52,7 +56,19 @@ The horizon is **path-dependent**, and the difference matters:
 | **Live**-data snapshots (a backup horizon, **not** an undo) | ≈ **28 days** (24 hourly + 7 daily + 4 weekly) | `tortoise/backup_config.py` `retention_hourly/daily/weekly` |
 | **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
 | **Session recording** — the recording itself | **no expiry** — retained until deleted by a member of the organization (**owner ruling 2026-10-08**); a snapshot taken before the deletion retains it until it ages out on the ≈28-day cycle, so deletion is complete in the live service immediately and in backups within four weeks | `tortoise/hosted_api.py` `delete_session` |
+| **Product-usage record** — the per-capture / per-team `capture_cost` rows in `analytics_events` (#3843) | **no default window** — the record is kept; on an account/team erasure the **identity layer is hard-deleted and the row is retained decoupled** (the table has **no FK** to `organizations`, so no cascade reaches it, and the `organizations` row carrying the name is deleted) | `tortoise/supabase_control.py` `purge_org_control_plane` — it deletes `api_keys` / `org_memberships` / `invitations` and then the `organizations` row via `purge_org_record`, and deliberately **never touches `analytics_events`** |
 | **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
+| **Auth session store** — an expired row in the D1 `sessions` table (the opaque handle + its refresh token) | deleted **24 hours after its own `expires_at`**; a **revoked** row is never deleted early, so it survives the session's whole declared life (400 days, `SESSION_MAX_AGE_S`) | `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` |
+| **Auth mail throttle** — a window-salted SHA-256 pseudonym of the caller's `CF-Connecting-IP` in the D1 `auth_mail_throttle` table (#4161) | deleted **after its own one-hour window** (plus the following window, the prune predicate's grace); reclaimed by `pruneExpired`, which runs on the request that creates the bucket as well as on a refusal, so it is a function of **time**, not of traffic | `website/apps/dashboard/functions/_shared/auth/mail-throttle.ts` `MAIL_THROTTLE_WINDOW_S` |
+
+The **auth session store** row is the store's own garbage collection, not a promise
+window: it bounds how long a dead handle (and the credential it carries) stays readable
+in D1. The **auth mail throttle** row is the same class of collection, one layer weaker
+still — what it holds is a per-window pseudonym of a client, never a credential or
+content. Neither says anything about user content, and no customer copy states either:
+the session store's declared lifetime is a session's `expires_at` (400 days) plus this
+grace, and revocation does not shorten it. See `docs/engineering/auth/d1-session-store.md`
+§5a.
 
 > **Restore window ≠ retention window.** R1 forbids retaining user **content**
 > for any length. The 7 days are an **undo** offer, never a claim that we keep
@@ -90,6 +106,8 @@ this document:
 | `tortoise/retention.py` `RESTORE_WINDOW_DAYS` / `RESTORE_WINDOW_HOURS` | **Sole authority for the restore window** |
 | `tortoise/backup_config.py` `retention_hourly` / `retention_daily` / `retention_weekly` | **Sole authority for the backup-hold counts** (a different concept from the restore window) |
 | `tortoise/backup_config.py` `LOCK_DAYS_MAX` | the bucket-lock bound; must stay strictly below the restore window (`RESTORE_WINDOW_DAYS - 1`) |
+| `tortoise/raw_state.py` `RAW_DELETION_MARKER_TTL` | **Sole authority for the deletion-marker guarantee window** (**10 days** — Cassandra's `gc_grace_seconds` default, the storage-layer canon the #3998 ruling rests on). Metadata about the LINK back to the raw, never a copy of it and never a retention period on user content (R1); after it a (future, journalled) collection pass MAY drop the marker. Registered so a restatement of the number is traceable to one authority; the availability axis itself is recorded at `docs/ONTOLOGY.md` §4.6. |
+| `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` | **Sole authority for the D1 auth-session-store grace** — how long a `sessions` row is kept past its own `expires_at` before `sweepExpiredSessions` deletes it (#8032). Not a deletion-promise window; see the table above. |
 
 Everything else is a **derived alias**, never independently set:
 
@@ -258,6 +276,56 @@ and it is exempt from the "link or be a named constant" rule by the same logic
 as the operational event store. The control-plane audit trail lives in
 `audit_events`; no deletion here destroys an audit record.
 
+## A different axis: the derived kind-index cache (#7351)
+
+`DEFAULT_CACHE_DIR` (`data/kind_index/*.npz`, `tortoise/kind_index.py`) is the
+classifier's content-addressed kind-embedding index. Every file is **derived** —
+regenerated from its spec on demand — so it is not user content, holds no
+personal data, and carries **no retention window**: deleting any file, or the
+whole directory, is always safe and costs one re-embed. It is exempt from the
+"link or be a named constant" rule by the same logic as the operational event
+store.
+
+It is nonetheless **bounded**, because its key space is tenant-growable: the
+spec varies per graph's installed-namespace gate (#5163), so `persist` added
+one npz per distinct gate and nothing deleted one (#7351). `persist` now sweeps
+the directory to `_MAX_PERSISTED_INDEXES` least-recently-used files (recency is
+refreshed on `load`, so a hot gate's index is not evicted for merely being the
+oldest *write*), and eviction is a re-embed, never a wrong answer.
+
+## A different axis: the product-usage record (#3843)
+
+The owner decided (#3843, 2026-09-17) to keep a rich **per-capture, per-team**
+usage record — *team · session · timestamp · harness · model(s) · calls · input
+tokens · output tokens · cost* — written as one `capture_cost` row per capture
+ATTEMPT into `analytics_events`, so usage can be read at team level ("this
+team's usage is climbing") and at capture level ("this capture was unusually
+expensive"). Its retention is **not** the deletion promise above and **is not a
+window**:
+
+- **No default window, of any length.** The owner ruled (#3853, 2026-09-17) that
+  there is no default retention period on user content, and the only
+  user-initiated deletion flow is the account/team path.
+- **On erasure the record is retained decoupled, not deleted.** *"Usage data
+  that's been aggregated (product usage analytics) can't be fully deleted but
+  gets decoupled from your identity (which is fully deleted)."* (Owner, #3853.)
+  No code severs a link, because the decoupling **is** the identity deletion:
+  `purge_org_control_plane` hard-deletes `api_keys`, `org_memberships`,
+  `invitations` and then the `organizations` row — the row that carries the
+  name, and through it the identity — and **never touches `analytics_events`**,
+  which has no FK to `organizations` to cascade through. The surviving row
+  carries a random `org_id` and no longer resolves to a team or a person. Pinned
+  by
+  `tests/test_retention_promise.py::test_usage_record_is_retained_decoupled_on_purge`.
+
+> **OVERRIDES:** the common erasure practice — a data-subject request deleting
+> *every* copy of that subject's personal data, analytics included — because the
+> owner ruled that product-usage analytics are kept and **de-identified** rather
+> than deleted. Customer copy states the same carve-out: privacy §6 *"analytics
+> data is not silently claimed to be deleted"*, and the §16 deletion scope is
+> *"deleted or de-identified"*. Reopening it is an owner question on **#3853**,
+> not a discovery to absorb into an adjacent deletion change.
+
 ## Open gaps and open decisions
 
 - **Team-account cascade (D5 — follow-up).** Deleting a team account today
@@ -314,8 +382,11 @@ not a whitelist — a file outside the set above may still link here.
 
 **Named implementation constants** (exempt by design): `tortoise/retention.py` and
 `tortoise/backup_config.py` are exempt whole-file (every line is the authority);
-`tortoise/{backup_sweep,hosted_api,sdk,supabase_control}.py` are exempt only on
-lines that name a canonical constant. `website/apps/dashboard/src/graphs.test.js`
+`tortoise/{backup_sweep,hosted_api,sdk,supabase_control,raw_state}.py` are exempt
+only on lines that name a canonical constant. `docs/ONTOLOGY.md` is exempt only on
+lines that name a canonical constant too (its §4.6 row does carry a bare window
+number, but it names `RAW_DELETION_MARKER_TTL` on that same line — the constant,
+not the absence of a number, is what makes the line traceable). `website/apps/dashboard/src/graphs.test.js`
 is derived: it imports `TRASH_GRACE_DAYS` from `graphs.js` rather than restating
 the number.
 

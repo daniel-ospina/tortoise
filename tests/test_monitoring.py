@@ -3498,7 +3498,7 @@ def test_event_retention_interval_validation(monkeypatch):
     POSITIVE whole number of seconds. ``0``/``-1`` make ``asyncio.sleep()``
     return immediately in the hosted retention loop and the SDK purge gate
     ``now - _EVENT_PURGE_LAST < interval`` always false (a DELETE on every
-    ``events_poll``). A non-numeric value raised out of the SDK poll."""
+    ``poll_events``). A non-numeric value raised out of the SDK poll."""
     from tortoise.monitoring import (
         EVENT_RETENTION_INTERVAL_DEFAULT_S,
         event_retention_interval,

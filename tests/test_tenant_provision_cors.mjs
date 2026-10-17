@@ -25,10 +25,10 @@
 //      read them.
 
 import assert from "node:assert";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { __setJwtUser, __setRpcResult } from "./edge-function-stubs/supabase-js.ts";
+import { __resetRpcCalls, __rpcCalls, __setJwtUser, __setRpcResult } from "./edge-function-stubs/supabase-js.ts";
 
 const REPO_ROOT = new URL("..", import.meta.url).pathname;
 const EDGE_FN = join(REPO_ROOT, "supabase/functions/tenant-provision/index.ts");
@@ -237,6 +237,30 @@ try {
   check("JWT POST from unknown Origin → 403 + fallback acao (origin gate first)",
     await call("POST", { ...jwtHeaders, origin: EVIL }, JSON.stringify({ user_id: USER_ID, email: EMAIL })),
     { status: 403, acao: FALLBACK, vary: true });
+
+  // ── Phase 4 (#2810): the tenant-provision half of the one-free-org
+  //    invariant. The org id is DETERMINISTIC — sha256(user_id)[:26] — so an
+  //    auth-hook redelivery or a direct-JWT re-invocation converges on ONE org
+  //    through provision_team's ON CONFLICT (id) DO UPDATE (asserted at the SQL
+  //    level in supabase/tests/0010_provisioning_rpcs.sql §3: "idempotent:
+  //    exactly one organizations row after re-invocation"). This exercises the
+  //    REAL handler twice and pins the RPC ARGUMENT that carries the invariant.
+  __setJwtUser({ id: USER_ID, email: EMAIL, user_metadata: { display_name: "Test" } });
+  __setRpcResult({ error: null });
+  __resetRpcCalls();
+  const twice1 = await call("POST", jwtHeaders, JSON.stringify({ user_id: USER_ID, email: EMAIL }));
+  const twice2 = await call("POST", jwtHeaders, JSON.stringify({ user_id: USER_ID, email: EMAIL }));
+  const orgIds = __rpcCalls().map((c) => c.params?.p_org_id);
+  const expectedOrgId = createHash("sha256").update(USER_ID).digest("hex").slice(0, 26);
+  const deterministic =
+    twice1.status === 201 && twice2.status === 201 &&
+    orgIds.length === 2 && orgIds[0] === expectedOrgId && orgIds[0] === orgIds[1];
+  results.push({
+    name: "ONE user provisioned twice → same deterministic p_org_id (sha256(user_id)[:26])",
+    ok: deterministic, status: twice1.status, acao: "-", vary: "p_org_id=" + orgIds[0],
+  });
+  assert.ok(deterministic,
+    `deterministic org id violated: p_org_ids=${JSON.stringify(orgIds)} expected=${expectedOrgId}`);
   __setJwtUser(null);
 
   // ── Report ─────────────────────────────────────────────────────────────
