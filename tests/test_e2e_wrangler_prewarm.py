@@ -64,7 +64,13 @@ PREWARM_STEP = "Pre-warm wrangler toolchain"
 
 #: A shell line CONTINUATION removes the backslash AND the newline, so the two
 #: lines are one command line: an invocation split across them is still one
-#: invocation and must be matched as one.
+#: invocation and must be matched as one. The fold is UNCONDITIONAL, so inside
+#: single quotes — or a quoted here-doc body — it removes a pair shell keeps: the
+#: word then reads as the pin while bash passes `4.127.0\<newline>`, which npm
+#: rejects as a range (measured `null`). That is fail-LOUD — npx errors instead of
+#: installing something else, and the step cannot pass — so it is declared rather
+#: than tracked: the fold runs before quoting is known, and moving it inside
+#: `_shell_words` would put it after the token scan that depends on it.
 _CONTINUATION = re.compile(r"\\\n")
 
 #: A whole-line comment is not a command — but a `#` line INSIDE a here-doc body
@@ -82,7 +88,7 @@ _CONTINUATION = re.compile(r"\\\n")
 #:
 #: This replaced a hand-written shell lexer that STRIPPED comments before reading
 #: the token. Every shell form that lexer had not modelled — `<<'EOF'`, `<<\EOF`,
-#: two here-docs on one line, an escaped quote, `$'…'`, `;#`, an apostrophe in a
+#: two here-docs on one line, an escaped quote, `;#`, an apostrophe in a
 #: here-doc body — could suppress a real floating invocation from a required
 #: check, i.e. report a green step while shell ran a float. The arms below pin
 #: them.
@@ -105,7 +111,7 @@ _CONTINUATION = re.compile(r"\\\n")
 #: commented-out line, a longer word containing the token — and every over-report
 #: is declared and pinned with the arms, because refusing a correct step is
 #: recoverable and passing a floating one is not. Quoting that SPLITS the word is
-#: read by `_shell_word` below, which resolves quoting the way shell does. What is
+#: read by `_shell_words` below, which resolves quoting the way shell does. What is
 #: left is an INTERPOLATION inside the word
 #: — `$X`, `${X}`, `$(…)`, `` `…` `` — which no text scan can read; it is declared
 #: and pinned as MISSED at `_exact_wranglers`.
@@ -114,7 +120,13 @@ _CONTINUATION = re.compile(r"\\\n")
 #: `wrangler\@4`, `wran\gler@4`, `wrangler'@'4` or `"wrangler"@4` executes
 #: `wrangler@4` while the literal text holds no `wrangler@` at all. The WORD scan
 #: below resolves them the way shell does, which is what makes each of them a
-#: reported float rather than a residual.
+#: reported float rather than a residual. That includes the `$`-prefixed QUOTING
+#: forms — `$'…'` (ANSI-C, where `\'` is a literal quote) and `$"…"` (a double
+#: quote) — whose `$` belongs to the quoting and not to the word: `wrangler$'@'4`
+#: and `wrangler$"@"4.127.0` run `wrangler@4` / `wrangler@4.127.0`. Reading their
+#: `$` as a word character is a MISS (`wrangler$@4` holds no `wrangler@`), and in
+#: the ANSI-C case it also desynchronises the scan, so a `\'` opened a quote that
+#: swallowed every later pin.
 #:
 #: DECLARED RESIDUAL: an INTERPOLATION inside the word — `wrangler$X@4`,
 #: `wrangler${X}@4`, `wran$(echo gler)@4`, `` wran`echo gler`@4 `` — executes
@@ -146,11 +158,24 @@ def _shell_words(text: str) -> list[str]:
     shell keeps it. Word boundaries and quoting are therefore decided together,
     which is the whole point: deleting quotes FIRST (an earlier draft) threw away
     the only signal that separates one argument from several.
+
+    The `$`-prefixed quoting forms are quoting too, and reading them as an
+    ordinary `$` character followed by a quote DESYNCHRONISES the scan: in `$'…'`
+    a `\'` escapes the quote (so `echo $'\'' # note` reads as an OPEN quote and
+    swallows every pin after it), and in `$'@'` / `$"@"` the `$` is not part of
+    the word (so `wrangler$'@'4` runs `wrangler@4` while no `wrangler@` appears in
+    the text at all — a MISS, not an over-report). Both forms are therefore
+    modelled: `$'` opens an ANSI-C quote where a backslash escapes the next
+    character, and `$"` opens an ordinary double quote.
     """
     words: list[str] = []
     out: list[str] = []
     quote = ""
     comment = False
+    # `started` is NOT `out`: an empty quoted word (`""#tok`) still STARTS a word,
+    # so shell reads `#tok` and not a comment. Using `out` let a `#` that shell
+    # keeps be dropped, and the pin read out of a word that is not the pin.
+    started = False
     i = 0
     while i < len(text):
         ch = text[i]
@@ -181,21 +206,53 @@ def _shell_words(text: str) -> list[str]:
                 continue
             else:
                 out.append(ch)
-        elif ch in "'\"":
-            quote = ch
-        elif ch == "\\" and i + 1 < len(text):
-            out.append(text[i + 1])
+        elif quote == "$'":
+            # ANSI-C quoting: a backslash escapes the next character (so `\''` is
+            # a LITERAL quote, not the end of the string). The escape sequence is
+            # collapsed to its character; the exact translation of `\n`/`\x41`
+            # does not matter here — what matters is that neither the escape nor
+            # the quote can end the word.
+            started = True
+            if ch == "\\" and i + 1 < len(text):
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                quote = ""
+            else:
+                out.append(ch)
+        elif text.startswith("$'", i):
+            quote = "$'"
+            started = True
             i += 2
             continue
-        elif ch == "#" and not out:
+        elif text.startswith('$"', i):
+            # `$"…"` is a double-quoted string (locale-translated by bash); the
+            # `$` is part of the QUOTING, never of the word.
+            quote = '"'
+            started = True
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+            started = True
+        elif ch == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            started = True
+            i += 2
+            continue
+        elif ch == "#" and not started:
             comment = True
         elif ch in _WORD_END:
             ended = True
         else:
             out.append(ch)
+            started = True
         if ended and out:
             words.append("".join(out))
             out = []
+        if ended:
+            started = False
         i += 1
     if out:
         words.append("".join(out))
@@ -208,9 +265,9 @@ def _shell_words(text: str) -> list[str]:
 #: at the first literal run called `4.127.0` the pin. Four rounds widened a list of
 #: continuation operators to catch that, and each widening left its symmetric
 #: neighbour open — an empty operand after `||` (node-semver reads `*`), a newline
-#: on the operand side, a `v`-prefixed hyphen bound — seven false PASSes in one
-#: review, all in the same six lines. So the enumeration is GONE: the word is read
-#: as shell presents it (`_shell_word`), and the token is the pin only when that
+#: on the operand side, a `v`-prefixed hyphen bound. So the enumeration is GONE:
+#: the word is read
+#: as shell presents it (`_shell_words`), and the token is the pin only when that
 #: whole word IS `wrangler@X.Y.Z`. An unknown tail is then floating by
 #: construction, not by being on a list.
 #:
@@ -250,7 +307,7 @@ def _wrangler_invocations(run: str) -> set[str]:
 #: `` wran`echo gler`@4 `` — executes `wrangler@4` while no text scan can see a
 #: literal `wrangler@`. The quoting and escaping forms an earlier round also called
 #: residual (`wrangler\@4`, `wran\gler@4`, `wrangler'@'4`, `"wrangler"@4`) are NOT:
-#: `_shell_word` resolves those characters the way shell does, which turns each of
+#: `_shell_words` resolves those characters the way shell does, which turns each of
 #: them into a literal the guard reports (pinned by the arms in
 #: `test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range`). Closing
 #: the interpolation class needs the shell's own evaluation, so the honest fix is
@@ -587,7 +644,11 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
         "cat <<'1'\nDon't\n1\nnpx --yes wrangler@4 --version",  # A4
         "echo \"escaped \\\" # note\" && npx --yes wrangler@4 --version",  # A5
         "echo a\\;# x && npx --yes wrangler@4 --version",  # A6
-        "cat <<< word\n# was wrangler@4\nnpx --yes wrangler@4 --version",  # A7
+        "cat <<< word\nnpx --yes wrangler@4 --version",  # A7 `<<<` is a HERE-STRING, not a
+        #     here-doc: a draft that read it as `<<word` took the next line as body
+        #     and reported NOTHING. The comment-mention variant this replaces could
+        #     not fail — the head reports a mention, so either line supplied its
+        #     expected value.
         "echo x $(cat <<\\EOF\nDont\nEOF\n) && npx --yes wrangler@4 --version",  # A8
         "echo $'x' # note\nnpx --yes wrangler@4 --version",  # A9  ANSI-C, then `#`
         "echo a;# (note)\nnpx --yes wrangler@4 --version",  # A10 `;#`, npx on the NEXT line
@@ -657,6 +718,28 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     for run in ("wrangler\\@4 --version", "wran\\gler@4 --version",
                 "wrangler'@'4 --version", '"wrangler"@4 --version'):
         assert _floating_wranglers(run) == {"4"}, run
+    # …INCLUDING the `$`-prefixed quoting forms, where the `$` is part of the
+    # QUOTING and not of the word. Reading it as a word character MISSES the token
+    # entirely (`wrangler$@4` holds no `wrangler@`), which is a fail-open: bash runs
+    # `wrangler@4`. Both are floats and must be REPORTED.
+    assert _floating_wranglers("wrangler$'@'4 --version") == {"4"}
+    assert _floating_wranglers('wrangler$"@"4 --version') == {"4"}
+    assert _exact_wranglers('wrangler$"@"4.127.0 --version') == {"4.127.0"}
+    # In ANSI-C quoting `\'` is a LITERAL quote, so it does not open one: reading it
+    # as an ordinary single quote desynchronised the scan for the rest of the block
+    # and swallowed the following pin (main pinned this arm; it had been replaced
+    # by one whose expected value the npx line supplied either way).
+    _ansi = "echo $'\\'' # was wrangler@4\nnpx --yes wrangler@4.127.0 --version"
+    assert _exact_wranglers(_ansi) == {"4.127.0"}, _ansi
+    assert _floating_wranglers(_ansi) == {"4"}, _ansi  # the comment mention only
+    assert _floating_wranglers("echo $'\\' # c' && npx --yes wrangler@4 --version") == {"4"}
+    # An EMPTY quoted word still STARTS a word, so `""#tok` reaches bash as the word
+    # `#tok` — not a comment. Testing the buffer instead of "a word has started"
+    # dropped the `#` and read the pin out of a word that is not the pin.
+    for run in ('npx --yes ""#wrangler@4.127.0 --version',
+                "npx --yes ''#wrangler@4.127.0 --version"):
+        assert _exact_wranglers(run) == set(), run
+        assert _floating_wranglers(run) == {""}, run
     # A BACKSLASH BEFORE AN ORDINARY CHARACTER inside double quotes is KEPT by
     # shell, so `wrangler@"4.\\127.0"` runs the invalid word `wrangler@4.\\127.0`
     # (npm rejects it). Reading the quoting is what lets this be REFUSED rather
@@ -669,17 +752,20 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
         assert _floating_wranglers(f"npx --yes wrangler@{spec} --version") == {spec}, spec
         assert _exact_wranglers(f"npx --yes wrangler@{spec} --version") == set(), spec
     # THE ARGUMENT IS THE SPEC, so a range is a range however it is spaced — and
-    # quoting is what makes one argument out of it. Every one of these resolves to
-    # something other than the pin under npm's own semver: `||` with an operator or
-    # wildcard operand, an EMPTY operand (node-semver reads `*`), a newline on
-    # either side of the operator, and a `v`-prefixed hyphen bound (`- v4` is the
-    # newest 4.x). Each was read as the exact pin by a version of this scan.
+    # quoting is what makes one argument out of it. Under npm's own semver these
+    # resolve away from the pin — `||` with an operator or wildcard operand, an
+    # EMPTY operand (node-semver reads `*` → the newest 4.x), a newline on either
+    # side of the operator, a `v`-prefixed hyphen bound (`- v4` → newest 4.x) —
+    # except `|| =4.127.0`, which resolves TO `4.127.0` and is refused anyway: the
+    # any-continuation rule does not read node-semver, so it over-reports an
+    # argument that happens to pin. Stated because the assertion above covers the
+    # value, not the reason.
     for run in ('npx --yes wrangler@"4.127.0 || 4.130.0" --version',
                 'npx --yes wrangler@"4.127.0 ||" --version',
                 'npx --yes wrangler@"4.127.0 || " --version',
                 'npx --yes wrangler@"4.127.0 || >=4.130.0" --version',
                 'npx --yes wrangler@"4.127.0 || <4.130.0" --version',
-                'npx --yes wrangler@"4.127.0 || =4.127.0" --version',
+                'npx --yes wrangler@"4.127.0 || =4.127.0" --version',  # over-report
                 'npx --yes wrangler@"4.127.0 || ^4" --version',
                 'npx --yes wrangler@"4.127.0 || x" --version',
                 'npx --yes wrangler@"4.127.0 || *" --version',
