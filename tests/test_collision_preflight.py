@@ -109,6 +109,7 @@ if [ "$1" = "api" ] && [[ "$2" =~ ^repos/[^/]+/[^/]+/issues/[0-9]+$ ]]; then
   # TEST HARNESS. `$repo` is parsed from `--repo`, which this REST form does not
   # carry, so the slug must be recovered FROM THE PATH — a guard keyed on an empty
   # `$repo` can never match and is dead code that merely looks like protection.
+  _slug="${2#repos/}"; _slug="${_slug%/issues/*}"
   if [ "${GH_STUB_ISSUE_REST_FAIL:-0}" = "1" ]; then
     echo "gh-stub: HTTP 403: Resource not accessible" >&2
     exit 1
@@ -148,15 +149,35 @@ if [ "$1" = "api" ] && [[ "$2" =~ ^repos/[^/]+/[^/]+/issues/[0-9]+$ ]]; then
     printf '{"number": %s, "title": "some other issue", "state": "open", "state_reason": null, "assignees": [], "html_url": "https://github.com/x/y/issues/%s"}\n' "$(( ${2##*/} + 1 ))" "$(( ${2##*/} + 1 ))"
     exit 0
   fi
-  if [ "${GH_STUB_ISSUE_ABSENT:-0}" = "1" ]; then
-    echo "gh-stub: HTTP 404: Not Found" >&2
-    exit 1
+  # #3435 review (P2): the CLOSED-over-REST path, and the ONE key REST spells
+  # differently. `_issue_view_rest` maps REST's `state_reason` onto the
+  # `stateReason` key `gh issue view --json` returns, and every other REST
+  # success here answers an OPEN issue with `state_reason: null` — so deleting
+  # that mapping kept the whole suite green while a CLOSED issue rescued over
+  # REST lost its reason and fell back to the generic "TERMINAL" wording
+  # instead of naming the closure that happened (the #8497 wording defect,
+  # `state_reason=not_planned` read as a shipment, reached through a second key
+  # spelling). It is also the only fixture that decides LANDED from a REST body
+  # alone: a terminal state SKIPS the timeline query.
+  if [ -n "${GH_STUB_ISSUE_REST_CLOSED:-}" ]; then
+    printf '{"number": %s, "title": "florfenicol dosing audit", "state": "closed", "state_reason": "%s", "assignees": [], "html_url": "https://github.com/%s/issues/%s"}\n' "${2##*/}" "$GH_STUB_ISSUE_REST_CLOSED" "$_slug" "${2##*/}"
+    exit 0
   fi
-  # NOTE: no `GH_STUB_ISSUE_ABSENT` guard belongs here. That seam fails the
-  # `issue view` call FIRST (so the fallback is never attempted), which makes a
-  # copy of it inside THIS branch unreachable code that reads as protection —
-  # the same defect the `$repo` note above names. The live REST-404 seam is
-  # `GH_STUB_ISSUE_REST_ABSENT` above.
+  # #3435 review (P2): a top-level NON-OBJECT body (a JSON array, a bare
+  # string) is refused BY NAME. Unpinned, deleting the guard turns the body into
+  # an `AttributeError` in the normaliser — no VERDICT line, exit 1, the code
+  # this tool documents as COLLISION.
+  if [ "${GH_STUB_ISSUE_REST_NON_OBJECT:-0}" = "1" ]; then
+    printf '[]\n'
+    exit 0
+  fi
+  # NOTE: there is deliberately NO `GH_STUB_ISSUE_ABSENT` guard here, and no
+  # copy of it belongs here either. That seam fails the `issue view` call FIRST
+  # (so the fallback is never attempted), which makes a copy inside THIS branch
+  # unreachable code that reads as protection — the same defect the `$repo` note
+  # above names. The live REST-404 seam is `GH_STUB_ISSUE_REST_ABSENT` above.
+  # (Cycle 4's commit text recorded this copy as DELETED; that commit had only
+  # added this note, so the record and the code disagreed until now.)
   # The endpoint failing FOR THIS SLUG (an unreachable host, a proxy refusing
   # the repo) — the REST counterpart of the `$repo`-keyed probe guard further
   # down. ⛔ IT MUST BE FIRED BY A TEST OR IT DOES NOT EXIST (#3435 review, P2):
@@ -167,7 +188,6 @@ if [ "$1" = "api" ] && [[ "$2" =~ ^repos/[^/]+/[^/]+/issues/[0-9]+$ ]]; then
   # missing_issue` drives it (a `--repo` run, so the ambiguity probe does not
   # read the file, plus a rate-limited `issue view`); deleting this guard makes
   # that case go CLEAN.
-  _slug="${2#repos/}"; _slug="${_slug%/issues/*}"
   if [ -f "$d/probe_unqueried.txt" ] && grep -qx "$_slug" "$d/probe_unqueried.txt"; then
     echo "gh-stub: could not connect to api.github.com" >&2; exit 1
   fi
@@ -2604,6 +2624,56 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertIn("issue-absent", out)
         self.assertNotIn("gh-unavailable", out)
+
+    def test_a_closed_issue_rescued_over_rest_keeps_its_reason(self):
+        # ⛔ THE ONE KEY REST SPELLS DIFFERENTLY (#3435 review, P2).
+        # `_issue_view_rest` maps REST's `state_reason` onto the `stateReason`
+        # key `gh issue view --json` returns. Every other REST fixture here
+        # answers an OPEN issue with `state_reason: null`, so deleting that
+        # mapping kept the whole suite green while a CLOSED issue rescued over
+        # REST silently lost its reason and printed the generic "the work item
+        # is TERMINAL" wording instead of naming the closure that happened —
+        # the #8497 wording defect (`state_reason=not_planned` read as a
+        # shipment), reached through a second key spelling.
+        #
+        # It is also the only case that decides LANDED from a REST body ALONE:
+        # a terminal state skips the timeline query, so no other test reaches
+        # that branch with the rescue in play (they are all OPEN).
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_CLOSED": "not_planned",
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 4, out)
+        self.assertIn("VERDICT: LANDED (exit 4)", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # REST says `closed`/`not_planned`; both consumers upper-case and
+        # `-`->`_`-fold, so the reason must reach the wording intact.
+        self.assertIn("issue state=closed", out)
+        self.assertIn("closed as NOT PLANNED", out)
+        self.assertIn("was CLOSED AS NOT PLANNED", out)
+        self.assertNotIn("ALREADY SHIPPED", out)
+        # A terminal issue must not pay for a timeline query it cannot need.
+        self.assertFalse((self.gh_dir / "timeline-calls.log").exists(), out)
+
+    def test_a_non_object_rest_body_is_a_named_incomplete_not_a_traceback(self):
+        # ⛔ `if not isinstance(raw, dict)` had NO fixture (#3435 review, P2):
+        # every other refusal in the REST reader was pinned, this one was not.
+        # Unpinned it is untested code on the path whose whole job is that a
+        # malformed body can never become exit 1 — without the guard,
+        # `raw.get(...)` on a list is an `AttributeError`, which `main()` does
+        # not catch, so it escapes as a traceback with no VERDICT line and
+        # exits 1 (the code this tool documents as COLLISION).
+        rc, out = self.run_tool(env_extra={
+            "GH_STUB_ISSUE_VIEW_RATE_LIMITED": "1",
+            "GH_STUB_ISSUE_REST_NON_OBJECT": "1",
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("non-object JSON (list)", out)
+        self.assertIn("issue-metadata-unavailable", out)
 
     def test_a_truncated_board_still_blocks_a_live_holder(self):
         # The truncation refusal is scoped to ABSENCE: a board that DID attribute a
