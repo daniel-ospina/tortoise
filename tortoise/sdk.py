@@ -3079,6 +3079,63 @@ def _raise_update_point_status_error(proj, id: str) -> None:
         f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
     )
 
+class _WriteNotLanded(Exception):
+    """Internal: an AUTHORISED re-issue completed without applying anything.
+
+    #8854 review P1. The retry predicate proves the graph KEY exists, and its
+    own docstring admits the residual case: a rebuild that recreated the key
+    and then failed mid-replay also reads ``EXISTS 1``. The re-issued
+    ``MATCH (n:Point {id:$id}) SET …`` then matches NOTHING — the node has not
+    been replayed into the new graph yet — and raises nothing, so the verb
+    reported SUCCESS for a write it never made (the #7685 false-success,
+    reached by a different mechanism).
+
+    ``witness`` closes it: a write that can say whether it matched anything
+    hands that answer to ``_graph_write_with_retry``, and a zero-row result on
+    an attempt that was only reached BECAUSE a previous one aborted raises
+    this sentinel instead of returning. It is retryable (nothing applied, so
+    re-issuing cannot duplicate), and on budget exhaustion the ORIGINAL abort
+    is re-raised unchanged, so the caller's error type is what it was before
+    the retry existed.
+
+    A zero-row FIRST attempt is untouched: it never reaches this class, so
+    ``update_point``'s historical ``{}``-for-a-missing-id contract is safe.
+
+    **Scope: the graph-abort family only.** ``retryable_aborted_write`` also
+    admits the write-slot arm (ordinary multi-writer contention) and MISCONF,
+    and NEITHER says anything about whether the target existed — so arming this
+    sentinel on those would turn a benign ``update_point(<missing id>)`` into a
+    stale ``ResponseError`` after four attempts. The gate in
+    ``_graph_write_with_retry`` therefore LATCHES the first
+    graph-deleted-or-replaced abort of the call (a later write-slot abort must
+    neither arm it nor disarm it — a rebuild is itself a concurrent writer) and
+    consults the witness only once that latch is set.
+
+    Residual, stated honestly: during a rebuild, a target that genuinely never
+    existed also yields zero rows, and this class raises the abort instead of
+    the historical ``{}``. It cannot be told apart from "not replayed yet"
+    without a read the verb would otherwise not pay for — and raising the abort
+    is the truthful answer for a call whose graph was replaced mid-flight.
+    Verbs whose zero-row result has its OWN documented meaning (a refused
+    promote, an already-terminal retraction) do not rely on this sentinel: their
+    witnesses run the same diagnostic read the first-attempt path uses, so the
+    documented error survives a retry.
+    """
+
+    def __init__(self, original: BaseException):
+        super().__init__(str(original))
+        self.original = original
+
+
+def _landed_at_least_one(result) -> bool:
+    """Witness for a statement suffixed ``RETURN count(n)``: >= 1 node matched.
+
+    ``count()`` always yields one row, so the row's VALUE is the answer — an
+    empty ``result_set`` would mean the statement did not run at all.
+    """
+    return bool(result.result_set) and result.result_set[0][0] > 0
+
+
 _logger = logging.getLogger(__name__)
 
 # ── #2600 server-resolved human actor ───────────────────────────────────────
@@ -5419,7 +5476,7 @@ class TortoiseSDK:
                 name, exc_info=True)
             return False
 
-    def _graph_write_with_retry(self, fn, *, what: str):
+    def _graph_write_with_retry(self, fn, *, what: str, witness=None):
         """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
 
         A rebuild/replace aborts an IN-FLIGHT query with
@@ -5461,12 +5518,16 @@ class TortoiseSDK:
         per-key loop, ``_sync_tags``) shares that one budget. A verb that
         reaches several wrapped call sites pays one window PER SITE, so its
         caller-visible bound is one window x the number of sites that branch
-        reaches. ``update_point`` is the widest: one for the property write
-        (the per-key loop counts once), one for the derived-embedding
-        clear+set when ``content`` is given without ``embedding``, and one for
-        the tag sync when ``tags`` is given — up to three (roughly 21-42 s)
-        for ``update_point(content=..., tags=[...])``, two for
-        ``update_point(tags=[...])``, and one for ``annotate_operator``. The
+        reaches. ``update_point`` is the widest, and the count is MEASURED
+        rather than enumerated by hand (#8854 review P2 — the earlier "up to
+        three" omitted ``_mark_dirty``, which it always runs): THREE to FOUR
+        for ``update_point(confidence=...)``; FOUR to FIVE for
+        ``update_point(tags=[...])``; FIVE to SIX for
+        ``update_point(content=..., tags=[...])``. The low end is a LIVE point;
+        the high end adds ``_mark_dirty``'s TERMINAL branch
+        (``_mark_dirty terminal ep_dirty clear SET``), which runs when the
+        caller updates a terminal point. At 7-14 s per window that is roughly
+        21-84 s, not 21-42 s. The
         window #7405 measured lasted **over an hour**, and no bounded retry
         should wait that long — so on exhaustion the original error still
         surfaces, **unchanged in type**.
@@ -5490,11 +5551,27 @@ class TortoiseSDK:
         retry — so the bound belongs to the caller's ``fn``, not to the verb.
         A multi-statement ``fn`` (``update_point``'s per-key ``SET`` loop,
         ``_sync_tags``' MERGE/read/DELETE sequence) is re-issued as a whole and
-        shares ONE 7-14 s window; a verb that calls this twice
-        (``update_point`` with tags) is bounded by two. Callers must keep the
-        count of calls per verb deliberate rather than assuming a fixed bound
-        per verb — the per-key loop is one call precisely so
+        shares ONE 7-14 s window; a verb that calls this several times pays
+        one window per call — ``update_point``'s measured 3-4 / 4-5 / 5-6
+        above is the SUM of its own sites plus the two (or three, on a
+        terminal point) inside ``_mark_dirty``. Callers must
+        keep the count of calls per verb deliberate rather than assuming a
+        fixed bound per verb — the per-key loop is one call precisely so
         ``annotate_operator``'s four properties do not multiply it.
+
+        ``witness`` (#8854 review P1): an optional ``result -> bool`` callback
+        answering "did this statement apply to at least one node?". It is
+        consulted ONLY once this call has seen a GRAPH-REPLACED abort
+        (``armed_abort``, latched on the first one) — that is the only family in
+        which a zero-match re-issue can mean "not replayed yet" rather than
+        "the caller's target never existed". The write-slot / MISCONF arms are
+        retried without arming it, so their benign zero-row outcomes are
+        unchanged, and a LATER one cannot disarm it. On exhaustion the abandoned
+        abort is re-raised. A first attempt is never consulted, so verbs that
+        return a benign empty result (``update_point`` on a missing id) keep
+        that contract. Statements a witness guards must therefore RETURN
+        something observable (``RETURN count(n)`` / ``RETURN r``); a bare
+        ``SET`` has no row to testify with.
 
         Retry budget (#7405 P2-2). This inner loop owns the write refusals
         (graph-replaced / write-lock / MISCONF) with ``retries=3`` (~7-14 s) and
@@ -5526,6 +5603,14 @@ class TortoiseSDK:
         attempts = 0
         last_abort: BaseException | None = None
         state_gated = False
+        # The FIRST graph-replaced abort, LATCHED (#8854 review round 3 P1).
+        # `last_abort` is overwritten by every retryable abort, so gating the
+        # witness on it let a write-slot abort that arrived AFTER a rebuild
+        # abort (the rebuild is itself a concurrent writer) silently DISARM a
+        # witness that had been legitimately armed — and the next zero-row
+        # re-issue reported success again. Once this call has seen a graph
+        # replacement, the ambiguity is live for the rest of the call.
+        armed_abort: BaseException | None = None
 
         def _probe() -> bool:
             return self._graph_exists(self._proj)
@@ -5552,14 +5637,41 @@ class TortoiseSDK:
                 # `ingest_retries` cannot over-report (review round 2).
                 self._graph_write_retry_count = getattr(
                     self, "_graph_write_retry_count", 0) + 1
-            return fn()
+            result = fn()
+            if (witness is not None and armed_abort is not None
+                    and not witness(result)):
+                # An authorised re-issue that matched nothing, after a
+                # GRAPH-REPLACED abort — the rebuild-recreated-the-key window.
+                # This is NOT a success: the rows this statement targets have
+                # not been replayed. Raising keeps the loudness the pre-retry
+                # code had, and the sentinel carries that graph abort so the
+                # exhausted path can surface the error the caller would have
+                # seen without the retry.
+                #
+                # The latch is load-bearing in BOTH directions: the
+                # write-slot and MISCONF arms are retried too and say nothing
+                # about node existence, so they must not ARM the witness
+                # (`update_point(<missing id>)` keeps returning `{}`), and a
+                # later one must not DISARM it either.
+                raise _WriteNotLanded(armed_abort)
+            return result
 
         def _predicate(exc: BaseException) -> bool:
-            nonlocal last_abort, state_gated
+            nonlocal last_abort, state_gated, armed_abort
+            if isinstance(exc, _WriteNotLanded):
+                # Nothing applied, so a re-issue is definitionally safe — and
+                # the graph-state question was already answered when the
+                # retry that produced this attempt was authorised. Keep the
+                # ORIGINAL abort as `last_abort` so exhaustion surfaces it.
+                return True
             keep = retryable_aborted_write(exc, graph_exists=_probe)
             if keep:
                 last_abort = exc
                 state_gated = graph_abort_family(exc)
+                if witness is not None and armed_abort is None and state_gated:
+                    # Latch the first graph-replaced abort. `_WriteNotLanded`
+                    # is intentionally NOT latched here: it is arm-neutral.
+                    armed_abort = exc
             return keep
 
         try:
@@ -5572,7 +5684,12 @@ class TortoiseSDK:
             # whose TYPE callers depend on — `_classify_db_failure` buckets the
             # redis family as "db" and anything else as "structural", so a new
             # wrapper type would silently misbucket every exhausted write.
-            raise (exc.__cause__ or exc) from None
+            inner = exc.__cause__ or exc
+            if isinstance(inner, _WriteNotLanded):
+                # A re-issue that never landed: surface the abort that
+                # authorised it, not the internal sentinel.
+                raise inner.original from None
+            raise inner from None
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
@@ -5768,9 +5885,10 @@ class TortoiseSDK:
         entry point so the existing call sites (and their
         `_graph_write_with_retry` wrapping) are unchanged.
 
-        `sweep_orphans` is forwarded verbatim: `update_point` sets it because a
-        retried reconciler can skip the orphan-`:Tag` GC otherwise (#8854
-        review P3 — see the projection method's docstring).
+        `sweep_orphans` is forwarded verbatim: `update_point` sets it FROM THE
+        SECOND ATTEMPT ON because a retried reconciler can skip the orphan-
+        `:Tag` GC otherwise (#8854 review P3 — see the projection method's
+        docstring).
         """
         proj._sync_tags(pid, tags, sweep_orphans=sweep_orphans)
 
@@ -10249,6 +10367,29 @@ class TortoiseSDK:
         # cannot promote twice, and a legitimately-refused promote still yields
         # an empty result set (the caller's
         # ``_raise_update_point_status_error`` path is unchanged).
+        def _promote_witness(result) -> bool:
+            """A refused promote keeps its documented `ValueError` (#8854 r3).
+
+            ``update_point(status='live')`` refuses in the statement's own
+            WHERE guard, so a zero-row re-issue is legitimate whenever the
+            node EXISTS and is no longer promotable. The diagnostic below
+            separates that from "the rebuild has not replayed the node yet":
+            an ABSENT node returns False, so the sentinel keeps retrying and the
+            graph abort surfaces — raising ``_raise_update_point_status_error``
+            on absence would instead raise ``ValueError('No point …')``, which
+            is predicate-FALSE and abandons the 7-14 s window after ONE
+            re-issue (#8854 review round 4 P1).
+            """
+            if result.result_set:
+                return True
+            present = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+            ).result_set[0][0]
+            if not present:
+                return False
+            _raise_update_point_status_error(proj, id)
+            return False  # pragma: no cover — the helper always raises
+
         if has_object:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2:
@@ -10277,6 +10418,7 @@ class TortoiseSDK:
                                 **_embed_params},
                     ),
                     what="update_point SET (Object promote)",
+                    witness=_promote_witness,
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
@@ -10286,11 +10428,17 @@ class TortoiseSDK:
                         "MATCH (n:Point:Object {id:$id}) " + _embed_clear
                         + "SET n += $props, "
                         "n.version = coalesce(n.version, 0) + 1, "
-                        "n.updatedAt = $now" + _embed_set,
+                        "n.updatedAt = $now" + _embed_set
+                        # #8854 review P1: a row to testify with. A bare SET
+                        # returns nothing, so a re-issue that matched nothing
+                        # (rebuild still replaying) was indistinguishable from
+                        # a landed write.
+                        + " RETURN count(n)",
                         params={"id": id, "props": _props_param, "now": now,
                                 **_embed_params},
                     ),
                     what="update_point SET (Object)",
+                    witness=_landed_at_least_one,
                 )
         else:
             if 'status' in props:
@@ -10311,6 +10459,7 @@ class TortoiseSDK:
                                 "now": now, **_embed_params},
                     ),
                     what="update_point SET (promote)",
+                    witness=_promote_witness,
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
@@ -10335,15 +10484,27 @@ class TortoiseSDK:
                 # `SET` of a value fixed before the first attempt, so the keys
                 # that DID land in the aborted attempt are rewritten to the
                 # same value rather than re-applied.
-                def _write_props() -> None:
+                def _write_props() -> bool:
+                    if not _props_param:
+                        return True
+                    applied = True
                     for key, val in _props_param.items():
-                        proj.g.query(
-                            "MATCH (n:Point {id:$id}) SET n += $props",
+                        matched = proj.g.query(
+                            "MATCH (n:Point {id:$id}) SET n += $props "
+                            "RETURN count(n)",
                             params={"id": id, "props": {key: val}},
-                        )
+                        ).result_set[0][0]
+                        if not matched:
+                            applied = False
+                    return applied
 
                 self._graph_write_with_retry(
-                    _write_props, what="update_point SET (per-key)")
+                    _write_props, what="update_point SET (per-key)",
+                    # EVERY key must match. A sum would let one key matched
+                    # by duplicate ids mask a sibling key that matched none
+                    # (#8854 review P2: ids are not unique — the duplicate
+                    # fan-out is a tested shape).
+                    witness=bool)
                 if _derived_embedding:
                     # The clear and the set are ONE atomic query, so a crash
                     # between them cannot leave the node vectorless. This arm
@@ -10354,10 +10515,12 @@ class TortoiseSDK:
                         lambda: proj.g.query(
                             "MATCH (n:Point {id:$id}) " + _embed_clear
                             + "SET " + set_embedding_clause(
-                                "n", preserve_on_null=False),
+                                "n", preserve_on_null=False)
+                            + " RETURN count(n)",
                             params={"id": id, **_embed_params},
                         ),
                         what="update_point SET (embedding)",
+                        witness=_landed_at_least_one,
                     )
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
@@ -10371,19 +10534,72 @@ class TortoiseSDK:
         # dropped ones by an explicit id, so a re-issue after a non-landing
         # abort converges on the caller's tag list.
         if "tags" in props:
-            # `sweep_orphans=True`: the orphan-`:Tag` GC inside `_sync_tags`
-            # normally keys off the edges THIS invocation deleted, and a retry
-            # re-invokes the whole helper — after an abort that landed the
-            # `DELETE r` before the GC statement, the re-read finds nothing
-            # stale and the GC would be skipped, leaving an orphan `:Tag` that
-            # a rebuilt graph (which never had one) does not have. Passing it
-            # unconditionally makes the sweep a function of the caller's tag
-            # list, not of a per-invocation counter (#8854 review P3).
+            # `sweep_orphans` is passed only from the SECOND attempt on
+            # (#8854 review P2). The orphan-`:Tag` GC normally keys off the
+            # edges THIS invocation deleted, and a retry re-invokes the whole
+            # helper — after an abort that landed the `DELETE r` before the GC
+            # statement, the re-read finds nothing stale and the GC would be
+            # skipped, leaving an orphan `:Tag` a rebuilt graph (which never
+            # had one) does not. That defect only EXISTS on a re-issue, so
+            # forcing the graph-wide `:Tag` scan on every first attempt would
+            # put a full-label scan on the SDK's hottest mutation door for
+            # nothing — the one thing the sibling paths in `edges.py`
+            # deliberately avoid. The counter is the attempt number: `fn` is
+            # invoked once per attempt by `_graph_write_with_retry`.
+            _sync_attempts = 0
+            # WITNESS (#8854 review round 5, P1). This arm rode the retry with
+            # `_sync_tags` returning None, so there was nothing to testify
+            # with — and a re-issue that lands NOTHING reported success.
+            # Measured pre-fix with the Point absent from the replayed graph:
+            # `update_point(id, tags=[a, b])` returned normally while the graph
+            # held ZERO TAGGED edges and no Point at all. The retry exists for
+            # the rebuild window, and in that window the not-yet-replayed Point
+            # is exactly the case it must NOT swallow: a MERGE against a
+            # missing anchor matches nothing, succeeds, and looks like a write.
+            #
+            # `_sync` now returns the number of TAGGED edges the Point really
+            # carries for the REQUESTED names, and the witness requires the
+            # FULL set. "At least one" would call a half-landed sync good, and
+            # on an absent Point it would still be zero — the defect itself.
+            # The COUNT is read back from the graph rather than returned by
+            # `_sync_tags`, because the reconciler is the projection's (shared
+            # with replay, #2897) and its return value is not a landing proof:
+            # a `MERGE` that matches nothing is not an error.
+            #
+            # The requested names are DEDUPED for the count only; the value
+            # handed to `_sync_tags` is the caller's own, unchanged. A
+            # NON-ARRAY value (a number/dict, outside the public signature but
+            # tolerated and pinned by
+            # `test_update_non_list_tags_no_crash`) derives no edges BY DESIGN
+            # (#8333 owns that), so it must not be witnessed against a count —
+            # `None` makes the witness vacuous there instead of inventing a
+            # non-landing on a write that was never asked to make edges.
+            _sync_raw_tags = props["tags"] or []
+            _sync_wanted = (list(dict.fromkeys(_sync_raw_tags))
+                            if isinstance(_sync_raw_tags, (list, tuple))
+                            else None)
+
+            def _sync() -> int:
+                nonlocal _sync_attempts
+                _sync_attempts += 1
+                self._sync_tags(
+                    proj, id, _sync_raw_tags,
+                    sweep_orphans=_sync_attempts > 1)
+                if not _sync_wanted:
+                    # An empty request asks for no edge, so the graph cannot be
+                    # missing one: it lands vacuously (and `landed == 0` agrees).
+                    return 0
+                rows = proj.g.query(
+                    "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "
+                    "WHERE t.name IN $names RETURN count(t)",
+                    params={"pid": id, "names": _sync_wanted},
+                ).result_set
+                return int(rows[0][0]) if rows else 0
+
             self._graph_write_with_retry(
-                lambda: self._sync_tags(
-                    proj, id, props["tags"] or [], sweep_orphans=True),
-                what="update_point TAGGED edges",
-            )
+                _sync, what="update_point TAGGED edges",
+                witness=lambda landed: (_sync_wanted is None
+                                        or landed == len(_sync_wanted)))
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         result = self.get_point(id)
@@ -10748,19 +10964,24 @@ class TortoiseSDK:
                 "n.updatedAt = $now, n.validTo = $valid_to, "
                 "n.validToPrecision = $valid_to_precision, "
                 "n.expiredAt = $now, "
-                f"{decay_clause('n')}",
+                f"{decay_clause('n')}"
+                + " RETURN count(n)",
                 params={"id": id, "now": now, "valid_to": stamp_valid_to,
                         "valid_to_precision": end_precision},
             ),
             what="invalidate_point terminal stamp SET",
+            # #8854 review P1: a re-issue into a rebuilt-but-not-yet-replayed
+            # graph matches nothing; that must stay loud, not read as success.
+            witness=_landed_at_least_one,
         )
         self._graph_write_with_retry(
             lambda: proj.g.query(
                 "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-                "MERGE (a)-[:CORRECTS]->(b)",
+                "MERGE (a)-[:CORRECTS]->(b) RETURN count(*)",
                 params={"new_id": corrected_by_id, "old_id": id},
             ),
             what="invalidate_point CORRECTS edge",
+            witness=_landed_at_least_one,
         )
         # Dreaming (#85): invalidation changes the propagation graph.
         # #2422 ORDERING: message drops BEFORE _mark_dirty's epoch bump (see
@@ -11525,7 +11746,36 @@ class TortoiseSDK:
         # by definition did not land) converges on the same stamp and cannot
         # re-retract or move `updatedAt`. An already-terminal point still yields
         # an empty result set on re-issue, so the `ValueError` contract is
-        # unchanged.
+        # unchanged — and the witness below makes that TRUE rather than
+        # assumed (#8854 review round 3).
+        def _retract_witness(result) -> bool:
+            """Empty CAS result: tell "terminal" from "not replayed yet".
+
+            ``PointRetracted`` is appended BEFORE the CAS, so a rebuild that
+            replays that record terminalizes the node and the re-issued CAS
+            can never match — a zero-row re-issue is therefore legitimately
+            reachable for an already-terminal point. The diagnostic read (only
+            on that empty path) decides which contract applies: the node is
+            there and terminal → the documented ``ValueError``; absent → the
+            write never landed, and the abort surfaces instead of a false
+            "already terminal".
+            """
+            if result.result_set:
+                return True
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+                params={"id": id},
+            ).result_set
+            if rows:
+                status, outdated = rows[0]
+                # PRESENCE alone is not terminality (#8854 review round 4 P2):
+                # the rebuild's replay can land the node live between the CAS
+                # and this read, and claiming "already terminal" for a live
+                # point is the exact failure this PR closes.
+                if status in TERMINAL_EXCLUDED_STATUSES or outdated:
+                    raise ValueError(
+                        f"Point {id!r} is already terminal — retraction is terminal")
+            return False
         r = self._graph_write_with_retry(
             lambda: proj.g.query(
                 "MATCH (n:Point {id:$id}) "
@@ -11534,6 +11784,11 @@ class TortoiseSDK:
                 f"{decay_clause('n')} RETURN properties(n)",
                 params={"id": id, "now": _now}),
             what="retract_point CAS SET",
+            # #8854 review P1: empty `result_set` is ambiguous — "matched a
+            # terminal node" (the legitimate ValueError below) or "matched
+            # nothing" (a rebuild still replaying). `_retract_witness`
+            # disambiguates with one diagnostic read on that path only.
+            witness=_retract_witness,
         )
         if not r.result_set:
             raise ValueError(

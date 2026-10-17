@@ -862,8 +862,9 @@ class _EdgeHandlers:
         orphan `:Tag` that `list_tags` reports as a `count: 0` entry while a
         rebuilt graph, which replays this routine from a clean state, has none
         (live != replay). A caller that can DELETE edges on a RETRIED path —
-        `update_point`'s tag sync — passes ``True`` so the sweep is a function of
-        the caller's tag list rather than of an attempt-local counter.
+        `update_point`'s tag sync — passes ``True`` FROM THE SECOND ATTEMPT ON
+        (``sweep_orphans=(_sync_attempts > 1)`` in `sdk.py`), so the first
+        attempt still pays no graph-wide `:Tag` scan.
         ``create_point`` keeps the default: a fresh point has no stale edges, so
         the scan stays off its hot path.
         """

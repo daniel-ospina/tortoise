@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import types
 import uuid
 
 import pytest
@@ -108,12 +109,17 @@ class _AbortOnceGraph:
     """
 
     def __init__(self, real, needle: str, *, aborts: int = 1,
-                 present: bool = True, skip: int = 0) -> None:
+                 present: bool = True, skip: int = 0,
+                 message: str = _DELETED_OR_REPLACED) -> None:
         self._real = real
         self._needle = needle
         self._aborts = aborts
         self._present = present
         self._skip = skip
+        # Default is the rebuild literal; a caller can inject the OTHER
+        # retryable family (the write-slot arm) to prove the witness is not
+        # armed by abort classes that say nothing about node existence.
+        self._message = message
         self.matching = 0
         self.applied = 0
 
@@ -126,7 +132,7 @@ class _AbortOnceGraph:
             # a single budget re-issues the keys that already landed, a
             # per-key budget does not.
             if self._skip < self.matching <= self._skip + self._aborts:
-                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+                raise redis_exc.ResponseError(self._message)
             self.applied += 1
         return self._real.query(cypher, params=params, timeout=timeout)
 
@@ -575,22 +581,20 @@ def test_the_per_key_loop_shares_one_retry_budget(tmp_path):
 
 def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
         tmp_path, monkeypatch):
-    """The stated bound is one window per wrapped CALL SITE a branch reaches.
+    """The stated bound is the number of wrapped CALL SITES a branch reaches.
 
     ``_graph_write_with_retry``'s docstring states the caller-visible bound as
-    one 7-14 s window per call: one for a plain property update, one for
-    ``annotate_operator``, two for ``update_point(tags=...)`` and THREE for
-    ``update_point(content=..., tags=...)`` (property loop, derived-embedding
-    clear+set, tag sync). #8854 review round 4 found that count stated as "at
-    most two", which understates the door's worst case by a whole window — the
-    number a caller sizes a timeout against, so it is pinned rather than left to
-    prose.
+    one 7-14 s window per call. #8854 review P2 measured that the door's real
+    counts are 3 / 4 / 5, not the stated 1 / 2 / 3: ``update_point`` also runs
+    ``_mark_dirty``, which itself reaches TWO wrapped sites
+    (``_advance_ep_version`` and the ``ep_dirty`` persist). The earlier test
+    filtered on ``what.startswith("update_point ")``, so it could not see them
+    and stayed green while the prose re-staled — the exact class of defect the
+    round-3 rewrite was fixing.
 
-    Discriminating power: pre-fix the wrapper was never called by the door at
-    all (empty list), and folding the embedding write into the per-key loop's
-    ``fn`` would drop the third case to two. Only the ``update_point``-labelled
-    sites are compared: the door also forwards ``_mark_dirty`` / ``_advance_ep_
-    version`` (pre-existing callers, not part of the enumerated bound).
+    This counts EVERY wrapped call the door makes, so a new site on any label
+    (including one inside a helper) breaks the assertion instead of quietly
+    widening the bound.
     """
     sdk = _sdk(tmp_path, "bound")
     try:
@@ -600,37 +604,420 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
         seen: list[str] = []
         original = sdk._graph_write_with_retry
 
-        def counting(fn, *, what):
-            if what.startswith("update_point "):
-                seen.append(what)
-            return original(fn, what=what)
+        def counting(fn, *, what, witness=None):
+            seen.append(what)
+            return original(fn, what=what, witness=witness)
 
         monkeypatch.setattr(sdk, "_graph_write_with_retry", counting)
 
+        _ADVANCE = "_advance_ep_version MERGE(:EpMeta)"
+        _DIRTY = "_mark_dirty ep_dirty persist SET"
+
         sdk.update_point(src, confidence=0.5)
-        assert seen == ["update_point SET (per-key)"], seen
+        assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY], seen
 
         seen.clear()
         sdk.update_point(src, tags=["a"])
         assert seen == ["update_point SET (per-key)",
-                        "update_point TAGGED edges"], seen
+                        "update_point TAGGED edges",
+                        _ADVANCE, _DIRTY], seen
 
         seen.clear()
         sdk.update_point(src, content="revised claim", tags=["a"])
         assert seen == ["update_point SET (per-key)",
                         "update_point SET (embedding)",
-                        "update_point TAGGED edges"], seen
+                        "update_point TAGGED edges",
+                        _ADVANCE, _DIRTY], seen
+        assert len(seen) == 5, "a LIVE content+tags update is FIVE windows"
 
         seen.clear()
         sdk.annotate_operator(op, bias=0.2, precision=0.8,
                               consistency=0.7, directness=0.9)
-        assert seen == ["update_point SET (per-key)"], seen
+        assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY], seen
+
+        # A TERMINAL point reaches `_mark_dirty`'s extra clear SET, so the
+        # bound is a RANGE, not a number (#8854 review round 3 P2).
+        sdk.retract_point(src)
+        seen.clear()
+        sdk.update_point(src, confidence=0.3)
+        assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY,
+                        "_mark_dirty terminal ep_dirty clear SET"], seen
+
+        # The documented UPPER bound: a TERMINAL point with content AND tags.
+        seen.clear()
+        sdk.update_point(src, content="terminal revision", tags=["b"])
+        assert seen == ["update_point SET (per-key)",
+                        "update_point SET (embedding)",
+                        "update_point TAGGED edges",
+                        _ADVANCE, _DIRTY,
+                        "_mark_dirty terminal ep_dirty clear SET"], seen
+        assert len(seen) == 6, "a TERMINAL content+tags update is SIX windows"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
 
 
 # ── the loud arm: a DELETED graph is never re-issued into ───────────────
+
+# ── the noisy arm that is NOT loud enough: a re-issue that lands NOTHING ─
+# #8854 review P1. The retry predicate can only prove the graph KEY exists, and
+# its own docstring admits the residual case — a rebuild that recreated the key
+# and has not replayed the node yet also reads ``EXISTS 1``. A re-issued
+# ``MATCH … SET`` then matches nothing and raises nothing, so pre-fix the verb
+# returned SUCCESS for a write it never made.
+
+
+class _AbortOnceThenEmptyGraph:
+    """Abort once AND empty the graph — a rebuild whose recreate has landed.
+
+    Models the #8854 P1 window exactly: the key is PRESENT (so the predicate
+    authorises the retry) but the data has not been replayed, so the re-issued
+    statement matches nothing. ``applied`` counts statements that reached the
+    real graph AFTER the wipe, so "the write never landed" is measured.
+    """
+
+    def __init__(self, real, needle: str, *, present: bool = True) -> None:
+        self._real = real
+        self._needle = needle
+        self._present = present
+        self.matching = 0
+        self.matched_rows = 0
+        self.aborted = False
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if not self.aborted:
+                self.aborted = True
+                # The rebuild's recreate: key present, graph EMPTY, replay not
+                # yet done. Nothing in the statement text can see this.
+                self._real.query("MATCH (n:Point) DETACH DELETE n")
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            res = self._real.query(cypher, params=params, timeout=timeout)
+            # ROWS this re-issue matched — not merely that it was issued.
+            self.matched_rows += (res.result_set[0][0]
+                                  if res.result_set else 0)
+            return res
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1 if self._present else 0
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_reissue_that_matches_nothing_is_NOT_reported_as_success(
+        tmp_path, monkeypatch):
+    """An authorised retry that lands zero rows must stay LOUD (#8854 P1).
+
+    Pre-fix this returned ``{}`` (or ``{"invalidated": True}``) with no
+    exception: the revision survived only in the caller's transcript, and in
+    journal-less mode the replay could not recover it either.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "emptied")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenEmptyGraph(proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, confidence=0.9)
+
+        assert proxy.matching >= 2, "the aborted statement was never re-issued"
+        assert proxy.matched_rows == 0, (
+            "the re-issue matched nothing, so the verb must not report success")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_invalidate_that_matches_nothing_does_not_report_invalidated(
+        tmp_path, monkeypatch):
+    """The ``invalidate_point`` witness: no CORRECTS edge, no success claim."""
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "invempty")
+    try:
+        old = _pid(sdk)
+        new = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenEmptyGraph(proj.g, _INVALIDATE_STAMP_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.invalidate_point(old, new)
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_retract_does_not_claim_already_terminal_after_a_retry(
+        tmp_path, monkeypatch):
+    """An empty CAS result after a retry is NOT "already terminal" (#8854 P1).
+
+    Pre-fix the re-issued ``SET`` matched nothing (rebuild still replaying) and
+    the empty ``result_set`` took the terminal branch — reporting a LIVE point
+    as already terminal, while the journal had already recorded the retraction.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "retractempty")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenEmptyGraph(proj.g, _RETRACT_CAS_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.retract_point(pid)
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
+        tmp_path):
+    """The witness must NOT change a legitimate zero-row FIRST attempt.
+
+    ``update_point`` on a missing id historically returns ``{}`` without
+    raising. A first attempt never consults the witness, so this stays true.
+    (The GATE itself — "only a graph-replaced abort arms it" — is pinned by
+    ``test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract``;
+    this test alone cannot observe it, since ``origin/main`` passes it too.)
+    """
+    sdk = _sdk(tmp_path, "missing")
+    try:
+        missing = str(uuid.uuid4())
+        assert sdk.update_point(missing, confidence=0.5) == {}
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+_WRITE_SLOT = "another write is in progress, retry the query"
+
+
+def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
+        tmp_path, monkeypatch):
+    """A non-rebuild abort must NOT arm the witness (#8854 review P1).
+
+    ``retryable_aborted_write`` also admits the write-slot arm — ordinary
+    multi-writer contention — which says nothing about whether the TARGET
+    exists. Arming the witness on it turned ``update_point(<missing id>)`` into
+    a stale ``ResponseError`` after four attempts, where the documented answer
+    is ``{}``. Only the graph-deleted-or-replaced family can mean "not
+    replayed yet", so only that family arms the witness.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "lockslot")
+    try:
+        missing = str(uuid.uuid4())
+        proj = sdk._get_proj()
+        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE,
+                               message=_WRITE_SLOT)
+        proj.g = proxy
+
+        assert sdk.update_point(missing, confidence=0.5) == {}
+        assert proxy.matching >= 2, "the aborted statement was never re-issued"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _GraphAbortThenSlotAbortEmptyGraph:
+    """Wipe + graph abort, then a write-slot abort, then pass through.
+
+    Models a rebuild — which is ITSELF a concurrent writer — followed by
+    ordinary write-slot contention inside the same retry window. The
+    graph-replaced abort must stay LATCHED: if the gate re-reads the LATEST
+    abort, the write-slot one disarms the witness and the zero-row re-issue
+    reports success again.
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+        self.matched_rows = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query("MATCH (n:Point) DETACH DELETE n")
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            if self.matching == 2:
+                raise redis_exc.ResponseError(_WRITE_SLOT)
+            res = self._real.query(cypher, params=params, timeout=timeout)
+            self.matched_rows += (res.result_set[0][0]
+                                  if res.result_set else 0)
+            return res
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_later_write_slot_abort_does_not_disarm_the_witness(
+        tmp_path, monkeypatch):
+    """The graph-abort latch survives a later, state-independent abort.
+
+    A rebuild is a concurrent writer, so a write-slot refusal arriving after a
+    graph-replaced one is not exotic. Gating on the LATEST abort let the slot
+    abort disarm a witness that had been legitimately armed, and the next
+    zero-row re-issue returned success — the false-success this PR closes.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "mixed")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _GraphAbortThenSlotAbortEmptyGraph(
+            proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, confidence=0.9)
+
+        assert proxy.matching >= 3, "the sequence never reached the re-issue"
+        assert proxy.matched_rows == 0, "nothing landed, so nothing may report it"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _AbortOnceThenTerminalise:
+    """Abort once AND mark the point terminal — a rebuild replaying the record.
+
+    ``retract_point`` appends ``PointRetracted`` BEFORE its CAS, so a rebuild
+    that replays that record makes the re-issued CAS match nothing through the
+    statement's OWN guard. The zero-row result is then legitimate and must
+    keep the documented ``ValueError``, not report a graph replacement.
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query("MATCH (n:Point) SET n.status = 'retracted'")
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_retract_that_lost_the_race_still_raises_already_terminal(
+        tmp_path, monkeypatch):
+    """A legitimately empty re-issue keeps the documented ValueError.
+
+    The graph was never replaced, so reporting one would name a cause that did
+    not occur (and `_classify_db_failure` would bucket it as "db").
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "lostrace")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenTerminalise(proj.g, _RETRACT_CAS_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.retract_point(pid)
+        assert proxy.matching >= 2, "the aborted CAS was never re-issued"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _AbortOnceThenSetStatus(_AbortOnceThenTerminalise):
+    """Abort once AND set every point's status — the competing writer's win."""
+
+    def __init__(self, real, needle: str, *, status: str = "live") -> None:
+        super().__init__(real, needle)
+        self._status = status
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query(
+                    "MATCH (n:Point) SET n.status = $s",
+                    params={"s": self._status})
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+
+def test_a_promote_refused_after_a_retry_keeps_its_illegal_transition(
+        tmp_path, monkeypatch):
+    """A present-but-not-draft node keeps the documented ValueError."""
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "promoterace")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenSetStatus(proj.g, _POINT_PROMOTE_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="Illegal status transition"):
+            sdk.update_point(pid, status="live")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_promote_on_an_absent_node_still_surfaces_the_abort(
+        tmp_path, monkeypatch):
+    """An absent node must NOT become `ValueError('No point')` (#8854 r4 P1).
+
+    ``ValueError`` is predicate-FALSE, so raising it after ONE re-issue would
+    abandon the 7-14 s window #7405 exists to heal. Absent → keep retrying;
+    exhausted → the graph abort, unchanged in type.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "promoteabsent")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenEmptyGraph(proj.g, _POINT_PROMOTE_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, status="live")
+        assert proxy.matching >= 3, (
+            "an absent node must keep retrying, not raise after one re-issue")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
 
 def test_a_deleted_graph_abort_on_the_property_set_stays_loud(tmp_path):
     """The retry must not MASK a deletion — the #7685 guarantee, extended.
@@ -654,6 +1041,119 @@ def test_a_deleted_graph_abort_on_the_property_set_stays_loud(tmp_path):
         assert proxy.applied == 0, (
             "a deleted graph must not be re-issued into — nothing may be "
             "reported as applied")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 9. the tag sync's LANDING WITNESS (#8854 review round 5, P1) ────────
+
+# The stale-edge DELETE the reconciler issues for a tag the caller dropped.
+_TAG_DELETE_NEEDLE = "-[r:TAGGED]->(t:Tag {name:$tag}) DELETE r"
+
+
+class _AbortThenUnreplay(_AbortOnceGraph):
+    """Abort the first matching statement, then delete its anchor Point.
+
+    Models the window the retry exists for, in the form that USED to be
+    swallowed: the abort is a rebuild's, and the statement it aborts is the one
+    that would write the derived half — so on the re-issue the anchor Point is
+    still not there. A ``MERGE`` against a missing anchor matches nothing and
+    returns normally, so without a witness the caller is told the tag write
+    landed while the graph holds no edge at all.
+
+    ``present=True`` keeps the graph KEY present, which is what authorises the
+    retry: the abort is indistinguishable from a plain deletion except by that
+    probe.
+    """
+
+    def __init__(self, real, needle: str, *, victim: str) -> None:
+        super().__init__(real, needle, present=True)
+        self._victim = victim
+        self.vanished = False
+
+    def query(self, cypher, params=None, timeout=None):
+        try:
+            return super().query(cypher, params=params, timeout=timeout)
+        except redis_exc.ResponseError:
+            # The rebuild replaced the graph mid-statement; its replay has not
+            # reached this Point yet. One deletion is enough — a second would
+            # race the assertions below.
+            if not self.vanished:
+                self.vanished = True
+                self._real.query(
+                    "MATCH (p:Point {id:$id}) DETACH DELETE p",
+                    params={"id": self._victim})
+            raise
+
+
+def test_a_retried_tag_sync_that_lands_nothing_does_not_report_success(
+        tmp_path):
+    """A re-issued tag sync against an unreplayed Point is NOT a success.
+
+    Measured pre-fix: ``update_point(pid, tags=[a, b])`` returned a point dict
+    while the graph held ZERO ``TAGGED`` edges and no ``Point`` at all — the
+    success report the whole retry exists to avoid (#6666 class). The tag arm
+    rode ``_graph_write_with_retry`` WITHOUT a witness, so nothing asked the
+    graph whether the re-issue had landed.
+
+    The abort therefore surfaces unchanged, exactly as it does on the property
+    arm — one behaviour for the whole mutation, not one per statement.
+    """
+    sdk = _sdk(tmp_path, "tagwitness")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _TAGGED_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, tags=["7405ghost", "7405spectre"])
+
+        proj.g = proxy._real
+        assert proxy.vanished, (
+            "fixture precondition: the Point must be gone — an unresolvable "
+            "anchor is the window under test")
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id})-[:TAGGED]->(t:Tag) RETURN count(t)",
+            params={"id": pid}).result_set
+        assert rows[0][0] == 0, (
+            "fixture precondition: the re-issue must land NO edge, or the "
+            "witness was never the thing that refused the call")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_clearing_tags_is_never_reported_as_a_non_landing(tmp_path):
+    """The witness must not turn an EMPTY tag request into a failure.
+
+    ``tags=[]`` asks for no edge, so a graph holding none is exactly what was
+    requested — ``landed == 0 == len(wanted)`` and the call returns. This pins
+    the FULL-SET rule against a future ``>= 1`` reading of it, which would red
+    an honest clear.
+    """
+    sdk = _sdk(tmp_path, "tagclear")
+    try:
+        pid = _pid(sdk)
+        sdk.update_point(pid, tags=["7405gone"])
+        proj = sdk._get_proj()
+        # Abort the stale-edge DELETE, so the retry re-issues the whole
+        # reconciler with the latch armed — the state in which the witness is
+        # actually consulted.
+        proxy = _AbortOnceGraph(proj.g, _TAG_DELETE_NEEDLE, present=True)
+        proj.g = proxy
+
+        sdk.update_point(pid, tags=[])  # returns; must NOT raise
+
+        assert proxy.matching >= 2, (
+            "the aborted stale DELETE was never re-issued — the witness was "
+            "never consulted, so this test would prove nothing")
+        proj.g = proxy._real
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id})-[:TAGGED]->(t:Tag) RETURN count(t)",
+            params={"id": pid}).result_set
+        assert rows[0][0] == 0, "the clear must have landed"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
