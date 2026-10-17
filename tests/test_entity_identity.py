@@ -867,6 +867,16 @@ _ALLOWED_OPERATOR = {
         # holders out. The ambiguous and terminal-only cases are refused before
         # this branch (test_5509_name_keyed_identity_reads.py).
         'entity_predicate = ( "(o.name = $topic OR o.canonical_name = $topic) " f"AND {_terminal_excluded(\'o.status\')}")': 1,
+        # C: `update_point`'s TAGGED landing witness (#7405), the existence
+        # probe for the EDGE half of a write. `:Tag` identity IS its name —
+        # the reconciler MERGEs `(t:Tag {name:$tag})` in the same routine
+        # (`projection/edges.py::_sync_tags`), so a name here cannot name two
+        # carriers the way an Object/Subject name can, and there is no other
+        # coordinate to key on. It returns an aggregate COUNT, never a row, so
+        # it can never select one identity; the caller compares the count to
+        # the requested set and raises on a short landing. Name-keying is
+        # deliberate and narrow: `Tag` is a value node, not an identity family.
+        'rows = proj.g.query( "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) " "WHERE t.name IN $names RETURN count(DISTINCT t.name)", params={"pid": id, "names": _sync_wanted}, ).result_set': 1,
     },
     'tortoise/session_link.py': {
         # D: the suffix probe already enforces EXACTLY-ONE (`if len(rows) == 1`),
