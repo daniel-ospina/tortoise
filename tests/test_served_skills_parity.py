@@ -1687,6 +1687,10 @@ def test_4643_the_arm_is_recognised_through_every_legitimate_spelling(tmp_path):
     spellings = [
         "tools/served_skills_parity.py --check-upstream",
         '"$GITHUB_WORKSPACE/tools/served_skills_parity.py" --check-upstream',
+        # Braced form: `_interpolate` handles only the unbraced one, so this case
+        # is the ONLY thing that makes the hermetic `GITHUB_WORKSPACE` entry
+        # load-bearing (review finding, P2 — reverting it left 85 green).
+        '"${GITHUB_WORKSPACE}/tools/served_skills_parity.py" --check-upstream',
         '"${{ github.workspace }}/tools/served_skills_parity.py" --check-upstream',
         '"${{github.workspace}}/tools/served_skills_parity.py" --check-upstream',
         "-m tools.served_skills_parity --check-upstream",
