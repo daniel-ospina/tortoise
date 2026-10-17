@@ -450,10 +450,12 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
 
     No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
     comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/agent/signup`` is
-    the only route this file reads and it is not exempt from the bound. The
+    the route this file reads most (18 of its 25 route reads) and it is not
+    exempt from the bound. The
     plain-client control is the non-vacuity leg — it is the exact
-    ``assert 504 == 200`` shape this conversion removes, and it would pass
-    unchanged if the route were ever exempted.
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if
+    the route is ever exempted (the middleware stops refusing, so the
+    control's 504 assertion fails).
     """
     from tortoise import mcp_auth
     from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT

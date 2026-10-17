@@ -907,14 +907,25 @@ class TestOthersBranchFailClosedRecheck1879:
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
         monkeypatch):
-    """#8818: the deterministic refusal pin for this module's client seams.
+    """#8818: the deterministic refusal pin for this module's SYNC client
+    seam.
+
+    The module has a second seam — the ``_run`` ASGI burst in
+    ``test_concurrent_recovery_mints_stay_at_cap``, built with
+    ``verdict_async_client`` — deliberately not pinned here: a reverted call
+    site is caught statically by `_CONVERTED_CLIENT_SEAMS`, and the async
+    factory's refusal behaviour is pinned by
+    `test_capture_loop_responsiveness.py`'s async leg. This pin covers the
+    ``client`` fixture, which is what the file's 29 route reads bind from (27
+    ``POST /v1/session/key`` + 2 ``GET /v1/team/keys``).
 
     No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
     comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/session/key`` is the
     route this file reads most and it is not exempt from the bound. The
     plain-client control is the non-vacuity leg — it is the exact
-    ``assert 504 == 200`` shape this conversion removes, and it would pass
-    unchanged if the route were ever exempted.
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if
+    the route is ever exempted (the middleware stops refusing, so the
+    control's 504 assertion fails).
     """
     from tortoise import mcp_auth
     from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
