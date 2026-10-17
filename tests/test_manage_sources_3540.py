@@ -192,6 +192,10 @@ def test_disabling_github_issues_writes_only_its_intent_flag(ctx):
         "disabling github_issues switched the sibling source off too")
     assert ctx["cleared"] is False, (
         "the stored credential was cleared — the connection was torn down")
+    # The OUTCOME of THIS branch, not just of the recording branch: mutating the
+    # github_issues success log to `error_flag_write` used to leave all 31 tests green.
+    assert any(e[2] == "disable" and e[3] == "ok" for e in ctx["logs"]), (
+        ctx["logs"])
 
 
 def test_disabling_github_documents_writes_its_own_flag(ctx):

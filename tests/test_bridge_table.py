@@ -31,7 +31,7 @@ GENERATOR = ROOT / "tools" / "bridge_table.py"
 
 
 def test_target_mcp_matches_the_beta_doc() -> None:
-    """The 26-tool target set is declared in TWO places; they must be equal.
+    """The MCP target set is declared in TWO places; they must be equal.
 
     This is the round-2 P1 of the PR #4177 review, and it is the *same* defect
     class round 1 found: two sets that both said the same number while being different
