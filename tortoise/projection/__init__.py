@@ -8620,6 +8620,22 @@ class FalkorProjection(
                     "rebuild: deferred CORRECTS fold failed; %d edge(s) not "
                     "replayed", len(deferred_corrects))
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
+        # #4125: pre-#4005 basename-url session Sources are re-materialised by
+        # this replay (their `SourceCreated` line, and `_link_source`'s stub
+        # mint from any PointAdded naming the bare basename) while the
+        # canonical `session:<id>` node is recreated beside them. The journal is
+        # APPEND-ONLY, so the migration cannot rewrite those records and no
+        # mapping for them exists in it to fold — but the replayed Points carry
+        # the attribution (`session_id` + the `extractedFrom` edge the passes
+        # above just rebuilt). Re-derive the migrated state here, AFTER every
+        # pass, so a rebuild converges on the same identity a live migration
+        # produces. Never raises (see `reconcile_after_replay`).
+        #
+        # NOTE: this is ``rebuild()``, not ``rebuild_all()`` — the engine label
+        # must match, or a rebuild-failure investigation is misdirected to the
+        # wrong engine (there is no #7951 re-assert in this engine).
+        from tortoise.session_source_migration import reconcile_after_replay
+        reconcile_after_replay(self, engine="rebuild")
         # #4653: re-establish the watermark captured above. DEGRADES, never
         # raises — this runs after the wipe (#2943 "no loss without proof").
         try:
@@ -12576,6 +12592,28 @@ class FalkorProjection(
                 remove_session=session_rematerialise_seq.get(_sid, -1) <= _seq,
                 remove_source=source_rematerialise_seq.get(_sid, -1) <= _seq,
             )
+
+        # ── #4125: re-migrate pre-#4005 basename session Sources ──────
+        # AFTER every replay pass. Both re-materialisation paths are done by
+        # here: the legacy node's own `SourceCreated` line (pass 1/1b) and
+        # `_link_source`'s stub mint for any PointAdded naming the bare
+        # basename (pass 2, which re-derives `extractedFrom` from EVERY
+        # PointAdded). So by this point the legacy node exists again and the
+        # canonical `session:<id>` node sits beside it — the duplicate a
+        # graph-only migration would silently leave behind after a wipe.
+        #
+        # The journal is APPEND-ONLY (`tortoise/log.py`: "sealing writes bytes,
+        # it never rewrites"), so the pre-fix lines cannot be corrected and no
+        # mapping for them exists in the journal to fold. What the journal DOES
+        # reproduce is the attribution: the replayed Points carry their
+        # `session_id` and the `extractedFrom` edge rebuilt above still names
+        # the legacy node. Re-deriving the migrated state from that is what
+        # makes the migration rebuild-durable instead of being undone by the
+        # next wipe (#2296's write-surface invariant, satisfied by
+        # re-derivation rather than by a record). Never raises — see
+        # `reconcile_after_replay`.
+        from tortoise.session_source_migration import reconcile_after_replay
+        reconcile_after_replay(self, engine="rebuild_all")
 
         # ── #4653: re-establish the event-log watermark ───────────────
         # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is

@@ -179,9 +179,16 @@ class TestCalendarAttendeeExtraction(unittest.TestCase):
             self.assertEqual(result, [])
 
     def test_valid_state_file(self):
-        """Valid state file should return attendees."""
+        """A state file that describes THIS meeting returns its attendees.
+
+        #8491: the read is grounded on the meeting's own evidence (same local
+        day or same `event_title`) — an unqualified read promoted another
+        call's participants into this meeting's CRM. The full contract lives in
+        tests/test_8491_cal_attendee_grounding.py.
+        """
         state = {
             "recording_pid": 12345,
+            "started_at": "2026-07-31T14:29:00",
             "event_title": "Test Call",
             "attendees": [
                 {"name": "John", "email": "john@test.com"},
@@ -194,10 +201,32 @@ class TestCalendarAttendeeExtraction(unittest.TestCase):
 
         try:
             with patch.object(bridge, "CAL_STATE_FILE", path):
-                result = bridge.get_calendar_attendees()
+                result = bridge.get_calendar_attendees(
+                    "2026-07-31T14:30:22Z", "Test Call")
                 self.assertEqual(len(result), 2)
                 self.assertEqual(result[0]["name"], "John")
                 self.assertEqual(result[1]["email"], "jane@test.com")
+        finally:
+            os.unlink(path)
+
+    def test_state_file_for_a_different_meeting_is_refused(self):
+        """#8491: a neighbouring meeting's state file yields no attendees."""
+        state = {
+            "recording_pid": 12345,
+            "started_at": "2026-07-30T09:00:00",
+            "event_title": "Some Earlier Call",
+            "attendees": [{"name": "John", "email": "john@test.com"}],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(state, f)
+            path = f.name
+
+        try:
+            with patch.object(bridge, "CAL_STATE_FILE", path):
+                self.assertEqual(
+                    bridge.get_calendar_attendees(
+                        "2026-07-31T14:30:22Z", "Test Call"),
+                    [])
         finally:
             os.unlink(path)
 
