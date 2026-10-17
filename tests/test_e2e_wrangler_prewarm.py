@@ -96,11 +96,24 @@ _CONTINUATION = re.compile(r"\\\n")
 #:     while the filter dropped the line;
 #:   - round 4 — a word-boundary lookbehind: `$@wrangler@4` runs `wrangler@4`
 #:     (bash removes an empty `$@`), and the lookbehind read it as mid-word.
-#: A substring search cannot be defeated by any of them, because it does not care
-#: what the text means. What it can do is over-report — a mention in prose, a
-#: quoted string, a commented-out line, a longer word containing the token — and
-#: every over-report is declared and pinned with the arms, because refusing a
-#: correct step is recoverable and passing a floating one is not.
+#: A substring search cannot be defeated by any of THOSE: each is a line-level
+#: construct, and the scan does not read what a line means. What it can do is
+#: over-report — a mention in prose, a quoted string, a commented-out line, a
+#: longer word containing the token — and every over-report is declared and
+#: pinned with the arms, because refusing a correct step is recoverable and
+#: passing a floating one is not. Quoting that SPLITS the word itself is handled
+#: by `_UNQUOTE` below; an EMPTY EXPANSION inside it is the one form no text scan
+#: can read, and it is declared at `_exact_wranglers`.
+#:
+#: Shell removes quoting and escapes BEFORE it runs a word, so a token spelled
+#: `wrangler\@4`, `wran\gler@4`, `wrangler'@'4` or `"wrangler"@4` executes
+#: `wrangler@4` while the literal text holds no `wrangler@` at all. Deleting those
+#: characters is sound in the fail-closed direction ONLY because `wrangler@`
+#: itself contains none of them: the deletion can JOIN two fragments into a token
+#: (an over-report, which this guard accepts) and can never split one apart.
+#: Order matters — the continuation fold runs FIRST, or deleting the backslash
+#: would leave `wrangler` and `@4` on two lines.
+_UNQUOTE = re.compile(r"[\\'\"`]")
 _INVOCATION = re.compile(r"wrangler@")
 
 #: The spec that follows — or `""` when it is INDIRECT: no literal at all
@@ -117,7 +130,7 @@ def _wrangler_invocations(run: str) -> set[str]:
     """Every `wrangler@<spec>` written in `run`, as a plain substring."""
     # Shell removes a backslash-newline pair; nothing else is removed and no line
     # is filtered — a pin inside a here-doc body or a quoted string is read too.
-    text = _CONTINUATION.sub("", run)
+    text = _UNQUOTE.sub("", _CONTINUATION.sub("", run))
     specs: set[str] = set()
     for at in _INVOCATION.finditer(text):
         literal = _SPEC_RUN.match(text, at.end())
@@ -128,15 +141,17 @@ def _wrangler_invocations(run: str) -> set[str]:
         else:
             specs.add(literal.group(0))
     return specs
-#: DECLARED RESIDUAL (review round 5, measured; NOT a regression — the lexer this
-#: replaced misses it too, as does any check that looks for the literal token):
-#: shell normalises QUOTING AND ESCAPING INSIDE the word before it runs it, and the
-#: literal `wrangler@` then is not in the text at all — `wrangler\@4`, `wran\gler@4`,
-#: `wrangler'@'4`, `"wrangler"@4` and `wrangler$X@4` (empty `X`) all execute
-#: `wrangler@4`. Closing that needs a real shell word-splitter — the instrument
-#: whose four unmodelled constructs this PR exists to stop depending on. The honest
-#: fix is at the lane: assert the wrangler version that actually resolved, rather
-#: than read it out of the script.
+#: DECLARED RESIDUAL (review round 5, NARROWED by round 6): an EMPTY EXPANSION
+#: inside the word — `wrangler$X@4`, `wrangler${X}@4` with `X` empty — executes
+#: `wrangler@4` while no text scan can see a literal `wrangler@`. The quoting and
+#: escaping forms the same review named (`wrangler\@4`, `wran\gler@4`,
+#: `wrangler'@'4`, `"wrangler"@4`) are NOT residual: `_UNQUOTE` deletes those
+#: characters before the scan, which turns each of them into a literal the guard
+#: reports (pinned by the arms in
+#: `test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range`). Closing
+#: the expansion case needs the shell's own variables, so the honest fix is at the
+#: lane: assert the wrangler version that actually resolved, rather than read it
+#: out of the script.
 
 #: DECLARED RESIDUAL — what a text check cannot reach at all: two INDIRECT pins
 #: cannot be proved EQUAL to each other, so parity between a pre-warm and a boot
@@ -346,8 +361,12 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     assert _exact_wranglers("# was: wrangler@4.127.0\nnpx --yes wrangler@latest --version") == {"4.127.0"}
     assert _floating_wranglers('echo "refs #8743" && npx --yes wrangler@4 --version') == {"4"}
 
-    # A shell CONTINUATION makes the two lines one command line.
+    # A shell CONTINUATION removes the backslash AND the newline, so the halves
+    # are ONE WORD: this token is split by the line break, not merely preceded by
+    # it, which is what makes the arm discriminate — dropping `_CONTINUATION`
+    # reads nothing here, so that removal is now caught.
     assert _floating_wranglers("npx --yes \\\n  wrangler@4 --version") == {"4"}
+    assert _floating_wranglers("npx --yes wrangler\\\n@4 --version") == {"4"}
 
     # REGRESSION ARMS — inputs where a previous draft of this matcher, or the
     # shell lexer it replaced, reported nothing while bash executed a floating
@@ -424,13 +443,18 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     assert _floating_wranglers("cat <<'EOF'\nnpx --yes wrangler@4 --version\nEOF") == {"4"}
     assert _floating_wranglers("xwrangler@4 pages dev") == {"4"}
 
-    # DECLARED RESIDUAL (round 5): quoting or an empty expansion INSIDE the word.
-    # bash runs `wrangler@4`; the literal `wrangler@` is not in the text, so this
-    # reads nothing. Pinned so the limit is stated, not hidden — see the residual
-    # note above `_exact_wranglers`.
+    # QUOTING INSIDE THE WORD is READ, not missed (round 6): shell removes these
+    # characters before it runs the word, so `_UNQUOTE` removes them before the
+    # scan and the token is reported as the float it is. Four forms that round 5
+    # had declared unreadable are caught here.
     for run in ("wrangler\\@4 --version", "wran\\gler@4 --version",
-                "wrangler'@'4 --version", '"wrangler"@4 --version',
-                "wrangler$X@4 --version"):
+                "wrangler'@'4 --version", '"wrangler"@4 --version'):
+        assert _floating_wranglers(run) == {"4"}, run
+    # The one form left: an EMPTY EXPANSION inside the word. bash runs
+    # `wrangler@4`; there is no literal to read, and no text scan can know that
+    # `X` is empty. Pinned so the limit is stated, not hidden — see the residual
+    # note above `_exact_wranglers`.
+    for run in ("wrangler$X@4 --version", "wrangler${X}@4 --version"):
         assert _wrangler_invocations(run) == set(), run
 
     # An INDIRECT spec is floating, never exact — including a literal CUT SHORT by
