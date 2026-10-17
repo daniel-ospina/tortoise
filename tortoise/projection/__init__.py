@@ -13670,6 +13670,53 @@ class FalkorProjection(
         except Exception:
             return True
 
+    #: The fields the Event FULLTEXT index is SUPPOSED to carry (#244) — the
+    #: SAME list the sweep CREATES it with, so the migration's target cannot
+    #: drift from the schema it migrates to.
+    _EVENT_FTS_TARGET_FIELDS: tuple[str, ...] = tuple(
+        dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Event"])
+
+    def _event_fts_index_is_current(self) -> bool:
+        """Does the EXISTING Event FULLTEXT index already index BOTH fields?
+
+        #5440: the Event legacy branch exists to widen a SUBJECT-ONLY index to
+        ``(subject, name)``, and it was gated on the one-time marker ALONE.
+        The marker is absent on a graph whose index is ALREADY the target
+        shape — the state a freshly built graph is in (the sweep creates the
+        two-field index and mints only the Point marker), and the state a
+        restore/DR graph is in (the dump carries no indexes and skips the
+        markers). Whenever anything else made the schema not-current, the
+        branch then entered and issued ``db.idx.fulltext.drop('Event')``
+        against a healthy, in-use index that needed NO migration: a failure
+        between the drop and the recreate left Event FTS absent for an index
+        that was correct the whole time, and a concurrent boot could drop the
+        index a peer had just created.
+
+        So the destructive half is gated on the SCHEMA half — the same
+        reasoning as ``_point_fts_search_keys_field_missing`` (#5444).
+
+        Requires the field to be indexed AS FULLTEXT (a RANGE index on
+        ``name`` cannot answer ``queryNodes``), read from the kinds map
+        ``_schema_is_current`` reads. A probe that cannot answer returns
+        False — migrate, never assume done.
+        """
+        try:
+            for row in self.g.query("CALL db.indexes()").result_set:
+                if not row or str(row[0]) != "Event":
+                    continue
+                if len(row) < 3 or not isinstance(row[2], dict):
+                    return False
+                for field in self._EVENT_FTS_TARGET_FIELDS:
+                    kinds = row[2].get(field)
+                    if isinstance(kinds, str):
+                        kinds = [kinds]
+                    if "FULLTEXT" not in {str(k).upper() for k in (kinds or ())}:
+                        return False
+                return True
+            return False
+        except Exception:
+            return False
+
     def _array_valued_search_keys_exist(self) -> bool:
         """Does any Point still store ``search_keys`` as an ARRAY?
 
@@ -14251,25 +14298,47 @@ class FalkorProjection(
                                     "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
                                 ).result_set
                                 if not done:
-                                    # #H05: the drop procedure NAME varies by
-                                    # engine (db.idx.fulltext.drop on server
-                                    # builds, dropIndex on older ones) -- the
-                                    # single hardcoded name could never migrate
-                                    # on a build registering only the other.
-                                    for drop_proc in ("db.idx.fulltext.drop",
-                                                      "db.idx.fulltext.dropIndex"):
-                                        try:
-                                            self.g.query(
-                                                f"CALL {drop_proc}('Event')"
-                                            )
-                                            dropped = True
-                                            break
-                                        except Exception:
-                                            continue
-                                    self._create_fulltext_index(
-                                        "Event", ["subject", "name"]
-                                    )
-                                    created = True
+                                    # #5440: the marker is ALSO absent on a
+                                    # graph whose index is ALREADY
+                                    # (subject, name) — a freshly built one
+                                    # mints only the Point marker, and a
+                                    # restore/DR graph carries no indexes.
+                                    # Dropping there is a destructive no-op
+                                    # against a healthy, in-use index, so
+                                    # only a genuinely legacy (subject-only)
+                                    # index is dropped; an already-current one
+                                    # just records the migration. The
+                                    # recreate is what makes a drop
+                                    # necessary at all — you cannot widen a
+                                    # FULLTEXT index in place.
+                                    if self._event_fts_index_is_current():
+                                        # The intended index is in place, so
+                                        # a later failure is only the marker.
+                                        created = True
+                                    else:
+                                        # #H05: the drop procedure NAME
+                                        # varies by engine
+                                        # (db.idx.fulltext.drop on server
+                                        # builds, dropIndex on older ones) --
+                                        # the single hardcoded name could
+                                        # never migrate on a build
+                                        # registering only the other.
+                                        for drop_proc in (
+                                            "db.idx.fulltext.drop",
+                                            "db.idx.fulltext.dropIndex",
+                                        ):
+                                            try:
+                                                self.g.query(
+                                                    f"CALL {drop_proc}('Event')"
+                                                )
+                                                dropped = True
+                                                break
+                                            except Exception:
+                                                continue
+                                        self._create_fulltext_index(
+                                            "Event", list(self._EVENT_FTS_TARGET_FIELDS)
+                                        )
+                                        created = True
                                     self.g.query(
                                         "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
                                     )
