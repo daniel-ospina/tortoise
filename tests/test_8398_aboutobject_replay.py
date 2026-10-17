@@ -328,8 +328,12 @@ def test_title_matching_is_Source_scoped(wired) -> None:
     success that masks a real loss.
     """
     sdk, proj, _events, _journal = wired
-    ev = _nid(sdk.create_event("titled", "event"))
-    sdk.create_object("o", title="MyDoc")
+    # The edge must EXIST for the count to be able to see the title, or the test
+    # cannot discriminate: with no edge the query returns 0 rows under the
+    # unscoped query too, so it would pass against the very code it pins.
+    obj = _nid(sdk.create_object("o", title="MyDoc"))
+    ev = _nid(sdk.create_event("titled", "event", aboutObject=obj))
     assert proj._count_about_to_value(ev, "MyDoc") == 0, (
-        "an Object's title satisfied a document link")
+        "an Object's title satisfied a document link — the Event IS joined to "
+        "that Object, so an unscoped `t.title` match counts it")
     assert proj._count_about_to_value(ev, "MyDoc-not-a-thing") == 0
