@@ -8,7 +8,10 @@ version: 1
 #
 # `commit` is a real upstream commit and every sha256 is the CONTENT of
 # that commit — `--check-upstream` re-fetches by commit and re-hashes, so
-# a fabricated pin fails rather than passing quietly.
+# a fabricated pin fails rather than passing quietly. The same sha256 is
+# re-computed over the bytes at upstream HEAD, so the pin is checked
+# against what the author repo has NOW; an upstream commit that leaves
+# these three files byte-identical is not a drift.
 #
 # Ownership of the artifacts NOT covered here (tortoise-onboarding, the
 # installer): docs/license-notes.md §7.

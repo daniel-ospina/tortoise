@@ -51,9 +51,10 @@
 #     MIT repo https://github.com/daniel-ospina/tortoise-skills-and-integrations.
 #     The copies served here are a DERIVED MIRROR: they are pinned in
 #     `config/served-skills-upstream.yml` and gated fail-closed by
-#     `tools/served_skills_parity.py` (`--check` in CI + at deploy, `--sync` to
-#     re-derive). To change one of those skills, edit it UPSTREAM and re-derive
-#     — never edit a served copy here.
+#     `tools/served_skills_parity.py`: the offline served↔pin check runs per-PR
+#     today, and the upstream (honesty/currency) arm lands with the deploy-time
+#     + scheduled wiring in #8129. `--sync` re-derives. To change one of those
+#     skills, edit it UPSTREAM and re-derive — never edit a served copy here.
 #   * THIS script and the onboarding instructions are authored HERE, in
 #     https://github.com/daniel-ospina/tortoise — the script at
 #     `website/apps/dashboard/public/install-tortoise-skills.sh` (its source of

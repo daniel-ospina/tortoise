@@ -26,22 +26,47 @@ TWO CHECKS, BECAUSE THEY FAIL DIFFERENTLY
   Catches the direction that needs no network: a served copy edited in place
   here, or an upstream file left un-mirrored after a hand edit of the pin.
 * ``--check-upstream`` — the pin is HONEST and CURRENT: the pinned commit's
-  bytes really hash to the pin, and upstream `main` has not moved past it.
-  Needs the network; runs in `deploy-pages.yml` (so the stale mirror cannot
-  ship behind a green deploy) and on a schedule (`skills-parity.yml`, so it is
-  caught even when nothing else triggers a deploy).
+  bytes really hash to the pin, and the bytes at upstream `main` HEAD are still
+  those bytes. Needs the network.
+
+  ⛔ HONEST LIMIT: this arm is implemented and covered, but NO RUNNER INVOKES IT
+  YET. Wiring it (a step in `deploy-pages.yml` before the build stages
+  `public/`, plus a scheduled `skills-parity.yml` that auto-files) is a
+  `.github/workflows/*` change, and this lane's credential cannot push one —
+  #8129. So today the only live enforcement is the offline arm: an upstream
+  skill edit reds nothing by itself, and a served copy edited in place *plus* a
+  matching re-cut of the pin's `sha256:` passes. Do not read this file's
+  presence as "the mirror cannot drift".
 
 ⛔ `--check-upstream` is not decoration. A pin-only gate is VACUOUS: pin any
 old commit and the "byte-identical" claim becomes true of history. The gate is
-only meaningful because HEAD currency is asserted alongside it.
+only meaningful because the upstream-HEAD bytes are compared alongside it.
+
+WHY CURRENCY COMPARES BYTES, NOT THE COMMIT POINTER
+
+The currency arm compares the PINNED sha256 against the bytes at upstream HEAD.
+It deliberately does NOT require `HEAD == pinned`: the MIT repo also takes
+commits that cannot change what we serve (a README edit, a new unrelated skill,
+CI config). Keying on the pointer reds the dashboard deploy and auto-files a
+"the mirror drifted" P2 for a commit that changed none of the three files — a
+false alarm on the one signal humans are asked to trust, and a wrong diagnosis
+("a skill changed there") for a cause that did not happen. A skill edit still
+reds (the bytes at HEAD differ from the pin); an unrelated commit does not.
 
 FAIL-CLOSED, EVERY TIME
 
 Missing manifest, missing skill entry, missing/unreadable served copy, a
-mismatched byte count, a network error after retries — each is a FAILURE with a
-non-zero exit, never a skip. A parity gate that passes when it could not read a
-side reports health it never observed; that is the exact defect class this
-exists to close (#3673's "0 fail-open paths", #4643 targets 1 and 2).
+byte count that disagrees with the pin, a network error after retries — each is
+a FAILURE with a non-zero exit, never a skip. A parity gate that passes when it
+could not read a side reports health it never observed; that is the exact
+defect class this exists to close (#3673's "0 fail-open paths", #4643 targets
+1 and 2).
+
+OUTPUT CONTRACT
+
+``--json`` writes ONE JSON document to stdout and nothing else — every human
+line goes to stderr on that path, so `json.loads(stdout)` works on a GREEN run
+as well as a red one (the direction a monitor actually reads).
 
 USAGE
 
@@ -55,26 +80,39 @@ USAGE
 writes each served copy byte-for-byte and re-cuts
 `config/served-skills-upstream.yml`. Run it after editing a skill upstream,
 then commit the changed skills + the pin together.
+
+``--sync --commit <sha>`` is for pinning a specific upstream commit. It is not
+silently equivalent to HEAD: the currency arm compares the pinned bytes against
+upstream HEAD, so a sync to a commit whose skill bytes differ from HEAD prints
+that consequence and the resulting pin reds `--check-upstream` until upstream
+moves back (or `--sync` is re-run at HEAD). See ``sync()``.
 """
 from __future__ import annotations
 
-import argparse
-import hashlib
-import os
-import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
-from pathlib import Path
 
 # #5128 shape: refuse a <3.12 interpreter before the work, not a traceback.
+# ⛔ POSITION IS THE RULE: `import sys` + this guard are the FIRST statements
+# after the docstring and `__future__`, BEFORE every other import — a
+# module-level 3.12-only import would raise before a later guard could run
+# (`tests/test_entry_point_python_guard.py` enforces exactly this shape).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/served_skills_parity.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
         f"`uv run python tools/served_skills_parity.py`"
     )
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_REL = Path("config") / "served-skills-upstream.yml"
@@ -93,6 +131,12 @@ class ParityError(RuntimeError):
 
 def _err(msg: str) -> None:
     print(f"::error::{msg}" if os.environ.get("GITHUB_ACTIONS") else msg,
+          file=sys.stderr)
+
+
+def _note(msg: str) -> None:
+    """A non-fatal observation. stderr only — never stdout (the --json contract)."""
+    print(f"::notice::{msg}" if os.environ.get("GITHUB_ACTIONS") else msg,
           file=sys.stderr)
 
 
@@ -166,7 +210,10 @@ def dump_manifest(manifest: dict) -> str:
         "#",
         "# `commit` is a real upstream commit and every sha256 is the CONTENT of",
         "# that commit — `--check-upstream` re-fetches by commit and re-hashes, so",
-        "# a fabricated pin fails rather than passing quietly.",
+        "# a fabricated pin fails rather than passing quietly. The same sha256 is",
+        "# re-computed over the bytes at upstream HEAD, so the pin is checked",
+        "# against what the author repo has NOW; an upstream commit that leaves",
+        "# these three files byte-identical is not a drift.",
         "#",
         "# Ownership of the artifacts NOT covered here (tortoise-onboarding, the",
         "# installer): docs/license-notes.md §7.",
@@ -211,8 +258,13 @@ def check_local(manifest: dict, root: Path) -> list[str]:
                 f"      the mirror is DERIVED — restore it with "
                 f"`uv run python tools/served_skills_parity.py --sync`")
         elif len(payload) != int(entry["bytes"]):
-            # Unreachable unless sha256 collides; kept because "the pin's byte
-            # count is decorative" would otherwise be an untested claim.
+            # REACHABLE, and not by collision: `bytes` is independent pin
+            # metadata, so a hand-edited `bytes:` beside a correct `sha256:`
+            # lands here (the payload matches the digest, the count does not).
+            # Kept — and covered by
+            # `test_4643_the_pins_byte_count_is_checked_not_decorative` — because
+            # "the pin's byte count is decorative" would otherwise be an
+            # untested claim.
             problems.append(
                 f"{name}: byte count disagrees with the pin "
                 f"({len(payload)} != {int(entry['bytes'])})")
@@ -284,10 +336,12 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
     """The pin is honest AND current, and the mirror matches it.
 
     Three assertions, in the order that makes each failure legible:
-      1. upstream `branch` HEAD == the pinned commit (CURRENCY — without this
-         the whole gate is vacuous, see the module docstring);
-      2. the pinned commit's bytes hash to the pinned sha256 (HONESTY — a
+      1. the pinned commit's bytes hash to the pinned sha256 (HONESTY — a
          hand-fabricated pin fails here instead of passing quietly);
+      2. the bytes at upstream `branch` HEAD hash to the SAME sha256
+         (CURRENCY — without this the whole gate is vacuous, see the module
+         docstring). Compared by BYTES, not by the commit pointer: an upstream
+         commit that cannot change what we serve must not red this;
       3. the served mirror equals those bytes (the end-to-end claim, re-stated
          so this check alone is sufficient at a deploy).
     """
@@ -296,19 +350,36 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
     repo, branch, pinned = upstream["repo"], upstream["branch"], upstream["commit"]
 
     head = remote_head(repo, branch, attempts, backoff)
-    if head != pinned:
+    # Honesty + mirror first: a pin that is not what its own commit contains is
+    # the more fundamental failure, and it is reported even when upstream moved.
+    problems.extend(_check_pinned_bytes(manifest, root, attempts, backoff))
+    if head == pinned:
+        return problems
+
+    # Currency. The pointer moved — but only a byte difference is a drift.
+    drifted = 0
+    for name in sorted(manifest["skills"]):
+        entry = manifest["skills"][name]
+        payload = fetch_raw(repo, head, entry["upstream_path"], attempts, backoff)
+        digest = sha256_bytes(payload)
+        if digest == entry["sha256"]:
+            continue
+        drifted += 1
         problems.append(
-            f"the MIRROR IS STALE — {repo}@{branch} is at {head[:12]} but the "
-            f"pin records {pinned[:12]}.\n"
-            f"      The MIT repo is the AUTHOR: a skill changed there and the "
+            f"{name}: the MIRROR IS STALE — the bytes of {entry['upstream_path']} "
+            f"at {repo}@{branch} HEAD ({head[:12]}) hash to {digest}; the pin "
+            f"records {entry['sha256']} (pinned commit {pinned[:12]}).\n"
+            f"      The MIT repo is the AUTHOR: this skill changed there and the "
             f"served copy here was never re-derived.\n"
             f"      Fix: `uv run python tools/served_skills_parity.py --sync` "
             f"and commit the mirrored skills + the pin. (#4643 target 2 — this "
             f"is the drift that must not ship behind a green deploy.)")
-        # Do NOT return early: report an honest/dirty pin too, in one run.
-        return problems + _check_pinned_bytes(manifest, root, attempts, backoff)
-
-    problems.extend(_check_pinned_bytes(manifest, root, attempts, backoff))
+    if not drifted:
+        # Green, but say WHY it is green — otherwise a reader sees the pin's
+        # commit differ from HEAD and has to re-derive that it is harmless.
+        _note(f"upstream {repo}@{branch} moved to {head[:12]} (pin: pinned "
+              f"{pinned[:12]}) but the pinned skill bytes are unchanged — "
+              f"nothing to re-derive; `--sync` would only bump the pointer.")
     return problems
 
 
@@ -328,6 +399,16 @@ def _check_pinned_bytes(manifest: dict, root: Path, attempts: int,
                 f"{entry['sha256']}. Re-cut it: "
                 f"`uv run python tools/served_skills_parity.py --sync`")
             continue
+        # sha256 equality implies byte equality against the CONTENT, but the
+        # pin's `bytes:` field is independent metadata: a hand-edited count
+        # beside a correct digest is invisible unless it is compared here.
+        if len(payload) != int(entry["bytes"]):
+            problems.append(
+                f"{name}: the pin's byte count is WRONG — {entry['upstream_path']} "
+                f"at {pinned[:12]} is {len(payload)} bytes, the pin records "
+                f"{int(entry['bytes'])}. Re-cut it: "
+                f"`uv run python tools/served_skills_parity.py --sync`")
+            continue
         served = root / entry["served_path"]
         if not served.is_file():
             problems.append(
@@ -343,14 +424,46 @@ def _check_pinned_bytes(manifest: dict, root: Path, attempts: int,
 
 # ── derive ─────────────────────────────────────────────────────────────────
 
+class SyncResult(NamedTuple):
+    """What ``sync`` did, and where it pinned — the OPERATOR-facing facts.
+
+    ``target`` is returned rather than left in the manifest: ``sync`` re-loads
+    the pin into its own dict, so a caller printing the outer manifest reports
+    the PREVIOUS commit — the one fact `--sync` exists to report.
+    """
+
+    changed: list[str]
+    target: str
+    previous: str
+    at_head: bool | None  # None = could not be read (the note is still printed)
+
+
 def sync(root: Path, manifest_path: Path, commit: str | None = None,
          attempts: int = DEFAULT_ATTEMPTS, backoff: float = DEFAULT_BACKOFF,
-         dry_run: bool = False) -> list[str]:
-    """Re-derive the mirror from upstream. Returns the changes made."""
+         dry_run: bool = False) -> SyncResult:
+    """Re-derive the mirror from upstream. Returns what changed and the target.
+
+    ``commit`` pins a specific upstream commit instead of HEAD. That is a
+    deliberate capability, and it has a stated consequence: the currency arm of
+    ``check_upstream`` compares the pinned bytes against upstream HEAD, so a
+    sync to a commit whose skill bytes differ from HEAD yields a pin that reds
+    until upstream matches it. ``at_head`` reports whether that applies, so the
+    caller can say so instead of leaving the operator to discover it from a red
+    gate (see the ``--commit`` help).
+    """
     manifest = load_manifest(manifest_path)
     upstream = manifest["upstream"]
     repo, branch = upstream["repo"], upstream["branch"]
+    previous = upstream["commit"]
     target = commit or remote_head(repo, branch, attempts, backoff)
+    at_head: bool | None = True
+    if commit is not None:
+        try:
+            at_head = commit == remote_head(repo, branch, attempts, backoff)
+        except ParityError:
+            # Unreadable HEAD must not turn an explicit --commit into a failure:
+            # the pin is written either way, and the note below still applies.
+            at_head = None
     changed: list[str] = []
 
     for name in sorted(manifest["skills"]):
@@ -369,7 +482,8 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
     manifest["upstream"]["commit"] = target
     if not dry_run:
         manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
-    return changed
+    return SyncResult(changed=changed, target=target, previous=previous,
+                      at_head=at_head)
 
 
 # ── report + CLI ───────────────────────────────────────────────────────────
@@ -398,15 +512,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sync", action="store_true",
                         help="re-derive the mirror from upstream")
     parser.add_argument("--commit", default=None,
-                        help="--sync from this upstream commit (default: branch HEAD)")
+                        help="--sync from this upstream commit (default: branch "
+                             "HEAD). The currency arm compares the pinned bytes "
+                             "against upstream HEAD, so a pin that is not HEAD "
+                             "reds `--check-upstream` until the bytes at HEAD "
+                             "equal it — use it to pin a commit whose skill "
+                             "bytes match HEAD, not to silence a drift.")
     parser.add_argument("--dry-run", action="store_true",
                         help="--sync: report the changes without writing")
     parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS)
     parser.add_argument("--backoff", type=float, default=DEFAULT_BACKOFF)
-    parser.add_argument("--json", action="store_true", help="machine-readable result")
+    parser.add_argument("--json", action="store_true",
+                        help="machine-readable result: ONE JSON document on "
+                             "stdout, every human line on stderr")
     parser.add_argument("--report", default=None,
                         help="write a markdown report (for the auto-file monitor)")
     args = parser.parse_args(argv)
+
+    # ⛔ `--sync --check` used to exit 0 having run NO gate: the `if args.sync:`
+    # branch returned before `do_local`/`do_upstream` were consulted, so a
+    # caller who asked for both got a green exit and no check — a fail-open path
+    # in a tool whose whole purpose is fail-closed. Derive and check are
+    # different commands; refuse the combination instead of silently picking one.
+    if args.sync:
+        requested = [flag for flag, on in (("--check", args.check),
+                                           ("--check-local", args.check_local),
+                                           ("--check-upstream", args.check_upstream))
+                     if on]
+        if requested:
+            parser.error(
+                f"--sync cannot be combined with {' / '.join(requested)}: --sync "
+                "RE-DERIVES the mirror and writes the pin, so a check in the same "
+                "invocation would grade bytes it just overwrote. Run --sync, "
+                "commit, then --check.")
 
     root = Path(args.root).resolve()
     manifest_path = Path(args.manifest) if args.manifest else root / MANIFEST_REL
@@ -423,13 +561,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = load_manifest(manifest_path)
         if args.sync:
-            changed = sync(root, manifest_path, args.commit, args.attempts,
-                           args.backoff, args.dry_run)
+            result = sync(root, manifest_path, args.commit, args.attempts,
+                          args.backoff, args.dry_run)
             verb = "would re-derive" if args.dry_run else "re-derived"
-            print(f"{verb} {len(changed)} served skill(s) from "
-                  f"{manifest['upstream']['repo']}@{manifest['upstream']['commit'][:12]}")
-            for line in changed:
+            # The TARGET, not the pre-sync pin: `sync` re-loads the manifest into
+            # its own dict, so the outer copy still holds the old commit — which
+            # is the one fact an operator runs --sync to learn.
+            print(f"{verb} {len(result.changed)} served skill(s) from "
+                  f"{manifest['upstream']['repo']}@{result.target[:12]}")
+            if result.previous != result.target:
+                print(f"  pin moved {result.previous[:12]} -> {result.target[:12]}")
+            for line in result.changed:
                 print(f"  ~ {line}")
+            if result.at_head is False:
+                _note(
+                    f"{result.target[:12]} is NOT upstream HEAD: the currency arm "
+                    "compares the pinned bytes against upstream HEAD, so "
+                    "`--check-upstream` reds until the bytes at HEAD equal this "
+                    "pin (or upstream rewinds).")
+            elif result.at_head is None:
+                _note("upstream HEAD could not be read, so whether this commit is "
+                      "HEAD is unverified — the currency arm will decide.")
             return 0
         if do_local:
             problems.extend(check_local(manifest, root))
@@ -439,7 +591,6 @@ def main(argv: list[str] | None = None) -> int:
         problems.append(f"FAIL-CLOSED: {exc}")
 
     if args.json:
-        import json
         print(json.dumps({
             "ok": not problems,
             "checked_local": bool(do_local),
@@ -459,12 +610,18 @@ def main(argv: list[str] | None = None) -> int:
     scope = " + ".join(filter(None, [
         "served↔pin" if do_local else "",
         "pin↔upstream" if do_upstream else ""]))
+    # `--json` OWNS stdout: the human summary goes to stderr on that path so
+    # `json.loads(stdout)` works on the GREEN run too — the direction a monitor
+    # actually reads, and the one that used to break (JSON, then summary lines,
+    # on the same stream).
+    out = sys.stderr if args.json else sys.stdout
     print(f"served-skills parity OK ({scope}) for "
           f"{len(manifest['skills'])} skill(s) from "
-          f"{manifest['upstream']['repo']}@{manifest['upstream']['commit'][:12]}")
+          f"{manifest['upstream']['repo']}@{manifest['upstream']['commit'][:12]}",
+          file=out)
     for name in sorted(manifest["skills"]):
         entry = manifest["skills"][name]
-        print(f"  ✓ {name}  {entry['sha256'][:12]}  {entry['served_path']}")
+        print(f"  ✓ {name}  {entry['sha256'][:12]}  {entry['served_path']}", file=out)
     return 0
 
 
