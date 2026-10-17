@@ -43,15 +43,17 @@ the spec on the upload line, and one over EVERY step: a bare `wrangler` is legal
 only in the five declared boot steps (which run the binary the verify step
 proved).
 
-The removed machinery is the point, not an accident: no install step, no version
-resolution and no reset of a shared prefix remains to get wrong. The division of
-labour is: the TEXT arms stop a float spelling being WRITTEN here, and the
-assertion is the runtime check on the binary the lane actually runs — neither
+What this file replaced is gone: the pre-warm's own probe install, its reset of the
+shared `_npx` prefix, and its version read out of script text. The install and the
+assertion that remain are the lane's own, and the arms below REQUIRE them. The
+division of labour is: the TEXT arms stop a float spelling being WRITTEN here, and
+the assertion is the runtime check on the binary the lane actually runs — neither
 alone is the guard.
 
-Where the text arms stop is stated rather than hidden. The spec scan resolves the
-two things bash does to a word that a reader would not see — quote removal and
-backslash escaping — and nothing else. So these are NOT seen, by design: a spec
+Where the text arms stop is stated rather than hidden. Within a line the spec scan
+resolves the two things bash does to a word that a reader would not see — quote
+removal and backslash escaping — and nothing else; it does not join a word split
+across a line continuation or a YAML fold. So these are NOT seen, by design: a spec
 that reaches npm through an alias, a function, a wrapper script or a file written
 first and executed later; a spec assembled at run time (`$(printf …)`); and a
 version passed to a third-party ACTION rather than a shell (`uses:
@@ -455,6 +457,13 @@ def test_a_spec_may_be_named_in_a_comment_but_not_in_a_message() -> None:
     assert not _floating_specs(
         '  run: npx --yes "wrangler@${WRANGLER_VERSION:?}" pages deploy dist'
     ), "the asserted form must pass, quoted or not"
+    # Both capabilities the docstring names, pinned: removing either one (a
+    # one-token edit) must red THIS arm, not sit green behind a claim.
+    assert _floating_specs(r"  run: npx --yes wran\gler@4 pages deploy"), \
+        "a backslash-split spec is the word bash runs — resolving it is advertised"
+    assert not _floating_specs(
+        '  run: npx --yes "wrangler@${WRANGLER_VERSION:?}" --version  # was wrangler@4'
+    ), "a TRAILING comment naming a spec is prose — cutting it is advertised"
 
 
 def test_each_workflow_reads_the_version_at_least_once() -> None:
