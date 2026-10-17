@@ -13807,7 +13807,9 @@ class TortoiseSDK:
         rejection on IMPL/NAND; multi-target rejection on plain IMPL/NAND
         (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
         + route-scoped attribute rejection (cycle-13: relation carries
-        direction/confidence/weight; operator route carries confidence/weight).
+        direction/confidence/weight — plus ``mitigation`` since #5244, because
+        a structural edge has no operator bridge to damp; operator route
+        carries confidence/weight).
         """
         if not isinstance(conn, dict):
             return  # dict-ness already reported by check 1
@@ -13979,6 +13981,24 @@ class TortoiseSDK:
                                    f"edges) — it belongs on plain IMPL/NAND "
                                    f"direct edges",
                     })
+            # #5244: `mitigation` is an OPERATOR-route attribute (§2.1 — a
+            # mitigation damps the operator bridge it attacks, #4937). A
+            # structural edge has no operator to damp, so accepting the key
+            # here would be the same accept-and-drop defect the operator route
+            # carried: the value validated, the write succeeded, nothing
+            # stored. Refuse it and name the route that does honor it.
+            if "mitigation" in conn:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] mitigation is "
+                               f"not allowed on relation connections "
+                               f"(structural edges) — a mitigation damps an "
+                               f"operator bridge (ontology §3.9); express the "
+                               f"connection as `operator` + `mitigation`, or "
+                               f"create it and call sdk.mitigate_operator("
+                               f"id=<operator id>, reason=..., "
+                               f"strength=0.10..0.50)",
+                })
 
     def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
         """ONE batched query resolving external endpoint existence, label
@@ -14514,6 +14534,16 @@ class TortoiseSDK:
           operator-less — routed to a DIRECT edge (no operator node, see
           INGEST_CONTRACT.md §8). A connection carrying ``relation`` stays a
           PLAIN structural edge (structural edges never reify).
+        - ``mitigation: {reason, strength}`` on an operator connection is
+          APPLIED, not just an anchor (#5244): after the operator is created /
+          deduped / absorbed, the mitigation is written through
+          :meth:`mitigate_operator` — a mitigation Point plus the
+          ``(op)-[:mitigated_by]->(m)`` edge, stamped with the bundle's
+          batch_id. Re-submission updates it IN PLACE (never a duplicate) and
+          warns ``mitigation_strength_change`` when the reason/strength
+          actually changed (INGEST_CONTRACT §3.2 key 6). On a ``relation``
+          connection a mitigation is a Phase-1 violation: a structural edge
+          has no operator bridge to damp.
         - Endpoint typing (#2062): operator-ROUTED connections (reify:
           true/mitigation/part-whole → create_operator) accept Point OR Event
           endpoints (A1b #1272 parity — the dedup key in _find_operator
@@ -15103,6 +15133,22 @@ class TortoiseSDK:
                 # (g)): a retry's _find_operator dedup hit on a batch-less
                 # operator Point acquires the bundle's batch_id.
                 self._stamp_batch_id(oid, batch_id)
+                # #5244: APPLY the connection's `mitigation` to the operator
+                # this connection resolved to — created, deduped OR absorbed.
+                # Until this call existed the field was read for ROUTING
+                # (`_connection_route`), accepted and validated by
+                # `_check_connection`, and then dropped: the caller got a real
+                # operator, a success status, no mitigation Point, no
+                # `(op:Point {is_operator:true})-[:mitigated_by]->(m:Point)`
+                # edge and no warning. Applied AFTER the operator write (the
+                # target id is only known here) and on EVERY submission, so a
+                # re-submission re-applies too — `mitigate_operator` is
+                # idempotent: it UPDATES the existing mitigation in place,
+                # never duplicates (INGEST_CONTRACT §3.2 key 6). The helper
+                # stamps the mitigation Point with this bundle's batch_id.
+                mitigation = conn.get("mitigation")
+                if isinstance(mitigation, dict):
+                    self._apply_ingest_mitigation(oid, mitigation, batch_id)
                 ids["connections"].append(oid)
             else:
                 rel = conn["relation"]
@@ -15771,6 +15817,64 @@ class TortoiseSDK:
             return {"kind": "decline",
                     "candidates": [r[0] for r in prows]}
         return None
+
+    def _apply_ingest_mitigation(self, operator_id: str, mitigation: dict,
+                                 batch_id: str) -> str:
+        """Apply an ingest connection's `mitigation` to its operator (#5244).
+
+        Phase 1 validates the shape (``_check_connection``: non-empty string
+        ``reason``, numeric ``strength`` in [0, 1]) and Phase 2 must therefore
+        HONOR it — a validated field that is not persisted is the one failure
+        mode a caller cannot detect. The write goes through
+        :meth:`mitigate_operator`, the single sanctioned mitigation writer
+        (ontology §3.9: ``mitigated_by`` can only originate from an
+        ``is_operator:true`` Point — a mitigation damps the operator bridge it
+        attacks, #4937), so the ingest path cannot drift from the direct-call
+        path.
+
+        Re-submission semantics (INGEST_CONTRACT §3.2 key 6):
+        ``mitigate_operator`` is idempotent — it updates the existing
+        mitigation's reason/strength IN PLACE (never a second Point) — and the
+        documented ``mitigation_strength_change`` warning is emitted when that
+        update actually changed something. An unchanged re-submission is
+        silent, as are incident retries (the crash-retry contract, §7).
+
+        The mitigation Point is stamped with the bundle's ``batch_id`` (§16:
+        "every **new** Point the bundle creates — plain points, operator
+        Points, mitigation Points"), carrying the two record fields
+        ``_stamp_batch_id`` reserves for exactly this write, so a
+        ``list_batch`` audit of the bundle includes the dampener the response
+        claimed to commit.
+
+        Returns the mitigation Point id.
+        """
+        reason = mitigation["reason"]
+        strength = mitigation["strength"]
+        # Read the mitigation this operator already carries BEFORE the write,
+        # so the in-place update is observable (§3.2 key 6). One query, only on
+        # a connection that declared a mitigation.
+        prior = self._get_proj().g.query(
+            "MATCH (op:Point {id:$oid})-[:mitigated_by]->(m:Point) "
+            "RETURN m.id, m.content, m.mitigation_strength",
+            params={"oid": operator_id},
+        ).result_set
+        mid = self.mitigate_operator(
+            operator_id, reason=reason, strength=strength)["id"]
+        if prior:
+            _old_id, _old_content, _old_strength = prior[0]
+            _old_reason = (_old_content or "").removeprefix("[MITIGATION] ")
+            try:
+                _same_strength = (_old_strength is not None
+                                  and float(_old_strength) == float(strength))
+            except (TypeError, ValueError):  # unrepresentable legacy value
+                _same_strength = False
+            if _old_reason != reason or not _same_strength:
+                self._append_warning(
+                    f"mitigation_strength_change:{operator_id}:{mid}:"
+                    f"{_old_strength}->{strength}")
+        self._stamp_batch_id(mid, batch_id, mitigates_operator_id=operator_id,
+                             mitigation_strength=strength)
+        return mid
 
     def _append_warning(self, entry: str) -> None:
         """Append to the current ingest's warnings accumulator (A3 cycle-23
