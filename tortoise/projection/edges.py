@@ -1141,12 +1141,19 @@ class _EdgeHandlers:
         VALUE": that is a name-keyed identity read, and #3633's guard refuses one
         from ``tortoise/projection/edges.py`` precisely because it reopens the
         route-then-refuse decision — identity resolves in ONE place
-        (``tortoise/entity_identity.py``), not in a diagnostic. The weaker count
-        below is what remains available without that read: it can only
-        under-count success (a source that already had other about edges counts a
-        no-op name link as wired), and it can never report a good link as failed —
-        the direction that matters, because a false failure trains readers to
-        ignore the warning.
+        (``tortoise/entity_identity.py``), not in a diagnostic.
+
+        ⚠️ **What this can and cannot tell you.** ``_create_about_edges`` MINTS a
+        Subject stub when nothing in the graph matches, so for any writable value
+        a name link leaves an outgoing edge and ``failed`` is effectively
+        unreachable — this count therefore does NOT detect a link that landed on
+        a stub of the wrong label instead of the real target. It detects the two
+        cases that are reachable: a cascade that produced no edge at all, and a
+        value the cascade could not use. That is weaker than "the right edge is
+        there", and it is what is available without the refused identity read.
+        The direction is deliberate: it can only UNDER-count success, never
+        report a good link as failed — a false failure trains readers to ignore
+        the warning, which is worse than a generous count.
 
         Idempotent: an already-wired source counts, so a re-run reports no
         failure that did not happen.
