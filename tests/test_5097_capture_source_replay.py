@@ -60,7 +60,11 @@ touches ``version`` on either arm, so neither may a replay. That discriminator
 is server-managed: it is refused by ``create_source``'s ``**props`` guard, by
 ``_sanitize_props`` and by the MCP ``_SERVER_MANAGED_PROPS`` boundary, so the
 capture writer is its only producer (a caller-settable one forged capture
-provenance AND stripped a tenant node's identity props).
+provenance AND stripped a tenant node's identity props). It is dropped from the
+RECORD layer too: ``record_projection._RECORD_ONLY_KEYS`` keeps it out of the
+``source.props`` jsonb tail that ``cache_projection`` copies back onto the node
+(pinned in ``tests/test_record_projection.py`` — the third home of a
+``_META_KEYS`` transport key, next to ``contains_session``).
 
 Offline: ``TORTOISE_SESSION_LLM_MOCK=1`` installs the deterministic MockModel
 extractor — zero network, zero provider spend.
@@ -290,6 +294,60 @@ def test_a_second_materialization_with_a_changed_transcript_moves_updatedAt(
         f"replayed updatedAt {after['updatedAt']!r} != live {live['updatedAt']!r}")
 
 
+def test_an_empty_transcript_capture_replays_the_stamp_live_set(tmp_path):
+    """Review ISSUE 1 (head f16638e6b): the ELSE arms of `updatedAt` disagreed.
+
+    The live clause stamps the update instant when the node has NONE
+    (``ELSE coalesce(s.updatedAt, $now)``), while `_upsert_source`'s ON MATCH
+    ELSE arm kept the absence (``ELSE s.updatedAt``). The two only part company
+    when the incoming hash EQUALS the stored one AND the node carries no
+    `updatedAt` — exactly the M2 stub (``contentHash=''``, no `updatedAt`, see
+    `_mint_source_stub`) receiving a capture whose derived transcript is EMPTY
+    (``content_hash`` is `''` precisely then), i.e. a session that already has
+    derived points referencing it and is then captured with nothing to say.
+
+    Fails on the head it was found on: live has an `updatedAt`, `rebuild()` has
+    none — the recovery path LOSING a value the write stored, the class this
+    lane exists to remove.
+    """
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
+    try:
+        url = f"session:{SESSION_ID}"
+        # The M2 stub: `contentHash=''` and NO `updatedAt`.
+        sdk.create_point("statement", "hello", extractedFrom=url)
+        stub = _source_props(sdk._get_proj(), url)
+        assert stub.get("contentHash") == "", (
+            "precondition: the stub carries the empty hash")
+        assert stub.get("updatedAt") is None, (
+            "precondition: the stub carries no update instant")
+
+        # The writer itself, with an EMPTY conversation: `content_hash` is `''`
+        # exactly when the derived transcript has no non-space text
+        # (`sdk._materialize_session_source`), i.e. the same hash the stub
+        # carries, so the live CASE takes its ELSE arm.
+        sdk._materialize_session_source(SESSION_ID, None, SECOND_NOW, [])
+        live = _source_props(sdk._get_proj(), url)
+        assert live.get("contentHash") == "", (
+            "precondition: an empty transcript hashes to '' — the SAME hash the "
+            "stub carries, so the write takes the ELSE arm")
+        assert live.get("updatedAt"), (
+            "precondition: live stamps the instant when the node has none")
+
+        sdk._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+        after = _source_props(sdk._get_proj(), url)
+        diverged = _bag_diff(live, after)
+        assert not diverged, (
+            "an empty-transcript capture was not reproduced by the replay — the "
+            "fold's ELSE arm kept an ABSENCE the live write filled: "
+            f"{diverged}")
+        assert after.get("updatedAt") == live["updatedAt"], (
+            f"replayed updatedAt {after.get('updatedAt')!r} != live "
+            f"{live['updatedAt']!r}")
+    finally:
+        sdk.close()
+
+
 def test_the_carrier_does_not_clear_a_version_window_the_node_had(tmp_path):
     """Review P2 + review P1: the carrier must not CLEAR or ADVANCE a version.
 
@@ -418,6 +476,13 @@ def test_the_stub_completion_discriminator_is_not_caller_settable(tmp_path):
         with pytest.raises(ValueError, match="_stub_completion"):
             sdk.create_point("statement", "a statement",
                              _stub_completion=True)
+        # …and the MCP boundary, the third surface the docstring above names:
+        # the tool splats caller `props` into `create_source(**props)`, so the
+        # name must be refused BEFORE the write is attempted.
+        from tortoise.mcp_server import _reject_server_managed_props
+        assert _reject_server_managed_props({"_stub_completion": True}), (
+            "the MCP boundary forwarded the capture discriminator")
+        assert _reject_server_managed_props({"sourceKind": "document"}) is None
         # Nothing was written by the refused calls, and a legitimate
         # `create_source` still gets the creator-only defaults — i.e. the
         # ON CREATE suppression is not reachable from the caller surface.

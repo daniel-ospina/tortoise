@@ -5142,9 +5142,24 @@ class _EntityHandlers:
             # branch is the LEGACY path for journals written before that record
             # existed; keeping `coalesce($updatedAt, $now)` makes both records
             # replay to the same node.
+            #
+            # Lane L5 (#5097 review, head f16638e6b): the SAME-HASH (last) arm
+            # must REPRODUCE the instant the record carries when the node has
+            # none — `_materialize_session_source`'s live clause is
+            # `ELSE coalesce(s.updatedAt, $now)`, i.e. it STAMPS a node that
+            # lacked one, while `ELSE s.updatedAt` kept the absence. The two
+            # part company on the one state where both conditions hold: the M2
+            # stub (`contentHash=''`, no `updatedAt`) receiving a capture whose
+            # derived transcript is empty (`content_hash` is `''` then) —
+            # measured live `updatedAt='2099-…'` / rebuilt `None`, a recovery
+            # path LOSING a value the write stored. `coalesce(s.updatedAt,
+            # $updatedAt)` is a no-op for a record that carries none (legacy /
+            # foreign journals) and for a node already stamped (the first stamp
+            # still wins), so no other producer moves.
             "           s.updatedAt = CASE WHEN $hash IS NULL THEN s.updatedAt "
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                     THEN coalesce($updatedAt, $now) ELSE s.updatedAt END, "
+            "                     THEN coalesce($updatedAt, $now) "
+            "                     ELSE coalesce(s.updatedAt, $updatedAt) END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
             # #3644: the window start moves ONLY on the same hash-diff gate as
             # `version`/`updatedAt` — a create/stub-completion (stored hash

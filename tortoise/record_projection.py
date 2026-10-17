@@ -758,6 +758,17 @@ def snake(prop: str) -> str:
 _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     "type", "ts", "event_id", "initiated_by", "projection_version", "seq",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
+    # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
+    # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
+    # creator-only defaults and admits the capture replay props), is listed in
+    # `_META_KEYS` so it never reaches a `:Source` node, and `create_source` /
+    # `_sanitize_props` / MCP refuse it as a caller key. The RECORD layer is the
+    # third home and it was missing: a `SourceCreated` snapshot is a
+    # `path=None` NodeSnapshot, so the record's flat payload IS the property
+    # dict, and the key fell into the `source.props` jsonb tail — which
+    # `cache_projection` copies back onto the node verbatim. Same class as the
+    # sibling `contains_session` above.
+    "_stub_completion",
     # Creating-record embedding identity (a DESCRIPTION of the record, never a
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
