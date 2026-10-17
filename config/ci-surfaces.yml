@@ -3685,6 +3685,7 @@ surfaces:
   - test_time_aware_sdk_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_time_aware_eval_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
+  - longmem_eval/test_slice_a_flood_bound.py  # #8043: the Slice A flooding bound + its receipt's reproducibility — dual-registered (eval + sdk) because `tortoise/retrieval.py` is this surface's own: a retrieval.py-only change must re-run the gate that pins the window bound
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the migration oracle pins `retrieval.ask_env_bool` as a migrated site)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
@@ -3844,6 +3845,18 @@ surfaces:
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
+  # #8043 (Slice A of #2683): the reader-window FLOODING BOUND, measured
+  # hermetically on the shipped `assemble_context`/`package_evidence_pool` —
+  # the pre-#2978 baseline shape, the post-#2978 reallocation, the assembly's
+  # 1 + max_verbatim bound, and the duplicate-free control. Registered HERE
+  # because the instrument is `tools/longmem_eval/slice_a_flood_bound.py` (a
+  # SOURCE_PATTERNS entry of this surface), and DUAL with `sdk` below because
+  # the functions it pins live in `tortoise/retrieval.py` (also this surface's
+  # own — `evidence_assembly` is on the eval arm path, `assemble_context` is
+  # the shared product window). Without this arm a slice-tool-only change
+  # would select no surface and the receipt's reproducibility gate would not
+  # run on the change that can move it.
+  - longmem_eval/test_slice_a_flood_bound.py
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
@@ -5113,6 +5126,14 @@ durations:
   # file's declared cost, not because the gate requires it. Refresh from the
   # first post-merge main run.
   longmem_eval/test_ingest_stall_guard.py: 2.0
+  # #8043: new file in this pool, never sampled by a CI run, so it takes the
+  # flat 2.0s default under the #3400/#4221 convention (a local timing is not
+  # the input). Measured locally at ~1.0s wall for the whole file (11 tests;
+  # the module-scoped `measure()` fixture is the only cost) — refresh from the
+  # first post-merge main run. The entry is also load-bearing for the 90%
+  # `DURATION_COVERAGE_MIN` floor: without it the pool sits at 781/868
+  # (89.98%), i.e. `manifest-integrity` reds.
+  longmem_eval/test_slice_a_flood_bound.py: 2.0
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
   test_3926_error_prop_guard.py: 0.3

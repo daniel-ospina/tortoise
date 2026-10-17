@@ -384,6 +384,14 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         flooding on duplicates. PURE function (package_evidence_pool)
         — recall surface unchanged, hermetic no-dupe tests prove the
         ON path is byte-identical on duplicate-free pools.
+        ⚠️ **On THIS lane the own-source leg is currently INERT (#8658):**
+        the product search path does not put ``quote`` / ``source_turn_id``
+        on a hit, so pass 2 (a point's own source chunks/turns) never
+        fires and only pass 1 (cross-item near-dupe statements) does —
+        measured cost: 12 window slots for one flooded fact instead of 2
+        (docs/runbook/8043-slice-a-t-gate.md §2, arm
+        ``provenance_free_assembly``). The no-dupe byte-identity above is
+        unaffected — do not read the collapse claims here as fully active.
 
     Returns the 13-field response shape: ``{answer, abstained,
     question_type, question_date, evidence, context_tokens, model,
@@ -524,7 +532,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         # ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF — fail-safe,
         # the #1745 default decision; hermetic no-dupe tests prove the
         # ON path is byte-identical to OFF when no near-duplicates
-        # exist). mark_for=None = the stored-``has_answer`` fallback
+        # exist). ⚠️ This lane's own-source leg is inert today (#8658) —
+        # see the arm's docstring above and
+        # docs/runbook/8043-slice-a-t-gate.md §2 for the measured cost.
+        # mark_for=None = the stored-``has_answer`` fallback
         # (source-session class only) — product graphs carry zero value
         # marks, so the package is pure collapse+ordering-by-rank on
         # real graphs (never a silent mark-driven reorder).
