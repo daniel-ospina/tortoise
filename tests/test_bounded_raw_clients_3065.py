@@ -134,8 +134,9 @@ def test_the_resolver_keeps_the_explicit_unbounded_opt_out(monkeypatch):
     }
     # #2969: the retry policy is INDEPENDENT of the bound's opt-out. Disabling
     # the bound must not also change the multiplier, or the two knobs would
-    # interact in a way no call site can see.
-    assert _bounded_server_socket_kwargs()["retry"]._retries == 1
+    # interact in a way no call site can see. ZERO retries is the policy: the
+    # bound is the wait (``_no_server_retry``), whether or not it is set.
+    assert _bounded_server_socket_kwargs()["retry"]._retries == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
