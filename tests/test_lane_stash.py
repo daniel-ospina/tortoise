@@ -256,7 +256,11 @@ def test_check_advisory_matches_prune_reclaimability(repo):
 def test_check_is_safe_on_an_empty_register(repo):
     check = repo.lane(repo.a, "check")
     assert check.returncode == 0, _fail(check)
-    assert "empty" in check.stdout
+    assert "the shared register is empty" in check.stdout, check.stdout
+    # SAFE here is true for a DIFFERENT reason than the own-entry case: there is
+    # nothing at all to take (#8822 review P2).
+    assert "has nothing to take" in check.stdout, check.stdout
+    assert "THIS lane's own entry" not in check.stdout, check.stdout
 
 
 def test_check_fails_closed_on_an_unattributable_top_entry(repo):
@@ -1968,7 +1972,7 @@ def test_list_reports_a_guard_left_by_another_lane(repo):
     assert f"[lane {b_key} — not this lane]" in listed.stdout, listed.stdout
 
 
-def test_prune_does_not_release_another_lanes_guard_for_an_unpinned_entry(
+def test_prune_keeps_a_LIVE_lanes_guard_for_an_unpinned_entry(
     repo, monkeypatch, capsys,
 ):
     """A live peer prune's guard must not be deleted just because a sha is registered.
@@ -1976,6 +1980,7 @@ def test_prune_does_not_release_another_lanes_guard_for_an_unpinned_entry(
     Being in the register is the TRANSIENT state a guard exists for: two lanes can
     each classify the same unpinned entry as kept, and the first to finish must not
     strip the other's protection while it is still deleting positions (#8773 P2).
+    The owner key here is lane B's LIVE key (#8822 review P2 sharpened the rule).
     """
     mod = _load_tool()
     repo.dirty(repo.a, "f.txt", "base\ndoomed\n")
@@ -1984,7 +1989,7 @@ def test_prune_does_not_release_another_lanes_guard_for_an_unpinned_entry(
     repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
     kept = repo.stash_sha()
     assert kept
-    ghost = f"refs/pi-lane-prune-guard/ghost-00000000/{kept}"
+    ghost = f"refs/pi-lane-prune-guard/{mod.lane_key(repo.b)}/{kept}"
     repo.git("update-ref", ghost, kept)
 
     monkeypatch.chdir(repo.a)
@@ -2000,6 +2005,89 @@ def test_prune_does_not_release_another_lanes_guard_for_an_unpinned_entry(
     # and it stays enumerable, so it cannot leak silently either
     listed = repo.lane(repo.a, "list")
     assert ghost in listed.stdout, listed.stdout
+
+
+def test_prune_reaps_a_guard_whose_worktree_is_gone(repo, monkeypatch, capsys):
+    """A guard under a REMOVED key is released once the object has another handle.
+
+    No other command can release it: `prune` only unpins the guards IT created, and
+    `recover` refuses a register-listed sha without `-m`. Left alone, that ref
+    blocks gc forever (#8822 review P2).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-11111111/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    assert mod.main(["prune", "--apply"]) == 0
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert dead not in refs, (
+        f"a guard whose owner worktree is gone must be reaped once the object is "
+        f"named elsewhere: {refs}"
+    )
+
+
+def test_prune_keeps_a_dead_lanes_guard_that_is_the_only_handle(repo, monkeypatch):
+    """The last handle on an object is never released, however dead its owner is."""
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nonly\n")
+    repo.git("stash", "push", "-q", "-m", "only", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-33333333/{sha}"
+    repo.git("update-ref", dead, sha)
+    # Nothing else names it: no register entry and no refs/stash.
+    repo.git("reflog", "expire", "--expire=now", "--all")
+    repo.git("update-ref", "-d", "refs/stash")
+
+    monkeypatch.chdir(repo.a)
+    assert mod.main(["prune", "--apply"]) == 0
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert dead in refs, f"the only handle on an object must survive: {refs}"
+
+
+def test_check_does_not_name_prune_as_reclaimable_on_a_diverged_register(repo):
+    """`check` must not advertise `prune --apply` on a state prune refuses.
+
+    A bare `git reflog delete` without `--updateref` leaves `refs/stash` on a sha
+    the register no longer enumerates; `prune --apply` then exits 2. The advisory
+    naming it was the same contradiction it exists to remove (#8822 review P2).
+    """
+    repo.dirty(repo.a, "f.txt", "base\na\n")
+    assert repo.lane(repo.a, "push", "-m", "A").returncode == 0
+    assert repo.lane(repo.a, "pop").returncode == 0  # unpinned + applied record
+    repo.dirty(repo.b, "f.txt", "base\nb\n")
+    repo.git("stash", "push", "-q", "-m", "B", cwd=repo.b)
+    repo.git("reflog", "delete", "refs/stash@{0}")  # no --updateref: diverges
+
+    check = repo.lane(repo.a, "check")
+    assert check.returncode == 1, _fail(check)
+    assert "reclaimable once the diverged register" in check.stdout, check.stdout
+    assert "reclaimable by `prune --apply`" not in check.stdout, check.stdout
+
+
+def test_list_does_not_call_a_peer_guard_durable(repo):
+    """Two guards for one object are not mutual evidence of durability."""
+    repo.dirty(repo.b, "f.txt", "base\nx\n")
+    repo.git("stash", "push", "-q", "-m", "x", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    for key in ("deadlane-11111111", "deadlane-22222222"):
+        repo.git("update-ref", f"refs/pi-lane-prune-guard/{key}/{sha}", sha)
+
+    listed = repo.lane(repo.a, "list")
+    assert listed.returncode == 0, _fail(listed)
+    assert "NOT durable" in listed.stdout, listed.stdout
+    assert "also named durably by" not in listed.stdout, listed.stdout
 
 
 def test_an_unreadable_ref_list_is_a_state_error_not_safe(repo, monkeypatch):

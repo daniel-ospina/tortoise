@@ -691,6 +691,52 @@ def _guard_release_all(sha: str) -> None:
         _guard_unpin(ref, sha)
 
 
+def _live_lane_keys() -> set[str] | None:
+    """Lane keys of every worktree git still knows about, or ``None`` if unreadable.
+
+    A prune guard is created under the CREATING worktree's key and outlives that
+    worktree. Telling a live owner from a removed one is what makes it safe to
+    reap a stale guard without touching a concurrent peer prune's protection.
+    """
+    cp = _git("worktree", "list", "--porcelain", check=False)
+    if cp.returncode != 0:
+        return None
+    keys: set[str] = set()
+    for ln in cp.stdout.splitlines():
+        if ln.startswith("worktree "):
+            keys.add(lane_key(Path(ln[len("worktree "):])))
+    return keys
+
+
+def _reap_stale_guards(present: set[str]) -> None:
+    """Release guards whose OWNER WORKTREE is gone and whose object has another handle.
+
+    A guard left by a removed worktree is never released by any other command:
+    `prune` only unpins the guards IT created, and `recover` refuses a sha that is
+    already in the register unless `-m`. Once its object is named by the register
+    or a lane ref the guard is redundant, and left alone it blocks gc forever
+    (#8822 review P2).
+
+    Both conditions are required: a LIVE owner key may be a prune in flight, whose
+    guard is its only protection during a positional delete; a DEAD owner's guard
+    for an object no other ref names is the LAST handle on that object.
+    """
+    live = _live_lane_keys()
+    if live is None:
+        return  # cannot tell live from dead — retain conservatively
+    for ref, sha, owner in _guard_refs():
+        if not owner or owner in live:
+            continue
+        others = {
+            r for r in _refs_pointing_at(sha)
+            if r != ref and not r.startswith(GUARD_NS + "/")
+        }
+        if sha in present or others:
+            _guard_unpin(ref, sha)
+            print(f"released stale guard {ref} for {sha[:12]} — its worktree is gone "
+                  "and the object is named elsewhere")
+
+
 def _refs_pointing_at(sha: str) -> set[str]:
     """Every ref that names ``sha``.
 
@@ -901,9 +947,17 @@ def cmd_list(args: argparse.Namespace) -> int:
               "FOREIGN lanes are listed here too")
         for ref, sha, owner in guards:
             others = _refs_pointing_at(sha) - {ref}
-            durable = sorted(others - {"refs/stash"})
+            peer_guards = sorted(r for r in others if r.startswith(GUARD_NS + "/"))
+            durable = sorted(others - {"refs/stash"} - set(peer_guards))
             if durable:
                 note = f"  (also named durably by: {', '.join(durable)})"
+            elif peer_guards:
+                # A guard is a handle its OWNER may release at any time, so two
+                # guards for one object are not mutual evidence — presenting them
+                # as "durably named" read as a permanent backing that neither has
+                # (#8822 review P2).
+                note = ("  (also held by another prune guard only — NOT durable; "
+                        "either owner may release it)")
             elif "refs/stash" in others:
                 note = ("  (refs/stash names it too, but that is NOT durable — a later "
                         "`stash store` moves it; this guard is the handle)")
@@ -1036,7 +1090,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     # reflog is expired/unreadable with no rows printed. An empty `rows` is then
     # NOT "nothing to take": a bare `git stash pop` would apply and drop that
     # entry. Fail closed rather than answer from the absence of data (#8051 P1).
-    if head is not None and (not rows or rows[0]["sha"] != head):
+    diverged = head is not None and (not rows or rows[0]["sha"] != head)
+    if diverged:
         verdict["safe"] = False
         verdict["reasons"].append(
             f"refs/stash resolves to {head[:12]} but the shared reflog does not "
@@ -1110,9 +1165,17 @@ def cmd_check(args: argparse.Namespace) -> int:
             # (#8773 review P2).
             parts = []
             if reclaimable_unpinned:
-                parts.append(
-                    f"{reclaimable_unpinned} reclaimable by `prune --apply` (this lane "
-                    f"recorded {'it' if reclaimable_unpinned == 1 else 'them'} applied)")
+                if diverged:
+                    # Naming `prune --apply` here would be the same contradiction
+                    # this advisory exists to remove: a diverged register makes
+                    # prune exit 2 (#8822 review P2).
+                    parts.append(
+                        f"{reclaimable_unpinned} reclaimable once the diverged register "
+                        "is reconciled — `prune --apply` refuses it as it stands")
+                else:
+                    parts.append(
+                        f"{reclaimable_unpinned} reclaimable by `prune --apply` (this lane "
+                        f"recorded {'it' if reclaimable_unpinned == 1 else 'them'} applied)")
             refused = len(unpinned) - reclaimable_unpinned
             if refused:
                 parts.append(f"{refused} refused (no handle)")
@@ -1120,10 +1183,17 @@ def cmd_check(args: argparse.Namespace) -> int:
                   f"{'y is' if len(unpinned) == 1 else 'ies are'} pinned by no lane ref: "
                   + "; ".join(parts))
         if verdict["safe"]:
-            # "THIS lane's own", never "this branch's": a branch name identifies a
-            # BRANCH, never a lane — the framing every HAZARD reason refutes
-            # (#8773 review P2).
-            print("VERDICT: SAFE — a bare `git stash pop` here would take THIS lane's own entry")
+            if not rows and head is None:
+                # SAFE with an empty register is true for a DIFFERENT reason: there
+                # is no own entry, there is nothing at all (#8822 review P2).
+                print("VERDICT: SAFE — the shared register is empty; a bare `git stash "
+                      "pop` has nothing to take")
+            else:
+                # "THIS lane's own", never "this branch's": a branch name identifies
+                # a BRANCH, never a lane — the framing every HAZARD reason refutes
+                # (#8773 review P2).
+                print("VERDICT: SAFE — a bare `git stash pop` here would take THIS "
+                      "lane's own entry")
         else:
             print("VERDICT: HAZARD — do not run a bare `git stash pop`/`git stash drop` here")
             for r in verdict["reasons"]:
@@ -1304,6 +1374,12 @@ def cmd_prune(args: argparse.Namespace) -> int:
             "it with `lane_stash list`, or reconcile the ref deliberately with git once you "
             "know the entry is safe."
         )
+    if args.apply:
+        # Guards left by REMOVED worktrees are otherwise un-releasable: `prune` only
+        # unpins the guards it created, and `recover` refuses a register-listed sha
+        # without `-m`. Read the register ONCE (`register_shas`) rather than
+        # re-deriving presence per guard (#8822 review P2).
+        _reap_stale_guards(register_shas)
     if not doomed:
         if not orphan:
             # Nothing to reclaim — but an APPLIED record whose register entry left

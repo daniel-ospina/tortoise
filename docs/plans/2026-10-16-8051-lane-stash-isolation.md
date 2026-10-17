@@ -193,13 +193,16 @@ One primitive, in `tools/lane_stash.py`:
 - **Orphan retention.** When an emptied register leaves `refs/stash` pointing at an entry no pin and
   no applied-record names, `prune` retains it; it now guard-pins the object rather than relying on
   `refs/stash`, because the reconciliation's `stash store` can move that ref and would otherwise have
-  destroyed the handle the retention message just promised. A retained guard has exactly two
-  lifetimes: it is released once `recover` puts the entry back under `refs/lane` — under **any** lane
-  key, since another worktree may be the one to rescue it — or when the prune that created it sees
-  the sha back in the register, which releases **only its own** guard: a foreign guard for the same
-  sha may belong to a concurrent prune that is still deleting positions, and "in the register" is
-  exactly the transient state a guard exists for. `lane_stash list` prints any still held and, per
-  guard, whether another ref names the object, so the namespace can be enumerated and cleared rather
+  destroyed the handle the retention message just promised. A retained guard is released three ways:
+  once `recover` puts the entry back under `refs/lane` — under **any** lane key, since another
+  worktree may be the one to rescue it; by the prune that created it, when the sha is back in the
+  register, which releases **only its own** guard because a foreign guard for the same sha may belong
+  to a concurrent prune that is still deleting positions, and "in the register" is exactly the
+  transient state a guard exists for; and by a later `prune --apply`, which reaps a guard whose OWNER
+  WORKTREE is gone **and** whose object is named by the register or another non-guard ref — no other
+  command can release that one, and left alone it blocks gc forever. `lane_stash list` prints any
+  still held and, per guard, whether another ref names the object — a peer guard does not count as
+  durable, since either owner may release it — so the namespace can be enumerated and cleared rather
   than silently keeping objects un-gc-able forever.
 
 Out of scope (reported, not absorbed): the skills text (`using-git-worktrees`, `commit-workflow`) is
