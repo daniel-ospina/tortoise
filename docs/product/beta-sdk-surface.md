@@ -102,7 +102,7 @@ person managing their own account).
 | | **PLATFORM** | | | |
 | 40 | `check_connection` | **What does this credential reach?** Omit `key_id` to check your own connection; pass one to inspect a specific credential. Makes the isolation promise verifiable. **Programmatic, returns a result — not a wizard** | `check_connection` | builder |
 
-**40 methods** against **150** today. **MCP: 26 tools** — every row except the tenancy block (28–39), `write_knowledge_batch`
+**40 methods** against **150** today. **MCP: 27 tools** (26 at the 2026-09-21 ruling; 27 since #3540) — every row except the tenancy block (28–39), `write_knowledge_batch`
 (builder-only, 13) and the constructor/`close` (1–2) — **plus row 30**, `update_memory_graph`,
 which is inside the tenancy block but is the one tenancy method with an MCP twin, because the
 owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26. That

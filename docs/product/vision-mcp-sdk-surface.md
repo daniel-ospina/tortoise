@@ -60,7 +60,7 @@ The freeze is on **tools and endpoints** — nothing is added, removed, renamed 
 either surface without explicit human approval. A **response field** that is off by default and
 leaves the response unchanged is **not** a gate failure, but must be recorded.
 
-## The reconciliation — MCP 98 → 26
+## The reconciliation — MCP 98 → 27
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -98,7 +98,7 @@ reason.
 
 † **`run_onboarding` is in the approved 23-tool list — it is tool #23, absorbing the seven
 `onboarding_*` tools — and the beta 26 drops it in favour of `check_connection`.** That is not a
-contradiction with the bridge table, which describes the **26-tool target**: `run_onboarding` was
+contradiction with the bridge table, which describes the **27-tool target** (26 before #3540): `run_onboarding` was
 a proposed merge of seven registry tools, the 26 drops it, so those seven have no destination and
 are correctly `REMOVED`. **They are one of the genuine retirements** — `check_connection` replaces
 the proposed entry point and absorbs none of them. Two of the seven were **tenant-visible reads**
@@ -106,9 +106,9 @@ the proposed entry point and absorbs none of them. Two of the seven were **tenan
 **rehomed to the tenancy block (SDK/REST)**, so the capability survives while the MCP surface
 loses both reads.
 
-**`98 − 26 = 72 retired` is wrong** and circulated in earlier drafts: 11 retire, 2 are tenancy-only,
-1 is absorbed into a builder-only SDK method that is not on the MCP, and 84 are
-absorbed into the 26 targets. Many current tools map onto one target, so the two numbers are
+**`98 − 26 = 72 retired` is wrong** and circulated in earlier drafts: 9 retire, 2 are tenancy-only,
+1 is absorbed into a builder-only SDK method that is not on the MCP, and 87 are
+absorbed into the 27 targets. Many current tools map onto one target, so the two numbers are
 not complements.
 
 ## The reconciliation — SDK 150 → 40
@@ -127,7 +127,8 @@ honest form, and the per-name completeness check is deferred to Phase 0.3b.
 **40 rows**, of which the table's rows 1–2 are the `Tortoise(...)` constructor and
 `close()`.
 
-**The SDK count is 40 and the MCP count is 26.** Start from the approved canonical MCP list of
+**The SDK count is 40 and the MCP count is 27** (26 at the 2026-09-21 ruling; 27 since #3540,
+2026-10-17). Start from the approved canonical MCP list of
 **23**. The owner's 2026-09-21 ruling added `graph_set_recording` — an unplaced tool — bringing the
 approved surface to **24**. The beta target then adds four, drops three and splits one:
 
@@ -138,7 +139,8 @@ approved surface to **24**. The beta target then adds four, drops three and spli
 | **±1** | `revise_knowledge` splits into `update_knowledge` + `supersede_knowledge` |
 | **renames** | `recall_beliefs`→`check_confidence` · `stabilize_beliefs`→`refresh_confidence` · `capture_knowledge`→`mine_knowledge_from_session` · `index_files`→`index_sources_from_directory` · `manage_source_trust` unchanged |
 
-`23 + 1 (owner ruling) + 4 − 3 + 1 = 26`. ✓
+`23 + 1 (owner ruling) + 4 − 3 + 1 = 26`, plus `tortoise_manage_sources` from #3540 (2026-10-17)
+= **27**. ✓
 
 **The one ruling this rests on** (owner, 2026-09-21 — `graph_set_recording` was an unplaced tool, so it is
 not one of the 23's rejects but a separate decision): **KEPT.** It is an agent's only in-MCP recovery

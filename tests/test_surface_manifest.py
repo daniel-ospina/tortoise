@@ -2950,8 +2950,9 @@ def test_the_compliance_check_is_RED_on_todays_gap(capsys):
     # The owner's ruling is the invariant; the live numbers are MEASURED, not restated, so
     # the migration that closes the gap only needs this test's premise updated, not its
     # arithmetic (#4185 review finding).
-    assert (targets["mcp"], targets["sdk"]) == (26, 40)
-    assert (live["mcp"], live["sdk"]) != (26, 40), (
+    assert (targets["mcp"], targets["sdk"]) == (27, 40), (
+        "#3540 ruling B added the consolidated source-management tool: 26 -> 27")
+    assert (live["mcp"], live["sdk"]) != (27, 40), (
         "the gap has closed — update this test's premise (it exists to pin the RED)"
     )
     rc = tc.main(["surface-target-check.py"])
@@ -2985,7 +2986,7 @@ def test_a_surface_UNDER_the_target_is_labelled_UNDER_not_OVER(monkeypatch, caps
 def test_the_compliance_check_is_GREEN_when_the_live_surface_equals_the_target(
     monkeypatch, capsys
 ):
-    """The fixture is the migrated surface: 26 tools, 40 methods → exit 0.
+    """The fixture is the migrated surface: 27 tools, 40 methods → exit 0.
 
     `live_surface` is the seam, so the test does not have to delete 56 tools to prove
     the green path (which the task explicitly forbids anyway).
@@ -2994,7 +2995,7 @@ def test_the_compliance_check_is_GREEN_when_the_live_surface_equals_the_target(
     monkeypatch.setattr(
         tc,
         "live_surface",
-        lambda: {"mcp": 26, "sdk": 40, "tools": [], "sdk_methods": []},
+        lambda: {"mcp": 27, "sdk": 40, "tools": [], "sdk_methods": []},
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out

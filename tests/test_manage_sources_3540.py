@@ -585,6 +585,10 @@ def test_a_write_logs_the_attempt_before_the_write(ctx):
     assert "write" in kinds, ctx["events"]
     first_write = kinds.index("write")
     assert ("log", "attempt") in ctx["events"][:first_write], ctx["events"]
+    # The OUTCOME half matters too: a mutation that logs `error_flag_write` on
+    # the success path used to leave the suite green.
+    assert any(e[2] == "disable" and e[3] == "ok" for e in ctx["logs"]), (
+        ctx["logs"])
 
 
 def test_disabling_an_already_off_session_writes_nothing(ctx):

@@ -4653,8 +4653,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
                 _log_source_change(org_id, source, "disable",
                                    "error_flag_write")
                 return {"error": (
-                    "The source's enable flag could not be written (control "
-                    "plane unavailable); nothing changed. Retry.")}
+                    "The source's enable flag could not be written; nothing "
+                    "changed. Retry.")}
             _log_source_change(org_id, source, "disable", "ok")
             return {
                 "source": source,
@@ -4758,8 +4758,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
                 return {
                     "error": (
                         "The index job started but the source's enable flag "
-                        "could not be written (control plane unavailable), so "
-                        "it will still read as off. Retry the enable."
+                        "could not be written, so it will still read as "
+                        "off. Retry the enable."
                     ),
                     "job_id": job_id,
                     "state": "started" if is_new else "reused",
@@ -4814,8 +4814,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
                            "enable" if enable else "disable",
                            "error_flag_write")
         return {"error": (
-            "The source's recording flag could not be written (control plane "
-            "unavailable); nothing changed. Retry.")}
+            "The source's recording flag could not be written; nothing "
+            "changed. Retry.")}
     _log_source_change(org_id, source,
                        "enable" if enable else "disable", "ok")
     return {"source": source, "scope": "source",

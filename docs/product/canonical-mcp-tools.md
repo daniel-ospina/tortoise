@@ -30,7 +30,7 @@ generated view of the current baseline) and the gate in `tools/surface-guard.py`
 document left **OPEN** are settled — `manage_deployment` is **off the MCP**,
 `run_onboarding` is **dropped for `check_connection`**, and `packs_list`/`pack_install` are
 **SDK/REST, post-beta** (#4663). The **23** is this list's own proposal count; the **MCP
-target is 26 at that ruling** (27 since #3540, 2026-10-17). `approved: 2026-09-18` above stays the original ruling date; this paragraph
+target was 26 at that ruling** (27 since #3540, 2026-10-17). `approved: 2026-09-18` above stays the original ruling date; this paragraph
 records the amendment.
 
 **Amended 2026-10-12** (owner ruling, recorded on **#7852**): `create_operator`
@@ -78,7 +78,8 @@ daniel-ospina · PR #8563 · date: 2026-10-14.
 
 **Amended 2026-10-17** (owner ruling on **#3540**, **PR #8863**): **one tool is added and two
 are retired — a net REDUCTION of one**, which is the ruling's own requirement. The TARGET count
-moves the other way, 26 → 27, because the two retired switches were never ON this target list: the
+moves the other way: the **MCP target count is 27** (it was 26), because the two retired
+switches were never ON this target list: the
 merged list gains `tortoise_manage_sources` while the SERVED surface loses one net (**82 → 81**).
 Both pairs are stated because they move in opposite directions, and a generated table that prints
 "27" must not be read as contradicting this record. Owner's words:
@@ -172,7 +173,7 @@ currently absorbs `get_confidence`, which is read-labelled but writes. See **Ope
 **Rows 22 and 23 are settled OFF the MCP (2026-09-22).** `manage_deployment` is account tenancy
 (`org_create`) plus two tenant-served pack operations; `run_onboarding` mixed a write with two
 tenant-served reads. Neither container ships on the MCP target. The rehomed members and the
-dropped capability are recorded in **Open items**; the **MCP target count is unchanged at 26 in
+dropped capability are recorded in **Open items**; the **MCP target count stayed at 26 for
 that ruling** (27 since #3540, 2026-10-17 — see the amendment above) —
 the beta list already carries `check_connection` in `run_onboarding`'s place and the tenancy
 surface outside the MCP. Nothing below is a silent deletion: every member is either rehomed or
@@ -233,7 +234,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 | **`packs_list` is tenant-facing and NOT on the MCP.** The registry has it `_ro()`, `http_policy=True`, described as *"List this team's active packs … another tenant's packs are never observable"* (`tortoise/tool_registry.py`). **Settled 2026-09-22: it is SDK/REST only and POST-BETA** — the tenant read is preserved there, and no competitor exposes pack installation on its agent API, so the agent-facing MCP does not carry it. Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
 | **`pack_install` is tenant-facing too — an unflagged write.** It has `http_policy=True` and is described as *"Install a custom expansion pack on the **HOSTED surface** … stores the manifest in the tenant graph and activates it"* (`tortoise/tool_registry.py`); the baseline records it `served: http`. **Settled 2026-09-22: SDK/REST only and POST-BETA**, so the tenant-visible write survives instead of being destroyed by folding it into an operator-only tool. (Its `hosted_only=True` flag is separately dead — see #4114.) Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
 | **`run_onboarding` absorbs two read-only tenant-served tools** — `onboarding_state` and `onboarding_github_status` are `_ro()` and `http_policy=True`. So it is both read and write on the customer-grantable surface, which the principle above forbids. **Settled 2026-09-22: the container is DROPPED** for `check_connection` (*programmatic, returns a result — not a wizard*), and its two tenant-visible reads are **rehomed to the tenancy block (SDK/REST)**. The MCP surface therefore **loses both reads by design** — the capability is reachable, just not through the agent API. The other five setup members are not on the MCP target. | **✅ RESOLVED 2026-09-22 — dropped for `check_connection`; two reads rehomed to SDK/REST** |
-| **`graph_set_recording` — dropping it removes an agent's self-heal path.** The registry says the capture `409` (*"Session recording is disabled for this graph"*) *"routes agents here; call this tool to turn recording back on, then retry the capture"* (the `tortoise_graph_set_recording` entry in `tortoise/tool_registry.py`). REST exposes the same operation at `PATCH /v1/graphs/{graph_id}`, but **an MCP client cannot reach REST** — so dropping it would leave an agent that hits a 409 with no recovery path inside MCP. **Owner ruling 2026-09-21: KEEP IT.** It becomes a **24th approved tool** — this list's own count, not the beta target's, which becomes **26** after its other deltas (a write; needs a `team:manage`-scoped key, so it is not a universal self-heal path). Its SDK method is the builder-only `update_memory_graph`; the SDK's own per-field `graph_set_recording` stays discarded, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ RESOLVED — kept; the MCP target is 26** |
+| **`graph_set_recording` — dropping it removes an agent's self-heal path.** The registry says the capture `409` (*"Session recording is disabled for this graph"*) *"routes agents here; call this tool to turn recording back on, then retry the capture"* (the `tortoise_graph_set_recording` entry in `tortoise/tool_registry.py`). REST exposes the same operation at `PATCH /v1/graphs/{graph_id}`, but **an MCP client cannot reach REST** — so dropping it would leave an agent that hits a 409 with no recovery path inside MCP. **Owner ruling 2026-09-21: KEEP IT.** It becomes a **24th approved tool** — this list's own count, not the beta target's, which becomes **26** after its other deltas (a write; needs a `team:manage`-scoped key, so it is not a universal self-heal path). Its SDK method is the builder-only `update_memory_graph`; the SDK's own per-field `graph_set_recording` stays discarded, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ RESOLVED — kept; the MCP target became 26 at that ruling (27 since #3540, 2026-10-17)** |
 | **SDK method `TortoiseSDK.get_entity`** keeps the narrow meaning while this tool takes the broad one — same name, two meanings, one layer apart. | resolve in the SDK pass |
 | **Bridge table** — every `type=`/`mode=` value in these 23 mapped to the SDK method behind it, before implementation starts. | pre-flight |
 
