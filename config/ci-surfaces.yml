@@ -3844,6 +3844,7 @@ surfaces:
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
+  - longmem_eval/test_server_posture_2969.py  # #2969 suggested fix 3: the eval refuses a defragging graph server (`CONFIG GET activedefrag`), opt-in `disable` applies the incident mitigation + read-back, unreadable CONFIG is UNKNOWN (never clean); wiring aborts before embedder/dataset (hermetic: fake connection records commands)
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
@@ -5119,6 +5120,10 @@ durations:
   # file's declared cost, not because the gate requires it. Refresh from the
   # first post-merge main run.
   longmem_eval/test_ingest_stall_guard.py: 2.0
+  # #2969 suggested fix 3: new file in this pool, never sampled by a CI run →
+  # the flat 2.0s default under the #3400/#4221 convention (a local timing is
+  # not the input). Refresh from the first post-merge main run.
+  longmem_eval/test_server_posture_2969.py: 2.0
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
   test_3926_error_prop_guard.py: 0.3
