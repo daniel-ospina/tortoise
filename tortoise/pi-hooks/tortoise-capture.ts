@@ -1,4 +1,4 @@
-// tortoise-hook-version: 2
+// tortoise-hook-version: 3
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -15,6 +15,17 @@
 // length (see `clipTurnContent`), so the bytes this seam POSTs changed and
 // every already-installed generation-1 copy must read as stale and be
 // reinstalled — an old copy would keep storing an unmarked 5,000-char wall.
+//
+// Generation 3 (#5109): `resolveConfig` now WARNS (once per path, stderr, path
+// + mode only, never refusing) when the FILE-sourced credential store is
+// group/other-readable — the read side of a store our writers pin `0600`. That
+// is a behavioural edit to this artifact, so the generation moves with it: an
+// already-installed generation-2 copy must read as STALE (`found < expected`),
+// not as `modified-artifact` ("marker matches but its bytes differ — local
+// edit"), which would tell every existing Pi user they had edited a file they
+// never touched and make the generation number incomparable across installs.
+// Any later behavioural edit here moves it again — the marker is the install
+// contract, not a changelog (see `hook_install.detect_artifact_install`).
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into

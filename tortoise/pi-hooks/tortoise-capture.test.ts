@@ -725,7 +725,16 @@ test("an unstattable store cannot warn or throw (the check never fails the comma
     assert.equal(cfg.apiKey, "");
     assert.deepEqual(warnings, []);
     assert.doesNotThrow(() => warnIfCredentialStoreIsReadable(join(dir, "absent.json")));
-    assert.deepEqual(warnings, [], "a store we cannot stat is not this check's business");
+    // The DIRECT call gets its OWN capture window. `captureWarnings` restores
+    // the `console.warn` mock in its `finally` — which runs as the arrow above
+    // returns — so the earlier `warnings` array is detached by this point and
+    // asserting on it would pass no matter what the function did (a dead
+    // assertion: it could start warning about absent stores and stay green).
+    // Capturing the call itself is what makes "an absent store is silent"
+    // falsifiable.
+    const direct = captureWarnings(() =>
+      warnIfCredentialStoreIsReadable(join(dir, "absent.json")));
+    assert.deepEqual(direct.warnings, [], "a store we cannot stat is not this check's business");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

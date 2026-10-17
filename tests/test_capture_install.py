@@ -3414,7 +3414,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
-                             "pi": 2}
+                             "pi": 3}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3456,7 +3456,10 @@ def test_shipped_install_contract_generations(harness):
     bump.  Cursor also started at 3, then moved 3→4 under #2122 (the
     sessionStart injection half — see the table comment above).  `pi` moved 1→2 on
     main under #4897, which this branch predates, so 2 is main's number and not
-    a #5838 bump.  Those
+    a #5838 bump; #5109 then moved `pi` 2→3 (the read-side store-mode warning
+    added to `resolveConfig` — a behavioural edit to the shipped artifact, so an
+    already-installed generation-2 copy must read as STALE rather than as
+    `modified-artifact`, i.e. "local edit").  Those
     numbers are a reviewed decision, not a detail, so they are pinned once and
     explicitly.
 
@@ -3493,15 +3496,48 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 2`` from
+    Mutation: delete ``// tortoise-hook-version: 3`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 2
+    assert hook_install.read_hook_version(_PI_SRC) == 3
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
+
+
+def test_pi_seam_generation_moved_past_the_unchecked_store_generation():
+    """#5109 added a behavioural edit to the shipped Pi artifact — the
+    read-side credential-store mode warning in ``resolveConfig`` — so the
+    install-contract generation must sit ABOVE the one that shipped without it
+    (2), or an already-installed copy reads as neither stale nor current.
+
+    Why this exists as well as the literal pin above: the pin tracks whatever
+    number is current, so a lane that edits the seam's BEHAVIOUR and forgets to
+    bump leaves BOTH the code and the pin at 2 and the pair stays green — the
+    exact failure that shipped here.  The claude seam already has this gate
+    (``tests/test_3796_probe_not_serialized.py::
+    test_the_shipped_generation_was_bumped_for_this_behaviour_change``) with a
+    ``shipped > 10`` floor; the Pi seam had none, so the hazard was recorded
+    and then not mechanised.
+
+    Measured consequence the floor prevents: at generation 2 a drifted-mode
+    install falls to ``detect_artifact_install``'s byte-compare branch and is
+    reported ``modified-artifact`` — "marker matches (2) but its bytes differ
+    from the shipped seam (local edit)" — so every existing Pi user is told
+    they made an edit they did not make, and the generation stops being a
+    comparable across installs.
+
+    Mutation: revert the marker to 2 — this REDs even if a lane also re-edits
+    the literal pin to 2, which is the point: the floor is a second,
+    independent witness that the generation moved for a behavioural edit.
+    """
+    shipped = hook_install.read_hook_version(_PI_SRC)
+    assert shipped is not None, "the Pi seam lost its install-contract marker"
+    assert shipped > 2, (
+        "#5109 changes the seam's read-path BEHAVIOUR, so the install-contract "
+        f"generation must move past 2; it is {shipped}")
 
 
 def test_pi_contract_is_pinned_to_the_installer_artifact():
