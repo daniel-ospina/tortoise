@@ -5194,7 +5194,7 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     (`_emit_event` and the dedupe/promote checks), so counting it would mark
     written-but-never-read nodes as read and bias `f` HIGH (#8877). The FTS
     funnel records its rows through the same module INLINE (it resolves the
-    label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path: `traverse`,
+    label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path:
     `traverse` and `get_historical_knowledge` read by
     direct Cypher and call nothing here (`recall_state`'s RELATED readers are
     likewise unhooked — the method itself does record the rows it serves), and

@@ -330,13 +330,11 @@ def hooked_sdk(ledger, monkeypatch):
 def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    ⛔ THIS PINS THREE OF THE NINE HOOKED SDK METHODS, and its name says so. The
-    other six SDK methods recorded as hooked in §17.4.6 (`suggest_entry_points`,
-    `issue_insight`, `recall_state`, `recall_gaps`, `search_sessions`,
-    `get_events`) are NOT exercised here, and neither are the two NON-SDK hooks —
-    `session_continuity`'s printed findings and `mcp_server`'s served tag page:
-    deleting any of those eight calls leaves this file green; no test drives them,
-    and §17.4.6 names the set. The former name
+    ⛔ THIS PINS THREE OF THE HOOKED SDK METHODS, and its name says so. The other
+    SDK methods recorded in §17.4.6 are not exercised here, and neither are the
+    two NON-SDK hooks (the session-start read, and the MCP tag tool's served
+    page): deleting any of those calls leaves this file green, no test drives
+    them, and §17.4.6 names the set. The former name
     (`test_every_row_returning_read_path_feeds_the_ledger`) promised coverage it
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.
