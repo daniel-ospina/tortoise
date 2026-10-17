@@ -165,9 +165,13 @@ _DQUOTE_ESCAPES = '$`"\\\n'
 #: bash does THREE things with an escape, and all three are modelled (measured on
 #: bash 5.2 by running the word and reading argv): it TRANSLATES it to a character;
 #: it DROPS it when the character is NUL (`\0`, `\x00`, `\u0000`, `\c@`, and any
-#: `\U` at or above 0x80000000) — and because a NUL is removed from the word, a
-#: dropped escape JOINS its neighbours, `wran$'\0'gler@4` being `wrangler@4`; or it
-#: keeps it LITERAL (an unknown escape, a surrogate, an out-of-range `\u`/`\U`).
+#: `\U` at or above 0x80000000) — and a NUL TRUNCATES THE SEGMENT, so everything
+#: between it and the closing quote is discarded and the characters on either side
+#: of it are adjacent: `wran$'\0gler@4'` is `wrangler@4`; or it keeps it LITERAL
+#: (an unknown escape, a surrogate, an out-of-range `\u`/`\U`). Two classes bash
+#: keeps literal that this table TRANSLATES instead — `\u`/`\U` at or above 0x80,
+#: and `\c?` (bash 0x7F, here 0x1F) — can only over-report: neither produces a
+#: character a spec can hold, so the word stops being the pin either way.
 #: Writing anything OTHER than the drop into the word — a placeholder, a sentinel —
 #: splits the token and hides it, which is how a float went unreported while every
 #: check stayed green.
@@ -177,8 +181,9 @@ _ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
 _ANSI_OCTAL = re.compile(r"[0-7]{1,3}")
 _ANSI_HEX = re.compile(r"[0-9A-Fa-f]{1,2}")
 _ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{1,4}"), 8: re.compile(r"[0-9A-Fa-f]{1,8}")}
-#: An escape bash DROPS contributes nothing: a NUL is removed from the word, so
-#: the characters around it are adjacent in what npm receives.
+#: A NUL-producing escape contributes nothing AND ends its `$'…'` segment: the
+#: segment is a C string, so the rest of it is discarded and what follows the
+#: closing quote is adjacent to what preceded the NUL.
 def _kept(code: int) -> str:
     return "" if code == 0 else chr(code)
 
@@ -207,6 +212,11 @@ def _shell_words(text: str) -> list[str]:
     out: list[str] = []
     quote = ""
     comment = False
+    #: A `$'…'` SEGMENT is a C string: the FIRST NUL ends it, so everything up to
+    #: the closing quote is DISCARDED — bash's `$'a\0b'c` is `ac` (measured on bash
+    #: 5). Keeping that tail stitched a pin out of `4` and `.127.0` while bash ran
+    #: `wrangler@4`, and hid `wran$'\0abc'gler@4`, which bash runs.
+    ansi_cut = False
     # `started` is NOT `out`: an empty quoted word (`""#tok`) still STARTS a word,
     # so shell reads `#tok` and not a comment. Using `out` let a `#` that shell
     # keeps be dropped, and the pin read out of a word that is not the pin.
@@ -246,17 +256,28 @@ def _shell_words(text: str) -> list[str]:
             # spell the token's `@` (see `_ANSI_C`). A backslash always consumes
             # what follows, so neither the escape nor the quote can end the word.
             started = True
+            if ansi_cut:
+                # Past the segment's NUL: bash has thrown the rest away.
+                if ch == "'":
+                    quote = ""
+                    ansi_cut = False
+                i += 1
+                continue
             if ch == "\\" and i + 1 < len(text):
                 nxt = text[i + 1]
                 octal = _ANSI_OCTAL.match(text, i + 1)
                 if octal:
-                    out.append(_kept(int(octal.group(0), 8) & 0xFF))
+                    char = _kept(int(octal.group(0), 8) & 0xFF)
+                    ansi_cut = char == ""
+                    out.append(char)
                     i = octal.end()
                     continue
                 if nxt == "x":
                     m = _ANSI_HEX.match(text, i + 2)
                     if m:
-                        out.append(_kept(int(m.group(0), 16)))
+                        char = _kept(int(m.group(0), 16))
+                        ansi_cut = char == ""
+                        out.append(char)
                         i = m.end()
                         continue
                 elif nxt in ("u", "U"):
@@ -268,15 +289,23 @@ def _shell_words(text: str) -> list[str]:
                         # LITERAL — never empty — so `chr()` must not be asked, and
                         # writing the escape back is what npm receives.
                         if code >= 0x80000000:
-                            out.append("")
+                            # Omitted from the word but NOT a NUL, so it does not
+                            # cut the segment: `wran$'\UFFFFFFFFabc'gler@4` is
+                            # `wranabcgler@4` under bash 5 (measured), which is not
+                            # the token at all.
+                            pass
                         elif code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
                             out.append(text[i:m.end()])
                         else:
-                            out.append(_kept(code))
+                            char = _kept(code)
+                            ansi_cut = char == ""
+                            out.append(char)
                         i = m.end()
                         continue
                 elif nxt == "c" and i + 2 < len(text):
-                    out.append(_kept(ord(text[i + 2]) & 0x1F))
+                    char = _kept(ord(text[i + 2]) & 0x1F)
+                    ansi_cut = char == ""
+                    out.append(char)
                     i += 3
                     continue
                 if nxt in _ANSI_C:
@@ -558,7 +587,7 @@ def _cut_comment(line: str) -> str:
 
     A `#` starts a comment only at the start of a word and outside quotes, which
     is shell's own rule — and a word starts after a blank OR a metacharacter, so a
-    `;#` tail is a comment too. ANI-C and `$"…"` quoting are NOT modelled here (this
+    `;#` tail is a comment too. ANSI-C and `$"…"` quoting are NOT modelled here (this
     keeps the CODE TEXT, not its words), so a `#` after a `\'` inside `$'…'` is cut
     where bash would keep it: that direction only ever OVER-reports.
     """
@@ -889,6 +918,22 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
                 "npx --yes wran$'\\u0000'gler@4 --version",
                 "npx --yes wran$'\\c@'gler@4 --version"):
         assert _floating_wranglers(run) == {"4"}, run
+    # A NUL also TRUNCATES the rest of its segment, so the tail is DISCARDED rather
+    # than kept: keeping it stitched a pin out of `4` + `.127.0` while bash ran
+    # `wrangler@4` (a moving window), and hid the spellings that split the token.
+    assert _floating_wranglers("npx --yes wrangler@4$'\\0.127.0' --version") == {"4"}
+    for run in ("npx --yes wran$'\\0abc'gler@4 --version",
+                "npx --yes wran$'\\0000'gler@4 --version",
+                "npx --yes wran$'\\x000'gler@4 --version",
+                "npx --yes wran$'\\u00000'gler@4 --version",
+                "npx --yes wran$'\\400abc'gler@4 --version"):
+        assert _floating_wranglers(run) == {"4"}, run
+    # A `\U` at or above 0x80000000 is OMITTED but does NOT cut the segment (it is
+    # not a NUL), so the letters on both sides stay and the word is no longer the
+    # token under bash either: nothing to report, nothing to refuse.
+    assert _wrangler_invocations("npx --yes wran$'\\UFFFFFFFFabc'gler@4 --version") == set()
+    # …and a truncated tail after a CORRECT pin leaves the pin exact, not a float.
+    assert _exact_wranglers("npx --yes wrangler@4.127.0$'\\0abc' --version") == {"4.127.0"}
     # …and a `\U` at or above 0x80000000 is dropped too, so that word IS the pin.
     assert _exact_wranglers("npx --yes wrangler@4.127.0$'\\UFFFFFFFF' --version") == {"4.127.0"}
     # A surrogate or an out-of-range `\u`/`\U` is kept LITERAL by bash (never
@@ -897,8 +942,8 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
                 "npx --yes wrangler@4.127.0$'\\U00110000' --version",
                 "npx --yes wrangler@4.127.0$'\\q' --version"):
         assert _floating_wranglers(run) == {""}, run
-    # An escape this scan does NOT model makes the word unreadable, and unreadable
-    # is FLOATING (fail-closed) rather than silently clean.
+    # A translated escape that is not a spec character makes the argument continue
+    # past the pin, which is FLOATING — `\cA` is translated, not unreadable.
     assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\cA' --version") == {""}
     # A BACKSLASH BEFORE AN ORDINARY CHARACTER inside double quotes is KEPT by
     # shell, so `wrangler@"4.\\127.0"` runs the invalid word `wrangler@4.\\127.0`
