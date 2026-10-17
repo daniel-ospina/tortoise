@@ -1170,7 +1170,9 @@ class _EdgeHandlers:
         re-matching the name inside the MERGE — is what makes the journaled link
         and the edge the same decision, with no second read that could answer
         differently. Every resolved id is written, so the live edge set is
-        exactly the journaled ``targets`` set.
+        exactly the journaled ``targets`` set — and the return value is that
+        write's MEASURED effect (the edge exists after the MERGE), never the
+        loop's progress, so a target that is gone reports ``False``.
         """
         rel = link["rel"]
         if rel not in _ABOUT_REPLAY_RELS:
@@ -1194,12 +1196,27 @@ class _EdgeHandlers:
         wrote = False
         for n in self._resolve_entity(source_id, by_id=True):
             for internal in internals:
-                self.g.query(
+                rows = self.g.query(
                     f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (t) "
-                    f"WHERE ID(t)=$tid MERGE (n)-[:{rel}]->(t)",
+                    f"WHERE ID(t)=$tid MERGE (n)-[:{rel}]->(t) "
+                    f"RETURN count(*)",
                     params={"sid": n["value"], "tid": internal},
-                )
-                wrote = True
+                ).result_set
+                # #8398 4th review P2-3: the WRITE's own effect, not the loop's
+                # progress. ``wrote = True`` used to be unconditional, so a target
+                # the graph no longer holds — the MATCH half of the MERGE finds
+                # nothing and the row is dropped — returned True for an edge that
+                # was never created. Measured:
+                # ``wire_about_link(ev, {"rel":"aboutObject"}, 999999)`` → True
+                # while ``count(r) == 0``. This boolean is what feeds
+                # ``wired += 1`` in ``replay_about_links``, i.e. it is the
+                # difference between "the replay restored the link" and "the
+                # replay reported it restored".
+                # ⚠️ ``count(*)`` AGGREGATES, so a match-less MERGE still yields
+                # ONE row holding 0 — the VALUE must be read, not the row count
+                # (``bool(rows)`` alone would stay True).
+                if rows and rows[0] and rows[0][0]:
+                    wrote = True
         return wrote
 
     def create_about_edge(self, source_id: str, target_id: str, edge_type: str, *,
@@ -1403,6 +1420,22 @@ class _EdgeHandlers:
                 if not isinstance(targets, list):
                     failed += 1
                     continue
+                # #8398 4th review P2-2: an EMPTY ``targets`` journals NO
+                # endpoint, so it is a malformed record and it is counted as one
+                # loss HERE — before the key fallback below can "repair" it.
+                # Measured before this boundary: a
+                # ``{"targets": [], "resolve_key": "Ghost-True",
+                # "mint_if_absent": true}`` record MINTED the ``:Subject``
+                # ``Ghost-True``, wired an edge and returned ``(1, 0)`` — a
+                # record that names no endpoint fabricating a node + edge and
+                # reporting ``derived == replay(journal)`` clean, contradicting
+                # this method's docstring. The sibling ``how:"id"`` arm counts
+                # the same record as one loss, so the two arms disagreed about
+                # the SAME record, and the fallback's own failure was the only
+                # reason the ``else`` arm ever agreed with it.
+                if not targets:
+                    failed += 1
+                    continue
                 # #8398 review: drop the endpoints the journal hard-deletes
                 # AFTER this record. A stale endpoint is not a loss and must
                 # never be re-minted (``resolve_structural_target`` would mint
@@ -1412,8 +1445,13 @@ class _EdgeHandlers:
                     value for value in targets
                     if not (isinstance(value, str)
                             and _target_stale(value, label))]
-                if not live_targets and key_stale:
-                    # EVERY journaled endpoint is stale — the whole link is.
+                if not live_targets:
+                    # EVERY journaled endpoint was hard-deleted after this
+                    # record: live has no such edge either, and the key fallback
+                    # below must NOT mint one back. (``key_stale`` is not the
+                    # test: a link whose endpoints are all stale is stale as a
+                    # LINK, and repairing it by key would fabricate the node
+                    # this very commit exists to stop fabricating.)
                     continue
                 wired_before = wired
                 for value in live_targets:
@@ -1459,15 +1497,16 @@ class _EdgeHandlers:
                     wired += 1
                     # ... and it repaired exactly ONE of the missing values.
                     failed += max(missing - 1, 0)
-                elif key_stale:
-                    # No repair is possible (or wanted) for a stale key: only
-                    # the LIVE endpoints can count as genuinely missing.
-                    failed += missing
                 else:
-                    # An EMPTY ``targets`` still counts one loss (there is no
-                    # journaled endpoint to count, and a record claiming a link
-                    # that names nothing is a malformed record, not a no-op).
-                    failed += max(missing, 1)
+                    # Every LIVE endpoint is a loss. ``missing`` is at least 1
+                    # here — the empty-``targets`` record was counted and
+                    # skipped above, and an all-stale link never reaches this
+                    # arm — so there is no artificial floor left. Before #8398's
+                    # 4th review this read ``max(missing, 1)`` (whose floor was
+                    # the ONLY thing counting an empty ``targets``, and only
+                    # when the fallback failed) beside a ``key_stale`` arm
+                    # adding the same ``missing``: two arms, one verdict.
+                    failed += missing
             elif link.get("how") == "id":
                 targets = link.get("targets")
                 if not isinstance(targets, list) or not targets:

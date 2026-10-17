@@ -564,7 +564,7 @@ def test_apply_does_not_abort_when_the_about_re_wire_raises(wired, monkeypatch) 
     sdk, proj, _events, _journal = wired
     ev = _nid(sdk.create_event("boom", "event"))
 
-    def _raise(_payload):
+    def _raise(_payload, *_rest, **_kw):
         raise RuntimeError("engine error mid re-wire")
 
     monkeypatch.setattr(proj, "replay_about_links", _raise)
@@ -1046,3 +1046,163 @@ def test_a_hard_deleted_ID_TARGET_is_not_a_FALSE_failure(wired, caplog) -> None:
     assert "could NOT be re-wired" not in caplog.text, (
         "a deliberately hard-deleted target was reported as a replay loss: "
         f"{caplog.text[-2000:]}")
+
+
+# ── Round 4 (adversarial review at 208f96eb8) ────────────────────────────────
+def test_a_hard_deleted_SOURCE_target_is_not_a_LOST_about_link(
+        wired, caplog) -> None:
+    """P2-1, the ``Source``/``aboutDocument`` arm — and the ids-vs-urls caveat.
+
+    The staleness filter compares a journaled endpoint VALUE against a
+    ``hard_delete_seqs`` key, and for a document link those are not the same
+    KIND of thing in general: the endpoint is a Source's ``url`` while the map
+    is keyed by the id its ``EntityMutated`` delete record carried. They are
+    EQUAL in-repo — ``_upsert_source`` MERGEs on ``url``, ``create_document``
+    keys a document ``:Source`` on ``url = id``, and ``_delete_entity``
+    journals the value it was CALLED with — and this test is what pins that:
+    delete the document Source by its url and the sweep must stay silent.
+    If that identity ever moves, this goes red rather than the filter silently
+    mis-suppressing (a mismatch suppresses nothing, the safe direction).
+    """
+    import logging
+
+    sdk, proj, events, _journal = wired
+    url = "https://example.test/docs/gone"
+    sdk.create_source(url, sourceKind="document")
+    sdk.create_event("d", "event", aboutDocument=url)
+    assert _counts(proj)["aboutDocument"] == 1, (
+        "live did not wire the document link")
+    assert sdk.delete(url) is True, "the Source was not deleted by its url"
+    assert _counts(proj)["aboutDocument"] == 0, (
+        "live kept the edge of a hard-deleted Source")
+
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _counts(proj)["aboutDocument"] == 0, (
+        "rebuild_all resurrected the document link of a hard-deleted Source")
+    assert "could NOT be re-wired" not in caplog.text, (
+        "the sweep reported a loss for a document link whose Source the journal "
+        "legitimately deleted (is the delete record still keyed by the url?): "
+        f"{caplog.text[-2000:]}")
+
+
+def test_an_EMPTY_pinned_targets_never_mints_and_is_a_COUNTED_loss(
+        wired) -> None:
+    """P2-2: a pinned link with ``targets == []`` must not be "repaired".
+
+    With ``targets == []`` both ``missing`` and ``wired - wired_before`` were 0,
+    so control fell through to the key fallback; if ``resolve_key`` resolved (or
+    ``mint_if_absent`` MINTED) the branch did ``wired += 1; failed += max(0-1, 0)``
+    → ``failed == 0``. Measured: ``(1, 0)`` and a brand-new ``:Subject`` named
+    ``Ghost-True`` plus an edge — a record journaling NO endpoint fabricating a
+    node and reporting ``derived == replay(journal)`` clean. The sibling
+    ``how:"id"`` arm counts the same record as one loss, so the two arms
+    disagreed about the SAME record, and the fallback's failure was the only
+    reason the ``else`` arm ever agreed.
+    """
+    sdk, proj, _events, _journal = wired
+    ev = _nid(sdk.create_event("malf", "event"))
+
+    def _edges() -> int:
+        return proj.g.query(
+            "MATCH (e:Event {id:$id})-[r]->() RETURN count(r)",
+            params={"id": ev}).result_set[0][0]
+
+    for mint in (True, False):
+        wired_n, failed_n = proj.replay_about_links({
+            "id": ev, "aboutLinks": [{
+                "rel": "aboutSubject", "how": "id", "targets": [],
+                "target_label": "Subject", "resolve_key": "Ghost-True",
+                "mint_if_absent": mint}]})
+        assert (wired_n, failed_n) == (0, 1), (
+            f"empty targets (mint_if_absent={mint}) was not counted as exactly "
+            f"one loss: wired={wired_n} failed={failed_n}")
+        assert proj.g.query(
+            "MATCH (s:Subject {name:'Ghost-True'}) RETURN count(s)"
+        ).result_set[0][0] == 0, (
+            "the replay MINTED a Subject for a record that journaled no "
+            "endpoint at all")
+        assert _edges() == 0, (
+            "the replay wired an edge for a record that journaled no endpoint")
+
+
+def test_wire_about_link_reports_FALSE_when_the_target_is_gone(wired) -> None:
+    """P2-3: the return value must be the WRITE's effect, not the loop's.
+
+    ``wrote = True`` was set unconditionally after the MERGE, so a target the
+    graph no longer holds — the ``MATCH`` half of the ``MERGE`` finds no row and
+    writes nothing — reported success. Measured:
+    ``wire_about_link(ev, {"rel": "aboutObject"}, 999999)`` → ``True`` while
+    ``count(r) == 0``. Latent in today's call graph (``replay_about_links``
+    resolves its ids first), but it is the boolean that feeds ``wired += 1``
+    there, and its docstring asserts "Every resolved id is written".
+    """
+    sdk, proj, _events, _journal = wired
+    ev = _nid(sdk.create_event("noop", "event"))
+
+    def _edges() -> int:
+        return proj.g.query(
+            "MATCH ()-[r:aboutObject]->() RETURN count(r)").result_set[0][0]
+
+    assert proj.wire_about_link(
+        ev, {"rel": "aboutObject"}, 999999) is False, (
+        "wire_about_link claimed it wrote an edge to a target that does not "
+        "exist")
+    assert _edges() == 0, f"an edge appeared from nowhere: {_edges()}"
+
+    # Control: the SAME call with a live target does report True, so the fix is
+    # "measure the write", not "return False".
+    obj = _nid(sdk.create_object("Present"))
+    internal = proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN ID(o)",
+        params={"id": obj}).result_set[0][0]
+    assert proj.wire_about_link(ev, {"rel": "aboutObject"}, internal) is True, (
+        "wire_about_link reported failure for an edge it DID create")
+    assert _edges() == 1, f"the control edge was not written: {_edges()}"
+
+
+def test_an_ALL_STALE_pinned_link_is_not_repaired_from_its_key(wired) -> None:
+    """P2-2, the second face: a link with NO live endpoint must not be
+    "repaired" by its key either.
+
+    Once every journaled endpoint of a pinned link is hard-deleted, the link is
+    stale as a LINK — live has no such edge — but the key fallback only asked
+    whether the KEY was stale, so a live key still in the graph (a same-name
+    node the record never named) put the fallback back in business: with
+    ``mint_if_absent`` it would MINT. Measured before this boundary:
+    ``replay_about_links`` returned ``(1, 0)`` and the edge landed on the live
+    ``Acme`` node, i.e. on a node the journaled endpoint was not.
+
+    Suppressing it is not a loss: nothing was wired, so nothing is reported.
+    """
+    sdk, proj, _events, _journal = wired
+    sdk.create_subject("Acme")           # the KEY's carrier — never journaled
+    ev = _nid(sdk.create_event("malf", "event"))
+    assert proj.g.query(
+        "MATCH (s:Subject {name:'Acme'}) RETURN count(s)"
+    ).result_set[0][0] == 1, "the key carrier is missing"
+
+    payload = {"id": ev, "aboutLinks": [{
+        "rel": "aboutSubject", "how": "id", "targets": ["gone-id"],
+        "target_label": "Subject", "resolve_key": "Acme",
+        "mint_if_absent": True}]}
+    # The record sits at seq 1; the journal hard-deletes the endpoint at seq 5.
+    wired_n, failed_n = proj.replay_about_links(
+        payload, {"gone-id": {"Subject": 5}}, 1)
+    assert (wired_n, failed_n) == (0, 0), (
+        "an ALL-STALE pinned link was repaired from its key instead of being "
+        f"recognised as stale: wired={wired_n} failed={failed_n}")
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id})-[r]->() RETURN count(r)",
+        params={"id": ev}).result_set[0][0] == 0, (
+        "the replay wired an edge from a link whose endpoints are all "
+        "hard-deleted")
+
+    # Control: the SAME payload with the delete AFTER the record is not
+    # suppressed — so the assertions above are about staleness, not about the
+    # key path being broken.
+    wired_n, failed_n = proj.replay_about_links(
+        payload, {"gone-id": {"Subject": 0}}, 1)
+    assert (wired_n, failed_n) == (1, 0), (
+        f"the key repair stopped working for a live endpoint: wired={wired_n} "
+        f"failed={failed_n}")

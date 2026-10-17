@@ -6894,6 +6894,14 @@ def _about_link_event_hard_deleted(hard_delete_seqs, seq, record) -> bool:
     of the same id is judged on its own seq — ``_hard_delete_suppresses`` is
     strictly "a delete AFTER this record", so a re-created-and-relinked Event
     survives.
+
+    ⚠️ This is the SOURCE half only: a record whose Event is gone loses ALL its
+    links, so the caller drops the record. The ENDPOINT (target) half of the same
+    rule belongs to the individual link — one target can be deleted while its
+    siblings survive — and lives in ``replay_about_links`` via ``_target_stale``
+    (#8398 4th review P2-1: this function used to be the WHOLE rule, so a journal
+    holding an Event→entity link to a since-deleted Object warned on every
+    rebuild with neither half of the warning true).
     """
     if not isinstance(record, dict):
         return False
