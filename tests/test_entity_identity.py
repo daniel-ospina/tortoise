@@ -921,9 +921,13 @@ _ALLOWED_KEYED = {
         # with `LIMIT 2` and refuse on >1 (`_refuse_ambiguous_target`), so the
         # remaining read is the holder probe itself, not a silent pick.
         'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2", params={"name": key}).result_set': 1,
-        # E: legacy `_create_about_edges` auto-detect anchor — a write key
-        # (mints/attaches by name); migration-gated.
-        'self.g.query( f"MATCH (n:{n[\'label\']} {{{n[\'key\']}:$pid}}), (s:Subject {{name:$name}}) " f"MERGE (n)-[:aboutSubject]->(s)", params={"pid": n["value"], "name": entity_name}, )': 1,
+        # E: the cascade's Subject-stub FALLBACK anchor (#8398 P1-2). Reached
+        # only when no label matched by name — including no `:Subject` — so the
+        # mint above it creates the node this read then addresses. A write key,
+        # migration-gated (owner: S3 identity/resolver). Its predecessor, the
+        # rel-ignoring `MERGE (n)-[:aboutSubject]->(s)` by name, is REMOVED with
+        # `_try_about_edge`'s inline write, not left stale below.
+        'rows = self.g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1", params={"name": link["resolve_key"]}).result_set': 1,
     },
     'tortoise/projection/entities.py': {
         # §B "Route" — lifecycle folds / participants fallback / edge anchors;
@@ -998,10 +1002,20 @@ _ALLOWED_FSTRING = {
         # #5509 A: the non-stubbable labels' (Object/Event/Point) replay target
         # — `LIMIT 2` + `_refuse_ambiguous_target` on >1.
         'q = (f"MATCH (x:{label} {{name:$key}}) " f"RETURN ID(x), x.id LIMIT 2")': 1,
-        # E: `_try_about_edge` — live auto-detect; it merges to the first
-        # label that has ANY holder. Write key, migration-gated.
-        'r = self.g.query( f"MATCH (e:{label} {{name:$name}}) RETURN e.name LIMIT 1", params={"name": target_name}, ).result_set': 1,
-        'self.g.query( f"MATCH (n:{n[\'label\']} {{{n[\'key\']}:$sid}}), (e:{label} {{name:$name}}) " f"MERGE (n)-[:{edge_type}]->(e)", params={"sid": n["value"], "name": target_name}, )': 1,
+        # E: the name cascade's PROBE (`_resolve_about_edge_target`) — live
+        # auto-detect still asks "which label holds this name", one attempt per
+        # label, and the answer is now JOURNALED as the pinned rel/label (#8398
+        # P1-2) instead of being re-derived at replay. Write key,
+        # migration-gated (owner: S3). Replaces the retired
+        # `RETURN e.name LIMIT 1` probe + the two by-name MERGEs it fed: the
+        # write is now by the RESOLVED internal id (`WHERE ID(t)=$tid`).
+        # `LIMIT` dropped entirely since the second #8398 review (P2-3): the
+        # probe must see EVERY same-name carrier — `LIMIT 1` pinned an arbitrary
+        # backend row order into an append-only journal, and `LIMIT 2` would
+        # still truncate at the third carrier. The coordinate text is updated,
+        # NOT the disposition — the read is still name-keyed, still one probe per
+        # cascade label, and still owned by S3.
+        'rows = self.g.query( f"MATCH (e:{label} {{name:$name}}) " "RETURN ID(e), coalesce(e.id, e.eventId, e.name)", params={"name": target_name}, ).result_set': 1,
     },
 }
 
