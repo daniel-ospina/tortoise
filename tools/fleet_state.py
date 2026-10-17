@@ -1428,14 +1428,17 @@ def build_state(
     # would author the surviving lane's label and then the orphan would tell the
     # human to delete that very row — following the instruction would silently
     # change the published label (review of #8849, cycle 4).
-    #
-    # ⛔ `labels_with_own_label` is computed HERE, on the PRE-inheritance list, and
-    # that placement is load-bearing: after the rebuild below EVERY kept row of an
-    # inheriting label carries a value, so an INHERITED one would count as "own" and
-    # the revert warning would never fire for the one label that needs it — measured
-    # on `[(L, stale, ""), (L, live, ""), (L, stale, "lane:x")]`, where the survivor
-    # publishes `lane:x` purely by inheritance (review of #8849).
-    labels_with_own_label: set[str] = {label for label, _ws, ilbl in kept if ilbl}
+    # ⛔ CAPTURE OWNERSHIP BEFORE THE FOLD. After it, a row's `lane:` value may be an
+    # INHERITED one, so a set built from the folded list answers "did this label end up
+    # with any value" — not "does a surviving row OWN one". Building it after the fold
+    # made the revert warning unreachable and brought back a real revert (review of
+    # #8849, cycle 10): with `[(L, STALE, lane:anc), (L, LIVE, ""), (L, STALE,
+    # lane:anc2)]` — or `[(L, STALE, ""), (L, LIVE, ""), (L, STALE, lane:x)]` — the
+    # board published a dropped line's value while the orphan said "delete the duplicate
+    # roster line", and deleting it reverted the label.
+    labels_owning_own_label: set[str] = {
+        label for label, _ws, issue_label in kept if issue_label
+    }
     kept = [
         (label, ws, issue_label or issue_label_by_label.get(label, ""))
         for label, ws, issue_label in kept
@@ -1739,12 +1742,10 @@ def build_state(
     published_by_ws: dict[tuple[str, str], str] = {
         (lbl, ws.upper()): ilbl for lbl, ws, ilbl in kept
     }
-    # ⛔ `labels_with_own_label` was computed on the PRE-inheritance list (see the
-    # inheritance block above): a SURVIVING row that owns a `lane:` value of its own.
-    # Inheritance is OWN-WINS, so a dropped row's value is irrelevant to such a label —
-    # warning about a revert there would tell the human to keep a row the board has
-    # already classified as not a lane record, and moving its value over would CHANGE
-    # the published label.
+    # Labels where a SURVIVING row OWNS a `lane:` value — captured BEFORE the
+    # inheritance fold (see there). Inheritance is own-wins, so a dropped row's value
+    # is irrelevant to such a label; warning about a revert there would tell the human
+    # to keep a row the board has already classified as not a lane record.
     def sole_carrier_value(row: dict[str, Any]) -> str:
         """
         The `lane:` value this row is the SOLE CARRIER of, or ``""`` if none.
@@ -1754,23 +1755,31 @@ def build_state(
         board PUBLISHES a value that lived only on the line the human is told to delete
         — and obeying that instruction silently reverts the label (review of #8849).
 
-        It fires only when this row's value IS what the label publishes — i.e. the
-        survivor owns none, so the label inherited THIS value (`issue_label_by_label` is
-        last-non-empty-wins across the registry). A survivor owning a different value,
-        or another dropped carrier holding the last-wins value, makes this row's value
-        irrelevant, and telling the human to move it over would CHANGE the label.
+        Two conditions, and both are needed:
+        * OWNERSHIP — no surviving row owns a value, so the label's value can only come
+          from a dropped line (own-wins would otherwise make this row's value moot);
+        * EQUALITY with the value that inheritance would publish (`issue_label_by_label`
+          is last-non-empty-wins across the registry). With three or more dropped
+          carriers they disagree, and naming one the board does NOT publish would send
+          the human to move a value that changes the label.
+        `published_by_ws` cannot answer this: in the `twin_kept=False` path that
+        workspace has no kept row, so its lookup is always `""`.
         """
         own = row.get("issue_label") or ""
         if (
             own
-            and row["lane"] not in labels_with_own_label
+            and row["lane"] not in labels_owning_own_label
             and own == issue_label_by_label.get(row["lane"])
         ):
             return own
         return ""
 
     def delete_advice(row: dict[str, Any]) -> str:
-        """The per-row delete instruction, with the revert warning when it is owed."""
+        """The per-row delete instruction, with the revert warning when it is owed.
+
+        Used by the two non-duplicate arms; `duplicate` branches on the same predicate
+        but keeps its own (longer) sentence.
+        """
         value = sole_carrier_value(row)
         if value:
             return (
@@ -1780,7 +1789,6 @@ def build_state(
                 "or the label reverts"
             )
         return "Delete the stale roster row"
-
     for row in stale_rows:
         ws_gone = f"workspace {row['workspace'][:8]}…" if row["workspace"] else "its workspace"
         arm = row.get("arm")
@@ -1841,13 +1849,15 @@ def build_state(
                 # value, which the board publishes via inheritance: a bare "delete
                 # the duplicate roster line" would revert the label, the very
                 # failure the sibling branch is written to prevent (cycle 6).
-                # ⛔ AND THIS ROW MAY BE THE ONE THE PUBLISHED VALUE COMES FROM.
-                # The gate is `_published == _carries`, NOT "no other row carries
-                # that value": inheritance is OWN-WINS, so it fires only when the
-                # surviving row has none. A surviving row owning a DIFFERENT value
-                # means this row's value is irrelevant and moving it over would
-                # CHANGE the published label — the opposite of the warning's advice
-                # (review of #8849, cycle 8).
+                # ⛔ AND THIS ROW MAY BE THE ONE THE PUBLISHED VALUE COMES FROM. The
+                # gate is OWNERSHIP plus the published value: if no surviving row owns a
+                # `lane:` value, the published one comes from a dropped line like this
+                # and deleting it reverts the label. Testing the published value ALONE is
+                # wrong (it matches when a survivor OWNS that value too, and
+                # `published_by_ws` is always "" here — there is no kept row for this
+                # workspace), and reading the owner set AFTER the inheritance fold is
+                # wrong too — it then contains the inherited value and the gate never
+                # fires (review of #8849, cycles 8 and 10).
                 if sole_carrier_value(row):
                     reason = (
                         f"registry row for '{row['lane']}' repeats {ws_gone}, "

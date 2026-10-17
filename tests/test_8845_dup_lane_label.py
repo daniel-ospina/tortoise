@@ -52,8 +52,8 @@ Each fact below fails under a NAMED mutation:
    human to undo what the board publishes. The ownership test that decides this runs
    on the PRE-inheritance list, or an inherited value counts as the survivor's own and
    the warning never fires.
-   Mutations: drop the ownership conjunct from the two non-duplicate arms -> red;
-   compute ``labels_with_own_label`` after the inheritance rebuild -> red.
+   Mutations: drop the ownership conjunct from ``sole_carrier_value`` -> red;
+   compute ``labels_owning_own_label`` after the inheritance rebuild -> red.
 """
 
 from __future__ import annotations
@@ -321,6 +321,35 @@ def test_an_empty_duplicate_is_not_told_neither_line_carries_the_label(monkeypat
     (orphan,) = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
     assert "Neither" not in orphan["reason"], orphan["reason"]
     assert "lane:new" in orphan["reason"], orphan["reason"]
+
+
+def test_a_dropped_duplicate_that_is_the_only_carrier_warns_before_deleting(
+    monkeypatch,
+) -> None:
+    """The revert warning must FIRE when the published value comes only from a drop.
+
+    `[(L, STALE, lane:anc), (L, LIVE, ""), (L, STALE, lane:anc2)]`: the survivor owns
+    no value, so inheritance publishes a dropped line's value; the second STALE row is
+    a duplicate whose twin was already dropped. A bare "delete the duplicate roster
+    line" reverted the label to `lane:anc` (review of #8849, cycle 10) — so this test
+    asserts the warning fires, which no prior test could see because its fixtures used
+    empty `lane:` values.
+    """
+    st = _build(
+        monkeypatch,
+        registry=[
+            (LABEL, WS_STALE, "lane:anc"),
+            (LABEL, WS_LIVE, ""),
+            (LABEL, WS_STALE, "lane:anc2"),
+        ],
+        live={WS_LIVE: {"cwd": WT_1}},
+        worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
+    )
+    stale = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
+    dup = [o for o in stale if "repeats" in o["reason"]]
+    assert len(dup) == 1, [o["reason"] for o in stale]
+    assert "only because this dropped line carries it" in dup[0]["reason"], dup[0]["reason"]
+    assert st["lanes"][0]["claim"]["lane_label"] == "lane:anc2"
 
 
 def test_the_advice_names_this_workspaces_value_when_a_label_has_two_kept_rows(
@@ -758,35 +787,6 @@ def test_the_second_unbound_reason_warns_when_it_is_the_only_carrier(monkeypatch
     assert "two unbound rows for one label are one lane" in reason, reason
     assert "`lane:x`" in reason, reason
     assert "the label reverts" in reason, reason
-
-
-def test_an_inherited_value_is_not_an_own_value(monkeypatch) -> None:
-    """The ownership test must run on the PRE-inheritance list.
-
-    `[(L, stale, ""), (L, live, ""), (L, stale, "lane:x")]`: the middle row survives
-    EMPTY and inherits `lane:x` from the third, which the duplicate arm drops with
-    "ALREADY dropped". Computed after the inheritance rebuild, that inherited value
-    counts as the survivor's OWN, so the revert warning never fires for the one label
-    that needs it and the orphan says only "Delete the duplicate roster line"
-    (review of #8849).
-    """
-    st = _build(
-        monkeypatch,
-        registry=[
-            (LABEL, WS_STALE, ""),
-            (LABEL, WS_LIVE, ""),
-            (LABEL, WS_STALE, "lane:x"),
-        ],
-        live={WS_LIVE: {"cwd": WT_1}},
-        worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
-    )
-    (lane,) = st["lanes"]
-    assert lane["claim"]["lane_label"] == "lane:x"
-    stale = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
-    dup = [o for o in stale if "ALREADY dropped" in o["reason"]]
-    assert len(dup) == 1, [o["reason"] for o in stale]
-    assert "`lane:x`" in dup[0]["reason"], dup[0]["reason"]
-    assert "the label reverts" in dup[0]["reason"], dup[0]["reason"]
 
 
 def test_a_dropped_carrier_is_not_warned_when_the_survivor_owns_a_value(
