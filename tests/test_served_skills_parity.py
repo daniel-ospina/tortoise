@@ -333,8 +333,14 @@ def test_4643_sync_re_derives_the_mirror_and_the_pin_byte_for_byte(monkeypatch, 
             upstream_bytes[entry["upstream_path"]], f"{name}: not byte-for-byte"
     re_pin = sp.load_manifest(pin)
     assert re_pin["upstream"]["commit"] == "a" * 40
+    # Read the upstream path from the pin, as the assertions above do, rather
+    # than re-spelling it: a bare `skills/<name>/…` literal is the shape
+    # `tests/test_8066_served_skill_relay_ratchet.py` rejects, because it is
+    # indistinguishable from a read through the machine-local `skills` relay
+    # symlink. This upstream path is the MIT repo's, not the relay's (#8066/#4643).
+    decide_upstream = manifest["skills"]["tortoise-decide"]["upstream_path"]
     assert re_pin["skills"]["tortoise-decide"]["sha256"] == \
-        sp.sha256_bytes(upstream_bytes["skills/tortoise-decide/SKILL.md"])
+        sp.sha256_bytes(upstream_bytes[decide_upstream])
     assert sp.check_local(re_pin, root) == [], "sync output must satisfy its own gate"
 
 
