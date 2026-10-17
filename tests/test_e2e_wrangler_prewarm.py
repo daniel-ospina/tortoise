@@ -158,20 +158,29 @@ _DQUOTE_ESCAPES = '$`"\\\n'
 #: (measured end to end on a parsed job body). Every arity bash accepts is
 #: covered: `\nnn` is 1–3 OCTAL digits, `\xHH` 1–2 hex, and `\uHHHH`/`\UHHHHHHHH`
 #: 1–4 / 1–8 hex. A fixed arity matched only the LONG spellings, so `$'\u40'` fell
-#: through to the sentinel with the digits left behind — the token then vanished
-#: instead of being refused, a false PASS (measured on bash 5). The same table keeps
-#: a CORRECT pin correct: `wrangler@$'\064'.127.0` is `wrangler@4.127.0`.
+#: through to a placeholder with the digits left behind — the token then vanished
+#: instead of being refused (measured on bash 5). The same table keeps a CORRECT pin
+#: correct: `wrangler@$'\064'.127.0` is `wrangler@4.127.0`.
+#:
+#: bash does THREE things with an escape, and all three are modelled (measured on
+#: bash 5.2 by running the word and reading argv): it TRANSLATES it to a character;
+#: it DROPS it when the character is NUL (`\0`, `\x00`, `\u0000`, `\c@`, and any
+#: `\U` at or above 0x80000000) — and because a NUL is removed from the word, a
+#: dropped escape JOINS its neighbours, `wran$'\0'gler@4` being `wrangler@4`; or it
+#: keeps it LITERAL (an unknown escape, a surrogate, an out-of-range `\u`/`\U`).
+#: Writing anything OTHER than the drop into the word — a placeholder, a sentinel —
+#: splits the token and hides it, which is how a float went unreported while every
+#: check stayed green.
 _ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
            "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\",
            "'": "'", '"': '"', "?": "?"}
 _ANSI_OCTAL = re.compile(r"[0-7]{1,3}")
 _ANSI_HEX = re.compile(r"[0-9A-Fa-f]{1,2}")
 _ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{1,4}"), 8: re.compile(r"[0-9A-Fa-f]{1,8}")}
-#: An escape this scan does not model becomes this sentinel. It cannot appear in
-#: an exact pin, so a SPEC carrying it is floating by the whole-word test — the
-#: scan will not guess what the escape spells. (The octal escape for NUL produces
-#: it too, and a NUL inside a spec is not the pin either.)
-_UNREADABLE = "\x00"
+#: An escape bash DROPS contributes nothing: a NUL is removed from the word, so
+#: the characters around it are adjacent in what npm receives.
+def _kept(code: int) -> str:
+    return "" if code == 0 else chr(code)
 
 
 def _shell_words(text: str) -> list[str]:
@@ -241,28 +250,40 @@ def _shell_words(text: str) -> list[str]:
                 nxt = text[i + 1]
                 octal = _ANSI_OCTAL.match(text, i + 1)
                 if octal:
-                    out.append(chr(int(octal.group(0), 8) & 0xFF))
+                    out.append(_kept(int(octal.group(0), 8) & 0xFF))
                     i = octal.end()
                     continue
                 if nxt == "x":
                     m = _ANSI_HEX.match(text, i + 2)
                     if m:
-                        out.append(chr(int(m.group(0), 16)))
+                        out.append(_kept(int(m.group(0), 16)))
                         i = m.end()
                         continue
                 elif nxt in ("u", "U"):
                     m = _ANSI_UNICODE[4 if nxt == "u" else 8].match(text, i + 2)
                     if m:
                         code = int(m.group(0), 16)
-                        # `chr` raises above the Unicode range and on surrogates;
-                        # bash yields the empty string there, so the word must be
-                        # unreadable rather than crash the guard.
-                        out.append(chr(code)
-                                   if code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF
-                                   else _UNREADABLE)
+                        # At or above 0x80000000 bash drops the escape like a NUL.
+                        # A surrogate or an out-of-range `\u`/`\U` it keeps
+                        # LITERAL — never empty — so `chr()` must not be asked, and
+                        # writing the escape back is what npm receives.
+                        if code >= 0x80000000:
+                            out.append("")
+                        elif code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                            out.append(text[i:m.end()])
+                        else:
+                            out.append(_kept(code))
                         i = m.end()
                         continue
-                out.append(_ANSI_C.get(nxt, _UNREADABLE))
+                elif nxt == "c" and i + 2 < len(text):
+                    out.append(_kept(ord(text[i + 2]) & 0x1F))
+                    i += 3
+                    continue
+                if nxt in _ANSI_C:
+                    out.append(_ANSI_C[nxt])
+                else:
+                    # bash keeps an escape it does not know, backslash and all.
+                    out.append("\\" + nxt)
                 i += 2
                 continue
             if ch == "'":
@@ -337,10 +358,6 @@ def _wrangler_invocations(run: str) -> set[str]:
     text = _CONTINUATION.sub("", run)
     specs: set[str] = set()
     for word in _shell_words(text):
-        # A word carrying `_UNREADABLE` cannot equal the pin, so it is refused by
-        # the whole-word test below — no separate check, which would otherwise
-        # refuse a CORRECT step whose script merely contains such an escape
-        # somewhere else (`echo $'\cA'` has nothing to do with wrangler).
         at = word.find("wrangler@")
         if at < 0:
             continue
@@ -541,8 +558,9 @@ def _cut_comment(line: str) -> str:
 
     A `#` starts a comment only at the start of a word and outside quotes, which
     is shell's own rule — and a word starts after a blank OR a metacharacter, so a
-    `;#` tail is a comment too. It is the same rule `_shell_words` applies, kept
-    here as a character scan because this test needs the CODE TEXT, not its words.
+    `;#` tail is a comment too. ANI-C and `$"…"` quoting are NOT modelled here (this
+    keeps the CODE TEXT, not its words), so a `#` after a `\'` inside `$'…'` is cut
+    where bash would keep it: that direction only ever OVER-reports.
     """
     quote = ""
     at_word_start = True
@@ -862,9 +880,23 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
                 "npx --yes wrangler$'\\U0040'4 --version"):
         assert _floating_wranglers(run) == {"4"}, run
     assert _exact_wranglers("npx --yes wrangler@4.1$'\\u32'7.0 --version") == {"4.127.0"}
-    # A code point `chr` cannot hold is UNREADABLE, not a crash: bash yields the
-    # empty string there, so the word can never be the pin.
-    assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\UFFFFFFFF' --version") == {""}
+    # A DROPPED escape contributes NOTHING — bash removes a NUL from the word — so
+    # the fragments join. Writing a placeholder there split the token and hid a real
+    # float (`wran$'\0'gler@4` runs `wrangler@4`) while every check stayed green.
+    for run in ("npx --yes wran$'\\0'gler@4 --version",
+                "npx --yes wran$'\\000'gler@4 --version",
+                "npx --yes wran$'\\x00'gler@4 --version",
+                "npx --yes wran$'\\u0000'gler@4 --version",
+                "npx --yes wran$'\\c@'gler@4 --version"):
+        assert _floating_wranglers(run) == {"4"}, run
+    # …and a `\U` at or above 0x80000000 is dropped too, so that word IS the pin.
+    assert _exact_wranglers("npx --yes wrangler@4.127.0$'\\UFFFFFFFF' --version") == {"4.127.0"}
+    # A surrogate or an out-of-range `\u`/`\U` is kept LITERAL by bash (never
+    # empty), so it cannot be the pin — and `chr` must not be asked, which raised.
+    for run in ("npx --yes wrangler@4.127.0$'\\uD800' --version",
+                "npx --yes wrangler@4.127.0$'\\U00110000' --version",
+                "npx --yes wrangler@4.127.0$'\\q' --version"):
+        assert _floating_wranglers(run) == {""}, run
     # An escape this scan does NOT model makes the word unreadable, and unreadable
     # is FLOATING (fail-closed) rather than silently clean.
     assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\cA' --version") == {""}
