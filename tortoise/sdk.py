@@ -3057,13 +3057,20 @@ _ENTITY_MUTATION_RECORD_TYPE = "EntityMutated"
 
 def _raise_update_point_status_error(proj, id: str, *,
                                    status_only: bool = False,
-                                   present: bool | None = None) -> None:
+                                   present: bool | None = None) -> bool:
     """#432: error path for the update_point draft→live promote guard.
 
     Runs a diagnostic existence read ONLY when the guarded SET returned no
     rows, so the happy path stays a single round trip. Missing point →
     ValueError matching the historical missing-point behavior; present but
     not promotable → illegal-transition ValueError.
+
+    Returns ``True`` for the ONE outcome that does not raise — an already-live
+    node on a status-only promote, the #1088 idempotent no-op — so the caller
+    can finish that call the way the pre-write probe finishes it (with NO
+    writes) instead of falling through to the tail's ``_mark_dirty``, which
+    would advance the graph-wide EP epoch for a promote that matched nothing.
+    Every other path raises and never returns.
 
     #1088: an already-LIVE point is short-circuited in ``update_point``
     (idempotent no-op), so apart from that window the only statuses that reach
@@ -3103,7 +3110,7 @@ def _raise_update_point_status_error(proj, id: str, *,
     node_status = status[0][0] if status else None
     if node_status == 'live':
         if status_only:
-            return
+            return True
         # A live node is not an ILLEGAL TRANSITION, and pointing the caller at
         # retract_point()/supersede_point() would advise damaging a healthy
         # point (#8854 r7 P2). Say what actually happened: the promote matched
@@ -5644,15 +5651,17 @@ class TortoiseSDK:
         # attempt, so `self._proj` is the live authoritative handle. A None still
         # answers False (`_graph_exists`), so the graph-abort family fails LOUD.
         attempts = 0
-        last_abort: BaseException | None = None
         state_gated = False
         # The FIRST graph-replaced abort, LATCHED (#8854 review round 3 P1).
-        # `last_abort` is overwritten by every retryable abort, so gating the
-        # witness on it let a write-slot abort that arrived AFTER a rebuild
-        # abort (the rebuild is itself a concurrent writer) silently DISARM a
-        # witness that had been legitimately armed — and the next zero-row
-        # re-issue reported success again. Once this call has seen a graph
-        # replacement, the ambiguity is live for the rest of the call.
+        # A single "last abort" slot is overwritten by EVERY retryable abort, so
+        # gating the witness on it let a write-slot abort that arrived AFTER a
+        # rebuild abort (the rebuild is itself a concurrent writer) silently
+        # DISARM a witness that had been legitimately armed — and the next
+        # zero-row re-issue reported success again. Once this call has seen a
+        # graph replacement, the ambiguity is live for the rest of the call.
+        # That slot is gone rather than merely unused: a write-only name that
+        # still looks load-bearing invites a later edit to re-raise it here,
+        # which is the r7 P2 "retry the query" text against a deleted graph.
         graph_abort: BaseException | None = None
         armed_abort: BaseException | None = None
 
@@ -5676,9 +5685,10 @@ class TortoiseSDK:
             attempts += 1
             if attempts > 1:
                 if state_gated and graph_abort is not None and not _probe():
-                    # Raise the LATCHED graph abort, not `last_abort`: after a
-                    # write-slot abort landed, `last_abort` is a message telling
-                    # the caller to retry a graph that is gone (#8854 r7 P2).
+                    # Raise the LATCHED graph abort, never the most recent one:
+                    # after a write-slot abort landed, the latest abort is a
+                    # message telling the caller to retry a graph that is gone
+                    # (#8854 r7 P2).
                     raise graph_abort
                 # Count only a retry that is actually re-issued, so the eval's
                 # `ingest_retries` cannot over-report (review round 2).
@@ -5704,29 +5714,26 @@ class TortoiseSDK:
             return result
 
         def _predicate(exc: BaseException) -> bool:
-            nonlocal last_abort, state_gated, armed_abort, graph_abort
+            nonlocal state_gated, armed_abort, graph_abort
             if isinstance(exc, _WriteNotLanded):
                 # Nothing applied, so a re-issue is definitionally safe — and
                 # the graph-state question was already answered when the
-                # retry that produced this attempt was authorised. Keep the
-                # ORIGINAL abort as `last_abort` so exhaustion surfaces it.
+                # retry that produced this attempt was authorised.
                 return True
             keep = retryable_aborted_write(exc, graph_exists=_probe)
-            if keep:
-                last_abort = exc
-                # LATCH the graph-replaced abort OBJECT (not merely a flag):
-                # a later write-slot abort is state-INDEPENDENT and must not
-                # re-open issuing into a graph the rebuild deleted — nor
-                # rewrite the error the guard raises into a "retry the query"
-                # instruction for a graph that is gone (#8854 r7 P2).
-                if graph_abort_family(exc):
-                    if graph_abort is None:
-                        graph_abort = exc
-                    state_gated = True
-                    if witness is not None and armed_abort is None:
-                        # `_WriteNotLanded` is intentionally NOT latched here:
-                        # it is arm-neutral.
-                        armed_abort = exc
+            # LATCH the graph-replaced abort OBJECT (not merely a flag):
+            # a later write-slot abort is state-INDEPENDENT and must not
+            # re-open issuing into a graph the rebuild deleted — nor
+            # rewrite the error the guard raises into a "retry the query"
+            # instruction for a graph that is gone (#8854 r7 P2).
+            if keep and graph_abort_family(exc):
+                if graph_abort is None:
+                    graph_abort = exc
+                state_gated = True
+                if witness is not None and armed_abort is None:
+                    # `_WriteNotLanded` is intentionally NOT latched here:
+                    # it is arm-neutral.
+                    armed_abort = exc
             return keep
 
         try:
@@ -10458,12 +10465,16 @@ class TortoiseSDK:
                 # no-op). With other props nothing was applied, so keep it
                 # loud instead of journaling a revision the graph never made.
                 return len(_props_param) == 1
-            _raise_update_point_status_error(
-                proj, id, status_only=len(_props_param) == 1,
-                present=True)
-            return False  # pragma: no cover — only a terminal→live flip between
-            # the witness's status read and this diagnostic's own read reaches
-            # here; a retry is then the safe outcome.
+            if _raise_update_point_status_error(
+                    proj, id, status_only=len(_props_param) == 1,
+                    present=True):
+                # A terminal→live flip between THIS read and the diagnostic's
+                # own read on a status-only promote: the same idempotent no-op
+                # the arm's post-check completes, so do not manufacture a
+                # non-landing for it.
+                return len(_props_param) == 1
+            return False  # pragma: no cover — every other outcome of the
+            # diagnostic raises, so only the flip above reaches here.
 
         if has_object:
             if 'status' in props:
@@ -10495,9 +10506,16 @@ class TortoiseSDK:
                     what="update_point SET (Object promote)",
                     witness=_promote_witness,
                 )
-                if not res.result_set:
-                    _raise_update_point_status_error(
-                        proj, id, status_only=len(_props_param) == 1)
+                if not res.result_set and _raise_update_point_status_error(
+                        proj, id, status_only=len(_props_param) == 1):
+                    # #1088: the caller asked for NOTHING BUT the status and
+                    # the replay landed the node live, so this is the
+                    # idempotent no-op the pre-write probe answers — and it
+                    # must answer it the SAME way, with no writes. Falling
+                    # through to the tail would run `_mark_dirty`, advancing
+                    # the graph-wide EP epoch and persisting `ep_dirty` for a
+                    # promote that matched nothing (#8854 review r9 P2).
+                    return self.get_point(id)
             else:
                 self._graph_write_with_retry(
                     lambda: proj.g.query(
@@ -10537,9 +10555,12 @@ class TortoiseSDK:
                     what="update_point SET (promote)",
                     witness=_promote_witness,
                 )
-                if not res.result_set:
-                    _raise_update_point_status_error(
-                        proj, id, status_only=len(_props_param) == 1)
+                if not res.result_set and _raise_update_point_status_error(
+                        proj, id, status_only=len(_props_param) == 1):
+                    # #1088: see the :Object arm above — the same idempotent
+                    # no-op, answered with no writes rather than through the
+                    # tail's `_mark_dirty` EP advance.
+                    return self.get_point(id)
             else:
                 # #7405: one key per statement, each an absolute
                 # `SET n += $props` — a re-issue writes the same value to

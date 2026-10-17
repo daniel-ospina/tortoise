@@ -704,9 +704,18 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
     and stayed green while the prose re-staled — the exact class of defect the
     round-3 rewrite was fixing.
 
-    This counts EVERY wrapped call the door makes, so a new site on any label
-    (including one inside a helper) breaks the assertion instead of quietly
-    widening the bound.
+    This counts EVERY wrapped call each shape below makes, on BOTH labels —
+    the per-key/embedding/tag arms plus ``_mark_dirty``'s two — so a new site
+    on either label's path (including one inside a helper) breaks an assertion
+    instead of quietly widening the bound. NOT pinned here: the two PROMOTE
+    arms (``status=``), which need a ``draft`` node and are exercised by their
+    own tests without a call count, so a new site on THAT path is not caught by
+    this test.
+
+    The ``:Object`` arm is a DIFFERENT statement (``SET n += $props`` for the
+    whole dict, not one key at a time) and folds the derived vector and the
+    relative ``version`` bump INTO it, so its counts are one LOWER than the
+    ``:Point`` shapes above and cannot be inferred from them.
     """
     sdk = _sdk(tmp_path, "bound")
     try:
@@ -746,6 +755,36 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
         sdk.annotate_operator(op, bias=0.2, precision=0.8,
                               consistency=0.7, directness=0.9)
         assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY], seen
+
+        # ── the SAME three shapes on the ``:Point:Object`` arm ──────────────
+        # The entity arm writes the WHOLE dict in one statement and folds the
+        # derived vector + the relative `version` bump into it, so there is no
+        # per-key loop and no separate embedding site: one FEWER window than the
+        # `:Point` shapes for content+tags. Counting only `:Point` left these
+        # arms unguarded (a new site reached only on the entity path stayed
+        # green), which is the drift this test exists to catch.
+        obj = _pid(sdk)
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n:Object", params={"id": obj})
+
+        seen.clear()
+        sdk.update_point(obj, confidence=0.5)
+        assert seen == ["update_point SET (Object)", _ADVANCE, _DIRTY], seen
+        assert len(seen) == 3, "an :Object plain update is THREE windows"
+
+        seen.clear()
+        sdk.update_point(obj, tags=["a"])
+        assert seen == ["update_point SET (Object)",
+                        "update_point TAGGED edges", _ADVANCE, _DIRTY], seen
+        assert len(seen) == 4, "an :Object tagged update is FOUR windows"
+
+        seen.clear()
+        sdk.update_point(obj, content="object revision", tags=["a"])
+        assert seen == ["update_point SET (Object)",
+                        "update_point TAGGED edges", _ADVANCE, _DIRTY], seen
+        assert len(seen) == 4, (
+            "an :Object content+tags update is FOUR windows — the derived "
+            "vector rides the same statement, so it adds no retry window")
 
         # A TERMINAL point reaches `_mark_dirty`'s extra clear SET, so the
         # bound is a RANGE, not a number (#8854 review round 3 P2).
@@ -1730,9 +1769,10 @@ def test_a_live_node_with_unwritten_props_is_not_a_silent_success(tmp_path):
 
     ``status_only`` is what separates the two: the replay can land the node
     ``live`` between the door's probe and the guarded ``SET`` (this proxy does),
-    and returning silently then reports a landed write that never happened —
-    measured pre-fix: ``update_point(status='live', confidence=0.42)`` returned
-    success, left ``confidence`` unset, and emitted ``PointRevised`` carrying it.
+    and returning silently then would report a landed write that never happened
+    for a call that asked for more than the status. The invariant this pins:
+    the promote matched NOTHING, so the ``confidence`` the caller asked for is
+    not on the node, and the door must not answer as though it were.
     """
     sdk = _sdk(tmp_path, "promoterace")
     try:
@@ -1793,6 +1833,52 @@ def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
         assert row[1] is None, (
             "a status-only promote writes nothing else, so no other prop may "
             f"appear: saw {row[1]!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_live_status_only_promote_writes_through_no_other_slot(
+        tmp_path, monkeypatch):
+    """The status-only no-op adds NO write after the promote it matched nothing.
+
+    ``_mark_dirty`` reaches TWO wrapped write slots of its own
+    (``_advance_ep_version``, a graph-wide ``:EpMeta`` MERGE, and the
+    ``ep_dirty`` persist), so falling through to the tail spends both — and
+    advances the EP epoch — for a promote that applied nothing a caller can
+    observe. The ``#1088`` probe-path no-op reaches the same end state without
+    touching either, so the post-write route may not do more work than the
+    route that never wrote.
+
+    The promote statement itself is still ISSUED on this path (it is the write
+    that discovered the node is already live), which is why the expectation is
+    that ONE call and not the empty list the probe path produces.
+    """
+    sdk = _sdk(tmp_path, "promotedirty")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
+        proj.g = proxy
+        seen: list[str] = []
+        original = sdk._graph_write_with_retry
+
+        def counting(fn, *, what, witness=None):
+            seen.append(what)
+            return original(fn, what=what, witness=witness)
+
+        monkeypatch.setattr(sdk, "_graph_write_with_retry", counting)
+
+        out = sdk.update_point(pid, status="live")  # must NOT raise
+
+        assert proxy.flipped, "fixture precondition: the node must have gone live"
+        assert seen == ["update_point SET (promote)"], (
+            "a status-only promote that matched nothing must not reach "
+            f"`_mark_dirty`'s slots: saw {seen}")
+        assert out["status"] == "live", (
+            "the no-op still answers with the node, like the probe path: "
+            f"saw {out.get('status')!r}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
