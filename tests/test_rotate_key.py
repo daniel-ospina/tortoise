@@ -44,6 +44,7 @@ from fastapi.testclient import TestClient
 import tortoise.hosted_api as ha_mod
 import tortoise.supabase_control as sc
 from tortoise.hosted_api import app
+from tests._verdict import verdict_client
 from tests.fake_control_plane import FakeControlPlane
 
 _SUPABASE_URL = "https://rotate4355.supabase.co"
@@ -71,7 +72,7 @@ def fake(_env):
 
 @pytest.fixture
 def client():
-    with TestClient(app) as c:
+    with verdict_client(app) as c:
         yield c
 
 
@@ -815,3 +816,29 @@ def test_rotate_stores_only_the_hash_and_reveals_once(client, fake):
     row = next(x for x in _rows(fake, org["org_id"]) if x["id"] == r.json()["id"])
     assert row["lookup_hash"] == lookup_hash(new_key)
     assert new_key not in str(row)
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seam.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/team/keys`` is the
+    route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/team/keys")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/team/keys answered" in message
