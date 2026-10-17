@@ -54,12 +54,21 @@ Each fact below fails under a NAMED mutation:
    the warning never fires.
    Mutations: drop the ownership conjunct from ``sole_carrier_value`` -> red;
    compute ``labels_owning_own_label`` after the inheritance rebuild -> red.
+10. The session arm needs a READING, not a stored ROW. ``cmux sessions list --all``
+   is a durable history that keeps FINISHED sessions, and ``build_state`` filters the
+   same records by lifecycle and re-checks every pid for that reason. A row whose
+   record carries no alive pid is therefore unbound, and — with a sibling that does
+   bind evidence — it is dropped. While the arm tested mere presence, the duplicate
+   label (and its exit-2 gate) survived for exactly the #7738 ghost shape.
+   Mutations: ``any(usable_pid_record(r) ...)`` -> ``bool(live.get(ws.upper()))``
+   -> red; ``usable_pid_record`` returning True unconditionally -> red.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -587,30 +596,90 @@ def test_a_lone_ghost_row_is_still_reported_as_the_lane(monkeypatch) -> None:
     assert not [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
 
 
-def test_a_live_session_record_keeps_the_ghost_as_a_lane(monkeypatch) -> None:
-    """A ghost row whose WORKSPACE still has a live session record is a lane.
+def test_a_session_record_with_a_live_pid_keeps_the_ghost_as_a_lane(monkeypatch) -> None:
+    """A ghost row whose WORKSPACE still has a session record with a LIVE pid is a lane.
+
+    This is the #7738 shape the drop must never touch: a workspace that is gone from
+    the live list can still have a `pi` process running against it, and a session
+    record is the only thing that says so. Pinned with `os.getpid()` — a pid that is
+    alive by construction — so the test proves the ARM works, not that any stored row
+    keeps a row (which was the defect; see the finished-record test below).
 
     Named for what it pins. An earlier name claimed this went "through the OVERRIDE
-    rule", but it does not: with `overrides=None` the state is byte-identical,
-    because the row is kept by `row_binds_evidence`'s live-session-record arm
-    (`live.get(ws.upper())`). The override's own effect is pinned separately by
+    rule", but it does not: the row is kept by `row_binds_evidence`'s session arm.
+    The override's own effect is pinned separately by
     `test_the_override_still_reaches_the_row_that_survives` (review of #8849).
     """
     sid = "c" * 36
+    alive_pid = os.getpid()
+    assert fs.pid_alive(alive_pid), "the fixture needs a pid that is alive"
     st = _build(
         monkeypatch,
         registry=[(LABEL, WS_STALE, ""), (LABEL, WS_LIVE, "")],
         live={WS_LIVE: {"cwd": WT_1}},
         worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
         overrides={LABEL: sid},
-        sessions={WS_STALE.upper(): [{"pid": 999999, "agent_lifecycle": "running",
+        sessions={WS_STALE.upper(): [{"pid": alive_pid, "agent_lifecycle": "running",
                                      "session_id": sid}]},
     )
-    # A live SESSION RECORD for the ghost's workspace is evidence of its own, so the
+    # A LIVE session record for the ghost's workspace is evidence of its own, so the
     # row is NOT dropped, and the duplicate stays visible to the gate (fail closed,
     # by design).
     assert [lane["identity"]["workspace"] for lane in st["lanes"]] == [WS_STALE, WS_LIVE]
     assert st["summary"]["stale_registry"] == 0
+
+
+def test_a_finished_session_record_does_not_keep_the_ghost_as_a_lane(monkeypatch) -> None:
+    """A stored record whose session has ENDED is not a pid reading (#8849 review).
+
+    `cmux sessions list --all` is a durable HISTORY — `build_state` filters the same
+    records by lifecycle and re-checks every pid precisely because finished ones are
+    in it. So the arm must test a READING, not the row's existence. While it tested
+    existence, a ghost row kept a durable record of a dead session counted as evidence:
+    the row was never dropped, the label still enumerated two lane records, and the
+    claim gate still answered HOLDER_UNMEASURED/exit 2 fleet-wide — the exact wedge
+    #8845 exists to remove, for exactly the #7738 ghost shape.
+
+    Mutation: `return bool(live.get(ws.upper()))` -> two lane records -> red.
+    """
+    dead_pid = 999999
+    assert not fs.pid_alive(dead_pid), "the fixture needs a pid that is provably dead"
+    st = _build(
+        monkeypatch,
+        registry=[(LABEL, WS_STALE, ""), (LABEL, WS_LIVE, "")],
+        live={WS_LIVE: {"cwd": WT_1}},
+        worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
+        # `agent_lifecycle` still says "running": a stale lifecycle field is common
+        # (#8), so the finished state is carried by the dead pid alone — the harsher
+        # of the two shapes, and the one a lifecycle-only test would miss.
+        sessions={WS_STALE.upper(): [{"pid": dead_pid, "agent_lifecycle": "running",
+                                     "session_id": "d" * 36}]},
+    )
+    assert [lane["identity"]["lane"] for lane in st["lanes"]] == [LABEL]
+    assert st["lanes"][0]["identity"]["workspace"] == WS_LIVE
+    assert st["summary"]["stale_registry"] == 1
+    (orphan,) = [o for o in st["orphans"] if o.get("kind") == "registry-stale"]
+    # The sentence must say what was actually measured: a pid that is not alive.
+    assert "LIVE pid" in orphan["reason"], orphan["reason"]
+
+
+def test_a_session_record_without_a_usable_pid_is_not_evidence(monkeypatch) -> None:
+    """A record that yields no pid at all cannot answer "is this lane running?".
+
+    A hand-edited or partially-written record (a respawn row, a child row, a store
+    entry whose pid field is empty) is not a reading. Presence alone used to keep the
+    duplicate alive here too.
+    """
+    st = _build(
+        monkeypatch,
+        registry=[(LABEL, WS_STALE, ""), (LABEL, WS_LIVE, "")],
+        live={WS_LIVE: {"cwd": WT_1}},
+        worktrees={WT_1: {"branch": "refs/heads/fix/8818-pin-prose", "head": HEAD}},
+        sessions={WS_STALE.upper(): [{"pid": None, "agent_lifecycle": "running"},
+                                     {"session_id": "e" * 36}]},
+    )
+    assert [lane["identity"]["workspace"] for lane in st["lanes"]] == [WS_LIVE]
+    assert st["summary"]["stale_registry"] == 1
 
 
 # ---------------------------------------------------------------------------

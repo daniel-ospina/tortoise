@@ -1296,7 +1296,8 @@ def build_state(
     # ---- which registry rows ARE lane records (#8845) ----
     # A registry row can outlive the cmux workspace behind it. When the row's
     # workspace is ABSENT from a MEASURED live list and the row binds no evidence
-    # of its own — no pane binding, no live session record — then it says nothing:
+    # of its own — no pane binding, no session record yielding a LIVE pid — then it
+    # says nothing:
     # it cannot answer whether the lane stopped, started or was never there.
     # Emitting it anyway makes ONE label enumerate TWO lane records, and the claim
     # gate reads a duplicated label as unreadable by construction
@@ -1322,15 +1323,39 @@ def build_state(
     # back. The override keeps its own meaning elsewhere: it re-binds a ghost's
     # session on disk, and a label whose only row is unbound is kept anyway.
     #
+    # ⛔ And the session arm needs a READING, not a stored ROW. `cmux sessions list
+    # --all` is a durable HISTORY: it keeps records whose session has ENDED — which
+    # is exactly why the liveness read below (`running`, `alive_pids`) filters the
+    # same records instead of trusting them. So the mere EXISTENCE of a record for
+    # this workspace proves nothing; only a record whose pid is alive right now is
+    # the "pid reading" this arm claims to be. Accepting a finished record kept the
+    # duplicate — and the exit-2 gate it causes — alive for precisely the #7738
+    # ghost shape this rule exists to remove (review of #8849).
+    #
     # Every dropped row is REPORTED through `orphans` below (kind `registry-stale`),
     # never silently erased: deleting the roster line is a human's call, not ours.
+    def usable_pid_record(rec: Any) -> bool:
+        """A stored session row that yields a USABLE reading: its pid is alive NOW."""
+        if not isinstance(rec, dict):
+            return False
+        try:
+            pid = int(rec.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        # `agent_lifecycle` is deliberately NOT required to say "running": a
+        # workspace holds several records (a stale lifecycle field, a respawn, a
+        # child) and a live lane must not read dead because of one of them (#8). The
+        # alive pid IS the reading; a dead or absent one is not.
+        return pid_alive(pid)
+
     def row_binds_evidence(ws: str) -> bool:
         """Does this registry ROW bind evidence of its own? (ROW-keyed — see above.)"""
         if ws.upper() in workspaces:
             return True                      # the workspace itself is live
         if (bindings.get(ws.upper()) or "").strip():
             return True                      # a pane resume binding exists
-        return bool(live.get(ws.upper()))     # a session record -> a pid reading
+        # a session record -> a pid reading, but ONLY while that pid is alive
+        return any(usable_pid_record(r) for r in live.get(ws.upper(), []))
 
     bound_rows_by_label: dict[str, int] = {}
     issue_label_by_label: dict[str, str] = {}
@@ -1838,9 +1863,10 @@ def build_state(
                     f"registry row for '{row['lane']}' repeats {ws_gone} — the same "
                     "(label, workspace) written twice is ONE lane, not two; the "
                     "duplicate is not a second lane record and NO verdict changes "
-                    "(one lane record remains). This is a de-duplication, not a "
-                    "retirement: it holds even when the cmux list could not be "
-                    f"read, because both rows name one workspace. {_advice}"
+                    "(only the repeated line goes away, not a lane). This is a "
+                    "de-duplication, not a retirement: it holds even when the cmux "
+                    "list could not be read, because both rows name one workspace. "
+                    f"{_advice}"
                 )
             else:
                 # The twin was dropped by another arm, so this drop is NOT a plain
@@ -1879,16 +1905,17 @@ def build_state(
         elif arm == "second-unbound":
             reason = (
                 f"registry row for '{row['lane']}' names {ws_gone}, which is NOT in "
-                "the live cmux list and binds no pane binding or session record, so "
-                "it is not a lane record; it repeats a label that already has one "
-                "such row kept, and two unbound rows for one label are one lane "
-                f"enumerated twice. {delete_advice(row)}"
+                "the live cmux list and binds no pane binding or session record with "
+                "a LIVE pid, so it is not a lane record; it repeats a label that "
+                "already has one such row kept, and two unbound rows for one label "
+                "are one lane enumerated twice. "
+                f"{delete_advice(row)}"
             )
         else:
             reason = (
                 f"registry row for '{row['lane']}' names {ws_gone}, which is NOT in "
                 "the live cmux list, and the row binds NO pane binding or session "
-                "record of its own — it is not a lane record "
+                "record with a LIVE pid of its own — it is not a lane record "
                 f"({row.get('why') or 'a row for this label does bind evidence'}); "
                 f"{delete_advice(row)}"
             )
@@ -2614,8 +2641,9 @@ def cmd_lane(args: argparse.Namespace) -> int:
             print(
                 f"{args.lane!r} is a STALE REGISTRY ROW, not a lane: {where} "
                 "is absent from the live cmux list and the row "
-                "binds no pane binding or session record of its own (#8845) — delete the "
-                "roster row; `python tools/fleet_state.py orphans` lists it",
+                "binds no pane binding or session record with a LIVE pid of its own "
+                "(#8845) — delete the roster row; "
+                "`python tools/fleet_state.py orphans` lists it",
                 file=sys.stderr,
             )
             return 1
