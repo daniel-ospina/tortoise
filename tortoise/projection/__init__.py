@@ -6874,6 +6874,33 @@ def _merge_hard_delete(out, rid, seq, labels) -> None:
             by_label[label] = seq
 
 
+def _about_link_payload(record):
+    """The part of a #8398 ``EventRecorded`` record that ADDRESSES its Event.
+
+    ONE definition of the nested-vs-flat ambiguity, shared by BOTH readers of
+    the record: the gate that decides whether to hand the record to
+    ``replay_about_links`` and that reader itself. ``event`` is not a reserved
+    name on every writer (``EventAPI.add_event`` and the miner journal use the
+    nested ``{event: {id, …}}`` form; a caller PROP may legally be called
+    ``event``), so the two shapes are ambiguous at that key. The nested form is
+    authoritative ONLY when its payload carries the record's address
+    (``id``/``eventId``, the two keys ``_upsert_event`` reads); otherwise the
+    record IS the payload and the ``event`` value is inert data.
+
+    ⛔ Two independent copies of this rule is what let the writers of this
+    branch drift six lines apart: ``replay_about_links`` was taught the
+    address check while the gate in front of it kept unwrapping ``event``
+    unconditionally, so for a caller-prop record the gate could not read the
+    address (``None``), declined to drop a record the journal had hard-deleted,
+    and the sweep then reported the very falsehood the gate exists to remove.
+    Both callers now resolve the payload HERE, so the rule cannot drift again.
+    """
+    inner = record.get("event") if isinstance(record, dict) else None
+    if isinstance(inner, dict) and ("id" in inner or "eventId" in inner):
+        return inner
+    return record
+
+
 def _about_link_event_hard_deleted(hard_delete_seqs, seq, record) -> bool:
     """True when the journal hard-DELETES the Event that owns this record's
     #8398 ``about*`` links at a seq AFTER ``record``'s own (#8398 review P2-2).
@@ -6902,12 +6929,14 @@ def _about_link_event_hard_deleted(hard_delete_seqs, seq, record) -> bool:
     (#8398 4th review P2-1: this function used to be the WHOLE rule, so a journal
     holding an Event→entity link to a since-deleted Object warned on every
     rebuild with neither half of the warning true).
+
+    The record's address is read through ``_about_link_payload`` — the SAME
+    resolver ``replay_about_links`` uses — so a caller ``event`` prop can hide
+    neither the reader's source nor this gate's subject (#8398 6th review P2).
     """
     if not isinstance(record, dict):
         return False
-    inner = record.get("event")
-    if not isinstance(inner, dict):
-        inner = record
+    inner = _about_link_payload(record)
     rid = inner.get("id") or inner.get("eventId")
     return _hard_delete_suppresses(hard_delete_seqs, rid, "Event", seq)
 

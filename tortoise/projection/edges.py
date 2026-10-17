@@ -1368,7 +1368,11 @@ class _EdgeHandlers:
         """
         # The label-aware staleness helper lives next to its sibling reader; the
         # lazy import mirrors ``entities.py`` and avoids the import cycle.
-        from tortoise.projection import _hard_delete_suppresses
+        # ``_about_link_payload`` is the SHARED resolver for this record's
+        # nested-vs-flat shape — imported from the same place so the gate that
+        # decides whether this reader runs cannot drift from the rule below
+        # (#8398 6th review P2).
+        from tortoise.projection import _about_link_payload, _hard_delete_suppresses
 
         def _target_stale(endpoint_id, endpoint_label) -> bool:
             """True when the journal hard-DELETES this target AFTER ``seq``.
@@ -1383,7 +1387,10 @@ class _EdgeHandlers:
                 hard_delete_seqs, endpoint_id, endpoint_label, seq)
 
         # ⛔ Unwrap the NESTED record format ONLY when the inner dict actually
-        # ADDRESSES this record (#8398, 5th review P2-1). ``event`` is not a
+        # ADDRESSES this record (#8398, 5th review P2-1), through the ONE
+        # resolver ``_about_link_payload`` — the same function the gate ahead of
+        # this reader calls, so the two cannot disagree about which dict is the
+        # payload (#8398 6th review P2). ``event`` is not a
         # reserved name on every writer (``EventAPI.add_event`` and the miner
         # journal ``{event: {id, …}}``; a caller PROP may legally be called
         # ``event``), so the two shapes are ambiguous at this key — and an
@@ -1408,10 +1415,7 @@ class _EdgeHandlers:
         # caller ``event`` prop at the Event door), but a journal written by
         # any other build must still be READ correctly: this reader cannot
         # assume the intake strip ran.
-        inner = payload.get("event")
-        if not (isinstance(inner, dict)
-                and ("id" in inner or "eventId" in inner)):
-            inner = payload
+        inner = _about_link_payload(payload)
         source = inner.get("id") or inner.get("eventId")
         # The record's OWN link field wins when the nested payload has none: a
         # ``_journal_extra`` field is written at the RECORD's top level even

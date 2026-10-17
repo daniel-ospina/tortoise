@@ -694,6 +694,85 @@ def test_a_hard_deleted_Event_is_not_a_LOST_about_link(wired, caplog) -> None:
         f"the EventLog sweep reported a phantom loss: {caplog.text[-2000:]}")
 
 
+def test_a_caller_event_prop_cannot_hide_the_HARD_DELETE_GATE(
+        wired, caplog) -> None:
+    """P2 (6th review at 947f20f36): the GATE must resolve the record exactly
+    as the READER does.
+
+    ``replay_about_links`` was taught to address-check ``id``/``eventId`` before
+    treating ``event`` as the nested payload; the gate that decides whether to
+    hand it the record (``_about_link_event_hard_deleted``) kept unwrapping
+    ``event`` unconditionally. For a record whose ``event`` key is a caller PROP
+    the gate read ``rid = None``, ``_hard_delete_suppresses`` answered False, the
+    record was NOT dropped, and the sweep then reported the very falsehood the
+    gate exists to remove ("could NOT be re-wired … the live graph had these
+    edges" — measured shape, hand-built because the SDK now strips the prop at
+    the Event door).
+
+    Latent in today's call graph — every in-tree ``EventRecorded`` door strips a
+    caller ``event`` prop — but a journal written by any other build can carry
+    it, and the reader already refuses to assume the intake strip ran. Both
+    therefore call ONE resolver (``_about_link_payload``), so they cannot drift
+    apart again.
+
+    Mutation: restore the unconditional unwrap in the gate → the gate answers
+    False for this record and the warning reappears.
+    """
+    import logging
+
+    from tortoise.projection import _about_link_event_hard_deleted, journal_hard_delete_seqs
+
+    sdk, proj, events, journal = wired
+    obj = _nid(sdk.create_object("Gone"))
+    ev = _nid(sdk.create_event("shadowed", "event", aboutObject=obj))
+    assert _counts(proj)["aboutObject"] == 1, "live did not wire the link"
+    assert sdk.delete(ev) is True, "the Event was not deleted"
+    assert _counts(proj)["aboutObject"] == 0, (
+        "live kept the edge of a hard-deleted Event")
+
+    # Rewrite the journal into the one shape the intake strip prevents the SDK
+    # from producing — a caller ``event`` prop on an EventRecorded record whose
+    # address stays at the RECORD's top level:
+    #   {"type": "EventRecorded", "id": <ev>, "event": {"payload": "x"}, …}
+    lines = _records(journal)
+    shadowed = shadowed_seq = None
+    for idx, rec in enumerate(lines):
+        if rec.get("type") == "EventRecorded" and rec.get("name") == "shadowed":
+            assert ev in (rec.get("id"), rec.get("eventId")), (
+                f"the record does not address its own Event: {rec!r}")
+            rec["event"] = {"payload": "x"}
+            shadowed, shadowed_seq = rec, idx
+    assert shadowed is not None, "the EventRecorded record was not journaled"
+    with open(journal, "w", encoding="utf-8") as fh:
+        for rec in lines:
+            fh.write(json.dumps(rec) + "\n")
+
+    # The GATE, on the record the reader would be handed: the deleted Event's
+    # address is unreachable through an unconditional unwrap, so this is the
+    # assertion the mutation flips.
+    assert _about_link_event_hard_deleted(
+        journal_hard_delete_seqs(lines), shadowed_seq, shadowed) is True, (
+        "the gate did not recognise the hard-deleted Event behind a caller "
+        "`event` prop, so the record was handed to the sweep as a live link")
+
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _counts(proj)["aboutObject"] == 0, (
+        "rebuild_all resurrected the link of a hard-deleted Event")
+    assert "could NOT be re-wired" not in caplog.text, (
+        "the sweep reported a loss for a link the journal legitimately deleted "
+        f"— live never had it: {caplog.text[-2000:]}")
+
+    # The same in the single-file engine: both sweeps must apply the rule.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild(_DirLog(journal.parent), confirm_destructive=True)
+    assert _counts(proj)["aboutObject"] == 0, (
+        "rebuild resurrected the link of a hard-deleted Event")
+    assert "could NOT be re-wired" not in caplog.text, (
+        f"the EventLog sweep reported a phantom loss: {caplog.text[-2000:]}")
+
+
 def test_two_same_name_carriers_are_BOTH_journaled_and_BOTH_wired(wired) -> None:
     """P2-3: never pin a ``LIMIT 1`` row-order pick into the journal.
 
