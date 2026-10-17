@@ -756,6 +756,44 @@ def test_a_short_write_reports_only_the_whole_lines(ledger, monkeypatch):
     assert written == 0, "20 B is a torn first line — no whole event was recorded"
 
 
+def test_short_writes_are_looped_so_nothing_is_lost(ledger, monkeypatch):
+    """A filesystem that accepts 7 B at a time must still get the whole batch."""
+    real_write = os.write
+
+    def dribble(fd, data):
+        return real_write(fd, data[:7])
+
+    monkeypatch.setattr(read_ledger.os, "write", dribble)
+    assert read_ledger.record_rows("Point", [{"id": f"p{i}"} for i in range(5)], path=ledger) == 5
+    folded = fold(ledger)
+    assert folded.lines_read == 5, "every line reached the file"
+    assert folded.unregistered_reads == 5, "and all five are READ events (no stock here)"
+
+
+def test_a_torn_batch_reports_no_provable_key(ledger, monkeypatch):
+    """A write that STOPS (0 bytes, no exception) must not be reported as recorded.
+
+    The caller cannot attribute whole lines to keys, so the honest answer is 0 —
+    and the flip back to the intended count is what this pins.
+    """
+    real_write = os.write
+    state = {"n": 0}
+
+    def stop_after_one(fd, data):
+        state["n"] += 1
+        return real_write(fd, data[:9]) if state["n"] == 1 else 0
+
+    monkeypatch.setattr(read_ledger.os, "write", stop_after_one)
+    assert read_ledger.record_rows("Point", [{"id": f"p{i}"} for i in range(5)], path=ledger) == 0
+
+
+def test_an_unresolvable_home_in_the_env_never_breaks_the_read_path(monkeypatch):
+    """`~nosuchuser` must be a swallowed warning, not a `RuntimeError` in a read."""
+    monkeypatch.setenv("TORTOISE_READ_LEDGER", "1")
+    monkeypatch.setenv("TORTOISE_READ_LEDGER_PATH", "~nosuchuser-7983/ledger.jsonl")
+    assert read_ledger.record_rows("Point", [{"id": "p1"}]) == 0
+
+
 def test_an_over_long_line_is_dropped_loudly_and_not_counted(ledger):
     """MAX_LINE_BYTES is a torn-record bound; a dropped line is not a written one."""
     assert read_ledger.record_rows("Point", [{"id": "x" * 5000}], path=ledger) == 0
@@ -773,3 +811,6 @@ def test_the_internal_scans_still_pass_record_reads_false():
     # a call site always has it alone at the start of its line.
     sites = [ln for ln in src.splitlines() if ln.strip().startswith("_record_reads=False")]
     assert len(sites) == 3, sites
+    # `session_continuity` is a fourth internal scan, in its own module.
+    other = (Path(__file__).resolve().parents[1] / "tortoise" / "session_continuity.py").read_text()
+    assert "_record_reads=False" in other

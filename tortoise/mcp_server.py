@@ -2055,8 +2055,14 @@ def tortoise_query(kind: str | None = None,
         return _safe(_get_org_sdk().paginated_query, kind, skip=eff_offset,
                      limit=eff_limit, include_retracted=include_retracted,
                      **(filters or {}))
+    # #7983: a caller-supplied filter may not set the SDK's PRIVATE switches
+    # (they start with `_`), or a remote agent could turn the read ledger off
+    # with a query parameter — a caller-controlled switch on a measurement that
+    # is presented as authoritative. Underscore keys are dropped here, so the
+    # same dict means the same thing on both the paginated and the plain path.
     result = _safe(_get_org_sdk().query, kind,
-                   include_retracted=include_retracted, **(filters or {}))
+                   include_retracted=include_retracted,
+                   **{k: v for k, v in (filters or {}).items() if not str(k).startswith("_")})
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion

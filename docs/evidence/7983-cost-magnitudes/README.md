@@ -108,13 +108,13 @@ IOPS      = $0   (5.2 blocks/mmiss MEAN ⇒ the step is 14.4 cold misses/s/tenan
 egress    = $0   ONLY below the project's 250 GB allowance: 2,312 B/miss MEAN ⇒ 108,154,878 misses/month SHARED by the tenants
                   ⇒ 1.04 misses/s/tenant at 40 tenants (3,755/hour), 0.042 at 1,000 (150/hour) — the FIRST line to leave $0; each miss above it adds $2.1e-7
                   of egress and RAISES rho
-rho       = (0.060 + 0.025) ÷ 0.0240         = 3.55
+rho       = (0.060 + 0.025) ÷ 0.023955       = 3.55
 
 ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
             (the division uses the UNROUNDED lines, so it re-derives from the log)
             5 tenants, 1 GB STARTUP           : $14.5948 ÷ $0.023955 = 609 ⇒ NO break-even (rho = 710); f=1 → 0.462×
             40 tenants, 8 GB PRO              : $8.7469  ÷ $0.023955 = 365 ⇒ pays BELOW f = 75.4%;  f=1 → 0.803×
-            1,000 tenants, 8 GB PRO (40/project): $8.7469 ÷ $0.023955 = 365 ⇒ pays BELOW f = 98.75%; f=1 → 0.988×
+            1,000 tenants, 8 GB PRO (25x40, ONE project): $8.7469 ÷ $0.023955 = 365 ⇒ pays BELOW f = 98.75%; f=1 → 0.988×
             (a LOWER break-even is the HARDER bar: at 40 tenants a quarter of the cache must be cold,
              at 1,000 tenants 1.25%, and at 5 tenants there is no break-even at all)
 ```
@@ -135,11 +135,11 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
    encoding at 21.9 chars/float, so **0.1916 GB is a LOWER BOUND at that column type**.
 2. **`rho` is dominated by TENANT DENSITY, not by any per-read cost.** At §17.4.3's 40-tenant
    density BOTH density-scaled lines move — compute `$60 ÷ 40 = $1.50` and plan `$25 ÷ 40 = $0.625`
-   ⇒ **`rho` = (1.50 + 0.625) ÷ 0.0240 = 88.7**; at 1,000 tenants the same two lines give **3.55**, and at 5
+   ⇒ **`rho` = (1.50 + 0.625) ÷ 0.023955 = 88.7**; at 1,000 tenants the same two lines give **3.55**, and at 5
    tenants/project **710** — where the split cannot pay at any `f`.
    ⚠️ **Three bases, not two** — a density, its own cache tier, and the measured disk line. Pairing
    each density with ITS OWN packing tier gives `ratio` **609** (5 tenants, 1 GB STARTUP) and **365**
-   (40 or 1,000 tenants, 8 GB PRO — 1,000 tenants is forty projects of 40); `multiplier = 1/(f + (1+rho)/ratio)` then gives:
+   (40 or 1,000 tenants, 8 GB PRO — 1,000 tenants is 25 cache instances of 40, all in ONE project); `multiplier = 1/(f + (1+rho)/ratio)` then gives:
    **`f` below 98.75% ⇒ the split pays at 1,000 tenants** (only 1.25% of the cache must be cold), below
    **75.4% at 40 tenants** (a quarter must be cold — the HARDER case), and **never at 5 tenants** on
    1 GB STARTUP, where `(1+rho)/ratio` exceeds 1 and no hot fraction makes it pay.
@@ -169,8 +169,10 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   exhaustive list would date the moment a reader is added): **`recall_subgraph`** (graph expansion:
   expander nodes, not keyed lookups); **`list_sources`, `diary_read`, `session_context`,
   `list_dedup_candidates`, `list_drafts`, `belief_timeline`, `get_org_structure`** (caller-facing
-  `RETURN properties(n)` readers, four of them MCP tools — and several of them return `Point.id`, so
-  their rows WOULD be joinable and only the missing hook excludes them); **the state and traversal
+  `RETURN properties(n)` readers, five of them registered MCP tools, several returning `Point.id`, so
+  their rows WOULD be joinable and only the missing hook excludes them), plus **`list_sources`** (a
+  `Source` projection returning `url`/`sourceKind`/count — not a `properties(n)` reader, and the
+  single most joinable of the set); **the state and traversal
   paths** (`traverse`, `recall_state`'s related-point/object readers, `get_historical_knowledge`);
   **the FTS funnel's candidate POOL** (only the returned rows are counted); and **the
   `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and

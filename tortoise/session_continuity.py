@@ -18,7 +18,9 @@ class SessionContinuity:
         self.session_id = datetime.now().strftime("session-%Y%m%d-%H%M%S")
         
         # Find recent context (context-based query removed #49 Phase 2)
-        prior = self.sdk.query(kind="observation")
+        # #7983: an internal population scan, not a caller read — recording it
+        # would mark the whole observation stock read (f -> ~1).
+        prior = self.sdk.query(kind="observation", _record_reads=False)
         
         summary = []
         # Get last 5 findings from any session

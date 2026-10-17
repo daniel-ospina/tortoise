@@ -275,8 +275,12 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         lines.append(line)
     if not lines:
         return 0
-    target = path or ledger_path()
+    target: Path | None = None
     try:
+        # RESOLUTION is inside the guard too: `ledger_path()` expands `~user` and
+        # raises `RuntimeError` when it cannot — a config typo on the one
+        # deployment that enables the instrument must not take the READ PATH down.
+        target = path or ledger_path()
         key = str(target)
         if key not in _dirs_made:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -369,12 +373,16 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
             )
             return blob[:written].count(b"\n")
         return len(lines)
-    except OSError as e:  # pragma: no cover — a broken filesystem
+    except Exception as e:  # pragma: no cover — a broken filesystem or a bad path
+        # ANY failure is swallowed, not just `OSError`: the module's contract is
+        # that a measurement may never break the thing it measures, and
+        # `RuntimeError` (an unresolvable `~user`), `ValueError` (a NUL byte in a
+        # path) and `TypeError` (a non-path) are all reachable from configuration.
         _warn_once(
             "oserror",
             "read ledger: append to %s failed (%s) — the read path "
             "is unaffected, but the measurement is now incomplete",
-            target,
+            target if target is not None else "(unresolved path)",
             e,
         )
         return 0
@@ -489,9 +497,13 @@ def record_rows(
             continue
         events.append({"at": stamp, "event": EVENT_READ, "label": label, "key": key, "tenant": who})
         recorded += 1
-    # A batch that wrote NOTHING recorded nothing: reporting the intended count
-    # would let a dead ledger read as a live one (the fail-loud rule).
-    return recorded if _append_many(events, path=path) else 0
+    # Report what reached the file, not what was intended: `_append_many` returns
+    # the whole LINES it wrote, and a torn batch may land fewer than it held. A
+    # torn batch cannot be attributed per key, so the honest answer is "none
+    # provably recorded" — `_append_many` has already warned that the window is
+    # INCOMPLETE, which is the fact a caller must not miss.
+    written = _append_many(events, path=path)
+    return recorded if written == len(events) else 0
 
 
 # ════════════════════════════════════════════════════════════════════════════
