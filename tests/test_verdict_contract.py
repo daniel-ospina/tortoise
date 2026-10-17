@@ -942,8 +942,8 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
     "tests/test_delivery_tenancy.py": (1, frozenset({"_sb_env", "_spine_env"})),
     "tests/test_invite_fusion_http.py": (1, frozenset({"client"})),
     # +2: `_mounted_test_client`'s mount-only parent (as in test_auth_flip —
-    # no REST 504 arm reaches it; its two `tools/call` reads already carry a
-    # `require_answered` call in their own bodies) and the pin's control.
+    # no REST 504 arm reaches it; the file's single `tools/call` read carries a
+    # `require_answered` call in its own body) and the pin's control.
     "tests/test_oauth_mcp.py": (2, frozenset({"api_client"})),
     "tests/test_onboarding_endpoints.py": (1, frozenset({"client",
                                                          "unauth_client"})),

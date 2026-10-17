@@ -3438,8 +3438,9 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     ``WaitBoundMiddleware``, so the REST 504 arm cannot reach it (the MCP
     seam's own refusal lives in the tool dispatch and is answered **200** with
     an error envelope — a bare ``assert status_code == 200`` PASSES on that, the
-    false-PASS arm #8763 owns; this file's two ``tools/call`` reads already carry
-    a ``require_answered`` call of their own), and this pin's own control.
+    false-PASS arm #8763 owns; this file's single ``tools/call`` read — the POST
+    at line 2063, inside ``test_oauth_sessionless_create_point_actor_stamped`` —
+    already carries a ``require_answered`` call), and this pin's own control.
     """
     from tortoise import mcp_auth
     from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
