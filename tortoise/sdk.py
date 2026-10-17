@@ -5198,7 +5198,10 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     """
     if not rows or not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
         return
-    from . import read_ledger
+    try:
+        from . import read_ledger
+    except Exception:  # pragma: no cover — a broken install must not break a read
+        return
 
     read_ledger.record_rows(label, rows)
 
@@ -16699,7 +16702,8 @@ class TortoiseSDK:
         query_text = (resolved or {}).get("content") or scope
         try:
             results = self.tortoise_fts_query(
-                query_text, entity_type="point", limit=200)
+                query_text, entity_type="point", limit=200,
+                _record_reads=False)  # #7983: a review pool, not a caller read
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -20725,6 +20729,7 @@ class TortoiseSDK:
             # the limit would otherwise be invisible at small limits.
             semantic_hits = self.tortoise_fts_query(
                 text, entity_type="point", limit=max(limit * 5, 20),
+                _record_reads=False,  # #7983: a candidate pool
             )
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
@@ -21417,7 +21422,11 @@ class TortoiseSDK:
         _read_ledger = None
         _read_ledger_enabled = is_truthy(os.environ.get("TORTOISE_READ_LEDGER"))
         if _read_ledger_enabled:
-            from . import read_ledger as _read_ledger
+            try:
+                from . import read_ledger as _read_ledger
+            except Exception:  # pragma: no cover — a broken install, not a read
+                _read_ledger = None
+                _read_ledger_enabled = False
 
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
@@ -23296,6 +23305,9 @@ class TortoiseSDK:
         _ledger_record(
             "Point", [i for i in out if i.get("entity_type") == "point"]
         )
+        _ledger_record(
+            "Object", [i for i in out if i.get("entity_type") == "object"]
+        )
         if read_status_out is not None:
             # B6 (#3892): the composite is derived AFTER the pipeline, from the
             # rows the caller actually RECEIVES. The filters, the rerank and
@@ -23653,7 +23665,8 @@ class TortoiseSDK:
             results = self.tortoise_fts_query(
                 query, kind=kind, entity_type="point", limit=pool,
                 exclude_status=exclude_status,
-                include_terminal=include_superseded)
+                include_terminal=include_superseded,
+                _record_reads=False)  # #7983: a candidate pool
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -23780,7 +23793,8 @@ class TortoiseSDK:
         # Topic text → hybrid retrieval (points about the topic are the seeds;
         # the expansion pulls in the entities they touch).
         return [r["id"] for r in self.tortoise_fts_query(
-            seed.strip(), entity_type="point", limit=5)]
+            seed.strip(), entity_type="point", limit=5,
+            _record_reads=False)]  # #7983: a seed lookup, not a caller read
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 

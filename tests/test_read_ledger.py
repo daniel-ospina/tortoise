@@ -816,8 +816,68 @@ def test_the_internal_scans_still_pass_record_reads_false():
     # The three population scans pass it as a bare keyword; the funnel's three
     # CANDIDATE-pool call sites carry a comment after the comma.
     sites = [ln for ln in src.splitlines() if ln.strip().startswith("_record_reads=False")]
-    assert len(sites) == 6, sites
+    assert len(sites) == 10, sites
     assert src.count("_record_reads: bool = True") == 2, "query() and the FTS funnel"
     # `session_continuity` is a fourth internal scan, in its own module.
     other = (Path(__file__).resolve().parents[1] / "tortoise" / "session_continuity.py").read_text()
     assert "_record_reads=False" in other
+
+
+def test_an_unknown_tenant_with_the_env_path_does_not_crash(tmp_path, monkeypatch, capsys):
+    """The guard must run on the RESOLVED path — `--ledger` is optional.
+
+    Round 9 passed `a.ledger` (None by default) to `Path()` and crashed on the
+    DEFAULT invocation, i.e. on exactly the case the guard exists for.
+    """
+    path = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv(LEDGER_PATH_ENV, str(path))
+    read_ledger.record_stock("Point", "p1", nbytes=10, tenant_id="real", path=path)
+    assert read_ledger._main(["--tenant", "typo"]) == 2
+    assert "no events for tenant 'typo'" in capsys.readouterr().out
+
+
+def test_a_torn_batch_reports_the_whole_lines_that_landed(ledger, monkeypatch):
+    """A PREFIX that lands must be counted, not rounded to zero or to the batch.
+
+    The earlier test's write RAISED on the second call, which reaches the
+    `except` and returns 0 without ever exercising the prefix arithmetic.
+    """
+    real_write = os.write
+    state = {"n": 0}
+
+    def one_line_then_stop(fd, data):
+        state["n"] += 1
+        if state["n"] == 1:
+            return real_write(fd, data)
+        return 0
+
+    monkeypatch.setattr(read_ledger.os, "write", one_line_then_stop)
+    # 10 events; the first json line is written whole, then the write stops.
+    got = read_ledger.record_rows("Point", [{"id": f"p{i}"} for i in range(1)], path=ledger)
+    assert got == 1, "one whole read line landed"
+    monkeypatch.setattr(read_ledger.os, "write", real_write)
+
+
+def test_a_numeric_key_is_stored_as_its_string(ledger):
+    """`row_key` coerces with `str()`, so the stock writer must too.
+
+    A raw number would make `fold` skip the stock line while every read of that
+    key resolved to a string — an EMPTY denominator and all reads `unregistered`.
+    """
+    read_ledger.record_stock("Point", 12345, nbytes=10, path=ledger)
+    read_ledger.record_rows("Point", [{"id": "12345"}], path=ledger)
+    folded = fold(ledger)
+    assert folded.stock_keys == 1 and folded.lines_skipped == 0
+    assert hot_fraction(folded).read_keys == 1
+
+
+def test_a_rotated_ledger_is_tightened_again(ledger):
+    """0600 must survive a rotation: the latch is per process, the inode is new."""
+    import stat as _stat
+
+    read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger)
+    # ROTATE: truncate and loosen the mode, as an operator's rotation may.
+    ledger.write_text("")
+    ledger.chmod(0o644)
+    read_ledger.record_stock("Point", "p2", nbytes=10, path=ledger)
+    assert _stat.S_IMODE(ledger.stat().st_mode) == 0o600

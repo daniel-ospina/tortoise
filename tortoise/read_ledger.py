@@ -78,6 +78,7 @@ import json
 import logging
 import os
 import stat
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -158,7 +159,7 @@ _warned: set[str] = set()
 #: The events the LAST `_append_many` kept (i.e. not dropped for size or
 #: encoding). `record_rows` needs them to report how many of ITS callers' reads
 #: provably reached the file — the batch's line count alone cannot say that.
-_LAST_KEPT: list[dict[str, Any]] = []
+_LAST_KEPT = threading.local()
 
 
 def _tail_ends_with_newline(target: Path) -> bool:
@@ -308,8 +309,7 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         kept.append(record)
     if not lines:
         return 0
-    _LAST_KEPT.clear()
-    _LAST_KEPT.extend(kept)
+    _LAST_KEPT.kept = kept
     target: Path | None = None
     try:
         # RESOLUTION is inside the guard too: `ledger_path()` expands `~user` and
@@ -379,7 +379,11 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # under a looser umask) is chmod'ed the first time this process writes to
         # it. Trusting the create mode alone would leave tenant identifiers
         # world-readable on exactly the files it was added for.
-        if key not in _mode_checked:
+        if key not in _mode_checked or size == 0:
+            # `size == 0` means a ROTATED (truncated/replaced) file: the latch is
+            # per process, and skipping the check because this process once
+            # tightened the OLD inode leaves the new one world-readable — the
+            # privacy reason 0600 exists.
             try:
                 st = target.stat()
                 # ⛔ REGULAR FILES ONLY: pointing the env var at a DIRECTORY (or a
@@ -441,7 +445,7 @@ def _append(record: Mapping[str, Any], *, path: Path | None = None) -> bool:
 
 def record_stock(
     label: str,
-    key: str,
+    key: Any,
     *,
     nbytes: int | None = None,
     at: str | None = None,
@@ -463,7 +467,10 @@ def record_stock(
             "at": at or _now(),
             "event": EVENT_STOCK,
             "label": label,
-            "key": key,
+            # STR() — `row_key` coerces too, and a numeric key written raw would
+            # be rejected by `fold` (it requires a str), silently emptying the
+            # DENOMINATOR while every read of that key resolved to "unregistered".
+            "key": str(key),
             "bytes": nbytes,
             "tenant": tenant_id if tenant_id is not None else tenant(),
         },
@@ -487,7 +494,7 @@ def record_read(
             "at": at or _now(),
             "event": EVENT_READ,
             "label": label,
-            "key": key,
+            "key": str(key),
             "tenant": tenant_id if tenant_id is not None else tenant(),
         },
         path=path,
@@ -555,7 +562,7 @@ def record_rows(
     # and still land the rest, and a torn tail lands a PREFIX of the kept lines.
     # Both are readable from the kept list, so the count is what provably landed
     # rather than what was intended (which is what a caller logs).
-    landed = _LAST_KEPT[:written]
+    landed = (getattr(_LAST_KEPT, "kept", None) or [])[:written]
     return sum(1 for e in landed if e.get("event") == EVENT_READ and e.get("key"))
 
 
@@ -847,6 +854,23 @@ def hot_fraction(folded: LedgerFold) -> HotFraction:
     )
 
 
+def _tenants_in_file(path: Path | str) -> set[str | None]:
+    """Every tenant named by ANY event (stock, read or unresolved)."""
+    seen: set[str | None] = set()
+    try:
+        with open(Path(path), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line.strip() or "{}")
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and "tenant" in ev:
+                    seen.add(ev.get("tenant"))
+    except OSError:  # pragma: no cover
+        return seen
+    return seen
+
+
 def _events_for_tenant(path: Path | str, tenant: str) -> int:
     """How many events in the FILE name this tenant (reads count, stock or not).
 
@@ -900,20 +924,21 @@ def _main(argv: list[str] | None = None) -> int:
         # instrument exists to remove.
         print(f"no ledger at {target} — nothing has been recorded there")
         return 2
-    folded = fold(a.ledger, window_days=a.window_days, tenant=a.tenant)
+    folded = fold(target, window_days=a.window_days, tenant=a.tenant)
     if (
         a.tenant is not None
         and folded.lines_read
         and not folded.rows
-        and (_events_for_tenant(a.ledger, a.tenant) == 0)
+        and (_events_for_tenant(target, a.tenant) == 0)
     ):
         # A typo'd `--tenant` is not an empty tenant: the file holds events for
         # SOMEONE, and reporting "0 keys / f n/a" over them is the same
         # typo-reads-as-a-zero-denominator failure the missing-file branch above
         # refuses. The tenants that ARE in the file are named by count only — the
         # identifiers stay out of a report that may be pasted into an issue.
-        seen = fold(a.ledger, window_days=a.window_days)
-        others = {t for (t, _l, _k) in seen.rows if t is not None}
+        seen = fold(target, window_days=a.window_days)
+        others = {t for t in _tenants_in_file(target) if t is not None}
+        others.discard(a.tenant)
         print(
             f"no events for tenant {a.tenant!r} — the ledger holds "
             f"{len(seen.rows):,} key(s) under {len(others)} other tenant(s)"

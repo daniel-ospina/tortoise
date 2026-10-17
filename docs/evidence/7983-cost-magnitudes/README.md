@@ -11,12 +11,15 @@ aboutObjects: "#7983, #7954, #7950, STORAGE-ARCHITECTURE.md §17.4, Postgres rec
 
 # `#7983` — `f` and `rho`: what is measured, what is not, and the instrument in between
 
-**Measured at:** `measure/7983-hot-fraction-and-rho@459f22912edf4893fb70144d42e97df389479ed5`
-on **2026-10-17**. Everything below is measured on that tree; the code this lane adds
-(`tortoise/read_ledger.py` plus the `_ledger_record` hook at `query`, `paginated_query`,
-`query_points_by_tag`, and the FTS funnel inline — and `query()` skips the SDK's own population scans (`_record_reads=False`: `recall_gaps`, `issue_insight`, the FTS fallback), because one `recall_gaps()` call reads the whole stock. Deliberately NOT `get_point`, which the write paths
-read through; graph expansion and three direct-Cypher readers are NOT hooked either) is the only
-change.
+**Measured on:** `2026-10-17`, on branch `measure/7983-hot-fraction-and-rho` — the rho bench and
+both ledger probes were run from the lane's own commits (the ledger instrument does not exist at the
+base commit, so the base `459f22912` is the tree the numbers are recorded INTO, not the tree they were
+produced on; each file below names its script and the log it produced). The code this lane adds
+(`tortoise/read_ledger.py` plus the `_ledger_record` hook at `query`, `paginated_query` and
+`query_points_by_tag`, and the FTS funnel inline; the SDK's own population scans and CANDIDATE-pool
+reads pass `_record_reads=False` — one `recall_gaps()` call would otherwise record the whole stock —
+and `get_point` is deliberately NOT hooked because the write paths read through it; see the named
+uncounted set below) is the only change.
 
 **The design being measured:** `docs/architecture/STORAGE-ARCHITECTURE.md` **§17.4** — the two-store
 cost model whose closed form is `1 / (f + (1 + rho) / ratio)`. It is complete except for two
@@ -174,9 +177,11 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   returning `url`/`sourceKind`/count — not a `properties(n)` reader, and the single most joinable row
   shape of the set); **the state and traversal paths** (`traverse`, `recall_state`'s related-point/
   object readers, `get_historical_knowledge`); **a POOL read of the FTS funnel** — its internal pool
-  callers opt out (`_record_reads=False`) and `recall_state` records the rows it RETURNS, but a caller
-  that hands the funnel a `limit` far above what it surfaces is still a pool read, so this stays a
-  named hole; and **the
+  callers opt out (`_record_reads=False`) and `recall_state` records the rows it RETURNS (both legs),
+  but a caller that hands the funnel a `limit` far above what it surfaces is still a pool read, and
+  **`search_sessions` (`tortoise_search_sessions`) is uncounted end-to-end** — its pool read opts out
+  and nothing records the session rows it returns, so that MCP surface is entirely outside the
+  ledger; and **the
   `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and
   carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in
   a joinable coordinate. **Every one of them leaves a read out of the numerator, so every one biases

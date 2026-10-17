@@ -361,8 +361,10 @@ def arithmetic(m: dict) -> None:
     b = m["miss_blocks_detoast_mean"]
     print("\n── the IOPS line (provisioned: peak, not total) ────────────")
     print(
-        f"1 cache miss                    : {b:.1f} IOPS MEAN over the miss mix "
-        f"({m['miss_blocks_detoast_median']:.0f} median, {m['miss_blocks_detoast_max']} max)"
+        f"1 cache miss                    : {b:.1f} BLOCKS/miss MEAN over the miss "
+        f"mix ({m['miss_blocks_detoast_median']:.0f} median, "
+        f"{m['miss_blocks_detoast_max']} max) = that many IOPS if every miss is a "
+        f"cold page read"
     )
     # BOTH densities: the allowance is PROJECT-wide, so a per-tenant threshold has
     # to name the density it divides by. Quoting one density's IOPS next to the
