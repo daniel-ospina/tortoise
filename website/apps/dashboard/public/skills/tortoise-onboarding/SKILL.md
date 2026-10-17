@@ -734,9 +734,11 @@ GitHub's two sources are **separately enable-able** and share **one OAuth
 connect** — turning issues off never disconnects GitHub for documents (the
 `github_connected` key is the connection, never a per-source toggle).
 
-- **Ask, then honour the answer.** A "no" writes nothing (an UNSET key is not
-  off: it means the product default, which for these flags is **on** — the
-  tool's `enabled` and `default` fields say which); a "yes" writes the
+- **Ask, then honour the answer.** A "no" writes the OFF intent
+  (`tortoise_manage_sources(action="disable", source=…)`) — an UNSET key is not
+  off: it means the product default, which for these flags is **on** (the tool's
+  `enabled` and `default` fields say which), so writing nothing on a "no" would
+  leave the source ON; a "yes" writes the
   per-source enable
   intent through the same tool surface the hosted wizard uses
   (`tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")` / the onboarding-state path) — one state path,
