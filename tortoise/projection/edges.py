@@ -1020,8 +1020,10 @@ class _EdgeHandlers:
         that could not re-wire a journaled link is never silent. Every skip that
         costs a journaled link counts as ``failed``: a mystery ``how``, a ``rel``
         outside the set, a ``targets`` that is not a list, an empty ``targets``.
-        "Wired" on the ``name`` path is MEASURED (the rel edge count must rise),
-        never assumed — a resolve-or-mint that wired nothing is a failure.
+        "Wired" on the ``name`` path is MEASURED, never assumed — but by the
+        LINK's presence, not by ``rel``: a name link's own rel resolved to nothing
+        at write time, so live wired whatever the rel-ignoring cascade found.
+        A resolve-or-mint that joined nothing is a failure.
         """
         inner = payload.get("event", payload)
         source = inner.get("id") or inner.get("eventId")
@@ -1081,11 +1083,22 @@ class _EdgeHandlers:
         question is not "did ``rel`` appear" but "is this value linked at all".
         Idempotent by construction — an already-wired link counts, so a re-run
         does not report a failure that did not happen.
+
+        The key set mirrors ``_try_about_edge``: ``Source`` matches by ``url`` OR
+        ``title``, so a ``title``-keyed document is linked live and must count
+        here too — omitting ``title`` reported a failure for a link the cascade
+        had just made (same class as measuring ``rel``).
+
+        ⚠️ Presence is the test, which means a link that genuinely failed could be
+        masked by a same-valued node already joined to this Event — by design: the
+        record is replayed to reproduce what live produced, and an Event joined to
+        that value IS that state.
         """
         rows = self.g.query(
             "MATCH (s:Event) WHERE s.id=$sv OR s.eventId=$sv "
             "MATCH (s)-[r:aboutSubject|aboutObject|aboutEvent|aboutPoint|aboutDocument]->(t) "
-            "WHERE t.name=$tv OR t.url=$tv OR t.id=$tv OR t.eventId=$tv "
+            "WHERE t.name=$tv OR t.url=$tv OR t.title=$tv "
+            "   OR t.id=$tv OR t.eventId=$tv "
             "RETURN count(r)",
             params={"sv": source, "tv": value}).result_set
         return int(rows[0][0]) if rows and rows[0] else 0

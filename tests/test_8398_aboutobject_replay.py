@@ -290,3 +290,27 @@ def test_a_name_link_replays_without_a_false_failure(wired) -> None:
         f"a name link reported failure although the value is linked: "
         f"wired={wired_n} failed={failed_n}")
     assert wired_n == 1
+
+
+def test_every_unusable_link_is_COUNTED_not_skipped(wired) -> None:
+    """Negative control: a journaled link the replay cannot wire is a LOSS.
+
+    Before round 2 these arms `continue`d without touching ``failed``, so a
+    journal claiming a link the replay did not understand produced no signal at
+    all. Each case below must report exactly one failure and zero wired.
+    """
+    sdk, proj, _events, _journal = wired
+    ev = _nid(sdk.create_event("mystery", "event"))
+    cases = [
+        {"id": ev, "aboutLinks": [{"rel": "aboutObject", "how": "bogus",
+                                   "targets": ["x"]}]},
+        {"id": ev, "aboutLinks": [{"rel": "aboutObject", "how": "id",
+                                   "targets": []}]},
+        {"id": ev, "aboutLinks": [{"rel": "aboutObject", "how": "id",
+                                   "targets": "a-string-not-a-list"}]},
+        {"id": ev, "aboutLinks": [{"rel": "notARel", "how": "id",
+                                   "targets": ["x"]}]},
+    ]
+    for payload in cases:
+        assert proj.replay_about_links(payload) == (0, 1), (
+            f"{payload['aboutLinks']} was not counted as a loss")
