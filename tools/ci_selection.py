@@ -1107,7 +1107,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # carries the other `tools/` pins (`test_collision_preflight.py`,
              # `test_test_lane_tool.py`). Pinned by
              # tests/test_ci_selection.py::test_lane_stash_guard_runs_on_a_tools_only_change.
-             "tools/lane_stash.py")
+             "tools/lane_stash.py",
+             # #8491: the meeting→CRM bridge. `integrations/` is a flat
+             # NON_PYTHON_PREFIXES entry and bridge.py matches no
+             # SOURCE_PATTERNS row, so a bridge.py-only change was filtered out
+             # BEFORE the "not matched -> core" fallback and took the
+             # docs-only early return — measured
+             # `select(["integrations/crm/twenty/bridge.py"])` -> surfaces=[]
+             # (45 tier-1 files), so the guard for the reader of
+             # `~/.minutes/cal-trigger-state.json`
+             # (tests/test_8491_cal_attendee_grounding.py, registered under
+             # `core`) never ran on the file it guards — the
+             # #1349/#3332/#6138 silent-drop class. Same shape as the
+             # `tools/queue_resweep.py` entry above. Pinned by
+             # tests/test_8491_cal_attendee_grounding.py::
+             # test_bridge_change_selects_core_so_this_guard_runs.
+             "integrations/crm/twenty/bridge.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

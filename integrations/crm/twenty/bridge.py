@@ -22,6 +22,8 @@ import json
 import os
 import sys
 import time
+from datetime import date as _date
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -325,16 +327,75 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         return {"status": "error", "reason": "tortoise_push_failed"}
 
 
-def get_calendar_attendees(meeting_date: str = None) -> list:  # noqa: RUF013
-    """Get attendees from the most recent cal-trigger state file."""
+def _as_calendar_day(value) -> _date | None:
+    """Calendar day of an ISO-8601-ish timestamp, or None when unparseable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, _date):
+        return value
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        try:
+            return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+
+def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
+                           meeting_title: str = None) -> list:  # noqa: RUF013
+    """Calendar attendees for THE MEETING under process — never a neighbour's.
+
+    ``~/.minutes/cal-trigger-state.json`` is a SINGLE-VALUED store: cal-trigger.py
+    calls ``save_state()`` on every recording start, so the file describes the
+    MOST RECENT event only and carries no ``meeting_id``. Reading it unscoped
+    (what this function did before #8491) promoted *another* meeting's calendar
+    participants into this meeting's CRM — ``process_meeting`` auto-creates one
+    ``Person`` and one "First call" ``Opportunity`` per entry, so a re-run or a
+    ``--watch`` backfill over an older file seeded the CRM with people who were
+    never on that call, at machine confidence. That is the failure class of
+    #8491 (attendees promoted into a structured identity surface ungrounded
+    against evidence already in hand), on the read path its fix direction 3
+    names.
+
+    Grounding therefore comes from the artifact's OWN evidence, since the state
+    has no id to match on: the same local calendar day (state ``started_at`` vs
+    the meeting ``date``), or the same ``event_title``. Neither matches — or no
+    evidence was supplied — and this returns ``[]``: refuse rather than guess,
+    so an ungrounded attendee is never written as a contact.
+    """
     if not os.path.exists(CAL_STATE_FILE):
         return []
     try:
         with open(CAL_STATE_FILE) as f:
             state = json.load(f)
-        return state.get("attendees", [])
     except (json.JSONDecodeError, IOError):  # noqa: UP024
         return []
+    if not isinstance(state, dict):
+        return []
+
+    want_day = _as_calendar_day(meeting_date)
+    have_day = _as_calendar_day(state.get("started_at"))
+    want_title = str(meeting_title).strip().casefold() if meeting_title else ""
+    have_title = str(state.get("event_title") or "").strip().casefold()
+
+    grounded = bool(want_day and have_day and want_day == have_day) or bool(
+        want_title and have_title and want_title == have_title)
+    if not grounded:
+        print(
+            "⚠️  cal-trigger state does not describe this meeting "
+            f"(state started_at={state.get('started_at')!r}, "
+            f"event_title={state.get('event_title')!r}; meeting "
+            f"date={meeting_date!r}, title={meeting_title!r}) — "
+            "skipping calendar attendees rather than attributing them to "
+            "this call (#8491)",
+            file=sys.stderr,
+        )
+        return []
+    return state.get("attendees", [])
 
 
 # --- Core Pipeline ---
@@ -373,8 +434,12 @@ def process_meeting(md_path: str) -> dict:
     if existing and "error" not in existing:
         return {"status": "skipped", "reason": "already_processed", "note_id": existing.get("id")}
 
-    # Auto-create contacts from calendar attendees AND create opportunities
-    cal_attendees = get_calendar_attendees()
+    # Auto-create contacts from calendar attendees AND create opportunities.
+    # Grounded on THIS meeting's own evidence — the cal-trigger state is
+    # single-valued (most recent recording), so an unqualified read would seed
+    # the CRM from a different call (#8491).
+    cal_attendees = get_calendar_attendees(
+        frontmatter.get("date"), frontmatter.get("title"))
     for att in cal_attendees:
         email = att.get("email", "")
         name = att.get("name", "")
