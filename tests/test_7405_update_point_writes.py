@@ -1302,3 +1302,49 @@ def test_clearing_tags_is_never_reported_as_a_non_landing(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+class _QueryCounter:
+    """Record every Cypher string issued through this handle."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.statements: list[str] = []
+
+    def query(self, cypher, params=None, timeout=None):
+        self.statements.append(cypher)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_tagged_update_that_never_retries_pays_no_read_back(tmp_path):
+    """The tag landing check must be LAZY — inside the witness, not in `fn`.
+
+    The wrapper consults a witness only once a graph-replaced abort has latched.
+    A read-back placed inside the reconciler callable is charged to EVERY tagged
+    update on the SDK's hottest mutation door, which is a cost this PR would be
+    introducing rather than removing (measured: one extra `count(DISTINCT
+    t.name)` per update at a head where the witness never ran).
+    """
+    sdk = _sdk(tmp_path, "lazy")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        counter = _QueryCounter(proj.g)
+        proj.g = counter
+
+        sdk.update_point(pid, tags=["7405lazy"])
+
+        read_backs = [s for s in counter.statements
+                      if "count(DISTINCT t.name)" in s]
+        assert read_backs == [], (
+            "the tag read-back ran on a NON-retried update — it belongs inside "
+            f"the witness; saw {read_backs}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()

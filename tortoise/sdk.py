@@ -10383,9 +10383,16 @@ class TortoiseSDK:
             """
             if result.result_set:
                 return True
-            present = proj.g.query(
+            _present_rows = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
-            ).result_set[0][0]
+            ).result_set
+            # `count()` is a single-row aggregate, so an EMPTY result set means
+            # the statement did not run — indexing it blind raises `IndexError`,
+            # which `retryable_aborted_write` does not recognise, so it escapes
+            # as a STRUCTURAL failure and MASKS the abort that authorised the
+            # retry. Read "no row" as "not present" (the same premise
+            # `_landed_at_least_one` documents).
+            present = _present_rows[0][0] if _present_rows else 0
             if not present:
                 return False
             _raise_update_point_status_error(proj, id)
@@ -10566,10 +10573,13 @@ class TortoiseSDK:
             # is exactly the case it must NOT swallow: a MERGE against a
             # missing anchor matches nothing, succeeds, and looks like a write.
             #
-            # `_sync` now returns the number of TAGGED edges the Point really
-            # carries for the REQUESTED names, and the witness requires the
-            # FULL set. "At least one" would call a half-landed sync good, and
-            # on an absent Point it would still be zero — the defect itself.
+            # The witness compares NAMES, not edges: `MATCH (p:Point {id:$pid})`
+            # fans out over every node carrying that id (the duplicate-id shape
+            # `_mark_dirty` also accounts for), so an edge count exceeds the
+            # requested name count and reports a NON-landing on a sync that
+            # landed. `_sync_witness` therefore returns a DISTINCT-name count.
+            # "At least one" would call a half-landed sync good, and on an
+            # absent Point it would still be zero — the defect itself.
             # The COUNT is read back from the graph rather than returned by
             # `_sync_tags`, because the reconciler is the projection's (shared
             # with replay, #2897) and its return value is not a landing proof:
@@ -10584,31 +10594,48 @@ class TortoiseSDK:
             # `None` makes the witness vacuous there instead of inventing a
             # non-landing on a write that was never asked to make edges.
             _sync_raw_tags = props["tags"] or []
-            _sync_wanted = (list(dict.fromkeys(_sync_raw_tags))
-                            if isinstance(_sync_raw_tags, (list, tuple))
-                            else None)
+            # DEDUPE for the count only, and only for the shapes that can be a
+            # count: `dict.fromkeys` raises `TypeError` on an unhashable entry
+            # (e.g. `tags=[{"name": "a"}]`), which would re-bucket the engine's
+            # own `ResponseError` from "db" to "structural". A list that is not
+            # all strings is therefore left UNWITNESSED (vacuously true) so the
+            # engine keeps owning the error it already raised before #7405.
+            _sync_wanted = (
+                list(dict.fromkeys(_sync_raw_tags))
+                if isinstance(_sync_raw_tags, (list, tuple))
+                and all(isinstance(t, str) for t in _sync_raw_tags)
+                else None)
 
-            def _sync() -> int:
+            def _sync() -> None:
                 nonlocal _sync_attempts
                 _sync_attempts += 1
                 self._sync_tags(
                     proj, id, _sync_raw_tags,
                     sweep_orphans=_sync_attempts > 1)
-                if not _sync_wanted:
-                    # An empty request asks for no edge, so the graph cannot be
-                    # missing one: it lands vacuously (and `landed == 0` agrees).
-                    return 0
+
+            def _sync_witness(_result) -> bool:
+                """Did the reconciler leave the Point carrying the WANTED names?
+
+                LAZY on purpose: the wrapper consults a witness only once a
+                graph-replaced abort has latched, so a tagged update that never
+                retries issues NO read-back. Measuring this is the point of
+                keeping it here rather than inside `_sync`.
+                """
+                if _sync_wanted is None or not _sync_wanted:
+                    # A non-array value derives no edges by design (#8333), and
+                    # an empty request asks for no edge: neither can be missing.
+                    return True
                 rows = proj.g.query(
                     "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "
                     "WHERE t.name IN $names RETURN count(DISTINCT t.name)",
                     params={"pid": id, "names": _sync_wanted},
                 ).result_set
-                return int(rows[0][0]) if rows else 0
+                landed = int(rows[0][0]) if rows else 0
+                return landed == len(_sync_wanted)
 
             self._graph_write_with_retry(
                 _sync, what="update_point TAGGED edges",
-                witness=lambda landed: (_sync_wanted is None
-                                        or landed == len(_sync_wanted)))
+                witness=_sync_witness)
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         result = self.get_point(id)
