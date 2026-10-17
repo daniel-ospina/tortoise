@@ -11837,9 +11837,9 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     exempt from the bound. No load and no wall-clock wait are involved: the
     bound is forced to 0 s, so the refusal is produced by the REAL
     ``WaitBoundMiddleware`` the production request meets. The plain-client
-    control is the non-vacuity leg — it would pass unchanged if the route were
-    ever exempted, turning this pin red instead of letting the conversion
-    silently become dead code.
+    control is the non-vacuity leg — it goes RED if the route is ever exempted
+    (the middleware stops refusing, so the control's 504 assertion fails), so
+    the conversion cannot silently become dead code.
     """
     from tortoise import mcp_auth
     from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
