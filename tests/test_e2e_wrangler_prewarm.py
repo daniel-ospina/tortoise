@@ -138,10 +138,18 @@ _INDIRECT_AFTER = ("$", "{")
 #: that literal: `wrangler@"4.127.0 || 4.130.0"` is one argument npm reads as a
 #: range and resolves to `4.130.0`, while the run stops at the space and read
 #: `4.127.0` as an exact pin — a false PASS, reproduced end to end. A spaced hyphen
-#: range behaves the same. Refusing the whole spec (an empty spec is floating) is
-#: the fail-closed direction. A FLAG must not trip it, so `-` counts only when a
-#: digit follows it across whitespace, and `--version` / `--flag=4` stay exact.
-_RANGE_CONTINUATION = re.compile(r"\s*(?:\|\||>|<|\^|~|,|-(?=\s*\d))")
+#: range behaves the same, INCLUDING with a `v`-prefixed upper bound: node-semver
+#: accepts `4.127.0 - v4` and resolves it to the NEWEST 4.x (measured: `4.151.1`),
+#: which is the `@4` float this file exists to stop. Refusing the whole spec (an
+#: empty spec is floating) is the fail-closed direction. Two things must NOT trip
+#: it, because refusing a correct step is the one over-report this file treats as a
+#: defect: a FLAG (`--version`, `--flag=4`), and a SHELL operator whose operand is
+#: not a version (`>/dev/null`, `|| true`). So every operator needs a version-ish
+#: operand, `-` needs one across optional whitespace with an optional `v`, and the
+#: gap is [ \t] only, so a redirect on the FOLLOWING line cannot trip it.
+_RANGE_CONTINUATION = re.compile(
+    r"[ \t]*(?:\|\|(?=[ \t]*[v\d])|[<>]=?(?=[ \t]*[v\d])|[\^~,](?=[ \t]*[v\d])"
+    r"|-(?=[ \t]*v?\d))")
 
 
 def _wrangler_invocations(run: str) -> set[str]:
@@ -176,6 +184,16 @@ def _wrangler_invocations(run: str) -> set[str]:
 #: the interpolation class needs the shell's own evaluation, so the honest fix is
 #: at the lane: assert the wrangler version that actually resolved, rather than
 #: read it out of the script.
+#:
+#: DECLARED RESIDUAL (round 8): a step whose EXECUTED invocation carries NO spec at
+#: all — `npx --yes wrangler pages dev` — has no `wrangler@` token for a text check,
+#: so it reads as nothing. If a pin is named anywhere else in the same `run` (a
+#: comment, a note), the exact check AND parity are both satisfied while npm
+#: installs the `latest` tag (measured: 4.151.1). Treating a bare `wrangler` as an
+#: offender would refuse the CORRECT steps whose prose names it (`# wrangler pinned
+#: to 4.127.0`), the over-report this file treats as a defect, so the limit is
+#: declared and pinned as MISSED instead. Same honest fix as above: assert what
+#: the lane resolved.
 
 #: DECLARED RESIDUAL — what a text check cannot reach at all: two INDIRECT pins
 #: cannot be proved EQUAL to each other, so parity between a pre-warm and a boot
@@ -275,7 +293,18 @@ def _parity_mismatches(jobs: dict) -> dict[str, tuple[set[str], set[str]]]:
 
 def test_the_three_website_e2e_jobs_still_prewarm() -> None:
     """Deleting the step re-exposes the boot budget #2178 added it to protect."""
-    assert {job for job, _ in _prewarm_steps()} == PREWARM_JOBS
+    steps = _prewarm_steps()
+    assert {job for job, _ in steps} == PREWARM_JOBS
+    for job, step in steps:
+        assert _prewarm_is_unconditional(step), (
+            f"{job}: pre-warm is gated by `if: {step.get('if')}` — a skipped step "
+            f"warms nothing, which is deletion by another name")
+    # DECLARED RESIDUAL, pinned: only the STEP's own `if` is read. A job-level gate
+    # or a `continue-on-error` that swallows a failure is not (the file names the
+    # limit rather than implying coverage).
+    assert not _prewarm_is_unconditional({"if": "${{ false }}"})
+    assert _prewarm_is_unconditional({})
+    assert _prewarm_is_unconditional({"if": "  "})
 
 
 def test_every_prewarm_pins_an_exact_wrangler_and_never_floats() -> None:
@@ -290,15 +319,22 @@ def test_every_prewarm_pins_an_exact_wrangler_and_never_floats() -> None:
             f"{job}: pre-warm still floats a wrangler range — {sorted(_floating_wranglers(run))}")
 
 
-def _has_retry_loop_in_code(run: str) -> bool:
-    """Is the bounded retry loop CODE? This file reads comments as data.
+def _prewarm_is_unconditional(step: dict) -> bool:
+    """A pre-warm step with an `if:` gate never runs — deletion by another name."""
+    return not str(step.get("if") or "").strip()
 
-    No comment filter is what keeps a real float from being dropped, and that is
-    the safe direction for the float checks. It is the UNSAFE direction for this
-    POSITIVE assertion: a comment naming the loop satisfied it while the step made
-    a single fetch (measured). So the line that starts the loop must not be a
-    whole-line comment — a comment costs a step nothing, an absent loop costs the
-    cold fetch the step exists to prevent.
+
+def _has_retry_loop_in_code(run: str) -> bool:
+    """Does the loop TEXT appear on a non-comment line?
+
+    That is exactly what this proves — not that the loop WRAPS the fetch. A
+    whole-line comment no longer satisfies it (measured: a step keeping "# old body
+    used `for attempt in 1 2 3`" while making a single fetch passed every
+    invariant), which is the case this guard was caught by. DECLARED RESIDUAL: a
+    here-doc body, an `echo`, or an empty loop (`for attempt in 1 2 3; do :; done`)
+    still satisfies the substring test; the arms below pin those misses so the
+    limit is stated rather than implied. The honest fix is at the lane: assert that
+    the fetch actually retried.
     """
     lines = [line for line in str(run or "").splitlines()
              if not line.strip().startswith("#")]
@@ -326,6 +362,12 @@ def test_the_retry_check_ignores_a_commented_out_loop() -> None:
         "# old body used `for attempt in 1 2 3`; now a single fetch\n"
         "npx --yes wrangler@4.127.0 --version")
     assert not _has_retry_loop_in_code("npx --yes wrangler@4.127.0 --version")
+    # DECLARED RESIDUAL, pinned: these still satisfy the substring test. Stated so
+    # the limit is not mistaken for coverage.
+    for run in ("cat <<'EOF'\nfor attempt in 1 2 3\nEOF\nnpx --yes wrangler@4.127.0 --version",
+                'echo "for attempt in 1 2 3; do"\nnpx --yes wrangler@4.127.0 --version',
+                "for attempt in 1 2 3; do :; done\nnpx --yes wrangler@4.127.0 --version"):
+        assert _has_retry_loop_in_code(run), run
 
 
 def test_prewarm_pins_the_same_version_the_job_boots() -> None:
@@ -524,15 +566,25 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     # A spec that CONTINUES past the literal run is not that literal: npm reads
     # `4.127.0 || 4.130.0` as ONE range argument and resolves `4.130.0`, while the
     # run stopped at the space and called it the pin — a false PASS, reproduced
-    # end to end on a real job body.
+    # end to end on a real job body. The `v`-prefixed upper bound is the same class
+    # and the worst case: `4.127.0 - v4` resolves to the newest 4.x (measured
+    # 4.151.1) — literally the `@4` float this file exists to stop.
     for run in ('npx --yes wrangler@"4.127.0 || 4.130.0" --version',
                 "npx --yes wrangler@4.127.0 - 4.130.0 --version",
-                "npx --yes wrangler@4.127.0||4.130.0 --version"):
+                "npx --yes wrangler@4.127.0 - v4 --version",
+                "npx --yes wrangler@4.127.0 - v4.130.0 --version",
+                "npx --yes wrangler@4.127.0||4.130.0 --version",
+                "npx --yes wrangler@4.127.0 >4.130.0 --version"):
         assert _exact_wranglers(run) == set(), run
         assert _floating_wranglers(run) == {""}, run
-    # …and a FLAG is not a range continuation: the real pin stays EXACT.
+    # …while a FLAG and a SHELL operator with a NON-version operand are not range
+    # continuations. Those steps are CORRECT, and refusing them is the over-report
+    # this file treats as a defect — so they are pinned as still exact.
     for run in ("npx --yes wrangler@4.127.0 --version",
-                "npx --yes wrangler@4.127.0 --flag=4"):
+                "npx --yes wrangler@4.127.0 --flag=4",
+                "npm install -g wrangler@4.127.0 >/dev/null",
+                "npx --yes wrangler@4.127.0 || true",
+                "npx --yes wrangler@4.127.0\n> /tmp/log 2>&1"):
         assert _exact_wranglers(run) == {"4.127.0"}, run
 
     # The residual class: an INTERPOLATION inside the word. bash runs
@@ -542,6 +594,15 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     for run in ("wrangler$X@4 --version", "wrangler${X}@4 --version",
                 "wran$(echo gler)@4 --version", "wran`echo gler`@4 --version"):
         assert _wrangler_invocations(run) == set(), run
+    # DECLARED RESIDUAL: a step whose EXECUTED invocation carries NO spec at all
+    # (`npx --yes wrangler pages dev`) — a pin named in a note then satisfies the
+    # exact check and parity while npm installs the `latest` tag. Measured; see the
+    # residual note above `_exact_wranglers`. Pinned as MISSED so the limit is
+    # stated, not implied to be covered.
+    miss = ("# was: npx --yes wrangler@4.127.0 pages dev\n"
+            "npx --yes wrangler pages dev . --port 8788")
+    assert _exact_wranglers(miss) == {"4.127.0"}, miss
+    assert _floating_wranglers(miss) == set(), miss
     # …and the EXACT side of an empty spec, so "an empty spec is never exact" is
     # pinned from BOTH directions: mutating `_exact_wranglers` to accept "" fails.
     for run in ("npx --yes wrangler@$WRANGLER --version",
