@@ -40,7 +40,7 @@ the AS issues refresh tokens; and `oauth_clients` growth has no named owner/date
 Accepted limitations (stated in code comment + PR): in-process stores ⇒ `limit × machines`, reset on
 restart (#1677 — process commitment, no automated check); the limiter runs **before body parsing**, so
 invalid-JSON/oversized 400/413 POSTs **do** consume budget (charges ≤ 600/hr anonymous + 1200/hr
-trusted; row writes are NOT bounded — #2853 owns pruning); the distinct-new-anonymous-key ceiling is
+trusted; row writes are NOT bounded — #2853 owns pruning †); the distinct-new-anonymous-key ceiling is
 **`STORE_CAP + PER_HOUR = 276/hr`** (256 live keys + 20 overflow) — a *burst/concurrent-live* bound, **derived**
 from the constants pinned by leg (r) and exercised structurally at small scale by legs (b)/(o3); it is a
 stated derivation, **not** a bound tested at shipped scale; the global aggregate is a one-source DoS
@@ -50,6 +50,13 @@ issue (a)); the exemption's security rests on the Fly edge stripping client `Fly
 (assumption 12, operator recipe + dated re-verification issue with owner/date); wall-clock
 `time.time()` (no monotonic seam) — consistent with the primitive; a backward clock step can delay
 reclaim, documented not fixed.
+
+† **DISCHARGED 2026-10-13 (#2853, ruling C):** the pruning question was retired —
+no retention window, no expiry, no deletion path, no cap. The row count is
+observable at `GET /v1/internal/oauth/clients/count`, which is the one
+deliverable that ruling makes mandatory. The clause above is retained verbatim
+so the reversal reads as deliberate rather than as a contradiction, and this
+paragraph is the mirror of the code comment, which carries the same annotation.
 
 **Rejected:** approach B (parametrize the shared primitive), C (LRU evicting active buckets), D
 (out-of-process limiter, #1677), E (CIMD, #2847), F (bounded store only), G (aggregate or /64 alone),

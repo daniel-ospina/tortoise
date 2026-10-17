@@ -16903,6 +16903,117 @@ def _parse_as_of(as_of: str | None) -> date:
     return day
 
 
+@app.get("/v1/internal/oauth/clients/count")
+async def oauth_clients_count(request: Request):
+    """How many `oauth_clients` registrations are stored — the number #2853's ruling C watches.
+
+    Operator-only (``_check_internal``), read-only. The count covers the WHOLE
+    table — DCR registrations, CIMD rows, and operator-issued /
+    ``oauth_anthropic_creds`` rows alike — because the ruling's question is how
+    many stored registrations accumulate, not how many came from one producer.
+
+    Ruling C (owner @daniel-ospina, 2026-10-13) accepted that ``oauth_clients``
+    grows without limit: **no prune, no expiry, no cap**. The ruling makes THIS
+    NUMBER part of the decision rather than an optional extra — "watch it" is
+    empty unless the count is observable, and a decision that cannot be seen
+    degrading is the unrecorded slide the ruling exists to prevent.
+
+    ``count`` is the SERVER's own COUNT (``count_exact=True``), never
+    ``len(rows)``: PostgREST truncates a page at the deployment's ``max_rows``,
+    so a page length is a floor that reads like a total. When the server states
+    no total (``query_with_total`` → ``None``) this reports
+    ``status="unavailable"`` with a reason and **no** ``count`` — a confident
+    zero is the one wrong answer here, because it would read as "nothing has
+    accumulated" and silently retire the decision.
+
+    Deliberately no alert threshold: ruling C rejected bounding the growth, so
+    a threshold would be a cap by another name. The revisit triggers are the
+    ruling's own, and are returned so a reader need not go find them.
+    """
+    _check_internal(request)
+
+    # Imported locally like the neighbouring control-plane callers (`rpc`,
+    # `sweep_oauth_retention`, `_iter_registered_orgs`): the module keeps this
+    # import function-local, and resolving it from `tortoise.supabase_control`
+    # at call time is also what lets a test substitute the seam.
+    from tortoise.supabase_control import get_control_plane
+
+    def _read_count():
+        # `limit=1` keeps the row payload trivial; `count_exact` is what asks
+        # the server for the full total the number is supposed to be.
+        return get_control_plane().query_with_total(
+            "oauth_clients", select=["id"], limit=1, count_exact=True,
+        )
+
+    try:
+        # OFF the event loop (the #2988/#3498/#3718 class): `query_with_total`
+        # is a SYNCHRONOUS `httpx.Client.get` with a 5 s per-phase timeout, and
+        # this module runs ONE uvicorn worker (`Dockerfile.hosted`, no
+        # `--workers`) — so an inline call here stalls EVERY concurrent request
+        # for the whole round trip, which is exactly what #2988 measured
+        # ("every route in the process timed out"). `_cp_offload` is this
+        # module's seam for control-plane I/O from an async body (its sibling
+        # `retention_cohort` offloads through `_run_off_loop`); `best_effort`
+        # because this endpoint's contract is the fail-soft `unavailable`
+        # body — a 503 from the seam would gate the operator reading it.
+        read = await _cp_offload(
+            _read_count, op="oauth_clients_count", best_effort=True,
+        )
+    except Exception as exc:  # fail soft, never a confident 0
+        # The HTTP body deliberately carries only the exception TYPE (an operator
+        # needs to know the read failed, not the fleet's internals), but the
+        # server log must carry the detail: `query_with_total` raises a
+        # RuntimeError whose message holds the real cause (e.g. `HTTP 503`), and
+        # without this the unavailable path leaves no trace to diagnose. Mirrors
+        # the retention-cohort endpoint's own unavailable-path warning.
+        _logger.warning(
+            "oauth clients count: control plane read failed", exc_info=True,
+        )
+        return {
+            "status": "unavailable",
+            "reason": f"control plane read failed: {type(exc).__name__}",
+            "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+        }
+    if read is None or read is OFFLOAD_REFUSED:
+        # The offload seam never delivered a read (its wait bound expired, or
+        # the pool REFUSED the submission), so `query_with_total` did not run.
+        # "We could not ask" is not a count: same fail-closed body as a read
+        # that raised, because the ruling's one requirement is a number that
+        # MEANS what it says.
+        _logger.warning(
+            "oauth clients count: control plane read did not run (offload "
+            "unavailable or refused)",
+        )
+        return {
+            "status": "unavailable",
+            "reason": (
+                "control plane read did not run (offload unavailable or "
+                "refused); an unasked count is not a count"
+            ),
+            "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+        }
+    _rows, total = read
+    if total is None:
+        return {
+            "status": "unavailable",
+            "reason": (
+                "the control plane did not state a total count (no "
+                "Content-Range total); a page length is not a total"
+            ),
+            "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+        }
+    return {
+        "status": "ok",
+        "count": total,
+        "table": "oauth_clients",
+        "ruling": (
+            "#2853 option C (2026-10-13) — unbounded growth accepted: "
+            "no prune, no expiry, no cap"
+        ),
+        "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+    }
+
+
 @app.get("/v1/internal/retention/cohort")
 async def retention_cohort(request: Request, as_of: str | None = None):
     """The retention indicator over the whole fleet. Operator-only, read-only.
@@ -36751,14 +36862,23 @@ async def webhooks_stripe(request: Request):
 # client early-returns like the shared primitive.
 #
 # Accepted limitations (PR body carries the full list): in-process stores ⇒
-# real capacity is limit × machines and resets on restart (#1677 / #2853 own
-# oauth_clients row pruning — owner @daniel-ospina, date 2026-10-15); the
+# real capacity is limit × machines and resets on restart; the
 # limiter runs before body parsing, so invalid-JSON / oversized POSTs DO
 # consume budget; the anonymous aggregate is a one-source DoS (trusted CIDRs
 # unaffected); the exemption's security rests on the Fly edge stripping
 # client `Fly-*` headers (assumption 12 — dated re-verification with an
-# operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
-# filings from this work: #3124 (the shared per-IP primitive + the generic
+# operator recipe is #3126, owner @daniel-ospina, 2026-11-15).
+#
+# #2853's commitment (owner @daniel-ospina, dated 2026-10-15) was DISCHARGED by
+# the owner's ruling C on 2026-10-13, and is not left to lapse quietly: growth
+# of `oauth_clients` is ACCEPTED as an unbounded condition — no prune, no
+# expiry, no cap — and the ruling makes the row count observable rather than
+# optional ("watch it" is empty without a number). See
+# `GET /v1/internal/oauth/clients/count` below. Revisit only on the ruling's
+# own triggers, held in `_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS`. The #1677
+# in-process-store half of this limitation is unchanged by that ruling.
+#
+# Sibling filings from this work: #3124 (the shared per-IP primitive + the generic
 # middleware's store — now bounded: reclaim-inactive + reject-new/shared
 # overflow + O(1) hot path), #3125 (`_check_claim_rate_limit`
 # keys on the proxy IP), #3134 (dated measurement of real DCR volume —
@@ -36775,6 +36895,15 @@ async def webhooks_stripe(request: Request):
 # #2038 precedent (PR #2049 review) — see also the docs limitation in
 # docs/oauth-mcp.md. The phase-1/phase-2 seam already exists, so moving the
 # charge past `register_client` is the follow-up if #2051 is taken up.
+#: The two conditions that reopen #2853's ruling C — named so the acceptance
+#: is not a default that holds forever (the ruling's own "Triggers to revisit").
+_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS = (
+    "2026-11-15: the separately-owned measurement of real DCR volume (#3134) "
+    "turns the unknown into a number; real growth reopens the retention "
+    "question, and it is then a decision with a size attached",
+    "the connection mechanism moves off per-connection Dynamic Client "
+    "Registration; re-evaluate against the new mechanism, not against this one",
+)
 _OAUTH_DCR_WINDOW_S = 3600
 _OAUTH_DCR_PER_HOUR_DEFAULT = 20
 _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600

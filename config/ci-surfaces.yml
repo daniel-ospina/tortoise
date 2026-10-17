@@ -667,6 +667,12 @@ surfaces:
   # class. See the `core` entry for the other half.
   - test_postgres_storage.py
   - test_oauth_mcp.py
+  # #2853: the `oauth_clients` row count that ruling C made part of the decision.
+  # Registered on `api` because the ONLY file it guards, `tortoise/hosted_api.py`,
+  # is an exact `api` SOURCE_PATTERN — so a change to the endpoint runs the guards
+  # that keep it from answering with a number that is not the count (a page
+  # length, or a confident 0 for an unstated total), and the on-loop read pin.
+  - test_oauth_clients_count_2853.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
   - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
