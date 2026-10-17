@@ -25532,7 +25532,8 @@ class TortoiseSDK:
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,
-                       _return_apply_result: bool = False) -> dict | tuple[dict, object]:
+                       _return_apply_result: bool = False,
+                       _journal_extra: dict | None = None) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -25793,6 +25794,9 @@ class TortoiseSDK:
                 "EventRecorded",
                 id=event["id"],
                 **_journal_record_payload(event),
+                # #8398: write-time facts that must NOT reach the folded node
+                # (they describe EDGES, not properties) but MUST reach replay.
+                **(_journal_extra or {}),
             )
         if label == "Object" and _journal_object_registration:
             # (#2194) Mirror the EventRecorded block above: payload = the
@@ -26787,11 +26791,56 @@ class TortoiseSDK:
             about_object = props.pop("aboutObject", None)
             about_point = props.pop("aboutPoint", None)
             about_document = props.pop("aboutDocument", None)
+            proj = self._get_proj()
+            # #8398: these four are wired LIVE (below) as graph edges, so they
+            # are popped before the fold and never reach the journaled
+            # EventRecorded payload — which made `derived == replay(journal)`
+            # FALSE for exactly this class: a rebuild dropped the Event→entity
+            # links while create_operator's IMPL edges survived.
+            # Classify each link HERE, against the LIVE graph, and journal the
+            # PRECISE form so replay repeats a known-good construction instead
+            # of re-deciding id-vs-name against a graph that may answer
+            # differently (the drift `_wire_about_value` exists to prevent).
+            from .projection.edges import STRUCTURAL_REL_LABELS as _REL_LABELS
+            about_links: list[dict] = []
+            for _rel, _val in (
+                ("aboutSubject", about_subject),
+                ("aboutObject", about_object),
+                ("aboutPoint", about_point),
+                ("aboutDocument", about_document),
+            ):
+                if not _val:
+                    continue
+                _tlabel = _REL_LABELS.get(_rel)
+                if isinstance(_val, str) and _tlabel is not None:
+                    _hits = [
+                        _h for _h in proj._resolve_entity(
+                            _val, by_id=True, by_eventId=True)
+                        if _h["label"] == _tlabel
+                    ]
+                else:
+                    _hits = []
+                if _hits:
+                    # Journal the RESOLVED values, not a flag: an id that resolved
+                    # to the rel's target label NOW. Replay repeats an exact
+                    # endpoint instead of re-running the id-or-name cascade
+                    # against a graph whose answers may differ.
+                    about_links.append({
+                        "rel": _rel,
+                        "how": "id",
+                        "targets": [_h["value"] for _h in _hits],
+                    })
+                elif isinstance(_val, str) and not _is_entity_id(_val):
+                    # resolves to nothing and is not handle-shaped → the name
+                    # path (resolve-or-mint) is what will actually wire it
+                    about_links.append({"rel": _rel, "value": _val, "how": "name"})
+                # else: an unresolvable HANDLE gets no edge (see
+                # _wire_about_value) — nothing to journal.
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
                 "eventStatus": "scheduled", **props}, "EventRecorded",
-                is_episodic=is_episodic)
-            proj = self._get_proj()
+                is_episodic=is_episodic,
+                _journal_extra={"aboutLinks": about_links} if about_links else None)
             if about_subject:
                 _wire_about_value(proj, eid, about_subject, "aboutSubject")
             if about_object:

@@ -65,6 +65,13 @@ STRUCTURAL_REL_LABELS = {
     'extractedFrom': 'Source',
 }
 
+#: The about* rels an ``EventRecorded`` record may carry replay links for
+#: (#8398). A subset of ``STRUCTURAL_REL_LABELS`` — ``extractedFrom`` is not an
+#: about* prop a caller can set on ``create_event``.
+_ABOUT_REPLAY_RELS = frozenset({
+    'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint', 'aboutDocument',
+})
+
 
 def stub_key(rel: str, target: dict):
     """Extract the replayable (label, key) for a structural edge's target node.
@@ -1032,6 +1039,127 @@ class _EdgeHandlers:
                 if r.result_set and r.result_set[0][0]:
                     created = True
         return created
+
+    def replay_about_links(self, payload: dict) -> tuple[int, int]:
+        """Re-wire the ``about*`` edges journaled WITH an ``EventRecorded`` record.
+
+        #8398: ``create_event(aboutObject=…)`` wires its links as GRAPH EDGES,
+        so they were never among the writes ``rebuild_all`` replays —
+        ``derived == replay(journal)`` was false for exactly this class (a
+        rebuild dropped the Event→entity links while ``create_operator``'s IMPL
+        edges, which journal an ``OperatorAdded`` record, survived).
+
+        ⚠️ **The CALLER must run this in a TRAILING SWEEP, after every entity
+        registration has folded** — not inline in the record loop. The replay
+        stream is filename order, not chronology (``sorted(os.listdir(…))``),
+        and pass-1a hoists only ``PointAdded``/``OperatorAdded``: invoked inline,
+        a rotated journal whose ``ObjectRegistered`` lands in a later file would
+        replay this record while the target does not exist yet, and
+        ``create_about_edge`` would return False and drop the link silently —
+        the very defect this fixes. This mirrors ``edge_message_events``, which
+        is buffered for the same reason ("making the target edge exist").
+
+        ``how == "id"`` carries the values RESOLVED at write time, so replay
+        repeats an exact endpoint instead of re-running the id-or-name cascade
+        against a graph whose answers may differ (the drift this method exists
+        to avoid). ``how == "name"`` cannot be resolved at write time (nothing
+        matched), so it repeats the live name path.
+
+        Returns ``(wired, failed)`` — the caller reports ``failed`` so a rebuild
+        that could not re-wire a journaled link is never silent. Every skip that
+        costs a journaled link counts as ``failed``: a mystery ``how``, a ``rel``
+        outside the set, a ``targets`` that is not a list, an empty ``targets``,
+        and a record whose id cannot address an Event at all (its links are
+        counted, not dropped).
+        "Wired" on the ``name`` path is MEASURED, never assumed — but by the
+        LINK's presence, not by ``rel``: a name link's own rel resolved to nothing
+        at write time, so live wired whatever the rel-ignoring cascade found.
+        """
+        inner = payload.get("event", payload)
+        source = inner.get("id") or inner.get("eventId")
+        links = inner.get("aboutLinks") or []
+        if not isinstance(source, str):
+            # an unaddressable record still CLAIMED links; a (0, 0) here would
+            # drop them without a signal — the class this fix exists to end
+            return (0, len(links)) if isinstance(links, list) and links else (0, 0)
+        if not isinstance(links, list):
+            return (0, 1)
+        wired = failed = 0
+        for link in links:
+            if not isinstance(link, dict):
+                failed += 1
+                continue
+            rel = link.get("rel")
+            if rel not in _ABOUT_REPLAY_RELS:
+                # a journaled link this replay does not understand is a loss,
+                # not a non-event — it must be counted, not skipped.
+                # ⚠️ TRIPWIRE: if the writer ever gains a rel this set lacks,
+                # this reports one failure per record on EVERY rebuild until the
+                # set is extended. Fail-loud is the intended direction; the
+                # remedy is to add the rel to ``_ABOUT_REPLAY_RELS``.
+                failed += 1
+                continue
+            if link.get("how") == "id":
+                targets = link.get("targets")
+                if not isinstance(targets, list) or not targets:
+                    failed += 1
+                    continue
+                for value in targets:
+                    ok = bool(value) and isinstance(value, str) and \
+                        self.create_about_edge(
+                            source, value, rel,
+                            target_label=STRUCTURAL_REL_LABELS.get(rel))
+                    if ok:
+                        wired += 1
+                    else:
+                        failed += 1
+            elif link.get("how") == "name" and isinstance(link.get("value"), str):
+                # ⚠️ ``_create_about_edges`` is the rel-IGNORING
+                # Subject→Object→Event→Source→Point cascade, and a "name" link is
+                # one whose OWN rel resolved to nothing at write time — so live
+                # did NOT wire ``rel`` either; it wired whatever the cascade
+                # found. Measuring ``rel`` here would report failure for the
+                # reproduction live just made (and would report failure on every
+                # re-run of an already-wired link, because MERGE adds nothing).
+                # Measure the LINK instead: is the source now joined to a node
+                # carrying this value, by any about rel?
+                self._create_about_edges(source, link["value"])
+                if self._count_about_to_value(source, link["value"]) > 0:
+                    wired += 1
+                else:
+                    failed += 1
+            else:
+                failed += 1
+        return (wired, failed)
+
+    def _count_about_to_value(self, source: str, value: str) -> int:
+        """Count the source's about edges reaching a node carrying ``value``.
+
+        The ``how: "name"`` success test: the cascade is rel-ignoring, so the
+        question is not "did ``rel`` appear" but "is this value linked at all".
+        Idempotent by construction — an already-wired link counts, so a re-run
+        does not report a failure that did not happen.
+
+        The key set is what live resolution could have used: identity keys
+        ``name|url|id|eventId`` on any label, plus ``title`` **only on ``Source``**
+        — the cascade matches a document by ``e.url = $name OR e.title = $name``,
+        and ``title`` is a display prop on ``Object``/``Event`` too, so matching it
+        un-scoped would report success for a same-titled Object while no document
+        was joined (masking a real loss).
+
+        ⚠️ Presence is the test, which means a link that genuinely failed could be
+        masked by a same-valued node already joined to this Event — by design: the
+        record is replayed to reproduce what live produced, and an Event joined to
+        that value IS that state.
+        """
+        rows = self.g.query(
+            "MATCH (s:Event) WHERE s.id=$sv OR s.eventId=$sv "
+            "MATCH (s)-[r:aboutSubject|aboutObject|aboutEvent|aboutPoint|aboutDocument]->(t) "
+            "WHERE t.name=$tv OR t.url=$tv OR t.id=$tv OR t.eventId=$tv "
+            "   OR (t:Source AND t.title=$tv) "
+            "RETURN count(r)",
+            params={"sv": source, "tv": value}).result_set
+        return int(rows[0][0]) if rows and rows[0] else 0
 
     def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:
         """Link entity → Source via extractedFrom edge (Ontology v3.3).
