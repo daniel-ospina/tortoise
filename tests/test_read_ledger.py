@@ -336,8 +336,7 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     `get_events`) are NOT exercised here, and neither are the two NON-SDK hooks —
     `session_continuity`'s printed findings and `mcp_server`'s served tag page:
     deleting any of those eight calls leaves this file green; no test drives them,
-    and the prose that would go stale is §17.4.6 and `_ledger_record`'s own
-    docstring (which names the six SDK methods). The former name
+    and §17.4.6 names the set. The former name
     (`test_every_row_returning_read_path_feeds_the_ledger`) promised coverage it
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.

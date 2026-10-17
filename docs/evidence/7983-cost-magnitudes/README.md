@@ -15,9 +15,7 @@ aboutObjects: "#7983, #7954, #7950, STORAGE-ARCHITECTURE.md §17.4, Postgres rec
 both ledger probes were run from the lane's own commits (the ledger instrument does not exist at the
 base commit, so the base `459f22912` is the tree the numbers are recorded INTO, not the tree they were
 produced on; each file below names its script and the log it produced). The code this lane adds
-(`tortoise/read_ledger.py` plus the `_ledger_record` hook; **§17.4.6 is the ONE home for the named set of hooked
-methods** — this file deliberately does not restate it, because a duplicated list re-staled twice before it was
-removed; the SDK's own population scans and
+(`tortoise/read_ledger.py` plus the `_ledger_record` hook; §17.4.6 names which read paths record — this file does not restate that list; the SDK's own population scans and
 CANDIDATE-pool reads pass `_record_reads=False` — one `recall_gaps()` call would otherwise record the whole stock —
 and `get_point` is deliberately NOT hooked because the write paths read through it; see the named
 uncounted set below) is the only change.
@@ -180,8 +178,7 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   shape of the set); **the state and traversal paths** (`traverse`, `recall_state`'s related-point/
   object readers, `get_historical_knowledge`); **a POOL read of the FTS funnel** — its internal pool
   callers opt out (`_record_reads=False`) and record the slice they SERVE — `recall_state` its
-  Point rows, as every hooked path does (§17.4.6 names them; this file keeps no second list,
-  because a copy is what re-stales) — but a caller that hands the funnel a `limit` far above what it
+  Point rows, as every hooked path does (§17.4.6 names them) — but a caller that hands the funnel a `limit` far above what it
   surfaces is still a pool read, and `recall_state`'s OBJECT leg is uncounted: its rows carry `id`,
   while an Object's key is `name`, so recording them could only emit `unresolved` (reported as a row with no
   value for the label's contract field, which for a successful Object read would be a mis-statement); and **the
