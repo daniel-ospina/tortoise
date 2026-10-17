@@ -15,9 +15,9 @@ aboutObjects: "#7983, #7954, #7950, STORAGE-ARCHITECTURE.md §17.4, Postgres rec
 both ledger probes were run from the lane's own commits (the ledger instrument does not exist at the
 base commit, so the base `459f22912` is the tree the numbers are recorded INTO, not the tree they were
 produced on; each file below names its script and the log it produced). The code this lane adds
-(`tortoise/read_ledger.py` plus the `_ledger_record` hook; §17.4.6 carries the named set of hooked methods —
-`query`, `paginated_query`, `query_points_by_tag`, `suggest_entry_points`, `issue_insight`, `recall_state`,
-`recall_gaps`, `search_sessions`, `get_events` — and the FTS funnel inline; the SDK's own population scans and
+(`tortoise/read_ledger.py` plus the `_ledger_record` hook; **§17.4.6 is the ONE home for the named set of hooked
+methods** — this file deliberately does not restate it, because a duplicated list re-staled twice before it was
+removed; the SDK's own population scans and
 CANDIDATE-pool reads pass `_record_reads=False` — one `recall_gaps()` call would otherwise record the whole stock —
 and `get_point` is deliberately NOT hooked because the write paths read through it; see the named
 uncounted set below) is the only change.
