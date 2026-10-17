@@ -47,8 +47,10 @@ def enumerate_keys(graph, label: str, key_prop: str, limit: int) -> list[str]:
         # rows — the #5346 defect `paginated_query` documents. `DISTINCT` prevents
         # repeats but not the DROPS, and a dropped key shrinks the denominator
         # invisibly, inflating `f`: the one number this probe exists to make
-        # honest. (This was measured, not assumed: the un-ordered walk left 904
-        # keys unread in a way the ordered walk did not.)
+        # honest. (Measured, not assumed: the un-ordered walk was observed to
+        # skip keys the ordered walk returns — the denominator shrinks, which
+        # INFLATES f. That is the failure this line prevents, not a read-count
+        # effect.)
         rows = graph.query(
             f"MATCH (n:`{label}`) WHERE n.`{key_prop}` IS NOT NULL "
             f"RETURN DISTINCT n.`{key_prop}` ORDER BY n.`{key_prop}` "

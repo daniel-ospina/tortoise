@@ -1989,12 +1989,16 @@ def _public_filters(filters: Any) -> dict:
     authoritative — and the drop applies to the paginated and the plain path
     alike, so the same dict means the same thing on both.
 
-    A non-mapping `filters` raises `TypeError`, the type the plain path raised
-    before this existed (`**` unpack of a str); the dict comprehension that
-    replaced it raised `AttributeError` from `.items()` instead, which no caller
-    or test expected.
+    A non-empty, non-mapping `filters` raises `TypeError`, the type the plain
+    path raised before this existed (`**` unpack of a str); the dict
+    comprehension that replaced it raised `AttributeError` from `.items()`
+    instead, which no caller or test expected. A FALSY value is still "no
+    filters", as it was.
     """
-    if filters is None:
+    if not filters:
+        # `None`, `0`, `False`, `""`, `[]` — the pre-existing code read every
+        # FALSY value as "no filters" (`**(v or {})`), so raising for those would
+        # turn a caller's empty payload into an error.
         return {}
     if not isinstance(filters, dict):
         raise TypeError("filters must be a mapping")

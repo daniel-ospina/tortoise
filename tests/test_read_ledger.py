@@ -1040,3 +1040,38 @@ def test_first_event_at_is_the_earliest_instant_not_the_earliest_string(ledger):
     read_ledger.record_stock("Point", "b", nbytes=1, path=ledger, at="2026-10-10T20:00:00+00:00")
     folded = fold(ledger)
     assert folded.first_event_at == "2026-10-11T01:00:00+09:00", folded.first_event_at
+
+
+def test_a_falsy_filters_value_still_means_no_filters():
+    """`0`, `False`, `""`, `[]` were "no filters" before the private-key drop."""
+    from tortoise.mcp_server import _public_filters
+
+    for value in (None, 0, False, "", [], {}):
+        assert _public_filters(value) == {}, value
+    assert _public_filters({"_record_reads": False, "status": "live"}) == {"status": "live"}
+    # A tenant property may START with an underscore (validate_filter_key allows
+    # it), so only the known switches are dropped.
+    assert _public_filters({"_foo": 1}) == {"_foo": 1}
+    import pytest
+
+    with pytest.raises(TypeError):
+        _public_filters("true")
+
+
+def test_an_undated_unresolved_event_is_counted_not_dropped(ledger):
+    """The coverage-hole counter may not be the one thing that vanishes."""
+    read_ledger.record_rows("Subject", [{"id": "no-name-key"}], path=ledger, at="not-a-date")
+    folded = fold(ledger, window_days=7, now=datetime.fromisoformat("2026-10-18T18:00:00+00:00"))
+    assert folded.unresolved_reads == 1
+
+
+def test_enabled_matches_the_funnels_own_flag_read(monkeypatch):
+    """`enabled()` and the funnel must agree, or the two gates can drift."""
+    from tortoise.sdk import is_truthy
+
+    for value in (None, "0", "1", "true"):
+        if value is None:
+            monkeypatch.delenv(read_ledger.LEDGER_FLAG_ENV, raising=False)
+        else:
+            monkeypatch.setenv(read_ledger.LEDGER_FLAG_ENV, value)
+        assert read_ledger.enabled() is is_truthy(value)

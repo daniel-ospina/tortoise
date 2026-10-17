@@ -195,7 +195,14 @@ def _tail_is_capped(target: Path) -> bool:
 
 
 def enabled() -> bool:
-    """Is the read funnel recording? (default off)"""
+    """Is the read funnel recording? (default off)
+
+    ⚠️ NOT the funnel's own gate: the funnel reads `TORTOISE_READ_LEDGER` itself
+    FIRST, so that this module is never even imported when the flag is off (one
+    env lookup, no import). This is the same predicate for callers that already
+    imported it — a CLI, a test, a report — and `tests/test_read_ledger.py` pins
+    the two against the same truthy contract so they cannot drift.
+    """
     return is_truthy(os.environ.get(LEDGER_FLAG_ENV))
 
 
@@ -582,8 +589,10 @@ def record_rows(
 ) -> int:
     """Record a whole returned batch in ONE append. Returns keys recorded.
 
-    Called by the read funnel ONLY when `enabled()` — the funnel reads the flag
-    first, so a default deployment neither imports this module nor calls in.
+    Called by the read funnel only when the flag is on — the funnel reads
+    `TORTOISE_READ_LEDGER` itself first, so a default deployment neither imports
+    this module nor calls in (`enabled()` is the same predicate, for callers that
+    already hold it).
     """
     stamp = at or _now()
     who = tenant_id if tenant_id is not None else tenant()
@@ -757,7 +766,14 @@ def fold(
             if kind == EVENT_UNRESOLVED:
                 at = ev.get("at")
                 _at_dt = _stamp(at)
-                if cutoff_dt is not None and (_at_dt is None or _at_dt < cutoff_dt):
+                if cutoff_dt is not None and _at_dt is None:
+                    # Same rule as a read: an event that cannot be placed in the
+                    # window is COUNTED, not dropped silently — this is the
+                    # coverage-hole counter, and a hole is not allowed to be
+                    # invisible.
+                    out.unresolved_reads += 1
+                    continue
+                if cutoff_dt is not None and _at_dt < cutoff_dt:
                     continue
                 out.unresolved_reads += 1
                 continue
