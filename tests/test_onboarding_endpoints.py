@@ -15,7 +15,7 @@ import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_client
 from tortoise.hosted_api import app, _make_sdk
 from tortoise.sdk import TortoiseSDK
 
@@ -70,7 +70,7 @@ def client(tmp_path):
             # JWT auth; tests seed it here).
             "session_user_id": "user-1",
         }
-        with TestClient(app) as tc:
+        with verdict_client(app) as tc:
             yield tc
 
 
@@ -80,7 +80,7 @@ def unauth_client(tmp_path):
     fixture_db_path = str(tmp_path / "unauth.db")
     # #2127 wave 2: shared helper (see the client fixture — the fixture was
     # already canonical; the helper now owns the patch/pin/close cycle).
-    with patched_tortoise_sdk(fixture_db_path), TestClient(app) as tc:
+    with patched_tortoise_sdk(fixture_db_path), verdict_client(app) as tc:
         yield tc
 
 
@@ -298,7 +298,7 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
             "legacy_full_access": True,
     }
     try:
-        with TestClient(_app) as tc:
+        with verdict_client(_app) as tc:
             r = tc.patch("/v1/onboarding/state",
                          json={"session_recording": True, "capture_revised": True})
             assert r.status_code == 200, r.text
@@ -1477,3 +1477,29 @@ def test_operational_keys_not_client_writable(client):
         assert after.get(state_key) == before.get(state_key), (
             f"{state_key} CHANGED despite the 403: "
             f"{before.get(state_key)!r} -> {after.get(state_key)!r}")
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``/v1/onboarding/state`` is the
+    route every fixture in this file reads and it is not exempt from the bound.
+    The plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("GET", "/v1/onboarding/state")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.get("/v1/onboarding/state").status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get("/v1/onboarding/state")
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /v1/onboarding/state answered" in message

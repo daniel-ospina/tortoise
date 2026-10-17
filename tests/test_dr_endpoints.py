@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tortoise.hosted_backup import MemoryStorage
 from tortoise.sdk import TortoiseSDK
 
@@ -64,7 +65,12 @@ def client():
         # directly, never registered as anchors) so it composes with the
         # helper unchanged — seeds still close at session end.
         try:
-            with patched_tortoise_sdk(db_path), TestClient(ha_mod.app) as tc:
+            # #8582: the client-construction seam. A transport wait-bound
+            # refusal (#3834) reaching any read bound from this fixture is a
+            # NON-ANSWER, so it skips as INCONCLUSIVE instead of failing as
+            # `assert 504 == 200`. `GET /backups` is this file's only route
+            # outside the `/v1/internal/` exempt prefix (see the pin below).
+            with patched_tortoise_sdk(db_path), verdict_client(ha_mod.app) as tc:
                 yield tc
         finally:
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
@@ -3458,3 +3464,32 @@ class TestRestoreSwapReadBound:
             else:
                 monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", raw)
             assert hb._restore_swap_settle_s() == expected, raw
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8582: the deterministic refusal pin for this module's client seam.
+
+    ``GET /backups`` is this file's ONLY route outside the exempt
+    ``/v1/internal/`` prefix, so it is the file's whole membership in the
+    #5049 rule-1 class (every other request here is exempt from the bound —
+    `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX`). No load and no wait are
+    involved: the bound is forced to 0 s, so the refusal is produced by the
+    REAL ``WaitBoundMiddleware`` the production request meets.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX
+
+    assert not "/backups".startswith(_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX), (
+        "the route became exempt — this pin no longer exercises the bound"
+    )
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    # Control: a PLAIN client reads the refusal as a status — the exact
+    # `assert 504 == 200` shape this seam exists to remove. Non-vacuity.
+    with TestClient(ha_mod.app) as raw:
+        assert raw.get("/backups", headers=INTERNAL_HEADERS).status_code == 504
+    with verdict_client(ha_mod.app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get("/backups", headers=INTERNAL_HEADERS)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /backups answered" in message

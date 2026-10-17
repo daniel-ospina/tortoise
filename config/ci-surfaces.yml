@@ -1718,6 +1718,17 @@ surfaces:
   # default; verified green there) — deliberately NOT carve_out-registered.
   - test_source_change_notice_5516.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
+  # #8051: `refs/stash` lives in the COMMON git dir, so a lane's bare
+  # `git stash pop` applies and drops another lane's entry. This guards
+  # `tools/lane_stash.py` (lane-scoped pinning + hash-addressed restore) and
+  # ships the 2-worktree reproduction from the issue. Both paths need the
+  # `CORE_ALSO` entry in `tools/ci_selection.py` — `tools/` is a flat
+  # NON_PYTHON_PREFIXES entry, so a tools-only diff selects NO surface and the
+  # pin would never run on the file it guards (the #1349/#3332/#3616
+  # silent-drop class). Hermetic (real temp git repo + 2 real worktrees; no
+  # network/Docker/FalkorDB), so it is deliberately NOT carve_out-registered:
+  # it is DB-free and runs on any lane, not embedded-only.
+  - test_lane_stash.py
   - test_test_lane_tool.py
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
@@ -2112,6 +2123,12 @@ surfaces:
   - test_event_log.py
   - test_event_provenance.py
   - test_event_store.py
+  # #2353: the semantic change feed — the `:GraphEvent` → per-claim-delta fold
+  # (`tortoise/change_feed.py`), the off-by-default `changes` response field on
+  # `poll_events`, the re-pin of the store's transition-only contract, and the
+  # read-side nameability of the opt-in type (`types=["PointRevised"]`, webhook
+  # subscription).
+  - test_change_feed_2353.py
   - test_extractor.py
   - test_extractor_doc.py
   - test_extractor_priors.py
@@ -4555,6 +4572,13 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
   test_collision_preflight.py: 3.6
+  # #8051: 82 tests. 185.0 is from LOCAL readings on this
+  # fleet-loaded host (subprocess + real-git harness): 173s / 182s at 61 tests
+  # (head 876dabfe), 187s at 69, 192s at 76. The weight this replaces — 160.0,
+  # published with an "88-169s" range — sat BELOW every one of those readings;
+  # erring high is correct for sharding. Refresh from the first post-merge
+  # junit artifact.
+  test_lane_stash.py: 185.0
   test_who_is_on.py: 0.9  # #4256: analogue estimate (same subprocess harness as test_collision_preflight.py); refresh from the first post-merge junit artifact
   test_branch_reaper.py: 2.0  # unmeasured — no measurement in the four source runs; flat default
   test_run_reaper.py: 2.0  # unmeasured — new file (#6868); no CI junit yet, flat default
@@ -4684,6 +4708,20 @@ durations:
   test_coverage_loop.py: 1.3
   test_ep_quadrature.py: 0.9
   test_event_store.py: 5.9
+  # #2353: hand-measured, NOT a junit re-derivation — a file added by a PR can
+  # never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations`
+  # samples push-to-main runs only), so the >=90% coverage floor (#2876) fails
+  # by construction for any test-adding PR. Reading: pytest session total
+  # 27.1s for 26 tests on the embedded carve-out lane
+  # (`TORTOISE_TEST_CARVE_OUT=1`, HF_HUB_OFFLINE=1), on this host. LANE
+  # MISMATCH, stated so the next sweep REPLACES it rather than carries it: this
+  # file is registered under `core`, which the pilot puts in `fast_pool`, and the
+  # `test` job runs that pool with the docker `TORTOISE_DB_URI` — while the
+  # reading above was taken on the carve-out lane. Every other entry in this map
+  # is a per-file reading from the fast band, so the unit here is "cost in the
+  # lane the file runs in" and this one entry is a different unit. Replace it
+  # with a fast-band reading in the next sweep.
+  test_change_feed_2353.py: 27.1
   test_health_ready_nonblocking.py: 3.1
   test_hosted_auth.py: 1.8
   test_ingest_event_endpoint.py: 1.7

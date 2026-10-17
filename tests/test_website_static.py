@@ -671,7 +671,7 @@ class TestAutomateBeatCopy:
     ⚠️ THE COPY IS THE OWNER'S, VERBATIM, AND ONE OF ITS TWO CLAUSES IS ROADMAP.
     The paragraph reads "Define confidence threshold or lifecycle events to fire
     webhooks." The LIFECYCLE half ships: `webhook_delivery._validated_types`
-    filters the durable `:GraphEvent` types → the 11 `CLAIM_EVENT_TYPES` in
+    filters the durable `:GraphEvent` types → the 12 `CLAIM_EVENT_TYPES` in
     `tortoise/shared_state/events.py`. The CONFIDENCE-THRESHOLD half does NOT:
     no subscription carries a threshold/condition field, and nothing fires on
     an EP belief crossing a threshold — that trigger is #3909 (OPEN,

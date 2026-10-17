@@ -656,7 +656,14 @@ class TestPointDeleteTwoStore:
         """The ``:GraphEvent`` row — and therefore ``poll_events`` — is intact.
 
         This is the property that makes the split acceptable: the fix changes
-        which store carries the *replay* meaning, not what subscribers see.
+        which store carries the *replay* meaning, not the fact that subscribers
+        see a point-delete row.
+
+        #2353 adds ONE key to that row. The hard-delete payload carries
+        ``deleted: true`` so the semantic change feed can tell this producer
+        from ``retract_point``'s tombstone. It is written UNCONDITIONALLY: the
+        marker records what the WRITE PATH did, so gating it on the reading
+        process's switch folded an unswitched writer's deletes as tombstones.
         """
         sdk, _events = env
         pid = sdk.create_point("observation", "x")["id"]
@@ -667,7 +674,8 @@ class TestPointDeleteTwoStore:
         assert "PointRetracted" in types
         polled = sdk.poll_events(after=None)["events"]
         assert any(e["type"] == "PointRetracted"
-                   and e["payload"] == {"id": pid} for e in polled)
+                   and e["payload"] == {"id": pid, "deleted": True}
+                   for e in polled)
 
     def test_retract_still_tombstones(self, env, caplog):
         """The CONTRAST row: splitting delete must not change retract.

@@ -16729,6 +16729,18 @@ _RETENTION_EXECUTOR = ThreadPoolExecutor(
 _RETENTION_PER_ORG_TIMEOUT_S = 30.0
 
 
+def _utc_today() -> date:
+    """The clock ``_parse_as_of`` fences against — named so a test can freeze it.
+
+    The future guard below is a fence against the WALL clock, so a test of the
+    boundary must control this instant rather than race it: built from an
+    import-time day, a "future" payload stops being future the moment the
+    assertion runs on the next UTC day, the strict ``>`` goes false, and the
+    endpoint answers 200 with the refusal never exercised (#8805).
+    """
+    return datetime.now(UTC).date()
+
+
 def _parse_as_of(as_of: str | None) -> date:
     """The reading's UTC day boundary. 422 on a malformed or FUTURE value.
 
@@ -16740,7 +16752,7 @@ def _parse_as_of(as_of: str | None) -> date:
     `curl` with a plain date).
     """
     if as_of is None:
-        return datetime.now(UTC).date()
+        return _utc_today()
     text = str(as_of).strip()
     if not text:
         raise HTTPException(status_code=422, detail="as_of must not be empty")
@@ -16765,7 +16777,7 @@ def _parse_as_of(as_of: str | None) -> date:
             status_code=422,
             detail=f"as_of is not a valid ISO-8601 date or timestamp: {as_of!r}",
         ) from exc
-    if day > datetime.now(UTC).date():
+    if day > _utc_today():
         raise HTTPException(
             status_code=422,
             detail=(f"as_of {day.isoformat()} is in the future — a day-N mark "

@@ -7683,3 +7683,20 @@ def test_mergify_guard_step_is_wired_fail_closed():
     assert step.get("if", "always()") in ("always()", "${{ always() }}"), (
         "the guard step must be unconditional: any other `if:` drops enforcement "
         "on the events it excludes")
+
+
+def test_lane_stash_guard_runs_on_a_tools_only_change():
+    # #8051: `tests/test_lane_stash.py` (registered `core`) guards
+    # `tools/lane_stash.py` — the lane-scoped stash that stops a bare
+    # `git stash pop` from applying and dropping a peer lane's entry, a
+    # repo-global `refs/stash` hazard with three recorded occurrences.
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and the tool matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a tools-only diff was
+    # filtered out BEFORE the "not matched -> core" fallback: the pin never ran
+    # on the file it exists to hold (the #1349/#3332/#3616 silent-drop class).
+    # Mutation check: removing the CORE_ALSO entry fails the arm below
+    # (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/lane_stash.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_lane_stash.py" in r["test_files"], r

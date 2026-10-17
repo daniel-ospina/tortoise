@@ -2,8 +2,13 @@
 
 Registration only (plan-review P2): encode/decode wiring is deferred to the
 first real upcaster task. ClaimStateChanged must NOT be registered
-(plan-review P1) — every claim transition maps to one of the eleven concrete
+(plan-review P1) — every claim transition maps to one of the twelve concrete
 types; challenged is derived from NAND-edge presence.
+
+This registry is the READ-side catalog: `poll_events(types=[...])` and the
+webhook subscription validator consult it (never `sdk._GRAPH_EVENT_TYPES`), so a
+type the `:GraphEvent` store can hold MUST be registered here or it is
+unnameable (#2353 review P2).
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ CLAIM_TYPES = (
     "DedupeRejected",
     "ObjectSuperseded",
     "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
+    "PointRevised",      # #2353: update_point revision — store half is opt-in (TORTOISE_CHANGE_FEED)
 )
 
 
@@ -56,7 +62,7 @@ def _register_claims(_clear_registry):
 
 
 class TestClaimRegistration:
-    def test_eleven_claim_types_registered_v1(self):
+    def test_twelve_claim_types_registered_v1(self):
         types = event_types()
         for t in CLAIM_TYPES:
             assert t in types, f"{t} not registered"
@@ -65,6 +71,27 @@ class TestClaimRegistration:
     def test_claim_state_changed_absent(self):
         """plan-review P1: ClaimStateChanged is NOT a registered type."""
         assert "ClaimStateChanged" not in event_types()
+
+    def test_every_store_writable_type_is_registered(self):
+        """#2353 review P2 — the invariant that keeps the two sets honest.
+
+        The `:GraphEvent` store's emit set must be a SUBSET of this registry: a
+        type the store can hold but the registry does not know is UNNAMEABLE
+        (`poll_events(types=[...])` and `create_subscription(types=[...])` both
+        raise `ValueError: unknown event type`, not an empty page). Measured at
+        the head before the fix: `PointRevised` reached the store under
+        `TORTOISE_CHANGE_FEED` while `types=["PointRevised"]` raised.
+        """
+        from tortoise.sdk import _GRAPH_EVENT_TYPES
+
+        registered = event_types()
+        unregistered = sorted(t for t in _GRAPH_EVENT_TYPES if t not in registered)
+        assert unregistered == [], (
+            f"the store can emit {unregistered}, which no caller can name — "
+            "register them in CLAIM_EVENT_TYPES"
+        )
+        # ...and the opt-in store half (#2353) rides the same registry.
+        assert "PointRevised" in registered
 
     def test_coexists_with_pm_types(self):
         """The claim types share the EventCodec registry, not a parallel set.
@@ -79,7 +106,7 @@ class TestClaimRegistration:
 
 
 class TestClaimRoundTrip:
-    def test_encode_decode_roundtrip_all_eleven(self):
+    def test_encode_decode_roundtrip_all_twelve(self):
         for t in CLAIM_TYPES:
             ev = EventCodec.encode(t, {"id": "p1", "note": "x"})
             assert ev["type"] == t

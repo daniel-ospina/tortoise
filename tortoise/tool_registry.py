@@ -590,10 +590,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_events_poll",
         id="surface.events_poll",
         description="Poll graph/claim events after an opaque cursor (at-least-once). "
-                    "Returns {events, next_cursor}. Event types: 11 registered claim "
+                    "Returns {events, next_cursor}. Event types: 12 registered claim "
                     "types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, "
                     "OperatorAnnotated, PointPromoted, OperatorPromoted, DedupeRecorded, "
-                    "DedupeRejected, ObjectSuperseded, PointInvalidated).",
+                    "DedupeRejected, ObjectSuperseded, PointInvalidated, PointRevised). "
+                    "PointRevised reaches the store, and the response adds `changes` "
+                    "(per-claim before→after deltas), only while TORTOISE_CHANGE_FEED "
+                    "is enabled.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="poll_events",

@@ -383,6 +383,41 @@ response_fields:
     tortoise/search_engine.py; the SDK search assembly and its embedded fallback both set the key (#4889)
   unchanged_when_off: yes — not flag-gated; the key is ABSENT whenever a subject resolved or the graph can carry
     one, so those responses stay byte-identical and simply omit this key; no other key is affected either way
+- response: tortoise_events_poll
+  field: changes
+  emitted_when: TORTOISE_CHANGE_FEED is truthy (1/true/yes/on; unset or 0 means off) — the SAME `:GraphEvent`
+    page the response's `events` key carries, folded into per-claim semantic deltas with before/after
+    (tortoise/change_feed.py is the fold's ONE home; issue-2353), so answering what-changed-for-claim-X is one call
+    instead of a client-side replay across event types. `before` is OBSERVED only AND SCOPED TO THE PAGE it was
+    observed in — the fold sees one page, so a page boundary falling between a claim's revisions omits `before`
+    for that delta rather than inventing one; and a hard-delete row (the one whose `change` is "deleted") ENDS the
+    incarnation, so the next event for that id reports no `before` either, however much of the window was
+    observed before it — the destroyed node's fields are not the new node's history. It is never
+    back-filled from a `precondition`, which rides its own
+    key. A transition's write-path guarantee rides its own `precondition` key, never a fabricated
+    `before`. THE SAME SWITCH also emits the store half — `PointRevised` records reach the `:GraphEvent` store
+    only while it is on, because that store's shape is the claim-TRANSITION contract
+    (docs/plans/2026-08-08-432-subscriptions-plan.md §Task 3, pinned by
+    tests/test_event_store.py::test_content_edit_emits_nothing)
+  unchanged_when_off: the `changes` key is ABSENT and the response SHAPE is unchanged off. NOT
+    byte-identical, and the difference is called out here rather than buried — the hard-delete
+    `PointRetracted` payload gained the `deleted` marker UNCONDITIONALLY (qualification 2 below), so a
+    hard delete's row differs from before this change whether or not anything is switched on. TWO
+    qualifications, each the consequence of the WRITE side being gated on this switch — (1) the `PointRevised`
+    store half is the EMITTING process's configuration, so an OFF reader polling a store an ON writer filled
+    sees rows it did not see before — new EVENTS, not a changed response shape; (2) the hard-delete
+    `PointRetracted` payload gains the `deleted` marker UNCONDITIONALLY, because the marker records what the write
+    path did and cannot be a function of the reader's switch — so that one row shape differs from before this
+    change whether or not anything is switched on
+- response: sdk:poll_events
+  field: changes
+  emitted_when: the same field on the SDK/assembly half — `TortoiseSDK.poll_events` is the ONE assembly site
+    (tortoise/sdk.py) that the MCP tool above and the hosted events endpoint both relay, so the switch and the
+    shape are identical on all three surfaces. See the `tortoise_events_poll` row above for the full contract
+  unchanged_when_off: the `changes` key is ABSENT and the reply's SHAPE is unchanged — `events` and
+    `next_cursor` only, NOT byte-identical (the hard-delete `deleted` marker, see below).
+    The same two qualifications as the `tortoise_events_poll` row above apply, for the same reason — the WRITE
+    side (the `PointRevised` store half, and the hard-delete `deleted` marker) is not scoped to the reader
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
@@ -2073,7 +2108,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_events_poll
-  served_from: tortoise/mcp_server.py:7cfbbd4f9c98dc75
+  served_from: tortoise/mcp_server.py:29e2a7af30242b7f
   served_attributes: 324350c5a3a0d9bf
   family: sessions
   family_rank: 4
@@ -2085,8 +2120,10 @@ rows:
   cluster: null
   canonical: null
   job: 'Poll graph/claim events after an opaque cursor (at-least-once). Returns {events, next_cursor}. Event types:
-    11 registered claim types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated, PointPromoted,
-    OperatorPromoted, DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated).'
+    12 registered claim types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated, PointPromoted,
+    OperatorPromoted, DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated, PointRevised). PointRevised
+    reaches the store, and the response adds `changes` (per-claim before→after deltas), only while TORTOISE_CHANGE_FEED
+    is enabled.'
   dependency: declares TortoiseSDK.poll_events (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
