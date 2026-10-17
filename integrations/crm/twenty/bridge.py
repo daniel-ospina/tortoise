@@ -367,6 +367,9 @@ _TITLE_WRITER_CAP = 50
 # unbounded, either mirror grounds on the title alone and promotes another
 # occurrence's calendar participants into this meeting's CRM at machine
 # confidence — #8491's stated harm, on the arm this grounding fix itself adds.
+# The bound is calendar-day granular, so it cannot tell an across-midnight
+# recording from a DAILY recurrence one day earlier; that residual is stated in
+# the contract docstring below rather than papered over.
 _TITLE_ARM_MAX_DAY_GAP = 1
 
 
@@ -445,9 +448,11 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     has no id to match on: the same ``event_title`` (compared on the writer's
     50-character truncation, so a long calendar title can still match) recorded
     no more than one calendar day EARLIER — the across-midnight case the arm
-    exists for, never a previous OR LATER occurrence of the same recurring title
-    (``_title_arm_grounds``) — or the same local calendar day (state
-    ``started_at`` vs the meeting ``date``).
+    exists for, and never a LATER occurrence. The bound is calendar-day
+    granular, so an earlier occurrence MORE than a day before refuses, while one
+    exactly a day before cannot be told apart from an across-midnight recording
+    of a daily-recurring title (``_title_arm_grounds``) — or the same local
+    calendar day (state ``started_at`` vs the meeting ``date``).
 
     A state whose title names a DIFFERENT event is DISQUALIFYING evidence — it
     says the store describes another call — so the day arm cannot rescue it: a
@@ -459,10 +464,10 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     writer's 50-character cap explaining it — the stored title shorter than the
     artifact's (a series variant), or the artifact's shorter than the stored one
     (a cut-short artifact title) (``_title_relation``) — or two EQUAL titles
-    whose state is not dated within the one day BEFORE the meeting, which is a
-    previous (or later) occurrence of a recurring title rather than this
-    recording (``_title_arm_grounds``). Neither arm matches — or no evidence was
-    supplied — and this returns ``[]``: refuse rather than guess, so an
+    whose state is not dated in the one calendar day BEFORE the meeting, which
+    is a later occurrence, or an earlier one more than a day before, rather than
+    this recording (``_title_arm_grounds``). Neither arm matches — or no evidence
+    was supplied — and this returns ``[]``: refuse rather than guess, so an
     ungrounded attendee is never written as a contact.
     """
     if not os.path.exists(CAL_STATE_FILE):

@@ -342,6 +342,23 @@ def test_a_title_literally_meeting_still_grounds_across_midnight(
         MEETING_DATE, "Meeting") == ATTENDEES
 
 
+def test_a_daily_recurring_title_one_day_earlier_is_indistinguishable(
+        tmp_path, monkeypatch):
+    """Documented RESIDUAL, pinned so it is never mistaken for a guarantee.
+
+    The bound is calendar-day granular: a daily recurrence ("Office Hours") one
+    day earlier has the same gap as an across-midnight recording of one event, so
+    it still grounds. This test is the honest statement of that limit — if the
+    arm is ever made finer, it should fail and be updated deliberately.
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-08T11:03:00",
+                        event_title=MEETING_TITLE)),
+    )
+    assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == ATTENDEES
+
+
 def test_an_equally_titled_state_of_unknown_age_is_refused(
         tmp_path, monkeypatch):
     """The title arm's bound needs a readable ``started_at``; unknown → refuse."""
