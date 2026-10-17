@@ -464,12 +464,22 @@ class WriteNotLandedError(RuntimeError):
     Loud by construction: a caller that sees this error knows the cache did
     not materialise the write. It is never raised for a read-back that
     SUCCEEDED.
+
+    #7951 — `update_point` RAISES IT TOO, with ``operation="update_point"``.
+    The revision door took the same outbox ordering after ``create_point``
+    (increment 2 of the plan of record), so its no-record arm is the same
+    refusal: the append failed, the cache write was skipped, and the caller
+    must not read the call as an applied update. Named so the two doors cannot
+    drift into two messages for one condition — the failure mode the class
+    exists to prevent is a caller that cannot tell which arm it is in.
     """
 
     def __init__(self, point_id: str, graph: str | None = None,
-                 detail: str = "", *, record_committed: bool = False) -> None:
+                 detail: str = "", *, record_committed: bool = False,
+                 operation: str = "create_point") -> None:
         self.point_id = point_id
         self.graph = graph
+        self.operation = operation
         self.detail = detail
         self.record_committed = record_committed
         _where = f" on graph {graph!r}" if graph else ""
@@ -494,14 +504,15 @@ class WriteNotLandedError(RuntimeError):
                 "the write has no durable home"
             )
             _contract = (
-                "The caller must not treat this call as successful: if the "
-                "Point is not in the cache, re-issue it (`dedup=True` is "
+                "The caller must not treat this call as successful: the "
+                "write was not applied, so re-issue it once a rebuild record "
+                "can be committed (`create_point`'s `dedup=True` is "
                 "content-hash idempotent). (A `:GraphEvent` may have been "
                 "written first by `_emit_event` — a declared residual, not a "
                 "committed rebuild record.)"
             )
         super().__init__(
-            f"create_point: the Point {point_id!r} was not committed{_where}: "
+            f"{operation}: the Point {point_id!r} was not committed{_where}: "
             f"{_cause}. {_contract} (#7209)"
             + (f" [{detail}]" if detail else "")
         )

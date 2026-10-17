@@ -449,11 +449,14 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     """#8818: the deterministic refusal pin for this module's client seam.
 
     No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
-    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/agent/signup`` is
-    the only route this file reads and it is not exempt from the bound. The
-    plain-client control is the non-vacuity leg — it is the exact
-    ``assert 504 == 200`` shape this conversion removes, and it would pass
-    unchanged if the route were ever exempted.
+    comes from the REAL ``WaitBoundMiddleware``. The conversion is on the client
+    CONSTRUCTION, not on one route, so the seam covers every read bound from it
+    — today ``POST /v1/agent/signup`` (the one this pin drives), ``GET /v1/team``,
+    ``POST /v1/claim``, ``GET /v1/points``, ``POST /v1/points``,
+    ``POST /internal/provision`` and ``GET /v1/organizations`` — and none of
+    them is exempt from the bound. The plain-client control is the non-vacuity
+    leg — it is the exact ``assert 504 == 200`` shape this conversion removes,
+    and it would pass unchanged if the route were ever exempted.
     """
     from tortoise import mcp_auth
     from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
