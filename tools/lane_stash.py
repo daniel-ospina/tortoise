@@ -622,12 +622,19 @@ GUARD_NS = "refs/pi-lane-prune-guard"
 def _guard_pin(key: str, sha: str) -> str | None:
     """Pin ``sha`` so a positional race cannot lose it.
 
-    Two lifetimes use this ref. For the entries a prune intends to KEEP it lives
-    for the duration of that prune (the ``finally`` unpins it once the sha is
-    back in the register). For a RETAINED ORPHAN — an emptied register whose
-    ``refs/stash`` no pin names — it is the object's only durable handle and is
-    deliberately left in place until ``recover`` puts the entry back under
-    ``refs/lane`` (``cmd_list`` prints any you still hold).
+    Three paths create this ref: the entries a prune intends to KEEP (lives for the
+    duration of that prune — the ``finally`` unpins it once the sha is back in the
+    register); a RETAINED ORPHAN — an emptied register whose ``refs/stash`` no pin
+    names — where it is the object's only durable handle; and a DISPLACED head in
+    :func:`_store_into_register` that no other ref names, which keeps the object
+    reachable across the store.
+
+    Three paths release it: the creating prune's ``finally`` (its own ref only);
+    ``recover`` of that sha (``_guard_release_all``, under any key); and
+    :func:`_reap_stale_guards` on a later ``prune --apply``, once the OWNER
+    worktree is gone AND the object is named elsewhere. Until one of those runs, a
+    guard for an entry nobody adopts is never reached — ``cmd_list`` prints any you
+    still hold.
 
     ``git reflog delete --updateref refs/stash@{i}`` re-resolves the position at
     DELETE time (git's own ``stash drop`` behaves the same), so a peer push
@@ -778,11 +785,11 @@ def _release_stale_guard(ref: str, sha: str) -> None:
 def _reap_stale_guards() -> None:
     """Release guards whose OWNER WORKTREE is gone and whose object has another handle.
 
-    A guard left by a removed worktree is not released by any ROUTINE command:
-    `prune` only unpins the guards IT created, and `recover` releases every guard
-    for a sha only when it ADOPTS that sha — so a guard for an entry nobody adopts
-    is never reached. Once its object is named by the register or a lane ref the
-    guard is redundant, and left alone it blocks gc forever (#8822 review P2).
+    Before this reap, no routine command released such a guard: `prune`'s
+    ``finally`` releases only the guards IT created, and `recover` frees them only
+    for the sha it ADOPTS. So a guard for an entry nobody adopts was never reached,
+    and left alone it blocks gc forever — which is exactly what this reap exists to
+    fix (#8822 review P2).
 
     Both conditions are required: a LIVE owner key may be a prune in flight, whose
     guard is its only protection during a positional delete; a DEAD owner's guard
@@ -1556,10 +1563,9 @@ def cmd_prune(args: argparse.Namespace) -> int:
             "know the entry is safe."
         )
     if args.apply:
-        # Guards left by REMOVED worktrees are not released by any routine command:
-        # `prune` only unpins the guards it created, and `recover` releases every
-        # guard for a sha when it ADOPTS that sha (`-m` or not — an own orphan needs
-        # no `-m`); a guard for an entry nobody adopts is never reached (#8822 P2).
+        # Before this reap, no routine command released a removed worktree's guard:
+        # `prune`'s `finally` releases only guards IT created, and `recover` frees
+        # them only for the sha it adopts (#8822 review P2).
         _reap_stale_guards()
     if not doomed:
         if not orphan:

@@ -1516,8 +1516,9 @@ def test_recover_does_not_guard_an_already_pinned_head(repo, monkeypatch, capsys
     """A head another ref already names needs no guard (which would leak).
 
     `_guard_release_all` only ever frees guards for the recovered sha, so a guard
-    created for a head that was already pinned under `refs/lane` would live
-    forever, contradicting the plan's one-lifetime rule (#8773 review P2).
+    created for a head that was already pinned under `refs/lane` would outlive every
+    release route: the file has no rule by that name, and only `_reap_stale_guards`
+    could ever reach it — and only once this worktree is gone (#8773 review P2).
     """
     mod = _load_tool()
     repo.dirty(repo.b, "f.txt", "base\nz\n")
@@ -2036,10 +2037,10 @@ def test_prune_keeps_a_LIVE_lanes_guard_for_an_unpinned_entry(
 def test_prune_reaps_a_guard_whose_worktree_is_gone(repo, monkeypatch, capsys):
     """A guard under a REMOVED key is released once the object has another handle.
 
-    No ROUTINE command releases it: `prune` only unpins the guards IT created, and
-    `recover` releases a guard only when it ADOPTS that sha (so an explicit
-    `recover <sha> -m "…"` also frees it — an escape hatch, not an automatic
-    route). Left alone, that ref blocks gc forever (#8822 review P2).
+    Before this reap, no routine command released it: `prune`'s `finally` releases
+    only the guards IT created, and `recover` frees them only for the sha it adopts
+    (an explicit `recover <sha>` is the escape hatch, not an automatic route). Left
+    alone, that ref blocks gc forever (#8822 review P2).
     """
     mod = _load_tool()
     repo.dirty(repo.b, "f.txt", "base\nkept\n")
