@@ -472,6 +472,16 @@ class WriteNotLandedError(RuntimeError):
     must not read the call as an applied update. Named so the two doors cannot
     drift into two messages for one condition — the failure mode the class
     exists to prevent is a caller that cannot tell which arm it is in.
+
+    #7951 — `delete_point` RAISES IT TOO, with ``operation="delete_point"``,
+    and it is the first door to use the COMMITTED arm for a reason other than
+    a read-back miss: it destroys first in the record and then in the cache, so
+    a committed record whose `DETACH DELETE` failed means *destroyed in the
+    truth, still served by the cache*. That arm gets its own ``_headline``,
+    ``_cause`` and ``_contract`` (the create-shaped text said "was not
+    committed" and "a replay will materialise it", both false here: the
+    destruction is committed and the replay REMOVES), while every door still
+    shares one message per condition.
     """
 
     def __init__(self, point_id: str, graph: str | None = None,
@@ -486,19 +496,50 @@ class WriteNotLandedError(RuntimeError):
         self.record_committed = record_committed
         _where = f" on graph {graph!r}" if graph else ""
         if record_committed:
-            _cause = (
-                "the cache did not materialise the write (the graph is being "
-                "replaced/rebuilt, or it was replaced between the write and "
-                "the read-back)"
-            )
-            _contract = (
-                f"The {self.record} record WAS appended before the cache "
-                "write (the #7951 §17.1 outbox ordering), so the TRUTH holds "
-                "this write and a replay will materialise it — do NOT "
-                "re-issue blindly (that would append a second record); treat "
-                "the write as COMMITTED and let the projection catch up."
-            )
+            if operation == "delete_point":
+                # …and on a DELETE the committed effect points the other way:
+                # the record is the destruction, so a replay does not
+                # materialise this call — it removes the node the cache still
+                # serves (#7951 review round 2). The create-shaped wording,
+                # verbatim, told an MCP caller "was not committed" about a
+                # destruction that IS committed.
+                _headline = (
+                    f"the Point {point_id!r} was DESTROYED in the record"
+                    f"{_where} and not in the cache"
+                )
+                _cause = (
+                    "the journal append committed the destruction and the "
+                    "cache delete then failed (the graph is being "
+                    "replaced/rebuilt) — no read-back is involved on this "
+                    "door"
+                )
+                _contract = (
+                    f"The {self.record} record WAS appended before the "
+                    "DETACH DELETE (the #7951 §17.1 outbox ordering), so the "
+                    "TRUTH no longer holds this Point and a replay will REMOVE "
+                    "the stale node from the cache — do NOT re-issue blindly "
+                    "(that would append a second delete record for one "
+                    "intent); treat the deletion as COMMITTED and let the "
+                    "projection catch up. The cache is `extra_in_cache` "
+                    "(tortoise/reconciliation.py), not merely lagging."
+                )
+            else:
+                _headline = f"the Point {point_id!r} was not committed{_where}"
+                _cause = (
+                    "the cache did not materialise the write (the graph is "
+                    "being replaced/rebuilt, or it was replaced between the "
+                    "write and the read-back)"
+                )
+                _contract = (
+                    f"The {self.record} record WAS appended before the cache "
+                    "write (the #7951 §17.1 outbox ordering), so the TRUTH "
+                    "holds this write and a replay will materialise it — do "
+                    "NOT re-issue blindly (that would append a second "
+                    "record); treat the write as COMMITTED and let the "
+                    "projection catch up."
+                )
         else:
+            _headline = f"the Point {point_id!r} was not committed{_where}"
             _cause = (
                 "no rebuild record was committed for it — the JSONL journal "
                 "append FAILED (and the #7951 §17.1 ordering then skipped the "
@@ -514,7 +555,7 @@ class WriteNotLandedError(RuntimeError):
                 "committed rebuild record.)"
             )
         super().__init__(
-            f"{operation}: the Point {point_id!r} was not committed{_where}: "
+            f"{operation}: {_headline}: "
             f"{_cause}. {_contract} (#7209)"
             + (f" [{detail}]" if detail else "")
         )

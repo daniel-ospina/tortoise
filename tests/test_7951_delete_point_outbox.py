@@ -151,7 +151,7 @@ def test_a_failed_append_does_not_delete_the_point(env, monkeypatch):
     """
     from tortoise.exceptions import WriteNotLandedError
 
-    sdk, events = env
+    sdk, _events = env
     proj = sdk._get_proj()
     pid = sdk.create_point("observation", "must survive a broken journal")["id"]
 
@@ -162,9 +162,6 @@ def test_a_failed_append_does_not_delete_the_point(env, monkeypatch):
         raise OSError("simulated journal append failure")
 
     monkeypatch.setattr(log, "append", _boom)
-
-    journal = Path(events) / "events.jsonl"
-    size_before = journal.stat().st_size if journal.exists() else 0
 
     with pytest.raises(WriteNotLandedError) as ei:
         sdk.delete_point(pid)
@@ -178,12 +175,15 @@ def test_a_failed_append_does_not_delete_the_point(env, monkeypatch):
     assert _live(proj, pid) is True, (
         "the Point was destroyed although the destruction was never recorded "
         "— the next replay would RESURRECT it (§17.1 apply-first window)")
-    # POSITIVE evidence, not the tautology `_mutations(...) == []` (which the
-    # spy's own raise guarantees, so it could never fail — review P2). The
-    # bytes on disk are what a caller's replay actually folds.
-    assert (journal.stat().st_size if journal.exists() else 0) == size_before, (
-        "the journal grew although the append raised — a partial record "
-        "would be folded by the next rebuild")
+    # The old assertion here was `_mutations(...) == []`, which the spy's own
+    # raise guaranteed: it could never fail (review P2). The positive evidence
+    # is `_live` above. What this arm must also do is NOT overclaim: a buffered
+    # append can land the record and still raise, so the message says "did not
+    # confirm" rather than "nothing was written" — pinned here, and the landed
+    # case has its own test (T8).
+    assert "did not confirm" in str(ei.value), (
+        "the refusal must not assert that nothing was written — `False` only "
+        "means the append raised, and an append can land and then raise")
 
 
 # ── T3: a committed record whose cache delete did not land ────────────────
@@ -336,3 +336,61 @@ def test_a_journal_less_sdk_still_deletes(tmp_path):
         assert _live(sdk._get_proj(), pid) is False
     finally:
         sdk.close()
+
+
+
+# ── T8: the append LANDS and then raises ──────────────────────────────────
+
+def test_an_append_that_lands_then_raises_is_reported_as_unconfirmed(
+        env, monkeypatch):
+    """`False` covers a landed-but-unconfirmed append, and the door says so.
+
+    `_emit_event` returns ``False`` for ANY exception from ``log.append``, and
+    `EventLog.append` is a buffered ``open/write/close``: an append can put the
+    record on disk and still raise. The delete is then refused (the ordering
+    skips the cache write), so nothing is destroyed eagerly — but the record is
+    durable, so the next replay removes the Point. Both halves are asserted
+    here, because the door's message promises exactly that residual.
+
+    MUTATION: make the door claim `record_committed=True` on this arm and the
+    first assertion fails; drop the replay assertion and the "and a replay
+    removes it" half of the message becomes an untested promise.
+    """
+    from tortoise.exceptions import WriteNotLandedError
+
+    sdk, events = env
+    proj = sdk._get_proj()
+    pid = sdk.create_point("observation", "append lands then raises")["id"]
+
+    log = sdk._get_event_log()
+    assert log is not None
+    real_append = log.append
+
+    def _land_then_raise(event):
+        real_append(event)
+        raise OSError("simulated post-write journal failure")
+
+    monkeypatch.setattr(log, "append", _land_then_raise)
+
+    with pytest.raises(WriteNotLandedError) as ei:
+        sdk.delete_point(pid)
+
+    assert ei.value.record_committed is False, (
+        "the door cannot confirm the append, so it must not claim the record "
+        "is committed — but it also must not claim nothing was written")
+    assert ei.value.operation == "delete_point"
+    assert _live(proj, pid) is True, (
+        "the DETACH DELETE must not be issued on an unconfirmed append")
+
+    monkeypatch.setattr(log, "append", real_append)
+
+    recs = _mutations(events, pid)
+    assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")], (
+        "premise: the append DID land, which is why the message cannot assert "
+        f"that nothing was written: {recs!r}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    assert _live(proj, pid) is False, (
+        "the landed record must be applied by the replay — that is the "
+        "residual the refusal message promises")

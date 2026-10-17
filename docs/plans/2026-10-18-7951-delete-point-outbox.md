@@ -69,12 +69,17 @@ append refuses the delete instead of performing an unrecorded destruction.**
 
 ## 3. Ordering contract (unchanged, applied)
 
-**Journal first, then project** — module top of `tortoise/sdk.py`, argued from the two crash windows:
-die between append and cache ⇒ the cache is **`extra_in_cache`** (it holds a node the record no
-longer has — the §17.1 second-writer signature, *not* a lag, which is `missing_in_cache`) and
-replay resolves it destructively; die between cache and
-append ⇒ the cache is **ahead of truth with no repair path**. On a delete the second window's harm is
-resurrection, which is strictly worse than loss and is why the delete door is worth a unit of its own.
+**Journal first, then project** — module top of `tortoise/sdk.py`, argued from the two crash windows.
+The divergence class each window produces DEPENDS ON THE DOOR, and this plan's earlier draft
+generalized the delete's class to all of them (review round 2):
+
+| door | die between append and cache | replay | die between cache and append |
+|---|---|---|---|
+| `create_point` / `update_point` | `missing_in_cache` — the record exists, the node does not | materialises the write | ahead of truth, no repair path |
+| `delete_point` | **`extra_in_cache`** — the cache holds a node the record no longer has (§17.1's second-writer signature, *not* a lag) | **removes** the node, destructively | resurrection on the next rebuild |
+
+On a delete the second window's harm is resurrection, which is strictly worse than loss and is why
+the delete door is worth a unit of its own.
 
 **Why journal-first is sound here even though the delete is conditional-looking.** The existing
 existence probe runs first, so a no-op delete journals nothing (T4). A concurrent delete between the
