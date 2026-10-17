@@ -11,6 +11,11 @@ the **BSD 3-Clause License** (or public domain — see CONTRIBUTING.md):
 
 - [ ] I donate this contribution under the BSD 3-Clause License (this project is
       BSL 1.1 → MPL 2.0; see CONTRIBUTING.md → Contribution license note)
+- [ ] **Every commit in this PR carries a `Signed-off-by:` trailer**, added with
+      `git commit -s`. The trailer is the durable record of your grant — it lives
+      in git history; this checkbox on its own is not a commit-level record. See
+      CONTRIBUTING.md → Contribution license note → Developer Certificate of
+      Origin (DCO).
 
 ## Checklist
 
