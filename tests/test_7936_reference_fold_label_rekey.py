@@ -290,9 +290,13 @@ def test_a_key_collision_is_resolved_deterministically():
     # not row order.
     left = {"id": "dup-7936", "name": "aaa"}
     right = {"id": "dup-7936", "name": "bbb"}
-    assert _graph_view(_StubRows([_row(left), _row(right)])) == \
-        _graph_view(_StubRows([_row(right), _row(left)])), (
-            "a same-class collision depends on row order")
+    same_forward = _graph_view(_StubRows([_row(left), _row(right)]))
+    assert same_forward == _graph_view(_StubRows([_row(right), _row(left)])), (
+        "a same-class collision depends on row order")
+    # ⛔ The equality above is VACUOUS if the fallback is ever deleted (two empty
+    # views are equal), so pin the cardinality too — otherwise this half of the
+    # test silently stops testing anything (#8873 review).
+    assert len(same_forward) == 1, same_forward
 
 
 def test_a_graph_only_id_only_event_is_digest_covered(tmp_path):
@@ -329,6 +333,49 @@ def test_a_graph_only_id_only_event_is_digest_covered(tmp_path):
         "a belief write on an id-only :Event did not move the baseline — the "
         "index keys Event by `eventId` alone, while the belief fold matches it "
         "by `id` (#7936)")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# The hazard the widening must NOT introduce — a false GREEN (#8873 review)
+# ═══════════════════════════════════════════════════════════════════════
+def test_an_id_only_event_cannot_satisfy_the_presence_of_a_buried_one(tmp_path):
+    """The ``id`` fallback is DIGEST-ONLY — it must not launder a burial.
+
+    ``_graph_view`` indexes an ``:Event`` carrying ``id`` but no ``eventId``, by
+    that ``id``, because the BELIEF fold matches that shape (``{id:$id}``) and a
+    graph-only belief write there must move ``db_hash``.
+
+    If the entity COMPARISON shared that key, then burying the faithful
+    ``:Event`` and leaving an ``id``-only node at the same value would answer
+    PRESENT: the presence check finds the impostor, ``_entity_node_view``
+    compares only status + belief (identical on an impostor carrying neither),
+    and the burial reads CLEAN. **A false GREEN is the one verdict this file
+    exists to prevent**, so the comparison leg keys on the DECLARED prop alone.
+
+    Mutation: delete the ``props.get(id_prop[label]) != eid`` guard in
+    ``_entities_from_view`` -> this test reds with ``ok=True``.
+    """
+    proj, log_path, _events = _built(tmp_path)
+    try:
+        first = _verdict(log_path, proj, record_state=True)
+        assert first["ok"] is True, first
+        # Bury the faithful, eventId-keyed node; leave an `id`-only impostor AT
+        # THE SAME VALUE, i.e. exactly the shape the fallback indexes.
+        buried = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) DETACH DELETE e RETURN count(*)",
+            params={"eid": _EVENT_ID}).result_set
+        assert buried and int(buried[0][0]) == 1, buried
+        proj.g.query(
+            "CREATE (e:Event {id:$eid, name:'rekey event', eventKind:'test', "
+            "startedAt:'2026-01-01T00:00:00Z'})", params={"eid": _EVENT_ID})
+        second = _verdict(log_path, proj, record_state=False)
+    finally:
+        proj.close()
+
+    assert second["ok"] is False, (
+        "an id-only :Event satisfied the presence of the buried faithful one — "
+        f"the comparison leg must key on the DECLARED prop only: {second}")
+    assert "absent-from-graph" in json.dumps(second), second
 
 
 # ═══════════════════════════════════════════════════════════════════════

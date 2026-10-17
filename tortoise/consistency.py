@@ -2206,6 +2206,24 @@ def _entities_from_view(graph_view: dict) -> tuple[dict, dict]:
     for (label, eid), props in graph_view.items():
         if label not in id_prop or not eid:
             continue
+        # ⛔ THE COMPARISON ADDRESSES A NODE BY ITS DECLARED KEY ONLY (#8873
+        # review, P2). `_graph_view` also indexes an `:Event` that carries `id`
+        # but no `eventId`: the BELIEF fold matches that shape (`{id:$id}`), so
+        # the DIGEST must see it or a graph-only belief write there moves no
+        # hash — the residual #7936 exists to close.
+        #
+        # But admitting that fallback HERE would let an `id`-only node satisfy
+        # PRESENCE for a journal `:Event` keyed by `eventId`. Bury the faithful
+        # node, leave an impostor carrying only `id` at the same value, and the
+        # presence check finds the impostor, `_entity_node_view` (status +
+        # belief) compares equal, and the burial reads CLEAN — a false GREEN,
+        # which is the one failure mode this file must never produce.
+        #
+        # So: the digest keeps the fallback, the comparison leg does not. A
+        # fallback-keyed node is simply not an entity-carrier here, and its
+        # journal counterpart correctly reports `absent-from-graph`.
+        if props.get(id_prop[label]) != eid:
+            continue
         rec = _entity_node_view(props)
         out[(label, eid)] = rec
         name = props.get("name")
