@@ -347,10 +347,10 @@ def _as_calendar_day(value) -> _date | None:
 
 # ``cal-trigger.py::start_recording`` stores ``event.get("title", "Meeting")[:50]``,
 # so a state's ``event_title`` is capped there — and when the calendar title is
-# longer than the cap it is a hard-truncated PREFIX of it. ONLY that truncation
-# can make the two titles differ while one nests in the other, so only that
-# shape may be read as agreement. Any other nesting is not the cap's doing and
-# is UNDETERMINED (a series variant, "Weekly Standup" vs "Weekly Standup
+# longer than the cap it is a hard-truncated PREFIX of it. Only that truncation
+# can make the STORED title a strict prefix of a LONGER artifact title, so only
+# that shape may be read as agreement. Any other nesting is not the cap's doing
+# and is UNDETERMINED (a series variant, "Weekly Standup" vs "Weekly Standup
 # (Engineering)", and a legitimately shortened artifact title are the same
 # shape), so the stored title stays silent and the day arm decides.
 _TITLE_WRITER_CAP = 50
@@ -366,10 +366,11 @@ def _title_relation(want_title: str, have_title: str,
 
     ``None`` is ABSENCE of evidence: a side is absent, or the two titles nest in
     a way the writer's cap does not explain — on either side (the stored title
-    shorter than the artifact's, OR the artifact's shorter than the stored
-    one). Those name neither this event nor a different one, so the day arm
-    decides. ``"different"`` (two titles that do not nest) always disqualifies,
-    whatever their length: it names another event.
+    shorter than the artifact's, OR the artifact's shorter than the stored one),
+    or the stored title is LONGER than the cap, which a capped writer cannot
+    have produced. Those name neither this event nor a different one, so the day
+    arm decides. ``"different"`` (two titles that do not nest) always
+    disqualifies, whatever their length: it names another event.
     """
     if not want_title or not have_title:
         return None
@@ -377,10 +378,12 @@ def _title_relation(want_title: str, have_title: str,
         return "same"
     short, long_ = sorted((want_title, have_title), key=len)
     if long_.startswith(short):
-        # Agreement by TRUNCATION requires the stored side to sit at the writer's
-        # cap with the artifact's title continuing past it. Anything else that
-        # nests cannot ground on its own.
-        if (short == have_title and have_raw_len >= _TITLE_WRITER_CAP
+        # Agreement by TRUNCATION requires the stored side to sit EXACTLY at the
+        # writer's cap (it never stores more) with the artifact's title
+        # continuing past it. Anything else that nests cannot ground on its own —
+        # including a store longer than the cap, which the cap cannot have
+        # produced (a foreign/older writer), so it is not its truncation.
+        if (short == have_title and have_raw_len == _TITLE_WRITER_CAP
                 and len(long_) > len(short)):
             return "same"
         return None
@@ -416,10 +419,10 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     length. The day arm therefore decides every case where the title cannot
     SPEAK: no ``event_title`` at all, or two titles that nest without the
     writer's 50-character cap explaining it — the stored title shorter than the
-    artifact's (a series variant, or a cut-short artifact title), or the
-    artifact's shorter than the stored one (``_title_relation``). Neither arm
-    matches — or no evidence was supplied — and this returns ``[]``: refuse
-    rather than guess, so an ungrounded attendee is never written as a contact.
+    artifact's (a series variant), or the artifact's shorter than the stored one
+    (a cut-short artifact title) (``_title_relation``). Neither arm matches — or
+    no evidence was supplied — and this returns ``[]``: refuse rather than guess,
+    so an ungrounded attendee is never written as a contact.
     """
     if not os.path.exists(CAL_STATE_FILE):
         return []

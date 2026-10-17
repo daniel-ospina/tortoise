@@ -214,6 +214,26 @@ def test_truncated_title_ending_in_whitespace_still_grounds(tmp_path, monkeypatc
         MEETING_DATE, calendar_title) == ATTENDEES
 
 
+def test_a_store_longer_than_the_cap_is_not_read_as_its_truncation(
+        tmp_path, monkeypatch):
+    """A stored title ABOVE the cap cannot be the capped writer's truncation.
+
+    The in-repo writer stores at most 50 characters, so a longer store came from
+    a foreign/older writer and the cap explains nothing about it: nesting is not
+    evidence, and a differing day refuses rather than seeding the CRM from
+    whatever that store describes.
+    """
+    stored = "Weekly Engineering Sync Roadmap Planning Extended Session Q3"
+    assert len(stored) > bridge._TITLE_WRITER_CAP
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-08T09:00:00",
+                        event_title=stored)),
+    )
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, stored + " (Engineering)") == []
+
+
 def test_a_tiny_stored_title_cannot_ground_but_does_not_disqualify(
         tmp_path, monkeypatch):
     """A short prefix is not the writer's truncation, so it cannot ground.
