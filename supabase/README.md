@@ -11,6 +11,7 @@ migrations and function changes as production operations.
 |--------------------|---------------------------------|-------------------|
 | tenant-provision   | Auth hook (after_user_created)  | false (self-auth) |
 | waitlist-subscribe | Landing waitlist capture (#373) | false (anon POST) |
+| deck-view          | Gated deck view capture (#8732) | false (anon POST) |
 
 ### tenant-provision caller auth (#802)
 
@@ -70,6 +71,9 @@ supabase secrets set --project-ref ybetwichurajbfswfeqa \
 
 `hp` is a honeypot (must stay empty for humans).
 `cf-turnstile-response` is only sent when `TURNSTILE_SITE_KEY` is set.
+`source` is optional and allow-listed (`landing_page` — the default — or
+`investors`): it records which surface the signup came from, since more than one
+page feeds this list. An unrecognised value falls back to `landing_page`.
 
 Responses:
 
@@ -84,8 +88,10 @@ Responses:
 | Bad origin / method      | 403 / 405                                   |
 
 CORS: allowlist echoes premiselabs.co, tortoise.premiselabs.co,
-premise-labs.pages.dev (+ *.premise-labs.pages.dev previews, localhost:8788),
-with `Vary: Origin`, on every response path.
+app.premiselabs.co, premise-labs.pages.dev (+ *.premise-labs.pages.dev
+previews, localhost:8788), with `Vary: Origin`, on every response path. A
+refused origin gets the default allowlist entry back, never an echo of the
+caller's origin.
 
 Anti-abuse:
 
@@ -165,6 +171,10 @@ automated flip and turns that run red.
 supabase db push --project-ref ybetwichurajbfswfeqa
 supabase functions deploy waitlist-subscribe \
   --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+supabase functions deploy tenant-provision \
+  --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+supabase functions deploy deck-view \
+  --project-ref ybetwichurajbfswfeqa --no-verify-jwt
 gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co-move
 ```
 
@@ -172,7 +182,7 @@ gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co
 
 1. Confirm `TURNSTILE_SECRET_KEY` is set (captcha is REQUIRED once set —
    the form blocks submit until a token exists) and `TURNSTILE_SITE_KEY` is
-   populated in `website/index.html`.
+   populated in `website/index.html` and `website/investors.html`.
 2. First `supabase db push`: confirm the project's `supabase_migrations`
    history covers 0001-0004 (`supabase migration list`); if not, baseline
    with `supabase migration repair --status reverted 0001..0004` first so
@@ -185,3 +195,62 @@ gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co
 6. Resubmit the same email -> "Already subscribed" message, no second email.
 7. Unsubscribe is a mailto (`hello@premiselabs.co`) processed manually —
    the operator removes the row / excludes the address from launch sends.
+8. With a real Turnstile site key set: unlock the gate, then confirm the
+   mailing-list widget renders correctly — on a gated first visit its container
+   (`#stay-in-touch`) is `display: none` while the widget loads.
+9. Verify the GATE's write path too: in a fresh/private window (the unlock is
+   remembered in `localStorage`, so a browser that already unlocked for step 8
+   will not render the gate again — clear `tortoise-investors-access` if you
+   reused one), unlock with a test address, then confirm a row in `deck_views`
+   (`deck = 'investors'`, `viewed_at` recent). The gate fails open on our own
+   failures by design, so a broken write path — migration not applied,
+   mis-scoped key, RLS misconfig — is otherwise invisible: the reader still
+   sees the deck and no row is written, which looks exactly like nobody having
+   visited.
+
+### deck-view contract (#8732)
+
+`POST /functions/v1/deck-view` with a JSON body:
+
+```json
+{
+  "email": "reader@example.com",
+  "hp": "",
+  "deck": "investors"
+}
+```
+
+Writes one row to `deck_views` (append-only) and returns 200 `{ok:true}`. It
+sends **no** email and never touches `waitlist_subscribers`: opening a gated deck
+records a view, and joining the mailing list stays a separate act (`POST
+/functions/v1/waitlist-subscribe`, with `source: "investors"` when it comes from
+the same page). `deck` is allow-listed and falls back to `investors`. There is no
+captcha on this endpoint; the honeypot and a per-IP limit are what bound it.
+
+Responses:
+
+| Case                     | Response                     |
+|--------------------------|------------------------------|
+| Recorded view            | 200 {ok:true}                |
+| Honeypot filled (bot)    | 200 {ok:true} silently       |
+| CORS preflight           | 204, no body                 |
+| Rate limited             | 429 with `Retry-After: 3600` |
+| Invalid email / body     | 400                          |
+| Bad origin / method      | 403 / 405                    |
+| Storage failure          | 500                          |
+
+CORS: the same allowlist as waitlist-subscribe (`https://premiselabs.co`,
+`https://tortoise.premiselabs.co`, `https://app.premiselabs.co`,
+`https://premise-labs.pages.dev`, `*.premise-labs.pages.dev` previews,
+localhost:8788), with `Vary: Origin`, on every response path. A refused origin
+gets the default allowlist entry back, never an echo of the caller's origin.
+
+Anti-abuse:
+
+- IP rate limit (30/hr, keyed on the gateway-appended XFF entry, best-effort
+  per-isolate) — higher than the list's 10/hr because a deck view is a cheaper,
+  more repeatable act than a subscribe
+- honeypot field
+- no captcha: this endpoint verifies no Turnstile token, which is why the gate
+  form renders no widget (the mailing-list form renders one once a site key is
+  provisioned, since `waitlist-subscribe` does verify)

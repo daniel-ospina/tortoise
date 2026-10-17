@@ -44,6 +44,10 @@ dedicated `test-track-b` job (must-pass — both sentinels shipped). `-m track_b
    markers (incl. the ELEVEN-key warnings table) are asserted by the A12
    conformance test with a skip-until-landed predicate; the suite is green
    with the skip, and the marker-grep enforces the moment #1057 lands.
+   ⚠️ 2026-10-15 correction: the closed set is now **TWELVE** keys (#8499 added
+   `point_mediated_route`), and the marker-grep reads the in-repo SERVED copy
+   rather than the agent-infra symlink (#8066). This entry records the state at
+   epic close; it is not current truth.
 2. **hosted_api #909 bridge** contentHash passthrough — scoped to #909.
 
 **Epic acceptance: MET** (all Track A E2Es green in default CI; Track B

@@ -6,7 +6,8 @@
 #      `flip-gate` in ci.yml; the operator additionally runs it --live with
 #      prod creds: TORTOISE_DB_URI + SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY).
 #   2. Dispatch `supabase-deploy` (workflow_dispatch-only since #771):
-#      migrations + waitlist-subscribe + tenant-provision Edge Functions.
+#      migrations + waitlist-subscribe + tenant-provision + deck-view Edge
+#      Functions.
 #   3. DISPATCH THIS WORKFLOW — the app flips to reading Supabase (#767).
 #      Steps 2+3 are the "single deploy": never run step 3 without step 2
 #      (the app would read Supabase before the Edge Function writes it) and

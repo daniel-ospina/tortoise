@@ -22,8 +22,10 @@ redislite has no per-graph FalkorDB users — the app layer alone enforces):
      (same shared helper + auth gate — team:manage or legacy full access;
      strict bool/null; 'default' + custom gids; 404 unknown) so the
      recording-off 409 can point callers at a REAL surface; the graph-layer
-     409 copy names both the PATCH and the MCP tool (REST/MCP same text —
-     shared _capture_session_impl).
+     409 copy names all THREE writable surfaces — the PATCH, the MCP tool
+     and (since #2650) the dashboard Graphs tab — plus the two key classes
+     the shared auth gate admits (team:manage scope / legacy full access),
+     with REST/MCP surfacing the SAME text (shared _capture_session_impl).
 
 Mirror helpers from tests/test_tenancy_spine.py (mint matrix + temp-db
 patch/restore in ONE scope — cross-file pollution lesson).
@@ -36,6 +38,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._verdict import verdict_client
 from tests.test_hosted_api import _patch_tortoise_sdk_init
 from tortoise.auth import hash_api_key
 
@@ -65,7 +68,7 @@ def _spine_env(tmp_path):
     def_pt = default_sdk.create_point(
         "default-secret", content="default-secret")
     default_sdk.close()
-    tc = TestClient(ha_mod.app)
+    tc = verdict_client(ha_mod.app)
     return sdk, tid, g, tc, def_pt["id"]
 
 
@@ -663,11 +666,13 @@ def test_mcp_graph_set_recording_requires_hosted_mode():
 
 
 def test_capture_409_graph_layer_names_real_surfaces(spine_env, monkeypatch):
-    """#2302: the graph-layer recording-off 409 routes callers to surfaces
-    that EXIST — the REST PATCH AND the new MCP tool (interpolating the
-    concrete graph id). REST and MCP surface the SAME text (shared
-    _capture_session_impl — the S11 drift invariant), and neither surface
-    writes a Session."""
+    """#2302/#2650: the graph-layer recording-off 409 routes callers to
+    surfaces that EXIST — the REST PATCH, the MCP tool AND the dashboard
+    Graphs tab (the human surface #2650 added), interpolating the concrete
+    graph id and naming the two key classes the shared gate admits
+    (team:manage / legacy full access). REST and MCP surface the SAME text
+    (shared _capture_session_impl — the S11 drift invariant), and neither
+    surface writes a Session."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     sdk, tid, g, tc, _def_pt = spine_env
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
@@ -685,6 +690,16 @@ def test_capture_409_graph_layer_names_real_surfaces(spine_env, monkeypatch):
     assert "PATCH /v1/graphs/" in rest_detail and \
         f"/v1/graphs/{g['graph_id']}" in rest_detail, rest_detail
     assert "tortoise_graph_set_recording" in rest_detail, rest_detail
+    # #2650: the THIRD surface — the dashboard Graphs tab's per-graph
+    # three-state control (shipped after this copy was written) is the one
+    # a human owner/admin can actually use, so the copy must name it too.
+    assert "dashboard" in rest_detail and "Graphs" in rest_detail, rest_detail
+    # #2650: the authorization claim matches the shared core's real gate —
+    # a team:manage scope OR the legacy full-access class (pinned for the
+    # MCP twin by test_mcp_graph_set_recording_permission_matrix below).
+    # The copy must not tell a caller holding the legacy class that it is
+    # unqualified.
+    assert "team:manage" in rest_detail and "legacy" in rest_detail, rest_detail
 
     def _capture_mcp():
         from tortoise.mcp_server import tortoise_session_capture
@@ -974,7 +989,7 @@ def _sb_env(monkeypatch, fake_cls=None):
     tmpdir = _tempfile.mkdtemp()
     patched = patched_tortoise_sdk(os.path.join(tmpdir, "sb.db"))
     patched.__enter__()
-    tc = TestClient(ha_mod.app)
+    tc = verdict_client(ha_mod.app)
     tc.__enter__()
     ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: {"org_id": _SB_TEAM, "key_id": None,
@@ -1059,3 +1074,31 @@ def test_patch_rename_supabase_unique_violation_maps_409_not_500(monkeypatch):
         assert r.json()["detail"] == "Graph name already exists"
     finally:
         _sb_teardown(tc, handles)
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/sessions`` is the
+    route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/sessions")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(ha_mod.app) as raw:
+        assert raw.post("/v1/sessions", json={}).status_code == 504
+    with verdict_client(ha_mod.app) as tc, \
+            pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/sessions", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/sessions answered" in message

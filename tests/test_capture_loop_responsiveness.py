@@ -44,7 +44,7 @@ from contextlib import suppress
 import httpx
 import pytest
 
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_async_client
 
 # Hosted-surface tests reuse test_hosted_api's authenticated TestClient
 # fixture (temp-DB SDK patching + the session-recording consent seed), which
@@ -57,6 +57,21 @@ from tests.test_hosted_api import (
     client as client,
 )
 from tortoise.sdk import TortoiseSDK
+
+
+def _verdict_async_client(app, **kwargs):
+    """#8582: the async client seam for this module.
+
+    These responsiveness tests build their own `httpx.AsyncClient` around an
+    ASGI transport (so they can drive concurrent requests and tick a loop),
+    rather than going through the `client` fixture `tests.test_hosted_api`
+    provides. The seam is the construction: a transport wait-bound refusal
+    (#3834) reaching ANY read bound from one of these clients is a NON-ANSWER —
+    INCONCLUSIVE, never the `assert 504 == 200` FAIL the #8000 lane measured 16
+    of in this file.
+    """
+    return verdict_async_client(app, **kwargs)
+
 
 # A stall long enough to be unambiguous, short enough to keep CI quick.
 STALL_S = 4.0
@@ -245,9 +260,7 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
                 await asyncio.sleep(0.05)
                 ticks.append(time.perf_counter())
 
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             tick = asyncio.create_task(_ticker())
             # Tick FIRST: the ticker must already be mid-sleep when the
             # capture blocks, otherwise a frozen loop would not register.
@@ -566,9 +579,7 @@ def test_health_answers_while_the_default_executor_is_saturated(
 
         try:
             await asyncio.sleep(0.3)  # let the hogs claim every worker
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with _verdict_async_client(app, base_url="http://test") as ac:
                 asyncio.BaseEventLoop.run_in_executor = _record_submission
                 try:
                     started = time.perf_counter()
@@ -660,9 +671,7 @@ def test_capture_capacity_limit_fails_fast_instead_of_queueing(
     monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             first = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
             for _ in range(200):
@@ -730,9 +739,7 @@ def test_capture_admission_is_reserved_before_the_extraction(client, monkeypatch
     monkeypatch.setattr(ha_mod, "_capture_session_impl", _parked_impl)
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             first = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
             for _ in range(200):
@@ -792,9 +799,7 @@ def test_capture_slot_is_held_until_the_worker_finishes(client, monkeypatch):
     monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             task = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
             for _ in range(200):
@@ -940,9 +945,7 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         entered.clear()
         release.clear()
         monkeypatch.setattr(ha_mod, "_CAPTURE_MAX_IN_FLIGHT", 1)
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             rest = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
             for _ in range(400):
@@ -1017,9 +1020,7 @@ def test_same_session_retry_during_an_in_flight_capture_is_refused(
     receipt_key = f"session_capture_receipt_{_HARNESS}"
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
             for _ in range(400):
                 if entered.is_set():
@@ -1109,9 +1110,7 @@ def test_in_flight_session_key_outlives_the_extraction(client, monkeypatch):
                "harness": _HARNESS}
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
             for _ in range(400):
                 if extraction_entered.is_set():
@@ -1187,9 +1186,7 @@ def test_cancelled_after_extraction_marks_the_attempt_failed(client, monkeypatch
                "harness": _HARNESS}
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
             for _ in range(400):
                 if extraction_entered.is_set():
@@ -1268,9 +1265,7 @@ def test_session_key_is_held_until_the_marker_write_lands(client, monkeypatch):
     key = "team-001:org_team-001:s-marker-hold-3129"
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             # Independent ticker: proves the loop keeps running while the
             # marker is parked in its worker thread (the #3060 invariant).
             ticks = {"n": 0}
@@ -1389,9 +1384,7 @@ def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
     key = "team-001:org_team-001:s-cancel-3129"
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
             for _ in range(200):
                 if entered.is_set():
@@ -1478,9 +1471,7 @@ def test_cancelled_m2_capture_records_the_m2_lane(client, monkeypatch):
     key = "team-001:org_team-001:s-m2-cancel-3129"
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
             for _ in range(200):
                 if entered.is_set():
@@ -1587,9 +1578,7 @@ def test_cancelled_extraction_disabled_capture_records_the_disabled_lane(
                "harness": _HARNESS}
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
             for _ in range(200):
                 if entered.is_set():
@@ -2070,9 +2059,7 @@ def test_capture_under_a_legacy_default_bound_key_is_refused(client,
                "harness": _HARNESS}
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
             # Wait for ADMISSION — the handler's FIRST gate, before any SDK /
             # projection / embedding work — not for the extraction. (Waiting on
@@ -2224,9 +2211,7 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
     monkeypatch.setattr(sdk_mod, "_write_capture_turns", _wrapped_writer)
 
     async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             return await ac.post("/v1/sessions",
                                  json={"conversation": _capture_conv(turns),
                                        "session_id": sid})
@@ -2345,9 +2330,7 @@ def test_capture_turn_store_is_one_batched_implementation(client, monkeypatch):
     sid = "batched-3086"
 
     async def _post():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as ac:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
             return await ac.post(
                 "/v1/sessions",
                 json={"conversation": _capture_conv(CAPTURE_TURNS_SMALL),
@@ -2462,3 +2445,41 @@ def test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop(
         f"total, cap {_MAX_GRAPHS_PER_CAPTURE} = one first bootstrap for the "
         f"tenant graph and one for the registry) — every projection "
         f"construction is bootstrapping again (#4465)")
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8582: the deterministic refusal pin for this module's client seams.
+
+    ``POST /v1/sessions`` is the route the #8000 lane measured 16 FAIL reads on
+    in this file, and it is not exempt from the bound. No load and no wait: the
+    bound is forced to 0 s, so the refusal comes from the REAL
+    ``WaitBoundMiddleware``. The plain-client control is the non-vacuity leg —
+    it would pass unchanged if the route were ever exempted, turning this pin
+    red instead of letting the conversion silently become dead code.
+    """
+    import asyncio
+
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT, app
+
+    assert ("POST", "/v1/sessions") not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+
+    async def _plain_client_status() -> int:
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test") as ac:
+            return (await ac.post("/v1/sessions", json={})).status_code
+
+    assert asyncio.run(_plain_client_status()) == 504
+
+    async def _through_the_seam() -> None:
+        async with _verdict_async_client(app, base_url="http://test") as ac:
+            await ac.post("/v1/sessions", json={})
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        asyncio.run(_through_the_seam())
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/sessions answered" in message

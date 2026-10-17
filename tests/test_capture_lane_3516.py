@@ -51,20 +51,23 @@ def _session_lane(sdk, sid: str) -> str | None:
 
 
 def _post_capture(client, payload: dict):
-    """POST /v1/sessions, tolerating the embedded lane's #3834/#4098 504.
+    """POST /v1/sessions for this lane's assertions.
 
-    The hosted lane's 10s transport wait bound measures the request that OPENS
-    the embedded graph; on a loaded box that open alone exceeds it and the
-    request is refused with a 504 whose own body says the work may still have
-    completed and that a retry is safe when repeating the operation is safe.
-    Capture IS idempotent by ``session_id`` and the lane is first-writer-wins,
-    so a single retry is sound — it makes these assertions about the LANE
-    rather than about box load.
+    #8582 — the retry this helper used to carry is GONE, deliberately. The
+    hosted lane's 10 s transport wait bound measures the request that OPENS the
+    embedded graph; on a loaded box that open alone exceeds it, and the request
+    was refused with a 504 which this helper re-issued once. That was a
+    mitigation for the very defect #5049 rule 1 names: the test's verdict was a
+    function of box load.
+
+    `tests/test_hosted_api.py::client` — this fixture — is now built through
+    `tests._verdict.verdict_client`, so the refusal is a NON-ANSWER: the request
+    SKIPs as INCONCLUSIVE naming the bound instead of reaching a re-issue. The
+    retry branch could no longer run, and keeping it would leave a docstring
+    that contradicts the code. The lane's assertions are unchanged; under load
+    they are reported as unobserved rather than retried into a verdict.
     """
-    r = client.post("/v1/sessions", json=payload)
-    if r.status_code == 504:
-        r = client.post("/v1/sessions", json=payload)
-    return r
+    return client.post("/v1/sessions", json=payload)
 
 
 # ── the boundary contract (no DB) ──────────────────────────────────────────

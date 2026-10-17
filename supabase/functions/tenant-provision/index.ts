@@ -83,8 +83,9 @@ const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
 // CORS headers the browser blocks EVERY signup with "No
 // 'Access-Control-Allow-Origin' header" (production incident 2026-08-13).
 //
-// ALLOWED_ORIGINS + ORIGIN_SUFFIXES are kept identical to waitlist-subscribe
-// (parity test: tests/test_provisioning_edge_function.py — change both
+// ALLOWED_ORIGINS + ORIGIN_SUFFIXES are kept identical to the other declaring
+// functions — deck-view, tenant-provision, waitlist-subscribe (parity test:
+// tests/test_provisioning_edge_function.py — change every declaring function
 // together). LOCAL_ORIGINS handling deliberately DIVERGES: tenant-provision
 // accepts ANY localhost/127.0.0.1 port because welcome.html's `isLocal`
 // treats every local port as local (wrangler --port, python http.server...),

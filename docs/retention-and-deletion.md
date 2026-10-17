@@ -21,6 +21,8 @@ related:
     note: "Owner ruling: account memory is the ACCOUNT's property — a person's erasure deletes the identity layer and severs the analytics linkage, and never reaches into the account's memory. The account-side PII filter / selective delete is DEFERRED (not prioritised); this document carries the boundary so a well-meaning adjacent change cannot quietly reverse it."
   - issue: 8032
     note: "Auth-session-store GC grace registered 2026-10-12: the D1 `sessions` table keeps a dead row for a grace past its own `expires_at` before deleting it. An implementation window for an internal credential store — registered here because this document is where a window may be stated, but it is NOT one of the deletion promise's windows and changes no customer-facing wording."
+  - issue: 7351
+    note: "Derived kind-index cache registered 2026-10-15: `data/kind_index/*.npz` is regenerable from its spec — bounded LRU (a named constant), never user content, and carrying no retention window. Registered so an ops reader can see that deleting it is always safe."
 ---
 
 # Retention and Deletion — the one promise
@@ -104,6 +106,7 @@ this document:
 | `tortoise/retention.py` `RESTORE_WINDOW_DAYS` / `RESTORE_WINDOW_HOURS` | **Sole authority for the restore window** |
 | `tortoise/backup_config.py` `retention_hourly` / `retention_daily` / `retention_weekly` | **Sole authority for the backup-hold counts** (a different concept from the restore window) |
 | `tortoise/backup_config.py` `LOCK_DAYS_MAX` | the bucket-lock bound; must stay strictly below the restore window (`RESTORE_WINDOW_DAYS - 1`) |
+| `tortoise/raw_state.py` `RAW_DELETION_MARKER_TTL` | **Sole authority for the deletion-marker guarantee window** (**10 days** — Cassandra's `gc_grace_seconds` default, the storage-layer canon the #3998 ruling rests on). Metadata about the LINK back to the raw, never a copy of it and never a retention period on user content (R1); after it a (future, journalled) collection pass MAY drop the marker. Registered so a restatement of the number is traceable to one authority; the availability axis itself is recorded at `docs/ONTOLOGY.md` §4.6. |
 | `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` | **Sole authority for the D1 auth-session-store grace** — how long a `sessions` row is kept past its own `expires_at` before `sweepExpiredSessions` deletes it (#8032). Not a deletion-promise window; see the table above. |
 
 Everything else is a **derived alias**, never independently set:
@@ -273,6 +276,23 @@ and it is exempt from the "link or be a named constant" rule by the same logic
 as the operational event store. The control-plane audit trail lives in
 `audit_events`; no deletion here destroys an audit record.
 
+## A different axis: the derived kind-index cache (#7351)
+
+`DEFAULT_CACHE_DIR` (`data/kind_index/*.npz`, `tortoise/kind_index.py`) is the
+classifier's content-addressed kind-embedding index. Every file is **derived** —
+regenerated from its spec on demand — so it is not user content, holds no
+personal data, and carries **no retention window**: deleting any file, or the
+whole directory, is always safe and costs one re-embed. It is exempt from the
+"link or be a named constant" rule by the same logic as the operational event
+store.
+
+It is nonetheless **bounded**, because its key space is tenant-growable: the
+spec varies per graph's installed-namespace gate (#5163), so `persist` added
+one npz per distinct gate and nothing deleted one (#7351). `persist` now sweeps
+the directory to `_MAX_PERSISTED_INDEXES` least-recently-used files (recency is
+refreshed on `load`, so a hot gate's index is not evicted for merely being the
+oldest *write*), and eviction is a re-embed, never a wrong answer.
+
 ## A different axis: the product-usage record (#3843)
 
 The owner decided (#3843, 2026-09-17) to keep a rich **per-capture, per-team**
@@ -362,8 +382,11 @@ not a whitelist — a file outside the set above may still link here.
 
 **Named implementation constants** (exempt by design): `tortoise/retention.py` and
 `tortoise/backup_config.py` are exempt whole-file (every line is the authority);
-`tortoise/{backup_sweep,hosted_api,sdk,supabase_control}.py` are exempt only on
-lines that name a canonical constant. `website/apps/dashboard/src/graphs.test.js`
+`tortoise/{backup_sweep,hosted_api,sdk,supabase_control,raw_state}.py` are exempt
+only on lines that name a canonical constant. `docs/ONTOLOGY.md` is exempt only on
+lines that name a canonical constant too (its §4.6 row does carry a bare window
+number, but it names `RAW_DELETION_MARKER_TTL` on that same line — the constant,
+not the absence of a number, is what makes the line traceable). `website/apps/dashboard/src/graphs.test.js`
 is derived: it imports `TRASH_GRACE_DAYS` from `graphs.js` rather than restating
 the number.
 

@@ -4701,6 +4701,13 @@ def run_evaluation(
                         # points AND chunks in the FULL reader context) —
                         # wired end-to-end alongside reader_evidence@k.
                         "reader_surface@k": ret.get("reader_surface@k"),
+                        # #2516 (C1, amended): the FACT-GRAIN answer-evidence
+                        # leg (binary: the assembled context shares >=3
+                        # contiguous verbatim words with the gold answer;
+                        # N/A on questions with no gold answer) — wired
+                        # end-to-end so the report's aggregate and the
+                        # per-category rows are live, not inert.
+                        "answer_evidence@k": ret.get("answer_evidence@k"),
                         # Task 0 (#1745): ranked ids + evidence-turn matches
                         # populated for BOTH arms (the pilot's context composition
                         # was unreconstructable — 0/50); ranked_ids_pre_boost is
@@ -5422,6 +5429,11 @@ def outcomes_to_report(
                 # carries it — pre-#1948 checkpoints resume without
                 # KeyError).
                 "reader_surface@k",
+                # #2516 (C1, amended): the fact-grain answer-evidence leg
+                # rides the projection (read via o.get — absent until the
+                # outcome carries it, so a pre-#2516 checkpoint resumes
+                # without KeyError).
+                "answer_evidence@k",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",

@@ -461,7 +461,7 @@ def test_ingest_one_event_per_issue(shared_proj, monkeypatch):
     assert [r[0] for r in rows] == ["Object"]
 
     # produces edge lands on the REAL pm:issue Object (name {repo}#{number}),
-    # not a name-stub with a random id.
+    # not a name-stub minted by the event path.
     rows = proj.g.query(
         "MATCH (e:Event {eventId:'github-issue-test/repo-42-created'})"
         "-[:produces]->(o:Object) RETURN o.name, o.objectKind, o.id"

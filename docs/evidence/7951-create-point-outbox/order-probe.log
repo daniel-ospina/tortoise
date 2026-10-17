@@ -1,0 +1,36 @@
+relation 'competesWith': semantics 'opposes' is retired in favour of 'mutuallyExclusive' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+relation 'blocks' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'blocks': the declaration binds no write path — 'blocks' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='blocks') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'partOfSprint' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'partOfSprint': the declaration binds no write path — 'partOfSprint' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='partOfSprint') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'assignedTo' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'assignedTo': the declaration binds no write path — 'assignedTo' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='assignedTo') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'onBoard' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'onBoard': the declaration binds no write path — 'onBoard' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='onBoard') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'funds': semantics 'funds' is retired in favour of 'transacts' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+relation 'producedBy': semantics 'produces' is retired in favour of 'causes' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+relation 'holds': semantics 'holds' is retired in favour of 'ownedBy' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+pack registry /Users/danielospina/Documents/GitHub/tortoise/.worktrees/7951-atomic-write/packs: 1 pack(s) carry a non-blocking lifecycle declaration note — a `statuses` word shared with the connector vocabulary, or a bare object kind claimed by more than one pack (see registry.lifecycle_warnings): venture: kindDefs 'investment': 'statuses' reuses the shared connector vocabulary word(s) active — this kind owns its own state (the built-in connector fold does not apply to it), but the spelling is ambiguous to a reader; rename or record the intent
+rebuild: the event-log dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tt7951-6j2ck9k0/events differs from the embedded DB dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tt7951-6j2ck9k0 — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tt7951-6j2ck9k0/events` to recover (#2943)
+Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+rebuild: the event-log dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tt7951-fail-8x6r4jxt/events differs from the embedded DB dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tt7951-fail-8x6r4jxt — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tt7951-fail-8x6r4jxt/events` to recover (#2943)
+Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+Point prop 'content_hash' dropped — deny-listed (recompute/EP-owned, #2795); not restorable from the payload
+Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+journal_backed (guard armed): True
+create_point order:              ['journal-PointAdded', 'cache-Point-write']
+ORDERING VERDICT: JOURNAL-FIRST
+journal PointAdded records:      1
+rebuild_all materialised Point:  1
+live/replay property map match:  True
+live/replay edge set match:      True (2 edges)
+REPLAY VERDICT: RECORD REPRODUCES THE LIVE NODE
+failed cache write raised:        RuntimeError
+record committed despite failure: 1
+replay healed the cache:         1
+COMMIT VERDICT: COMMITTED + REPLAY-HEALABLE
+RAW HANDLE LANE (proj.g.query):  SUCCEEDED, rows = [['via-raw-handle']]
+RESIDUAL: the raw handle is NOT closed — recorded on #7951 (the OVERRIDES: line); increment 1 routes one door, not 288.

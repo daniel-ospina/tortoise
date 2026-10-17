@@ -495,3 +495,183 @@ class TestIndexMemoIsBoundedAndThreadSafe:
         monkeypatch.setattr(os, "umask", recorder)
         idx.persist(cache_dir=tmp_path)
         assert calls == [], f"persist() mutated the process umask: {calls}"
+
+
+class TestPersistedSetIsBounded:
+    """#7351: after #5163 the spec — and so the content-addressed FILENAME —
+    varies per installed-namespace gate, and the gate space is tenant-growable
+    (``pack_state.graph_kind_namespaces`` + an unvalidated ``objectKind``), so
+    ``persist`` added one npz per distinct gate with nothing ever deleting one.
+    These pin the retention policy: the directory is bounded at
+    ``_MAX_PERSISTED_INDEXES`` least-recently-USED files, eviction is
+    best-effort and never touches the file just written or an in-flight temp,
+    and a read that loses its file to the sweep degrades to a miss instead of
+    raising."""
+
+    @staticmethod
+    def _variant(spec: dict, n: int) -> dict:
+        """A spec that differs from the base only in one kind's surface —
+        i.e. a different gate's candidate set, and therefore a different
+        content-addressed key."""
+        variant = {k: dict(v) for k, v in spec.items()}
+        key = "core:Project"
+        variant[key] = dict(variant[key], text=f"{variant[key]['text']} #variant-{n}")
+        return variant
+
+    @classmethod
+    def _seed(cls, spec, tmp_path, count, *, base_mtime=1_000_000.0):
+        """``count`` distinct-key npz files, mtimes increasing with ``n``.
+        Returns ``[(variant_spec, path)]`` oldest first. The default cap is
+        16, so seeding never evicts."""
+        import os
+
+        seeded = []
+        for n in range(count):
+            variant = cls._variant(spec, n)
+            idx = KindIndex.build(variant, encoder=StubEncoder(), persist=False)
+            path = idx.persist(cache_dir=tmp_path)
+            os.utime(path, (base_mtime + n, base_mtime + n))
+            seeded.append((variant, path))
+        return seeded
+
+    def test_sweep_keeps_the_newest_and_unlinks_the_oldest(self, spec, tmp_path):
+        import tortoise.kind_index as ki
+
+        seeded = self._seed(spec, tmp_path, 5)
+        evicted = ki._sweep_persisted_indexes(
+            tmp_path, keep_path=seeded[-1][1], max_files=2)
+        assert sorted(evicted) == sorted(p for _, p in seeded[:3])
+        assert sorted(p.name for p in tmp_path.glob("*.npz")) == \
+            sorted(p.name for _, p in seeded[3:])
+
+    def test_sweep_is_a_noop_at_or_below_the_cap(self, spec, tmp_path):
+        import tortoise.kind_index as ki
+
+        seeded = self._seed(spec, tmp_path, 2)
+        assert ki._sweep_persisted_indexes(
+            tmp_path, keep_path=seeded[-1][1], max_files=2) == []
+        assert all(p.exists() for _, p in seeded)
+
+    def test_sweep_never_evicts_the_just_written_file(self, spec, tmp_path):
+        """A coarse mtime granularity ties every file, so the victim is chosen
+        by NAME — and the file the caller JUST persisted can land in that tail.
+        Evicting it would make ``persist`` a no-op for a fresh key and re-embed
+        on every call, which is strictly worse than holding one file over the
+        cap."""
+        import os
+
+        import tortoise.kind_index as ki
+
+        seeded = self._seed(spec, tmp_path, 3)
+        # Force the tie AND put ``keep`` at the name-ordered tail, i.e. exactly
+        # where the sweep would evict it if the guard were missing.
+        keep = tmp_path / ("0" * 32 + ".npz")
+        seeded[0][1].rename(keep)
+        for path in [keep] + [p for _, p in seeded[1:]]:
+            os.utime(path, (1_000_000.0, 1_000_000.0))
+        evicted = ki._sweep_persisted_indexes(tmp_path, keep_path=keep, max_files=1)
+        assert keep.exists(), "the file just written must never be evicted"
+        assert keep not in evicted
+        assert len(evicted) == 1, "the rank-2 file is still evicted for the cap"
+
+    def test_sweep_never_touches_an_in_flight_temp(self, spec, tmp_path):
+        """The per-writer save temp (dot-prefixed) is another writer's
+        not-yet-renamed file: unlinking it would break its atomic ``replace``."""
+        import tortoise.kind_index as ki
+
+        seeded = self._seed(spec, tmp_path, 1)
+        temp = tmp_path / f".{seeded[0][1].stem}.4242.deadbeef.tmp.npz"
+        temp.write_bytes(b"in-flight")
+        ki._sweep_persisted_indexes(tmp_path, keep_path=tmp_path / "other.npz",
+                                    max_files=0)
+        assert temp.exists(), "an in-flight temp was swept"
+        assert not seeded[0][1].exists(), \
+            "the real file beyond the cap must still be swept"
+
+    def test_sweep_never_raises(self, spec, tmp_path, monkeypatch):
+        """It runs on the capture write path — a cache must never break a
+        write (missing dir, failing ``unlink``)."""
+        import tortoise.kind_index as ki
+
+        assert ki._sweep_persisted_indexes(tmp_path / "absent",
+                                           keep_path=tmp_path / "x.npz",
+                                           max_files=0) == []
+        self._seed(spec, tmp_path, 2)
+
+        def boom(self, *a, **k):
+            raise PermissionError("read-only")
+
+        monkeypatch.setattr(Path, "unlink", boom)
+        assert ki._sweep_persisted_indexes(tmp_path,
+                                           keep_path=tmp_path / "x.npz",
+                                           max_files=0) == []
+
+    def test_persist_bounds_the_directory(self, spec, tmp_path, monkeypatch):
+        """The integration pin: N+1 distinct-gate persists leave at most N npz
+        files, and the evicted ones are the least-recently-written."""
+        import os
+
+        import tortoise.kind_index as ki
+
+        monkeypatch.setattr(ki, "_MAX_PERSISTED_INDEXES", 3)
+        written = []
+        for n in range(5):
+            idx = KindIndex.build(self._variant(spec, n), encoder=StubEncoder(),
+                                  persist=True, cache_dir=tmp_path)
+            path = idx.persist(cache_dir=tmp_path)
+            os.utime(path, (1_000_000.0 + n, 1_000_000.0 + n))
+            written.append(path)
+        assert len(list(tmp_path.glob("*.npz"))) == 3
+        assert written[-1].exists()
+        assert not written[0].exists() and not written[1].exists()
+
+    def test_failed_save_evicts_nothing(self, spec, tmp_path, monkeypatch):
+        """The sweep runs AFTER a successful ``replace`` only: a save that
+        raises must not take a peer index down with it."""
+        import numpy as np
+
+        import tortoise.kind_index as ki
+
+        seeded = self._seed(spec, tmp_path, 3)
+        monkeypatch.setattr(ki, "_MAX_PERSISTED_INDEXES", 1)
+        idx = KindIndex.build(self._variant(spec, 99), encoder=StubEncoder(),
+                              persist=False)
+
+        def boom(*a, **k):
+            raise RuntimeError("save failed")
+
+        monkeypatch.setattr(np, "savez", boom)
+        with pytest.raises(RuntimeError):
+            idx.persist(cache_dir=tmp_path)
+        assert all(p.exists() for _, p in seeded), "a failed save evicted peers"
+
+    def test_load_degrades_to_a_miss_when_the_file_vanished(
+            self, spec, tmp_path, monkeypatch):
+        """The sweep can unlink between ``exists()`` and the open: that is a
+        miss (the caller rebuilds), never an exception out of the classifier."""
+        import tortoise.kind_index as ki
+
+        variant = self._variant(spec, 0)
+        idx = KindIndex.build(variant, encoder=StubEncoder(), persist=False)
+        assert idx.persist(cache_dir=tmp_path).exists()
+
+        class _Vanished:
+            @staticmethod
+            def load(*a, **k):
+                raise FileNotFoundError("evicted by a concurrent sweep")
+
+        monkeypatch.setattr(ki, "np", _Vanished)
+        assert KindIndex.load(variant, cache_dir=tmp_path) is None
+
+    def test_load_refreshes_recency(self, spec, tmp_path):
+        """A gate READ constantly but written once keeps its npz: the sweep
+        evicts by least-recently-USED, so a load bumps the mtime that ranks it
+        (otherwise a burst of new gates evicts the hot index and every boot
+        re-embeds it — the exact cost the persisted set exists to avoid)."""
+        import os
+
+        seeded = self._seed(spec, tmp_path, 1)
+        variant, path = seeded[0]
+        os.utime(path, (1_000_000.0, 1_000_000.0))
+        assert KindIndex.load(variant, cache_dir=tmp_path) is not None
+        assert path.stat().st_mtime > 1_000_000.0

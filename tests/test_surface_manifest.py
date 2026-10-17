@@ -1609,6 +1609,54 @@ def test_the_8171_advisory_field_is_recorded_on_both_create_doors():
         )
 
 
+def test_the_2350_precision_fields_are_recorded():
+    """#2350's new response keys must be RECORDED, not left to the reviewing half.
+
+    The additive precision layer changes two PUBLIC reply shapes —
+    ``tortoise_search`` hits and ``sdk:get_historical_knowledge`` — and
+    CONTRIBUTING.md's surface rule says an added field on an existing response
+    "does not gate as an addition, but it must still be recorded". `check`
+    anchors the rows that ARE recorded but cannot see a field nobody recorded
+    (nothing inspects response bodies at runtime). Fails on the pre-#2350-record
+    manifest, which carries none of these rows.
+    """
+    block = _manifest()["response_fields"]
+    recorded = {(rf["response"], rf["field"]) for rf in block}
+    for response, field in (
+        ("tortoise_search", "valid_from_precision"),
+        ("tortoise_search", "valid_to_precision"),
+        ("tortoise_search", "end_state"),
+        ("sdk:get_historical_knowledge", "end_state_unknown"),
+        ("sdk:get_historical_knowledge", "indeterminate_end_ids"),
+    ):
+        assert (response, field) in recorded, (
+            f"the {field!r} field {response} returns is not recorded in "
+            "config/surface-manifest.yml::response_fields"
+        )
+    # The chain/valid_point/candidates/nearest triple is one composite row.
+    assert any(
+        rf["response"] == "sdk:get_historical_knowledge"
+        and "valid_from_precision" in rf["field"]
+        and "end_state" in rf["field"]
+        for rf in block
+    ), "the get_historical_knowledge precision triple is not recorded"
+
+
+def test_the_2350_precision_fields_are_rendered():
+    """The record must reach the list the owner reviews (the same rule as
+    ``test_recorded_response_field_is_rendered_in_the_list``), so a row that
+    exists only in the YAML is not a record either."""
+    text = RENDERED.read_text(encoding="utf-8")
+    for response, field in (
+        ("tortoise_search", "valid_from_precision"),
+        ("tortoise_search", "valid_to_precision"),
+        ("tortoise_search", "end_state"),
+        ("sdk:get_historical_knowledge", "end_state_unknown"),
+        ("sdk:get_historical_knowledge", "indeterminate_end_ids"),
+    ):
+        assert f"| `{response}` | `{field}` |" in text, (response, field)
+
+
 def test_the_8171_alias_doors_record_the_advisory():
     """The three legacy alias doors surface `advisories` — so record them too.
 

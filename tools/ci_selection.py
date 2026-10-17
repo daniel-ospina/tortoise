@@ -23,9 +23,13 @@ should be exercised; the workflow header comment says the same).
 Selection rules (fail-closed, conservative):
 - push to main / schedule  -> full (tier 3 — the trunk backstop)
 - any changed file UNKNOWN to the surface map -> full (new dirs/subsystems)
-  — EXCEPT a root-level file in ROOT_NON_PYTHON_FILES, which is
-  non-python-relevant by explicit name (#6784). There is deliberately NO
-  blanket `*.md` clause: only named files are ever exempted.
+  — EXCEPT a root-level file in ROOT_NON_PYTHON_FILES (non-python-relevant by
+  explicit name, #6784) or a prose file in NON_CODE_DOC_PATHS (#8785: a doc
+  with no guard READER — a prose edit cannot affect the suite, so it takes the
+  tier-1 smoke path exactly as `docs/` already does). There is deliberately NO
+  blanket `*.md` clause and no `.github/` prefix clause: `.github/workflows/`
+  YAML, `Makefile`, `pyproject.toml`, `uv.lock` and any new/unknown path still
+  fail closed to FULL.
 - any changed SHARED/core module -> full (cross-cutting code wants max coverage)
 - otherwise -> tier 2 = core ∪ union(matched surfaces' test files)
   (docs-only PRs -> core set only — the always-on smoke)
@@ -61,7 +65,7 @@ from pathlib import Path
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
 # instead of two hard-coded halves, and the push matrix is emitted as the whole
 # GHA matrix object (`fast_matrix`).
-SELECTION_FN_VERSION = "1.4.0"
+SELECTION_FN_VERSION = "1.5.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
@@ -1073,7 +1077,37 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # the right surface rather than a cost concern: config.toml is edited
              # rarely (9 commits ever as of 2026-10-14). Pinned by
              # tests/test_ci_selection.py::test_supabase_config_change_selects_core_not_tier1.
-             "supabase/config.toml")
+             "supabase/config.toml",
+             # PR #8744 review P2: the SQL↔Python contract guard
+             # (`tests/test_postgres_storage.py`, registered `core`) reads the
+             # migration TEXT to pin the two RPC names and the `p_since` /
+             # `p_until` parameter names — a rename on either side makes
+             # PostgREST 404 the wrapper at runtime, and the PGlite suite cannot
+             # see it (it calls the functions positionally). BOTH paths sit
+             # under NON_PYTHON_PREFIXES (`supabase/`, `docs/`) and match no
+             # SOURCE_PATTERNS row, so before these entries a migration-only or
+             # doc-only change came back with `changed == []`, took the
+             # docs-only early return and fell back to tier-1 smoke — the guard
+             # never ran on the very change that can rename the contract (the
+             # #1349/#3332/#3616 silent-drop class). A name in a surface's
+             # test_files only runs when that surface is ALREADY selected, so
+             # the `core` registration could not fix it. Pinned by
+             # tests/test_ci_selection.py::test_postgres_storage_guard_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261015000001_postgres_storage_footprint.sql",
+             "docs/ops/postgres-storage-measurement.md",
+             # #8051: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a
+             # `tools/lane_stash.py`-only change was filtered out BEFORE the
+             # "not matched -> core" fallback: `select(["tools/lane_stash.py"])`
+             # returned NO surface and the pin registered under `core`
+             # (`tests/test_lane_stash.py`) never ran on the file it guards — the
+             # #1349/#3332/#3616 silent-drop class, the same shape as the
+             # `tools/tmpdir_sweep.py` entry above. `CORE_ALSO` (not a
+             # SOURCE_PATTERNS row) is deliberate: the guard is a lane-hygiene
+             # contract about a TOOL, and `core` is the surface that already
+             # carries the other `tools/` pins (`test_collision_preflight.py`,
+             # `test_test_lane_tool.py`). Pinned by
+             # tests/test_ci_selection.py::test_lane_stash_guard_runs_on_a_tools_only_change.
+             "tools/lane_stash.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -1119,10 +1153,60 @@ def _is_safe_root_file(path: str) -> bool:
     Root-level only (any path containing "/" is never safe here, so a
     subdirectory doc keeps whatever behaviour its prefix/fallback already had),
     and NAME-only: an earlier revision also accepted any root `*.md`, which
-    admitted README.md/CHANGELOG.md/CONTRIBUTING.md — all read by tests — so the
-    pattern clause was removed along with them.
+    admitted README.md — a file a guard READS
+    (`tests/test_embedded_durability_claim.py:62`) and which is therefore NOT
+    exempt by NON_CODE_DOC_PATHS either — so the pattern clause was removed.
+    Root PROSE with no content reader is handled by NON_CODE_DOC_PATHS below
+    instead (#8785); the two lists are disjoint, and both fail SAFE (a missing
+    entry keeps the full matrix).
     """
     return "/" not in path and path in ROOT_NON_PYTHON_FILES
+
+
+# NON-CODE DOCUMENTATION paths that reserve no test surface (#8785).
+#
+# A prose file OUTSIDE every NON_PYTHON_PREFIXES directory — at the repo root or
+# under `.github/` — matches no prefix and no SOURCE_PATTERNS entry, so before
+# this it fell through to the unknown-path branch and reserved the FULL matrix:
+# a one-line `CONTRIBUTING.md` or `.github/pull_request_template.md` edit ran
+# `test (a)…(i)`, `test-carve-out (a)(b)(c)`, `test-slow (a)(b)` and more
+# (measured on PR #8726: 2 files, 0 Python, ~17 test jobs).
+#
+# This is the DISTINCTION #8785 asks for: "no surface matched because the file is
+# not code" (drop it -> the tier-1 smoke, as `docs/` already does) versus "no
+# surface matched because the path is unclassified and might carry code" (the
+# unknown-path branch below, which still fails closed to FULL). Membership is
+# EXACT PATH — deliberately NOT a `*.md` rule and NOT a `.github/` prefix rule:
+# `.github/workflows/*.yml`, `Makefile`, `pyproject.toml`, `uv.lock` and any
+# new/unknown path keep the full matrix.
+#
+# The membership test is the CONTENT-READER census, NOT a mention: a doc a guard
+# READS stays out. `README.md` (tests/test_embedded_durability_claim.py:62,
+# tests/test_capacity_page.py:40), `AGENTS.md` (the base-subset pin),
+# `.gitignore` (tests/test_kind_index.py:290) and `.env.example` are therefore
+# NOT here. `CONTRIBUTING.md` was left out of #6786's two-file reprieve on a
+# MENTION census ("the surface tooling"); re-derived here, every mention is a
+# docstring, a generated-doc link, or `scripts/record-review.sh`'s basename case
+# — no test or tool reads its CONTENT, so the mention was not a reader.
+#
+# Ratchets: `test_non_code_doc_paths_exist` (liveness) and
+# `test_non_code_doc_paths_have_no_content_reader` (the read census).
+NON_CODE_DOC_PATHS = frozenset({
+    ".github/pull_request_template.md",
+    "CHANGELOG.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+})
+
+
+def _is_non_code_doc(path: str) -> bool:
+    """True only for an exact path in NON_CODE_DOC_PATHS.
+
+    A named seam (rather than an inline `in NON_CODE_DOC_PATHS`) so tests can
+    monkeypatch it — that is how the non-vacuity check proves the same path
+    selected the FULL matrix before this tuple existed.
+    """
+    return path in NON_CODE_DOC_PATHS
 
 
 # Linter-policy files, by BASENAME at ANY DEPTH (#7435).
@@ -1358,6 +1442,29 @@ TOOL_CARVEOUTS = (
     # matrix) is the safe default for a tool whose answer drives dispatch.
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
+    # #8375 item 1: the required-check repair. The workflow and the launchd
+    # fallback both run `tools/ci_check_repair.py` with `--apply` on a schedule,
+    # unattended, with the ability to CLOSE and REOPEN pull requests and to re-run
+    # workflow runs. Its suite (tests/test_ci_check_repair.py) is registered in the
+    # `ci-surfaces.yml` `core` surface — and that registration covers the TEST
+    # FILE's own edits, NOT the tool's: no SOURCE_PATTERNS entry matches
+    # `tools/ci_check_repair.py`, so a tool-only diff is swallowed by the flat
+    # "tools/" prefix, `changed` comes back empty, select() takes the docs-only
+    # early return (which bypasses the `if not matched: matched.add("core")`
+    # fallback entirely), and NOT ONE of the 74 guards runs on the very change
+    # that can break them. Measured: `--changed-files tools/ci_check_repair.py`
+    # returned surfaces=[] full=False before this carve-out. `--integrity` cannot
+    # catch it — it only asks whether the test file is CLASSIFIED. The same
+    # applies to the launchd entry point (the `bash -s`/TCC handoff), the local
+    # fallback, and the installer whose plist decides whether the job is armed.
+    # None of the four matches a SOURCE_PATTERNS row, so they land in the
+    # unknown-path branch -> FULL matrix (fail closed), which is the safe default
+    # for a tool that mutates other PRs.
+    # Pinned by test_ci_selection.test_ci_check_repair_tool_change_fails_closed_to_full.
+    "tools/ci_check_repair.py",
+    "tools/ci_check_repair_launchd.py",
+    "tools/ci-check-repair-local.sh",
+    "tools/install-ci-check-repair-schedule.sh",
 )
 
 
@@ -1525,6 +1632,14 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         # `_is_safe_root_file` fallback below.
         if _is_linter_policy_path(c):
             return True
+        # #8785: a prose doc no guard READS is not python-relevant. Dropping it
+        # here means a docs-only diff reaches the docs-only early return
+        # (tier-1 smoke) instead of the unknown-path fail-closed branch. Ordered
+        # AFTER every CLAIM above, so a SOURCE_PATTERNS/CORE_ALSO entry still
+        # rescues a doc that gains a reader (the repo's documented remedy,
+        # #6138 review P1).
+        if _is_non_code_doc(c):
+            return False
         if _is_safe_root_file(c):
             return False
         return not c.startswith(NON_PYTHON_PREFIXES)

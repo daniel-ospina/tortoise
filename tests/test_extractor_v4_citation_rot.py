@@ -22,7 +22,7 @@ WHAT THIS PINS
 1. **`test_the_retracted_passages_do_not_reappear`** — each stale sentence is
    matched as a literal. This is the NON-VACUITY half: every string below was
    present in the pre-fix document, so this file is red on it.
-2. **`test_the_corrected_passages_state_the_landed_facts`** — the repaired
+2. **`test_the_repaired_passages_still_state_the_design_facts`** — the repaired
    passages must POSITIVELY say what landed. A revert of the wording reds.
 3. **`test_the_code_still_agrees_with_the_corrected_passages`** — the code
    facts behind the repaired passages (D10's retirement, T6's journalled
@@ -57,6 +57,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
 STORAGE = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
 ONTOLOGY = ROOT / "docs" / "ONTOLOGY.md"
+ONTOLOGY_CHANGELOG = ROOT / "docs" / "ONTOLOGY-CHANGELOG.md"
 INGEST = ROOT / "docs" / "INGEST_CONTRACT.md"
 EVAL_SPEC = ROOT / "docs" / "epistemic-layer-eval-spec.md"
 #: The documents that carry the same claims as `DOC`. Several of these claims
@@ -215,33 +216,38 @@ RETRACTED_IN_SIBLINGS: dict[str, str] = {
 #: corrected passage silently DELETED, which would otherwise pass by omission.
 #:
 #: Each entry names its OWN document and is checked against THAT document only:
-#: a combined-text check cannot tell a correction from a relocation, so a landed
-#: passage deleted from one sibling would pass on the strength of the other.
-LANDED_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
+#: a combined-text check cannot tell a correction from a relocation, so a passage
+#: deleted from one sibling would pass on the strength of the other.
+#:
+#: ⚠️ A pin states a DESIGN FACT, never a delivery state (`landed`, `live`,
+#: `done`, `open`, `closed`). A delivery-state pin reds the moment the document
+#: says the same thing in design language, which punishes the edit it should
+#: reward.
+FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     (
         STORAGE,
-        "STORAGE records the vector-trace mechanism as landed",
-        "the trace now records the mechanism (`index` / `scan` / `scan_fallback`)",
+        "STORAGE records the vector-trace mechanism",
+        "The trace records the mechanism (`index` / `scan` / `scan_fallback`)",
     ),
     (
         STORAGE,
         "STORAGE homes the embeddings ruling on the open V1 decision",
-        "the open **V1/§12.1c** decision (measured and filed as `#4997`, now CLOSED `COMPLETED`)",
+        "the open **V1/§12.1c** decision (`#4997`)",
     ),
     (
         ONTOLOGY,
-        "ONTOLOGY tracks the direction-sourcing gap as `#7852`",
-        "tracked as `#7852` (`#7813` is CLOSED `COMPLETED`)",
+        "ONTOLOGY states the four-value direction vocabulary",
+        "four values: `->`, `<-`, `<->`, `-`",
     ),
     (
         ONTOLOGY,
-        "ONTOLOGY states `#2421` closed with the triage untracked",
-        "the per-edge triage is NOT yet implemented and has no open tracker",
+        "ONTOLOGY states the restatement-vs-correction policy",
+        "**restatement-vs-correction policy**",
     ),
     (
         STORAGE,
-        "STORAGE separates the closed `#4997` measurement from the still-live defect",
-        "the measurement half is CLOSED `COMPLETED`; the unindexed-embeddings defect it measured is still LIVE",
+        "STORAGE separates the `#4997` measurement from the live defect",
+        "the unindexed-embeddings defect is real, and its home is the V1/§12.1c decision",
     ),
     (
         STORAGE,
@@ -255,13 +261,13 @@ LANDED_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     ),
     (
         ONTOLOGY,
-        "ONTOLOGY attributes the untracked triage to the closed design, not a tracker",
-        "the design was #2421 (CLOSED `COMPLETED`) and it has no open tracker",
+        "ONTOLOGY states the per-edge triage as the design, not as a tracker",
+        "edge disposition is decided **per edge at write time**",
     ),
     (
         ONTOLOGY,
-        "ONTOLOGY's shared replacement-edge semantics qualify `#2421` as the closed design",
-        "restatement-vs-correction policy** (#2421 — the design is CLOSED `COMPLETED`; the per-edge triage is not implemented and has no open tracker)",
+        "ONTOLOGY's shared replacement-edge semantics name the policy without a tracker",
+        "**restatement-vs-correction policy**. `invalidate_point(id, corrected_by)` =",
     ),
     (
         EVAL_SPEC,
@@ -285,11 +291,6 @@ LANDED_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     ),
     (
         STORAGE,
-        "STORAGE separates the open tracker entry from the landed D10 work",
-        "D10 code-half work done: `#5024`, `#5025`, `#5026`",
-    ),
-    (
-        STORAGE,
         "STORAGE states the Q5 keys as non-interchangeable",
         "**A `:Document` key and a `:Source` key are not interchangeable**",
     ),
@@ -304,49 +305,54 @@ LANDED_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
         "operator endpoints are live (`#7902`)",
     ),
     (
-        ONTOLOGY,
-        "ONTOLOGY records `#5126` as landed, not as an open residual",
+        ONTOLOGY_CHANGELOG,
+        "the changelog records `#5126` as landed, not as an open residual",
         "**Landed:** `#5126`",
     ),
     (
         STORAGE,
-        "STORAGE states the `#5422` ownership gap as closed",
-        "`#5422` (its ownership gap) is CLOSED `COMPLETED`",
+        "STORAGE states the re-inference engine as open with its acceptance criterion",
+        "**Open — the re-inference engine**: its acceptance is **A2 of `#5038`**",
     ),
 )
 
-#: The repaired passages must SAY what landed, not merely omit the old claim —
+#: The repaired passages must SAY what the design is, not merely omit the old claim —
 #: an omission-only guard passes over a passage that is silently deleted rather
 #: than corrected. The literals are the documents' CANONICAL wording: each
-#: repaired passage states the fact together with its authority (`#N`, PR,
-#: `file:line`) and does not record how the passage changed — history lives in
-#: git, and a claim about a correction has no artifact to check it against, so
-#: it can only re-stale.
+#: repaired passage states the design fact together with its authority (`#N`, PR,
+#: `file:line`) and does not record how the passage changed.
+#:
+#: ⚠️ A pin states a DESIGN FACT, never a delivery state. A pin on "is live" or
+#: "is done" reds the moment the document says the same thing in design
+#: language — punishing the edit it exists to reward. For the same reason a pin
+#: does not require the AUTHORITY citation (`PR #5127`): the fact is what the
+#: document owes a reader, and the citation was deliberately dropped when the
+#: issue/PR references went to the changelog.
 LANDED_STATEMENTS: dict[str, str] = {
-    "§S0 states the D10 code half as landed": "D10 is LANDED — both halves.",
-    "§D's provenance row records the retirement": (
-        "✅ **NOW TRUE** — the `:Document` NODE label is **retired**"
+    "§S0 states the D10 code half as landed": "D10 holds in both halves — ontology and code.",
+    "§D's D10 row states the label retirement": (
+        "the `:Document` NODE label is retired"
     ),
     "§S0's Q3 row says `doc_status` is retired": (
         "RETIRED** (`tortoise/api.py:458`)"
     ),
-    "§S0's Q5 row says the migration is done": (
-        "Fold + change the replay key + migrate — **✅ DONE 2026-09-25**"
+    "§S0's Q5 row states the migration": (
+        "There is nothing to migrate"
     ),
     "§S0's T6 finding says the transition is journalled": (
         "journalled as `SourceVersioned`"
     ),
-    "§7 says the operator endpoints are live": (
-        "operator endpoints are live (`#7902`)"
+    "§7 states the operator target set": (
+        "the write path admits all four target types"
     ),
     "§S2.3's row says Jev needs an adapter, not a seam": (
         "Jev requires an adapter, a prompt and a parser"
     ),
-    "§7 names the constant the S1 slot actually appends": (
-        "appends `STATE_VALUE_CARVE_OUT` to S1"
+    "§7 names the constant the S1 slot carries": (
+        "`STATE_VALUE_CARVE_OUT` in `_granularity_text()` is the code anchor"
     ),
-    "§S0 separates the open tracker entry from the three landed ones": (
-        "**`#5038`** (open)"
+    "§S0 names the open question": (
+        "The open question is `#5038`"
     ),
 }
 
@@ -381,21 +387,21 @@ def test_the_sibling_documents_do_not_carry_the_retracted_claims():
     )
 
 
-def test_the_sibling_documents_state_the_landed_facts():
+def test_the_sibling_documents_still_state_the_design_facts():
     missing = [
         f"{doc.name}: {name}"
-        for doc, name, literal in LANDED_STATEMENTS_IN_SIBLINGS
+        for doc, name, literal in FACT_STATEMENTS_IN_SIBLINGS
         if literal not in doc.read_text(encoding="utf-8")
     ]
     assert not missing, (
-        "the corrected sibling passages no longer state the landed fact in their "
+        "the corrected sibling passages no longer state the fact in their "
         "OWN document — a passage was silently deleted rather than corrected, or "
         "moved to a document that does not own the claim:\n  - "
         + "\n  - ".join(missing)
     )
 
 
-def test_the_corrected_passages_state_the_landed_facts():
+def test_the_repaired_passages_still_state_the_design_facts():
     text = _doc_text()
     missing = [name for name, literal in LANDED_STATEMENTS.items() if literal not in text]
     assert not missing, (
@@ -528,3 +534,307 @@ def test_every_quoted_symbol_citation_resolves_at_head():
             for line, sym, where, why in unresolved
         )
     )
+
+
+#: An issue's open/closed state asserted in the model reference. The ontology
+#: states the model; whether a tracker entry is closed is not a fact about the
+#: model, and is exactly the shape that accumulated a 730-line changelog and a
+#: per-field `Impl` column inside a document whose own header declares it is
+#: *"not a status report on what is built."*
+#: The state vocabulary, split by how ambiguous it is. The CAPS forms are this
+#: document set's convention for delivery state and are safe. The lowercase forms
+#: are ordinary English — *"a closed vocabulary"*, *"FAIL-CLOSED"*, *"the code is
+#: closed `[vF, vT]`"*, *"a fixed-width row"* — so each needs either a `#NNN` in
+#: the same clause, or a copula directly in front.
+_STATUS_WORDS = r"(?:CLOSED|COMPLETED|LANDED|FILED|FIXED|SHIPPED|RETIRED|BUILT|DONE|IMPLEMENTED|OPEN|PENDING|TODO|OUTSTANDING|UNIMPLEMENTED)"
+#: Only the participles that are unambiguously delivery in these documents.
+#: `closed`, `fixed`, `done` and `built` are ordinary English here — *"a closed
+#: vocabulary"*, *"a fixed-width row"*, *"done in S6"*, *"built to close"* — and
+#: including them turns the guard into noise, which is a different way to be dead.
+#: `completed`, `implemented` and `retired` are ordinary verbs here (*"`#2453`
+#: root-caused this"*, *"implemented by the write path"*, *"both halves are now
+#: implemented"*) and including them produced more false positives than true ones.
+#: `landed` and `shipped` are the two that are delivery almost every time.
+_STATUS_LOWER = r"(?:landed|shipped)"
+
+#: The documents that STATE A DESIGN — as opposed to the three changelogs, which
+#: keep the record of how each got there. The same class of pollution reached all
+#: three: `ONTOLOGY.md` carried a 730-line changelog (37% of the file) plus a
+#: per-field `Impl` column; the two architecture documents carried issue-state
+#: assertions, `CORRECTED 20xx-xx-xx` stamps and *"an earlier draft said X"*
+#: narration. Each header already declared the opposite of what the body did.
+#:
+#: Defined above the class test that uses it because `STATUS_ABSENCE_DOCS` reads
+#: it — one definition, so the two guards cannot come to disagree about the set.
+DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
+
+#: Absence of work spoken as absence: *"`#3011` has not run"*, *"THE S0 HALF IS
+#: NOT BUILT"*, *"not yet wired"*. A design document states what the design IS;
+#: what is missing is a tracker's job. Applied to every design document,
+#: `ONTOLOGY.md` included: the lines it carried were dropped when the owner
+#: approved the exact copy (#8745) — the two `not yet written by …` clauses, plus
+#: the producer-absence claims. The per-field build status for
+#: `validFrom`/`validTo` was ALREADY recorded in `ONTOLOGY-CHANGELOG.md`
+#: (§4.2/§4.3, `❌` both), so the record did not need to gain it.
+#:
+#: Scope: this arm catches three absence forms — the CAPS form, the
+#: `#NNN`-adjacent lowercase form, and the producer-absence form (`no producer`,
+#: `spec-only`). It is NOT "the design documents are free of status prose":
+#: `ONTOLOGY.md:426` (*"**Not written by `_upsert_subject`**"*) and `:446`
+#: (*"**Not written by `_upsert_object`**"*) pass it — each ends *"— planned
+#: follow-up"*. That shape was measured (`not written` has 12 corpus
+#: lines, only 2 of them status claims) and deliberately left out.
+_STATUS_ABSENCE = (
+    # The CAPS form is this document set's convention for delivery state, so it
+    # carries no ambiguity.
+    re.compile(r"\bNOT (?:BUILT|RUN|WIRED|IMPLEMENTED|WRITTEN)\b"),
+    # The lowercase form is ordinary English — *"a claim not worth keeping is not
+    # written"*, *"the read path classifies a leg that did not run"* — so it needs
+    # a `#NNN` in the same clause, which is where the absence is being tracked.
+    # Measured: the bare form fired on 7 design sentences and this arm fires on 0.
+    re.compile(
+        r"#[0-9]{3,5}[^.\n]{0,40}?\bnot\s+(?:yet\s+)?(?:run|built|wired|implemented|written)\b"
+        r"|\bnot\s+(?:yet\s+)?(?:run|built|wired|implemented|written)\b[^.\n]{0,40}?#[0-9]{3,5}",
+        re.IGNORECASE,
+    ),
+    # The "absence of a producer" form: *"no producer yet"*, *"has no producer
+    # here"*, *"spec-only"*. Absence of work is a tracker's business, and this is
+    # how this document set spells it when the missing thing is a writer rather
+    # than a step.
+    #
+    # Measured against the three design documents before adding: 0 hits at HEAD,
+    # and it fires on both claims #8774 removed. NOT widened to the general
+    # `not written` form — measured, that shape has 12 corpus lines and only 2 are
+    # status claims; the other 10 are design English (*"appended, never written
+    # onto the Object"*, *"a claim not worth keeping is not written"*). Precision
+    # over coverage: an arm that fires on design prose is a guard that gets
+    # deleted.
+    re.compile(r"\b(?:has\s+)?no producer\b|\bspec-only\b", re.IGNORECASE),
+)
+#: The documents `_STATUS_ABSENCE` governs — the same set as `DESIGN_DOCS`.
+#: `ONTOLOGY.md` was once excluded because this shape sat there at four lines
+#: awaiting the owner's approval of the exact copy; those lines landed (#8745),
+#: so the exclusion and the reason recorded for it are both gone. Guarding the
+#: owner-gated file adds no new hazard: the CLASS check
+#: (`test_the_design_documents_carry_no_issue_state_or_change_narration`) already
+#: iterates `DESIGN_DOCS`, so `ONTOLOGY.md` was never outside a guard.
+STATUS_ABSENCE_DOCS: tuple[Path, ...] = DESIGN_DOCS
+
+#: Uses that are ordinary English, not a delivery claim. Matched against the
+#: token and its immediate context, and dropped.
+_NOT_DELIVERY = re.compile(
+    r"FAIL-CLOSED"
+    r"|closed\s+(?:vocabulary|set|under|interval|form|range|loop|list)\b"
+    r"|closed\s+[\[\(\{]"
+    r"|CLOSED\s+(?:vocabulary|set)\b"
+    r"|fixed-width"
+    r"|\bdone\s+in\s+S[0-9]\b",
+    re.IGNORECASE,
+)
+
+def _adjacent(state: str, flags: int = 0):
+    return re.compile(
+        r"#[0-9]{3,5}[^.\n]{0,40}?\b" + state + r"\b"
+        r"|\b" + state + r"\b[^.\n]{0,40}?#[0-9]{3,5}",
+        flags,
+    )
+
+
+#: Two arms, and the case split matters: the CAPS vocabulary is case-SENSITIVE
+#: (lowercase *"filed"*, *"done"*, *"closed"* are ordinary English and appear on
+#: almost every line), while the lowercase participles are case-INSENSITIVE but
+#: drawn only from words that are unambiguous delivery here.
+_STATUS_ADJACENT = (
+    _adjacent(_STATUS_WORDS),
+    _adjacent(_STATUS_LOWER, re.IGNORECASE),
+)
+#: A change narrated as a change, rather than the rule it settled on. The record
+#: of what changed belongs in `ONTOLOGY-CHANGELOG.md`, which is what a changelog
+#: is for.
+_CHANGE_NARRATION = re.compile(
+    r"(?:an|the) earlier (?:draft|version|note|row|line|passage|recommendation)"
+    r"|Corrections? to (?:an )?earlier"
+    r"|(?:CORRECTED|AMENDED) 20[0-9]{2}-"
+    r"|\bDraft [0-9]\b"
+    r"|rewritten twice"
+    # A version the passage says it has been true since — change history, not the
+    # rule it settled on. Measured across the three design documents before
+    # adding: 0 hits at HEAD.
+    r"|\bsince v[0-9]+\.[0-9]+\b",
+    re.IGNORECASE,
+)
+
+#: Delivery spoken as delivery. A design document states the fact, not the fact
+#: that it arrived: *"D10 is LANDED"*, *"the migration is NOT WIRED"*, *"this
+#: reopen is CLOSED"*. The trailing window is deliberately short — a sentence
+#: further on is a different claim.
+_DELIVERY_STATE = (
+    # Only the state words that are NOT ordinary design vocabulary. `RETIRED`,
+    # `CLOSED`, `BUILT`, `FIXED` and `DONE` all have legitimate design senses here
+    # ("the field is RETIRED", "a CLOSED vocabulary", "the cap was built to close
+    # X"), so a bare-word arm for them fires on the design itself. The state claim
+    # for those is caught where it actually appears: adjacent to its `#NNN`.
+    re.compile(r"\b(?:LANDED|SHIPPED)\b|\bNOW TRUE\b"
+              r"|\b(?:is|are|was|were)\s+(?:already\s+)?CLOSED\b"),
+    # *"has already landed"* / *"is shipped"*: delivery in lowercase, and the
+    # only lowercase copula arm that is safe — `landed` and `shipped` have no
+    # ordinary design sense here, unlike `closed` / `built` / `done`.
+    re.compile(r"\b(?:is|are|was|were|has|have)\s+(?:already\s+)?(?:landed|shipped)\b",
+               re.IGNORECASE),
+    # A lowercase copula arm was tried and removed: *"the vocabulary is closed"*,
+    # *"the code is closed `[vF, vT]`"* and *"not a status report on what is
+    # built"* are all design prose, and it produced far more false positives than
+    # true ones. Delivery state in these documents is written in CAPS; the casual
+    # lowercase form is out of this guard's scope, and this docstring says so
+    # rather than claiming a class it does not pin.
+    re.compile(r"\bImplementation status\b", re.IGNORECASE),
+)
+
+
+def _delivery_hits(line: str) -> list[str]:
+    """The delivery-state claims in one line, with ordinary English dropped.
+
+    A guard that fires on *"a closed vocabulary"* is as unusable as one that
+    fires on nothing, so every candidate is checked against its own context.
+    """
+    hits = []
+    for rx in _DELIVERY_STATE:
+        for m in rx.finditer(line):
+            lo = max(0, m.start() - 10)
+            if _NOT_DELIVERY.search(line[lo:m.end() + 16]):
+                continue
+            hits.append(m.group(0))
+    return hits
+
+
+def test_the_design_documents_carry_no_issue_state_or_change_narration():
+    """A design document states the design. Status and change history do not.
+
+    The three design documents each carried the opposite of their own header:
+    `ONTOLOGY.md` a 730-line changelog (37% of the file, all 31 entries appended
+    by `feat`/`fix`/`refactor`/`test` commits) and a per-field `Impl` column
+    across five §4 tables; `EXTRACTOR-V4-ARCHITECTURE.md` and
+    `STORAGE-ARCHITECTURE.md` issue-state assertions (`#4999` is CLOSED
+    `COMPLETED`), `CORRECTED 20xx-xx-xx` stamps, and *"an earlier draft said
+    X"* narration. All of it moved to the sibling `*-CHANGELOG.md` — the two
+    architecture documents' move is #8542; `ONTOLOGY.md`'s is #8745 (owner
+    approval of that exact diff is tracked there).
+
+    This pins the CLASS rather than the strings, so the next lane cannot
+    reintroduce it by appending one status claim — which is how the changelog
+    accumulated in the first place. A literal pin cannot catch that: it only
+    knows the violations it was written against, and a literal that matches
+    nothing passes vacuously (#8564).
+
+    Three shapes are pinned: an issue-state adjacent to a `#NNN`, the narrative
+    of a change (`an earlier draft`, `CORRECTED`/`AMENDED 20xx-`,
+    `Draft N`), and delivery spoken as delivery (`D10 is LANDED`,
+    `this reopen is CLOSED`, `#5007 shipped`). The last shape is the one the
+    first two windows let through: it needs no `#NNN` adjacent and carries no
+    date.
+
+    `_STATUS_ABSENCE` (`not built`, `has not run`, `not yet wired`) is applied to
+    `STATUS_ABSENCE_DOCS`, which is `DESIGN_DOCS` — `ONTOLOGY.md` included. It was
+    once excluded because this shape sat there at four lines awaiting the
+    owner's approval of the exact copy; those lines landed (#8745), so the
+    exclusion and the reason recorded for it are both gone.
+    """
+    offenders = []
+    for path in DESIGN_DOCS:
+        absence = path in STATUS_ABSENCE_DOCS
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if any(rx.search(line) for rx in _STATUS_ADJACENT):
+                offenders.append(f"{path.name}:{number}: issue-state claim: {line.strip()[:160]}")
+            if _CHANGE_NARRATION.search(line):
+                offenders.append(f"{path.name}:{number}: change narration: {line.strip()[:160]}")
+            if _delivery_hits(line):
+                offenders.append(f"{path.name}:{number}: delivery state: {line.strip()[:160]}")
+            if absence and any(rx.search(line) for rx in _STATUS_ABSENCE):
+                offenders.append(f"{path.name}:{number}: absent-work claim: {line.strip()[:160]}")
+    assert not offenders, (
+        "a design document must state the design. An issue's open/closed state, "
+        "and the narrative of what changed, belong in the sibling "
+        "`*-CHANGELOG.md` (#8542 for the architecture docs, #8745 for "
+        "`ONTOLOGY.md`):\n  - " + "\n  - ".join(offenders)
+    )
+
+
+def test_the_class_check_is_neither_dead_nor_noisy():
+    """The instrument's own test — a guard with no fixture is unfalsifiable.
+
+    `test_the_design_documents_carry_no_issue_state_or_change_narration` is green
+    on a corpus that currently yields no hits, so on its own its greenness carries
+    no information at all. That is the failure this file pins elsewhere (#8564: a
+    literal that matches nothing passes vacuously), and it reached this guard by
+    the ordinary route — three rounds of widening, each measured against the
+    documents rather than against a fixture.
+
+    So the check is asserted in BOTH directions here, where it can be read: the
+    shapes it must catch, and the ordinary English it must not.
+    """
+    def flagged(line: str) -> bool:
+        return bool(
+            _delivery_hits(line)
+            or any(rx.search(line) for rx in _STATUS_ADJACENT)
+            or any(rx.search(line) for rx in _STATUS_ABSENCE)
+            or _CHANGE_NARRATION.search(line)
+        )
+
+    must_flag = [
+        "The work is tracked as `#4999` **CLOSED `COMPLETED`** for now.",
+        "`#5007` shipped the span *schema*.",
+        "The migration is LANDED.",
+        "⚠️ **`#3011` has not run: the layer is unmeasured on our stack.**",
+        "**THE S0 HALF IS NOT BUILT.**",
+        "Part of v3 has already landed.",
+        "`#2354` **OPEN, epistemic-team** —",
+        "this reopen is CLOSED",
+        "*An earlier draft said* the opposite of this paragraph.",
+        "**CORRECTED 2026-09-24** \u2014 this passage was repaired.",
+        "**Implementation status.** Both halves are now implemented.",
+        "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
+        "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
+        # The change-history date form, on the §8 direction note #8738 moved (the
+        # line is already absent from `main`; the guard pins the form, not the diff).
+        "*(Stored and interpreted on every path since v3.25 \u2026 see the "
+        "Transition state note in the changelog.)*",
+        # The "absence of a producer" arm, on the two claims #8774 removed.
+        "| `participatesIn` | Subject \u2192 Event | Subjects involved in an event "
+        "(\u26a0\ufe0f spec-only \u2014 no producer yet, tracked in issue #7884) |",
+        "`aboutSubject` has no producer here: the ONTOLOGY registers Session as an "
+        "`aboutObject` source only.",
+    ]
+    must_not_flag = [
+        "The gate is FAIL-CLOSED at the boundary.",
+        "`goalState` is a CLOSED vocabulary.",
+        "A 384-dim float32 embedding is a fixed-width row.",
+        "The code is closed `[vF, vT]`.",
+        "Supersession does not rewrite an earlier one.",
+        "Everything is done in S6.",
+        "`#4999` records the trace mechanism.",
+        # A near-miss for the producer arm: names a producer, claims no absence.
+        '`tortoise/subject_binding.py` is the ONLY confidence-gated `aboutSubject` producer.',
+        # A near-miss for the version-date arm: a version NAMED, not asserted as
+        # a period the passage has held true since.
+        "Model version v3.15 retires the `:Document` label.",
+    ]
+    # The SCOPE is pinned too, and pinned ABSOLUTELY. Two narrowings are possible
+    # and both must red a test:
+    #   - narrowing `STATUS_ABSENCE_DOCS` alone drops `ONTOLOGY.md` from the
+    #     absence arm while the class check keeps it;
+    #   - narrowing `DESIGN_DOCS` drops it from every status guard at once, and
+    #     an equality between the two names survives that edit untouched
+    #     (measured: `DESIGN_DOCS = (DOC, STORAGE)` left all 8 tests green).
+    # A guard that can be narrowed without reddening is a guard that will be.
+    assert set(DESIGN_DOCS) == {ONTOLOGY, DOC, STORAGE}, (
+        "DESIGN_DOCS is the set of documents these guards police; a document "
+        "silently leaving it is the narrowing this assert exists to catch"
+    )
+    assert set(STATUS_ABSENCE_DOCS) == set(DESIGN_DOCS), (
+        "STATUS_ABSENCE_DOCS no longer covers the same documents as the class "
+        "check: the absence arm must not narrow silently"
+    )
+    for line in must_flag:
+        assert flagged(line), f"the class check no longer fires on: {line!r}"
+    for line in must_not_flag:
+        assert not flagged(line), f"the class check is a false positive on: {line!r}"

@@ -32,11 +32,11 @@ from datetime import datetime, timedelta, timezone
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_async_client, verdict_client
 from tortoise.auth import verify_api_key
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
@@ -51,6 +51,17 @@ _U_BOB = "9f2c1a40-0000-4a00-8000-00000000000e"
 _U_ALICE = "9f2c1a40-0000-4a00-8000-00000000000f"
 _U_CAROL = "9f2c1a40-0000-4a00-8000-000000000010"
 _U_GHOST = "9f2c1a40-0000-4a00-8000-0000000000ab"
+
+
+def _verdict_async_client(app, **kwargs):
+    """#8582: the async client seam for this module.
+
+    The concurrency tests build their own `httpx.AsyncClient` around an ASGI
+    transport rather than going through the `client` fixture, so they need the
+    same conversion at their own construction site — a transport wait-bound
+    refusal reaching a read bound from it is a NON-ANSWER, not a FAIL.
+    """
+    return verdict_async_client(app, **kwargs)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -77,7 +88,10 @@ def client():
         # close stay here (direct SDK constructions, not keepalive anchors).
         with patched_tortoise_sdk(db_path):
             try:
-                with TestClient(app) as tc:
+                # #8582: the client-construction seam — a transport wait-bound
+                # refusal reaching any read bound from this fixture skips as
+                # INCONCLUSIVE instead of failing as `assert 504 == 200`.
+                with verdict_client(app) as tc:
                     yield tc
             finally:
                 while _REG_SDKS:
@@ -237,9 +251,7 @@ class TestInviteCreate:
         _seed_team_with_owner(reg, "team-pro-race", tier="pro")
 
         async def _burst():
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with _verdict_async_client(app, base_url="http://test") as ac:
                 return await asyncio.gather(*(
                     ac.post("/v1/invites", json={"org_id": "team-pro-race",
                                                   "email": email})
@@ -514,9 +526,7 @@ class TestInviteAccept:
 
         async def _accept_as(uid, email, token):
             _actor.set({"user_id": uid, "email": email})
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with _verdict_async_client(app, base_url="http://test") as ac:
                 return await ac.post("/v1/invites/accept",
                                      json={"token": token})
 
@@ -1368,3 +1378,29 @@ class TestExpiredInviteReMint:
         assert r.status_code == 409
         rows = self._ghost_rows(client)
         assert [m["user_id"] for m in rows] == [f"invite-{inv['invite_id']}"]
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8582: the deterministic refusal pin for this module's client seams.
+
+    No load and no wait: the bound is forced to 0 s, so the refusal comes from
+    the REAL ``WaitBoundMiddleware``. ``POST /v1/invites`` is not exempt, and
+    the seam converts the refusal before the caller's own status assertion sees
+    it. The plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/invites")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post("/v1/invites", json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/invites", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/invites answered" in message

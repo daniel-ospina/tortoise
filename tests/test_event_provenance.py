@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
+from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
@@ -918,17 +919,25 @@ class TestNegativePaths:
         assert r2[0][0] == 0
 
 
-# ── #151: Stub Subject/Object ULID ids ───────────────────────────────────
+# ── #151: Stub Subject/Object ids are proper ids, NOT the entity name ────
+#
+# #7936: the stub id `_event_plain_merge` mints is now the CANONICAL entity id
+# for the name (`tortoise.ids.entity_name_id` → `sub-<sha256[:26]>` /
+# `obj-<sha256[:26]>`): deterministic, so replaying one journal cannot move it
+# — which is the hazard that blocked the `(label, id)` re-key of the
+# consistency digest. Before #7936 it was a RANDOM ulid. Its exact SHAPE was
+# never the contract #151 protects: the load-bearing half is `id != name`
+# below (the stub must not take the entity NAME as its id).
 
-_ULID_RE = __import__("re").compile(r"^[0-9a-f]+-[0-9a-f]{12}$")
 
+class TestStubEntityIdIsNotTheName:
+    """#151: `_upsert_event` auto-created Subject/Object stubs carry a real id
+    for the name — never the entity name itself (#7936: the canonical
+    `entity_name_id`, formerly a random ulid)."""
 
-class TestStubEntityULID:
-    """#151: _upsert_event must use ULID-based ids for auto-created stub
-    Subject/Object nodes, not the entity name as id."""
-
-    def test_performs_stub_subject_has_ulid_id(self, sdk):
-        """Stub Subject created via performs edge gets ULID id, not name."""
+    def test_performs_stub_subject_has_entity_name_id(self, sdk):
+        """Stub Subject created via performs edge gets the canonical id, not
+        the entity name."""
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -944,11 +953,12 @@ class TestStubEntityULID:
         assert len(r) == 1
         sid, name = r[0][0], r[0][1]
         assert name == "stub-agent-1"
-        assert _ULID_RE.match(sid), f"id={sid!r} is not ULID format"
-        assert sid != name, f"id should be ULID, not name ({sid!r} == {name!r})"
+        assert sid == _entity_name_id("Subject", "stub-agent-1"), sid
+        assert sid != name, f"id must not be the entity name ({sid!r} == {name!r})"
 
-    def test_produces_stub_object_has_ulid_id(self, sdk):
-        """Stub Object created via produces edge gets ULID id, not name."""
+    def test_produces_stub_object_has_entity_name_id(self, sdk):
+        """Stub Object created via produces edge gets the canonical id, not
+        the entity name."""
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -965,11 +975,12 @@ class TestStubEntityULID:
         assert len(r) == 1
         oid, name = r[0][0], r[0][1]
         assert name == "artifact-stub-1"
-        assert _ULID_RE.match(oid), f"id={oid!r} is not ULID format"
-        assert oid != name, f"id should be ULID, not name ({oid!r} == {name!r})"
+        assert oid == _entity_name_id("Object", "artifact-stub-1"), oid
+        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
 
-    def test_uses_stub_object_has_ulid_id(self, sdk):
-        """Stub Object created via uses edge gets ULID id, not name."""
+    def test_uses_stub_object_has_entity_name_id(self, sdk):
+        """Stub Object created via uses edge gets the canonical id, not the
+        entity name."""
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -986,14 +997,23 @@ class TestStubEntityULID:
         assert len(r) == 1
         oid, name = r[0][0], r[0][1]
         assert name == "input-stub-1"
-        assert _ULID_RE.match(oid), f"id={oid!r} is not ULID format"
-        assert oid != name, f"id should be ULID, not name ({oid!r} == {name!r})"
+        assert oid == _entity_name_id("Object", "input-stub-1"), oid
+        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
 
-    def test_stub_preserves_existing_ulid_on_merge(self, sdk):
-        """When Subject already exists via _upsert_subject with a ULID id,
-        the _upsert_event MERGE matches by name and ON CREATE does NOT fire,
-        so the proper ULID id is preserved."""
-        # Create a proper Subject with ULID id via SDK
+    def test_stub_preserves_existing_id_on_merge(self, sdk):
+        """When the Subject already exists via `_upsert_subject` (with its own
+        canonical `sub-<sha256>` id), the `_upsert_event` MERGE matches by name
+        and ON CREATE does NOT fire, so the existing id is preserved.
+
+        #7936: this shape no longer DISTINGUISHES the clause — the stub now
+        mints the same canonical id, so an unconditional `SET` would also pass
+        here. The guard that does distinguish it (a FOREIGN id registered
+        before the event) is
+        `tests/test_7936_stable_stub_ids.py::test_a_late_stub_does_not_clobber_a_canonical_id`
+        for Object and `::test_a_late_subject_stub_does_not_clobber_a_foreign_id`
+        for Subject.
+        """
+        # Create a proper Subject with the canonical id via SDK
         subj = sdk.create_subject("existing-agent", "tester")
         proj = sdk._get_proj()
         # Now create an event referencing the same subject name
@@ -1005,13 +1025,13 @@ class TestStubEntityULID:
             "subject": "existing-agent",
             "startedAt": "2024-01-01T00:00:00Z",
         })
-        # The Subject should still have its original ULID id, not overwritten
+        # The Subject should still have its original canonical id, not overwritten
         r = proj.g.query(
             "MATCH (s:Subject {name:'existing-agent'}) RETURN s.id"
         ).result_set
         assert len(r) == 1
         assert r[0][0] == subj["id"], (
-            f"existing ULID should be preserved: {r[0][0]!r} != {subj['id']!r}"
+            f"existing id should be preserved: {r[0][0]!r} != {subj['id']!r}"
         )
 
 

@@ -209,6 +209,37 @@ def test_undated_hit_renders_no_valid_marker():
     assert _validity_marker({"id": "x", "valid_from": ""}) == ""
 
 
+def test_ended_unknown_hit_is_not_rendered_as_still_true():
+    """#2350: an ended-unknown window (``validToPrecision='unknown'``, no
+    ``validTo``) renders ``[valid since <from>; end unknown]`` — never the
+    still-true ``[valid since <from>]`` shape (D7 + #2349)."""
+    from tools.longmem_eval.retrieve import _validity_marker
+    ended = {"id": "x", "valid_from": "2026-06-14",
+             "valid_to_precision": "unknown", "end_state": "unknown"}
+    assert _validity_marker(ended) == "[valid since 2026-06-14; end unknown]"
+    # Either promoted key alone is enough (the eval lane forwards both; a
+    # hand-built hit may carry only one).
+    assert _validity_marker({"id": "x", "valid_from": "2026-06-14",
+                             "end_state": "unknown"}) == \
+        "[valid since 2026-06-14; end unknown]"
+    assert _validity_marker({"id": "x", "valid_from": "2026-06-14",
+                             "valid_to_precision": "unknown"}) == \
+        "[valid since 2026-06-14; end unknown]"
+    # A still-open window at the same start stays the byte-identical shape.
+    assert _validity_marker({"id": "x", "valid_from": "2026-06-14",
+                             "end_state": "open"}) == "[valid since 2026-06-14]"
+
+
+def test_ended_unknown_with_transaction_expiry_keeps_the_expiry_date():
+    """#2350: ``invalidate_point(valid_to_precision='unknown')`` stamps
+    ``expiredAt`` too; the marker keeps that transaction-time datum."""
+    from tools.longmem_eval.retrieve import _validity_marker
+    assert _validity_marker({"id": "x", "valid_from": "2026-06-14",
+                             "expired_at": "2026-07-01T10:00:00+00:00",
+                             "end_state": "unknown"}) == \
+        "[valid since 2026-06-14; expired 2026-07-01; end unknown]"
+
+
 # ── (d) owned negatives ─────────────────────────────────────────────
 
 def test_restore_before_earliest_window_honest_absence(graph):

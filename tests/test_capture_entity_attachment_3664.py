@@ -75,22 +75,46 @@ def _object_id(g, name: str) -> str:
     return rows[0][0]
 
 
-# The FULL Session property set the capture path writes — the durability
-# invariant is "live == replay" for the whole node. Every prop the live
+# The FULL Session property set the SDK capture path writes — the durability
+# invariant is "live == replay" for the whole node. Every prop the live SDK
 # capture MERGE / SET writes is listed: the unconditional session-MERGE three
 # (turn_count/is_episodic/created_at), the conditional harness/actor_user_id,
-# the entity-link outcome counters, and the attempt-outcome pair
-# (capture_ok/capture_extractor). `_session_props` returns them BY NAME so a
+# the entity-link outcome counters, the attempt-outcome pair
+# (capture_ok/capture_extractor), the per-window redaction count
+# (`capture_redactions`, SET in `_TURN_WRITE_CYPHER` alongside the turn write),
+# and the capture-origin quartet (#3516: client_captured_at,
+# client_captured_at_source, capture_lane, source).
+# `_session_props` returns them BY NAME so a
 # column reorder can never silently make a comparison vacuous.
+#
+# Scope, stated plainly: this is the SDK lane's SET, not the hosted lane's.
+# `machine_id` / `model` are set by the same writer
+# (`_write_session_and_turns`, sdk.py) but are client-claimed and HOSTED-ONLY
+# (#2599) — the SDK lane passes neither, so both are absent here and are
+# deliberately out of scope for this file.
+#
+# Coverage, stated plainly: membership in the SET does not by itself buy a
+# red. Measured in this file's scenario, six declared props are None on both
+# sides and so cannot red here: `harness` and `actor_user_id`, plus the
+# capture-origin quartet (client_captured_at, client_captured_at_source,
+# capture_lane, source). The quartet's fold ARMS live in
+# `_fold_session_recorded`, reached by the `rebuild_all` this file does run,
+# but they never fire here because no value is journaled. The dedicated #3516
+# journal test exercises three of the four (client_captured_at,
+# client_captured_at_source, source); no production caller journals
+# `capture_lane` yet. Listing the quartet keeps this declaration true to the
+# write path and closes the gap for any future fixture here that populates it.
 _SESSION_PROPS_SQL = (
     "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.is_episodic, "
     "s.created_at, s.harness, s.actor_user_id, s.capture_ok, "
     "s.capture_extractor, s.entity_links_attempted, "
-    "s.entity_links_created")
+    "s.entity_links_created, s.capture_redactions, s.client_captured_at, "
+    "s.client_captured_at_source, s.capture_lane, s.source")
 _SESSION_PROP_NAMES = (
     "turn_count", "is_episodic", "created_at", "harness", "actor_user_id",
     "capture_ok", "capture_extractor", "entity_links_attempted",
-    "entity_links_created")
+    "entity_links_created", "capture_redactions", "client_captured_at",
+    "client_captured_at_source", "capture_lane", "source")
 
 
 def _session_props(g, sid: str) -> dict:

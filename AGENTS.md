@@ -204,6 +204,8 @@ Does **not** apply to: routine project file reads, git operations, local shell c
 
 - **Never use sed for multi-line code changes.**
 - **Never use `git add -A`** — always stage specific files.
+- **Never use a bare `git stash pop`/`apply` in a worktree lane** — `refs/stash` is shared by every
+  worktree; see *Repo-Specific Conventions → Git Workflow* and `tools/lane_stash.py` (#8051).
 - **Prefer the `edit` tool over `write`** for targeted changes to existing files.
 - **Commit messages: always `git commit -F <file>` — never `-m`, never a heredoc.** The message
   message file goes in a **repo- and worktree-unique temp directory**, never a shared
@@ -394,20 +396,29 @@ mechanics** — pre-filter, batching, thresholds, caching, and fail-closed degra
 not let the model's probability *be* the verdict: the threshold band, the cache identity, and the
 failure paths belong to the caller, and they must be **measured and pinned, not assumed**.
 
-- **In-repo use:** `tools/collision_preflight.py` (#5070) — the claim-ownership `Noul` question
-  ("is this comment a lane taking ownership of the issue's work?"), with the model pinned to
-  `jev-1.13.0` and prompt version `claim-ownership-v1`. CLEAN requires p < 0.50; the band
-  `[0.50, 0.70)` is a HIT, never a silent CLEAN; a `model` field that is not exactly the pin is
-  rejected. No key, no network, or any JEV error/parse failure degrades to the offline verdict and
-  exit code (`COLLISION_PREFLIGHT_JEV=off` forces that path exactly) — a JEV outage can never
-  become a false CLEAN.
-- **The request shape is pinned by the caller and verified against the live endpoint — it is
-  deliberately NOT restated here.** A shape copied out of prose is how the next caller gets a 400
-  that blames its own code; copy the working construction in the caller instead (#7866 is the open
-  finding on that shape).
+- **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
+  `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
+  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0`, prompt version
+  `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
+  path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
+  `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
+  mechanical attribution (branch slug / worktree path / the lane's own first user message) plus
+  that lane's own `session.pid_alive` (a live process keeps blocking even when its cmux workspace
+  is gone — `lane_live_map` folds a terminal workspace to dead even then, so the gate reads the pid
+  directly). The reasons are recorded in that module's docstring under "Claim gate —
+  the HOLDER, never prose"; the short version is that a **probability that only the caller can
+  interpret is not a mechanical answer**, and this gate needs one. The capability itself is
+  unchanged and still shared; the extraction journey is its next consumer, and it must
+  **build** the seam — `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §"✅ Jev for
+  classification is cheap — but ⚠️ the seam does **NOT** yet exist" (S2.2/S2.3): wiring it
+  "requires an adapter, a prompt, and a parser … it is work, not a config flag."
+- **When a caller does wire it:** the request shape is pinned by the caller and verified against the
+  live endpoint — it is deliberately NOT restated here. A shape copied out of prose is how the next
+  caller gets a 400 that blames its own code; copy the working construction in the caller instead
+  (#7866 is the open finding on that shape).
 - **Rationale and JEV's decision-only properties:** `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
-  (§"✅ Jev for classification is cheap, and the seam already exists"; the extraction journey's
-  S2.2/S2.3 consumes the same capability) — not this file.
+  (§"✅ Jev for classification is cheap — but ⚠️ the seam does **NOT** yet exist"; the extraction
+  journey's S2.2/S2.3 is where that seam would be built) — not this file.
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
@@ -491,6 +502,28 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 ### Git Workflow
 
 - **Before any commit:** invoke `commit-workflow` skill
+- **⛔ Never run a bare `git stash pop` / `git stash apply` / `git stash drop` in a worktree lane.**
+  `refs/stash` and its reflog live in the **common** git dir, so the stack is repo-GLOBAL: a peer
+  lane's `git stash push` renumbers YOUR entry, and your unqualified `git stash pop` then applies
+  and **drops the PEER's entry** into your worktree (#2654, #3539, and a 7860/8482 lane that
+  already knew the hazard — three recorded incidents, #8051). It presents as a *successful* pop:
+  no conflict, no warning, no different exit status. Use `python tools/lane_stash.py push|pop|list`
+  instead — it pins every entry to `refs/lane/<lane-key>/stash/<n>` and restores **by sha**, so a
+  peer's entry is unreachable in either direction; `python tools/lane_stash.py check` is the
+  executable detector (exit 1 = a bare `git stash pop` here would take work that is not provably
+  this lane's — a peer lane's marker or lane ref, any entry only a branch name could attribute, or a
+  `refs/stash` that resolves over an emptied reflog; a register that cannot be read at all is exit 2,
+  a state error, so treat ANY non-zero as "do not run a bare `git stash pop`").
+  `python tools/lane_stash.py recover <sha>` is the repair recipe for THIS lane's own dropped entry
+  (it pins what it restores under the current lane), and it **refuses** an entry another lane's ref
+  or `[<lane-key>]` marker names, or one already enumerated by the register that is not provably
+  this lane's (nothing was dropped, so `recover` would only mint ownership; pass `-m` to assert it
+  deliberately) — pinning a peer's entry here would leave it claimed by both lanes, and `check`
+  would then clear a bare pop on work that is not this lane's. To restore a *peer's* dropped entry,
+  use `git stash store -m "<original subject>" <sha>` (the commit survives in the object DB), or let
+  that lane recover it from its own worktree.
+  `tests/test_lane_stash.py` carries the 2-worktree reproduction. The lane rule
+  also exists one repo up in agent-infra (skills + guard extension) as agent-infra #1264.
 - Branch naming: `feat/`, `fix/`, `chore/` prefixes
 - PRs auto-merge by default (no staging hold unless `deploy:staging` label)
 - Pre-commit hook enforces agent-infra version sync via `.husky/pre-commit`

@@ -1145,6 +1145,11 @@ def build_report(
     # only) so the pool@k rank-(20, cap] undercount is directly measurable.
     reader_surface_recall: dict[str, float] = {}
     reader_surface_recall_n: dict[str, int] = {}
+    # #2516 (C1, amended): the fact-grain answer-evidence leg aggregate
+    # (mean over outcomes with a gold answer; N/A-dropped like every other
+    # evidence metric).
+    answer_evidence_recall: dict[str, float] = {}
+    answer_evidence_recall_n: dict[str, int] = {}
     # #1763: the re-baselined point-level answer-availability view (mark (d)
     # answer_string) — aggregated parallel to evidence_recall@k so the legacy
     # source-session-dominated metric stays byte-identical (D5 #1540
@@ -1217,6 +1222,21 @@ def build_report(
         if real_as:
             answer_string_recall[str(k)] = _mean(real_as)
             answer_string_recall_n[str(k)] = len(real_as)
+        # #2516 (C1, amended): the FACT-GRAIN answer-evidence leg — did the
+        # assembled reader context hand the reader the answer-bearing unit?
+        # Per-outcome binary (1.0/0.0) computed by the retrieval leg over the
+        # SAME rendered context the reader receives
+        # (evidence.answer_evidence_in_context — lexical >=3-contiguous-word
+        # span vs the gold answer; N/A on questions with no gold answer).
+        # Aggregated parallel to reader_evidence@k with the same N/A-drop
+        # discipline; absent per-outcome keys leave the aggregate absent
+        # (never fabricated).
+        aes = [(o.get("answer_evidence@k") or {}).get(str(k), None)
+               for o in outcomes]
+        real_ae = [v for v in aes if v is not None]
+        if real_ae:
+            answer_evidence_recall[str(k)] = _mean(real_ae)
+            answer_evidence_recall_n[str(k)] = len(real_ae)
 
     # M6 (D6): evidence_coverage — fraction of evidence-bearing questions
     # (dataset has >=1 evidence turn) whose ingest wrote evidence points
@@ -1250,6 +1270,93 @@ def build_report(
         str(k): _paper_agg("turn_recall@k", k) for k in ks}
     evidence_recall_paper = {
         str(k): _paper_agg("evidence_recall@k", k) for k in ks}
+
+    # ── #2516 (C1, amended): per-category retrieval aggregates ──
+    # The official metric is per-question all-or-nothing, and the measured
+    # failure profile is CATEGORY-specific: the multi-session tail carries
+    # the partial-evidence loss while the naive head slice is ~100%
+    # single-session-user (the 2026-09-07 50-Q head-slice artifact — a head
+    # slice CANNOT measure the tail). So the retrieval metrics are ALSO
+    # aggregated per paper category (the SAME ``category_of`` grouping the
+    # accuracy block uses) plus a ``full_mix`` row, over non-_abs questions
+    # ONLY (the official print_retrieval_metrics.py exclusion).
+    #
+    # This block carries the per-question FRACTION aggregates. The official
+    # BINARY projection (``recall_all@5`` == fraction == 1.0) lives in
+    # ``w7_publish.py`` alone — one implementation of the official semantics
+    # (``w7_publish.category_variant_rows`` derives the per-category official
+    # rows at publication time from the same outcomes), so the projection can
+    # never drift between the report and the receipt.
+    #
+    # ``answer_evidence@5`` (the C1 amendment) is the FACT-GRAIN bridge: it
+    # sits between the session surface (session_recall@5 / official
+    # recall_all@5) and the marked-content surface (reader_evidence@5 /
+    # reader_surface@5) and answers "did the answer-bearing unit reach the
+    # reader?" — the A2 gap the A-levers are gated on. N/A (None) on
+    # questions with no gold answer (abstention / _abs), dropped from the
+    # mean like every other N/A evidence metric.
+    _RETRIEVAL_CAT_KEYS = (
+        "session_recall@k", "turn_recall@k", "evidence_recall@k",
+        "chunk_evidence_recall@k", "reader_evidence@k", "reader_surface@k",
+        "answer_evidence@k", "answer_string_evidence_recall@k",
+    )
+
+    def _retrieval_cat_block(rows: list[dict]) -> dict[str, Any]:
+        """Per-category retrieval aggregation at k=5 (the gate horizon).
+
+        Every metric keeps its own N/A discipline (a None-valued outcome is
+        DROPPED, never coerced to 0.0) and carries its own ``n`` + the
+        ``n_missing`` vacuity count, so a category whose evidence denominator
+        is empty (all-degraded ingest) is visible instead of reading 0.0.
+        """
+        block: dict[str, Any] = {"n": len(rows)}
+        for key in _RETRIEVAL_CAT_KEYS:
+            vals = [(o.get(key) or {}).get("5") for o in rows]
+            real = [v for v in vals if v is not None]
+            if not real:
+                continue
+            block[key] = {"value": _mean(real), "n": len(real),
+                          "n_missing": len(rows) - len(real)}
+        return block
+
+    by_cat_outcomes: dict[str, list[dict]] = {}
+    for o in paper_outcomes:
+        by_cat_outcomes.setdefault(
+            category_of({"question_id": o.get("question_id"),
+                         "question_type": o.get("question_type", "")}),
+            [],
+        ).append(o)
+    retrieval_by_category: dict[str, Any] = {
+        cat: _retrieval_cat_block(rows)
+        for cat, rows in sorted(by_cat_outcomes.items())}
+    # full_mix = the union of every non-_abs category (the aggregate the
+    # per-category rows are read against).
+    retrieval_by_category["full_mix"] = _retrieval_cat_block(paper_outcomes)
+    # #2516 (C1, amended): the POPULATION label rides the block so the two
+    # lane disclosures of the #2513 W2C scope cycle cannot be lost when a
+    # number is quoted out of the report: (i) a retrieval-only lane ran NO
+    # reader, so it cannot see a reader-path (class B) failure at all — a
+    # class-A delta from it is a proxy, not progress; (ii) the D3 fixture lane
+    # is the SPARSE lane (dense leg inert) and is a different instrument — it
+    # is not this harness and its numbers do not merge with these (the D3
+    # instrument records its own `retrieval_degraded` census; the eval runner
+    # has no such key, so none is fabricated here). (i) is machine-checkable
+    # and is recorded; (ii) is a cross-instrument rule the reader must apply.
+    retrieval_by_category["population"] = {
+        "n_non_abs": len(paper_outcomes),
+        "reader_ran": not retrieval_only,
+        "class_b_measurable": not retrieval_only,
+        "disclosure": (
+            "retrieval-only lane: no reader ran, so a class-B "
+            "(reader-path) failure is INVISIBLE here — an `recall_all@5` / "
+            "`evidence_recall@5` delta from this lane is a proxy, never "
+            "progress (#2513 W2C; 2026-09-07 scope doc §3–§4.2)"
+            if retrieval_only else
+            "answers were produced by the pinned reader; a class-A vs "
+            "class-B comparison still requires ONE population with one "
+            "real reader (the D3 fixture lane is the sparse lane — a "
+            "different instrument; its numbers do not merge with these)"),
+    }
 
     # ── #1349 vector-arm metrics (binary-gain nDCG@10 + P@10/P@5) ──
     def _vmean(key: str):
@@ -2309,6 +2416,24 @@ def build_report(
             # read here), and reader_evidence@k counts points only.
             "reader_surface@k": _gated(reader_surface_recall or None),
             "reader_surface_n@k": _gated(reader_surface_recall_n or None),
+            # #2516 (C1, amended): the FACT-GRAIN answer-evidence leg — binary
+            # per question (1.0 = the assembled reader context shares >=3
+            # contiguous verbatim words with the gold answer), N/A (None) when
+            # the question carries no gold answer. The bridge between the
+            # session surface and the marked-content surface: the A2 gap
+            # (session/reader surfaces complete, the answer-bearing unit
+            # never reaching the reader) is invisible to both.
+            "answer_evidence@k": _gated(answer_evidence_recall or None),
+            "answer_evidence_n@k": _gated(answer_evidence_recall_n or None),
+            # #2516 (C1, amended): per-category retrieval aggregates (the
+            # category-specific measurement surface — a naive head slice is
+            # ~100% single-session-user and cannot see the tail). One row per
+            # paper category + `full_mix`, non-_abs only; each metric carries
+            # its own n/n_missing (N/A-drop discipline). The official BINARY
+            # recall_all@5 rows are derived from the same outcomes by
+            # w7_publish.category_variant_rows (one implementation of the
+            # official semantics).
+            "retrieval_by_category": _gated(retrieval_by_category or None),
             # #1763: the re-baselined point-level answer-availability view
             # (mark (d) answer_string). The pilot census is 98.5%
             # source-session (472/479 marks), so the legacy evidence_recall@k
@@ -2521,7 +2646,26 @@ def build_report(
                                  "produced by the retrieval leg (evidence.answer_string_recall_at_k "
                                  "— the chunk_evidence_recall@k seam) and stays ABSENT from "
                                  "the aggregate when outcomes carry no such key (never "
-                                 "fabricated); evidence_recall_n@k = "
+                                 "fabricated); #2516 answer_evidence@k = the "
+                                 "FACT-GRAIN answer-evidence leg: 1.0 when the "
+                                 "assembled reader context shares >=3 "
+                                 "contiguous verbatim words with the gold "
+                                 "answer, else 0.0, N/A (None) when the "
+                                 "question carries no gold answer (lexical "
+                                 "floor — a paraphrase reads absent; "
+                                 "parity-pinned with the D3 instrument's "
+                                 "gold_answer_in_evidence_pn rule); "
+                                 "retrieval.retrieval_by_category = the same "
+                                 "fraction metrics aggregated per paper "
+                                 "category + 'full_mix' over non-_abs "
+                                 "questions (the type-stratified measurement "
+                                 "surface: a naive head slice is ~100% "
+                                 "single-session-user and cannot measure the "
+                                 "tail), each with its own n/n_missing; the "
+                                 "official per-category recall_all@5 rows are "
+                                 "derived from these outcomes by "
+                                 "w7_publish.category_variant_rows; "
+                                 "evidence_recall_n@k = "
                                  "evidence-bearing outcomes in the mean; "
                                  "evidence_vacuity_rate@k = fraction of "
                                  "evidence-bearing outcomes with 0.0 while "

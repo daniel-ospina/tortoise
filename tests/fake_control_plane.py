@@ -113,6 +113,7 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("connectors", "created_at"),
     ("connectors", "last_sync_at"),
     ("connectors", "updated_at"),
+    ("deck_views", "viewed_at"),
     ("graphs", "created_at"),
     ("graphs", "deleted_at"),
     ("graphs", "purged_at"),

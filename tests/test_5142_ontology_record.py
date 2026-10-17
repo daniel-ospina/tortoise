@@ -50,6 +50,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ONTOLOGY = REPO / "docs" / "ONTOLOGY.md"
+ONTOLOGY_CHANGELOG = REPO / "docs" / "ONTOLOGY-CHANGELOG.md"
 
 # The two marker rows PR #5127 flipped, and the PR/commit that flipped them.
 FLIP_PR = "#5127"
@@ -64,6 +65,17 @@ def _doc() -> str:
     return ONTOLOGY.read_text(encoding="utf-8")
 
 
+def _changelog_doc() -> str:
+    """The ONTOLOGY changelog file — the home of the per-field build record.
+
+    #8745 moved the `Impl` column and the changelog prose out of `ONTOLOGY.md`
+    into this sibling (owner approval tracked there; #8542 authorised only the
+    two architecture documents), so the change record and the per-field markers
+    are read from here rather than from the model.
+    """
+    return ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
+
+
 def _section(doc: str, heading: str) -> str:
     """The text of one `### …` section, up to the next `###`/`##` heading."""
     start = doc.index(heading)
@@ -72,12 +84,15 @@ def _section(doc: str, heading: str) -> str:
     return doc[start:min(ends)] if ends else doc[start:]
 
 
-def _changelog(doc: str) -> str:
+def _changelog() -> str:
     """The contiguous blockquote run that holds the changelog entries.
 
     Every changelog line is a blockquote line (blank separators are a bare
     ``>``), so the run ends at the first line that is not prefixed with ``>``.
+    The entries live in `docs/ONTOLOGY-CHANGELOG.md` since #8745 moved them out
+    of the model.
     """
+    doc = _changelog_doc()
     start = doc.index("> **Changelog")
     out: list[str] = []
     for line in doc[start:].splitlines():
@@ -104,20 +119,29 @@ def test_format_is_in_source_handled() -> None:
 
 
 def test_format_marker_rows_are_checked() -> None:
-    """Both flipped rows read ✅; a re-flip to ⚠️/❌ must fail here."""
-    doc = _doc()
+    """Both flipped rows read ✅; a re-flip to ⚠️/❌ must fail here.
+
+    The §4.6 `format` **build marker** now lives in `ONTOLOGY-CHANGELOG.md`'s
+    per-field implementation table — #8745 moved the `Impl` column out of the
+    model — so it is read from its new home. §4.7's matrix row is a design
+    statement ("`format` belongs here"), not a per-field `Impl` cell, and stays
+    in `ONTOLOGY.md`.
+    """
     source_row = [
-        ln for ln in _section(doc, "### §4.6 Source").splitlines()
+        ln for ln in _section(_changelog_doc(), "### §4.6 Source").splitlines()
         if ln.startswith("| `format` ")
     ]
-    assert len(source_row) == 1, "expected exactly one `format` row in §4.6"
+    assert len(source_row) == 1, (
+        "expected exactly one `format` row in the §4.6 build record "
+        "(`ONTOLOGY-CHANGELOG.md`)"
+    )
     assert "✅" in source_row[0], (
-        "§4.6's `format` row must stay ✅ (PR #5127 moved it into "
+        "the §4.6 `format` build record must stay ✅ (PR #5127 moved it into "
         "`_SOURCE_HANDLED`) — #5142"
     )
 
     matrix_row = [
-        ln for ln in _section(doc, "### §4.7 Temporal Model").splitlines()
+        ln for ln in _section(_doc(), "### §4.7 Temporal Model").splitlines()
         if ln.startswith("| format ")
     ]
     assert len(matrix_row) == 1, "expected exactly one `format` row in §4.7"
@@ -128,7 +152,7 @@ def test_format_marker_rows_are_checked() -> None:
 
 def test_changelog_records_the_format_move() -> None:
     """The flip must be recorded, not appear from nowhere in the rows."""
-    changelog = _changelog(_doc())
+    changelog = _changelog()
     assert "_SOURCE_HANDLED" in changelog and "format" in changelog, (
         "the `format` markers moved ⚠️ → ✅ with no changelog entry (#5142): the "
         "changelog must record the `_SOURCE_HANDLED |= format` fact"

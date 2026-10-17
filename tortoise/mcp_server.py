@@ -1810,7 +1810,21 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # real T1 source could never move, and `baseline_source='system-default'`
     # forged the #2199 provision.
     "ep_alpha", "ep_beta", "baseline_set", "baseline_source",
-    "baseline_system_default"})
+    "baseline_system_default",
+    # #7936 (review P2): the event-name-stub DISCRIMINATOR. `_event_plain_merge`
+    # marks its three name stubs `_stub=true` ON CREATE and
+    # `_upsert_object`/`_upsert_subject` CLEAR it on adoption; the
+    # first-registration probe in `sdk._create_entity` excludes marked nodes, so
+    # a later `create_entity` for the name still journals its
+    # `ObjectRegistered`/`SubjectAdded`. A caller able to write it can FORGE the
+    # exclusion and silently stop the registration being journaled — measured
+    # before this entry: `tortoise_update_entity(<stub id>, _stub=False)` was
+    # accepted, journalled as an `EntityMutated` (surviving `rebuild_all`), and
+    # the following `create_entity` skipped `ObjectRegistered` — the node then
+    # vanished on rebuild and live != replay. Refused here BEFORE the write is
+    # attempted, with `sdk._sanitize_props` as the fail-closed backstop for the
+    # direct SDK route (the same two-layer shape as `__runId`/`baseline_*`).
+    "_stub"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -2775,10 +2789,12 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
     Returns {events: [...], next_cursor}. after=None → tail (oldest retained).
     Expired cursor → structured error ('cursor expired — replay from tail');
     malformed cursor → 'invalid cursor'. types: comma-free list of event types
-    (11 registered claim types: PointAdded, OperatorAdded, PointRetracted,
+    (12 registered claim types: PointAdded, OperatorAdded, PointRetracted,
     PointSuperseded, OperatorAnnotated, PointPromoted, OperatorPromoted,
-    DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated)
-    or None for all.
+    DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated,
+    PointRevised) or None for all. `PointRevised` rows exist, and the response
+    additionally carries `changes` (per-claim before→after deltas, #2353), only
+    while `TORTOISE_CHANGE_FEED` is enabled.
 
     readOnlyHint covers user-visible state: the poll NEVER mutates user
     content. A rare maintenance purge (retention) may run at most once per

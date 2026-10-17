@@ -33,6 +33,7 @@ from typing import NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
+    _guard_numeric_literals,  # #8479: the SAME domain, on the statement TEXT
     _guard_numeric_params,  # #7174: the store's numeric domain, same seam
     _guard_unsupported_cypher,
     _predicate_barrier_required,  # #7162: engine-version gate for the barrier
@@ -3045,7 +3046,11 @@ def _journal_safe_params(params, cypher=None):
 #
 #   * `_live_write_scope(...)` — opened by the live doors that append FIRST and
 #     fold second (`TortoiseSDK._apply_and_journal`, `_doc_write`,
-#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`).
+#     `_create_entity`, `EventAPI._emit`, `ConversationMiner._emit_event`), and
+#     by `TortoiseSDK.create_point` (#7951), whose scope is a RESERVED marker
+#     today — its `CREATE` still runs on the raw guarded handle, so the scope
+#     authorizes nothing yet; it becomes load-bearing when increment 3 replaces
+#     the `CREATE` with the fold.
 #     The append is the COMMIT POINT (the ordering contract at the top of
 #     `tortoise/sdk.py`); the scope is opened immediately AFTER it, around the
 #     fold that follows — so the journal write is never inside the scope that
@@ -3066,8 +3071,8 @@ def _journal_safe_params(params, cypher=None):
 # (`proj.g.query(...)`). That handle is *also* the live path of every SDK
 # writer — `create_point`'s `CREATE (:Point)`, `update_point`'s
 # `SET n += $props` — so a blanket refusal there would break the product's own
-# write path, not a violation of it: the SDK's live doors journal (or carry
-# the recorded apply-first exception), and there is no runtime signal at the
+# write path, not a violation of it: the SDK's live doors journal, and there is
+# no runtime signal at the
 # handle that separates a journaled live write from a direct one. Converting
 # that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
 # recorded as still-open on `#7951` rather than papered over here.
@@ -3166,12 +3171,14 @@ class _GuardedGraph:
     ``execute_command``), so it does not depend on the inner handle's class to
     refuse the ``=~`` operator. NOTE the override is NOT uniform: only
     ``query`` applies the bulk-wipe check (L2) as well. The five query verbs
-    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``) carry BOTH
-    pre-dispatch refusals — the #3595 operator guard and, since #7174, the
-    numeric-domain guard on their ``params`` — while ``execute_command`` carries
-    the operator guard only (a raw command has no params map to walk; the
-    vendor inlines params into the statement text instead — see
-    ``cypher_guard._guard_numeric_params``). See KNOWN GAPS in the module
+    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``) carry ALL
+    THREE pre-dispatch refusals — the #3595 operator guard, the #7174
+    numeric-domain guard on their ``params``, and (since #8479) that same domain
+    applied to the statement's own TEXT — while ``execute_command`` carries the
+    operator and statement-text guards (a raw command has no params map to walk;
+    the vendor inlines params into the statement text instead, which is exactly
+    the text the #8479 scan reads — see
+    ``cypher_guard._guard_numeric_literals``). See KNOWN GAPS in the module
     comment above. ``__getattr__`` below forwards only the remaining non-query
     attributes (``name``, ``delete``, ``schema``, ...) to the underlying handle.
     """
@@ -3203,6 +3210,9 @@ class _GuardedGraph:
         # domain travels in PARAMS, and this wrapper must stay complete rather
         # than rely on the inner handle's class (the #3595 precedent above).
         _guard_numeric_params(params)
+        # #8479: the OTHER half of that domain — a number written into the
+        # statement's own TEXT, which no param map can carry.
+        _guard_numeric_literals(cypher)
         if _is_bulk_wipe(cypher):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
@@ -3223,6 +3233,7 @@ class _GuardedGraph:
         # rather than relying on the inner handle's class.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        _guard_numeric_literals(cypher)
         cypher = self._bar(cypher)
         return self._g.ro_query(
             cypher, params=_journal_safe_params(params, cypher), timeout=timeout
@@ -3233,6 +3244,7 @@ class _GuardedGraph:
         # reaching `_query` directly must not slip past the refusal either.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        _guard_numeric_literals(cypher)
         cypher = self._bar(cypher)
         return self._g._query(
             cypher, params=_journal_safe_params(params, cypher),
@@ -3244,12 +3256,14 @@ class _GuardedGraph:
         # `_query`, so they carry their own refusal.
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        _guard_numeric_literals(cypher)
         cypher = self._bar(cypher)
         return self._g.profile(cypher, params=_journal_safe_params(params, cypher))
 
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
+        _guard_numeric_literals(cypher)
         cypher = self._bar(cypher)
         return self._g.explain(cypher, params=_journal_safe_params(params, cypher))
 
@@ -4101,6 +4115,77 @@ def _value_ok(val, _depth: int = 0) -> bool:
     return _annotator_value_ok(val) or _engine_coerces(val)
 
 
+class _UnstoredValue:
+    """Sentinel: the store keeps NO property for this value (#7951)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<unstored>"
+
+
+#: Returned by :func:`_stored_prop_value` for a value no property can hold.
+_UNSTORED = _UnstoredValue()
+
+
+def _stored_prop_value(val):
+    """The value FalkorDB STORES for ``val``, or :data:`_UNSTORED`.
+
+    #7951 §17.1 appends the `PointAdded` record BEFORE the `CREATE`, so the
+    payload can no longer be the post-`CREATE` `get_point` read-back — the
+    APPLIED value. It must state what the `CREATE` is about to write instead,
+    and "what the store holds" is THREE outcomes, not one:
+
+      * a JSON-native value the engine takes verbatim (``str``/``bool``/
+        ``int``/finite ``float``, and arrays of those) — kept as-is;
+      * a value the driver INLINES as ``str(val)`` and the engine parses as a
+        numeric/bool literal — ``Decimal("1.5")`` -> ``1.5``,
+        ``Fraction(5, 1)`` -> ``5``, ``np.int64(7)`` -> ``7``,
+        ``np.bool_(True)`` -> ``True``. The store holds the PARSED literal, so
+        the record must too: the raw object is not JSON-encodable and
+        ``EventLog.append`` passes no ``default=``, so journaling it destroyed
+        the append AND the cache write behind it (#7951 review P1);
+      * a value no property can hold — a null (a Cypher null property is not
+        stored), a map/bytes/set, a non-finite float, a NUL/lone-surrogate
+        string, a null inside an array, or anything else whose ``str()`` is
+        not a literal — for which the store holds NOTHING, so the record must
+        OMIT the key.
+
+    OMIT rather than record ``None``: the historic read-back payload omitted a
+    dropped property, and ``consistency.check_consistency`` reads a journal key
+    the node does not carry as ``uncarried_journal_fields``
+    (``_UNCARRIED_NULL`` / ``_UNCARRIED_NON_PERSISTABLE``) — so recording the
+    value the store REFUSED would manufacture exactly the asymmetry this
+    function exists to avoid (#7951 review, secondary symptom: a nested dict
+    that ``json`` accepts but the engine drops was journalled as a real
+    property the node never had).
+
+    The predicates are the boundary's OWN (``_value_ok`` / ``_engine_coerces``),
+    so a new accept-or-reject rule cannot be taught to the transport gate and
+    missed here.
+    """
+    if val is None:
+        return _UNSTORED
+    if isinstance(val, (list, tuple)):
+        # `_value_ok` already walks every leaf (and refuses a null INSIDE an
+        # array, which the engine rejects); reusing it keeps the array rule in
+        # one home. Every leaf it admits is storable — verbatim or coerced —
+        # so the recursion below cannot produce `_UNSTORED`.
+        if not _value_ok(val):
+            return _UNSTORED
+        return [_stored_prop_value(item) for item in val]
+    if _annotator_value_ok(val):
+        return val
+    if not _engine_coerces(val):
+        return _UNSTORED
+    text = str(val)
+    if text in _LITERAL_BOOLS:
+        return text == "True"
+    if "." in text or "e" in text or "E" in text:
+        return float(text)
+    return int(text)
+
+
 def _writable_at_parse(val, _depth: int = 0) -> bool:
     """False only for what the engine rejects while PARSING a parameter.
 
@@ -4286,7 +4371,11 @@ _NO_PROJECTION_FOLD = frozenset({
     "IngestStarted",        # audit-only, no graph effect (pre-existing no-op)
     "BatchIdStamped",       # JSONL-only; replayed from the batch snapshot
                             # (rebuild_all pass-2b), not via this dispatcher
-    "DirectEdgeCreated",    # JSONL-only; deliberately deferred (A10 #1048)
+                            # (#8499: `DirectEdgeCreated` used to be listed
+                            # here as "deliberately deferred (A10 #1048)" —
+                            # that deferral is now LANDED as a real pass-2b
+                            # fold, `direct_edge_created_events`. A type with
+                            # a real fold branch must never sit in this set.)
     "CalibrationRecorded",  # :Meta milestone marker (audit)
     "DedupeRecorded",       # #784 content-dedup audit
     "DedupeRejected",       # #784 content-dedup audit
@@ -4335,6 +4424,13 @@ _POINT_RESTAMP_EVENT_TYPES = frozenset({
 # consumes and returns on both before this set is reached (#3305).
 _APPLY_WARN_ONLY_TYPES: frozenset[str] = frozenset({
     "DirectEdgeRepoint",
+    # #8499: `DirectEdgeCreated` is now folded by `rebuild_all`'s pass-2b, but
+    # this ONE-RECORD `apply()` engine has no pass-2b equivalent — so it stays
+    # recognized-not-folded HERE, on exactly `DirectEdgeRepoint`'s terms.
+    # Classifying it as unknown instead would make `rebuild(log)` /
+    # `recover_from_log` refuse any journal holding a direct-edge descriptor,
+    # i.e. a lost DB could no longer be recovered.
+    "DirectEdgeCreated",
 })
 
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
@@ -4367,6 +4463,11 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     # documented contract that a record folded by both graph engines must not
     # reach that warning (the four point-lifecycle types are the deliberate
     # exception — see the NOTE above).
+    # #8499: `DirectEdgeCreated` is a REAL fold in `rebuild_all`'s pass-2b but
+    # has no representation in this `{id: point}` index (a flat edge
+    # descriptor, not a Point) — so it must be listed explicitly now that it
+    # is no longer covered by `_NO_PROJECTION_FOLD` above.
+    "DirectEdgeCreated",
     "EntityLinked",
     "SessionRecorded",
     # #7951: the :Session hard-delete carrier. A real fold in
@@ -5816,6 +5917,29 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # `_canonical_point_fields` drops on BOTH sides.
             if "tags" in ev:
                 p["tags"] = ev["tags"]
+            # #2350 (E-prec): fold the per-end validity-precision EDIT — the
+            # same class as `tags` above, and it must ride the SAME pure-fold
+            # arm the graph fold uses, or the two replay engines disagree.
+            # `update_point(id, validToPrecision="unknown")` writes the prop
+            # LIVE (its per-key `SET n += $props`) and the `PointRevised`
+            # payload carries it, but this fold built its props only from
+            # content/annotator/belief/`mitigation_strength`/`tags`, so:
+            #   * the GRAPH rebuild dropped it and `end_state` flipped
+            #     `unknown` -> `open`, i.e. "an un-datable end read as
+            #     still-true" (#2349 fabricated coverage) — the exact hazard
+            #     the 3-state end exists to prevent; and
+            #   * `check_consistency` (this fold is its reference view) red a
+            #     graph the live path itself wrote, with advice ("replay the
+            #     journal") that could never clear it — the #5048/#3817 class.
+            # Presence-conditional: an explicit `None` is the documented clear
+            # and folds as an absent value, which `_canonical_point_fields`
+            # drops on BOTH sides. The writability gate is the SAME
+            # `_annotator_value_ok` `mitigation_strength` uses (it keeps
+            # `None`, so a clear still folds): a corrupt journal's
+            # non-persistable value must DROP, never strand the rebuild.
+            for _pk in ("validFromPrecision", "validToPrecision"):
+                if _pk in ev and _annotator_value_ok(ev[_pk]):
+                    p[_pk] = ev[_pk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -8132,11 +8256,13 @@ class FalkorProjection(
                     ev.get("rel"))
         elif t in _NO_PROJECTION_FOLD:
             # Recognized, intentionally folded elsewhere or not at all: the
-            # audit-only markers, the JSONL-only batch snapshot replayed in
-            # rebuild_all pass-2b, and the deliberately-deferred
-            # DirectEdgeCreated (A10 #1048). The warning below is reserved
-            # for a type OUTSIDE this vocabulary — #3299 arose from exactly
-            # that (an unknown mutation vanishing under wipe+replay).
+            # audit-only markers and the JSONL-only batch snapshot replayed
+            # in rebuild_all pass-2b. The warning below is reserved for a
+            # type OUTSIDE this vocabulary — #3299 arose from exactly that
+            # (an unknown mutation vanishing under wipe+replay).
+            # ⚠️ `DirectEdgeCreated` is NO LONGER here: #8499 moved it into
+            # `_APPLY_WARN_ONLY_TYPES` and gave it a real pass-2b fold, so this
+            # engine now WARNS on it rather than passing it silently.
             pass
         elif t in _APPLY_WARN_ONLY_TYPES:
             # P1-fix (#3585 re-review): `DirectEdgeRepoint` IS recognized and
@@ -9630,6 +9756,12 @@ class FalkorProjection(
         # #2897: the same class as `last_ms_write_by_source`, for `tags` — the
         # last creation whose own clause actually WROTE the tag list.
         last_tags_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #2350 (E-prec): the same open-set conditional-write class again, one
+        # anchor per end (a creation that wrote only ONE of the two props did
+        # not clear the other live, so a single shared anchor would
+        # over-suppress the revision's value for the prop nobody restated).
+        last_vfp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        last_vtp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         # #4305: id-WIDE (cross-file) journal-owned derived markers for the
         # pass-1b restore tail. The per-source anchors above are a WITHIN-file
         # chronology boundary; the restore tail runs AFTER every journal file,
@@ -9870,6 +10002,15 @@ class FalkorProjection(
                     # for a tag EDIT.
                     if "tags" in persisted_extras:
                         last_tags_write_by_source[key] = seq
+                    # #2350 (E-prec): the two per-end precision props ride the
+                    # same reported set — the passthrough writes each only when
+                    # the creation payload carries a non-None value, so the
+                    # pass-1b boundary for a precision EDIT is the creation
+                    # that actually WROTE that end.
+                    if "validFromPrecision" in persisted_extras:
+                        last_vfp_write_by_source[key] = seq
+                    if "validToPrecision" in persisted_extras:
+                        last_vtp_write_by_source[key] = seq
                     # #4305: the id-wide counterpart (see the sets'
                     # declaration). A re-creation explicitly cleared both
                     # conditional fields before the upsert, so it owns them
@@ -9960,10 +10101,11 @@ class FalkorProjection(
         # TRANSFERRED direct edge from its ``DirectEdgeRepoint`` descriptor
         # (A10 #1048), so an edge that only exists by pass-2b would be missed
         # inline. (``DirectEdgeCreated`` — plain direct-edge BASE creation —
-        # is folded by NEITHER engine: it is JSONL-only and its replay stays
-        # deferred (A10 #1048), so those edges are lost on rebuild by that
-        # pre-existing gap. That loss is the ``EXEMPT_SHAPES`` rationale for
-        # an edge-message MISS, not a reason to defer this sweep.)
+        # is folded by pass-2b since #8499, so it exists by the time this
+        # sweep runs. What stays EXEMPT in ``EXEMPT_SHAPES`` is the shape the
+        # journal NEVER records at all — a raw-Cypher dressed edge with no
+        # ``create_direct_edge``/``create_operator`` call — which is an
+        # edge-message MISS rationale, not a reason to defer this sweep.)
         # The sweep runs after EVERY edge-creating pass, so the edge set is
         # final; records are buffered WITH their journal seq and replayed in
         # journal order, which is what makes a ``clear`` followed by a
@@ -9978,6 +10120,12 @@ class FalkorProjection(
         # #2423: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT transfer
         # journal) — replayed in pass-2b AFTER operator edges exist.
         direct_repoint_events: list = []
+        # #8499 / A10 #1048: `DirectEdgeCreated` descriptors — the plain
+        # operator-less direct-edge BASE creation, journaled by
+        # `create_direct_edge` on every write. Deferred to the pass-2b sweep
+        # (before the repoint leg above, which is load-bearing — see the fold):
+        # it needs the endpoints to exist, which only holds after pass 1-2.
+        direct_edge_created_events: list = []
         # #7951: `SessionDeleted` records, re-applied AFTER every replay pass.
         # Pass 2 re-derives edges from EVERY `PointAdded` and its `_link_source`
         # / `_link_session` side effects MERGE the `:Source` / `:Session` back —
@@ -10328,6 +10476,8 @@ class FalkorProjection(
                 skip_hash = False
                 skip_mitigation_strength = False
                 skip_tags = False
+                skip_valid_from_precision = False
+                skip_valid_to_precision = False
                 if isinstance(rid, str) and src is not None:
                     # #3860 composition: a PointRevised revises a ``:Point``,
                     # so its anchor key carries the same kind-scoped inner key
@@ -10371,6 +10521,17 @@ class FalkorProjection(
                         skip_tags = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_tags_write_by_source.get(key, -1) > seq)
+                        # #2350 (E-prec): each per-end precision prop is the
+                        # same open-set conditional-write class — its own
+                        # anchor, so a creation that restated only ONE end
+                        # does not suppress the revision's value for the
+                        # other.
+                        skip_valid_from_precision = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_vfp_write_by_source.get(key, -1) > seq)
+                        skip_valid_to_precision = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_vtp_write_by_source.get(key, -1) > seq)
                 wrote_embedding, wrote_content_hash = self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
@@ -10387,7 +10548,9 @@ class FalkorProjection(
                     skip_embedding=skip_embedding,
                     skip_hash=skip_hash,
                     skip_mitigation_strength=skip_mitigation_strength,
-                    skip_tags=skip_tags)
+                    skip_tags=skip_tags,
+                    skip_valid_from_precision=skip_valid_from_precision,
+                    skip_valid_to_precision=skip_valid_to_precision)
                 if isinstance(rid, str):
                     # #4305: id-wide journal-owned derived marks — the revision
                     # wrote (or explicitly wiped) each field it was not told
@@ -10593,16 +10756,22 @@ class FalkorProjection(
                     self._decay_point_belief(ev["id"])
                 if _stamp:
                     point_re_stamp_folds.append((seq, ev))
+            elif t == "DirectEdgeCreated":
+                # #8499 / A10 #1048: the plain direct-edge BASE creation —
+                # deferred to the pass-2b sweep (see its declaration and the
+                # fold there for why it must precede the repoint leg).
+                direct_edge_created_events.append(ev)
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
                 # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
-                # per repointed direct edge (sdk.py). No replay consumer
-                # exists anywhere — on rebuild the transferred direct edge is
-                # LOST (pass-2 only rebuilds operator-mediated edges from
-                # snapshots; operator-less direct edges have no PointAdded
-                # snapshot to carry them). Deferred to pass-2b (after all
-                # operator edges exist) — descriptor replay is a MERGE of the
-                # flat endpoints, order-independent by construction.
+                # per repointed direct edge (sdk.py). Replayed by the pass-2b
+                # direct-edge repoint leg below; before #8499 the descriptor had
+                # NO consumer anywhere, so a transferred direct edge was LOST on
+                # rebuild (pass-2 rebuilds operator-mediated edges from
+                # snapshots, and an operator-less direct edge has no PointAdded
+                # snapshot to carry it). Deferred to pass-2b (after all operator
+                # edges exist) — descriptor replay is a MERGE of the flat
+                # endpoints, order-independent by construction.
                 direct_repoint_events.append(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
@@ -10632,10 +10801,12 @@ class FalkorProjection(
                 self._fold_source_versioned(ev)
             elif t in _NO_PROJECTION_FOLD:
                 # Recognized, intentionally not folded here — the audit-only
-                # markers, the JSONL-only batch snapshot (replayed in pass
-                # 2b) and the deliberately-deferred DirectEdgeCreated (A10
-                # #1048). The warning below is reserved for a type outside
-                # this vocabulary — see FalkorProjection.apply.
+                # markers and the JSONL-only batch snapshot (replayed in pass
+                # 2b). ⚠️ `DirectEdgeCreated` left this set in #8499: it is now
+                # in `_APPLY_WARN_ONLY_TYPES` and folded by pass-2b above
+                # (`direct_edge_created_events`), so a rebuild never reaches
+                # this branch with it. The warning below is reserved for a
+                # type outside this vocabulary — see FalkorProjection.apply.
                 pass
             else:
                 # P2-1 (#3299): a record type outside the recognized
@@ -11769,10 +11940,10 @@ class FalkorProjection(
         # journal, flat {src, tgt, edge_type, attrs}) get their replay
         # consumer — the transferred direct edge is re-created at its FINAL
         # (transitively-resolved) endpoints with its attrs. Direct-edge base
-        # creation (DirectEdgeCreated) replay stays deferred (A10 #1048 —
-        # plain direct edges remain lost on rebuild); the supersede-transfer
-        # descriptors ARE in scope here (E2E-11.6: the successor holds the
-        # transferred direct edge post-rebuild).
+        # creation (``DirectEdgeCreated``) is ALSO replayed now — #8499 landed
+        # the fold, in this same pass-2b block and BEFORE this leg (see
+        # ``direct_edge_created_events``), which retires the A10 #1048
+        # deferral that used to make plain direct edges lost on rebuild.
         # #2488: succ/repoint/fold_seq bind to the supersede-kind SURVIVOR
         # subset (supersede_last — post-recreate, last-per-id) of the one
         # pre-filtered deferred list. A PointInvalidated survivor is NOT a
@@ -11793,7 +11964,7 @@ class FalkorProjection(
         # descriptor replay; that holds by pass structure (pass-2 resurrection
         # precedes the pass-2b sweep). If a future phase reorder moves snapshot
         # resurrection later, the delete-leg must tolerate late resurrection.
-        if supersede_last or direct_repoint_events:
+        if supersede_last or direct_repoint_events or direct_edge_created_events:
             from tortoise.security import validate_rel_type
 
             from .edges import (
@@ -11801,8 +11972,13 @@ class FalkorProjection(
                 STRUCTURAL_REL_LABELS,
                 resolve_structural_target,
             )
+
             # Successor map old→new; resolve transitively to the final live
-            # point (chain-safe, cycle-guarded).
+            # point (chain-safe, cycle-guarded). Built HERE — above the
+            # DirectEdgeCreated fold below, whose superseded-endpoint guard
+            # reads it — and consumed unchanged by the supersede and repoint
+            # legs further down (nothing between the two positions mutates
+            # `supersede_last`).
             succ: dict[str, str] = {}
             for _, ev in supersede_last.values():
                 oid, nid = ev.get("id"), ev.get("new_id")
@@ -11816,6 +11992,131 @@ class FalkorProjection(
                     point_id = succ[point_id]
                 return point_id
 
+            # ── #8499 / A10 #1048: fold ``DirectEdgeCreated`` ─────────────
+            # The plain operator-less direct-edge BASE creation, journaled by
+            # ``create_direct_edge`` on EVERY write (sdk.py — emitted
+            # unconditionally, not on created-only, so the crash window between
+            # the MERGE and the emission is recovered by the retry's emission).
+            # Recognized-but-never-replayed until now: a direct edge was LOST by
+            # every rebuild. That was the pre-existing gap the A10 #1048
+            # deferral NAMED and whose tracker chain (#2895 → #5048) closed
+            # without landing it; the edge-message fold's
+            # ``SHAPE_EDGE_MESSAGE_MISS`` exemption was justified BY this gap, so
+            # this fold retires that premise (see nonfolded.EXEMPT_SHAPES).
+            #
+            # TWO ordering properties, both load-bearing:
+            #  1. FLAT endpoints, and a SUPERSEDED endpoint SKIPS the record
+            #     entirely (the ``succ`` guard in the loop). A supersede
+            #     transfer is journaled SEPARATELY as ``DirectEdgeRepoint``,
+            #     which records the NEW endpoint rather than the old — so
+            #     replaying the creation at ``_final()``-resolved endpoints
+            #     would apply the transfer twice AND resurrect the dead-source
+            #     phantom.
+            #  2. This block MUST precede the repoint leg below, which MERGEs
+            #     the edge at the SUCCESSOR (``src_f = _final(src)``). A
+            #     created-fold running after it would add the old-endpoint
+            #     edge on top; running before, the ``succ`` guard has already
+            #     skipped the record, so for the ONE-creation-then-transfer
+            #     sequence the two legs never both fire for one edge.
+            #
+            # ⚠️ KNOWN BOUND on block ordering (recorded, not overlooked): the
+            # two legs are ordered by BLOCK, not by journal seq, so a creation
+            # that FOLLOWS its own transfer is applied BEFORE the transfer and
+            # then overwritten by it. Measured (``create_direct_edge`` A→B;
+            # ``supersede`` A→A'; ``create_direct_edge`` A'→B): replay lands the
+            # PRE-transfer attrs where live has the post-transfer ones. Only
+            # ATTRS diverge — the edge itself survives — and #8499 does not
+            # introduce it (the later creation was never replayed at all before
+            # this fold), but it is a silent wrong-state on the disaster-
+            # recovery path (#8722). Closing it means interleaving the two legs
+            # by journal seq rather than by block;
+            # ``test_a10_post_transfer_recreation_attr_divergence_known_bound``
+            # pins the current behaviour so it cannot drift unnoticed.
+            #
+            # ⚠️ KNOWN BOUND on the ``succ`` guard (recorded, not overlooked):
+            # ``succ`` is built from the #2488 SURVIVOR-filtered supersede set,
+            # so a supersede whose id is later RE-CREATED is dropped from it
+            # while its ``DirectEdgeRepoint`` descriptor is not gated on the
+            # same fold_seq — so for an id-REUSING producer this fold and the
+            # repoint leg could both fire and leave two edges where live has
+            # one. It is not closed here because no public API can construct
+            # the trigger (nothing in ``create_point``/``ingest`` accepts a
+            # caller-chosen id), and the full id-reuse/supersede suite passes
+            # against it (458 tests, incl.
+            # ``test_id_reuse_double_supersede_no_parallel_edges``). Closing it
+            # properly means plumbing the RAW supersede id set (pre-survivor)
+            # into this block; a producer that can re-create a chosen id must
+            # do that first.
+            #
+            # Label-agnostic endpoints (#7902): a direct IMPL/NAND may connect
+            # ANY two of :Point/:Subject/:Object/:Event (owner ruling #7813), so
+            # each endpoint is resolved by an id-anchored per-label sweep and
+            # the edge query is anchored on the label that resolved it — a
+            # hardcoded :Point match would silently drop every Object↔Object
+            # direct edge (the same defect the repoint leg's direct branch still
+            # carries).
+            for ev in direct_edge_created_events:
+                etype = ev.get("edge_type")
+                src, tgt = ev.get("src"), ev.get("tgt")
+                if (not isinstance(src, str) or not isinstance(tgt, str)
+                        or not isinstance(etype, str)):
+                    logger.warning(
+                        "rebuild: malformed DirectEdgeCreated event skipped "
+                        "(event_id=%s)", ev.get("event_id"))
+                    continue
+                validate_rel_type(etype)
+                if src == tgt:
+                    # Phantom self-edge: never re-create (E2E-11.6 no-self
+                    # contract — the same guard the repoint leg applies).
+                    continue
+                if src in succ or tgt in succ:
+                    # A SUPERSEDED endpoint. Supersede already transferred (or
+                    # collapsed) this edge LIVE, and journaled its own
+                    # ``DirectEdgeRepoint`` descriptor for the NEW endpoint
+                    # (that descriptor's ``src`` is new_id — it records where
+                    # the edge NOW is, not where it was). Re-creating the edge
+                    # here would leave a phantom at the DEAD source that no
+                    # later leg cleans: the repoint leg's delete-leg is
+                    # STRUCTURAL-only, and its direct branch MERGEs at the
+                    # successor. So the repoint descriptor owns the edge's
+                    # post-transfer form — and in the collapse-to-self-edge
+                    # lane (which deliberately emits NO descriptor) this skip
+                    # is what makes the edge disappear, matching live.
+                    continue
+                labels: dict[str, str] = {}
+                for _label in EPISTEMIC_LABELS:
+                    rows = self.g.query(
+                        f"MATCH (p:{_label}) WHERE p.id IN $ids RETURN p.id",
+                        params={"ids": [src, tgt]},
+                    ).result_set
+                    for r in rows:
+                        labels.setdefault(r[0], _label)
+                if src not in labels or tgt not in labels:
+                    # Endpoint absent at replay (hard-deleted live, or an
+                    # unjournaled producer). SKIP — this fold mirrors a live
+                    # write and never mints an endpoint node (unlike the
+                    # structural stub path): inventing one would fabricate a
+                    # node the live graph does not have.
+                    continue
+                # Two-step MERGE (never duplicate nodes), mirroring
+                # create_direct_edge byte-for-byte on the edge shape.
+                self.g.query(
+                    f"MATCH (a:{labels[src]} {{id:$a}}), "
+                    f"(b:{labels[tgt]} {{id:$b}}) "
+                    f"MERGE (a)-[:{etype}]->(b)",
+                    params={"a": src, "b": tgt},
+                )
+                # Last-writer-wins attr SET — the final attrs post-rebuild
+                # (REVIEW-FIX P1 cycle-26 on the emission site).
+                attrs = {k: ev[k] for k in
+                         ("direction", "confidence", "weight", "label",
+                          "batch_id") if k in ev}
+                if attrs:
+                    self.g.query(
+                        f"MATCH (a:{labels[src]} {{id:$a}})-[r:{etype}]->"
+                        f"(b:{labels[tgt]} {{id:$b}}) SET r += $attrs",
+                        params={"a": src, "b": tgt, "attrs": attrs},
+                    )
             if supersede_last:
                 # Collect per-fold operator-edge rows + validate rel types
                 # BEFORE any mutation (#329 collect-then-mutate pattern).
@@ -12151,8 +12452,10 @@ class FalkorProjection(
             if self._fold_edge_message_changed(_em_ev) == 0 \
                     and _em_ev.get("op") == "set":
                 # RECORDED and warned, never refused — see
-                # ``_fold_edge_message_changed``: a plain direct edge is
-                # legitimately absent (A10 #1048), and a hard-deleted edge is
+                # ``_fold_edge_message_changed``: an edge the journal NEVER
+                # records (a raw-Cypher dressed edge, not create_direct_edge)
+                # is legitimately absent — the journaled DirectEdgeCreated
+                # shape IS replayed since #8499 — and a hard-deleted edge is
                 # gone live too, so a refusal here would block recovery of a
                 # journal whose edge loss this fold does not cause. Exempt in
                 # ``nonfolded.EXEMPT_SHAPES``; the record is what makes the
@@ -14122,7 +14425,10 @@ class FalkorProjection(
                       skip_embedding: bool = False,
                       skip_hash: bool = False,
                       skip_mitigation_strength: bool = False,
-                      skip_tags: bool = False) -> tuple[bool, bool]:
+                      skip_tags: bool = False,
+                      skip_valid_from_precision: bool = False,
+                      skip_valid_to_precision: bool = False
+                      ) -> tuple[bool, bool]:
         """Apply PointRevised event — update content, context, and re-compute embedding.
 
         ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
@@ -14174,6 +14480,17 @@ class FalkorProjection(
         only embedding/content_hash/embedding_verbatim/sourceVersionTransit
         (plus ``tags``, added by #2897) — a pre-existing gap general to every
         OTHER open-set prop (#4042 class), not something this flag can reach.
+
+        ``skip_valid_from_precision`` / ``skip_valid_to_precision`` (#2350)
+        are the SAME open-set, conditionally-written class again: each prop
+        is persisted by the open-set passthrough only when the payload
+        carries a non-None value, and `update_point` writes it LIVE via
+        `SET n += $props`. The boundary for each is therefore the creation
+        that actually WROTE that prop (read from the writer's reported key
+        set), or a hard delete->recreate. Without the fold, a precision
+        written through the update door was dropped by replay and
+        `end_state` flipped `unknown` -> `open` (fabricated coverage,
+        #2349) while `check_consistency` red the healthy live graph.
 
         Returns ``(embedding_written, content_hash_written)`` (#4305) — the
         same conditional-write outcome ``_upsert_point_props`` reports, and
@@ -14287,6 +14604,30 @@ class FalkorProjection(
                 set_clauses.append("n.tags = $tags")
                 params["tags"] = ev["tags"]
                 wrote_tags = True
+
+        # #2350 (E-prec): fold a per-end validity-precision EDIT. The
+        # PointRevised payload carries it (`update_point(id,
+        # validToPrecision="unknown")` writes it LIVE via `SET n += $props`),
+        # but this fold built clauses only from content/embedding/hash/
+        # annotator/belief/`mitigation_strength`/`tags`, so a rebuild dropped
+        # it and `end_state` flipped `unknown` -> `open` — the "un-datable end
+        # read as still-true" fabricated-coverage hazard (#2349) the 3-state
+        # end exists to prevent, reintroduced on the one replay door this
+        # feature did not extend. Presence-conditional, mirroring the live
+        # `SET n += $props`: an explicit `None` is the documented clear and
+        # removes the property here too. Each prop has its OWN skip boundary
+        # (the same open-set class as `tags` / `mitigation_strength`): a later
+        # same-file creation that omitted the prop never cleared it live, so
+        # it must not suppress this revision's value — hence one flag per
+        # prop rather than one shared anchor.
+        if (not skip_valid_from_precision and "validFromPrecision" in ev
+                and _annotator_value_ok(ev["validFromPrecision"])):
+            set_clauses.append("n.validFromPrecision = $validFromPrecision")
+            params["validFromPrecision"] = ev["validFromPrecision"]
+        if (not skip_valid_to_precision and "validToPrecision" in ev
+                and _annotator_value_ok(ev["validToPrecision"])):
+            set_clauses.append("n.validToPrecision = $validToPrecision")
+            params["validToPrecision"] = ev["validToPrecision"]
 
         if new_content is not None:
             # Re-compute embedding when content changes (even to empty — wipe

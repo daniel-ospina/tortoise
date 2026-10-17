@@ -19,7 +19,13 @@ from datetime import datetime, timezone
 # #2795: cycle-free helper (tortoise/ids.py is stdlib-only). sdk.py imports
 # projection at module top, so the sdk-private `_content_hash` is NOT
 # importable here.
+# #7936: the same leaf supplies the CANONICAL entity id for a `(label, name)` —
+# the name stubs this file mints must carry the identity the entity path
+# registers, or a node's IDENTITY is not a pure function of the journal (a
+# random stub id moved on every replay) and the reference fold cannot model
+# the stub at all.
 from tortoise.ids import content_hash as _content_hash
+from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
     epistemic_disjunction,  # #5380: the target-position widening
@@ -1119,6 +1125,11 @@ class _EntityHandlers:
     # Keys explicitly handled by each _upsert_* method.
     _SUBJECT_HANDLED: frozenset = frozenset({
         "id", "name", "subject_kind", "subjectKind", "createdAt", "embedding",
+        # #7936: the event-stub discriminator is projection-owned — an
+        # EventRecorded replay must NOT persist a caller-forged `_stub` via
+        # _persist_extra_props (it would then be read back by the
+        # first-registration probe). Mirrors the Object set below.
+        "_stub",
         "status",  # #1423: status is projection-owned — a SubjectAdded replay
         # must NOT rewrite it via _persist_extra_props (the clobber guard ported
         # from #1350's Object clause: a re-mention of a superseded team/role/
@@ -1126,6 +1137,10 @@ class _EntityHandlers:
     })
     _OBJECT_HANDLED: frozenset = frozenset({
         "id", "name", "object_kind", "objectKind", "createdAt", "title",
+        # #7936: the event-stub discriminator (see _SUBJECT_HANDLED): kept out
+        # of the extra-props persistence lane so a caller prop can never seed
+        # the first-registration probe's exclusion.
+        "_stub",
         "embedding", "status",  # #1350: status is projection-owned — an
         # ObjectRegistered replay must NOT rewrite it via _persist_extra_props
         # (the clobber guard: superseded stays superseded on re-mention).
@@ -1368,20 +1383,68 @@ class _EntityHandlers:
         "source_path",
         "_searchText",
     })
-    # D10 (ONTOLOGY v3.15 §4.4): the document write path now targets a :Source,
-    # so its passthrough skip-set is ``_SOURCE_HANDLED | _DOC_RETIRED``. This
-    # keeps every fixed-clause key off the passthrough AND denies the RETIRED
-    # fields — `content`, `doc_status`/`docStatus`, `objectKind`/`object_kind`
-    # — so they can never re-enter the graph through the open passthrough
-    # (adversarial class B6).
+    # D10 B6 (#5135): the RETIRED document fields — THE single declaration of
+    # the retirement for the write/replay doors THAT CONSULT IT. Those are:
+    #   * `sdk._update_entity`'s target-aware guard, which reads it directly;
+    #   * `_upsert_document`'s open passthrough and its promotion scrub, which
+    #     both compose with it at CALL time (see below) — so a member added
+    #     here is denied and scrubbed in this class without a second edit.
+    # (The historical `_DOCUMENT_HANDLED` overlap on three of these keys is
+    # incidental: `object_kind`/`docStatus` reach the document passthrough ONLY
+    # through the registry union at the call site, not through that set.)
+    # ⛔ Two further graph-side doors deny the retirement by a DIFFERENT route
+    # and so do NOT consult this set. They are named here so the next member is
+    # not assumed covered:
+    #   * `_upsert_source`'s open passthrough denies by its CLOSED ALLOWLIST
+    #     (`_SOURCE_HANDLED` ∪ `_SOURCE_EXTRA_PROPS`). Every retired key is
+    #     outside both today, so the denial holds — but a key added here that is
+    #     ALSO declared in `_SOURCE_EXTRA_PROPS` would pass that door. Widen
+    #     that allowlist check; do not assume this set covers it.
+    #   * the `EntityMutated` fold drops by the DECLARED SURFACE: the keys are
+    #     absent from `_SOURCE_NODE_PROPS`, the surface every replay filters to
+    #     (`filter_source_props`). That is a different question from the
+    #     retirement, answered by a different set.
+    # NOT in this module's reach, and therefore NOT consolidated by this change:
+    # the record mirror in `record_projection.py` spells the same five keys as a
+    # literal `drop` on its `DocumentCreated` mutation (that layer imports no
+    # graph projection, by design), and `log.py`'s tear-immunity note lists them
+    # in prose. A member added HERE must be added THERE too.
+    # ⛔ ONE list — for this class. The divergence between this set and the
+    # per-path copies it used to have is what let the #5135 third door
+    # (`update_entity`) and the promotion fourth door exist at all: a writer
+    # that consults a stale copy silently misses the newest member.
     # BOTH spellings are denied: the projection normalizes to camelCase for
     # the FIXED clauses, but a raw journal payload (a hand-written JSONL line,
     # `EventAPI.add_document`, or a producer's `create_source(**props)`) can
     # carry the snake_case spelling, which would otherwise persist verbatim as
     # a node property no reader owns — a B6 re-entry through the snake door.
+    # ``object_kind`` (synonym of ``objectKind``) and ``docStatus`` (synonym of
+    # ``doc_status``) are the two the write path can actually produce;
+    # ``content`` has no second spelling.
+    _DOC_RETIRED_KEYS: frozenset = frozenset({
+        "content", "doc_status", "docStatus", "objectKind", "object_kind",
+    })
+    # D10 (ONTOLOGY v3.15 §4.4): the document write path now targets a :Source,
+    # so its passthrough skip-set is
+    # ``_SOURCE_HANDLED | _DOC_PASSTHROUGH_HANDLED | _DOC_RETIRED_KEYS``. This
+    # keeps every fixed-clause key off the passthrough. It carries no
+    # INDEPENDENT copy of the retirement: the three registry keys it holds do
+    # so only as historical `_DOCUMENT_HANDLED` members, while the registry is
+    # unioned at the call site — which is the only thing that can cover a key
+    # added to it (e.g. `object_kind`/`docStatus` are not in
+    # `_DOCUMENT_HANDLED`), so the two cannot drift (#5135).
     # The historical `_DOCUMENT_HANDLED` set is retained as the base so no
     # previously-handled key becomes an accidental passthrough key.
-    _DOC_RETIRED: frozenset = _DOCUMENT_HANDLED | frozenset({
+    # ⛔ Distinct from the registry: a SUPERSET of the historical
+    # `_DOCUMENT_HANDLED` is only safe on the document path (there,
+    # `_upsert_document`'s fixed clause owns every other key). Applying the
+    # full `_DOCUMENT_HANDLED` union to a Source write would ALSO deny
+    # `summary` / `topics` / `embedding` / `status` / `about_entities`, which
+    # `_upsert_source`'s fixed clause does NOT write and which a Source
+    # legitimately carries (a `SourceCreated` passthrough write of `summary` or
+    # an `embedding` — read by the vector retrieval leg — would be silently
+    # dropped). Deny the retirement, not the history.
+    _DOC_PASSTHROUGH_HANDLED: frozenset = _DOCUMENT_HANDLED | frozenset({
         "needs_extraction",
         # #5422: the snake_case spelling of the version anchor. The fixed
         # clause above writes `contentHash` from `ev["content_hash"]`; the
@@ -1390,25 +1453,6 @@ class _EntityHandlers:
         # `s.content_hash` property beside the camelCase the readers use
         # (the same snake-door class as `needs_extraction` below).
         "content_hash",
-        # D10 B6: snake/camel synonyms of the retired props. ``object_kind``
-        # (synonym of ``objectKind``) and ``docStatus`` (synonym of
-        # ``doc_status``) are the two the write path can actually produce;
-        # ``content`` has no second spelling.
-        "object_kind", "docStatus",
-    })
-    # D10 B6: the RETIRED document fields as a LITERAL set — the keys that must
-    # not be writable through ANY open passthrough.
-    # ⛔ Distinct from `_DOC_RETIRED`, which is a SUPERSET of the historical
-    # `_DOCUMENT_HANDLED` and is therefore only safe on the document path
-    # (there, `_upsert_document`'s fixed clause owns every other key). Applying
-    # the full `_DOCUMENT_HANDLED` union to a Source write would ALSO deny
-    # `summary` / `topics` / `embedding` / `status` / `about_entities`, which
-    # `_upsert_source`'s fixed clause does NOT write and which a Source
-    # legitimately carries (a `SourceCreated` passthrough write of `summary` or
-    # an `embedding` — read by the vector retrieval leg — would be silently
-    # dropped). Deny the retirement, not the history.
-    _DOC_RETIRED_KEYS: frozenset = frozenset({
-        "content", "doc_status", "docStatus", "objectKind", "object_kind",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
     # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
@@ -1561,6 +1605,14 @@ class _EntityHandlers:
         # log a FALSE `"Point prop %r is not declared"` drift warning on every
         # rebuild.
         "credibility",
+        # #2350 (E-prec): the per-end validity precision declaration. It rides
+        # the PointAdded snapshot as a plain string prop and the open-set
+        # passthrough restores it, so declaring it is warning-suppression only
+        # — but without it a rebuild logs a FALSE `"Point prop %r is not
+        # declared"` drift warning for a documented part of the window
+        # contract. ``validToPrecision='unknown'`` is the 3-state end's
+        # closed-unknown marker and must survive rebuild verbatim.
+        "validFromPrecision", "validToPrecision",
         # #6151 defect 2: the #2199 system-default provision, recorded on a
         # decide part BORN live (no explicit status). `_apply_source_
         # inheritance` re-injects the default ONLY where this marker says one
@@ -2125,12 +2177,13 @@ class _EntityHandlers:
                               source_versions=source_versions)
         # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
         # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
-        # member of the deferred generic direct-edge replay (#1048: caller-
-        # authored `create_direct_edge` descriptors stay unaligned on
-        # rebuild): it carries no caller attrs, and it is the capture TURN LOOP
-        # ALONE that journals the link, on the turn's own PointAdded (the only
-        # two `contains_session=` emission sites are the SDK and hosted turn
-        # loops). The extractor-minted points are wired into the Session by
+        # member of the generic direct-edge replay (#1048; the journaled
+        # `DirectEdgeCreated`/`DirectEdgeRepoint` descriptors ARE replayed since
+        # #8499, but this CONTAINS link is carried by the capture TURN LOOP's
+        # PointAdded, not by a descriptor): it carries no caller attrs, and it
+        # is the capture TURN LOOP ALONE that journals the link, on the turn's
+        # own PointAdded (the only two `contains_session=` emission sites are
+        # the SDK and hosted turn loops). The extractor-minted points are wired into the Session by
         # OTHER, raw CONTAINS writes scattered through the capture/extraction
         # path — every one of them unjournaled — so a journal-only `rebuild()`
         # still drops those edges; only `rebuild_all`'s `:Session` snapshot
@@ -2396,10 +2449,10 @@ class _EntityHandlers:
         The capture path MERGEs the Session with a raw graph write; this
         record is its journal carrier, so the node (and any ``EntityLinked``
         edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``,
-        ``actor_user_id`` and ``capture_lane`` are coalesce-preserved (first
-        writer wins, mirroring the live merge), ``turn_count`` tracks the latest
-        journaled capture. Returns 1 when the node exists after the fold, 0 on a
-        malformed record.
+        ``source``, ``actor_user_id`` and ``capture_lane`` are coalesce-preserved
+        (first writer wins, mirroring the live merge), ``turn_count`` tracks the
+        latest journaled capture. Returns 1 when the node exists after the fold,
+        0 on a malformed record.
 
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
@@ -2488,6 +2541,18 @@ class _EntityHandlers:
             sets.append(
                 "s.client_captured_at=coalesce(s.client_captured_at, $v_client_captured_at)")
             params["v_client_captured_at"] = _cap_at
+        # #3516 §D: the transcript stem the capture came from. Set-if-absent
+        # (coalesce), the SAME semantics as the live raw SET
+        # (`sdk._write_session_and_turns`): the store-sync backstop ships the
+        # SAME session after the hook, and an absent/different stem from the
+        # later writer must never relabel what the hook observed. The
+        # truthiness guard matches the sink too — `""`/`0`/`False` stay absent
+        # on replay exactly as they are live. Without this arm a journal-only
+        # rebuild loses `source` and live/replay diverge (review P2).
+        _src = ev.get("source")
+        if _src and _annotator_value_ok(_src):
+            sets.append("s.source=coalesce(s.source, $v_source)")
+            params["v_source"] = _src
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):
@@ -3086,6 +3151,11 @@ class _EntityHandlers:
         # too. updatedAt mirrors the live stamp block (supersede-time now,
         # journaled on the line via the ts fallback).
         valid_to = ev.get("valid_to")
+        # #2350 (E-prec): the journaled per-end precision rides the SAME record.
+        # ``None`` when the record predates the field — writing it clears the
+        # property, which is the legacy node's own state, so a pre-#2350
+        # journal replays byte-identically.
+        valid_to_precision = ev.get("valid_to_precision")
         expired_at = _journal_instant(ev, "expired_at")
         updated_at = _journal_instant(ev)
         # ``skip_updated_at`` is the SAME seq-gate ``_fold_point_invalidated``
@@ -3101,12 +3171,16 @@ class _EntityHandlers:
         # ``fold_deferred_corrects_edges`` / the pass-1b sweep).
         if skip_updated_at:
             set_clause = ("SET n.status='superseded', n.outdated=true, "
-                          "n.validTo=$vt, n.expiredAt=$ea ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at}
+                          "n.validTo=$vt, n.validToPrecision=$vtp, "
+                          "n.expiredAt=$ea ")
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at}
         else:
             set_clause = ("SET n.status='superseded', n.outdated=true, "
-                          "n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at,
+                          "n.validTo=$vt, n.validToPrecision=$vtp, "
+                          "n.expiredAt=$ea, n.updatedAt=$ua ")
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at,
                       "ua": updated_at}
         result = self.g.query(
             "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
@@ -3200,20 +3274,28 @@ class _EntityHandlers:
         # replayed verbatim). validTo/expiredAt fall back like supersede;
         # updatedAt reads the ts key (the emit passes ts=now).
         valid_to = ev.get("valid_to")
+        # #2350 (E-prec): the journaled per-end precision, replayed verbatim
+        # (None on a pre-#2350 record — clearing a property the legacy node
+        # never had, so the replay stays exact).
+        valid_to_precision = ev.get("valid_to_precision")
         expired_at = _journal_instant(ev, "expired_at")
         updated_at = _journal_instant(ev)
         if skip_updated_at:
             # A later same-id PointRevised/PointPromoted already stamped
             # updatedAt (inline, pass-1b) — omit the column so this fold
             # cannot clobber the newer stamp with the older invalidate ts.
-            set_clause = ("SET n.outdated=true, n.validTo=$vt, n.expiredAt=$ea ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at}
+            set_clause = ("SET n.outdated=true, n.validTo=$vt, "
+                          "n.validToPrecision=$vtp, n.expiredAt=$ea ")
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at}
         else:
             # Unconditional updatedAt write: this sweep fold is the id's last
             # journal writer → exact live parity (supersede's precedent).
             set_clause = ("SET n.outdated=true, n.validTo=$vt, "
+                          "n.validToPrecision=$vtp, "
                           "n.expiredAt=$ea, n.updatedAt=$ua ")
-            params = {"id": oid, "vt": valid_to, "ea": expired_at,
+            params = {"id": oid, "vt": valid_to, "vtp": valid_to_precision,
+                      "ea": expired_at,
                       "ua": updated_at}
         result = self.g.query(
             "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
@@ -3363,11 +3445,13 @@ class _EntityHandlers:
           class), i.e. the fix would trade a loss for a divergence.
 
         Returns the matched-edge count for ``set`` (0 = no such edge) and the
-        dropped-edge count for ``clear``. A ``set`` miss is NOT a refusal: a
-        plain direct edge is legitimately absent after a rebuild (A10 #1048 —
-        ``DirectEdgeCreated`` replay is deferred and unimplemented, so the
-        EDGE itself is lost, which the callers report and the fold cannot
-        change), and a hard-deleted edge is gone live too.
+        dropped-edge count for ``clear``. A ``set`` miss is NOT a refusal: the
+        edge was hard-deleted live (the ``set`` fold runs after every
+        edge-creating pass), or — for the one-record ``apply()`` engine, which
+        has no pass-2b and still does not fold ``DirectEdgeCreated`` — the
+        plain direct edge was never re-created at all. Since #8499
+        ``rebuild_all`` DOES replay ``DirectEdgeCreated``, so on that leg a
+        miss is no longer explained by a missing creation path.
 
         #5380 R8: a miss is still a non-folded event and is RECORDED, never
         silently dropped. The ``set`` miss is recorded by its two callers
@@ -3514,7 +3598,9 @@ class _EntityHandlers:
         # #1918: canonical id must win on MATCH too — parity with the #1155
         # Object fix (_upsert_object ON MATCH o.id=coalesce($id, o.id)). The
         # webhook name-stub path (_event_plain_merge) can mint a Subject stub
-        # with a RANDOM ulid id before this entity path's SubjectAdded lands;
+        # before this entity path's SubjectAdded lands (since #7936 under the
+        # canonical `sub-<sha256>` id — a no-op here; a pre-fix or foreign
+        # graph may still carry a random ulid);
         # without the ON MATCH id write, the MERGE below adopts the stub by
         # NAME and the canonical id never lands on any node — MATCH
         # (s:Subject {id:$sid}) wiring (participatesIn, aboutSubject) silently
@@ -3552,6 +3638,13 @@ class _EntityHandlers:
             "            s.status=coalesce($st, 'live'), "
             "            " + _set_emb + " "
             "ON MATCH SET s.id=coalesce($id, s.id), "
+            # #7936: adoption CLEARS the event-stub discriminator the
+            # first-registration probe excludes. `SET ... = NULL` REMOVES the
+            # property (not `false`), so an adopted live node's property set
+            # stays byte-identical to the one replay's ON CREATE builds (which
+            # never writes `_stub`). A legacy random-ulid stub carries no
+            # `_stub`, so this is a no-op there.
+            "            s._stub=NULL, "
             "            s.subjectKind=coalesce($sk, s.subjectKind), "
             # #2295: ON MATCH createdAt ADOPTS only when absent
             # (coalesce(s.createdAt, $ca) — existing value wins): mirrors the
@@ -3606,9 +3699,12 @@ class _EntityHandlers:
         except Exception:
             pass
         # #1155-P1: canonical id must win on MATCH too. The produces-edge
-        # wiring in _event_plain_merge can mint a name-stub Object (random
-        # ulid) when a poll/webhook event lands BEFORE this entity path's
-        # first ObjectRegistered. Without the ON MATCH id write, the MERGE
+        # wiring in _event_plain_merge can mint a name-stub Object when a
+        # poll/webhook event lands BEFORE this entity path's first
+        # ObjectRegistered — since #7936 under the canonical `obj-<sha256>` id
+        # (making this clause a no-op for the generic path), while a pre-fix or
+        # foreign graph may still carry a random ulid. Without the ON MATCH id
+        # write, the MERGE
         # below adopts the stub by NAME and the canonical id never lands on
         # any node — aboutSubject wiring (MATCH by o.id) silently matches
         # nothing. `coalesce($id, o.id)` is idempotent: $id is always the
@@ -3627,6 +3723,9 @@ class _EntityHandlers:
             "            o.status=coalesce($st, 'live'), "
             "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
+            # #7936: adoption CLEARS the event-stub discriminator the
+            # first-registration probe excludes (see _upsert_subject).
+            "            o._stub=NULL, "
             "            o.objectKind=coalesce($ok, o.objectKind), "
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
@@ -3812,8 +3911,9 @@ class _EntityHandlers:
         identity is ``url``). It is written by the fixed clause above, gated
         so a hash-less write preserves it, and stays out of the open
         passthrough because BOTH spellings (``contentHash`` via
-        ``_SOURCE_HANDLED``, ``content_hash`` via ``_DOC_RETIRED``) are
-        denied. ``version`` is advanced in the same clause, per §4.6.
+        ``_SOURCE_HANDLED``, ``content_hash`` via
+        ``_DOC_PASSTHROUGH_HANDLED``) are denied. ``version`` is advanced in
+        the same clause, per §4.6.
         """
         did = ev.get("id")
         # #7369: `did` is the Source MERGE key (`MERGE (s:Source {url:$id})`),
@@ -3959,9 +4059,13 @@ class _EntityHandlers:
             # creator MERGEs onto that SAME node by `url`, inheriting the
             # retired values live AND on replay. The deny-sets above (and in
             # `_upsert_source`) stop NEW writes; this REMOVE clears an
-            # INHERITED one. Keys = `_DOC_RETIRED_KEYS`.
-            "REMOVE s.content, s.doc_status, s.docStatus, s.objectKind, "
-            "       s.object_kind",
+            # INHERITED one.
+            # ⛔ GENERATED from the ONE registry (#5135) rather than spelled
+            # again: the previous hand-written literal was a fourth copy of
+            # the retirement, so a member added to `_DOC_RETIRED_KEYS` would
+            # not have been scrubbed here.
+            "REMOVE " + ", ".join(
+                f"s.{k}" for k in sorted(self._DOC_RETIRED_KEYS)),
             params={"id": did, "title": ev.get("title", did),
                     # NO "" default here: a present null and an omitted key
                     # both stay Cypher null and fall to the third coalesce
@@ -3989,7 +4093,14 @@ class _EntityHandlers:
         # the ROOT bag, which used to bypass it (#5196, P1).
         self._persist_extra_props(
             "MATCH (n:Source {url: $id})", {"id": did},
-            ev, self._SOURCE_HANDLED | self._DOC_RETIRED,
+            ev,
+            self._SOURCE_HANDLED
+            | self._DOC_PASSTHROUGH_HANDLED
+            # The retirement is the ONE registry, unioned HERE at call time
+            # (#5135): `_DOC_PASSTHROUGH_HANDLED` deliberately carries no
+            # copy, so a member added to the registry is denied without a
+            # second edit.
+            | self._DOC_RETIRED_KEYS,
         )
         # #205 — wire references edge (Source → document Source) for provenance
         # chain. D10: only when the corpus Source is DISTINCT from the document
@@ -4252,11 +4363,15 @@ class _EntityHandlers:
         if not _writable_id(subj):
             _log_identity_skip("Event subject", subj, "subject (MERGE key)")
         else:
-            from tortoise.ids import ulid
-            stub_id = ulid()
+            # #7936: DETERMINISTIC id (the canonical one for this name), not a
+            # random ulid — the graph must be a pure function of the journal.
+            # ON CREATE ONLY is unchanged (#1155-P1): a late stub still cannot
+            # clobber a canonical id, and a generic registration for the name
+            # is now a no-op (same id) rather than a re-key.
+            stub_id = _entity_name_id("Subject", subj)
             self.g.query(
                 "MERGE (s:Subject {name:$name}) "
-                "ON CREATE SET s.id=$id, s.subjectKind='other'",
+                "ON CREATE SET s.id=$id, s.subjectKind='other', s._stub=true",
                 params={"name": subj, "id": stub_id},
             )
             self.g.query(
@@ -4303,18 +4418,28 @@ class _EntityHandlers:
                 params={"id": obj, "eid": eid},
             )
         else:
-            from tortoise.ids import ulid
-            stub_id = ulid()
-            # #1155-P1: id is written ON CREATE ONLY — the stub id is a
-            # RANDOM ulid, and a poll/webhook event may arrive before the
-            # entity path's ObjectRegistered. If this MERGE also wrote id
-            # on MATCH, a late stub would CLOBBER the canonical id
-            # (github-issue-{repo}-{n}) that _upsert_object set. The
-            # canonical id wins via _upsert_object's ON MATCH
-            # `o.id=coalesce($id, o.id)` — do not add an id write here.
+            # #7936: DETERMINISTIC id (the canonical one for this name), not a
+            # random ulid — a random stub id moved on every replay, so the
+            # graph was not a pure function of the journal.
+            stub_id = _entity_name_id("Object", obj)
+            # #7936: `_stub=true` is the discriminator the first-registration
+            # probe (sdk._create_entity) excludes — a marked stub is NOT a
+            # registered node, so a later `create_entity` for this name still
+            # journals its ObjectRegistered. Cleared on adoption by
+            # `_upsert_object`'s ON MATCH.
+            # #1155-P1: id is written ON CREATE ONLY, and THIS is the clause the
+            # ruling protects. A poll/webhook event may arrive before the
+            # entity path's ObjectRegistered; if this MERGE also wrote id on
+            # MATCH, a late stub would CLOBBER the canonical id
+            # (github-issue-{repo}-{n}) that _upsert_object set. The canonical
+            # id wins via _upsert_object's ON MATCH `o.id=coalesce($id, o.id)`
+            # — do not add an id write here. The ruling is about the CLAUSE, not
+            # about the stub value: a deterministic stub IS the canonical id
+            # for the generic path (a no-op there) and is still replaced by a
+            # foreign/connector canonical id.
             self.g.query(
                 "MERGE (o:Object {name:$name}) "
-                "ON CREATE SET o.id=$id, o.objectKind='other'",
+                "ON CREATE SET o.id=$id, o.objectKind='other', o._stub=true",
                 params={"name": obj, "id": stub_id},
             )
             self.g.query(
@@ -4398,11 +4523,16 @@ class _EntityHandlers:
                     _log_identity_skip(
                         "Event use", use_name, "name (MERGE key)")
                 else:
-                    from tortoise.ids import ulid
-                    stub_id = ulid()
+                    # #7936: deterministic canonical id, as for the subject and
+                    # `object` stubs above — never a random ulid.
+                    stub_id = _entity_name_id("Object", use_name)
+                    # #7936: mark the `uses[]` stub with the same discriminator
+                    # as the subject/object stubs — it too can precede a
+                    # canonical `ObjectRegistered` for the name, and the probe
+                    # must still journal that registration.
                     self.g.query(
                         "MERGE (o:Object {name:$name}) "
-                        "ON CREATE SET o.id=$id, o.objectKind=$kind "
+                        "ON CREATE SET o.id=$id, o.objectKind=$kind, o._stub=true "
                         "ON MATCH SET o.objectKind=$kind",
                         params={"name": use_name, "kind": use_kind, "id": stub_id},
                     )
@@ -4526,8 +4656,8 @@ class _EntityHandlers:
         carries an explicit ``sourceObjectId`` (set exclusively by the github
         entity path). ``event.object`` is NEVER used as an Object key — on
         poll/webhook paths it is the entity TITLE string and
-        ``_event_plain_merge`` already stubs ``Object {name: title}`` with a
-        random ulid; using it would wire references to the wrong stub.
+        ``_event_plain_merge`` already stubs ``Object {name: title}`` under its
+        own name-keyed id; using it would wire references to the wrong stub.
         """
         sk = inner.get("sourceKind")
         source_url = inner.get("sourceUrl")

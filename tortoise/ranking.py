@@ -91,6 +91,28 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # delta stays under the boost effect.  Sizing the boost, changing the fusion
 # tie semantics, or restating the promise is a product decision — tracked on
 # #7704, not decided here.
+#
+# AND THE RANKER'S POOL IS THE PAGE, NOT THE CORPUS (#7704, re-measured
+# 2026-10-15).  ``tortoise_fts_query`` truncates the fused candidate list to
+# ``limit`` (``result_ids[:limit]``, before ``rerank`` normalizes it), so the
+# fused relevance delta the boost must clear is a function of the caller's
+# ``limit`` — the promise's truth is a property of the READ SHAPE.  Same
+# graph, same query, 404 points, dense leg live: the contested twin ranks
+# BELOW its twin at limit=4 (delta 0.0157) and at the shipped default limit=10
+# (delta 0.0013), and ABOVE it at limit>=40 (delta -0.0041), the gap shrinking
+# as the page grows.  On the fixture with 40 filler rows (a 44-point graph) it
+# ranks below at every limit 2..40 (+0.0056 at limit=40).  Raising the boost
+# does not repair this: the required magnitude is unbounded as the page shrinks
+# — a 2-row page normalizes the two rows to similarity 0.0 and 1.0, needing a
+# graph-boost increment > 1.43 where ``graph_boost`` is capped at 1.0 (measured
+# delta 0.4825 of final score).
+#
+# Every listed remedy is blocked by a RECORDED decision, which is why this is
+# reported rather than enacted: (1) boost inside fusion = score-based fusion,
+# the open owner ruling on #4210; (2) raise the boost = unbounded (above);
+# (3) tie on the contested signal = reverses #3019's id tie-break, which
+# ``temporal_leg.py`` consumes positionally; (4) restate the promise = the
+# recorded #2102 E2E-1 indicator, also the owner's.
 W4_CONTESTED_BOOST = 0.05
 # Significant-token floor: query/counter-claim overlap needs tokens ≥ this
 # many alphanumerics (1-3 char function words and subword noise never count;

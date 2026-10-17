@@ -400,6 +400,136 @@ def test_extraction_state_set_agreement():
 # ── the projection (§D): new columns go at the END, pinned by POSITION ─────
 
 
+def _python_strings(text: str) -> str:
+    """Rebuild an implicit Python string concatenation from a source slice.
+
+    The slice is Python source: the Cypher is split over adjacent string
+    literals with Python comments and indentation between them. This drops the
+    comments (outside literals) and concatenates the double-quoted literal
+    contents, so what comes back IS the query the engine runs.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "#":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ch == '"':
+            i += 1
+            buf: list[str] = []
+            while i < n:
+                c = text[i]
+                if c == "\\" and i + 1 < n:
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                if c == '"':
+                    i += 1
+                    break
+                buf.append(c)
+                i += 1
+            out.append("".join(buf))
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _strip_cypher_comments(cypher: str) -> str:
+    """Remove ``//`` line and ``/* … */`` block comments, keeping literals."""
+    out: list[str] = []
+    i, n = 0, len(cypher)
+    quote = ""
+    while i < n:
+        ch = cypher[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(cypher[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and cypher[i + 1] == "/":
+            j = cypher.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ch == "/" and i + 1 < n and cypher[i + 1] == "*":
+            j = cypher.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_top_level(payload: str) -> list[str]:
+    """Split a RETURN payload on commas NOT inside ()/[]/{} or a literal — a
+    parenthesised expression must not hide its own comma."""
+    parts: list[str] = []
+    cur: list[str] = []
+    depth = 0
+    quote = ""
+    i, n = 0, len(payload)
+    while i < n:
+        ch = payload[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < n:
+                cur.append(payload[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    tail = "".join(cur).strip()
+    if tail:
+        parts.append(tail)
+    return [p for p in parts if p]
+
+
+def _return_column_tokens(py_source: str) -> list[str]:
+    """The COMPLETE ordered projection token list from a slice of Python source.
+
+    Rebuilds the Cypher, strips any Cypher comments, isolates the
+    ``RETURN … ORDER BY`` payload and splits it on TOP-LEVEL commas. Returning
+    EVERY token — not only ``s.``-prefixed ones — is the point: an inserted
+    ``properties(s)`` / ``coalesce(...)`` / ``labels(s)`` shifts the positional
+    wire mapping exactly as an inserted ``s.foo`` does, while an ``s.``-only
+    scan stays byte-identical and green through precisely the re-bind the guard
+    exists to catch.
+    """
+    cypher = _strip_cypher_comments(_python_strings(py_source))
+    upper = cypher.upper()
+    ret = upper.find("RETURN")
+    assert ret != -1, f"no RETURN in reconstructed Cypher: {cypher!r}"
+    order = upper.find("ORDER BY", ret)
+    payload = cypher[ret + len("RETURN"):order if order != -1 else len(cypher)]
+    return _split_top_level(payload)
+
+
 def test_new_columns_appended_at_end():
     """The new columns are APPENDED, and the positions are pinned.
 
@@ -408,14 +538,22 @@ def test_new_columns_appended_at_end():
     were each appended at the END so the existing `r[0..3]` count mapping never
     shifted. An insert would silently re-bind id/created_at/turns/extracted.
     """
-    # 1. The DECLARATION order: the new field is last in the shared list.
-    assert SESSION_LIST_FIELDS[-1] == "extraction"
-    assert SESSION_READ_FIELDS[-1] == "extraction"
-    # The detail projection carries it before its detail-only extras, so the
+    # 1. The DECLARATION order: everything added after the base columns is at
+    #    the END, and inside that appended tail the order is #3520's pair then
+    #    #3516's triplet. Deliberately NOT "extraction is last": that was true
+    #    only while it was the newest addition, and pinning it would make the
+    #    NEXT append illegal instead of making an INSERT illegal — the actual
+    #    invariant is that nothing is inserted before an existing column.
+    assert SESSION_LIST_FIELDS[-1] == "capture_lane"
+    assert SESSION_READ_FIELDS[-1] == "capture_lane"
+    assert SESSION_LIST_FIELDS[-4:] == (
+        "extraction", "client_captured_at", "client_captured_at_source",
+        "capture_lane")
+    # The detail projection carries them before its detail-only extras, so the
     # list field order is a PREFIX of the detail order (the prepend rule the
     # module documents).
     assert SESSION_DETAIL_FIELDS[:len(SESSION_LIST_FIELDS)] == SESSION_LIST_FIELDS
-    assert SESSION_DETAIL_FIELDS.index("extraction") == len(SESSION_LIST_FIELDS) - 1
+    assert SESSION_DETAIL_FIELDS.index("extraction") == len(SESSION_LIST_FIELDS) - 4
 
     # 2. The WIRE dict, built by the REAL handler helper from a positional row.
     #    r[0..9]: the pre-existing columns keep their indices; the pair is r[8]/r[9].
@@ -428,8 +566,11 @@ def test_new_columns_appended_at_end():
         "claude",                    # r[5] s.harness
         "mbp-14",                    # r[6] s.machine_id
         "claude-sonnet-4",           # r[7] s.model
-        True,                        # r[8] s.capture_ok          (NEW)
-        "v2",                        # r[9] s.capture_extractor   (NEW)
+        True,                        # r[8] s.capture_ok          (#3520)
+        "v2",                        # r[9] s.capture_extractor   (#3520)
+        1700000000.0,                # r[10] s.client_captured_at         (#3516)
+        "cli_observed",              # r[11] s.client_captured_at_source  (#3516)
+        "hook",                      # r[12] s.capture_lane               (#3516)
     )
     d = _ha._session_row_dict(row, {})
     assert d["id"] == "sess-1"
@@ -442,9 +583,12 @@ def test_new_columns_appended_at_end():
     assert d["model"] == row[7]
     assert d["extraction"] == {
         "status": "stored-and-processed", "extractor": "v2", "outcome_known": True}
-    # THE PIN: the wire dict's key ORDER ends with the new field (dicts preserve
-    # insertion order; the handler appends after `model`).
-    assert list(d)[-1] == "extraction", list(d)
+    assert d["client_captured_at"] == 1700000000.0
+    assert d["client_captured_at_source"] == "cli_observed"
+    assert d["capture_lane"] == "hook"
+    # THE PIN: the wire dict's key ORDER ends with the NEWEST appended field
+    # (dicts preserve insertion order; the handler appends after `model`).
+    assert list(d)[-1] == "capture_lane", list(d)
     assert list(d)[:4] == ["id", "created_at", "turns", "extracted"]
     assert set(d) == set(SESSION_LIST_FIELDS)
 
@@ -455,23 +599,31 @@ def test_new_columns_appended_at_end():
     head = source.index('"WHERE (p.pointKind IS NULL OR p.pointKind <> \'event\') "')
     tail = source.index('"ORDER BY s.created_at DESC LIMIT 50"', head)
     clause = source[head:tail]
-    # The projected `s.*` columns in ORDER, as the concatenated literals spell
-    # them (comments between the literals are comments, not columns).
-    selected = re.findall(r"s\.[a-z_]+", clause)
+    # The projected columns in ORDER, as the concatenated literals spell them.
+    #  COMPLETE tokens — `s.*` names AND everything else (`count(p)`, and any
+    # future `properties(s)` / `coalesce(...)`) — because an INSERT of ANY
+    # projection token shifts the positional wire mapping, while an `s.`-only
+    # scan stays byte-identical. Comments between the literals are comments,
+    # not columns; the RETURN payload is split on TOP-LEVEL commas so a
+    # parenthesised expression cannot hide its own comma.
+    selected = _return_column_tokens(clause)
     assert selected == [
-        "s.id", "s.created_at", "s.turn_count", "s.actor_user_id", "s.harness",
+        "s.id", "s.created_at", "s.turn_count", "count(p)",
+        "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",
+        "s.client_captured_at", "s.client_captured_at_source", "s.capture_lane",
     ], (
-        f"the #3520 columns must be the LAST two in the RETURN clause of "
-        f"GET /v1/sessions (got {selected}) — the column list is built "
-        "positionally, so an insert anywhere earlier re-binds r[0..3]")
+        f"#3520's pair and #3516's triplet must be the LAST columns of the "
+        f"RETURN clause, in that order (got {selected}) — the column list is "
+        "built positionally, so an insert anywhere earlier re-binds r[0..3]")
     assert "count(p)" in clause
     # The detail handler's clause, the same rule (sess[0..6] unchanged).
     detail_head = source.index(
         '"MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "')
     detail_tail = source.index('params={"sid": session_id},', detail_head)
-    detail_sel = re.findall(r"s\.[a-z_]+", source[detail_head:detail_tail])
+    detail_sel = _return_column_tokens(source[detail_head:detail_tail])
     assert detail_sel == [
         "s.id", "s.created_at", "s.turn_count", "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",
+        "s.client_captured_at", "s.client_captured_at_source", "s.capture_lane",
     ], detail_sel

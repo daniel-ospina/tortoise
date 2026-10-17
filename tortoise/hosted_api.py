@@ -12242,7 +12242,15 @@ class SessionRequest(BaseModel):
     # what the floor is about (piece 12).
     client_captured_at: float | None = None
     client_captured_at_source: str | None = None
-    source: str | None = None
+    # #3516 §D: `source` is the transcript stem (both producers send it — the
+    # Pi seam declares it REQUIRED, the claude CLI fills `transcript_path.stem`,
+    # and the spool forwards `meta["source"]`). It was accepted here and then
+    # DROPPED: `body.source` had no reader and `_write_session_and_turns` had no
+    # parameter for it, so the property the comment above claims never reached
+    # the store. Capped at 256 like its siblings `session_id`/`machine_id`
+    # (same N x len amplification argument the `session_id` note makes), and
+    # persisted with set-if-absent semantics in the write primitive.
+    source: str | None = Field(None, max_length=256)
     # #2599: machine_id and model are CLIENT-CLAIMED informational fields
     # (forgeable, never security-trusted) — complementing the server-resolved
     # actor_user_id. Supplied by the capture hook/harness; stored verbatim as
@@ -12695,15 +12703,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # drift invariant); the concrete graph id is interpolated so
             # remediation is direct: a bound key → its graph,
             # org-wide/session → 'default'.
+            # #2650 (recording-on surfaces for HUMANS): the third writable
+            # surface — the dashboard Graphs tab's per-graph three-state
+            # control — shipped AFTER this copy was written, so the copy
+            # named every surface except the one a human owner/admin can
+            # actually use; and its authorization claim was narrower than
+            # the gate: the shared core admits the legacy full-access class
+            # (deleg NULL + scopes == []) beside a team:manage scope
+            # (hosted_api above), so the copy must not tell a caller that
+            # holds one of those that it is unqualified. Both are pinned in
+            # tests/test_delivery_tenancy.py (surface set + auth claim).
             gid = org.get("graph_id") or "default"
             detail = (
                 "Session recording is disabled for this graph (override). "
                 "Enable it via PATCH /v1/graphs/" + gid + " with "
                 "{recording: true} (or {recording: null} to inherit the "
                 "team default), or via the tortoise_graph_set_recording "
-                "MCP tool — both need a team:manage key; otherwise ask "
-                "your team owner or admin to turn recording on for this "
-                "graph."
+                "MCP tool — both need management authority (a team:manage "
+                "scope, or the legacy full-access team key); otherwise ask "
+                "your team owner or admin, who can switch recording on for "
+                "this graph in the dashboard's Graphs tab."
             )
         else:
             detail = ("Session recording is disabled for this team. Enable it "
@@ -13132,6 +13151,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         capture_lane=body.capture_lane,
         client_captured_at=body.client_captured_at,
         client_captured_at_source=body.client_captured_at_source,
+        source=body.source,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
@@ -15901,7 +15921,11 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             # POSITIONAL columns (r[0..3] is the id/created/turns/extracted
             # count), so a column placed anywhere earlier would silently
             # re-bind every one of them. r[8]/r[9] are new; nothing above moves.
-            "s.capture_ok, s.capture_extractor "
+            "s.capture_ok, s.capture_extractor, "
+            # #3516: the capture-provenance triplet, APPENDED AFTER #3520's pair
+            # (r[10..12]). #3520 landed first and holds r[8]/r[9]; placing these
+            # there instead would have silently re-bound `extraction`.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
@@ -15958,6 +15982,14 @@ def _session_row_dict(r, members_by_id: dict) -> dict:
         # positional contract is `r[8]`/`r[9]`, and #5498's binding assert just
         # below keeps the wire dict and the shared declaration from drifting.
         "extraction": session_extraction_status(r[8], r[9]),
+        # #3516 §B / #3515 piece 12: the floor's inputs and the producer lane,
+        # APPENDED AFTER #3520's pair (r[10..12]). Null when absent — a legacy
+        # or hook-less row carries no capture instant and no floor can be
+        # evaluated against it, which the verdict reports as DISABLED rather
+        # than as a pass.
+        "client_captured_at": r[10],
+        "client_captured_at_source": r[11],
+        "capture_lane": r[12],
     }
     assert set(d) == set(SESSION_LIST_FIELDS), (
         f"session projection drifted: wire={sorted(d)} "
@@ -16039,7 +16071,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # #3520: APPENDED at the END — the existing sess[0..6] mapping is
             # unchanged (sess[7]/sess[8] are the new pair), and the detail
             # endpoint must serve the SAME extraction status the list does.
-            "s.capture_ok, s.capture_extractor",
+            "s.capture_ok, s.capture_extractor, "
+            # #3516: the capture-provenance triplet, APPENDED AFTER #3520's pair
+            # (sess[9..11]) — #3520 holds sess[7]/sess[8].
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
             params={"sid": session_id},
         ).result_set)
     if not sess_rows:
@@ -16150,6 +16185,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         # detail projection too, so the wire key set is the shared declaration
         # plus the detail-only fields (the #5498 binding assert below).
         "extraction": session_extraction_status(sess[7], sess[8]),
+        # #3516 §B / #3515 piece 12: the floor's inputs + the producer lane.
+        # This is the read the install-verify path needs to evaluate the floor
+        # at all — serving them is what turns `client_capture_floor_verdict`
+        # from an unconsumed function into a consumable one. sess[9..11], after
+        # #3520's pair.
+        "client_captured_at": sess[9],
+        "client_captured_at_source": sess[10],
+        "capture_lane": sess[11],
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,
@@ -16789,6 +16832,18 @@ _RETENTION_EXECUTOR = ThreadPoolExecutor(
 _RETENTION_PER_ORG_TIMEOUT_S = 30.0
 
 
+def _utc_today() -> date:
+    """The clock ``_parse_as_of`` fences against — named so a test can freeze it.
+
+    The future guard below is a fence against the WALL clock, so a test of the
+    boundary must control this instant rather than race it: built from an
+    import-time day, a "future" payload stops being future the moment the
+    assertion runs on the next UTC day, the strict ``>`` goes false, and the
+    endpoint answers 200 with the refusal never exercised (#8805).
+    """
+    return datetime.now(UTC).date()
+
+
 def _parse_as_of(as_of: str | None) -> date:
     """The reading's UTC day boundary. 422 on a malformed or FUTURE value.
 
@@ -16800,7 +16855,7 @@ def _parse_as_of(as_of: str | None) -> date:
     `curl` with a plain date).
     """
     if as_of is None:
-        return datetime.now(UTC).date()
+        return _utc_today()
     text = str(as_of).strip()
     if not text:
         raise HTTPException(status_code=422, detail="as_of must not be empty")
@@ -16825,7 +16880,7 @@ def _parse_as_of(as_of: str | None) -> date:
             status_code=422,
             detail=f"as_of is not a valid ISO-8601 date or timestamp: {as_of!r}",
         ) from exc
-    if day > datetime.now(UTC).date():
+    if day > _utc_today():
         raise HTTPException(
             status_code=422,
             detail=(f"as_of {day.isoformat()} is in the future — a day-N mark "
@@ -26856,6 +26911,17 @@ def _get_onboarding_state(org_id: str) -> dict:
         # so this pop cannot mutate the stored row.)
         stored.pop(_STATE_VERSION_KEY, None)
         return stored
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686: same store as the write above. Merged OVER the defaults so an
+        # unset key keeps its documented default (`session_recording` is
+        # default-ON, #1927) instead of reading as absent.
+        from tortoise.onboarding import state as _ob_state
+        merged = _onboarding_defaults()
+        merged.update(_ob_state.read_operational_state(_org_proj(org_id),
+                                                      org_id))
+        merged.pop(_STATE_VERSION_KEY, None)
+        return merged
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -27173,6 +27239,22 @@ def _read_onboarding_state_and_version(org_id: str) -> tuple[dict, int | None]:
         state = dict(stored)
         state.pop(_STATE_VERSION_KEY, None)
         return state, (version if isinstance(version, int) else 0)
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686 (review P1): this leg MUST agree with `_write_onboarding_state`
+        # and `_get_onboarding_state`. The CAS fallback composes the dict it
+        # writes from HERE; without this branch it handed back the full DEFAULT
+        # set (session_recording=True among it), and `write_operational_state`'s
+        # merge then wrote those stale defaults straight back over a stored
+        # `False` -- the off-switch reverted on the next, unrelated write. The
+        # version stays None because the identity IS absent self-hosted, which
+        # is exactly the documented no-op case the caller preserves.
+        from tortoise.onboarding import state as _ob_state
+        merged = _onboarding_defaults()
+        merged.update(_ob_state.read_operational_state(_org_proj(org_id),
+                                                      org_id))
+        merged.pop(_STATE_VERSION_KEY, None)
+        return merged, None
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -27314,6 +27396,17 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
     )
     if is_supabase_enabled():
         _sb_write(get_control_plane(), org_id, state)
+        return
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if org_id == SELFHOST_ORG_ID:
+        # #8686: a self-hosted install has no control-plane team record, so the
+        # registry MATCH below matched NOTHING -- without error. The caller's
+        # echo then re-added the value it had just been asked to set, and the
+        # tool reported success over a write that never happened: a false ACK
+        # on the only capture control a user has. The deployment's own store is
+        # the :OnboardingState node it already owns (create-on-write seam).
+        from tortoise.onboarding import state as _ob_state
+        _ob_state.write_operational_state(_org_proj(org_id), org_id, state)
         return
     import json as _json
     sdk = _make_sdk(namespace="registry")
@@ -34793,6 +34886,7 @@ async def backups_rebaseline(request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Re-baseline rejected: {e}")  # noqa: B904
     from tortoise.backup_sweep import (
+        _COMPLETED_REPAIRS_KEY,
         _graph_state_key,
         _write_json,
         query_label_counts,
@@ -34834,7 +34928,7 @@ async def backups_rebaseline(request: Request):
         # true.
         graph_name = row["graph_name"]
 
-        def _current_counts() -> tuple[int, dict[str, int]]:
+        def _current_counts() -> tuple[int, dict[str, int], int]:
             # #8595 review P1: BOTH reads — the total and the per-label
             # baseline the #661 guard compares against — in ONE hand-off, so
             # the label query cannot be left inline on the loop (the same
@@ -34842,10 +34936,18 @@ async def backups_rebaseline(request: Request):
             # RAISES out of the helper and fails the request: writing
             # `node_count` with an unrefreshed label baseline would re-fire
             # the incident this call exists to clear.
+            # #8660: the third read is the completed-repair count, the count
+            # window's reference. It is refreshed here for the SAME #8595
+            # reason — a re-baseline must write the baseline shape the next
+            # sweep compares against, or the guard's count window reopens.
+            from tortoise.onboarding.state import count_stamped_repairs
+            graph_handle = db.select_graph(graph_name)
             return (count_data_nodes(db, graph_name),
-                    query_label_counts(db.select_graph(graph_name)))
+                    query_label_counts(graph_handle),
+                    count_stamped_repairs(graph_handle))
 
-        count, label_counts = await asyncio.to_thread(_current_counts)
+        count, label_counts, completed_repairs = await asyncio.to_thread(
+            _current_counts)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {
@@ -34860,6 +34962,10 @@ async def backups_rebaseline(request: Request):
           else read_graph_state(storage, org_id, graph_id)),
         "node_count": count,
         "label_counts": label_counts,
+        # #8660: refresh the count window's reference alongside the label
+        # baseline, so a re-baseline closes it the same way a sweep's success
+        # path does.
+        _COMPLETED_REPAIRS_KEY: completed_repairs,
         "updated_at": datetime.now(UTC).isoformat(),
     }
     _write_json(storage, _graph_state_key(org_id, graph_id), state)

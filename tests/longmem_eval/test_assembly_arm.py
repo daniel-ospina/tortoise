@@ -45,27 +45,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tests import _live_utils
 from tortoise.ask_lane import run_ask_assembled, run_ask_lane
 from tortoise.sdk import TortoiseSDK
 
 _URI = os.environ.get(
     "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared; converting flips the tier-2 lane
-    "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+    _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
 try:
     os.environ["TORTOISE_DB_URI"] = _PROBE_GRAPH
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
-    _probe = _ProbeSDK()
-    _probe._get_proj().g.query("RETURN 1")
-    _probe.create_point(
-        "statement", "probe zzqfulltext roundtrip token 7f3a9c", id="pProbe",
-        session_id="sess-probe", is_episodic=True, status="draft")
-    _hits = _probe.tortoise_fts_query(
-        "zzqfulltext roundtrip token", entity_type="point", limit=3)
-    if _hits and _hits[0].get("id") == "pProbe":
-        FALKORDB_AVAILABLE = True
+    # #8057: the probe WRITES a point, and `create_point` derives an embedding
+    # (`encode_for_store` -> `EmbeddingModel.get`). This runs at MODULE IMPORT,
+    # so the `_no_embedder` fixture below cannot reach it — and a cold
+    # sentence-transformers/torch load is 50-205s (#6960) paid for a probe that
+    # only needs the FULLTEXT round-trip. Mask the embedder over the whole
+    # probe so its cost cannot depend on whether a model is installed.
+    with _live_utils.mask_embedder():
+        _probe = _ProbeSDK()
+        _probe._get_proj().g.query("RETURN 1")
+        _probe.create_point(
+            "statement", "probe zzqfulltext roundtrip token 7f3a9c", id="pProbe",
+            session_id="sess-probe", is_episodic=True, status="draft")
+        _hits = _probe.tortoise_fts_query(
+            "zzqfulltext roundtrip token", entity_type="point", limit=3)
+        if _hits and _hits[0].get("id") == "pProbe":
+            FALKORDB_AVAILABLE = True
 except Exception:
     FALKORDB_AVAILABLE = False
 finally:
@@ -89,12 +97,13 @@ def _fresh_uri() -> str:
 
 
 @pytest.fixture(autouse=True)
-def _no_embedder(monkeypatch):
-    import tortoise.embeddings as _emb
-    monkeypatch.setattr(_emb, "compute_embedding",
-                        staticmethod(lambda content: None))
-    monkeypatch.setattr(_emb.EmbeddingModel, "get",
-                        staticmethod(lambda: None))
+def _no_embedder():
+    # #8057: the mask has ONE owner (`tests/_live_utils.mask_embedder`) — the
+    # module-level probe above needs the same mask, from a place a fixture
+    # cannot reach. Hand-rolling the two patches here again is how the probe
+    # fell out of step in the first place.
+    with _live_utils.mask_embedder():
+        yield
 
 
 @pytest.fixture(autouse=True)

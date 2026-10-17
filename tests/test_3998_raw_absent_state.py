@@ -20,17 +20,32 @@ The contract under test (issue #3998, verbatim):
 ⛔ THE TRAP THIS FILE IS BUILT AROUND — the contract names **three** causes.
 A suite that only ever exercises *"deleted"* looks green while two thirds of
 the contract is unverified. So every cause-driven assertion here is driven by
-``RAW_ABSENT_STATES`` — the vocabulary itself — and a test asserts the three
-are pairwise **distinguishable**, not merely non-null. ``assert provenance is
-not None`` is not a test of "correctly labelled".
+the VOCABULARY ITSELF, and a test asserts the three are pairwise
+**distinguishable**, not merely non-null. ``assert provenance is not None`` is
+not a test of "correctly labelled".
+
+⛔ THE RULING THIS FILE PINS (#3998, owner decision 2026-10-14, Option A):
+  - deleting a memory is an **ACT**, recorded durably as a marker **bounded by
+    an expiry policy** — record durably, do NOT record forever;
+  - `offline` / `access_revoked` are **CONDITIONS, observed live, never
+    stored**;
+  - the deletion marker **carries an expiry policy**.
+So `deleted` is driven through the WRITE path (`raw_state=`), and the two
+observed causes are driven through the LIVE seam (`resolve_raw_availability` /
+`raw_entry(..., observed=...)`). A stored `offline`/`access_revoked` (a row
+written by an earlier head) is a legacy row and reads fail-closed.
 
 ⚠️ NOT COVERED (stated plainly, per the doctrine: silence is not acceptable):
   - **lazy detection** — nothing here probes a host or a credential to
-    DISCOVER an absence. These tests cover the *recorded* state; the
-    detection policy (issue decision #2, "who sets it, and when") is
-    deliberately left to the caller, and is **not** implemented here.
-  - **retention** — R1 gives no default retention window, so there is nothing
-    to test; a test asserting "no window exists" would be decorative.
+    DISCOVER an absence. These tests cover the *recorded* act and the
+    *observation seam*; the probe itself (issue decision #2, "who sets it, and
+    when") is deliberately left to the caller, and is **not** implemented here.
+  - **the marker DROP** — the expiry policy is tested (`RAW_DELETION_MARKER_TTL`,
+    `deletion_marker_expires_at`, `is_deletion_marker_expired`) and the read is
+    pinned NOT to resurrect past it, but no collection pass drops an expired
+    marker: that drop must be a journalled act (a node-only removal would make
+    `rebuild_all` replay the marker back, `live != replay`), so it is a later
+    piece of work by construction, not an omission.
   - **the search-hit provenance block** (``search_engine.SearchHit.to_dict``) —
     it does not yet carry the raw state; that read path is **unmodified**.
   - ⚠️ **VALUE-level payload bounds — the honest residual of criterion (4).**
@@ -51,6 +66,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -61,15 +77,23 @@ from tortoise.raw_state import (
     RAW_ABSENT_STATES,
     RAW_ACCESS_REVOKED,
     RAW_DELETED,
+    RAW_DELETION_MARKER_TTL,
+    RAW_DURABLE_STATES,
+    RAW_OBSERVED_STATES,
     RAW_OFFLINE,
     RAW_PRESENT,
+    RAW_STATE_AT_PROP,
     RAW_STATE_PROP,
     RAW_UNRECOGNISED,
     WRITABLE_RAW_STATES,
     RawState,
+    deletion_marker_expires_at,
+    is_deletion_marker_expired,
     is_valid_raw_state,
     raw_availability,
     raw_entry,
+    raw_state_for,
+    resolve_raw_availability,
     validate_raw_state,
 )
 from tortoise.sdk import TortoiseSDK
@@ -164,13 +188,23 @@ def test_three_causes_are_pairwise_distinguishable():
     permissions fact. If they collapse to one "missing", the product says
     something false while every not-null assertion still passes.
 
+    ⛔ The two vocabularies are separate on purpose (#3998 Option A):
+    ``deleted`` is RECORDED (``raw_availability``), ``offline`` /
+    ``access_revoked`` are OBSERVED (``raw_state_for``). This test drives each
+    cause through the route the ruling gives it, so a cause that is neither
+    recordable nor observable fails here rather than passing by accident.
+
     (1) FAILS when any two causes share a state, a label, a message, or a
         (permanent, retryable) pair — i.e. when a collapsed implementation
         returns "missing" for all three.
-    (2) REACHABLE: all three constants exist, so the fixture holds a row for
-        every cause by construction.
+    (2) REACHABLE: all three constants exist and are each reachable through
+        their sanctioned route, so the fixture holds a row for every cause.
     """
-    seen = {c: raw_availability({RAW_STATE_PROP: c}) for c in RAW_ABSENT_STATES}
+    seen = {
+        RAW_DELETED: raw_availability({RAW_STATE_PROP: RAW_DELETED}),
+        RAW_OFFLINE: raw_state_for(RAW_OFFLINE),
+        RAW_ACCESS_REVOKED: raw_state_for(RAW_ACCESS_REVOKED),
+    }
     assert set(seen) == set(RAW_ABSENT_STATES) == {
         RAW_DELETED, RAW_OFFLINE, RAW_ACCESS_REVOKED,
     }
@@ -194,6 +228,182 @@ def test_three_causes_are_pairwise_distinguishable():
     assert all(s.absent is True for s in seen.values())
     assert present.state not in {s.state for s in seen.values()}
     assert present.label not in {s.label for s in seen.values()}
+
+
+def test_the_write_vocabulary_is_the_durable_acts_and_the_observed_ones_are_not(
+):
+    """The ruling's FIRST half, pinned exactly: only an ACT is recordable.
+
+    (1) FAILS against the pre-ruling code, whose
+        ``WRITABLE_RAW_STATES = (present, *RAW_ABSENT_STATES)`` admitted
+        ``offline`` / ``access_revoked``. Restoring that composition reds this
+        test.
+    (2) REACHABLE: the constants exist and the refused values are passed below.
+    """
+    assert WRITABLE_RAW_STATES == RAW_DURABLE_STATES == (RAW_PRESENT, RAW_DELETED)
+    assert RAW_OBSERVED_STATES == (RAW_OFFLINE, RAW_ACCESS_REVOKED)
+    assert RAW_ABSENT_STATES == (RAW_DELETED, RAW_OFFLINE, RAW_ACCESS_REVOKED)
+    for condition in RAW_OBSERVED_STATES:
+        assert not is_valid_raw_state(condition), condition
+        with pytest.raises(ValueError, match="observed live"):
+            validate_raw_state(condition)
+
+
+def test_a_stored_condition_is_a_legacy_row_and_fails_closed():
+    """The ruling's SECOND half, on the read side: a stored condition is NOT
+    honoured, because a condition is never stored.
+
+    A deployment that ran an earlier head holds ``rawState='offline'`` rows.
+    Reading one as ``offline`` would resurrect the stored-condition behaviour
+    the ruling removed; reading it as ``present`` would fail OPEN. It reads
+    ``unrecognised`` — absent — which is the stated fail-closed default for a
+    value this build cannot interpret.
+
+    (1) FAILS if ``_RECORDED_STATES`` is widened back to the whole vocabulary,
+        or if the unknown-value branch fails open to PRESENT.
+    (2) REACHABLE: both spellings are constructed as a legacy node would hold
+        them.
+    """
+    for legacy in (RAW_OFFLINE, RAW_ACCESS_REVOKED):
+        r = raw_availability({RAW_STATE_PROP: legacy})
+        assert r.state == RAW_UNRECOGNISED, legacy
+        assert r.absent is True, legacy
+        assert r.state != RAW_PRESENT
+
+
+def test_the_live_seam_derives_a_condition_never_reads_it():
+    """The read resolver: record first, observation second — and the
+    observation is the ONLY route to a condition.
+
+    (1) FAILS if the resolver reads a condition from the record (then an
+        observation would be unnecessary and the stored value would win), or if
+        a recorded deletion can be overridden by a live observation — that is
+        the un-deletion the ruling forbids.
+    (2) REACHABLE: every branch below is constructed.
+    """
+    deleted = {RAW_STATE_PROP: RAW_DELETED, RAW_STATE_AT_PROP: "2026-10-01T00:00:00+00:00"}
+    # 1. With no observation the record is returned as-is.
+    assert resolve_raw_availability(deleted).state == RAW_DELETED
+    assert resolve_raw_availability({}).state == RAW_PRESENT
+    # 2. A live observation supplies the condition the record cannot hold.
+    assert resolve_raw_availability({}, observed=RAW_OFFLINE).state == RAW_OFFLINE
+    assert resolve_raw_availability({}, observed=RAW_ACCESS_REVOKED).state == RAW_ACCESS_REVOKED
+    # 3. A RECORDED act WINS over any observation — including `present`.
+    assert resolve_raw_availability(deleted, observed=RAW_PRESENT).state == RAW_DELETED
+    assert resolve_raw_availability(deleted, observed=RAW_OFFLINE).state == RAW_DELETED
+    # 4. An unrecognised record also wins (fail closed), and a hostile /
+    #    unrecognised observation fails closed rather than open.
+    assert resolve_raw_availability({"rawState": "banana"}, observed=RAW_PRESENT).state == RAW_UNRECOGNISED
+    assert resolve_raw_availability({}, observed="banana").state == RAW_UNRECOGNISED
+    assert resolve_raw_availability({}, observed=None).state == RAW_PRESENT
+    # 5. The seam never raises, on the same hostile inputs the record resolver
+    #    survives.
+    for hostile in (object(), [1, 2], 3.5, b"offline"):
+        assert resolve_raw_availability({}, observed=hostile).state == RAW_UNRECOGNISED
+
+
+def test_the_deletion_marker_carries_a_bounded_expiry_policy():
+    """The ruling's THIRD half: the marker carries an expiry policy.
+
+    (1) FAILS if the marker has no bound (``deletion_marker_expires_at`` returns
+        None for a stamped ``deleted`` row), or if the bound is not the named
+        constant, or if a non-deletion row acquires one.
+    (2) REACHABLE: a deletion row with a recorded instant is constructed, and
+        the non-deletion controls are present.
+    """
+    assert isinstance(RAW_DELETION_MARKER_TTL, timedelta)
+    assert timedelta(0) < RAW_DELETION_MARKER_TTL, (
+        "an unbounded (non-positive) marker window is not an expiry policy"
+    )
+    stamp = "2026-10-01T00:00:00+00:00"
+    marked = {RAW_STATE_PROP: RAW_DELETED, RAW_STATE_AT_PROP: stamp}
+    expires = deletion_marker_expires_at(marked)
+    assert expires is not None, "a stamped deletion marker carries no expiry"
+    assert datetime.fromisoformat(expires) - datetime.fromisoformat(stamp) == (
+        RAW_DELETION_MARKER_TTL
+    ), "the bound is not the named policy constant"
+    # A non-deletion row carries no marker, so no expiry.
+    assert deletion_marker_expires_at({RAW_STATE_PROP: RAW_PRESENT,
+                                       RAW_STATE_AT_PROP: stamp}) is None
+    assert deletion_marker_expires_at({}) is None
+    # A malformed marker is UNKNOWN, not expired — the safe direction.
+    assert deletion_marker_expires_at({RAW_STATE_PROP: RAW_DELETED}) is None
+    assert deletion_marker_expires_at(
+        {RAW_STATE_PROP: RAW_DELETED, RAW_STATE_AT_PROP: "not-a-date"}) is None
+
+
+def test_the_expiry_predicate_flips_exactly_at_the_window_edge():
+    """The fake-clock seam (no sleeping): the predicate reports drop-eligibility
+    strictly after the window, and a marker with no readable instant never
+    reports expired.
+
+    (1) FAILS if the comparison is inclusive at the instant (``>=``), or if a
+        malformed marker is treated as expired — the direction that would let a
+        drop resurrect a memory with no recorded deletion time.
+    (2) REACHABLE: the boundary instants are computed from the constant.
+    """
+    stamp = datetime(2026, 10, 1, tzinfo=UTC)
+    marked = {RAW_STATE_PROP: RAW_DELETED, RAW_STATE_AT_PROP: stamp.isoformat()}
+    assert not is_deletion_marker_expired(marked, now=stamp)
+    assert not is_deletion_marker_expired(
+        marked, now=stamp + RAW_DELETION_MARKER_TTL - timedelta(seconds=1))
+    assert not is_deletion_marker_expired(
+        marked, now=stamp + RAW_DELETION_MARKER_TTL), "the edge instant is still inside"
+    assert is_deletion_marker_expired(
+        marked, now=stamp + RAW_DELETION_MARKER_TTL + timedelta(seconds=1))
+    # No readable instant => never expired, whatever the clock says.
+    assert not is_deletion_marker_expired(
+        {RAW_STATE_PROP: RAW_DELETED}, now=stamp + timedelta(days=999))
+    # A non-deletion row has no marker to expire.
+    assert not is_deletion_marker_expired(
+        {RAW_STATE_PROP: RAW_PRESENT, RAW_STATE_AT_PROP: stamp.isoformat()},
+        now=stamp + timedelta(days=999))
+
+
+def test_a_datetime_max_stamp_is_unfit_to_reason_on_and_never_raises():
+    """A ``rawStateAt`` at ``datetime.max`` overflows ``stamp + TTL``. The
+    marker is then UNFIT to reason on: expiry is UNKNOWN (``None``) and the
+    predicate says NOT expired — the safe direction, and never a raise on a
+    hostile foreign/legacy row.
+
+    (1) FAILS if the window arithmetic raises ``OverflowError`` (the pre-fix
+        behaviour), or if an unboundable stamp is reported as expired — the
+        direction that would let a drop resurrect a memory.
+    (2) REACHABLE: ``datetime.max`` is a real ISO-8601 stamp; the resolver is
+        documented never to raise, and the read path must not either.
+    """
+    instant = datetime.max.replace(tzinfo=UTC)
+    marked = {RAW_STATE_PROP: RAW_DELETED, RAW_STATE_AT_PROP: instant.isoformat()}
+    assert deletion_marker_expires_at(marked) is None
+    assert is_deletion_marker_expired(marked, now=instant) is False
+
+
+def test_a_deletion_marker_is_still_honoured_past_its_window():
+    """⛔ EXPIRED IS NOT RESURRECTED (the ruling's load-bearing safety property).
+
+    The window authorises a LATER, JOURNALLED drop of the marker. It must never
+    change what a read reports: a raw deleted 10 days + 1 second ago is still
+    DELETED, because dropping the marker is a separate act and a node-only
+    removal would make ``rebuild_all`` replay the marker straight back
+    (``live != replay``). Reading ``expired`` as ``the raw is back`` is exactly
+    the resurrection the ruling forbids.
+
+    (1) FAILS if ``raw_availability``/``resolve_raw_availability`` consult the
+        expiry, or if a live observation of ``present`` is allowed to override
+        the recorded deletion once expired.
+    (2) REACHABLE: the marker is genuinely past its window (asserted), so the
+        test cannot pass by the marker being fresh.
+    """
+    stamp = datetime(2026, 10, 1, tzinfo=UTC)
+    marked = {RAW_STATE_PROP: RAW_DELETED, RAW_STATE_AT_PROP: stamp.isoformat()}
+    long_after = stamp + RAW_DELETION_MARKER_TTL + timedelta(days=30)
+    assert is_deletion_marker_expired(marked, now=long_after), "fixture is not expired"
+
+    assert raw_availability(marked).state == RAW_DELETED
+    assert raw_availability(marked).permanent is True
+    assert resolve_raw_availability(marked).state == RAW_DELETED
+    # A probe that says the raw is reachable must NOT un-delete it.
+    assert resolve_raw_availability(marked, observed=RAW_PRESENT).state == RAW_DELETED
 
 
 def test_no_recorded_state_reads_as_present():
@@ -247,6 +457,15 @@ def test_unrecognised_recorded_state_does_not_read_as_present():
         r = raw_availability(bad)
         assert r.state == RAW_UNRECOGNISED, f"{bad!r} -> {r.state}"
         assert r.absent is True, f"{bad!r} read as reachable"
+    # ⛔ A stored CONDITION is in this class too now (#3998 Option A): a row
+    # written by an earlier head holds `offline`/`access_revoked`, and reading
+    # it as a condition would restore the stored-condition behaviour the ruling
+    # removed. It is unrecognised — not `present` (fail open) and not the
+    # condition itself.
+    for legacy in RAW_OBSERVED_STATES:
+        r = raw_availability({RAW_STATE_PROP: legacy})
+        assert r.state == RAW_UNRECOGNISED, legacy
+        assert r.absent is True, legacy
 
 
 def test_resolver_never_raises_on_hostile_input():
@@ -279,11 +498,19 @@ def test_write_side_is_strict_on_every_invalid_value():
     for good in WRITABLE_RAW_STATES:
         assert validate_raw_state(good) == good
         assert is_valid_raw_state(good)
-    for bad in ("banana", "", None, 0, "missing", "unrecognised"):
-        # `unrecognised` is READ-side only: a writer must never record it.
+    # `unrecognised` is READ-side only, and a CONDITION is never recordable at
+    # all (#3998 Option A) — the write boundary must refuse both.
+    for bad in ("banana", "", None, 0, "missing", "unrecognised",
+                *RAW_OBSERVED_STATES):
         assert not is_valid_raw_state(bad), bad
         with pytest.raises(ValueError):
             validate_raw_state(bad)
+    # The refusal of a CONDITION says WHY, so a caller that tried to store a
+    # condition is not left guessing (the message is load-bearing: it is the
+    # only place the tenant learns the field cannot hold one).
+    for condition in RAW_OBSERVED_STATES:
+        with pytest.raises(ValueError, match="observed live"):
+            validate_raw_state(condition)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -295,26 +522,41 @@ def test_write_side_is_strict_on_every_invalid_value():
 def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
     """Criterion (1), driven by the vocabulary so all three causes run.
 
+    Each cause is driven through the route the #3998 Option A ruling gives it:
+    ``deleted`` is RECORDED (so the SDK read path produces it end to end), and
+    ``offline`` / ``access_revoked`` are OBSERVED live — the write is refused,
+    no state is stored, and the entry is built from the live determination over
+    the SAME node properties the SDK reader holds.
+
     (1) FAILS on a pre-#3998 build for the only reason that matters: the
         returned provenance carries NO raw state at all, so ``raw_state``
         cannot equal the cause. It also fails if two causes report the same
-        value, or if the read raises/gives an empty chain.
-    (2) REACHABLE: the fixture writes the cause onto the Source and reads the
-        SAME memory back through the real ``extractedFrom`` edge.
+        value, if a condition is ever stored, or if the read raises/gives an
+        empty chain.
+    (2) REACHABLE: ``deleted`` is driven end-to-end through the SDK write +
+        read path (the ``extractedFrom`` edge); the two conditions are driven
+        through the live observation seam (``raw_entry(..., observed=cause)``)
+        over the SAME node properties the SDK reader holds — they have no
+        stored state to read back.
     """
     s, _events = sdk
     s.create_source(RAW_URL, "conversation", contentHash="h1")
     pid = _memory(s)
-    s.create_source(RAW_URL, "conversation", raw_state=cause)
+    if cause == RAW_DELETED:
+        s.create_source(RAW_URL, "conversation", raw_state=cause)
+        raw = s.get_provenance_chain(pid)[0]["raw"]
+    else:
+        with pytest.raises(ValueError, match="observed live"):
+            s.create_source(RAW_URL, "conversation", raw_state=cause)
+        assert RAW_STATE_PROP not in _source_props(s), (
+            "a CONDITION was STORED — the ruling says observed live, never stored"
+        )
+        raw = raw_entry(_source_props(s), observed=cause)
 
     # The memory itself stays readable — absence is not corruption.
     assert s.get_point(pid)["content"] == "a claim whose raw may be gone"
-
-    chain = s.get_provenance_chain(pid)
-    assert len(chain) == 1, f"provenance went silent: {chain}"
-    raw = chain[0]["raw"]
-    assert raw["raw_state"] == cause
     assert raw["available"] is False
+    assert raw["raw_state"] == cause
     assert raw["source_id"] == RAW_URL
     assert raw["content_hash"] == "h1", "the version anchor must survive absence"
     assert raw["label"] and raw["message"], "a cause must be SAYABLE"
@@ -323,7 +565,7 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
     # the pure resolver — this is the assertion the trap is about. Compared
     # against the resolved state for THIS cause, so a generic "missing" label
     # (the collapse the contract forbids) fails rather than passes.
-    expected = raw_availability({RAW_STATE_PROP: cause})
+    expected = raw_state_for(cause)
     assert raw["label"] == expected.label
     assert raw["message"] == expected.message
     assert raw["permanent"] == (cause == RAW_DELETED)
@@ -332,21 +574,30 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
 
 def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
     """The whole deliverable, asserted on the READ path rather than the pure
-    resolver: read the SAME memory back under each cause and require the three
-    reports to differ. A not-null check would pass for a collapsed "missing".
+    resolver: the SAME memory under each cause must produce three different
+    reports. A not-null check would pass for a collapsed "missing".
+
+    ``deleted`` is read back through the SDK read path; the two conditions are
+    read through the live seam over the same node. If any two agree on state,
+    label, message, or ``(permanent, retryable)``, this reds.
 
     (1) FAILS if any two causes report the same state, label, message, or
-        ``(permanent, retryable)`` pair through the provenance read.
-    (2) REACHABLE: all three causes are written to the live Source and read
-        back through the real ``extractedFrom`` edge.
+        ``(permanent, retryable)`` pair.
+    (2) REACHABLE: the deletion is written to the live Source and read back
+        through the real ``extractedFrom`` edge; the conditions are observed
+        over the node the reader holds.
     """
     s, _events = sdk
     s.create_source(RAW_URL, "conversation", contentHash="h1")
     pid = _memory(s)
-    seen = {}
-    for cause in RAW_ABSENT_STATES:
-        s.create_source(RAW_URL, "conversation", raw_state=cause)
-        seen[cause] = s.get_provenance_chain(pid)[0]["raw"]
+    # Observe the two conditions over a node the deletion marker has NOT
+    # touched: a recorded ACT wins over any observation (asserted in
+    # `test_the_live_seam_derives_a_condition_never_reads_it`), so the three
+    # causes must be compared across a clean record.
+    plain = _source_props(s)
+    seen = {cause: raw_entry(plain, observed=cause) for cause in RAW_OBSERVED_STATES}
+    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    seen[RAW_DELETED] = s.get_provenance_chain(pid)[0]["raw"]
     assert len({r["raw_state"] for r in seen.values()}) == 3
     assert len({r["label"] for r in seen.values()}) == 3
     assert len({r["message"] for r in seen.values()}) == 3
@@ -356,23 +607,38 @@ def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
 def test_reads_do_not_raise_when_the_raw_is_unreachable(sdk):
     """Criterion (2) end to end: every read path returns a VALUE.
 
+    The recorded deletion is exercised through the SDK's public reads; the
+    observed conditions are exercised through the live seam, which returns an
+    explicit, labelled, user-facing state — never an empty result standing in
+    for "not there", and never a raise on a hostile observation.
+
     (1) FAILS if any of these raises for an absent raw, or returns an ``error``
-        payload instead of the state.
-    (2) REACHABLE: each cause is written and read below; the sourceless point
-        is created by ``create_point`` with no ``extractedFrom`` and no
-        session context.
+        payload (or an empty/None entry) instead of the state.
+    (2) REACHABLE: the deletion is recorded and read below; the conditions are
+        observed over the real node; the sourceless point is created by
+        ``create_point`` with no ``extractedFrom`` and no session context.
     """
     s, _events = sdk
     s.create_source(RAW_URL, "conversation", contentHash="h1")
     pid = _memory(s)
+    # The live observations must be taken over a record with no marker (a
+    # recorded act wins), so capture the plain record before the write.
+    plain = _source_props(s)
 
-    for cause in RAW_ABSENT_STATES:
-        s.create_source(RAW_URL, "conversation", raw_state=cause)
-        chain = s.get_provenance_chain(pid)          # must not raise
-        prov = s.provenance(pid)                     # must not raise
-        assert chain[0]["raw"]["raw_state"] == cause
-        assert prov["raw"]["raw_state"] == cause
-        assert "error" not in prov
+    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    chain = s.get_provenance_chain(pid)          # must not raise
+    prov = s.provenance(pid)                     # must not raise
+    assert chain[0]["raw"]["raw_state"] == RAW_DELETED
+    assert prov["raw"]["raw_state"] == RAW_DELETED
+    assert "error" not in prov
+
+    for cause in RAW_OBSERVED_STATES:
+        entry = raw_entry(plain, observed=cause)
+        assert isinstance(entry, dict) and entry, "the live read went silent"
+        assert entry["raw_state"] == cause
+        assert entry["available"] is False and entry["label"] and entry["message"]
+    # A hostile observation is a value too, not an exception.
+    assert raw_entry(plain, observed=object())["raw_state"] == RAW_UNRECOGNISED
 
     # A point with NO source at all: still no raise, and no raw key invented.
     orphan = s.create_point("statement", "orphan claim")["id"]
@@ -393,7 +659,7 @@ def test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge(sdk
         indexed before extraction.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_OFFLINE)
+    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
     pid = _memory(s)
     chain = s.get_provenance_chain(pid)
     assert len(chain) == 1, "a source with no entity must not silence the chain"
@@ -411,7 +677,7 @@ def test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge(sdk
     assert "content" not in chain[0]["entity"], (
         "the coalesce fallback re-handed the raw payload"
     )
-    assert chain[0]["raw"]["raw_state"] == RAW_OFFLINE
+    assert chain[0]["raw"]["raw_state"] == RAW_DELETED
 
 
 def test_absence_is_preserved_by_a_later_upsert_that_carries_none(sdk):
@@ -441,12 +707,16 @@ def test_present_is_the_documented_way_back(sdk):
     """A raw that returns must be sayable as returned — otherwise the state is
     write-only and the product can never un-say an absence.
 
+    ⛔ The outbound state is the RECORDED deletion (a durable act), not a
+    stored condition (#3998 Option A) — this is the only way back, and it is a
+    recorded write like the absence it clears.
+
     (1) FAILS if a writer cannot move the state back to present.
     (2) REACHABLE: ``raw_state='present'`` below is one of WRITABLE_RAW_STATES.
     """
     s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_OFFLINE)
-    assert _source_props(s)[RAW_STATE_PROP] == RAW_OFFLINE
+    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
+    assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
     s.create_source(RAW_URL, "conversation", raw_state=RAW_PRESENT)
     props = _source_props(s)
     assert props[RAW_STATE_PROP] == RAW_PRESENT
@@ -524,13 +794,13 @@ def test_graph_holds_an_index_entry_not_a_copy(sdk):
     s.create_source(RAW_URL, "conversation", contentHash=digest, chunks=[body])
 
     # (c) the sanctioned route: identity + version + availability, no bytes.
-    s.create_source(RAW_URL, "conversation", contentHash=digest, raw_state=RAW_OFFLINE,
+    s.create_source(RAW_URL, "conversation", contentHash=digest, raw_state=RAW_DELETED,
                     title="Weekly sync", format="transcript")
 
     props = _source_props(s)
     assert props["url"] == RAW_URL
     assert props["contentHash"] == digest
-    assert props[RAW_STATE_PROP] == RAW_OFFLINE
+    assert props[RAW_STATE_PROP] == RAW_DELETED
     assert props["format"] == "transcript", "a declared metadata prop must still persist"
     assert set(props) <= ALLOWED_SOURCE_NODE_PROPS, (
         "undeclared :Source properties reached the node: "
@@ -1435,6 +1705,8 @@ def test_absence_survives_a_rebuild(sdk):
     s.create_source(RAW_URL, "conversation", contentHash="h1")
     s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
     assert _source_props(s)[RAW_STATE_PROP] == RAW_DELETED
+    expected_expiry = deletion_marker_expires_at(_source_props(s))
+    assert expected_expiry is not None, "the live marker carries no expiry policy"
 
     s._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
@@ -1442,6 +1714,44 @@ def test_absence_survives_a_rebuild(sdk):
     assert props[RAW_STATE_PROP] == RAW_DELETED, "the absence did not survive rebuild"
     assert props["contentHash"] == "h1", "the version anchor did not survive rebuild"
     assert raw_availability(props).permanent is True
+    # The marker carries its EXPIRY POLICY through the replay too: the policy is
+    # derived from the RECORDED instant, so live and rebuilt agree byte for byte
+    # (`derived = replay(journal)` covers the policy, not only the state).
+    assert props[RAW_STATE_AT_PROP], "the marker lost its recorded instant"
+    assert deletion_marker_expires_at(props) is not None
+    assert deletion_marker_expires_at(props) == expected_expiry, (
+        "the marker's expiry policy did not survive the rebuild"
+    )
+
+
+def test_an_observed_condition_leaves_nothing_for_a_rebuild_to_resurrect(sdk):
+    """The ruling's structural half on the durability path: because a CONDITION
+    is never stored, a rebuild has nothing to restore — and, critically, no
+    path can mint one back onto the node.
+
+    (1) FAILS if a condition reaches the journal: a rebuilt source would carry
+        a ``rawState`` the ruling forbids, and the node's availability would
+        change across a rebuild (``live != replay``).
+    (2) REACHABLE: the journal is wired and a state-carrying write runs BEFORE
+        the rebuild, so the fixture would catch a stored condition.
+    """
+    s, events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    for condition in RAW_OBSERVED_STATES:
+        with pytest.raises(ValueError, match="observed live"):
+            s.create_source(RAW_URL, "conversation", raw_state=condition)
+    assert RAW_STATE_PROP not in _source_props(s), "a condition was stored live"
+
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    props = _source_props(s)
+    assert RAW_STATE_PROP not in props, (
+        "the rebuild materialised a stored condition the ruling forbids"
+    )
+    # The read still derives the condition from the live seam, and reports the
+    # record (present) when nothing has been observed.
+    assert resolve_raw_availability(props).state == RAW_PRESENT
+    assert resolve_raw_availability(props, observed=RAW_OFFLINE).state == RAW_OFFLINE
 
 
 def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sdk):

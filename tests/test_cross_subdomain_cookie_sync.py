@@ -33,7 +33,11 @@ What survives here, and is still gated:
     remaining host-conditional cookie write on the site;
   - the same-origin auth bounce's search-param preservation (`main.jsx`);
   - the key-identity router in `oauth.py`, the last remaining session-adapter
-    copy (out of scope for #3559/#4178 — its owner is #3496).
+    copy (out of scope for #3559/#4178 — its owner is #3496);
+  - the completeness of the key-identity ROUTER REGISTRY (`_ROUTER_CASES`):
+    every product source carrying the contract must be registered there, so a
+    FOURTH copy cannot land unguarded (#5735's residual half — see
+    `test_every_storage_adapter_copy_is_registered`).
 
 The #3503 fragment-retention harness that executed the bridge lives in
 `tests/test_session_bridge_fragment_retention.py`; it is now the same deletion
@@ -81,6 +85,11 @@ BRIDGE_SCRIPT = 'src="/assets/supabase-session.js"'
 # bridge and the blog-admin adapter deleted, `oauth.py` is the LAST copy; its
 # write/remove paths route a non-session key to the aux stores and never to the
 # cookie (`!==` on both methods).
+#
+# This table IS the contract's declared home (#5735): a copy of the adapter that
+# is not listed here is a copy no gate can see, so
+# `test_every_storage_adapter_copy_is_registered` below enumerates the copies and
+# fails on any that is missing.
 _ROUTER_KEY_CMP = re.compile(r"\bkey\s*(===|!==)\s*([A-Za-z_$][\w$]*)")
 _ROUTER_SHAPE_PREDICATE = re.compile(
     r"\.endsWith\(|\.startsWith\(|\.slice\(|\.charAt\(|\.includes\("
@@ -402,3 +411,301 @@ def test_key_identity_router_allows_only_the_session_key() -> None:
                 "the credential jar for every name it has not heard of; route by "
                 "key identity instead (#3496)"
             )
+
+
+# ── #5735: the registry is the contract's DECLARED HOME, and it must be complete ──
+#
+# #5735 counted three copies of this contract and only one CI-gated. Two of the
+# three were then DELETED by the session-model lane (#3559 the bridge, #4178 the
+# console adapter), so `oauth.py` is the last copy and the duplication itself is
+# gone. What #5735 left un-done is its SECOND half: "the contract has a declared
+# home that a new copy must be added to". `_ROUTER_CASES` above is that home —
+# but a table only declares the copies someone remembered to list, and the two
+# absence gates above are written by PATH (they can only forbid a copy that was
+# deleted once). A FOURTH copy, in a new file, landed green. This scan is that
+# gate.
+#
+# TWO detectors, because the contract has two failure shapes:
+#
+#   * ROUTER — a `setItem`/`removeItem` that routes on `key`: the shape
+#     `_ROUTER_CASES` pins (exactly one key comparison per method, allowlisting
+#     the session key).
+#   * COOKIE-WRITER — a file that names the session cookie AND assigns
+#     `document.cookie`: the shape #5735 calls "no routing — writes any key"
+#     (the deleted bridge's own shape). A writer with NO router is caught too,
+#     which is the point — such a copy has no legal registration, so it must be
+#     key-routed by identity (then registered) or deleted, which is exactly the
+#     decision #5735's task 4 asked the session-model lane to make.
+#
+# Scope: the PRODUCT source roots below. `tests/` is deliberately out of scope —
+# a harness embeds the adapter on purpose (this file pins bodies by text, and
+# tests/test_oauth_consent_pkce.py runs a JS `cookieStorage` over a mocked jar)
+# and can never reach a browser. The platform-wide absence of the JS-readable
+# artifact itself is owned by tests/test_no_legacy_token_path.py.
+
+_PRODUCT_ROOTS = (
+    "apps",
+    "client",
+    "integrations",
+    "menu-bar",
+    "services",
+    "tortoise",
+    "website",
+)
+_SCAN_SKIP_DIRS = {
+    "node_modules",
+    "dist",
+    ".git",
+    "archive",
+    ".worktrees",
+    "vendor",
+    ".wrangler",
+    "build",
+}
+_SCAN_SUFFIXES = {".py", ".html", ".js", ".ts", ".tsx", ".jsx", ".mjs"}
+
+# The session cookie's name as a bare literal. The registry carries it as a
+# SYMBOL (`COOKIE_NAME`), so a copy has to name the cookie itself to be seen by
+# the writer detector — as the deleted bridge and console adapter did.
+_SESSION_COOKIE_LITERAL = "sb-tortoise-auth-token"
+
+# A storage-adapter METHOD DEFINITION that takes a `key`, in any of the styles
+# this repo uses (`setItem(key, value) {`, `setItem: (key: string) => {`,
+# `setItem: function (key, value) {`, `setItem = function (key, value) {`).
+#
+# This matches the DEFINITION, not a use of it: a CALL SITE ends at `)`, which
+# is followed by `;`, `.` or end-of-statement, so requiring the parameter list
+# to CLOSE and then be followed by a body opener (`{` or `=>`) excludes it.
+# #8701 review (P2, cycle 1): the prior `[:(=]` character class contained `(`,
+# so a call like `s.setItem(key, v);` matched the `(` arm and was reported as
+# an adapter copy — a false positive whose only legal resolution was to rename
+# the argument (the registration pin `_extract_fn_body` still demands a real
+# definition).
+# #8701 review (P2, cycle 2): `[^)]*` still SPANNED a nested delimiter in the
+# parameter text, so `store.setItem(key, () => { … })` reached the inner `)`
+# and then the body opener and matched too — the same false positive via an
+# ordinary JS call with a callback/object argument. The parameter text must
+# not span `(`/`{`, so both delimiters are in the negated class as well.
+# Pinned by test_router_detector_matches_definitions_not_call_sites.
+_ROUTER_METHOD = re.compile(
+    r"\b(?:setItem|removeItem)\s*(?::|=)?\s*(?:function\s*)?"
+    r"\([^(){}]*\bkey\b[^(){}]*\)\s*(?:\{|=>)"
+)
+_COOKIE_ASSIGNMENT = re.compile(r"document\s*\.\s*cookie\s*=[^=]")
+
+
+def _scan_code(path: Path) -> str:
+    """File text with comments removed, so each detector matches CODE and not
+    the prose that documents the removal — every deleted path here carries a
+    comment naming it, and this suite's own header names the cookie.
+
+    A `.py` file hosts the consent page's JS inside a string literal, so it gets
+    only its FULL-LINE `#` comments removed: stripping JS comments from Python
+    would eat a floor-division tail and could blank an inline script that starts
+    later on that same line.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix.lower() == ".py":
+        return re.sub(r"(?m)^\s*#.*$", "", text)
+    return _strip_js_comments(text)
+
+
+def _scannable_sources() -> list[Path]:
+    """Every product source file a browser- or page-facing adapter could live in.
+
+    A root absent from this checkout is skipped (the app trees have moved
+    between root and `apps/` before); `inspected` in the test below is what keeps
+    that from silently shrinking the scan.
+    """
+    sources: list[Path] = []
+    for root in _PRODUCT_ROOTS:
+        base = REPO_ROOT / root
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in _SCAN_SUFFIXES:
+                continue
+            if any(part in _SCAN_SKIP_DIRS for part in path.relative_to(REPO_ROOT).parts):
+                continue
+            sources.append(path)
+    return sorted(sources)
+
+
+def _adapter_copies() -> tuple[dict[Path, set[str]], int]:
+    """`({copy: {detector, ...}}, files_inspected)` over the product sources."""
+    copies: dict[Path, set[str]] = {}
+    sources = _scannable_sources()
+    for path in sources:
+        code = _scan_code(path)
+        hits: set[str] = set()
+        if _ROUTER_METHOD.search(code) and _ROUTER_KEY_CMP.search(code):
+            hits.add("router")
+        if _SESSION_COOKIE_LITERAL in code and _COOKIE_ASSIGNMENT.search(code):
+            hits.add("cookie-writer")
+        if hits:
+            copies[path] = hits
+    return copies, len(sources)
+
+
+def test_router_detector_matches_definitions_not_call_sites() -> None:
+    """#8701 review (P2): `_ROUTER_METHOD` must match the adapter DEFINITION,
+    not a call site.
+
+    The old pattern's `[:(=]` character class contained `(`, so a call like
+    `s.setItem(key, v);` matched and the file was reported as an unregistered
+    copy. That is a false positive with no legal resolution: registering it
+    cannot succeed because `test_key_identity_router_allows_only_the_session_key`
+    resolves the entry through `_extract_fn_body`, which asserts a real
+    `setItem`/`removeItem` definition. This test FAILS on the pre-fix regex
+    (`old = re.compile(r"\\b(?:setItem|removeItem)\\s*[:(=]\\s*(?:function\\s*)?\\(?\\s*key\\b")`),
+    which matches every call below; the fixed pattern requires the parameter
+    list to close and be followed by a body opener.
+
+    #8701 review (P2, cycle 2): a `[^)]*` parameter text still SPANNED a nested
+    delimiter, so an ordinary `setItem(key, cb)` / `setItem(key, { … })` call
+    whose argument list carries its own parens matched at the first inner `)`
+    and was reported as a copy. The parameter text now forbids `(`/`{` as well
+    (`[^(){}]*`), and the nested-paren call sites below pin it.
+    """
+    # Call sites: a use of the adapter, not the adapter itself.
+    call_sites = (
+        "s.setItem(key, v);",
+        "s.removeItem(key);",
+        "store.setItem(key, value);",
+        "this.removeItem(key);",
+        "s.setItem(\n  key,\n  v\n);",
+        # #8701 review (P2, cycle 2): argument lists with NESTED parens/braces —
+        # ordinary JS that matched the pre-cycle-2 `[^)]*` pattern.
+        "store.setItem(key, () => { doThing(); });",
+        "store.setItem(key, { onError: (e) => { log(e); } });",
+        "wrap.removeItem(key, function (err) { report(err); });",
+    )
+    for code in call_sites:
+        assert not _ROUTER_METHOD.search(code), (
+            f"the detector matched a CALL SITE ({code!r}) — a file that merely "
+            "uses a storage adapter would be reported as an unregistered copy, "
+            "and registering it cannot succeed (#8701 review P2)"
+        )
+
+    # Definitions, in every style this repo uses — these MUST match.
+    definitions = (
+        "setItem(key, value) {",
+        "removeItem(key) {",
+        "setItem: function (key, value) {",
+        "setItem: (key: string) => {",
+        "setItem = function (key, value) {",
+    )
+    for code in definitions:
+        assert _ROUTER_METHOD.search(code), (
+            f"the detector missed a real adapter DEFINITION ({code!r}) — a new "
+            "copy in that style would land unguarded (#5735)"
+        )
+
+    # The end-to-end ROUTER branch: a file that only CALLS an adapter and
+    # contains an unrelated `key === <id>` comparison must not be flagged. That
+    # combination is exactly the reviewer's false-positive vector (a call site
+    # + a property access such as `t.key === key`) — with the regex fixed, the
+    # method half no longer fires, so the branch stays silent.
+    false_positive = "\n".join(
+        [
+            "widget.setItem(key, payload);",
+            "if (t.key === key) { render(); }",
+        ]
+    )
+    assert not (_ROUTER_METHOD.search(false_positive) and _ROUTER_KEY_CMP.search(false_positive)), (
+        "a file that only USES an adapter (call site + a `key ===` comparison) "
+        "was reported as a router copy — a false positive whose only legal fix "
+        "is renaming the caller's argument (#8701 review P2)"
+    )
+
+    # #8701 review (P2, cycle 2): the same false positive via a callback/object
+    # argument whose list holds its own parens — the vector the `[^)]*` pattern
+    # missed. The method half must stay silent so the branch does not fire.
+    nested_false_positive = "\n".join(
+        [
+            "widget.setItem(key, () => { render(); });",
+            "if (t.key === key) { render(); }",
+        ]
+    )
+    assert not (
+        _ROUTER_METHOD.search(nested_false_positive)
+        and _ROUTER_KEY_CMP.search(nested_false_positive)
+    ), (
+        "a file that only USES an adapter with a callback argument was reported "
+        "as a router copy — no legal registration exists (#8701 review P2, "
+        "cycle 2)"
+    )
+
+
+def test_every_storage_adapter_copy_is_registered() -> None:
+    """#5735: `_ROUTER_CASES` is the contract's declared home — a copy of the
+    adapter that is not registered there is not gated, and this fails until it
+    is.
+
+    Registration is not paperwork: the loop in
+    `test_key_identity_router_allows_only_the_session_key` pins the registered
+    copy's per-method polarity (exactly one `key !== <that file's session key>`
+    comparison, and no string-shape predicate on `key`), so adding a copy here
+    is what makes the contract actually bind it.
+    """
+    copies, inspected = _adapter_copies()
+    registered = {path for path, _, _ in _ROUTER_CASES}
+
+    # NON-VACUITY. A broken root list, a missing suffix (the platform's scripts
+    # are .jsx/.ts/.html as well as .py) or a detector that no longer recognises
+    # the one live copy would each report "no unregistered copies" while seeing
+    # nothing — a dead gate reads exactly like a clean one.
+    assert inspected > 100, (
+        f"only {inspected} product sources scanned under {list(_PRODUCT_ROOTS)} — "
+        "the root list or the glob is broken, so every absence proved below would "
+        "pass vacuously"
+    )
+    assert OAUTH in copies and "router" in copies[OAUTH], (
+        f"the one live adapter copy ({OAUTH.relative_to(REPO_ROOT)}) was NOT "
+        "detected as a router — the detector is dead, so its silence proves nothing"
+    )
+    # #8701 review (P2): pin the WRITER detector too. `oauth.py` is the only
+    # product source that hits it, so if `_SESSION_COOKIE_LITERAL` /
+    # `_COOKIE_ASSIGNMENT` regress, `unregistered`, `stale` and `decorative`
+    # all stay empty and the test above reads as clean while the whole
+    # `cookie-writer` failure shape (#5735's "no routing — writes any key") goes
+    # unwatched. This assertion is what makes a dead writer detector fail.
+    assert OAUTH in copies and "cookie-writer" in copies[OAUTH], (
+        f"the one live adapter copy ({OAUTH.relative_to(REPO_ROOT)}) was NOT "
+        "detected as a cookie-writer — that detector is dead, so its silence "
+        "proves nothing and a `document.cookie` writer that names the session "
+        "cookie would land unregistered (#8701 review P2)"
+    )
+
+    unregistered = sorted(copies.keys() - registered)
+    assert not unregistered, (
+        "these product sources carry the key-routing storage-adapter contract but "
+        "are NOT in `_ROUTER_CASES`, so nothing gates them (#5735):\n"
+        + "\n".join(
+            f"  {p.relative_to(REPO_ROOT)}  [{', '.join(sorted(copies[p]))}]" for p in unregistered
+        )
+        + "\n\nRoute the copy by key IDENTITY — exactly one `key !== <that file's "
+        "session-key constant>` in each of setItem/removeItem, and no "
+        "endsWith/startsWith/slice/charAt/includes/regex test on `key` — then add "
+        "it to `_ROUTER_CASES` as (path, SESSION_KEY_SYMBOL, {'setItem': op, "
+        "'removeItem': op}). A `cookie-writer` hit with no router has no legal "
+        "registration: key-route it, or delete it. Do not rely on this list "
+        "staying short — a copy of this contract that is not registered is a copy "
+        "no gate can see (the #3496 duplication finding, #5735's residual half)."
+    )
+
+    stale = sorted(registered - copies.keys())
+    assert not stale, (
+        f"`_ROUTER_CASES` registers {[p.name for p in stale]} but no adapter was "
+        "detected there — a stale entry is a registry that no longer describes the "
+        "contract it declares. Drop the entry, or restore the detector if the copy "
+        "is real and it was missed"
+    )
+    # (stale is empty by here, so every registered path IS a key of `copies`.)
+    decorative = sorted(p for p in registered if "router" not in copies[p])
+    assert not decorative, (
+        f"`_ROUTER_CASES` registers {[p.name for p in decorative]} but that file "
+        "carries no key-routing setItem/removeItem body, so the polarity "
+        "assertions in test_key_identity_router_allows_only_the_session_key cannot "
+        "bind it — the entry is decorative"
+    )

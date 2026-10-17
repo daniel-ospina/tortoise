@@ -562,7 +562,13 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
         "SourceVersioned",
         # additive edge write
         "EntityLinked",
-        # `_NO_PROJECTION_FOLD` audit records: NO fold in any dispatcher
+        # `_NO_PROJECTION_FOLD` / `_NO_POINT_FOLD` audit records: no fold is
+        # reachable from the dispatcher that tolerates a torn tail here.
+        # ⚠️ `DirectEdgeCreated` is NO LONGER in `_NO_PROJECTION_FOLD` — #8499
+        # gave it a real `rebuild_all` pass-2b fold — and it stays in this set
+        # for a DIFFERENT reason: a torn tail costs that one edge its replay,
+        # which is bounded and does not revive state (see log.py's entry, which
+        # records the real cost of the tolerant posture).
         "BatchIdStamped", "IngestStarted", "CalibrationRecorded",
         "DedupeRecorded", "DedupeRejected", "EntityBindingRefused",
         "DirectEdgeCreated",

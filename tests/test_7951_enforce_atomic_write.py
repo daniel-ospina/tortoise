@@ -499,39 +499,29 @@ def test_a_live_write_whose_fold_fails_is_already_in_the_journal(
     )
 
 
-def test_create_point_is_apply_first_a_recorded_deviation(
+def test_create_point_journals_the_record_before_the_cache_write(
         sdk_with_journal, monkeypatch):
-    """§17.1's ORDER is NOT yet journal-first on `create_point` — PINNED, not
-    claimed away.
+    """#7951 §17.1 — `create_point` is now JOURNAL-first (the outbox ordering).
 
-    `create_point` writes the Point through the guarded HANDLE
-    (`proj.g.query("CREATE (n:Point {…})")`) and appends its `PointAdded`
-    record only afterwards, from `get_point(pid)` — so the DERIVED store is
-    briefly AHEAD of the TRUTH (window (a) of the ordering contract at the top
-    of `tortoise/sdk.py`). It is that contract's recorded exception 2: the
-    record IS the applied node (`RETURN properties(n)`), so there is no
-    pre-fold payload to append. A crash in the gap leaves a node no replay
-    reproduces.
+    `create_point` builds its `PointAdded` payload from the WRITE INTENT
+    (`_create_map`, the properties the `CREATE` will write) and appends the
+    record BEFORE the cache write, so the DERIVED store can never lead the
+    TRUTH. Before this lane the record was the post-`CREATE` `get_point`
+    read-back and the cache write came first (window (a) of the ordering
+    contract at the top of `tortoise/sdk.py`, the recorded apply-first
+    deviation).
 
-    The order CANNOT be corrected in this increment without changing the
-    journal payload's shape on the highest-traffic write path (the pre-fold
-    values differ from `properties(n)` — e.g. a server-computed embedding is
-    stored `vecf32`-narrowed, #5004), which is exactly the `derived =
-    replay(journal)` break this lane exists to prevent. Closing it needs
-    §17.1's mechanism (1), the atomic write, still OPEN on #7951.
+    This is the flipped pin: the same spy that used to assert `[1]` (cache
+    already held the node when the record was journalled) now asserts `[0]`.
 
-    This test pins the ACTUAL order so the residual is checkable and no later
-    lane can claim `create_point` is journal-first (the review's P1).
-
-    ⛔ WHEN THE ATOMIC WRITE LANDS: flip the assertion to
-    `order.index("journal-PointAdded") < order.index("cache-create")` and
-    delete exception 2 from the ordering contract.
+    MUTATION: move the `_emit_event("PointAdded", …)` back below the `CREATE`
+    (or delete the append) and this fails with `[1]` (or `[]`).
     """
     sdk = sdk_with_journal
     proj = sdk._get_proj()
     # How many Point rows the CACHE holds at the instant `PointAdded` is
-    # journalled. `1` = the node was already written (apply-first); `0` = the
-    # record went first (journal-first, what §17.1 requires).
+    # journalled. `0` = the record went first (journal-first, §17.1); `1` =
+    # the node was already written (the old apply-first deviation).
     cache_at_journal: list[int] = []
 
     real_emit = sdk._emit_event
@@ -544,14 +534,14 @@ def test_create_point_is_apply_first_a_recorded_deviation(
 
     monkeypatch.setattr(sdk, "_emit_event", spy_emit)
 
-    point = sdk.create_point("statement", "an apply-first claim")
+    point = sdk.create_point("statement", "a journal-first claim")
     assert point.get("id"), f"create_point returned no id: {point!r}"
 
-    assert cache_at_journal == [1], (
-        "create_point's order CHANGED — if the journal record now precedes the "
-        "cache write (observed count 0), delete this deviation pin and remove "
-        "exception 2 from the ordering contract in `tortoise/sdk.py` "
-        f"(observed: {cache_at_journal!r})"
+    assert cache_at_journal == [0], (
+        "create_point must append its record BEFORE the cache write (§17.1): "
+        "the observation must be [0] (the record went first). A [1] means the "
+        "order regressed to apply-first; an [] means the record was never "
+        f"appended (observed: {cache_at_journal!r})"
     )
     assert _count(proj, "Point", "id", point["id"]) == 1
 

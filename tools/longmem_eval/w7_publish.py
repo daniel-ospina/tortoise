@@ -119,6 +119,84 @@ def binary_projections(fraction: float) -> tuple[float, float]:
             1.0 if fraction > 0 else 0.0)
 
 
+#: #2516 (C1): the TYPE-TAIL gate categories — the per-category rows the
+#: sealed run must publish beside the full-mix number. These are the RAW
+#: dataset ``question_type`` values (the same field the report's
+#: ``category_of`` maps to the paper categories), so the grouping needs no
+#: second category table here. The 2026-09-07 measurement (epic-scope
+#: doc §1) put the partial-evidence loss on exactly these classes; a naive
+#: head slice is ~100% ``single-session-user`` and cannot measure any of
+#: them (the 50-Q head-slice artifact).
+CATEGORY_GATE_TYPES = ("multi-session", "knowledge-update",
+                       "single-session-preference")
+
+
+def category_variant_rows(outcomes: list[dict], k: int | str = 5,
+                          *,
+                          categories: tuple[str, ...] = CATEGORY_GATE_TYPES,
+                          ) -> dict[str, Any]:
+    """#2516 (C1): per-category OFFICIAL ``recall_all@k`` rows.
+
+    The official aggregate in :func:`variant_rows` answers "how did the run
+    do overall"; the EPIC's gate needs "how did it do on the tail" — the
+    failure profile is category-specific and the official binary is
+    all-or-nothing, so a full-mix number can sit near its anchor while the
+    multi-session class is where the loss lives.
+
+    Grouping is by the dataset's own ``question_type`` (the raw field), with
+    a ``full_mix`` row over every non-``_abs`` question. The projection is
+    the SAME exact one :func:`binary_projections` applies
+    (``recall_all == (fraction == 1.0)``) — deliberately one implementation
+    of the official semantics, shared with the top-level row, so the
+    per-category numbers can never be computed by a different rule than the
+    headline.
+
+    A gate category ABSENT from the outcome set is returned with
+    ``n == 0`` and ``value is None`` — never omitted (an omitted row is
+    indistinguishable from a row nobody looked at, and the coverage target
+    "tail categories ≥95% covered" has to be checkable) and never
+    fabricated.
+    """
+    non_abs = [o for o in outcomes if not _is_abs(o.get("question_id"))]
+
+    def _row(rows: list[dict]) -> dict[str, Any]:
+        vals: list[float] = []
+        fracs: list[float] = []
+        for o in rows:
+            f = _fraction_at_k(o, k)
+            if f is None:
+                continue
+            vals.append(binary_projections(f)[0])
+            fracs.append(f)
+        return {
+            f"official_recall_all@{k}": (
+                sum(vals) / len(vals) if vals else None),
+            f"fraction_paper@{k}": (
+                sum(fracs) / len(fracs) if fracs else None),
+            "n": len(vals),
+            "n_excluded": len(rows) - len(vals),
+        }
+
+    rows = {"full_mix": _row(non_abs)}
+    for cat in categories:
+        rows[cat] = _row([o for o in non_abs
+                          if o.get("question_type") == cat])
+    covered = sum(1 for c in categories if rows[c]["n"] > 0)
+    return {
+        "k": k,
+        "semantics": "official all(doc in recalled_docs for doc in "
+                     "correct_docs) projection, non-_abs ONLY, grouped by "
+                     "the dataset's question_type",
+        "gate_categories": list(categories),
+        "rows": rows,
+        "coverage": {
+            "gate_categories_total": len(categories),
+            "gate_categories_with_questions": covered,
+            "coverage": (covered / len(categories)) if categories else None,
+        },
+    }
+
+
 def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
     """The labeled metric-variant block for one report (official +
     any-hit + the computable divergence variants). Pure over the outcomes
@@ -164,7 +242,7 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
         anyhit_vals.append(recall_any)
     frac_paper, n_paper, n_ex_paper = _mean(non_abs)
     frac_legacy, n_legacy, n_ex_legacy = _mean(outcomes)
-    return {
+    out = {
         f"official_recall_all@{k}": {
             "label": "OFFICIAL LongMemEval recall_all@k (all correct "
                      "sessions in top-k; non-_abs)",
@@ -208,6 +286,11 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
             "value": None,  # filled from the report's retrieval block
         },
     }
+    # #2516 (C1): the per-category official rows ride WITH the top-level
+    # rows (one projection implementation, one artifact) — the sealed
+    # receipt's gate surface for the type tail.
+    out["by_category"] = category_variant_rows(outcomes, k)
+    return out
 
 
 # ── sealed keys ────────────────────────────────────────────────────────────
@@ -315,6 +398,31 @@ def validate_receipt(receipt: dict) -> list[str]:
         issues.append(
             "receipt.metrics: completed run missing the "
             "official_recall_all@k metric key")
+    elif receipt.get("run_status") == "completed":
+        # #2516 (C1): a sealed run that cannot report the TYPE TAIL cannot
+        # gate the #2513 levers (the measured loss is category-specific and
+        # the all-or-nothing official binary hides it in the full-mix mean).
+        # The per-category block is REQUIRED on a completed receipt; a gate
+        # category with no questions is legitimate and stays VISIBLE as
+        # n == 0 (coverage is then readable) — an absent block is not.
+        by_cat = metrics.get("official_recall_all@5_by_category")
+        if not isinstance(by_cat, dict) or not isinstance(
+                by_cat.get("rows"), dict):
+            issues.append(
+                "receipt.metrics: completed run missing the per-category "
+                "official rows (official_recall_all@5_by_category — the "
+                "#2516 type-tail gate surface)")
+        else:
+            cat_rows = by_cat["rows"]
+            missing = [c for c in CATEGORY_GATE_TYPES
+                       if not isinstance(cat_rows.get(c), dict)]
+            if "full_mix" not in cat_rows:
+                missing = ["full_mix", *missing]
+            if missing:
+                issues.append(
+                    "receipt.metrics: per-category official rows incomplete "
+                    f"(missing {sorted(missing)} — every gate category must "
+                    "be present, n == 0 when the run carried none)")
     if not isinstance(receipt.get("resolved_config"), dict):
         issues.append("receipt.resolved_config: expected an object")
     if isinstance(receipt.get("cost_usd"), bool) or not isinstance(
@@ -391,6 +499,9 @@ def _main(argv: list[str] | None = None) -> None:
     verdict = "pass" if run_status == "completed" else "inconclusive"
     metrics = {f"official_recall_all@{k}": rows[f"official_recall_all@{k}"]["value"]
                for k in ("5",)}
+    # #2516 (C1): the sealed receipt carries the per-category official rows
+    # beside the full-mix number (the type-tail gate surface).
+    metrics["official_recall_all@5_by_category"] = rows["by_category"]
     metrics["variants"] = rows
     receipt = build_receipt(
         run_id=f"w7a-500q-{args.commit[:12]}",
@@ -422,6 +533,7 @@ def _main(argv: list[str] | None = None) -> None:
     artifact = {
         "seal": seal,
         "variants": rows,
+        "by_category": rows["by_category"],
         "receipt": receipt,
         "receipt_valid": not issues,
         "receipt_issues": issues,
@@ -434,6 +546,13 @@ def _main(argv: list[str] | None = None) -> None:
     print(f"[w7_publish] official_recall_all@5 = "
           f"{rows['official_recall_all@5']['value']} (n="
           f"{rows['official_recall_all@5']['n']})")
+    cat = rows["by_category"]
+    for name, row in cat["rows"].items():
+        print(f"[w7_publish]   recall_all@5[{name}] = "
+              f"{row['official_recall_all@5']} (n={row['n']})")
+    print(f"[w7_publish] gate-category coverage = "
+          f"{cat['coverage']['gate_categories_with_questions']}/"
+          f"{cat['coverage']['gate_categories_total']}")
     print(f"[w7_publish] receipt valid: {not issues}")
     for i in issues:
         print(f"  RECEIPT ISSUE: {i}")

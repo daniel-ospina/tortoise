@@ -218,12 +218,23 @@ def next_selfhost_step(node: dict[str, Any] | None,
 
 
 def read_selfhost_state(handle: Any) -> dict[str, Any]:
-    """FLOW-only onboarding projection for the selfhost org.
+    """Onboarding projection for the selfhost org: the FLOW keys plus the
+    OPERATIONAL capture-control keys.
 
     Graph-DOWN → the ``'unavailable'`` markers (200, never fabricated
     defaults — the same contract the hosted projection serves, DE2E-10's
     "graph-down render" negative case). Node-absent → ``flow_defaults()``
-    (read-only, never written by a read path)."""
+    (read-only, never written by a read path).
+
+    #8686: the OPERATIONAL keys are served here so the capture controls are
+    OBSERVABLE, not merely persisted. Before that fix the write never landed
+    self-hosted, and after it the write landed but this reader — the one the
+    MCP tool and ``GET /v1/onboarding/state`` use — still could not show it, so
+    a user could set the switch and had no way to see the setting. The value is
+    what is STORED: an absent key means the documented default applies, and
+    this layer does not invent one (the disclosure renderer owns the wording
+    for 'unset'). Graph-down is ``'unavailable'`` for the same reason as the
+    FLOW keys — never a fabricated empty dict that reads as 'nothing set'."""
     proj = _proj(handle)
     org_id = selfhost_org_id()
     try:
@@ -234,6 +245,7 @@ def read_selfhost_state(handle: Any) -> dict[str, Any]:
         return {
             "org_id": org_id,
             **_state.flow_unavailable(),
+            "operational": "unavailable",
             "onboarding_complete": "unavailable",
             "restart_pending": "unavailable",
             "next": "unavailable",
@@ -243,6 +255,7 @@ def read_selfhost_state(handle: Any) -> dict[str, Any]:
         return {
             "org_id": org_id,
             **_state.flow_defaults(),
+            "operational": {},
             "onboarding_complete": False,
             "restart_pending": False,
             "next": "harness-connected",
@@ -261,6 +274,12 @@ def read_selfhost_state(handle: Any) -> dict[str, Any]:
             node.get("member_progress")),
         "last_decide_attempt": node.get("last_decide_attempt"),
         "fork_unsure_at": node.get("fork_unsure_at"),
+        # the capture controls this deployment persists (#8686) — stored keys
+        # only; an absent key is the default, resolved by the caller. Decoded
+        # from the node ALREADY IN HAND: a second read would cost a round trip
+        # and, being outside the try above, would let a failure between the two
+        # reads escape this function instead of becoming 'unavailable' (#8741).
+        "operational": _state.operational_from_node(node),
         "onboarding_complete": node.get("status") == _state.STATUS_COMPLETE,
         "restart_pending": _state.restart_pending(steps),
         "next": next_selfhost_step(node, steps),

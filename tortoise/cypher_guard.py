@@ -95,6 +95,18 @@ the store cannot hold is a divergence for ``check_consistency`` to report, never
 a crash (#5011), so every whole-journal replay engine runs with the refusal
 suspended; a caller-driven write at the param boundary is still refused.
 
+**The third invariant (#8479) — the SAME domain, on the statement's TEXT.** A
+number written into the Cypher itself has no param map for the seam above to
+inspect, and the store does NOT treat the two surfaces alike: a Cypher integer
+LITERAL goes through the range-checking literal parser and RAISES, while a param
+PAYLOAD is parsed loosely and CLAMPS (both MEASURED — the table is on
+:func:`_numeric_literal_reason`). So the bare literal the issue named is already
+loud, and the surface that is genuinely silent is a value INLINED into a
+``CYPHER k=<v>`` header, which is TEXT by the time it is dispatched. One scan
+covers both: :func:`_guard_numeric_literals` reads the statement's masked text, so
+a digit inside a string, a backtick identifier or a comment is data and cannot
+trip it. The journal exemption applies to it unchanged.
+
 **The scan** is a single left-to-right pass that keeps state, so ``=~`` is
 reported only where it is CODE. Inside a quoted literal (``RETURN 'a =~ b'``) it
 is DATA; inside a backtick-quoted identifier (``MATCH (n:`a=~b`)``) it is a
@@ -115,7 +127,11 @@ from tortoise.exceptions import (
     UnrepresentableNumberError,
     UnsupportedCypherOperatorError,
 )
-from tortoise.numeric_domain import numeric_alteration_reason
+from tortoise.numeric_domain import (
+    _INT64_MAX,
+    _INT64_MIN,
+    numeric_alteration_reason,
+)
 
 #: Marker set on the generated classes so the factories are idempotent —
 #: wrapping an already-guarded client/handle again is a no-op, never a second
@@ -265,11 +281,11 @@ def _guard_numeric_params(params) -> None:
     including ``apply``'s live callers, a residual stated in full on the
     decorator's own docstring.
 
-    NOT covered here, deliberately: a numeric LITERAL in the statement text
-    (``{v: 1180591620717411303424}`` with no ``params``) and a raw vendor client
-    the package did not build are separate mechanisms with their own homes — see
-    the SCOPE paragraph above and issue #7174, which also carries the analysis of
-    a number already serialized into a STRING param (a JSON payload).
+    NOT covered here, deliberately: a raw vendor client the package did not
+    build. A numeric LITERAL in the statement text is NOT part of that exclusion
+    — it is the same domain on a different surface, and it has its own seam,
+    :func:`_guard_numeric_literals` (#8479). Issue #7174 also carries the analysis
+    of a number already serialized into a STRING param (a JSON payload).
     """
     if not isinstance(params, dict):
         return
@@ -279,6 +295,303 @@ def _guard_numeric_params(params) -> None:
         reason = numeric_alteration_reason(key, value)
         if reason:
             raise UnrepresentableNumberError(reason)
+
+
+# ---------------------------------------------------------------------------
+# #8479 — the store's numeric domain, applied to the statement's own TEXT.
+#
+# A number written into the Cypher has no ``params`` map for the #7174 seam to
+# inspect. That much the issue got right. What it inferred from it — that such a
+# literal is therefore CLAMPED the way a param is — is what needed measuring,
+# and the measurement REFUTES it for the shape the issue names, while finding a
+# genuinely silent one it did not name.
+#
+# MEASURED 2026-10-16 (this worktree), the out-of-domain value ``2**70`` per
+# shape, on THREE engines — the embedded build and two throwaway containers — so
+# the result is attributed to a VERSION and never to a "lane":
+# ``FalkorProjection.__init__`` redirects a path-based projection onto
+# ``TORTOISE_DB_URI`` when that variable is set, so an "embedded lane" run can be
+# a docker one (the embedded figures below were taken under
+# ``env -u TORTOISE_DB_URI``).
+#
+#   shape                                    embedded 4.18.3      docker 4.20.1         docker 6.0.1
+#   ---------------------------------------  -------------------  --------------------  ------------------
+#   literal in CREATE map / list / SET /
+#     ``SET +=`` / ``SET =`` / MERGE /
+#     WITH / RETURN / WHERE / IN             Integer overflow     Integer overflow      Integer overflow
+#   ``CYPHER v=2**70 ...`` INLINED header    CLAMPS to INT64_MAX  CLAMPS to INT64_MAX   Failed to parse
+#   param ``$v = 2**70``                     CLAMPS to INT64_MAX  CLAMPS to INT64_MAX   Failed to parse
+#   float literal ``1.0e400``                Float overflow       Float overflow        Float overflow
+#   float literal ``1.0e-400``               Float overflow       Float overflow        ACCEPTED -> 0
+#
+# Two readings follow, and they are why this is a scan and not a note:
+#
+# * the bare out-of-domain INTEGER literal does NOT reproduce the #4647 defect.
+#   The literal parser range-checks and RAISES (``ResponseError: Integer overflow
+#   '1180591620717411303424'``) in every clause position on every engine; it is
+#   the PARAM payload that clamps. So refusing a literal is UNIFORM-EARLY rather
+#   than a rescue: it makes the seam engine-independent and moves the failure
+#   before dispatch instead of after. Worth having, but it is not the data loss
+#   the issue claims, and saying so matters more than the code it justifies;
+# * the INLINED ``CYPHER k=<v>`` header DOES clamp on 4.x. The vendor builds that
+#   header from a param MAP inside ``_query``, where :func:`_guard_numeric_params`
+#   has already refused the value, so the in-package path is covered — but a
+#   caller who assembles the header itself and dispatches it on the raw command
+#   channel (which this module documents as outside its scope) reaches text that
+#   nothing inspects. That is a measured SILENT alteration, on the text surface.
+#
+# Both are one surface to the engine, because the header IS text by the time it
+# is dispatched. One scan covers them, and it is deliberately NOT a second Cypher
+# parser (the issue's own warning): it reuses :func:`_mask_literals`, so the
+# quoted/backticked/comment discipline is shared with the ``=~`` and #7162 scans
+# rather than re-derived.
+
+
+def _is_ascii_digit(ch: str) -> bool:
+    """``True`` for ``0``-``9`` only.
+
+    ``str.isdigit`` is deliberately NOT used: it accepts Unicode digits
+    (``'٣'``, ``'１'``), which ``int()`` converts but which are not Cypher number
+    literals — reading one as a number would refuse an identifier.
+    """
+    return "0" <= ch <= "9"
+
+
+def _is_ident_char(ch: str) -> bool:
+    """Whether *ch* can continue a Cypher identifier (a letter or ``_``)."""
+    return ch == "_" or ch.isalpha()
+
+
+def _has_minus_sign_before(masked: str, start: int) -> bool:
+    """Whether a ``-`` (modulo spaces) immediately precedes *start*.
+
+    Only one value hangs on the answer — ``-9223372036854775808`` is INT64_MIN
+    and is representable, while its unsigned token is ``2**63`` and is not — so
+    the sign is taken at face value rather than classified. A ``-`` that is
+    really a subtraction therefore only ever ADMITS one extra value, and an
+    arithmetic expression the store cannot evaluate raises on its own.
+    """
+    k = start - 1
+    while k >= 0 and masked[k] in " \t\r\n":
+        k -= 1
+    return k >= 0 and masked[k] == "-"
+
+
+def _literal_domain_reason(
+    token: str, offset: int, is_float: bool, negated: bool = False
+) -> str | None:
+    """Whether the store would ALTER the number *token* denotes, or ``None``.
+
+    The predicate is :mod:`tortoise.numeric_domain`'s — one home for the domain —
+    but applied to what the TEXT denotes, because a literal has no Python value
+    to compare against:
+
+    * an INTEGER literal is an INT64 in Cypher — MEASURED: ``9.3e18`` is accepted
+      where ``9223372036854775808`` raises, so there is no wider integer type to
+      fall back to — so the range check is exactly the param seam's;
+    * a FLOAT literal is parsed to the nearest double, and that is faithful for
+      every finite non-zero result, so only a parse that LEAVES the domain is
+      refused: a non-finite one (``1.0e400``) and a NON-ZERO number that parses
+      to ZERO (``1.0e-400`` — stored as ``0`` on 6.0.1, MEASURED). Text that
+      denotes zero (``0.0``, ``0.0e-400``) is accepted, so the rule cannot refuse
+      an ordinary literal; the exponent is excluded from the non-zero test, or
+      ``0.0e-400`` would look non-zero because of the exponent's own digits.
+
+    *negated* is the sign the scan saw in front of the token. It matters on
+    exactly one value: ``-9223372036854775808`` is INT64_MIN and IS
+    representable, while its UNSIGNED token is ``2**63`` and is not — checking
+    the magnitude alone would refuse a legal literal. The sign cannot be
+    classified reliably from text (``a-1`` is a subtraction), so a preceding
+    ``-`` is taken at face value: that only ever admits one extra value, and an
+    arithmetic expression the store cannot evaluate raises of its own accord.
+    """
+    key = f"numeric literal at offset {offset}"
+    if is_float:
+        try:
+            value = float(token)
+        except (ValueError, OverflowError):
+            # An exponent that overflows becomes ``inf`` rather than raising, so
+            # this is a token the engine cannot parse either: refuse it rather
+            # than forward a guess.
+            return (
+                f"{key}: {token[:32]!r} is not a number the store can parse, so "
+                "it cannot be held faithfully. Store it as a string."
+            )
+        reason = numeric_alteration_reason(key, value)
+        if reason:
+            return reason
+        mantissa = token.split("e")[0].split("E")[0]
+        if value == 0.0 and any(ch in "123456789" for ch in mantissa):
+            return (
+                f"{key}: {token} is a non-zero number that parses to 0.0 as a "
+                "double, so the store would hold a DIFFERENT number. Store it "
+                "as a string if the full value is needed."
+            )
+        return None
+    digits = token.lstrip("0")
+    if len(digits) > len(str(_INT64_MAX)):
+        # More significant digits than INT64_MAX has, so it is out of range
+        # WITHOUT ``int()`` — which CPython refuses past its 4300-digit decimal
+        # conversion limit, and which would otherwise make the MESSAGE itself
+        # raise for a pathological literal.
+        return (
+            f"{key}: integer with {len(digits)} digits is outside the range "
+            f"FalkorDB can store ({_INT64_MIN}..{_INT64_MAX}) and would be "
+            "SILENTLY clamped to a different number. Store it as a string if "
+            "the full value is needed."
+        )
+    # Parse the STRIPPED token, never the raw one: ``int()`` refuses a string
+    # past CPython's 4300-digit decimal conversion limit, so a valid,
+    # representable literal such as ``0…01`` (5000 leading zeros) raised a bare
+    # ``ValueError`` out of this seam instead of being admitted (P2, review
+    # 2026-10-16). Leading zeros add no magnitude, so ``digits`` denotes the
+    # same integer; the ``else 0`` covers a token that is all zeros.
+    value = int(digits) if digits else 0
+    return numeric_alteration_reason(key, -value if negated else value)
+
+
+def _starts_inside_a_token(masked: str, i: int) -> bool:
+    """Whether the number starting at *i* continues a token read before it.
+
+    The scan must not re-read a digit run it has already walked (the fraction of
+    a float), nor read a NAME as a number (``n.v2``, ``$p1``, ``Point2``). A
+    ``.`` does that continuing — UNLESS it is the second dot of openCypher's
+    ``..`` slice/range operator, which is not a fraction and leaves the token
+    after it FRESH (``x[0..9223372036854775808]``).
+    """
+    prev = masked[i - 1]
+    if _is_ident_char(prev) or prev == "$":
+        return True
+    return prev == "." and not (i > 1 and masked[i - 2] == ".")
+
+
+def _numeric_literal_reason(cypher: str) -> str | None:
+    """The first statement-text number the store could not hold, else ``None``.
+
+    A single left-to-right pass over the MASKED statement, so a digit inside a
+    string literal, a backtick identifier or a comment is already blanked and
+    cannot be read as a number — the discipline :func:`_mask_literals` gives the
+    ``=~`` and #7162 scans, and the reason this is not a second Cypher parser. A
+    number token is recognised only where it STARTS one (the character before it
+    is not an identifier char, ``$`` or a fraction ``.``), which is what keeps
+    ``n.v2``, ``$p1`` and the fraction of an already-walked float out. A
+    LEADING-DOT double (``.5e-400``) has no integer part, so it must be started
+    at the ``.`` itself — otherwise its exponent is never read and an underflow
+    is stored as ``0`` (MEASURED on 6.0.1) — but only where that ``.`` does not
+    continue a name or a walk. ``..`` is the slice/range operator, never a
+    number: both dots are stepped over so the bound that follows starts its own
+    token. Hex (``0x1F``) is a literal the engine range-checks itself and is
+    stepped over whole, so its hex digits are never read as a decimal run.
+    """
+    masked = _mask_literals(cypher)
+    i, n = 0, len(masked)
+    while i < n:
+        if masked[i] == "." and i + 1 < n and masked[i + 1] == ".":
+            # ``..`` — neither dot is a number and the token AFTER them is
+            # fresh. Stepping over BOTH is load-bearing: leaving the walk on the
+            # second dot let the digit run that follows be read as the fraction
+            # of the token that ended at the first dot, so
+            # ``x[0..9223372036854775808]`` was ADMITTED (P2, review
+            # 2026-10-16).
+            i += 2
+            continue
+        leading_dot = masked[i] == "."
+        if leading_dot:
+            if i + 1 >= n or not _is_ascii_digit(masked[i + 1]):
+                i += 1
+                continue
+        elif not _is_ascii_digit(masked[i]):
+            i += 1
+            continue
+        if i > 0 and _starts_inside_a_token(masked, i):
+            # The number is part of a token the walk already read from its own
+            # start, or it is a NAME. Consume the WHOLE digit run, never one
+            # character: advancing by one re-enters the run at its second digit
+            # and reads a SHORTER number (``$p12`` read ``2``; the same skip let
+            # a ``..`` bound through — P2, review 2026-10-16).
+            if leading_dot:
+                i += 1
+            else:
+                while i < n and _is_ascii_digit(masked[i]):
+                    i += 1
+            continue
+        start = i
+        j = i
+        while j < n and _is_ascii_digit(masked[j]):
+            j += 1
+        if (
+            not leading_dot
+            and masked[start] == "0"
+            and j == start + 1
+            and j + 1 < n
+            and masked[j] in "xX"
+        ):
+            k = j + 1
+            while k < n and masked[k] in "0123456789abcdefABCDEF":
+                k += 1
+            if k > j + 1:
+                i = k
+                continue
+        has_frac = leading_dot
+        has_exp = False
+        if (
+            j < n
+            and masked[j] == "."
+            and not (j + 1 < n and masked[j + 1] == ".")
+        ):
+            # A single ``.`` is a fraction; ``..`` is the range operator and
+            # must not be absorbed into the token before it, or the walk would
+            # be left sitting on the second dot.
+            k = j + 1
+            while k < n and _is_ascii_digit(masked[k]):
+                k += 1
+            has_frac = True
+            j = k
+        if j < n and masked[j] in "eE":
+            k = j + 1
+            if k < n and masked[k] in "+-":
+                k += 1
+            if k < n and _is_ascii_digit(masked[k]):
+                while k < n and _is_ascii_digit(masked[k]):
+                    k += 1
+                has_exp = True
+                j = k
+        if j < n and _is_ident_char(masked[j]):
+            # A digit run with a letter on its tail (``1e`` with no exponent,
+            # ``12abc``) is not a number this scan can read. It is not a silent
+            # path either: the engine rejects such a token itself.
+            i = j + 1
+            continue
+        reason = _literal_domain_reason(
+            cypher[start:j],
+            start,
+            has_frac or has_exp,
+            _has_minus_sign_before(masked, start),
+        )
+        if reason:
+            return reason
+        i = j
+    return None
+
+
+def _guard_numeric_literals(cypher: str) -> None:
+    """#8479: refuse a statement-text number the store would silently ALTER.
+
+    The TEXT half of the #7174 boundary: :func:`_guard_numeric_params` reads the
+    ``params`` mapping, this reads the statement — so a value written into the
+    Cypher, or inlined into a ``CYPHER k=<v>`` header, is refused instead of
+    reaching a 4.x store that would clamp it. The journal WRITE path is exempt
+    exactly as the param seam is (:func:`tolerating_altered_numbers`): #5011
+    decided that replaying a record whose number the store cannot hold is a
+    DIVERGENCE for ``check_consistency`` to report, never a crash.
+    """
+    if not isinstance(cypher, str) or not cypher:
+        return
+    if _TOLERATE_ALTERED_NUMBERS.get():
+        return
+    reason = _numeric_literal_reason(cypher)
+    if reason:
+        raise UnrepresentableNumberError(reason)
 
 
 # ---------------------------------------------------------------------------
@@ -819,16 +1132,21 @@ def _predicate_barrier_required(handle) -> bool:
 
 
 def _guard_query(cypher: str, params=None, *, handle=None) -> str:
-    """Both pre-dispatch refusals, then the #7162 normaliser; returns the statement.
+    """Every pre-dispatch refusal, then the #7162 normaliser; returns the statement.
 
     This is the ONE place the refusals TURN INTO a decision, and now also the one
     place the predicate barrier is applied — every guarded entry point calls it,
-    so a new builder inherits both without remembering to opt in. The RETURN
-    VALUE is the statement to dispatch: callers must send it, not their original
-    argument (the barrier is an insertion into the text).
+    so a new builder inherits all of them without remembering to opt in. The
+    RETURN VALUE is the statement to dispatch: callers must send it, not their
+    original argument (the barrier is an insertion into the text).
+
+    The refusals are the operator scan (#3595), the param map (#7174) and the
+    statement TEXT (#8479). The last two are the two halves of the store's
+    numeric domain, so a value is guarded whichever surface carries it.
     """
     _guard_unsupported_cypher(cypher)
     _guard_numeric_params(params)
+    _guard_numeric_literals(cypher)
     if _predicate_barrier_required(handle):
         return _predicate_drop_barrier(cypher)
     return cypher
@@ -922,8 +1240,8 @@ def _guard_execute_command(args, client=None):
     unknown engine gets the barrier), so the raw command channel cannot be the
     hole a new caller slips through.
 
-    #7174 — deliberately NO numeric check here, and the reason is MEASURED, not
-    assumed: a raw ``GRAPH.QUERY`` has no positional params argument. The pinned
+    #7174 — deliberately NO **param-map** check here, and the reason is MEASURED,
+    # not assumed: a raw ``GRAPH.QUERY`` has no positional params argument. The pinned
     vendor (``falkordb`` 1.6.2, ``graph.py::_query``) builds its param header INTO
     the statement (``self._build_params_header(params) + q``) and sends
     ``[cmd, name, query, "--compact"]``, appending ``["timeout", <int>]`` only
@@ -931,8 +1249,11 @@ def _guard_execute_command(args, client=None):
     never a JSON payload. Params on this channel are
     therefore inlined as TEXT (``CYPHER k=<v>``), which is a statement-literal
     channel, not a param map: covered on the ``params=`` path by
-    :func:`_guard_numeric_params` before the vendor serializes them, and left
-    uncovered as a literal (see its docstring).
+    :func:`_guard_numeric_params` before the vendor serializes them, and — since
+    #8479 — covered HERE as text by :func:`_guard_numeric_literals`, which is what
+    refuses a header whose value a 4.x store would clamp instead of forwarding it
+    to be SILENTLY altered (MEASURED; the table is on
+    :func:`_numeric_literal_reason`).
     """
     if len(args) >= 3:
         verb = _as_text(args[0])
@@ -943,6 +1264,7 @@ def _guard_execute_command(args, client=None):
             and isinstance(statement, str)
         ):
             _guard_unsupported_cypher(statement)
+            _guard_numeric_literals(statement)
             if _engine_needs_predicate_barrier(client):
                 barred = _predicate_drop_barrier(statement)
                 if barred != statement:

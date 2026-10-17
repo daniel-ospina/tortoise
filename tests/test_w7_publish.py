@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools.longmem_eval.w7_publish import (
     JUDGE_PIN,
     _fraction_at_k,
     binary_projections,
     build_receipt,
+    category_variant_rows,
     seal_answer_keys,
     validate_receipt,
     variant_rows,
@@ -127,9 +130,65 @@ def test_receipt_valid_when_completed_with_all_pins():
         reader_model_spec="openrouter:deepseek/deepseek-v4-flash",
         reader_pinned=True, ingest_mode="deterministic",
         run_status="completed", verdict="pass", failure_origin=None,
-        cost_usd=2.0, metrics={"official_recall_all@5": 0.9},
+        cost_usd=2.0, metrics={"official_recall_all@5": 0.9,
+                               "official_recall_all@5_by_category":
+                                   _by_category({"multi-session": [1.0]})},
         notes=["n"])
     assert validate_receipt(receipt) == []
+
+
+def _by_category(per_type: dict[str, list[float]]) -> dict:
+    """Build the #2516 per-category block shape from outcomes."""
+    outcomes = []
+    for qtype, fracs in per_type.items():
+        for i, f in enumerate(fracs):
+            outcomes.append(_outcome(f"{qtype}-{i}", f))
+            outcomes[-1]["question_type"] = qtype
+    return category_variant_rows(outcomes, 5)
+
+
+def test_receipt_completed_requires_the_per_category_rows():
+    """#2516 (C1): a completed receipt must carry the type-tail gate surface.
+
+    The measured loss is CATEGORY-specific and the all-or-nothing official
+    binary hides it in the full-mix mean, so a receipt that cannot report the
+    category is not a gate for the #2513 levers. RED mutation: drop the
+    per-category block from the metrics → this fails.
+    """
+    base = dict(
+        run_id="r", date="d", commit="c", corpus_hash="sha256:x",
+        judge_pin="pin", judge_model="m", judge_rubric_id_hash="h",
+        reader_model_spec="s", reader_pinned=True, ingest_mode="det",
+        run_status="completed", verdict="pass", failure_origin=None,
+        cost_usd=1.0, metrics={"official_recall_all@5": 0.5},
+        resolved_config={}, notes=[])
+    issues = validate_receipt(base)
+    assert any("per-category" in i for i in issues)
+    # all three gate categories must be PRESENT (n == 0 when the run carried
+    # none — coverage has to be readable, and an absent row cannot be)
+    partial = _by_category({"multi-session": [1.0]})
+    del partial["rows"]["knowledge-update"]
+    issues = validate_receipt(dict(
+        base, metrics={"official_recall_all@5": 0.5,
+                       "official_recall_all@5_by_category": partial}))
+    assert any("incomplete" in i for i in issues)
+    # full block → clean; a category with zero questions is legitimate
+    ok = _by_category({"multi-session": [1.0]})
+    assert validate_receipt(dict(
+        base, metrics={"official_recall_all@5": 0.5,
+                       "official_recall_all@5_by_category": ok})) == []
+    assert ok["rows"]["knowledge-update"]["n"] == 0
+    # a failed run is not asked for the gate surface
+    assert validate_receipt(dict(base, run_status="failed",
+                                 metrics={"x": 1})) == []
+
+
+def _base_receipt_metrics(**over) -> dict:
+    m = {"official_recall_all@5": 0.5,
+         "official_recall_all@5_by_category": _by_category(
+             {"multi-session": [1.0]})}
+    m.update(over)
+    return m
 
 
 def test_receipt_completed_requires_pins():
@@ -138,7 +197,7 @@ def test_receipt_completed_requires_pins():
         judge_pin="pin", judge_model="m", judge_rubric_id_hash="h",
         reader_model_spec="s", reader_pinned=True, ingest_mode="det",
         run_status="completed", verdict="pass", failure_origin=None,
-        cost_usd=1.0, metrics={"official_recall_all@5": 0.5},
+        cost_usd=1.0, metrics=_base_receipt_metrics(),
         resolved_config={}, notes=[])
     issues = validate_receipt(dict(base, judge_pin=""))
     assert any("judge_pin" in i for i in issues)
@@ -188,3 +247,71 @@ def test_cli_emits_valid_artifact(tmp_path):
     assert artifact["receipt"]["metrics"]["official_recall_all@5"] == 0.5
     assert artifact["seal"]["n_questions"] == 1
     assert artifact["variants"]["official_recall_all@5"]["n"] == 2
+    # #2516 (C1): the artifact + receipt carry the per-category gate surface
+    by_cat = artifact["by_category"]
+    assert by_cat["rows"]["full_mix"]["official_recall_all@5"] == 0.5
+    assert artifact["receipt"]["metrics"][
+        "official_recall_all@5_by_category"]["rows"]["full_mix"][
+        "official_recall_all@5"] == 0.5
+    # every gate category is present even when the run carried none
+    for cat in ("multi-session", "knowledge-update",
+                "single-session-preference"):
+        assert cat in by_cat["rows"]
+
+
+# ── #2516 (C1): per-category official rows (the type-tail gate surface) ────
+
+def test_category_rows_use_the_same_official_projection():
+    """#2516 (C1): the per-category row is the SAME exact projection as the
+    headline (``recall_all == (fraction == 1.0)``, non-_abs only) — never a
+    second rule, never the fraction, never any-hit."""
+    outcomes = [
+        dict(_outcome("m1", 1.0), question_type="multi-session"),
+        dict(_outcome("m2", 0.5), question_type="multi-session"),
+        dict(_outcome("k1", 1.0), question_type="knowledge-update"),
+        dict(_outcome("p1", 0.0),
+             question_type="single-session-preference"),
+        dict(_outcome("x_abs", 1.0), question_type="multi-session"),
+    ]
+    block = category_variant_rows(outcomes, 5)
+    rows = block["rows"]
+    # multi-session: fractions 1.0 / 0.5 → official = 1/2 (NOT 0.75)
+    assert rows["multi-session"]["official_recall_all@5"] == 0.5
+    assert rows["multi-session"]["fraction_paper@5"] == 0.75
+    assert rows["multi-session"]["n"] == 2
+    assert rows["knowledge-update"]["official_recall_all@5"] == 1.0
+    assert rows["single-session-preference"]["official_recall_all@5"] == 0.0
+    # the _abs question is excluded from every category AND from full_mix
+    assert rows["full_mix"]["n"] == 4
+    assert rows["full_mix"]["official_recall_all@5"] == 0.5
+    assert block["coverage"] == {"gate_categories_total": 3,
+                                 "gate_categories_with_questions": 3,
+                                 "coverage": 1.0}
+
+
+def test_category_rows_report_absent_categories_as_covered_zero():
+    """#2516 (C1): a gate category with NO questions in the run is returned
+    with ``n == 0`` / ``value is None`` — visible, never omitted and never
+    fabricated (the '≥95% tail coverage' target has to be checkable)."""
+    outcomes = [dict(_outcome("m1", 1.0), question_type="multi-session")]
+    block = category_variant_rows(outcomes, 5)
+    for cat in ("knowledge-update", "single-session-preference"):
+        assert block["rows"][cat] == {"official_recall_all@5": None,
+                                      "fraction_paper@5": None,
+                                      "n": 0, "n_excluded": 0}
+    assert block["coverage"] == {"gate_categories_total": 3,
+                                 "gate_categories_with_questions": 1,
+                                 "coverage": pytest.approx(1 / 3)}
+
+
+def test_variant_rows_carry_the_by_category_block():
+    """#2516 (C1): the per-category rows ride WITH the top-level rows so a
+    publication artifact cannot carry one without the other."""
+    outcomes = [dict(_outcome("m1", 1.0), question_type="multi-session")]
+    rows = variant_rows(outcomes, k=5)
+    assert rows["by_category"]["rows"]["multi-session"][
+        "official_recall_all@5"] == 1.0
+    # the per-category full_mix row agrees with the headline row's value over
+    # the same non-_abs set (one projection implementation)
+    assert rows["by_category"]["rows"]["full_mix"][
+        "official_recall_all@5"] == rows["official_recall_all@5"]["value"]

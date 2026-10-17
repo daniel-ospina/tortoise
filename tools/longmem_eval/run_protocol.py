@@ -5,7 +5,10 @@ Encodes the 9-step phased protocol from 03-scope §Run/Testing Protocol
 
     1  code review + bug pass           (gate: clean review, no known bugs)
     2  micro-tests (R1 sweep + M6)      (gate: knob selected, marking calibrated)
-    3  50-Q pilot + full-context cell   (gate: pilot completes, integrity readable)
+    3  50-Q pilot + full-context cell   (gate: pilot completes, integrity readable,
+                                        slice is TYPE-STRATIFIED — #2516: a
+                                        head slice is ~100% single-session-user
+                                        and cannot measure the tail)
     4  mechanical + obvious fixes       (gate: pilot findings fixed)
     5  full 500-Q run — V3 baseline     (gate: integrity.valid=true — invalid_rate ≤ threshold AND zero hard failures (n_hard_invalid == 0 AND n_excluded_hard == 0 — excluded-outcome hard vetoes count) AND non-empty attempted set whenever any entry was excluded or dropped; threshold = JUSTIFIED_BASELINE_THRESHOLD (the module constant, interpolated everywhere — never a hardcoded literal) justified default at 500-Q scale, #1747)
     6  mechanical + obvious fixes       (gate: findings fixed)
@@ -39,7 +42,7 @@ Usage::
     python -m tools.longmem_eval.run_protocol status
     python -m tools.longmem_eval.run_protocol plan
     python -m tools.longmem_eval.run_protocol gate 1 --pass --note "clean review"
-    python -m tools.longmem_eval.run_protocol run 3 --limit 50        # pilot
+    python -m tools.longmem_eval.run_protocol run 3                 # type-stratified pilot
     python -m tools.longmem_eval.run_protocol run 5                    # 500-Q baseline
     python -m tools.longmem_eval.run_protocol run 7 --expected-direction "up on KU/TR"
     python -m tools.longmem_eval.run_protocol run 8 --owner-approve "needed for CIs"
@@ -63,6 +66,7 @@ import argparse
 import json
 import os
 import subprocess
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,6 +100,20 @@ DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 #: must pair their own ``--integrity-justification`` or the applied
 #: threshold carries no recorded reason (documented silent case).
 JUSTIFIED_BASELINE_THRESHOLD = 0.02
+
+#: #2516 (C1): the TYPE-STRATIFIED slice mandate. The pilot (step 3) and the
+#: confirmation (step 7) must measure a slice that spans the question types,
+#: never a head slice. Measured artifact this guards (2026-09-07, epic-scope
+#: doc §1): the naive ``--limit 50`` pilot took the FIRST 50 rows of the
+#: official split — ~100% ``single-session-user``, near-ceiling, zero
+#: diagnostic signal — so the multi-session tail (where the whole loss is)
+#: was invisible to every pilot/confirmation iteration.
+PILOT_SLICE_N = 50
+
+#: #2516 (C1): the minimum number of distinct question types a MEASUREMENT
+#: slice must span. A slice covering fewer is refused by construction — it
+#: cannot see a category it does not contain, so it cannot gate a lever.
+STRATIFIED_MIN_TYPES = 2
 
 #: Round-16/17: argparse parser used ONLY to detect an operator
 #: ``--integrity-threshold`` override among the extra run flags — mirrors the
@@ -141,8 +159,11 @@ STEPS: list[Step] = [
     Step(2, "micro-tests", "Micro-tests (R1 granularity sweep + M6 evidence-marking calibration)",
          "gate",
          "knob selected, marking calibrated against the 52 healthy questions"),
-    Step(3, "pilot-50q", "50-Q pilot (real extractor + real backend + pre-flight, incl. full-context cell)",
-         "run", "pilot completes, integrity block readable", runner="pilot"),
+    Step(3, "pilot-50q", "50-Q pilot — TYPE-STRATIFIED slice (real extractor + real backend + pre-flight, incl. full-context cell)",
+         "run",
+         "pilot completes, integrity block readable, and the measured slice "
+         "spans >= STRATIFIED_MIN_TYPES question types (the slice "
+         "composition is recorded in the run state; #2516)", runner="pilot"),
     Step(4, "fix-pilot", "Mechanical + obvious fixes from the pilot",
          "gate", "pilot findings fixed"),
     Step(5, "baseline-500q", "Full 500-Q run — the V3 baseline (V4 comparison point)",
@@ -292,7 +313,8 @@ class ProtocolState:
 
     def record_run(self, number: int, *, report: str, checkpoint: str,
                    command: list[str], expected_direction: str | None = None,
-                   resume_quality: dict | None = None) -> None:
+                   resume_quality: dict | None = None,
+                   slice_composition: dict | None = None) -> None:
         """Record the artifacts of an executed run step (the protocol-level
         checkpoint: report + per-question checkpoint paths + the exact command
         + the pre-stated expected delta direction for the confirmation).
@@ -312,6 +334,12 @@ class ProtocolState:
             self.data["runs"][str(number)]["expected_direction"] = expected_direction
         if resume_quality is not None:
             self.data["runs"][str(number)]["resume_quality"] = resume_quality
+        if slice_composition is not None:
+            # #2516 (C1): the question-type composition of a measured slice.
+            # Recorded so a "50-Q pilot" can never again be read as a
+            # full-mix measurement when the slice was one category.
+            self.data["runs"][str(number)]["slice_composition"] = \
+                slice_composition
         self.save()
 
 
@@ -362,9 +390,18 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
     out = _default_report(step.runner)
     common = [*extra, "--checkpoint", str(cp), "--output", str(out)]
 
-    if step.runner == "pilot":          # step 3: 50-Q pilot (real extractor)
-        return _run_cmd(["--split", "s", "--limit", "50",
-                         "--ingest-mode", "v2", *common])
+    if step.runner == "pilot":          # step 3: type-stratified pilot
+        # #2516 (C1): the pilot is a TYPE-STRATIFIED slice, NOT the split's
+        # head. `--limit 50` measured the first 50 rows (~100%
+        # single-session-user) — a near-ceiling, zero-signal slice that could
+        # not see the multi-session tail. The subset is materialized when the
+        # command will actually execute; the composition is recorded by
+        # cmd_run (from the written subset) so this builder stays side-effect
+        # free for `plan`.
+        subset, _composition = _build_stratified_slice(
+            state, materialize=materialize)
+        return _run_cmd(["--data", str(subset), "--ingest-mode", "v2",
+                         *common])
     if step.runner == "baseline":       # step 5: full 500-Q run (V3 baseline)
         # #1747: inject the justified threshold + its recorded justification
         # so the EXECUTED run matches the documented gate and the M7
@@ -461,10 +498,23 @@ def _build_confirmation_subset(state: ProtocolState, run_dir: Path,
         instances = ds.load_dataset(
             "s", data_path=None, cache=ds.cache_dir(), download=False)
     subset_instances = [q for q in instances if q["question_id"] in subset_qids]
+    subset_types = [str(q.get("question_type") or "") for q in subset_instances]
+    composition = stratified_slice_composition(
+        subset_types, list(range(len(subset_types))))
+    # #2516 (C1): the confirmation is a measurement too — it must span the
+    # types. The pilot it inherits from is type-stratified by construction
+    # (build_command), but the regression sample rides on top of it, so
+    # verify rather than assume.
+    if len(composition) < STRATIFIED_MIN_TYPES:
+        raise SystemExit(
+            f"refusing a confirmation slice spanning only {len(composition)} "
+            f"question type(s) ({composition}) — a measurement slice must "
+            f"span >= {STRATIFIED_MIN_TYPES} types (#2516)")
     out = run_dir / "confirm_subset.json"
     out.write_text(json.dumps(subset_instances, indent=2), encoding="utf-8")
     print(f"[run_protocol] confirmation subset: {len(subset_instances)} "
-          f"questions (pilot {len(pilot_qids)} ∪ regression {len(regression)})")
+          f"questions (pilot {len(pilot_qids)} ∪ regression {len(regression)})"
+          f", composition {composition}")
     return out
 
 
@@ -472,6 +522,124 @@ def _report_qids(report_path: Path) -> list[str]:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     return [o.get("question_id") for o in report.get("outcomes", [])
             if o.get("question_id")]
+
+
+# ── #2516 (C1): type-stratified measurement slices ──────────────────────────
+
+def stratified_slice_indices(question_types: list[str], *, n: int) -> list[int]:
+    """Deterministic TYPE-STRATIFIED selection of ``n`` source indices.
+
+    Round-robin over the distinct question types in FIRST-APPEARANCE order:
+    one question per type per lap, a type whose bucket is exhausted simply
+    skipped, until ``n`` are picked. Pure (same input -> same output, no RNG)
+    and TOTAL: every type present in the source is represented, and the pick
+    is returned in SOURCE order so the subset's index identity is stable
+    (``build_cohorts.py``'s own convention).
+
+    Why round-robin rather than a proportional quota: with the real split's
+    type mix a proportional allocation starves the small classes, and the
+    small classes ARE the gate (the multi-session / knowledge-update /
+    single-session-preference tail). Round-robin guarantees each type
+    ``floor(n/K)`` or ``ceil(n/K)`` questions — a tail category can never be
+    absent from a slice that is supposed to measure it.
+    """
+    if n <= 0:
+        return []
+    order: list[str] = []
+    buckets: dict[str, list[int]] = {}
+    for i, raw in enumerate(question_types):
+        key = raw if isinstance(raw, str) and raw else "?"
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(i)
+    picked: list[int] = []
+    lap = 0
+    while len(picked) < n:
+        added = False
+        for key in order:
+            bucket = buckets[key]
+            if lap < len(bucket):
+                picked.append(bucket[lap])
+                added = True
+                if len(picked) == n:
+                    break
+        if not added:          # every bucket exhausted — slice < n
+            break
+        lap += 1
+    return sorted(picked)
+
+
+def stratified_slice_composition(question_types: list[str],
+                                 indices: list[int]) -> dict[str, int]:
+    """Type -> count for a selected slice (the composition the protocol
+    records in the run state, so a `50-Q pilot` can never again read as a
+    full-mix measurement when it was 100% single-session-user)."""
+    return dict(sorted(Counter(
+        (question_types[i] if isinstance(question_types[i], str)
+         and question_types[i] else "?")
+        for i in indices).items()))
+
+
+def _load_cached_instances(split: str = "s") -> list[dict]:
+    """Load the CACHED corpus for the protocol's measurement slices
+    (``download=False`` — the protocol never silently fetches a corpus).
+
+    A missing cache raises a loud ``SystemExit`` rather than falling back to
+    ``--limit n``: the head slice IS the #2516 defect, so the refusal is the
+    correct outcome. Kept as its own seam so tests inject a fake corpus
+    instead of depending on a 49 MB download.
+    """
+    from . import dataset as ds
+    try:
+        return ds.load_dataset(
+            split, data_path=None, cache=ds.cache_dir(), download=False)
+    except (FileNotFoundError, OSError) as e:
+        raise SystemExit(
+            "the type-stratified pilot slice needs the cached "
+            f"LongMemEval-{'S' if split == 's' else split} corpus "
+            f"(download=False): {e!r}. Fetch it first "
+            "(python -m tools.longmem_eval.dataset --split " + split +
+            ") — the protocol will NOT fall back to a head slice "
+            "(--limit n) because a head slice is ~100% "
+            "single-session-user and cannot measure the tail (#2516).") from e
+
+
+def _build_stratified_slice(state: ProtocolState, n: int = PILOT_SLICE_N, *,
+                            materialize: bool = True,
+                            instances: list[dict] | None = None,
+                            ) -> tuple[Path, dict[str, int]]:
+    """Write the step-3 pilot slice as a dataset file the runner reads via
+    ``--data`` — a TYPE-STRATIFIED ``n``-question slice, never the split's
+    head (the #2516 mandate).
+
+    Reads the CACHED corpus only (``_load_cached_instances``): a missing
+    cache is a loud ``SystemExit``, not a silent fallback to ``--limit n``.
+    The composition is returned so the caller records it in the run state.
+    ``materialize=False`` (plan/dry-run) resolves the same path +
+    composition without writing.
+    """
+    if instances is None:
+        instances = _load_cached_instances("s")
+    question_types = [str(q.get("question_type") or "") for q in instances]
+    indices = stratified_slice_indices(question_types, n=n)
+    composition = stratified_slice_composition(question_types, indices)
+    if len(composition) < STRATIFIED_MIN_TYPES:
+        raise SystemExit(
+            f"refusing a {len(indices)}-question slice spanning only "
+            f"{len(composition)} question type(s) ({composition}) — a "
+            f"measurement slice must span >= {STRATIFIED_MIN_TYPES} types "
+            "(#2516: a single-type slice cannot see the categories it does "
+            "not contain)")
+    run_dir = Path(state.data.get("run_dir", DEFAULT_RUN_DIR))
+    out = run_dir / f"pilot_stratified_{n}.json"
+    if materialize:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        subset = [instances[i] for i in indices]
+        out.write_text(json.dumps(subset, indent=2), encoding="utf-8")
+        print(f"[run_protocol] type-stratified pilot slice: "
+              f"{len(subset)} questions, composition {composition} -> {out}")
+    return out, composition
 
 
 def checkpoint_resume_quality(checkpoint: Path,
@@ -828,6 +996,21 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         raise SystemExit(
             "internal error: build_command must append an --output flag to "
             "every run-step command (protocol bug — no flag found)")
+    # #2516 (C1): record the measured slice's question-type composition (read
+    # from the subset the protocol just wrote) so the run state documents
+    # that a pilot/confirmation measured a TYPE-STRATIFIED slice — the head
+    # slice this replaces is invisible in a recorded report.
+    slice_composition: dict[str, int] | None = None
+    data_arg = _last_flag_value(cmd, "--data")
+    if step.runner in ("pilot", "confirm") and data_arg \
+            and Path(data_arg).is_file():
+        subset_instances = json.loads(
+            Path(data_arg).read_text(encoding="utf-8"))
+        subset_types = [str(q.get("question_type") or "")
+                        for q in subset_instances]
+        slice_composition = stratified_slice_composition(
+            subset_types, list(range(len(subset_types))))
+        print(f"[run_protocol] measured slice composition: {slice_composition}")
     state.record_run(
         step.number,
         report=str(Path(out_arg)),
@@ -835,6 +1018,7 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         command=cmd,
         expected_direction=args.expected_direction if step.runner == "confirm" else None,
         resume_quality=resume_quality,
+        slice_composition=slice_composition,
     )
     rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:

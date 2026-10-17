@@ -80,13 +80,28 @@ jobs:
           fetch-depth: 0   # PR base SHA must be present for the diff
       - name: Compute per-surface path gates (#2149)
         id: gate
+        env:
+          # #8734: these two are the only `${{ }}` spans in this `run:`, and GitHub
+          # compiles a `run:` that contains any expression under a 21000-byte cap —
+          # measured at 20944 raw + 66 expression bytes = 21010, so `ci.yml` stopped
+          # loading and the whole workflow ran ZERO jobs on every event (the required
+          # `docs`/`legal-e2e`/`license-surface`/`pricing-artifact`/`test-isolation`
+          # contexts could not be produced, and a push run with no jobs is the
+          # signature of that refusal). A scalar with no `${{ }}` is never compiled
+          # (`ai-review-gate.yml` loads a 34 KB one), so as step env these are
+          # substituted before the script is assembled and the cap stops applying to
+          # it — instead of being re-armed by the next comment anyone adds. Keep
+          # expression spans out of this `run:`; the byte budget is tracked by
+          # tests/test_ci_selection.py.
+          MAIN_HEALTH: ${{ inputs.main_health }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base,
           # so the empty-diff fallback below would set EVERY gate true and re-run
           # the whole ~20-gate matrix nightly. Under `main_health` only the five
           # always-on required jobs run, so every gated surface is explicitly
-          # false. (`inputs.main_health` is empty on a `pull_request` event.)
-          if [ "${{ inputs.main_health }}" = "true" ]; then
+          # false. (`MAIN_HEALTH` is empty on a `pull_request` event.)
+          if [ "$MAIN_HEALTH" = "true" ]; then
             for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
                        client packaging website hosted flip python drift \
                        driver_scripts ai_review_gate watchdog_scripts \
@@ -97,7 +112,7 @@ jobs:
             echo "changes: main_health call — all gated surfaces false; only the 5 required jobs run"
             exit 0
           fi
-          BASE="${{ github.event.pull_request.base.sha }}"
+          BASE="$BASE_SHA"
           [ -n "$BASE" ] || BASE="origin/main"
           CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
@@ -219,7 +234,7 @@ jobs:
                   startswith("packs/"),
               ),
               # welcome-e2e (wrangler preview of website/ + mocked playwright
-              # + the two edge-function node harnesses). Separate-app changes
+              # + the three edge-function node harnesses). Separate-app changes
               # under website/apps/ do NOT trigger it — dashboard-js-tests
               # covers dashboard; blog-admin has no gated suite. (#2160 P3-1:
               # excluded website/apps/ wholesale, not dashboard only.)
@@ -235,9 +250,8 @@ jobs:
                          # needs a path entry or a test-only PR would not run it.
                          "tests/test_blog_markdown.mjs",
                          "docs/blog-authoring.md",
-                         # #8293: the SEO keyword + agent-limiter harness — same
-                         # reason as #4481 above.
-                         "tests/test_blog_seo_meta.mjs"),
+                         # #8293: the SEO keyword + agent-limiter harness.
+                         "tests/test_blog_seo_meta.mjs", "tests/test_deck_view.mjs"),
                   # #3501: the BFF auth suites live here and had NO path entry —
                   # a suite-only PR could not trigger the job that runs them.
                   startswith("tests/e2e/auth/"),
@@ -246,6 +260,7 @@ jobs:
                          "tests/e2e/test_auth_cross_origin_cookie.py"),
                   startswith("supabase/functions/waitlist-subscribe/"),
                   startswith("supabase/functions/tenant-provision/"),
+                  startswith("supabase/functions/deck-view/"),
                   # #2810: the edge-function harnesses above import these stubs
                   # (supabase-js.ts, _shared/lookup.ts) — the stub is an input to
                   # the subject under test, so a stub-only PR must still run them.
@@ -1507,17 +1522,18 @@ jobs:
   # — invisible until runtime, on the one tree whose failures are a 500 at the
   # edge with no test in front of it.
   #
-  # It rides the EXISTING `website` gate rather than a new `changes` output: that
-  # job's inline gate script already sits within about a hundred bytes of
-  # GitHub's hard 21000-byte cap on a COMPILED `run:` scalar, and exceeding it
-  # makes GitHub refuse to LOAD ci.yml — ZERO jobs, every required context
-  # unproducible (#6253, pinned by tests/test_ci_selection.py::test_expression_
-  # bearing_run_scalars_stay_under_githubs_21000_byte_cap). A new output key
-  # would spend headroom the next editor needs, so this change instead adds the
-  # `tools/ts/` entry to the `website` predicate (which already covers
-  # `website/functions/**`) and tightens prose elsewhere in that step to leave it
-  # no larger. The `tools/ts/` entry is what makes a change to the tsc project
-  # itself (strict, include, the pinned toolchain) run this job too.
+  # It rides the EXISTING `website` gate rather than a new `changes` output: a
+  # new output key would spend headroom the next editor needs. That gate script
+  # carries no `${{ }}` spans now, so GitHub does not compile it and the
+  # 21000-byte cap no longer applies to it (#8734 moved the two expression
+  # spans into the step's `env:`; before that it sat at 20944 raw + 66 = 21010
+  # and GitHub refused to LOAD ci.yml — ZERO jobs, every required context
+  # unproducible). `tests/test_merge_throughput.py` pins the pair: the params
+  # stay bound in `env:`, and no expression span returns to the `run:`.
+  # This change adds the `tools/ts/` entry to the `website` predicate (which
+  # already covers `website/functions/**`). The `tools/ts/` entry is what makes
+  # a change to the tsc project itself (strict, include, the pinned toolchain)
+  # run this job too.
   #
   # The tsc project + pinned toolchain live in `tools/ts/` OUTSIDE `website/` on
   # purpose: everything under `website/` is STAGED for public upload
@@ -1562,8 +1578,9 @@ jobs:
     # renderer. Without that path entry a docs-only edit to the authoring
     # contract ran the CommonMark/heading guard but NOT the leg that executes
     # the examples, so a placeholder id that embeds nothing shipped green. The
-    # rationale lives HERE, not inside the gate script: that `run:` scalar is
-    # within ~100 bytes of GitHub's 21000-byte expression cap (#6253).
+    # rationale lives HERE, not inside the gate script: that `run:` scalar
+    # carries no expression span, so GitHub does not compile it and the
+    # 21000-byte cap does not reach it (#8734).
     # Mocked welcome-page suite (#541) — secret-free per-PR coverage against
     # the LIVE page (Supabase calls mocked via Playwright routes). The #801
     # live signup smoke self-skips without SUPABASE secrets and runs in
@@ -1591,8 +1608,32 @@ jobs:
       # boot budget (empty /tmp/wrangler.log = cold npx install never finished).
       - name: Pre-warm wrangler toolchain
         run: |
-          npx --yes wrangler@4 --version
-          npx --yes wrangler@4 pages dev --help >/dev/null
+          # Pin the SAME wrangler the boot step below starts: `@4` floats to the
+          # newest 4.x and so warms a DIFFERENT tarball than the pinned one the
+          # boot actually fetches — the cold fetch this step exists to absorb
+          # still landed at boot (the agent-infra#414 drift class), and resolving
+          # a range downloads the whole packument. Retry the fetch as well: one
+          # npm-registry ECONNRESET on a cold runner failed the required
+          # legal-e2e check outright (2026-10-15, `Invalid response body while
+          # trying to fetch https://registry.npmjs.org/wrangler: read
+          # ECONNRESET`) — before the boot loop's own 2x240s retry could start.
+          ok=0
+          for attempt in 1 2 3; do
+            if npx --yes wrangler@4.127.0 --version \
+               && npx --yes wrangler@4.127.0 pages dev --help >/dev/null; then
+              ok=1
+              break
+            fi
+            echo "wrangler pre-warm attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != 1 ]; then
+            # Best-effort by design: this step only warms caches. The boot step
+            # below is the real gate (it retries twice at 240s each and surfaces
+            # wrangler's own log), so a transient registry reset must not red
+            # the job here.
+            echo "::warning::wrangler pre-warm failed after 3 attempts - deferring to the boot retry"
+          fi
       # #3501: the auth suites resolve wrangler via `shutil.which("wrangler")`
       # and FAIL (not skip) when it is missing — `require_toolchain()` calls
       # `pytest.fail()`, so a missing toolchain reds this job instead of
@@ -1699,6 +1740,10 @@ jobs:
           AUTH_CLICKTHROUGH: "1"
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Run deck-view edge-function behavioral harness (#8732)
+        # The only enforcement of "a view never touches the mailing list": the
+        # gate writes deck_views, and joining the list stays a separate act.
+        run: node --experimental-strip-types tests/test_deck_view.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Run blog SSR markdown renderer harness (#4481)
@@ -1738,10 +1783,42 @@ jobs:
       # boot budget (empty /tmp/wrangler.log = cold npx install never finished;
       # #2211 hit this 4x in a row 2026-09-04). --version is fast; the
       # readiness loop below retries twice at 240s each.
+      #
+      # ⛔ PIN THE EXACT VERSION THE BOOT USES (4.127.0), not a floating `@4`.
+      # A floating pre-warm fetched a DIFFERENT wrangler (4.151.0 on
+      # 2026-10-15) and left the boot's pinned install un-warmed; that install
+      # failed on a runner and the npx shim emitted `sh: 1: wrangler: not
+      # found`, timing out both attempts on a PR that touched no website file
+      # (#8744). Warming the pinned version also lets the retry reuse a
+      # COMPLETE cache entry instead of a half-written one.
       - name: Pre-warm wrangler toolchain
         run: |
-          npx --yes wrangler@4 --version
-          npx --yes wrangler@4 pages dev --help >/dev/null
+          # Pin the SAME wrangler the boot step below starts: `@4` floats to the
+          # newest 4.x and so warms a DIFFERENT tarball than the pinned one the
+          # boot actually fetches — the cold fetch this step exists to absorb
+          # still landed at boot (the agent-infra#414 drift class), and resolving
+          # a range downloads the whole packument. Retry the fetch as well: one
+          # npm-registry ECONNRESET on a cold runner failed the required
+          # legal-e2e check outright (2026-10-15, `Invalid response body while
+          # trying to fetch https://registry.npmjs.org/wrangler: read
+          # ECONNRESET`) — before the boot loop's own 2x240s retry could start.
+          ok=0
+          for attempt in 1 2 3; do
+            if npx --yes wrangler@4.127.0 --version \
+               && npx --yes wrangler@4.127.0 pages dev --help >/dev/null; then
+              ok=1
+              break
+            fi
+            echo "wrangler pre-warm attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != 1 ]; then
+            # Best-effort by design: this step only warms caches. The boot step
+            # below is the real gate (it retries twice at 240s each and surfaces
+            # wrangler's own log), so a transient registry reset must not red
+            # the job here.
+            echo "::warning::wrangler pre-warm failed after 3 attempts - deferring to the boot retry"
+          fi
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -1779,6 +1856,15 @@ jobs:
             # with > anyway, and deleting after the LAST attempt would remove
             # the only evidence before the final cat (review P1 — a double
             # failure must still surface wrangler's own diagnostics).
+            #
+            # #8744: an npx cache entry left half-written by a failed install
+            # cannot be recovered by REUSING it — the retry relaunched npx,
+            # the shim re-ran, and `sh: 1: wrangler: not found` repeated
+            # identically until the job reddened on a PR that touched no
+            # website file. Clear the npx cache so attempt 2 is a genuinely
+            # clean install (from the warm tarball cache), which is what the
+            # retry was always meant to be.
+            rm -rf "$(npm config get cache)/_npx"
             sleep 3
           done
           # Final cleanup: flush the log + free :8788 before surfacing it
@@ -1907,13 +1993,40 @@ jobs:
       # fast; the readiness loops below now retry twice at 240s each.
       - name: Pre-warm wrangler toolchain
         run: |
-          npx --yes wrangler@4 --version
-          npx --yes wrangler@4 pages dev --help >/dev/null
+          # Pin the SAME wrangler the boot step below starts: `@4` floats to the
+          # newest 4.x and so warms a DIFFERENT tarball than the pinned one the
+          # boot actually fetches — the cold fetch this step exists to absorb
+          # still landed at boot (the agent-infra#414 drift class), and resolving
+          # a range downloads the whole packument. Retry the fetch as well: one
+          # npm-registry ECONNRESET on a cold runner failed the required
+          # legal-e2e check outright (2026-10-15, `Invalid response body while
+          # trying to fetch https://registry.npmjs.org/wrangler: read
+          # ECONNRESET`) — before the boot loop's own 2x240s retry could start.
+          ok=0
+          for attempt in 1 2 3; do
+            if npx --yes wrangler@4.127.0 --version \
+               && npx --yes wrangler@4.127.0 pages dev --help >/dev/null; then
+              ok=1
+              break
+            fi
+            echo "wrangler pre-warm attempt ${attempt}/3 failed - retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          if [ "$ok" != 1 ]; then
+            # Best-effort by design: this step only warms caches. The boot step
+            # below is the real gate (it retries twice at 240s each and surfaces
+            # wrangler's own log), so a transient registry reset must not red
+            # the job here.
+            echo "::warning::wrangler pre-warm failed after 3 attempts - deferring to the boot retry"
+          fi
       - name: Start wrangler pages dev preview (website/ = auth origin, :8788)
         run: |
           cd website
           for attempt in 1 2; do
-            npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+            # Pinned to the same 4.127.0 as welcome-e2e/legal-e2e and this
+            # job's pre-warm: `@4` floats to latest each run (agent-infra#414),
+            # warming a tarball the pre-warm never fetched.
+            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > /tmp/wrangler-auth.log 2>&1 &
             echo $! > /tmp/wrangler-auth.pid
@@ -1943,7 +2056,7 @@ jobs:
             # unreachable") instead of 200, so the suite's seeded-session
             # fixtures can never render the shell. The harness seeds the row it
             # reads (tests/e2e/test_session_login_flow.py).
-            npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
+            npx --yes wrangler@4.127.0 pages dev dist --port 8790 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 --d1 SESSIONS \
               > /tmp/wrangler-dash.log 2>&1 &
             echo $! > /tmp/wrangler-dash.pid
