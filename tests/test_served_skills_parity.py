@@ -1249,8 +1249,14 @@ def _is_the_arm(args: list[str]) -> bool:
     if args[operand].endswith("served_skills_parity.py"):
         if not _resolves_to_the_tool(args[operand]):
             return False
-    elif not args[operand].replace("/", ".").endswith(
-            "tools.served_skills_parity"):
+    # ONLY a bare dotted module name is the `-m` form. A PATH that merely ends
+    # in `tools/served_skills_parity` is not the tool either:
+    # `/tmp/evil/tools/served_skills_parity` is a `.`-separated tail too, and
+    # certifying it while rejecting the identical `.py` shim was a fail-open
+    # (review finding, P2).
+    elif ("/" in args[operand]
+          or not args[operand].replace("/", ".").endswith(
+              "tools.served_skills_parity")):
         return False
     tail = args[operand + 1:]
     # `main()`'s semantics are CUMULATIVE, not first-flag-wins:
@@ -1284,7 +1290,15 @@ def _can_fail(unit: dict) -> bool:
     if coe is not None and not (coe is False or str(coe).strip().lower() == "false"):
         return False
     if "if" in unit:
-        return str(unit["if"]).strip() in {"always()", "${{ always() }}"}
+        # `success()` and `!cancelled()` mask NOTHING — they are what the runner
+        # does when there is no `if:` at all, so a step carrying one still runs
+        # and its failure still reds the run. Keeping only `always()` dropped a
+        # correct gate and blamed a `continue-on-error:` that was not there
+        # (review finding, P2). Everything else stays fail-closed.
+        cond = str(unit["if"]).strip()
+        if cond.startswith("${{") and cond.endswith("}}"):
+            cond = cond[3:-2].strip()
+        return cond in {"always()", "success()", "!cancelled()"}
     return True
 
 
@@ -1674,6 +1688,62 @@ def test_4643_a_piped_gate_under_the_pipefail_shell_is_still_a_runner(tmp_path):
     workflows = _workflows_with_mutation(tmp_path, mutate)
     assert "deploy-pages.yml" in _upstream_runners(workflows), (
         "a piped gate under `shell: bash` fails the step, so it is a runner")
+
+
+def _arm_workflows(tmp_path: Path, name: str, mutate) -> Path:
+    """The two real workflows, with `mutate` applied to deploy's arm step."""
+    workflows = tmp_path / name
+    workflows.mkdir()
+    for workflow in ("deploy-pages.yml", "skills-parity.yml"):
+        shutil.copyfile(WORKFLOWS / workflow, workflows / workflow)
+    path = workflows / "deploy-pages.yml"
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    arm = next(s for s in doc["jobs"]["deploy-dashboard"]["steps"]
+               if isinstance(s.get("run"), str)
+               and "served_skills_parity" in s["run"])
+    mutate(arm)
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    return workflows
+
+
+def test_4643_a_shim_and_a_noop_if_are_judged_correctly(tmp_path):
+    """Two verdict rules, both measured (review findings, P2).
+
+    (a) The `-m` fix let ANY extensionless operand through: a `.`-separated PATH
+        tail matched a module name, so `/tmp/evil/tools/served_skills_parity` was
+        certified as a fail-closed gate while the identical `.py` shim was
+        rejected.
+    (b) `_can_fail` kept only `always()`, so `if: success()` and
+        `if: ${{ !cancelled() }}` — which mask nothing and are what the runner
+        does with no `if:` at all — dropped a correct gate and blamed a
+        `continue-on-error:` that was not there.
+    """
+    base = "uv run --no-project --with pyyaml==6.0.3 python3"
+
+    for index, shim in enumerate(("/tmp/evil/tools/served_skills_parity",
+                                  "../evil/tools/served_skills_parity")):
+        workflows = _arm_workflows(
+            tmp_path, f"shim-{index}",
+            lambda arm, s=shim: arm.update(run=f"{base} {s} --check-upstream"))
+        assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+            f"an extensionless PATH {shim!r} was certified as the shipped tool")
+
+    for index, cond in enumerate(("success()", "${{ success() }}",
+                                  "!cancelled()", "${{ !cancelled() }}")):
+        workflows = _arm_workflows(
+            tmp_path, f"noopif-{index}",
+            lambda arm, c=cond: arm.update({"if": c}))
+        assert "deploy-pages.yml" in _upstream_runners(workflows), (
+            f"`if: {cond}` masks nothing — the arm still runs and still fails "
+            f"the step, so the job is a runner")
+
+    # …while a condition that DOES mask the gate stays disqualifying.
+    for index, cond in enumerate(("false", "failure()")):
+        workflows = _arm_workflows(
+            tmp_path, f"maskif-{index}",
+            lambda arm, c=cond: arm.update({"if": c}))
+        assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+            f"`if: {cond}` does mask the gate — it must not count as a runner")
 
 
 def test_4643_the_arm_is_recognised_through_every_legitimate_spelling(tmp_path):
