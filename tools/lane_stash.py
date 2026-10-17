@@ -632,7 +632,10 @@ def _guard_pin(key: str, sha: str) -> str | None:
     Three paths release it: the creating prune's ``finally`` (its own ref only);
     ``recover`` of that sha (``_guard_release_all``, under any key); and
     :func:`_reap_stale_guards` on a later ``prune --apply``, once the OWNER
-    worktree is gone AND the object is named elsewhere. Until one of those runs, a
+    worktree is gone AND the object is named by the register or a durable non-guard
+    ref other than ``refs/stash`` (a lane pin; ``refs/stash`` itself is movable by
+    any later ``stash store``, and another guard is releasable at its owner's
+    will). Until one of those runs, a
     guard for an entry nobody adopts is never reached — ``cmd_list`` prints any you
     still hold.
 

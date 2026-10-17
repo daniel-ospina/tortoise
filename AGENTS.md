@@ -516,10 +516,12 @@ for three sends to one pane that were recorded as `OK` and never consumed.
   a state error, so treat ANY non-zero as "do not run a bare `git stash pop`").
   `python tools/lane_stash.py recover <sha>` is the repair recipe for THIS lane's own dropped entry
   (it pins what it restores under the current lane), and it **refuses** an entry another lane's ref
-  or `[<lane-key>]` marker names, or one already enumerated by the register that is not provably
-  this lane's (nothing was dropped, so `recover` would only mint ownership; pass `-m` to assert it
-  deliberately) — pinning a peer's entry here would leave it claimed by both lanes, and `check`
-  would then clear a bare pop on work that is not this lane's. To restore a *peer's* dropped entry,
+  or `[<lane-key>]` marker names, or one that is not provably this lane's when nothing was dropped —
+  whether the register ENUMERATES it, or `refs/stash` still NAMES it (an emptied reflog), since that
+  only mints ownership; pass `-m` to assert it deliberately. Provenance is an own lane pin/applied
+  record or an own `[<lane-key>]` marker, so an entry this lane provably owns is adopted without
+  `-m` — pinning a peer's entry here would leave it claimed by both lanes, and `check` would then
+  clear a bare pop on work that is not this lane's. To restore a *peer's* dropped entry,
   use `git stash store -m "<original subject>" <sha>` (the commit survives in the object DB), or let
   that lane recover it from its own worktree.
   `tests/test_lane_stash.py` carries the 2-worktree reproduction. The lane rule
