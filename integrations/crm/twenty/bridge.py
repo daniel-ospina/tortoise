@@ -346,20 +346,22 @@ def _as_calendar_day(value) -> _date | None:
 
 
 # ``cal-trigger.py::start_recording`` stores ``event.get("title", "Meeting")[:50]``,
-# so the state's ``event_title`` is a hard-truncated PREFIX of the calendar title.
-# Titles are therefore compared on that truncation — but only when the shorter
-# side is long enough to be evidence: below this floor a prefix coincidence is
-# not a ground, so the titles "cannot speak" and the day arm decides instead.
-_TITLE_GROUNDING_MIN = 16
+# so a state's ``event_title`` is capped there — and when the calendar title is
+# longer than the cap it is a hard-truncated PREFIX of it. ONLY that truncation
+# can make the two titles differ while one nests in the other, so only that
+# shape may be read as agreement. Any other nesting is two different events (a
+# series variant: "Weekly Standup" vs "Weekly Standup (Engineering)").
+_TITLE_WRITER_CAP = 50
 
 
 def _title_relation(want_title: str, have_title: str) -> str | None:
     """``"same"`` / ``"different"`` / ``None`` for two normalised titles.
 
-    ``None`` means the titles cannot speak to the question (a side is absent,
-    or the only agreement is a prefix too short to distinguish the writer's
-    truncation from a coincidence) — absence of evidence, not contradicting
-    evidence.
+    ``None`` is ABSENCE of evidence: a side is absent, or the stored title is a
+    strict prefix of the artifact's that the writer's ``[:50]`` cap does not
+    explain — it neither names this event nor contradicts it, so the day arm
+    decides. ``"different"`` (two titles that do not nest) always disqualifies,
+    whatever their length: it names another event.
     """
     if not want_title or not have_title:
         return None
@@ -367,13 +369,14 @@ def _title_relation(want_title: str, have_title: str) -> str | None:
         return "same"
     short, long_ = sorted((want_title, have_title), key=len)
     if long_.startswith(short):
-        # Only the writer's ``[:50]`` truncation can shorten a calendar title, so
-        # agreement with a truncated store is PREFIX agreement, not equality —
-        # but a short prefix is a coincidence, not a ground: below the floor the
-        # title cannot speak, so the day arm decides instead.
-        return "same" if len(short) >= _TITLE_GROUNDING_MIN else None
-    # Not nested: two different titles. No floor applies — a disagreement is
-    # evidence whether the titles are long or short.
+        # Agreement by TRUNCATION requires the stored side to sit at the writer's
+        # cap with the artifact's title continuing past it. Anything else that
+        # nests (short stored side, or the artifact's title being the shorter
+        # one) is not the cap's doing, so it cannot ground on its own.
+        if (short == have_title and len(short) >= _TITLE_WRITER_CAP
+                and len(long_) > len(short)):
+            return "same"
+        return None
     return "different"
 
 
@@ -402,11 +405,13 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     says the store describes another call — so the day arm cannot rescue it: a
     same-day neighbour is exactly the residue a ``--watch`` pass or a retry
     (``watchdog.sh`` re-enters on failure) meets, and it is the #8491 harm
-    narrowed, not removed. The day arm is kept for the case the title cannot
-    speak (no ``event_title``, a title too short to compare, or one the writer
-    never stored). Neither arm matches — or no evidence was supplied — and this
-    returns ``[]``: refuse rather than guess, so an ungrounded attendee is never
-    written as a contact.
+    narrowed, not removed. "Different" means two titles that do not nest, at any
+    length. The day arm therefore decides every case where the title cannot
+    SPEAK: no ``event_title`` at all, or a stored title that is a strict prefix
+    of the artifact's which the writer's 50-character cap does not explain
+    (``_title_relation``). Neither arm matches — or no evidence was supplied —
+    and this returns ``[]``: refuse rather than guess, so an ungrounded attendee
+    is never written as a contact.
     """
     if not os.path.exists(CAL_STATE_FILE):
         return []

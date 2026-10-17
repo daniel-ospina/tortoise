@@ -153,24 +153,54 @@ def test_long_calendar_title_grounds_on_the_writers_truncation(
     Day is deliberately mismatched here so ONLY the title arm can ground it.
     """
     long_title = ("Quarterly GTM Packaging Review with the Entire "
-                  "Infrastructure and Pricing Team")[:60]
-    assert len(long_title) == 60
+                  "Infrastructure and Pricing Team")
+    # Must exceed the writer's cap, or the stored value is not a truncation.
+    assert len(long_title) > bridge._TITLE_WRITER_CAP
     monkeypatch.setattr(
         bridge, "CAL_STATE_FILE",
         str(_state_file(tmp_path, started_at="2026-10-08T23:52:00",
-                        event_title=long_title[:50])),
+                        event_title=long_title[:bridge._TITLE_WRITER_CAP])),
     )
     assert bridge.get_calendar_attendees(
         MEETING_DATE, long_title) == ATTENDEES
 
 
+def test_a_nested_title_that_is_not_the_writers_truncation_is_refused(
+        tmp_path, monkeypatch):
+    """Nesting alone is not agreement — a series variant is another event.
+
+    ``Weekly Team Standup`` nests in ``Weekly Team Standup (Engineering)`` and
+    both are short enough that the writer's ``[:50]`` cap cannot explain the
+    difference, so the title arm is silent and a differing day refuses. (Across
+    days, grounding on the bare prefix would seed the Tuesday call's CRM from
+    Monday's state — #8491 again, through the door the truncation fix opened.)
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-08T09:00:00",
+                        event_title="Weekly Team Standup")),
+    )
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, "Weekly Team Standup (Engineering)") == []
+
+    # Same day: the title cannot speak either way, so the day arm grounds it.
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-09T09:00:00",
+                        event_title="Weekly Team Standup")),
+    )
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, "Weekly Team Standup (Engineering)") == ATTENDEES
+
+
 def test_a_tiny_stored_title_cannot_ground_but_does_not_disqualify(
         tmp_path, monkeypatch):
-    """Below the floor a prefix is not evidence — it neither grounds nor refutes.
+    """A short prefix is not the writer's truncation, so it cannot ground.
 
-    ``1:1`` is a prefix of ``1:1 with Alice`` only because it is 3 characters;
-    treating that as a match would ground any short stored title, so the title
-    cannot speak: the day arm decides, and on a differing day it refuses.
+    ``1:1`` nests in ``1:1 with Alice`` only because it is 3 characters; treating
+    that as a match would ground any short stored title. The title therefore
+    cannot speak — on a differing day it refuses, on the same day the day arm
+    still decides.
     """
     monkeypatch.setattr(
         bridge, "CAL_STATE_FILE",
