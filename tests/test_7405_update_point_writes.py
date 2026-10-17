@@ -1353,7 +1353,7 @@ class _AbortThenUnreplay(_AbortOnceGraph):
 
 
 def test_a_retried_tag_sync_that_lands_nothing_does_not_report_success(
-        tmp_path):
+        tmp_path, monkeypatch):
     """A re-issued tag sync against an unreplayed Point is NOT a success.
 
     Measured pre-fix: ``update_point(pid, tags=[a, b])`` returned a point dict
@@ -1365,6 +1365,14 @@ def test_a_retried_tag_sync_that_lands_nothing_does_not_report_success(
     The abort therefore surfaces unchanged, exactly as it does on the property
     arm — one behaviour for the whole mutation, not one per statement.
     """
+    # The witness answers `False` on every re-issue, so this test runs the
+    # budget to EXHAUSTION — the path that issues the three real backoff
+    # sleeps (`base=2.0`, `cap=8.0` ⇒ 7-14 s of wall clock). Recording rather
+    # than sleeping keeps the file cheap and simultaneously proves the
+    # exhaustion path was the one exercised.
+    sleeps: list[float] = []
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=sleeps.append))
     sdk = _sdk(tmp_path, "tagwitness")
     try:
         pid = _pid(sdk)
@@ -1375,6 +1383,10 @@ def test_a_retried_tag_sync_that_lands_nothing_does_not_report_success(
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
             sdk.update_point(pid, tags=["7405ghost", "7405spectre"])
 
+        assert sleeps, (
+            "the retry budget was never exhausted — the witness must refuse "
+            "EVERY re-issue, so this test proves nothing if it does not run "
+            "out of attempts")
         proj.g = proxy._real
         assert proxy.vanished, (
             "fixture precondition: the Point must be gone — an unresolvable "
@@ -1533,7 +1545,7 @@ def test_a_promote_witness_reads_an_empty_status_row_as_absent(
             sdk.close()
 
 
-def test_a_non_string_tag_list_is_still_witnessed(tmp_path):
+def test_a_non_string_tag_list_is_still_witnessed(tmp_path, monkeypatch):
     """A HASHABLE non-string tag list must not disable the landing check.
 
     ``tags=[1, 2]`` is a legal write — the engine creates both ``:Tag`` nodes
@@ -1543,6 +1555,12 @@ def test_a_non_string_tag_list_is_still_witnessed(tmp_path):
     no read-back at all. The witness is disabled only for entries it cannot
     dedupe (UNHASHABLE ones), where the engine owns the error.
     """
+    # Same exhaustion shape as the string-tag sibling above: the witness stays
+    # `False` for every re-issue, so the three backoff sleeps would be real
+    # wall clock (7-14 s) unless recorded instead of slept.
+    sleeps: list[float] = []
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=sleeps.append))
     sdk = _sdk(tmp_path, "nonstrtags")
     try:
         pid = _pid(sdk)
@@ -1553,6 +1571,9 @@ def test_a_non_string_tag_list_is_still_witnessed(tmp_path):
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
             sdk.update_point(pid, tags=[1, 2])
 
+        assert sleeps, (
+            "the retry budget was never exhausted — the witness must refuse "
+            "every re-issue even for a non-string tag list")
         assert proxy.vanished, "fixture precondition: the Point must be gone"
     finally:
         with contextlib.suppress(Exception):
