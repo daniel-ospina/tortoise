@@ -48,6 +48,7 @@ from tools.journal_growth import (
     main,
     measure,
 )
+from tortoise.embeddings import EMBEDDING_DIM
 from tortoise.log import SEAL_SENTINEL
 
 FIXTURE = Path(__file__).resolve().parent.parent / (
@@ -157,6 +158,15 @@ def test_directory_enumeration_matches_rebuild_all(tmp_path: Path) -> None:
     `projection.rebuild_all` lists with ``os.listdir`` + ``endswith('.jsonl')``,
     so a nested file is NOT part of that graph's journal. Counting it here
     would report growth the replay never reads (and vice versa).
+
+    The nested case is asserted under BOTH names, because the name is what the
+    old unconditional ``<subdir>/events.jsonl`` scan turned on: ``old.jsonl``
+    fails the ``JOURNAL_NAME`` test and stayed out, while ``events.jsonl`` — the
+    natural name for a retained/archived slice of a journal, and what an
+    operator reaches for while sizing one — WAS counted, in the tool that exists
+    to size exactly that. Over-reporting is the direction that argues for a
+    tighter bound than the journal requires, whose discarded prefix is state
+    loss on the next ``rebuild_all`` (`STORAGE-ARCHITECTURE.md` §5.2).
     """
     _write(tmp_path / "graph.jsonl", [{"type": "PointAdded", "id": "p1"}])
     (tmp_path / "notes.txt").write_text("not a journal\n", encoding="utf-8")
@@ -166,6 +176,14 @@ def test_directory_enumeration_matches_rebuild_all(tmp_path: Path) -> None:
     assert [p.name for p in journal_files(tmp_path)] == ["graph.jsonl"]
     report = measure(tmp_path)
     assert report["total"]["records"] == 1
+
+    # The invariant its docstring names, for the name that actually slipped
+    # through: a retained journal called `events.jsonl` under a per-graph dir.
+    _write(nested / "events.jsonl", [{"type": "PointAdded", "id": "p2"}] * 4)
+    assert [p.name for p in journal_files(tmp_path)] == ["graph.jsonl"]
+    assert [f["path"] for f in measure(tmp_path)["files"]] == [
+        str(tmp_path / "graph.jsonl")]
+    assert measure(tmp_path)["total"]["records"] == 1
 
 
 def test_real_fixture_corpus_measures() -> None:
@@ -445,6 +463,46 @@ def test_text_form_total_is_the_sum_of_its_rows(
     assert int(total_line.split()[2].replace(",", "")) == file_total
 
 
+def test_probe_vector_width_is_derived_from_the_embedder(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe's vector width comes from `tortoise.embeddings` — never a literal.
+
+    The probe STAMPS a vector and then PRINTS
+    ``f"vector: {VECTOR_WIDTH}-d, {EMBEDDING_MODEL}"``. With ``VECTOR_WIDTH = 384``
+    as a literal, rotating the embedder (``tortoise/embeddings.py``: "Rotating the
+    embedder = editing this line") keeps stamping 384 floats while printing the
+    NEW model's name — so the README, `STORAGE-ARCHITECTURE.md` §5.2 and the
+    `docs/00_index.md` row publish a growth figure attributed to a model that does
+    not produce it, ~2.7x low for a 1024-d model (the understating direction this
+    instrument exists to avoid).
+
+    Discriminating in the right direction: the width is read from the SINGLE
+    SOURCE OF TRUTH after it is rotated, so a literal cannot pass. Pinning
+    ``VECTOR_WIDTH == 384`` (literal against literal) could not fail this way —
+    it is exactly what a rotated embedder leaves green.
+    """
+    from tortoise import embeddings
+
+    def load_probe():
+        spec = importlib.util.spec_from_file_location("corpus_growth_probe", PROBE)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    assert load_probe().VECTOR_WIDTH == embeddings.EMBEDDING_DIM
+
+    monkeypatch.setattr(embeddings, "EMBEDDING_DIM", 1024)
+    rotated = load_probe()
+    assert rotated.VECTOR_WIDTH == 1024
+    # The width the probe stamps IS the width it prints and labels the report
+    # with, so the three published figures cannot be attributed to the wrong
+    # model.
+    assert len(rotated.unit_vector()) == 1024
+    assert rotated.stamp({"type": "PointAdded", "point": {"id": "p1"}},
+                          rotated.unit_vector())["point"]["embedding"]
+
+
 def test_probe_pins_its_published_outputs(
         tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The evidence probe is a pinned artifact, not a dead file.
@@ -471,7 +529,7 @@ def test_probe_pins_its_published_outputs(
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
 
-    assert probe.VECTOR_WIDTH == 384             # the pinned embedder's width
+    assert probe.VECTOR_WIDTH == EMBEDDING_DIM    # the pinned embedder's width
     assert probe.CORPUS.is_file()                # the committed corpus
 
     records = [json.loads(line) for line in

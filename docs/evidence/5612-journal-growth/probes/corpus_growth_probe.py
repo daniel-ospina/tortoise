@@ -11,7 +11,7 @@ The **record shapes** are real — they are the committed corpus
 `supabase/tests/fixtures/record_projection_journal.jsonl`, which carries one
 record of each event type the writers emit. The **vector** is real in the two
 properties that decide its size: the width is the pinned embedder's
-(`tortoise.embeddings.EMBEDDING_MODEL`, BAAI/bge-small-en-v1.5, 384) and it is
+(`tortoise.embeddings.EMBEDDING_DIM`, derived here, never a literal) and it is
 stamped through the SAME seam the writers use
 (`tortoise.embeddings.stamp_journal_embedding`, called from
 `TortoiseSDK._emit_event`), so the encoded form — the float reprs plus the
@@ -50,12 +50,19 @@ import numpy as np  # noqa: E402
 
 from tools.journal_growth import measure  # noqa: E402
 from tortoise.embeddings import (  # noqa: E402
+    EMBEDDING_DIM,
     EMBEDDING_MODEL,
     stamp_journal_embedding,
 )
 
 CORPUS = REPO / "supabase/tests/fixtures/record_projection_journal.jsonl"
-VECTOR_WIDTH = 384          # BAAI/bge-small-en-v1.5, the pinned embedder
+#: The pinned embedder's width, DERIVED — never a literal. `tortoise/embeddings.py`
+#: says "Rotating the embedder = editing this line"; a literal here would keep
+#: stamping 384 floats while printing the new model's name, understating the
+#: vector-dominated record (~2.7x low for a 1024-d model) and publishing a figure
+#: attributed to a model that does not produce it. Pinned by
+#: `test_probe_vector_width_is_derived_from_the_embedder`.
+VECTOR_WIDTH = EMBEDDING_DIM
 #: The types a writer stamps a vector onto (see `stamp_journal_embedding`).
 VECTOR_TYPES = ("PointAdded", "OperatorAdded",          # creating: + identity
                 "PointPromoted", "OperatorPromoted")    # re-emitted snapshot
@@ -168,7 +175,7 @@ def main() -> int:
     print("== the 29-type corpus, measured WHOLE (all 39 committed records — "
           "a record-type mix, NOT an operation mix)")
     for label, total in (("as committed", base),
-                         ("with 384-d vector", hosted)):
+                         (f"with {VECTOR_WIDTH}-d vector", hosted)):
         print(f"  {label:<18} {total['records']:>3} records  "
               f"{total['bytes']:>8,} B  mean {total['record_bytes']['mean']:>7.1f} B"
               f"  p50 {total['record_bytes']['p50']:>6,} B"

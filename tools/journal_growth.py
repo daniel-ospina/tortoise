@@ -37,21 +37,27 @@ Usage
     python tools/journal_growth.py /data/events/team_tortoise
     python tools/journal_growth.py /data/events/team_tortoise/events.jsonl --json
 
-A directory is read in BOTH layouts the deployment writes:
+A directory is read in one of the two layouts the deployment writes — the
+layout is chosen by the directory's own shape, never by scanning for both:
 
 * a BASE dir — ``<base>/<graph>/events.jsonl``, one journal per graph
   (``config._resolve_event_log_path``: ``os.path.join(base, key,
   "events.jsonl")``; ``entrypoint.sh`` / ``docker-compose.yml`` point
-  ``TORTOISE_EVENT_LOG_BASE_DIR`` at ``/data/events``), and
+  ``TORTOISE_EVENT_LOG_BASE_DIR`` at ``/data/events``) — taken when the dir has
+  NO direct ``*.jsonl`` children, and
 * a per-graph dir (or any dir of journals) — its direct ``*.jsonl`` children,
   the enumeration ``rebuild_all`` uses (``projection/__init__.py`` lists with
   ``os.listdir`` + ``endswith('.jsonl')``), NOT recursive: a nested
-  ``archive/old.jsonl`` is not part of any graph's journal and is not counted.
+  ``archive/old.jsonl`` OR ``archive/events.jsonl`` is not part of any graph's
+  journal and is not counted.
 
 Both are needed because the base dir's direct children are graph
 DIRECTORIES; listing only ``*.jsonl`` there found nothing and reported "no
 journal to measure" on exactly the journal an operator is trying to size.
-Each per-graph file is labelled with its graph key in the report.
+Each per-graph file is labelled with its graph key in the report. Scanning the
+``<subdir>/events.jsonl`` level under a per-graph dir (the previous behaviour)
+counted a retained/archived slice the replay never reads — an over-report, the
+direction that argues for a tighter bound than the journal requires.
 
 ``--json`` emits a stable schema (``files``, ``total``, ``projection``); the text
 form is for a human reading a volume.
@@ -127,11 +133,26 @@ def _is_seal(text: str) -> bool:
 def journal_files(target: Path) -> list[Path]:
     """The journal files *target* names, in both layouts the deployment writes.
 
-    A file measures itself. A directory measures its direct ``*.jsonl``
-    children (one graph's journal, the enumeration ``rebuild_all`` uses) AND
-    one level of ``<subdir>/events.jsonl`` (the base-dir layout — see
-    :data:`JOURNAL_NAME`), so a live ``TORTOISE_EVENT_LOG_BASE_DIR`` measures
-    every graph instead of reporting "no journal".
+    The two layouts are MUTUALLY EXCLUSIVE, and which one applies is decided by
+    the target's own shape — never by scanning for both:
+
+    * a **per-graph dir** (or any dir of journals) has direct ``*.jsonl``
+      children, and that is exactly the enumeration ``rebuild_all`` uses
+      (``os.listdir`` + ``endswith('.jsonl')``, NOT recursive). Only the direct
+      children are returned; a nested ``<subdir>/events.jsonl`` (a retained or
+      archived journal — the natural name when slicing one) is not part of any
+      graph's journal and is NOT counted.
+    * a **BASE dir** (``TORTOISE_EVENT_LOG_BASE_DIR``) has NO direct
+      ``*.jsonl`` children — its children are graph DIRECTORIES — so the
+      ``<graph>/events.jsonl`` one level down is the journal, and every graph is
+      measured instead of reporting "no journal".
+
+    Scanning both unconditionally (the previous behaviour) counted
+    ``<dir>/<subdir>/events.jsonl`` under a per-graph dir, which the replay never
+    reads: an over-estimate, and over-reporting is the direction that argues for
+    a *tighter* bound than the journal requires — whose discarded prefix is
+    state loss on the next ``rebuild_all``. Pinned by
+    ``test_directory_enumeration_matches_rebuild_all``.
     """
     if target.is_file():
         return [target]
@@ -140,9 +161,10 @@ def journal_files(target: Path) -> list[Path]:
     children = list(target.iterdir())
     direct = sorted(p for p in children
                     if p.is_file() and p.name.endswith(".jsonl"))
-    per_graph = sorted(p / JOURNAL_NAME for p in children
-                       if p.is_dir() and (p / JOURNAL_NAME).is_file())
-    return direct + per_graph
+    if direct:                      # a per-graph dir (or a dir of journals)
+        return direct
+    return sorted(p / JOURNAL_NAME for p in children
+                  if p.is_dir() and (p / JOURNAL_NAME).is_file())
 
 
 def _graph_key(path: Path) -> str:
@@ -256,7 +278,7 @@ def measure_file(path: Path) -> dict:
     """Measure one journal file. Never raises on a journal it cannot parse.
 
     STREAMED, one line at a time: the journal this exists to size is unbounded
-    by design (#5612 — ~8.6 GB per 1,000,000 creates), so a ``read_bytes()`` +
+    by design (#5612 — ~8.5 GB per 1,000,000 creates), so a ``read_bytes()`` +
     ``split()`` pair would need ~2× that in RAM and would OOM on exactly the
     volume the measurement was landed for.
     """
