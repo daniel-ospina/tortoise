@@ -1254,9 +1254,10 @@ def _is_the_arm(args: list[str]) -> bool:
     # `/tmp/evil/tools/served_skills_parity` is a `.`-separated tail too, and
     # certifying it while rejecting the identical `.py` shim was a fail-open
     # (review finding, P2).
-    elif ("/" in args[operand]
-          or not args[operand].replace("/", ".").endswith(
-              "tools.served_skills_parity")):
+    # EXACT module name: a suffix test also certified a DIFFERENT package
+    # (`evil.tools.served_skills_parity`, `mytools.served_skills_parity`) as this
+    # tool — the same lookalike class, one spelling over (review finding, P2).
+    elif args[operand] != "tools.served_skills_parity":
         return False
     tail = args[operand + 1:]
     # `main()`'s semantics are CUMULATIVE, not first-flag-wins:
@@ -1344,7 +1345,7 @@ def _runs_sync(args: list[str]) -> bool:
             if _resolves_to_the_tool(arg) and "--sync" in args[index + 1:]:
                 return True
             continue
-        if arg.replace("/", ".").endswith("tools.served_skills_parity"):
+        if arg == "tools.served_skills_parity":
             return "--sync" in args[index + 1:]
     return False
 
@@ -1721,7 +1722,9 @@ def test_4643_a_shim_and_a_noop_if_are_judged_correctly(tmp_path):
     base = "uv run --no-project --with pyyaml==6.0.3 python3"
 
     for index, shim in enumerate(("/tmp/evil/tools/served_skills_parity",
-                                  "../evil/tools/served_skills_parity")):
+                                  "../evil/tools/served_skills_parity",
+                                  "-m evil.tools.served_skills_parity",
+                                  "-m mytools.served_skills_parity")):
         workflows = _arm_workflows(
             tmp_path, f"shim-{index}",
             lambda arm, s=shim: arm.update(run=f"{base} {s} --check-upstream"))
