@@ -230,6 +230,15 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > therefore connect any two plain epistemic nodes — **not** Point→Point only. #7853's branch converges
 > on the same shared declaration.
 >
+> **#7925 then closed the INGEST half of that widening** (the boundary #7926 recorded rather than
+> absorbed): `sdk._check_endpoints` (Phase 1) and `_check_endpoint_race` (Phase 2) still gated the
+> DIRECT route on plain `:Point`, so `ingest()` refused a `(Subject)-[:IMPL]->(Object)` connection
+> that `create_direct_edge` itself wrote — the validator was stricter than the primitive it calls.
+> Both phases now read ONE declaration, `sdk._INGEST_ENDPOINT_LABELS` (≡ `EPISTEMIC_LABELS`), the
+> same set the two write primitives accept; the `:Source` / operator-Point / not-addressed-by-`id`
+> exclusions are unchanged, and the endpoint-KIND gate (#8499) continues to choose the STRUCTURE
+> (a Point-bearing pair is reified; Object↔Object and the other non-Point pairs keep the direct edge).
+>
 > **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
 > §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
 > as an `objectKind` and the miner emitted `event_kind="milestone"` — one bare name on three axes,

@@ -1003,6 +1003,20 @@ _ALLOWED_FSTRING = {
         'r = self.g.query( f"MATCH (e:{label} {{name:$name}}) RETURN e.name LIMIT 1", params={"name": target_name}, ).result_set': 1,
         'self.g.query( f"MATCH (n:{n[\'label\']} {{{n[\'key\']}:$sid}}), (e:{label} {{name:$name}}) " f"MERGE (n)-[:{edge_type}]->(e)", params={"sid": n["value"], "name": target_name}, )': 1,
     },
+    'tortoise/sdk.py': {
+        # #7925: `_entity_name_holders` — the bundle-local entity-ref probe the
+        # ingest endpoint guard runs to resolve the Subject/Object the writer
+        # will MERGE BY NAME (so the guard cannot fail open and leave a
+        # partially-mutated graph). READ-ONLY: it returns `n.id`, the shared
+        # `_terminal_expression` and `is_operator` — it mints, folds and
+        # re-keys nothing, so there is no fold to route through
+        # `entity_identity`; its whole purpose is to REFUSE an endpoint before
+        # any write. Enumerated here (not deleted) for the same #5509
+        # disposition sweep that owns the other name-keyed sites — #8866 landed
+        # the resolver routing for the rest, including `_create_entity`'s
+        # re-fetch (whose site is now id-keyed and no longer enumerated).
+        'rows = proj.g.query( f"MATCH (n:{label} {{name:$name}}) " f"RETURN n.id, {_terminal_expression(\'n\')} AS term, " f"coalesce(n.is_operator, false) AS op", params={"name": name}, ).result_set': 1,
+    },
 }
 
 

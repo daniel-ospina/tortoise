@@ -417,7 +417,8 @@ class TestE2E1Matrix:
             joined = "\n".join(messages)
             assert any("does not exist" in m for m in messages), joined       # c1
             assert any("SUPPORTS" in m for m in messages), joined             # c2
-            assert any("must be a plain Point" in m for m in messages), joined  # c3/c4/c5
+            assert any("must be a Point/Subject/Object/Event endpoint — got a"
+                       in m for m in messages), joined  # c3/c4/c5
             assert any("multi-item 'to'" in m for m in messages), joined      # c7
             # zero mutations — only the pre-seeded Source exists
             assert _point_count(sdk) == 0
