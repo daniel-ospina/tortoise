@@ -21117,6 +21117,13 @@ class TortoiseSDK:
         # absent"; a SET read names no node and passes nothing, keeping
         # today's set-level polarity. Default None = byte-identical.
         _residency_key: str | None = None,
+        # #7983: PRIVATE — an INTERNAL pool read (recall_state's candidate pool,
+        # a review pool, a session search) is not a caller reading these keys.
+        # The funnel records the rows it RETURNS, and for a pool caller those
+        # rows are candidates the end caller never sees, so recording them marks
+        # up to 3-30k keys read and biases `f` HIGH — the direction that removes
+        # the saving the instrument measures. Default True = product reads.
+        _record_reads: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -21440,7 +21447,12 @@ class TortoiseSDK:
                 read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
-            if _read_ledger is not None and rows and _read_ledger_enabled:
+            if (
+                _read_ledger is not None
+                and rows
+                and _read_ledger_enabled
+                and _record_reads
+            ):
                 # The ledger never changes the answer: it records the
                 # `(label, key)` of every row this read returned, and a ledger
                 # failure is swallowed inside the module (a measurement may not
@@ -23165,6 +23177,7 @@ class TortoiseSDK:
             _object_status = {}
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
+            _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
             exclude_status=exclude_status,
             include_terminal=include_superseded,
             # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
@@ -23179,6 +23192,7 @@ class TortoiseSDK:
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
+                _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
                 include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
@@ -23276,6 +23290,12 @@ class TortoiseSDK:
                 out = [by_id.get(i["id"], i) for i in out]
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
+        # #7983: the CANDIDATE pool above was not recorded (`_record_reads=False`)
+        # — these are the rows the caller actually receives, and they are what a
+        # read of this path means for `f`.
+        _ledger_record(
+            "Point", [i for i in out if i.get("entity_type") == "point"]
+        )
         if read_status_out is not None:
             # B6 (#3892): the composite is derived AFTER the pipeline, from the
             # rows the caller actually RECEIVES. The filters, the rerank and
@@ -27003,6 +27023,7 @@ class TortoiseSDK:
         hybrid = self.tortoise_fts_query(
             query, kind="AgentSession", entity_type="event",
             limit=candidate_limit,
+            _record_reads=False,  # #7983: a candidate pool, sliced before return
         )
         has_semantic = any(
             r.get("scores")

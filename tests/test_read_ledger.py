@@ -514,8 +514,12 @@ class TestTheReadFunnel:
             off = sdk.tortoise_fts_query("alpha", limit=5)
             monkeypatch.setenv(LEDGER_FLAG_ENV, "1")
             on = sdk.tortoise_fts_query("alpha", limit=5)
-            assert [r["id"] for r in off] == [r["id"] for r in on]
-            assert [r["content"] for r in off] == [r["content"] for r in on]
+            # The WHOLE row, not two fields: a hook that added, dropped or
+            # mutated any key would still pass an id/content comparison, and the
+            # claim this test names is byte-identity.
+            assert json.dumps(off, sort_keys=True, default=str) == json.dumps(
+                on, sort_keys=True, default=str
+            )
         finally:
             sdk.close()
 
@@ -809,8 +813,11 @@ def test_the_internal_scans_still_pass_record_reads_false():
     src = (Path(__file__).resolve().parents[1] / "tortoise" / "sdk.py").read_text()
     # Count CALL SITES, not mentions: the helper's comment names the flag too, and
     # a call site always has it alone at the start of its line.
+    # The three population scans pass it as a bare keyword; the funnel's three
+    # CANDIDATE-pool call sites carry a comment after the comma.
     sites = [ln for ln in src.splitlines() if ln.strip().startswith("_record_reads=False")]
-    assert len(sites) == 3, sites
+    assert len(sites) == 6, sites
+    assert src.count("_record_reads: bool = True") == 2, "query() and the FTS funnel"
     # `session_continuity` is a fourth internal scan, in its own module.
     other = (Path(__file__).resolve().parents[1] / "tortoise" / "session_continuity.py").read_text()
     assert "_record_reads=False" in other

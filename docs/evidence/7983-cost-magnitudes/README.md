@@ -167,14 +167,16 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   `unregistered` and leaves `f` without a denominator.
 - **read paths the ledger cannot count** — a NAMED set, deliberately not claimed exhaustive (an
   exhaustive list would date the moment a reader is added): **`recall_subgraph`** (graph expansion:
-  expander nodes, not keyed lookups); **`list_sources`, `diary_read`, `session_context`,
-  `list_dedup_candidates`, `list_drafts`, `belief_timeline`, `get_org_structure`** (caller-facing
-  `RETURN properties(n)` readers, five of them registered MCP tools, several returning `Point.id`, so
-  their rows WOULD be joinable and only the missing hook excludes them), plus **`list_sources`** (a
-  `Source` projection returning `url`/`sourceKind`/count — not a `properties(n)` reader, and the
-  single most joinable of the set); **the state and traversal
-  paths** (`traverse`, `recall_state`'s related-point/object readers, `get_historical_knowledge`);
-  **the FTS funnel's candidate POOL** (only the returned rows are counted); and **the
+  expander nodes, not keyed lookups); **`diary_read`, `session_context`, `list_dedup_candidates`,
+  `list_drafts`, `belief_timeline`, `get_org_structure`** (caller-facing `RETURN properties(n)`
+  readers — five of them registered MCP tools — several returning `Point.id`, so their rows WOULD be
+  joinable and only the missing hook excludes them); **`list_sources`** (a `Source` projection
+  returning `url`/`sourceKind`/count — not a `properties(n)` reader, and the single most joinable row
+  shape of the set); **the state and traversal paths** (`traverse`, `recall_state`'s related-point/
+  object readers, `get_historical_knowledge`); **a POOL read of the FTS funnel** — its internal pool
+  callers opt out (`_record_reads=False`) and `recall_state` records the rows it RETURNS, but a caller
+  that hands the funnel a `limit` far above what it surfaces is still a pool read, so this stays a
+  named hole; and **the
   `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and
   carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in
   a joinable coordinate. **Every one of them leaves a read out of the numerator, so every one biases

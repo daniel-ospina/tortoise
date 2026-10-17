@@ -155,6 +155,25 @@ MAX_LINE_BYTES = 4096
 _warned: set[str] = set()
 
 
+#: The events the LAST `_append_many` kept (i.e. not dropped for size or
+#: encoding). `record_rows` needs them to report how many of ITS callers' reads
+#: provably reached the file — the batch's line count alone cannot say that.
+_LAST_KEPT: list[dict[str, Any]] = []
+
+
+def _tail_ends_with_newline(target: Path) -> bool:
+    """Does the file end with a newline? (a crash can leave a torn last line)"""
+    try:
+        with open(target, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return True
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) == b"\n"
+    except OSError:  # pragma: no cover
+        return True
+
+
 def _tail_is_capped(target: Path) -> bool:
     """Does the file already END with a `capped` marker? (another process's)"""
     try:
@@ -260,8 +279,21 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
     if not records:
         return 0
     lines: list[str] = []
+    kept: list[dict[str, Any]] = []
     for record in records:
-        line = json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+        try:
+            line = json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+        except (TypeError, ValueError):
+            # A non-serialisable field (`nbytes` from an odd caller) is a lost
+            # EVENT, warned once — never an exception in the read path, which is
+            # what the broad handler downstream exists for. It has to be HERE
+            # because the handler starts at the file I/O.
+            _warn_once(
+                "encode",
+                "read ledger: dropping an unencodable %s event",
+                record.get("event") if isinstance(record, dict) else type(record).__name__,
+            )
+            continue
         if len(line.encode()) > MAX_LINE_BYTES:
             _warn_once(
                 "long-line",
@@ -273,8 +305,11 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
             )
             continue
         lines.append(line)
+        kept.append(record)
     if not lines:
         return 0
+    _LAST_KEPT.clear()
+    _LAST_KEPT.extend(kept)
     target: Path | None = None
     try:
         # RESOLUTION is inside the guard too: `ledger_path()` expands `~user` and
@@ -304,6 +339,17 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
             # truncated — the "truncated window read as a quiet one" failure.
             if not _tail_is_capped(target):
                 with open(target, "ab") as fh:
+                    # ⛔ A crash can leave a TORN final line with no newline.
+                    # Appending the marker onto it makes the marker unparseable
+                    # (so `fold` reports `capped: false` over a truncated file)
+                    # AND corrupts the marker itself — the module's headline
+                    # guarantee would fail exactly in the case it exists for.
+                    try:
+                        needs_nl = target.stat().st_size > 0 and not _tail_ends_with_newline(target)
+                    except OSError:  # pragma: no cover
+                        needs_nl = False
+                    if needs_nl:
+                        fh.write(b"\n")
                     fh.write(
                         (
                             json.dumps(
@@ -503,7 +549,14 @@ def record_rows(
     # provably recorded" — `_append_many` has already warned that the window is
     # INCOMPLETE, which is the fact a caller must not miss.
     written = _append_many(events, path=path)
-    return recorded if written == len(events) else 0
+    if not written:
+        return 0
+    # Exact, not "all or nothing": a batch may lose ONE event to the size bound
+    # and still land the rest, and a torn tail lands a PREFIX of the kept lines.
+    # Both are readable from the kept list, so the count is what provably landed
+    # rather than what was intended (which is what a caller logs).
+    landed = _LAST_KEPT[:written]
+    return sum(1 for e in landed if e.get("event") == EVENT_READ and e.get("key"))
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -794,6 +847,29 @@ def hot_fraction(folded: LedgerFold) -> HotFraction:
     )
 
 
+def _events_for_tenant(path: Path | str, tenant: str) -> int:
+    """How many events in the FILE name this tenant (reads count, stock or not).
+
+    `fold(tenant=...)` builds ROWS, and a tenant whose reads are all
+    `unresolved` — the FTS Subject/Object/Source legs, or a deployment with no
+    stock census — has NO rows while its reads are real. Asking the file is the
+    only way "a typo" and "reads recorded before the stock" stay distinguishable.
+    """
+    n = 0
+    try:
+        with open(Path(path), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line.strip() or "{}")
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("tenant") == tenant:
+                    n += 1
+    except OSError:  # pragma: no cover
+        return 0
+    return n
+
+
 def _main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -825,7 +901,12 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"no ledger at {target} — nothing has been recorded there")
         return 2
     folded = fold(a.ledger, window_days=a.window_days, tenant=a.tenant)
-    if a.tenant is not None and folded.lines_read and not folded.rows:
+    if (
+        a.tenant is not None
+        and folded.lines_read
+        and not folded.rows
+        and (_events_for_tenant(a.ledger, a.tenant) == 0)
+    ):
         # A typo'd `--tenant` is not an empty tenant: the file holds events for
         # SOMEONE, and reporting "0 keys / f n/a" over them is the same
         # typo-reads-as-a-zero-denominator failure the missing-file branch above

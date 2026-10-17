@@ -2054,7 +2054,11 @@ def tortoise_query(kind: str | None = None,
             eff_offset = (page - 1) * eff_limit
         return _safe(_get_org_sdk().paginated_query, kind, skip=eff_offset,
                      limit=eff_limit, include_retracted=include_retracted,
-                     **(filters or {}))
+                     # #7983: the SAME underscore drop as the plain path below,
+                     # so one filter dict cannot be a private switch here and a
+                     # property filter there.
+                     **{k: v for k, v in (filters or {}).items()
+                        if not str(k).startswith("_")})
     # #7983: a caller-supplied filter may not set the SDK's PRIVATE switches
     # (they start with `_`), or a remote agent could turn the read ledger off
     # with a query parameter — a caller-controlled switch on a measurement that
