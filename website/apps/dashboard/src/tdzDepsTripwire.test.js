@@ -100,7 +100,11 @@ export function depsArrays(source) {
       const value = node[key]
       if (value && typeof value === 'object') stack.push(value)
     }
-    if (node.type !== 'CallExpression') continue
+    // Babel emits OptionalCallExpression for `useMemo?.(…)`, so an
+    // equality test here silently MISSED those hooks — the fail-open
+    // direction, in the one guard that exists for a silent white-screen.
+    // No live instance today (no optional hook call in main.jsx).
+    if (!/CallExpression$/.test(node.type)) continue
     const callee = node.callee
     const name = callee?.type === 'Identifier' ? callee.name
       : callee?.type === 'MemberExpression' && !callee.computed && callee.property?.type === 'Identifier' ? callee.property.name
@@ -248,9 +252,11 @@ test('#3726: analyzer scans a deps array that follows a parenthesised call', () 
 })
 
 test('#3726: a NON-hook call taking an array literal is not a deps array', () => {
-  // The cheap fix — widening the anchor to `)` — would also match this and
-  // report `lateArr` as a TDZ violation, which is a false red. Anchoring on the
-  // hook arity cannot: `describe(...)` is not a hook.
+  // Guards the REJECTED design, not the shipped one: origin/main's `[}\]]`
+  // anchor does not match this either, so this test is green on both. It exists
+  // to stop a future fix from "solving" the missing shape by widening the
+  // character class to `)`, which would report `lateArr` here as a TDZ
+  // violation — a false red. Anchoring on the hook call cannot.
   const source = [
     'function App() {',
     '  describe(pick(ready), [lateArr])',
@@ -318,10 +324,11 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
 })
 
 test('#3726: a regex literal inside a hook body does not hide its deps array', () => {
-  // The regression a hand-rolled paren walk introduced: `/\[/` and `/\)/`
-  // desynchronised the depth counter, so the hook was dropped entirely and a
-  // TDZ violation in its deps array shipped silently. The AST cannot be
-  // confused by this.
+  // origin/main's anchor already caught these, so this is not evidence for the
+  // AST seam — it is a REGRESSION GUARD against returning to a character
+  // scanner: a hand-rolled paren walk desynchronised on `/\[/` and `/\)/`, so
+  // the hook was dropped entirely and a TDZ violation in its deps array shipped
+  // silently (measured on the branch's first commit).
   for (const body of ['const m = /\\[/g; go(m)', 'const m = /\\)/g; go(m)', 'go(/[)]/)']) {
     const source = [
       'function App() {',
@@ -336,8 +343,9 @@ test('#3726: a regex literal inside a hook body does not hide its deps array', (
 })
 
 test('#3726: a hook call written in a comment, a string or JSX text is not code', () => {
-  // Scanning raw text reported these as violations — a false red that would
-  // red the suite for documenting the very rule this file enforces.
+  // Also a regression guard rather than evidence for the AST seam (origin/main's
+  // anchor does not match these either): a text scan reported them as
+  // violations, which would red the suite for documenting the rule it enforces.
   const source = [
     'function App() {',
     '  // do NOT write useMemo(() => x, [lateComment]) here',
@@ -347,6 +355,22 @@ test('#3726: a hook call written in a comment, a string or JSX text is not code'
   ].join('\n')
   assert.deepEqual(findTdzDeps(source), [],
     'comments, string literals and JSX text are not hook calls')
+})
+
+test('#3726: an OPTIONAL hook call is still scanned', () => {
+  // Babel emits `OptionalCallExpression` for `useMemo?.(…)`. An equality test
+  // against 'CallExpression' silently dropped the hook — a fail-open miss in the
+  // guard whose whole job is to catch a silent white-screen. No live instance in
+  // main.jsx today; pinned so the fix cannot be removed quietly.
+  const source = [
+    'function App() {',
+    '  React.useMemo?.(() => 1, [lateOpt])',
+    '  const lateOpt = 1',
+    '  return null',
+    '}',
+  ].join('\n')
+  assert.deepEqual(findTdzDeps(source).map((v) => v.name), ['lateOpt'],
+    'a hook called with `?.` still has a deps array')
 })
 
 // ── the real file ───────────────────────────────────────────────────────────

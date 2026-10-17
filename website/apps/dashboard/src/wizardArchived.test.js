@@ -21,6 +21,72 @@ import { parseModule } from './wizardRenderedCopy.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
 
+// #3726 cycle 2: the two #3913 pins below were still written as source regexes,
+// so each covered two of the three JS string delimiters (`"`, `'` — not `` ` ``)
+// and the negative one silenty false-GREENed on a template literal or a quoted
+// key. Spelling every combination is an arms race; the AST settles it. Both
+// helpers read the one parse config the module already imports.
+function walkNodes(root, visit) {
+  const stack = [root]
+  while (stack.length) {
+    const node = stack.pop()
+    if (Array.isArray(node)) { stack.push(...node); continue }
+    if (!node || typeof node !== 'object' || typeof node.type !== 'string') continue
+    visit(node)
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue
+      const value = node[key]
+      if (value && typeof value === 'object') stack.push(value)
+    }
+  }
+}
+
+/** The static string value of a literal node in ANY spelling, else null. */
+function literalString(node) {
+  if (!node) return null
+  if (node.type === 'StringLiteral') return node.value
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0) return node.quasis[0].value.cooked
+  return null
+}
+
+/** A property KEY's name: `step`, `'step'`, `"step"` and `` `step` `` all read `step`. */
+function keyName(node) {
+  if (!node) return null
+  if (node.type === 'Identifier') return node.name
+  return literalString(node)
+}
+
+/** Every `step: <literal>` write in the source, whatever the key/value quoting. */
+function stepWrites(source) {
+  const out = []
+  walkNodes(parseModule(source), (node) => {
+    if (node.type === 'ObjectProperty' && keyName(node.key) === 'step') {
+      const value = literalString(node.value)
+      if (value !== null) out.push(value)
+    }
+    if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression') {
+      if (keyName(node.left.property) === 'step') {
+        const value = literalString(node.right)
+        if (value !== null) out.push(value)
+      }
+    }
+  })
+  return out
+}
+
+/** Every `forkId !== <literal>` comparison, whatever the literal's quoting. */
+function forkIdComparisons(source) {
+  const out = []
+  walkNodes(parseModule(source), (node) => {
+    if (node.type !== 'BinaryExpression') return
+    if (!['!==', '!='].includes(node.operator)) return
+    if (node.left.type !== 'Identifier' || node.left.name !== 'forkId') return
+    const value = literalString(node.right)
+    if (value !== null) out.push(value)
+  })
+  return out
+}
+
 test('legacy #1643 wizard render is gated behind the ARCHIVED flag (never rendered)', () => {
   // The legacy wizard's gate must be the archived flag, not the live path.
   assert.ok(/LEGACY_WIZARD_ARCHIVED\s*&&\s*welcomeOriented\s*&&/.test(src),
@@ -34,10 +100,13 @@ test('archived marker comment present (rollback drill reference)', () => {
 })
 
 test('legacy wizard labels still exist in source (archived-not-deleted)', () => {
-  // the legacy labels array uses JS-escaped apostrophes (\')
+  // #3726: match the LABEL, not its escape spelling. Comparing `You\\'re set`
+  // hard-codes "the author wrote this in single quotes" — a re-quote to double
+  // quotes needs no backslash and the pin false-redded on a pure formatting edit.
+  const normalised = src.replace(/\\'/g, "'")
   for (const label of ["Connect your tool", "Memory sources",
-                       "Your agent\\'s toolkit", "Seed your graph", "You\\'re set"]) {
-    assert.ok(src.includes(label), `legacy label archived: ${label}`)
+                       "Your agent's toolkit", "Seed your graph", "You're set"]) {
+    assert.ok(normalised.includes(label), `legacy label archived: ${label}`)
   }
 })
 
@@ -54,22 +123,24 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   // #3726: quote-agnostic AND anchored. `indexOf` returning -1 used to make
   // `src.slice(-1, …)` a one-character window, so every assertion inside it
   // passed vacuously — a re-quote turned these guards off instead of reddening.
-  const h1Open = src.search(/<h1 className=["']welcome-title["']>/)
+  const h1Open = src.search(/<h1 className=(?:"welcome-title"|'welcome-title'|\{\s*["']welcome-title["']\s*\})>/)
   assert.notEqual(h1Open, -1, 'the live wizard <h1> anchor must resolve')
-  const h1 = src.slice(h1Open, src.indexOf('</h1>', h1Open))
+  const h1End = src.indexOf('</h1>', h1Open)
+  assert.notEqual(h1End, -1, 'the </h1> close must resolve (an unresolved end makes the window the rest of the file)')
+  const h1 = src.slice(h1Open, h1End)
   assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })'),
     'the live wizard <h1> names the stage through wizardStageLabel (the org-holding, paused, #3428 not-connected and cycle-4 build-fork overrides are pinned by the unit tests)')
   // #3726: the same `indexOf`-is--1 hazard on the NEGATIVE side is worse — a
   // re-quote made the window empty, so this guard reported "no in-card label"
   // while no longer looking at the card at all. Anchor first, then test.
-  const headOpen = src.search(/<div className=["']welcome-head["']>/)
+  const headOpen = src.search(/<div className=(?:"welcome-head"|'welcome-head'|\{\s*["']welcome-head["']\s*\})/)
   assert.notEqual(headOpen, -1, 'the welcome-head card anchor must resolve (a negative pin over an empty window is a false green)')
   const headEnd = src.indexOf('LEGACY_WIZARD_ARCHIVED &&', headOpen)
   assert.notEqual(headEnd, -1, 'the archived-block boundary must resolve')
   assert.ok(!/className=["']wizard-title["']/.test(src.slice(headOpen, headEnd)),
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // the archived block's title still reads wizardSteps (kept for rollback)
-  assert.ok(/wizard-title">\{wizardSteps\[wizardStep\]\}/.test(src),
+  assert.ok(/className=["'`]wizard-title["'`]\s*>\s*\{wizardSteps\[wizardStep\]\}/.test(src),
     'archived legacy title retained (wizardSteps)')
 })
 
@@ -103,11 +174,11 @@ test('review P1 / #3913: the build fork handler writes NO checkpoint step (the c
   // author use" is not a behaviour), while the checkpoint pin beside it stayed
   // GREEN — the same hard-coding in the negative form is a false green, because
   // the pattern simply stops matching the writer it exists to catch.
-  assert.ok(/if \(forkId !== ['"]build['"]\)/.test(src),
+  assert.deepEqual(forkIdComparisons(src), ['build'],
     'handleWizardFork still branches on the build pick (non-build picks advance, build stays for the card)')
   assert.ok(src.includes('Build catalog'),
     'the build catalog CARD still renders (only the write was removed)')
-  assert.ok(!/step:\s*['"]catalog-presented['"]/.test(src),
+  assert.ok(!stepWrites(src).includes('catalog-presented'),
     'no catalog-presented checkpoint anywhere in main.jsx — #3913 removed the writer')
 })
 
