@@ -31,7 +31,12 @@ from fastapi.testclient import TestClient
 
 from tests._github_mock import MockGitHubTransport, gh_issue
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered, require_within, transport_wait_bound_s
+from tests._verdict import (
+    require_answered,
+    require_within,
+    transport_wait_bound_s,
+    verdict_client,
+)
 from tortoise.hosted_api import (
     _ALLOWED_STATE_KEYS,
     _INDEX_JOBS,
@@ -111,7 +116,7 @@ def client(tmp_path):
             "max_sessions": None,
         }
         _INDEX_JOBS.clear()
-        with TestClient(app) as tc:
+        with verdict_client(app) as tc:
             ctx.tc = tc
             yield ctx
             # Drain background index jobs spawned during THIS test's requests
@@ -1748,3 +1753,35 @@ def test_dedup_script_resolve_uri_honors_explicit_uri(monkeypatch):
     assert script._resolve_uri(script.DEFAULT_URI) == script.DEFAULT_URI
     # env-only → env wins
     assert script._resolve_uri("") == "docker://:x@localhost:9999/other"
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client SEAM.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``GET /v1/onboarding/state``
+    is the route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+
+    The file's OTHER eleven plain clients are deliberately outside this sweep:
+    they are ``httpx.AsyncClient(transport=<MockGitHubTransport>)`` (the real
+    GitHub API stub), not ASGI clients over ``app`` — no ``WaitBoundMiddleware``
+    sits on that path, so no request bound to them can be a refusal. Named in
+    ``tests/test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS``.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("GET", "/v1/onboarding/state")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.get(route[1]).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get(route[1])
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /v1/onboarding/state answered" in message
