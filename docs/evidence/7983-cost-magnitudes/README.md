@@ -1,5 +1,5 @@
 ---
-title: "#7983 — the two magnitudes §17.4 needed: `f` and `rho`, measured"
+title: "#7983 — the two magnitudes §17.4 needed: `f` and `rho` — what is measured, what is not"
 type: evidence
 domain: platform
 doc_status: final
@@ -13,9 +13,9 @@ aboutObjects: "#7983, #7954, #7950, STORAGE-ARCHITECTURE.md §17.4, Postgres rec
 
 **Measured at:** `measure/7983-hot-fraction-and-rho@459f22912edf4893fb70144d42e97df389479ed5`
 on **2026-10-17**. Everything below is measured on that tree; the code this lane adds
-(`tortoise/read_ledger.py` plus the `_ledger_record` hook in the four row-returning read paths —
-`tortoise_fts_query`, `query`, `get_point`, `query_points_by_tag`; graph expansion is NOT hooked,
-see #8877) is the only change.
+(`tortoise/read_ledger.py` plus the `_ledger_record` hook at `query`, `paginated_query`, `get_point`
+and `query_points_by_tag`, the FTS funnel recording inline — five read paths; graph expansion and
+three direct-Cypher readers are NOT hooked, see #8877) is the only change.
 
 **The design being measured:** `docs/architecture/STORAGE-ARCHITECTURE.md` **§17.4** — the two-store
 cost model whose closed form is `1 / (f + (1 + rho) / ratio)`. It is complete except for two
@@ -31,8 +31,8 @@ magnitudes, and this issue is those two magnitudes.
 
 | quantity | measurable at `459f22912`? | what this lane did | measured value |
 |---|---|---|---|
-| **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py`, hooked into the four row-returning product read paths) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 2.07%** over 200 proxy queries — **a proxy mix, not a tenant** |
-| **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 3.54** at the doc's 1,000-tenant density (**88.5** at its 40-tenant cache density) — the term that decides it is TENANT DENSITY, not any per-read cost |
+| **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py`, hooked into five row-returning read paths) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 8.64%** over 200 proxy queries — **a proxy mix, not a tenant** |
+| **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 3.54** at the doc's 1,000-tenant density (**88.5** at its 40-tenant cache density) — ⚠️ **the disk line is measured, the compute+plan lines are the doc's DENSITY ASSUMPTIONS**, so `rho` is an assumption over a measurement, and only the disk line is a value |
 
 ---
 
@@ -58,11 +58,11 @@ not achievable from the query surface; what was missing is a **persisted fact**,
 
 ```
 graph            tortoise (self-hosted, docker://:@localhost:16379/tortoise)
-stock            10,435 keys / 21,065 nodes   (Point 10,374 · Source 60 · Event 1 · Subject/Object/Session 0)
-read events      2,000   (200 queries × 10 results — a PROXY mix, built from the graph's own Point contents)
-distinct read    216 keys  ⇒ f = 2.07%
-never read       10,219 keys = 17.09 MB   (bytes attributed at §17.4.2's measured 1,672 B/resident node)
-nodes before/after  21,065 / 21,065       (the probe wrote nothing)
+stock            10,457 keys / 21,110 nodes   (Point 10,396 · Source 60 · Event 1 · Subject/Object/Session 0)
+read events      2,000   (200 queries × 10 results — a PROXY mix, sampled at random from a 2,000-row pool)
+distinct read    904 keys  ⇒ f = 8.64%
+never read       9,553 keys = 15.97 MB   (bytes attributed at §17.4.2's measured 1,672 B/resident node)
+nodes before/after  21,110 / 21,110       (the probe wrote nothing)
 ```
 
 ⚠️ **This is an instrument exercise, not `f` for the cost model.** The mix is a proxy, the window is
@@ -99,41 +99,48 @@ would overstate the row by its dominant column.
 container, default settings) — an accounting bench, not a vendor benchmark.**
 
 ```
-disk      = $0.125 × 0.1916 GB               = $0.0240 /tenant/month   (MEASURED; the doc used $0.0187 from the CACHE's 0.1499 GB)
+disk      = $0.125 × 0.1916 GB               = $0.0240 /tenant/month   (MEASURED GB × the plan's AVERAGE rate; the plan includes 8 GB/project ≈ 41.8 tenants of this stock, so the MARGINAL byte is $0 until then — rho is an average-cost ratio. The doc used $0.0187 from the CACHE's 0.1499 GB)
 compute   = $60 ÷ 1,000                      = $0.060                  (density assumption)
 plan      = $25 ÷ 1,000                      = $0.025                  (density assumption)
 IOPS      = $0   (4 blocks/miss ⇒ the step is 18.75 cold misses/s/tenant at 40 tenants, 0.75 at 1,000)
-egress    = $0   ONLY below the project's 250 GB allowance: 1,286 B/miss ⇒ 194,476,857 misses/month SHARED by the tenants (from the unrounded 1,285.5 B median; the row above rounds it to 1,286 B)
+egress    = $0   ONLY below the project's 250 GB allowance: 1,286 B/miss ⇒ 194,476,857 misses/month SHARED by the tenants (the log divides by the UNROUNDED 1,285.5 B median, which the row above rounds to 1,286 B: 250 GB ÷ 194,476,857 = 1,285.5 B)
                   ⇒ 1.9 misses/s/tenant at 40 tenants, 0.075 at 1,000 — the FIRST line to leave $0; each miss above it adds $1.2e-7
                   of egress and RAISES rho
 rho       = (0.060 + 0.025) ÷ 0.0240         = 3.54
 
 ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
-            1 GB STARTUP cache, 1,000 tenants : $14.59 ÷ $0.0240 = 609  ⇒ break-even f 99.25%, f=1 → 0.993×
-            8 GB PRO cache,   40 tenants      : $ 8.75 ÷ $0.0240 = 365  ⇒ break-even f 75.5%,  f=1 → 0.803×
+            (the division uses the UNROUNDED lines, so it re-derives from the log)
+            1 GB STARTUP cache, 1,000 tenants : $14.5948 ÷ $0.023955 = 609 ⇒ the split pays BELOW f = 99.25%; f=1 → 0.993×
+            8 GB PRO cache,   40 tenants      : $ 8.7469 ÷ $0.023955 = 365 ⇒ the split pays BELOW f = 75.5%;  f=1 → 0.803×
+            (a LOWER break-even is the HARDER bar: at 40 tenants a quarter of the cache must be cold, at 1,000 tenants 0.75%)
 ```
 
 **Two findings the model needs:**
 
-1. **The record's footprint is 1.28× the cache's for the SAME nodes** (0.1916 GB vs 0.1499 GB),
+1. **The record's footprint is 1.28× the cache's for the SAME node COUNT** (0.1916 GB vs 0.1499 GB),
    because the record stores the 384-d vector as `jsonb` decimal text where the cache stores
-   `vecf32` — the encoding gap §5.2 measured on the journal (~4×), now measured on the record. The
+   `vecf32` — the encoding gap §5.2 measured on the journal (~4×), now measured on the record.
+   ⚠️ **Indicative, not a per-node ratio:** the bench plants 89,701 `:Point`s while the cache's
+   1,672 B/node is a blend over the live graph's real mix (~half `GraphEvent`). The closed form uses
+   dollars on both lines and never divides one node count by the other. The
    planted vector used 6 decimal places (~9.5 chars/float) where §5.2 measured the journal's real
    encoding at 21.9 chars/float, so **0.1916 GB is a LOWER BOUND at that column type**.
 2. **`rho` is dominated by TENANT DENSITY, not by any per-read cost.** At §17.4.3's 40-tenant
    density BOTH density-scaled lines move — compute `$60 ÷ 40 = $1.50` and plan `$25 ÷ 40 = $0.625`
    ⇒ **`rho` = (1.50 + 0.625) ÷ 0.0240 = 88.5**; at 1,000 tenants the same two lines give **3.54**.
-   ⚠️ **The basis must be the same on three lines, not two** — a density, its own cache tier, and the
-   measured disk line. Pairing each density with ITS cache rate gives `ratio` **609** (1 GB STARTUP,
-   1,000 tenants) and **365** (8 GB PRO, 40 tenants); the closed form then gives break-even `f`
-   **99.25%** and **75.5%**, and `f = 1` multipliers **0.993×** and **0.803×**. (Dividing a measured
-   `rho` by §17.4.4's pre-measurement `778.7` mixes a price with a quantity: 778.7 is a RATE ratio,
-   valid only while the record occupies the cache's own 0.1499 GB.) The coherent pair is 25× apart,
-   and no per-read measurement can resolve it: 4 blocks and 30–92 µs per miss do not make a compute
-   tier. ⚠️ **The egress allowance is shared by the project**, so it holds only up to 1.9 misses/s/tenant
-   at 40 tenants (0.075 at 1,000) — a real mix can exceed that and raise `rho`. **Neither a floor nor a
-   ceiling:** the encoding bound and the miss-rate bound point opposite ways, and the density moves it
-   25×; the figures are quotable only with their bases attached.
+   ⚠️ **Three bases, not two** — a density, its own cache tier, and the measured disk line. Pairing
+   each density with ITS cache rate gives `ratio` **609** (1 GB STARTUP, 1,000 tenants) and **365**
+   (8 GB PRO, 40 tenants); `multiplier = 1/(f + (1+rho)/ratio)` then gives:
+   **`f` below 99.25% ⇒ the split pays at 1,000 tenants** (only 0.75% of the cache must be cold) and
+   **`f` below 75.5% at 40 tenants** (a quarter of it must be) — the 40-tenant case is the HARDER one.
+   `f = 1` is 0.993× / 0.803× in both, so at today's keep-everything policy nothing is saved.
+   (Dividing the measured DISK LINE — the only part of `rho` that is a value, since compute and plan are density assumptions — by §17.4.4's pre-measurement `778.7` mixes a price with a quantity:
+   778.7 is a RATE ratio, valid only while the record occupies the cache's own 0.1499 GB.) The
+   coherent pair is 25× apart and no per-read measurement can resolve it: 4 blocks and 30–92 µs
+   per miss do not make a compute tier. ⚠️ **The egress allowance is shared by the project**, so it
+   holds only up to 1.9 misses/s/tenant at 40 tenants (0.075 at 1,000) — a real mix can exceed that
+   and raise `rho`. **Neither a floor nor a ceiling:** the encoding bound and the miss-rate bound
+   point opposite ways, and the density moves it 25×; the figures are quotable only with their bases.
 
 ## 4. What is still unmeasured, and the seam it needs
 
@@ -145,6 +152,16 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   §17.4.2's measured unit, not each key's own width. The seam is the record's row widths
   (`pg_column_size`) registered as stock at projection time — **a schema-shaped change, deliberately
   not taken here.**
+- **stock registration by the product**: the ledger learns a key exists only when a caller says so
+  (today, the census probe). Enabling `TORTOISE_READ_LEDGER` without a stock census makes every read
+  `unregistered` and leaves `f` without a denominator.
+- **three read paths the ledger cannot count**, all biasing `f` LOW (so they flatter the split):
+  **graph expansion** (`recall_subgraph` returns expander nodes, not keyed lookups); **the state and
+  traversal paths** (`traverse`, `recall_state`'s related-point/object readers,
+  `get_historical_knowledge`) plus the FTS funnel's candidate POOL (only the returned rows are
+  counted); and **the `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are
+  `SearchResult.to_dict()` and carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in
+  `unresolved` rather than in a joinable coordinate. All three are **#8877**.
 
 ---
 

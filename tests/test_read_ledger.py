@@ -42,8 +42,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -292,6 +295,93 @@ def test_an_operator_is_recorded_as_a_point():
         assert read_ledger.label_for_entity_type(et) == et.capitalize()
 
 
+@pytest.fixture
+def hooked_sdk(ledger, monkeypatch):
+    """An SDK whose store is a stub, with the ledger flag ON.
+
+    The three structural read paths are ordinary SDK methods over
+    `proj.g.query(...).result_set`, so a stub projection is enough to prove the
+    HOOK fires — which is the part that rots silently if a path is refactored.
+    """
+    from tortoise import sdk as sdk_module
+
+    class _Res:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    class _Graph:
+        rows: ClassVar[list] = []
+
+        def query(self, cypher, params=None, **kwargs):
+            if "count(n)" in cypher:
+                return _Res([[2]])
+            return _Res([(dict(row),) for row in self.rows])
+
+    class _Proj:
+        g = _Graph()
+
+    monkeypatch.setenv("TORTOISE_READ_LEDGER", "1")
+    inst = sdk_module.TortoiseSDK.__new__(sdk_module.TortoiseSDK)
+    monkeypatch.setattr(inst, "_get_proj", lambda: _Proj, raising=False)
+    monkeypatch.setattr(inst, "_expand_kind", lambda kind: [kind], raising=False)
+    return inst, _Graph
+
+
+def test_every_row_returning_read_path_feeds_the_ledger(hooked_sdk):
+    """A hook that is not exercised is a hook that will be lost in a refactor.
+
+    Each of `query()`, `get_point()` and `query_points_by_tag()` returns Point
+    rows, so each must record exactly ONE read per returned key — no more (a
+    double record inflates `f`) and no fewer (a missed record inflates the
+    never-read mass, which flatters the split).
+    """
+    inst, graph = hooked_sdk
+    # The keys must exist as STOCK first, or every read is (correctly) reported
+    # as `unregistered` and there is no row to count on.
+    for key in ("p1", "p2", "p3", "p7", "p8", "p9"):
+        record_stock("Point", key, nbytes=100)
+
+    graph.rows = [{"id": "p1"}, {"id": "p2"}]
+    got = inst.query()
+    assert [r["id"] for r in got] == ["p1", "p2"]
+
+    graph.rows = [{"id": "p3"}]
+    assert inst.paginated_query()["results"] == [{"id": "p3"}]
+
+    graph.rows = [{"id": "p7"}]
+    assert inst.get_point("p7") == {"id": "p7"}
+
+    graph.rows = [{"id": "p8"}, {"id": "p9"}]
+    inst.query_points_by_tag("t")
+
+    folded = fold()
+    counts = {k[2]: row.read_count for k, row in folded.rows.items()}
+    # read_count == 1, not >= 1: a DOUBLE record would inflate `f`.
+    assert counts == {"p1": 1, "p2": 1, "p3": 1, "p7": 1, "p8": 1, "p9": 1}
+    assert folded.unresolved_reads == 0
+
+
+def test_the_ledger_module_is_not_imported_when_the_flag_is_off():
+    """ "Off by default" must mean NOT IMPORTED, not "imported and idle".
+
+    Checked in a subprocess because any earlier test may have imported it: the
+    claim is about a deployment that never sets the flag, not about this process.
+    """
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, tortoise.sdk; print('tortoise.read_ledger' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TORTOISE_READ_LEDGER": ""},
+        cwd=str(ROOT),
+        check=True,
+    )
+    assert out.stdout.strip() == "False", out.stderr
+
+
 def test_label_is_part_of_the_coordinate(ledger):
     """One name, two labels, two rows — the `declared_key` rule, for `f`."""
     record_stock("Subject", "acme", nbytes=10)
@@ -437,3 +527,38 @@ def test_the_cli_reports_f_with_its_window(ledger, capsys):
     assert payload["f_keys"] == pytest.approx(0.5)
     assert payload["zero_read_bytes"] == 100
     assert payload["window_started"] is None
+
+
+def test_a_missing_ledger_is_not_an_empty_reading(tmp_path, capsys):
+    """`stock 0 keys` from a path typo reads exactly like "nothing registered"."""
+    rc = read_ledger._main(["--ledger", str(tmp_path / "absent.jsonl")])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "no ledger at" in out
+    assert "stock" not in out
+
+
+def test_a_torn_line_is_counted_and_reported(ledger, capsys):
+    """A half-written line is a LOST EVENT, not a quiet one."""
+    record_stock("Point", "p1", nbytes=100)
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write('{"at": "2026-10-17T00:00:00+00:00", "event": "st')  # torn
+    rc = read_ledger._main(["--ledger", str(ledger)])
+    assert rc == 0
+    assert "1 unreadable line(s) skipped" in capsys.readouterr().out
+
+
+def test_a_second_cap_on_a_rotated_ledger_still_says_so(ledger, monkeypatch):
+    """Rotation must not silence the marker: the SECOND cap has to report too.
+
+    Otherwise a rotated ledger that fills again stops recording with
+    `capped: false` — a truncated window reported as a quiet one.
+    """
+    monkeypatch.setattr(read_ledger, "_max_bytes", lambda: 400)
+    for i in range(50):
+        read_ledger.record_stock("Point", f"p{i}", nbytes=10, path=ledger)
+    assert fold(ledger).capped is True
+    ledger.write_text("")  # rotate
+    for i in range(50):
+        read_ledger.record_stock("Point", f"q{i}", nbytes=10, path=ledger)
+    assert fold(ledger).capped is True, "the second cap must write its own marker"

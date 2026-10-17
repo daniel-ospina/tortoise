@@ -59,10 +59,13 @@ file; the default sits next to the embedded store (`resolve_db_path()`'s
 directory) so one instance's ledger cannot be confused with another's.
 
 Format: JSONL, one line per event, appended with a single `O_APPEND` write **per
-BATCH** (the funnel hands over a whole returned row-set) and kept under 4 KiB per
-line, so several processes may append to one ledger without interleaving. One
-write per event was measured at ~610 µs (open/write/close/mkdir/stat) — 5 ms on a
-10-row read — which is the instrument slowing the path it measures. Created
+BATCH** (the funnel hands over a whole returned row-set — one write, not one per
+event: per-event open/write/close/mkdir/stat measured ~610 µs, i.e. 5 ms on a
+10-row read, which is the instrument slowing the path it measures). `O_APPEND`
+gives each write an atomic end-of-file, so concurrent appenders add whole batches
+and never seek into each other's bytes. Individual LINES are kept under 4 KiB so
+a torn write (a crash mid-`write`) damages at most one record — and a damaged
+line is COUNTED (`lines_skipped`) and reported, never silently dropped. Created
 `0600`: the ledger carries tenant identifiers (`Subject.name`, `Source.url`), so
 it must not be world-readable just because the umask says so.
 """
@@ -137,7 +140,10 @@ KEY_FIELDS: dict[str, str] = {
     "Session": "id",
 }
 
-#: A line longer than this could interleave with a concurrent appender.
+#: A line longer than this is dropped. The bound is NOT what prevents interleaving
+#: — one `O_APPEND` write per batch is — it keeps a single record's line inside a
+#: page, so a write torn by a crash damages one record at most, and that record is
+#: COUNTED (`lines_skipped`) rather than lost silently.
 MAX_LINE_BYTES = 4096
 
 _warned: set[str] = set()
@@ -230,8 +236,8 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
             _warn_once(
                 "long-line",
                 "read ledger: dropping an over-long %s events line "
-                "(a line over %d B can interleave with a concurrent "
-                "appender)",
+                "(over %d B: a record that large can be torn by a crash, so it "
+                "is not written)",
                 record.get("event"),
                 MAX_LINE_BYTES,
             )
@@ -258,7 +264,11 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # whose first report says f = 0: the measurement-window trap this module
         # exists to refuse.
         if size >= cap:
-            if key not in _capped and not _tail_is_capped(target):
+            # The marker decision reads the FILE's tail, never a process latch: a
+            # rotated ledger that caps AGAIN must say so again, or the second stop
+            # is silent and `fold()` reports `capped: false` over a file it
+            # truncated — the "truncated window read as a quiet one" failure.
+            if not _tail_is_capped(target):
                 with open(target, "ab") as fh:
                     fh.write(
                         (
@@ -606,10 +616,11 @@ class HotFraction:
     def f_bytes_qualified(self) -> bool:
         """Is `f_bytes` a reading of the READS, or only of the sized subset?
 
-        False when any READ key carries no `bytes`: the ratio then omits hot
-        bytes it cannot see, which reads as "less was read" than the truth — the
-        flattering direction. The number is still reported (it is a lower bound),
-        and this flag is what stops it being quoted as `f`.
+        False when any READ key carries no `bytes`. Those keys leave the
+        numerator AND the denominator, so the subset ratio is NOT a bound in
+        either direction — it is higher than the truth if the unsized keys are
+        mostly unread, lower if they are mostly read. The flag exists to stop the
+        number being QUOTED as `f`, not to label it conservative.
         """
         return self.bytes_known_read_keys == self.read_keys
 
@@ -690,9 +701,28 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
-    f = hot_fraction(fold(a.ledger, window_days=a.window_days))
+    target = Path(a.ledger) if a.ledger else ledger_path()
+    if not target.exists():
+        # A missing file is not a zero reading: "stock 0 keys" from a path typo
+        # reads exactly like "nothing is registered", which is the confusion this
+        # instrument exists to remove.
+        print(f"no ledger at {target} — nothing has been recorded there")
+        return 2
+    folded = fold(a.ledger, window_days=a.window_days)
+    f = hot_fraction(folded)
     if a.json:
-        print(json.dumps(f.as_dict(), indent=2))
+        # `lines_skipped` / `lines_read` are fold-level facts, not `f`'s: a torn
+        # line is a LOST event, so they belong beside the reading they qualify.
+        print(
+            json.dumps(
+                {
+                    **f.as_dict(),
+                    "lines_read": folded.lines_read,
+                    "lines_skipped": folded.lines_skipped,
+                },
+                indent=2,
+            )
+        )
         return 0
     print(f"ledger           : {a.ledger or ledger_path()}")
     print(
@@ -713,7 +743,8 @@ def _main(argv: list[str] | None = None) -> int:
     if fb is not None:
         cov = f.bytes_known_fraction or 0.0
         qualifier = (
-            "; ⚠️ NOT all READ keys carry bytes, so this is a LOWER BOUND"
+            "; ⚠️ NOT all READ keys carry bytes — this is the ratio over the sized"
+            " subset only, not a bound in either direction"
             if not f.f_bytes_qualified
             else ""
         )
@@ -726,6 +757,11 @@ def _main(argv: list[str] | None = None) -> int:
         print(
             f"⚠️ reads outside the denominator: {f.unregistered_reads} unregistered, "
             f"{f.unresolved_reads} with no key — f undercounts the numerator by these"
+        )
+    if folded.lines_skipped:
+        print(
+            f"⚠️ {folded.lines_skipped} unreadable line(s) skipped of {folded.lines_read:,} read "
+            "— a torn line is a lost event, so the window is INCOMPLETE"
         )
     if f.capped:
         print(

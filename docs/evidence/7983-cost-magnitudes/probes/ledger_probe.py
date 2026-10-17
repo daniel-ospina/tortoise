@@ -106,13 +106,16 @@ def main() -> int:
         total_stock = sum(stock.values())
 
         # ── the READ MIX (a PROXY): one query per sampled Point ──────────────
-        sampled = g.query(
+        # A CANDIDATE POOL, then a real random sample of it: `LIMIT n` before a
+        # shuffle is a no-op — it takes the first n rows in storage order, so the
+        # "sample" would be whatever the graph happened to return first.
+        pool = g.query(
             f"MATCH (n:Point) WHERE n.id IS NOT NULL AND n.content IS NOT NULL "
-            f"RETURN n.content LIMIT {a.queries}").result_set
+            f"RETURN n.content LIMIT {a.queries * 10}").result_set
         random.seed(7983)
-        random.shuffle(sampled)
+        sampled = random.sample(pool, min(a.queries, len(pool)))
         ran = 0
-        for (content,) in sampled[: a.queries]:
+        for (content,) in sampled:
             words = [w for w in str(content).split() if len(w) > 3][:4]
             if not words:
                 continue

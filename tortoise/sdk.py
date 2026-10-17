@@ -5179,8 +5179,16 @@ def _read_stored_number(value, default):
 def _ledger_record(label: str, rows: list[dict]) -> None:
     """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
 
-    Every product read path that returns ROWS calls this with the label those
-    rows come from, so the ledger sees all of them — not just the FTS funnel.
+    Called by the row-returning read paths that have a known LABEL: `query()`,
+    `paginated_query()`, `get_point()` and `query_points_by_tag()`. The FTS
+    funnel records its rows through the same module INLINE (it resolves the
+    label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path: `traverse`,
+    `recall_state`'s related readers and `get_historical_knowledge` read by
+    direct Cypher and call nothing here, and the FTS funnel records only its
+    RETURNED rows, not its candidate pool — so a deployment serving those paths
+    reads an `f` that is too LOW (which flatters the split). #8877 carries the
+    wiring; the coverage gaps are named in STORAGE-ARCHITECTURE.md §17.4.6.
+
     OFF by default and never imported when off: one env lookup (the #4097 truthy
     contract), and a ledger failure is swallowed inside the module (a measurement
     may not break the thing it measures).
@@ -13009,7 +13017,9 @@ class TortoiseSDK:
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)",
             params=params,
         ).result_set
-        return [r[0] for r in rows]
+        points = [r[0] for r in rows]
+        _ledger_record("Point", points)  # #7983: a product READ of these keys
+        return points
 
     def paginated_query(self, kind: str | None = None,
                         skip: int = 0, limit: int = 20,
