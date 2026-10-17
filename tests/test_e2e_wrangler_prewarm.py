@@ -181,11 +181,70 @@ _ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
 _ANSI_OCTAL = re.compile(r"[0-7]{1,3}")
 _ANSI_HEX = re.compile(r"[0-9A-Fa-f]{1,2}")
 _ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{1,4}"), 8: re.compile(r"[0-9A-Fa-f]{1,8}")}
-#: A NUL-producing escape contributes nothing AND ends its `$'…'` segment: the
-#: segment is a C string, so the rest of it is discarded and what follows the
-#: closing quote is adjacent to what preceded the NUL.
-def _kept(code: int) -> str:
-    return "" if code == 0 else chr(code)
+def _ansi_translate(body: str) -> str:
+    r"""What bash puts in the word for a `$'…'` BODY.
+
+    A `$'…'` body is a C string, so a NUL TRUNCATES it: everything after the NUL is
+    discarded and the characters on either side of it are adjacent in the argument
+    (`$'a\0b'c` is `ac`). bash translates an escape, OMITS one whose character is
+    NUL — and any `\U` at or above 0x80000000, omitted WITHOUT cutting the body
+    because it is not a NUL — and keeps LITERAL the ones it does not know, an
+    out-of-range `\u`/`\U`, and a surrogate. Two classes bash keeps literal are
+    translated here instead (`\u`/`\U` at or above 0x80, and `\c?` — bash 0x7F,
+    here 0x1F), which can only over-report: neither yields a character a spec can
+    hold, so the word stops being the pin either way.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        octal = _ANSI_OCTAL.match(body, i + 1)
+        if octal:
+            code = int(octal.group(0), 8) & 0xFF
+            if code == 0:
+                return "".join(out)
+            out.append(chr(code))
+            i = octal.end()
+            continue
+        if nxt == "x":
+            m = _ANSI_HEX.match(body, i + 2)
+            if m:
+                code = int(m.group(0), 16)
+                if code == 0:
+                    return "".join(out)
+                out.append(chr(code))
+                i = m.end()
+                continue
+        elif nxt in ("u", "U"):
+            m = _ANSI_UNICODE[4 if nxt == "u" else 8].match(body, i + 2)
+            if m:
+                code = int(m.group(0), 16)
+                if code >= 0x80000000:
+                    i = m.end()  # omitted, and NOT a NUL: the body continues
+                    continue
+                if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                    out.append(body[i:m.end()])  # bash keeps it literal
+                elif code == 0:
+                    return "".join(out)
+                else:
+                    out.append(chr(code))
+                i = m.end()
+                continue
+        elif nxt == "c" and i + 2 < len(body):
+            code = ord(body[i + 2]) & 0x1F
+            if code == 0:
+                return "".join(out)
+            out.append(chr(code))
+            i += 3
+            continue
+        out.append(_ANSI_C[nxt] if nxt in _ANSI_C else "\\" + nxt)
+        i += 2
+    return "".join(out)
 
 
 def _shell_words(text: str) -> list[str]:
@@ -212,11 +271,6 @@ def _shell_words(text: str) -> list[str]:
     out: list[str] = []
     quote = ""
     comment = False
-    #: A `$'…'` SEGMENT is a C string: the FIRST NUL ends it, so everything up to
-    #: the closing quote is DISCARDED — bash's `$'a\0b'c` is `ac` (measured on bash
-    #: 5). Keeping that tail stitched a pin out of `4` and `.127.0` while bash ran
-    #: `wrangler@4`, and hid `wran$'\0abc'gler@4`, which bash runs.
-    ansi_cut = False
     # `started` is NOT `out`: an empty quoted word (`""#tok`) still STARTS a word,
     # so shell reads `#tok` and not a comment. Using `out` let a `#` that shell
     # keeps be dropped, and the pin read out of a word that is not the pin.
@@ -252,81 +306,27 @@ def _shell_words(text: str) -> list[str]:
             else:
                 out.append(ch)
         elif quote == "$'":
-            # ANSI-C quoting: the escapes are TRANSLATED, because one of them can
-            # spell the token's `@` (see `_ANSI_C`). An escape never reaches past its
-            # SEGMENT: `\c` with no character left inside the `$'…'` is kept literal
-            # by bash and the closing quote then ends the segment (measured). Letting
-            # `\c` consume that quote left the scan in `$'…'` mode for the rest of the
-            # run, where a following `\0` truncated everything after it and three
-            # spellings of a real `wrangler@4` were reported as nothing at all.
+            # The SEGMENT is found BEFORE it is translated: bash's boundary scan
+            # skips exactly one character after each backslash, and `\c` is no
+            # exception — no escape reaches past the quote that closes its segment.
+            # Doing both in one pass let an escape's ARITY decide where the quote
+            # was: `$'\c\\'` then swallowed the closing quote, left the scan in
+            # `$'…'` mode for the rest of the run, and a later `\0` truncated
+            # everything after it, so three spellings of a real `wrangler@4` were
+            # reported as nothing at all (measured against bash 5).
             started = True
-            if ansi_cut:
-                # Past the segment's NUL: bash has thrown the rest away — but a
-                # backslash still escapes, so `\'` does not close the segment.
-                if ch == "\\" and i + 1 < len(text):
-                    i += 2
-                    continue
-                if ch == "'":
-                    quote = ""
-                    ansi_cut = False
-                i += 1
-                continue
-            if ch == "\\" and i + 1 < len(text):
-                nxt = text[i + 1]
-                octal = _ANSI_OCTAL.match(text, i + 1)
-                if octal:
-                    char = _kept(int(octal.group(0), 8) & 0xFF)
-                    ansi_cut = char == ""
-                    out.append(char)
-                    i = octal.end()
-                    continue
-                if nxt == "x":
-                    m = _ANSI_HEX.match(text, i + 2)
-                    if m:
-                        char = _kept(int(m.group(0), 16))
-                        ansi_cut = char == ""
-                        out.append(char)
-                        i = m.end()
-                        continue
-                elif nxt in ("u", "U"):
-                    m = _ANSI_UNICODE[4 if nxt == "u" else 8].match(text, i + 2)
-                    if m:
-                        code = int(m.group(0), 16)
-                        # At or above 0x80000000 bash drops the escape like a NUL.
-                        # A surrogate or an out-of-range `\u`/`\U` it keeps
-                        # LITERAL — never empty — so `chr()` must not be asked, and
-                        # writing the escape back is what npm receives.
-                        if code >= 0x80000000:
-                            # Omitted from the word but NOT a NUL, so it does not
-                            # cut the segment: `wran$'\UFFFFFFFFabc'gler@4` is
-                            # `wranabcgler@4` under bash 5 (measured), which is not
-                            # the token at all.
-                            pass
-                        elif code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
-                            out.append(text[i:m.end()])
-                        else:
-                            char = _kept(code)
-                            ansi_cut = char == ""
-                            out.append(char)
-                        i = m.end()
-                        continue
-                elif nxt == "c" and i + 2 < len(text) and text[i + 2] != "'":
-                    char = _kept(ord(text[i + 2]) & 0x1F)
-                    ansi_cut = char == ""
-                    out.append(char)
-                    i += 3
-                    continue
-                if nxt in _ANSI_C:
-                    out.append(_ANSI_C[nxt])
+            j = i
+            while j < len(text):
+                if text[j] == "\\":
+                    j += 2
+                elif text[j] == "'":
+                    break
                 else:
-                    # bash keeps an escape it does not know, backslash and all.
-                    out.append("\\" + nxt)
-                i += 2
-                continue
-            if ch == "'":
-                quote = ""
-            else:
-                out.append(ch)
+                    j += 1
+            out.append(_ansi_translate(text[i:j]))
+            quote = ""
+            i = j + 1
+            continue
         elif text.startswith("$'", i):
             quote = "$'"
             started = True
