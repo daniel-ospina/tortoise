@@ -329,12 +329,15 @@ def test_the_resolved_read_bound_interrupts_a_stalled_read(monkeypatch):
 
     server, held, port = _silent_peer()
     try:
-        # ``retry`` is pinned to zero attempts ON PURPOSE: this test is about
-        # the SOCKET BOUND, not the multiplier. The resolver now carries its
-        # own bounded retry (#2969), so it is overridden here rather than
-        # letting the product's `2 x socket_timeout` budget (measured in
-        # ``test_socket_bound_not_multiplied_2969.py``) land in this
-        # assertion.
+        # The resolver already pins `Retry(NoBackoff(), 0)` (#2969), which IS
+        # the policy this test wants: ZERO retries, so the caller waits exactly
+        # one `socket_timeout` and this stays a measurement of the SOCKET BOUND
+        # rather than of a multiplier. `retry` is popped from the spread and
+        # passed explicitly ONCE — not to override a policy, but because
+        # spreading the dict AND passing `retry=` would raise `TypeError: got
+        # multiple values for keyword argument 'retry'`. Passing it explicitly
+        # keeps the subject bound-only: if the resolver's retry policy ever
+        # changes, this test still measures one bound.
         kwargs = {k: v for k, v in _bounded_server_socket_kwargs().items()
                   if k != "retry"}
         client = redis.Redis(host="127.0.0.1", port=port,

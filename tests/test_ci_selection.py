@@ -1558,7 +1558,7 @@ def test_socket_bound_2969_guard_runs_on_every_spread_site():
     # (the doctor probe) and `tortoise/acl_graph_users.py` (the ACL admin client)
     # are BOTH exact SOURCE_PATTERNS["api"] entries. A diff touching either one
     # alone therefore selected `api`, REPLACED the `core` fallback, and never
-    # collected this file: the two-attempt/wall-clock measurement simply did not
+    # collected this file: the one-attempt/wall-clock measurement simply did not
     # run on a change to a site it pins (the #2938/#3154/#4367 silent-drop class
     # `#3261` removed the false claim about). Registration is DUAL for that
     # reason; `session_indexer.py` / `backup.py` match no named pattern, so they
