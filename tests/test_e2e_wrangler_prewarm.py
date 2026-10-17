@@ -23,23 +23,23 @@ What is left for THIS file is the shape that keeps those properties true:
      nothing and let a consuming step act on a different version than the one
      verified) and no inline assignment other than the file read;
   3. every wrangler spec is the asserted `@${WRANGLER_VERSION:?...}` form;
-  4. every e2e job has an unconditional install-and-VERIFY step, and that step
-     keeps its 3-attempt registry retry (a single npm `ECONNRESET` reded the
-     required `legal-e2e` check on 2026-10-15);
+  4. every e2e job has an unconditional install-and-VERIFY step that runs BEFORE
+     its boot and keeps its three-attempt registry retry (a single npm
+     `ECONNRESET` reded the required `legal-e2e` check on 2026-10-15, and the
+     last attempt is the hard one now);
   5. boot steps carry no spec and keep their two-attempt retry;
   6. every deploy step asserts before it uploads;
   7. every job that installs wrangler pins node 22 — `npm install` only WARNS
      (`EBADENGINE`) on an engines mismatch, so a node-20 job would install
      "successfully" and fail later, inside the readiness loop.
 
-A spec-free invocation is a second class, and it has no `wrangler@` token for the
-spec arm (`test_every_wrangler_spec_is_the_asserted_form`) to read:
-`npx --yes wrangler pages deploy` resolves to the registry's latest without ever
-writing a spec down. `test_no_step_invokes_wrangler_without_the_asserted_spec`
-therefore refuses a bare `wrangler` invocation EVERYWHERE except the five
-declared boot steps (which run the binary the verify step proved) and the
-`--version` probe — so a new step, a new job or a new deploy line cannot float
-without also losing its name.
+A spec-LESS invocation is a second class, and it has no `wrangler@` token for the
+spec arm to read: `npx --yes wrangler pages deploy` resolves to the registry's
+latest without writing a spec down anywhere. Two arms cover it — one restricted
+to the deploy paths, where the assertion validates the declared spec rather than
+the spec on the upload line, and one over EVERY step: a bare `wrangler` is legal
+only in the five declared boot steps (which run the binary the verify step
+proved).
 
 The removed machinery is the point, not an accident: with no spec at the call
 site there is no shell word-splitting to model. The residual is stated rather
@@ -49,7 +49,7 @@ shell alias, a function, or a wrapper script naming its own version), which no
 text scan over the workflows can see. The spec and invocation arms refuse the
 first in every workflow file, the executed harnesses in
 `tests/test_pages_bindings.py` prove the deploy step's assertion, and the arms
-below execute the manual deploy script rather than grepping its path.
+below EXECUTE the manual deploy script rather than grepping its path.
 """
 
 from __future__ import annotations
@@ -79,6 +79,8 @@ EXACT_VERSION = re.compile(r"\d+\.\d+\.\d+")
 #: so an empty declaration aborts instead of expanding to `wrangler@` (= latest).
 LEGAL_SPEC = re.compile(r"wrangler@\$\{WRANGLER_VERSION:\?")
 
+BARE_INVOCATION = re.compile(r"(?<![\w@$./-])wrangler(?![\w@])")
+
 #: The only legal way the variable may be SET.
 DECLARATION = 'WRANGLER_VERSION="$(cat config/wrangler-version)"'
 
@@ -92,12 +94,6 @@ LEGAL_TOKENS = (
     "declared ${WRANGLER_VERSION}",
     "wrangler ${WRANGLER_VERSION}",
 )
-
-#: The SPEC-FREE wrangler command word, and nothing that merely contains it: not
-#: `wrangler.log` / `wrangler.pid` / `/tmp/wrangler-*` (paths), not
-#: `config/wrangler-version` (a filename), not `test_e2e_wrangler_prewarm.py` —
-#: and not `wrangler@…`, which carries a spec and belongs to the arm above.
-WRANGLER_WORD = re.compile(r"(?<![\w./@-])wrangler(?![\w@.-])")
 
 
 
@@ -141,16 +137,6 @@ def _run(step: dict) -> str:
     return step.get("run") or ""
 
 
-def _code(run: str) -> list[str]:
-    """The step's CODE lines: a `#` comment cannot execute.
-
-    Only full-line comments are dropped. An inline `#` is left alone on purpose:
-    in these `run:` blocks it is as often part of a value (`${VAR#prefix}`) as a
-    comment, and a wrong strip would silently hide an invocation.
-    """
-    return [line for line in run.splitlines() if not line.lstrip().startswith("#")]
-
-
 def _steps_named(name: str) -> list[tuple[str, dict]]:
     out = []
     for path in _workflow_paths():
@@ -158,6 +144,110 @@ def _steps_named(name: str) -> list[tuple[str, dict]]:
             if (step.get("name") or "") == name:
                 out.append((job_name, step))
     return out
+
+
+def _deploy_steps() -> list[tuple[str, dict]]:
+    return [
+        (job, step)
+        for job, step in _all_steps(_load(WORKFLOWS / "deploy-pages.yml")["jobs"])
+        if (step.get("name") or "").startswith(DEPLOY_STEP_PREFIX)
+    ]
+
+
+# ------------------------------------------------- shell text, read honestly
+
+
+def _cut_comment(line: str) -> str:
+    """`line` with a COMMENT TAIL cut off — quoting honoured, so `"a#b"` is data.
+
+    A `#` starts a comment only at the start of a word and outside quotes, which
+    is shell's own rule, and a word starts after a blank OR a metacharacter — so a
+    `;#` tail is a comment too. This file's subject is prose ABOUT the code: a
+    comment that NAMES a retry loop on a step that has none must never satisfy the
+    check, and `ci.yml`'s boot steps carry exactly that kind of prose.
+    """
+    quote = ""
+    at_word_start = True
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+            elif ch == "\\" and i + 1 < len(line):
+                i += 1
+        elif ch in "'\"":
+            quote = ch
+            at_word_start = False
+        elif ch == "\\" and i + 1 < len(line):
+            at_word_start = False
+            i += 1
+        elif ch == "#" and at_word_start:
+            return line[:i]
+        elif ch in " \t;&|()<>":
+            at_word_start = True
+        else:
+            at_word_start = False
+        i += 1
+    return line
+
+
+def _strip_quoted(line: str) -> str:
+    """`line` with quoted SEGMENTS removed — a diagnostic is not a command.
+
+    `::error::resolved wrangler ${got} != …` NAMES wrangler in a message, and a
+    `npx --yes "wrangler@${WRANGLER_VERSION:?}"` spec is judged by the spec arm
+    (which keeps quotes, or a literal spec inside one would vanish).
+    """
+    out = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+            elif ch == "\\" and i + 1 < len(line):
+                i += 1
+        elif ch in "'\"":
+            quote = ch
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _retry_loop_bodies(run: str, header: str) -> list[str]:
+    """The bodies of each `header` … `done` loop found in comment-stripped CODE."""
+    bodies: list[str] = []
+    current: list[str] | None = None
+    for raw in str(run or "").splitlines():
+        line = _cut_comment(raw)
+        if current is None:
+            if header in line:
+                current = []
+            continue
+        if line.strip() == "done":
+            bodies.append("\n".join(current))
+            current = None
+        else:
+            current.append(line)
+    return bodies
+
+
+def _bare_invocations(code: str) -> list[str]:
+    """Spec-less wrangler invocations — `npx wrangler`, `wrangler pages deploy`."""
+    offences = []
+    for lineno, line in enumerate(str(code or "").splitlines(), 1):
+        if BARE_INVOCATION.search(_strip_quoted(_cut_comment(line))):
+            offences.append(f"line {lineno}: {line.strip()}")
+    return offences
 
 
 # ---------------------------------------------------------------- 1. one artefact
@@ -221,7 +311,10 @@ def test_every_wrangler_spec_is_the_asserted_form() -> None:
     offenders = []
     for path in _workflow_paths():
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            code = line.split("#", 1)[0] if line.lstrip().startswith("#") else line
+            # `_cut_comment`, not a whole-line strip: a TRAILING comment naming a
+            # spec (`… --version  # was wrangler@4`) is prose too, and reading it
+            # as code makes this arm fail on a correct workflow.
+            code = _cut_comment(line)
             for match in re.finditer(r"wrangler@\S*", code):
                 token = match.group(0)
                 if LEGAL_SPEC.match(token):
@@ -266,19 +359,70 @@ def test_the_three_website_e2e_jobs_install_and_verify() -> None:
         assert '"$WRANGLER_VERSION"' in run, (
             f"{job}: the verify step installs/comares something other than the declared value"
         )
-        # The loop must be the FULL 3-attempt retry, in CODE: a substring match on
-        # "for attempt" is satisfied by a rewrite that silently drops attempts, and
-        # the last attempt is the hard one (a single npm-registry ECONNRESET reded
-        # the required legal-e2e check on 2026-10-15 — #2178/#8744).
-        assert re.search(r"for attempt in 1 2 3; do", run), (
-            f"{job}: the install lost its 3-attempt retry loop — one npm-registry "
-            "ECONNRESET (2026-10-15) reded the required legal-e2e check when the "
-            "fetch had none"
+        assert _retry_loop_bodies(run, "for attempt in 1 2 3;"), (
+            f"{job}: the install lost its three-attempt retry loop — one npm-registry "
+            "ECONNRESET (2026-10-15) reded the required legal-e2e check when the fetch "
+            "had none, and the last attempt is HARD now"
         )
+        # The loop must END in a hard failure, or "three attempts" is prose: a
+        # `done` that falls through leaves the pin unverified on a persistent
+        # registry failure.
         assert re.search(r"after 3 attempts", run), (
             f"{job}: the install loop has no hard failure after the last attempt — "
             "a persistent registry failure would leave the pin unverified"
         )
+        for body in _retry_loop_bodies(run, "for attempt in 1 2 3;"):
+            assert "npm install -g" in body, (
+                f"{job}: the retry does not wrap the install, so the install itself is "
+                "still a single unprotected fetch"
+            )
+            assert re.search(r"sleep \$\(\(attempt \* 10\)\)", body), (
+                f"{job}: the retry carries no backoff — all three attempts would burn "
+                "inside the same second and fail together"
+            )
+
+
+def test_the_retry_check_ignores_a_commented_out_loop() -> None:
+    """Prose about the loop must not satisfy the check — and a 2-attempt loop is not it."""
+    header = "for attempt in 1 2 3;"
+    assert _retry_loop_bodies(f"{header} do\n  npm install -g x\ndone", header)
+    assert not _retry_loop_bodies(
+        "# old body used `for attempt in 1 2 3;`\nnpm install -g x", header
+    )
+    assert not _retry_loop_bodies("npm install -g x  # for attempt in 1 2 3;", header)
+    assert not _retry_loop_bodies("for attempt in 1 2; do\nnpm install -g x\ndone", header)
+    assert not _retry_loop_bodies("npm install -g x", header)
+
+
+def test_the_verify_step_precedes_every_boot_in_the_same_job() -> None:
+    """The boot must run the binary the verify step proved — asserted as an ORDER.
+
+    ``test_the_three_website_e2e_jobs_install_and_verify`` proves a verify step
+    EXISTS in each job, and ``test_boot_steps_carry_no_spec_and_keep_their_retry``
+    proves the boot carries no spec. Neither asserts that the verify runs FIRST:
+    with the order unasserted, moving the verify after the boot leaves the boot
+    running whatever global ``wrangler`` happens to be on PATH, unverified, while
+    every test in this file stays green.
+    """
+    verify_at: dict[str, list[int]] = {}
+    boot_at: dict[str, list[int]] = {}
+    steps = _all_steps(_load(WORKFLOWS / "ci.yml").get("jobs") or {})
+    for idx, (job, step) in enumerate(steps):
+        name = step.get("name") or ""
+        if name == VERIFY_STEP:
+            verify_at.setdefault(job, []).append(idx)
+        elif name.startswith(BOOT_STEP_PREFIX):
+            boot_at.setdefault(job, []).append(idx)
+
+    for job in sorted(PREWARM_JOBS):
+        verifies = verify_at.get(job) or []
+        assert verifies, f"{job}: no {VERIFY_STEP!r} step at all"
+        for boot in boot_at.get(job) or []:
+            assert any(v < boot for v in verifies), (
+                f"{job}: the boot at step {boot} runs BEFORE every verify step "
+                f"{verifies} — the boot would use whatever wrangler is on PATH, "
+                "which nothing asserted"
+            )
 
 
 def test_the_verify_step_is_unconditional() -> None:
@@ -294,6 +438,25 @@ def test_the_verify_step_is_unconditional() -> None:
                 f"{job}: job-level `if: {gate!r}` is constant-false — the whole job, "
                 "including the verify, can never run"
             )
+
+
+def test_the_ci_yml_wrangler_wiring_is_exercised_by_an_ungated_job() -> None:
+    """`ci.yml` is in no `changes` gate, so one job must run it on EVERY PR.
+
+    `ci.yml` carries three of the five consumers and every assertion, and it is
+    deliberately absent from the `website`/`dashboard_e2e` gates (a workflow-only
+    change would otherwise run two full e2e suites). What makes that safe is
+    this: an UNGATED job installs, verifies and boots from the same wiring, so
+    the lane is executed on every PR that can change it.
+    """
+    ci_jobs = _load(WORKFLOWS / "ci.yml")["jobs"]
+    verified = {job for job, _step in _steps_named(VERIFY_STEP)} & set(ci_jobs)
+    assert verified, f"no job in ci.yml carries {VERIFY_STEP!r} — the probe is wrong"
+    ungated = {job for job in verified if ci_jobs[job].get("if") is None}
+    assert ungated, (
+        "every job carrying the wrangler wiring is gated by `changes`, and ci.yml is in "
+        f"no gate — a ci.yml-only wiring change would run none of them: gated={sorted(verified)}"
+    )
 
 
 def test_the_version_check_is_an_equality_against_the_declared_value() -> None:
@@ -325,7 +488,7 @@ def test_boot_steps_carry_no_spec_and_keep_their_retry() -> None:
             f"{job}: the boot carries a spec — it must run the binary the verify step "
             "asserted, so that a spec has nowhere to float"
         )
-        assert re.search(r"for attempt in 1 2; do", run), (
+        assert re.search(r"for attempt in 1 2;", run), (
             f"{job}: the boot lost its two-attempt retry"
         )
 
@@ -350,59 +513,82 @@ def test_each_deploy_step_asserts_before_it_uploads() -> None:
         )
 
 
-# ---------------------------------------- 4. no spec-free invocation, anywhere
+# ------------------------------------------- 4. no spec-LESS invocation on a deploy path
 
 
-def test_no_step_invokes_wrangler_without_the_asserted_spec() -> None:
-    """A bare `wrangler` is the spelling a `wrangler@` scan can never see.
+def test_every_deploy_invocation_is_the_declared_spec() -> None:
+    """A spec-LESS invocation ships an UNDECLARED version past the assertion.
 
-    `npx --yes wrangler pages deploy` (or a bare `wrangler pages dev` in a NEW
-    step) has no spec token at all and resolves to whatever npm serves. A
-    spec-free invocation is therefore legal in exactly two places, both declared
-    here: the five boot steps, which run the binary the verify step proved, and
-    the `--version` probe of that installed binary. Everywhere else — a new step,
-    a new job, a deploy line — it is an offender.
+    The runtime assertion validates the DECLARED spec, never the spec on the
+    upload line — so a deploy step copied as `npx --yes wrangler pages deploy`
+    would deploy an unverified version while every `wrangler@` arm stayed green
+    (a bare invocation has no `@` to match). Bare `wrangler` is legal only in the
+    boot steps, where the install-and-verify step already proved the binary.
+    """
+    deploys = _deploy_steps()
+    assert len(deploys) == 2, f"expected 2 deploy steps, found {len(deploys)}"
+    offenders = [
+        f"{job}: {hit}" for job, step in deploys for hit in _bare_invocations(_run(step))
+    ]
+    script = REPO_ROOT / "website" / "apps" / "dashboard" / "deploy.sh"
+    offenders += [f"deploy.sh: {hit}" for hit in _bare_invocations(script.read_text())]
+    assert not offenders, (
+        "a deploy path invokes wrangler without the declared spec, so the version it "
+        "uploads with is not the one that was asserted:\n" + "\n".join(offenders)
+    )
 
-    Declared residual: an `echo`/`printf` line QUOTES the word, so it is skipped —
-    a command smuggled onto a diagnostic line (`echo x; npx wrangler pages deploy`)
-    is out of this arm's reach. The other lines are not: the two skip classes are
-    positive (the asserted spec, the probe), so a new spelling of the command is
-    an offender by default rather than a non-match.
+
+def test_the_bare_invocation_scan_ignores_messages_and_comments() -> None:
+    for code in (
+        'npx --yes wrangler pages deploy "$STAGE"',
+        "npx wrangler --version",
+        "wrangler pages deploy dist",
+    ):
+        assert _bare_invocations(code), code
+    for code in (
+        'got="$(npx --yes "wrangler@${WRANGLER_VERSION:?}" --version)"',
+        'echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"',
+        "# npx --yes wrangler pages deploy (the old float)",
+    ):
+        assert not _bare_invocations(code), code
+
+
+def test_no_step_invokes_wrangler_without_a_spec_outside_the_declared_boots() -> None:
+    """The deploy-path arm above is keyed on the TWO deploy steps; this one is not.
+
+    A spec-LESS invocation has no `wrangler@` token and, in a step that is not
+    named `Deploy to Cloudflare Pages…`, no arm read it either — measured on this
+    file's predecessor: a one-off `npx --yes wrangler pages deploy dist` inserted
+    into `welcome-e2e`, and a whole new job booting a bare `npx wrangler`, BOTH
+    survived every arm. A bare `wrangler` is therefore legal in exactly one place:
+    the five declared boot steps, which run the binary the verify step proved
+    (`test_boot_steps_carry_no_spec_and_keep_their_retry` pins that there are
+    exactly five and that each carries no spec). Everything else — a new step, a
+    new job, a deploy line — is an offender.
+
+    The scan is quote- and comment-aware (`_strip_quoted` / `_cut_comment`), so a
+    diagnostic that NAMES wrangler, or a commented-out old command, is not an
+    offence; the count assertion keeps the arm from passing vacuously.
     """
     offenders = []
-    inspected = 0
+    boots = 0
     for path in _workflow_paths():
         for job, step in _all_steps(_load(path).get("jobs") or {}):
             name = step.get("name") or ""
-            for line in _code(_run(step)):
-                if not WRANGLER_WORD.search(line):
-                    continue
-                if LEGAL_SPEC.search(line):
-                    inspected += 1
-                    continue  # the asserted spec
-                # A diagnostic QUOTES the word; it does not invoke it.
-                if line.lstrip().startswith(("echo ", "printf ")):
-                    continue
-                # The assertion on the binary the verify step installed.
-                if re.search(r"\bwrangler\s+--version", line):
-                    inspected += 1
-                    continue
-                if name.startswith(BOOT_STEP_PREFIX):
-                    inspected += 1
-                    continue
-                offenders.append(f"{path.name}:{job}: {name!r}: {line.strip()}")
-    # 5 declared boots + the 3 verify steps' `wrangler --version` probes. The
-    # spec-carrying invocations (`wrangler@…`) are deliberately NOT matches here —
-    # they are the arm above's subject — so this count is exact, not a floor that
-    # hides a rewrite.
-    assert inspected == 8, (
-        f"expected 8 legal spec-free invocations (5 boots + 3 probes), found "
-        f"{inspected} — the scan stopped matching, so this arm would pass on nothing"
-    )
+            hits = _bare_invocations(_run(step))
+            if name.startswith(BOOT_STEP_PREFIX):
+                assert hits, (
+                    f"{path.name}:{job}: {name!r} is a declared boot but invokes no "
+                    "wrangler — the probe is wrong"
+                )
+                boots += len(hits)
+                continue
+            offenders += [f"{path.name}:{job}: {name!r}: {hit}" for hit in hits]
+    assert boots == 5, f"expected 5 spec-free boot invocations, found {boots}"
     assert not offenders, (
-        "wrangler invoked WITHOUT the asserted spec outside the five boots and the "
-        "`--version` probe — a bare invocation resolves to whatever npm serves, "
-        "which is the float this file exists to kill:\n" + "\n".join(offenders)
+        "wrangler invoked WITHOUT a spec outside the five declared boots — a bare "
+        "invocation resolves to whatever npm serves, which is the float this file "
+        "exists to kill:\n" + "\n".join(offenders)
     )
 
 
@@ -418,10 +604,14 @@ def test_every_job_that_installs_wrangler_pins_node_22() -> None:
         for job_name, job in (_load(path).get("jobs") or {}).items():
             steps = job.get("steps") or []
             # A job "installs wrangler" if any step's CODE names the command —
-            # with a spec or without one. Deriving it from `wrangler@` alone let a
-            # new job that calls a bare `npx wrangler` escape this arm entirely.
+            # with a spec or without one. Keying on `wrangler@` alone let a new
+            # job that calls a bare `npx wrangler` escape this arm entirely (the
+            # reviewer measured exactly that mutation surviving every arm).
             installs = any(
-                WRANGLER_WORD.search("\n".join(_code(_run(step)))) for step in steps
+                "wrangler@" in _run(step)
+                or "npm install -g wrangler" in _run(step)
+                or _bare_invocations(_run(step))
+                for step in steps
             )
             if not installs:
                 continue
@@ -444,16 +634,58 @@ def test_every_job_that_installs_wrangler_pins_node_22() -> None:
     )
 
 
-# ------------------------------------------ 6. the manual deploy script, EXECUTED
+# ------------------------------------------------ 6. the manual deploy script
 
-DEPLOY_SCRIPT = REPO_ROOT / "website" / "apps" / "dashboard" / "deploy.sh"
 
-#: Stub `npm`: the script's `npm ci` is skipped by a pre-existing node_modules and
-#: `npm run build` is not the subject here.
+def test_the_manual_deploy_script_pins_the_same_version() -> None:
+    """`website/apps/dashboard/deploy.sh` is the documented manual deploy.
+
+    It is outside the workflows, so no other arm reaches it — and a bare
+    `npx wrangler pages deploy` there ships whatever npm serves, with nothing
+    asserting what that was. It reads the same artefact.
+    """
+
+    script = REPO_ROOT / "website" / "apps" / "dashboard" / "deploy.sh"
+    assert script.is_file(), f"{script} is missing"
+    text = script.read_text(encoding="utf-8")
+    code = "\n".join(_cut_comment(ln) for ln in text.splitlines())
+    # The read must go through an ABSOLUTE script dir resolved BEFORE any `cd`.
+    # This arm used to pin the literal `cat "$(dirname "$0")/…config/wrangler-version"`,
+    # which pinned the BUG: after `cd "$(dirname "$0")"`, a RELATIVE `$0` makes that
+    # path double-apply the prefix, so the documented
+    # `bash website/apps/dashboard/deploy.sh` aborted with "No such file or
+    # directory" — and no arm could see it, because the arm asserted the broken
+    # text verbatim (#8816 review).
+    assert 'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"' in code, (
+        "the manual deploy does not resolve an ABSOLUTE script dir — a relative `$0` "
+        "re-derived after `cd` points at a path that does not exist"
+    )
+    assert 'cat "$SCRIPT_DIR/../../../config/wrangler-version"' in code, (
+        "the manual deploy does not read config/wrangler-version through SCRIPT_DIR — "
+        "it would deploy an unasserted wrangler"
+    )
+    assert 'cat "$(dirname "$0")/../../../config/wrangler-version"' not in code, (
+        "the relative-`$0` read is back: after `cd`, it double-applies the prefix and "
+        "the documented manual deploy aborts"
+    )
+    assert "--version" in code, "the manual deploy never asserts what resolved"
+    declared = VERSION_FILE.read_text(encoding="utf-8").strip()
+    assert declared not in code, (
+        f"the manual deploy restates the pinned version ({declared}); it must read "
+        f"{VERSION_SOURCE}, or a bump edits one place and drifts in another"
+    )
+    for match in re.finditer(r"wrangler@\S*", code):
+        assert LEGAL_SPEC.match(match.group(0)), (
+            f"manual deploy spec {match.group(0)!r} is not the asserted variable form"
+        )
+
+
+#: Stub `npm` for the executed arms: `npm ci` is skipped by a pre-existing
+#: node_modules and `npm run build` is not the subject.
 STUB_NPM = "#!/bin/sh\nexit 0\n"
 
 #: Stub `npx`: answers the `--version` probe with the declared value and records
-#: its argv, so the executed arm can prove WHICH spec the deploy would use.
+#: its argv, so the harness can prove WHICH spec the deploy would use.
 STUB_NPX_MANUAL = """#!/bin/bash
 printf '%s\\n' "$@" > "$STUB_DIR/npx_args"
 for arg in "$@"; do
@@ -470,16 +702,17 @@ def _run_manual_deploy(tmp_path: Path, *, from_repo_root: bool):
     """Execute the SHIPPED deploy.sh from a scratch tree, stubs on PATH.
 
     The tree mirrors the checkout layout (`website/apps/dashboard/deploy.sh` +
-    `config/wrangler-version`) so the script's own path arithmetic is under test,
-    not a string in a file.
+    `config/wrangler-version`), so the script's own path arithmetic is under test
+    rather than a string in a file.
     """
     dashboard = tmp_path / "website" / "apps" / "dashboard"
     dashboard.mkdir(parents=True)
-    shutil.copy2(DEPLOY_SCRIPT, dashboard / "deploy.sh")
+    shutil.copy2(REPO_ROOT / "website" / "apps" / "dashboard" / "deploy.sh",
+                 dashboard / "deploy.sh")
     (dashboard / "node_modules").mkdir()  # skips `npm ci`
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "wrangler-version").write_text(
-        _declared_version() + "\n", encoding="utf-8"
+        VERSION_FILE.read_text(encoding="utf-8"), encoding="utf-8"
     )
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -503,50 +736,26 @@ def _run_manual_deploy(tmp_path: Path, *, from_repo_root: bool):
 
 
 @pytest.mark.parametrize("from_repo_root", [True, False])
-def test_the_manual_deploy_reads_the_version_from_either_invocation(
+def test_the_manual_deploy_resolves_the_version_from_either_invocation(
     tmp_path, from_repo_root: bool
 ) -> None:
-    """#8852 review P1: BOTH documented invocations must resolve the artefact.
+    """EXECUTED, because a text pin cannot see a path that does not resolve.
 
-    The script `cd`s to its own directory, and re-deriving `$(dirname "$0")`
-    AFTER that `cd` applied the directory component twice: the runbook's
-    `./website/apps/dashboard/deploy.sh` looked for
-    `website/apps/dashboard/../../../config/wrangler-version` and died inside
-    `cat` under `set -e` — before the `:?` message could explain anything.
-
-    Executed rather than grepped on purpose: a text pin of the path string gave
-    the broken form the appearance of coverage, because a path that does not
-    resolve still matches its own literal.
+    The text arm above pins the shape. This one runs the shipped script the way
+    the runbook documents (`./website/apps/dashboard/deploy.sh` from the repo
+    root) AND from its own directory, and requires the deploy to carry the
+    declared version. On the pre-fix script (re-derived `$(dirname "$0")` after
+    the `cd`) the repo-root invocation aborts inside `cat` under `set -e` with
+    `…/website/apps/dashboard/../../../config/wrangler-version: No such file or
+    directory` — one of these two arms would have failed and the other passed,
+    which is exactly the blind spot the old single text pin had.
     """
     r = _run_manual_deploy(tmp_path, from_repo_root=from_repo_root)
     out = r.stdout + r.stderr
     where = "the repo root" if from_repo_root else "its own directory"
     assert r.returncode == 0, f"deploy.sh failed when invoked from {where}:\n{out}"
     args = (tmp_path / "npx_args").read_text(encoding="utf-8").splitlines()
-    assert args[:2] == ["--yes", f"wrangler@{_declared_version()}"], (
+    declared = VERSION_FILE.read_text(encoding="utf-8").strip()
+    assert args[:2] == ["--yes", f"wrangler@{declared}"], (
         f"the manual deploy ran {args!r} — it must carry the version it read"
     )
-
-
-def test_the_manual_deploy_script_pins_the_same_version() -> None:
-    """Shape, beside the execution arms: one artefact, asserted spec, no copy.
-
-    `website/apps/dashboard/deploy.sh` is the documented manual deploy and sits
-    outside the workflows, so no other arm reaches it.
-    """
-    assert DEPLOY_SCRIPT.is_file(), f"{DEPLOY_SCRIPT} is missing"
-    code = "\n".join(_code(DEPLOY_SCRIPT.read_text(encoding="utf-8")))
-    assert VERSION_SOURCE in code, (
-        "the manual deploy does not read config/wrangler-version — it would deploy "
-        "an unasserted wrangler"
-    )
-    assert "--version" in code, "the manual deploy never asserts what resolved"
-    declared = _declared_version()
-    assert declared not in code, (
-        f"the manual deploy restates the pinned version ({declared}); it must read "
-        f"{VERSION_SOURCE}"
-    )
-    for match in re.finditer(r"wrangler@\S*", code):
-        assert LEGAL_SPEC.match(match.group(0)), (
-            f"manual deploy spec {match.group(0)!r} is not the asserted variable form"
-        )
