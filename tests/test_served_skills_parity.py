@@ -1332,7 +1332,34 @@ def _arm_steps(doc: dict) -> list[tuple[str, dict, dict]]:
             if _is_arm_step(step)]
 
 
-def _job_syncs(job: dict) -> bool:
+def _body_mentions_sync_on_the_tool(body: str) -> bool:
+    """Fail-closed fallback for spellings the hermetic run cannot expand.
+
+    Text-only, so it must decide the way `_runs_sync` does — NOT by substring. A
+    substring test rejected honest jobs: an inline comment on the gate step
+    (`# never run --sync before this`) or a lookalike `scripts/…` script both
+    dropped a fully armed gate from the runner set, and the message blamed a
+    disarmed step (review finding, P2). Shell comments are stripped, the two
+    idioms that defeat expansion are substituted with the repo root, and only an
+    operand that RESOLVES to this tree's tool counts.
+    """
+    lines = []
+    for line in body.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        lines.append(line.split(" #", 1)[0])
+    text = "\n".join(lines)
+    for token in ("${{ github.workspace }}", "$GITHUB_WORKSPACE", "${PWD}", "$PWD"):
+        text = text.replace(token, str(REPO))
+    if "--sync" not in text:
+        return False
+    for word in text.replace("'", " ").replace('"', " ").split():
+        if word.endswith("served_skills_parity.py") and _resolves_to_the_tool(word):
+            return True
+    return False
+
+
+def _job_syncs(job: dict, inherited_env: dict | None = None) -> bool:
     """True iff ANY step of the job runs `--sync` on THIS tree's tool.
 
     The hazard is JOB-scoped, not step-scoped: step 1 re-derives the mirror and
@@ -1354,13 +1381,12 @@ def _job_syncs(job: dict) -> bool:
         # `run: … python3 "$TOOL" --sync` hides the name from any text test while
         # GitHub runs it. So EVERY step is executed, with the step's own `env:`.
         env = step.get("env") if isinstance(step.get("env"), dict) else None
-        _rc, calls = _execute_step(body, flags=_shell_flags(step), extra_env=env)
+        merged = {**(inherited_env or {}), **(env or {})} or None
+        _rc, calls = _execute_step(body, flags=_shell_flags(step), extra_env=merged)
         if any(_runs_sync(a) for a in calls):
             return True
-        # Fail-closed text fallback for spellings the hermetic run cannot expand
-        # (`$PWD/…`, `${{ github.workspace }}/…`): both name the tool AND ask for
-        # `--sync`. A false positive here only rejects a job — the safe side.
-        if "served_skills_parity" in body and "--sync" in body:
+        # Fail-closed text fallback for spellings the hermetic run cannot expand.
+        if _body_mentions_sync_on_the_tool(body):
             return True
     return False
 
@@ -1379,7 +1405,12 @@ def _upstream_runners(workflows: Path | None = None) -> dict[str, dict]:
         # and `if: false` skips it — either way the arm never gates a deploy
         # and every surface here still says "failing closed" (P2, measured:
         # both left 49/49 green).
-        if any(_can_fail(job) and not _job_syncs(job) for _, job, _ in _arm_steps(doc)):
+        # `env:` is inherited from the workflow and the job too, and GitHub
+        # expands all three levels — probing only the step's own left the sync
+        # hazard reachable one level up (review finding, P2).
+        if any(_can_fail(job) and not _job_syncs(
+                job, {**(doc.get("env") or {}), **(job.get("env") or {})})
+               for _, job, _ in _arm_steps(doc)):
             runners[path.name] = doc
     return runners
 
@@ -1684,6 +1715,108 @@ def test_4643_a_sync_hidden_behind_env_or_pwd_still_disarms_the_job(tmp_path):
         assert "deploy-pages.yml" not in _upstream_runners(workflows), (
             f"a job that runs --sync still certified itself as fail-closed for "
             f"this spelling: {run!r}")
+
+
+def test_4643_a_sync_hidden_in_job_or_workflow_env_still_disarms_the_job(tmp_path):
+    """`env:` is inherited from the workflow and the job, and GitHub expands all
+    three levels. A probe that only merged the STEP's env left `"$PARITY_TOOL"
+    --sync` expanding to empty, so the job stayed certified while it re-derived
+    the mirror (review finding, P2)."""
+    for level in ("job", "workflow"):
+        workflows = tmp_path / f"wf-{level}"
+        workflows.mkdir()
+        for name in ("deploy-pages.yml", "skills-parity.yml"):
+            shutil.copyfile(WORKFLOWS / name, workflows / name)
+        path = workflows / "deploy-pages.yml"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = {"PARITY_TOOL": "tools/served_skills_parity.py"}
+        if level == "job":
+            doc["jobs"]["deploy-dashboard"]["env"] = env
+        else:
+            doc["env"] = env
+        steps = doc["jobs"]["deploy-dashboard"]["steps"]
+        index = next(i for i, s in enumerate(steps)
+                     if isinstance(s.get("run"), str)
+                     and "served_skills_parity" in s["run"])
+        steps.insert(index, {
+            "name": "Re-derive the mirror from upstream",
+            "run": 'uv run --no-project --with pyyaml==6.0.3 python3 "$PARITY_TOOL" --sync',
+        })
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+            f"a job whose --sync is spelled through {level}-level `env:` still "
+            f"certified itself as fail-closed")
+
+
+def test_4643_an_honest_gate_is_not_disarmed_by_a_comment_or_a_lookalike(tmp_path):
+    """The text fallback must decide like `_runs_sync`, not by substring: a
+    COMMENT on the gate step (`# never run --sync`) and a lookalike
+    `scripts/served_skills_parity.py --sync` both dropped a fully armed gate from
+    the runner set, and the failure message blamed a disarmed step (review
+    finding, P2)."""
+    # (a) an inline comment mentioning --sync on the arm step itself
+    workflows = tmp_path / "comment"
+    workflows.mkdir()
+    for name in ("deploy-pages.yml", "skills-parity.yml"):
+        shutil.copyfile(WORKFLOWS / name, workflows / name)
+    path = workflows / "deploy-pages.yml"
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["deploy-dashboard"]["steps"]
+    arm = next(s for s in steps if isinstance(s.get("run"), str)
+               and "served_skills_parity" in s["run"])
+    arm["run"] = arm["run"] + "   # never run --sync before this step"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    assert "deploy-pages.yml" in _upstream_runners(workflows), (
+        "a comment mentioning --sync disarmed an honest gate")
+
+    # (b) a lookalike script that is NOT this tree's tool
+    workflows = tmp_path / "lookalike"
+    workflows.mkdir()
+    for name in ("deploy-pages.yml", "skills-parity.yml"):
+        shutil.copyfile(WORKFLOWS / name, workflows / name)
+    path = workflows / "deploy-pages.yml"
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["deploy-dashboard"]["steps"]
+    index = next(i for i, s in enumerate(steps)
+                 if isinstance(s.get("run"), str)
+                 and "served_skills_parity" in s["run"])
+    steps.insert(index, {
+        "name": "Lookalike",
+        "run": "uv run python3 scripts/served_skills_parity.py --sync",
+    })
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    assert "deploy-pages.yml" in _upstream_runners(workflows), (
+        "a lookalike script path was mistaken for this tree's tool")
+
+
+def test_4643_the_daily_runner_keeps_its_red_run_evidence():
+    """`skills-parity.yml` promises red-run evidence: the report distinguishes
+    DRIFT from COULD NOT VERIFY and is uploaded only when the gate fails, so a
+    human diagnosing a red does not re-run a network gate. `if-no-files-found:
+    ignore` makes losing it SILENT — deleting `--report` or the upload step left
+    80/80 green (review finding, P2)."""
+    doc = yaml.safe_load((WORKFLOWS / "skills-parity.yml").read_text(encoding="utf-8"))
+    armed = [(job, step) for job in (doc.get("jobs") or {}).values()
+             for step in (job.get("steps") or [])
+             if _is_arm_step(step)]
+    assert armed, "the daily runner has no arm step"
+    for job, step in armed:
+        body = str(step.get("run") or "")
+        assert "--report" in body, (
+            "the daily runner must write the report its own comment promises")
+        report_path = body.split("--report", 1)[1].split()[0].strip("'\"")
+        uploads = [s for s in (job.get("steps") or [])
+                   if isinstance(s, dict)
+                   and str(s.get("uses") or "").startswith(
+                       "actions/upload-artifact")]
+        assert uploads, (
+            f"the report {report_path!r} must be uploaded, or no red run has "
+            f"its evidence")
+        paths = " ".join(str((u.get("with") or {}).get("path") or "")
+                         for u in uploads)
+        assert report_path in paths, (
+            f"the upload does not carry the report the gate writes "
+            f"({report_path!r} not in {paths!r})")
 
 
 def test_4643_a_sync_step_is_not_a_gate(tmp_path):
