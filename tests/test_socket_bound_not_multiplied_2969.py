@@ -61,9 +61,12 @@ import pytest
 #: leaving the three candidate policies far apart (4 attempts / 11.5s,
 #: 2 attempts / 2.2s, 1 attempt / 1.0s).
 _READ_BOUND_S = 1.0
-#: Upper limit on the total wait. One attempt is ~1.0s; two attempts measured
-#: ~2.2s, so 1.8s separates "the knob is the wait" from "something multiple it"
-#: with ~0.8s of margin on both sides even on a loaded box.
+#: Upper limit on the total wait. One attempt is ~1.0s, so 1.8s keeps ~0.8s of
+#: slack ABOVE a single attempt (a loaded shard can only push the passing shape
+#: up, never down). It is deliberately NOT symmetric: a two-attempt wait is
+#: ~2.0-2.2s, leaving only 0.2-0.4s of clearance on the failing side, which is
+#: why the ATTEMPT COUNT — not this ceiling — is the load-independent assertion
+#: (`test_a_stalled_read_costs_the_product_one_read_bound` asserts both).
 _MAX_BOUNDED_WAIT_S = 1.8
 
 
