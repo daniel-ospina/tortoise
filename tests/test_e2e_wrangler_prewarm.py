@@ -128,6 +128,16 @@ def _wrangler_invocations(run: str) -> set[str]:
         else:
             specs.add(literal.group(0))
     return specs
+#: DECLARED RESIDUAL (review round 5, measured; NOT a regression — the lexer this
+#: replaced misses it too, as does any check that looks for the literal token):
+#: shell normalises QUOTING AND ESCAPING INSIDE the word before it runs it, and the
+#: literal `wrangler@` then is not in the text at all — `wrangler\@4`, `wran\gler@4`,
+#: `wrangler'@'4`, `"wrangler"@4` and `wrangler$X@4` (empty `X`) all execute
+#: `wrangler@4`. Closing that needs a real shell word-splitter — the instrument
+#: whose four unmodelled constructs this PR exists to stop depending on. The honest
+#: fix is at the lane: assert the wrangler version that actually resolved, rather
+#: than read it out of the script.
+
 #: DECLARED RESIDUAL — what a text check cannot reach at all: two INDIRECT pins
 #: cannot be proved EQUAL to each other, so parity between a pre-warm and a boot
 #: step that both take their version from a variable is not checkable here. Each
@@ -413,6 +423,15 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     assert _floating_wranglers('echo "npx --yes wrangler@4 --version"') == {"4"}
     assert _floating_wranglers("cat <<'EOF'\nnpx --yes wrangler@4 --version\nEOF") == {"4"}
     assert _floating_wranglers("xwrangler@4 pages dev") == {"4"}
+
+    # DECLARED RESIDUAL (round 5): quoting or an empty expansion INSIDE the word.
+    # bash runs `wrangler@4`; the literal `wrangler@` is not in the text, so this
+    # reads nothing. Pinned so the limit is stated, not hidden — see the residual
+    # note above `_exact_wranglers`.
+    for run in ("wrangler\\@4 --version", "wran\\gler@4 --version",
+                "wrangler'@'4 --version", '"wrangler"@4 --version',
+                "wrangler$X@4 --version"):
+        assert _wrangler_invocations(run) == set(), run
 
     # An INDIRECT spec is floating, never exact — including a literal CUT SHORT by
     # an interpolation, which must not be read as the pin `4.127.`:
