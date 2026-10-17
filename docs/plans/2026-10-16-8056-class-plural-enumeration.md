@@ -339,6 +339,15 @@ probe can separate linear from quadratic.
   recall-only: it turned `formal` into `form` and enumerated "filled out the
   FORM for the insurance" as a *formal event* — a false include, which this
   design does not accept. A pair outside the alias list costs recall only.
+- **Two more false-include classes were closed by measurement** (each was a
+  word-class error, not a recall trade): a reduced relative COORDINATES, so
+  the post-modifier run is stripped as a RUN — trimming a single token
+  promoted the next participle to "the discriminator" and enumerated
+  "organized my desk this morning" as an event of the class (F22); and the
+  plural `s` strip no longer crosses a word whose singular is a DIFFERENT
+  lexeme, so `news` no longer becomes `new` and enumerates "ordered a new
+  couch" as a news item (F23). The stemmer's "loses recall, not precision"
+  claim holds again for the pairs measured.
 - **Three more false-include classes were closed by measurement** (each was a
   word-class error, not a recall trade): a PLURAL `-ing`/`-ed` word is a noun,
   so "the morning MEETINGS at the office" no longer loses its head to the

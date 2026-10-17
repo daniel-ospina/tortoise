@@ -5168,6 +5168,21 @@ def test_class_vocabulary_excludes_clauses_appositives_and_postmodifiers():
         ("weekly", "training")
     assert _class_tokens("the concerts organized by the club") == \
         ("concert",)
+    # a reduced relative COORDINATES, so the post-modifier RUN is stripped —
+    # trimming one token left the next participle as the sole selector
+    # (#8779 F22)
+    assert _class_tokens("the meetings held and recorded by the team") == \
+        ("meeting",)
+    coordinated = _class_tokens("the events organized and hosted by the club")
+    assert "organized" not in coordinated and "hosted" not in coordinated
+    assert not _class_owns_row(
+        {"content": "organized my desk this morning"}, coordinated)
+    # ... and the plural `s` strip does not cross a word whose singular is a
+    # DIFFERENT lexeme (#8779 F23)
+    assert _class_tokens("the news") == ("news",)
+    assert _class_tokens("the goods") == ("goods",)
+    assert not _class_owns_row({"content": "ordered a new couch"},
+                               _class_tokens("the news"))
     # an INFINITIVE complement names no class; the generic head stays a weak
     # filter rather than becoming the verb (#8779 F21)
     assert resolve_class_window(

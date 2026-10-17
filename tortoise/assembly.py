@@ -3396,6 +3396,23 @@ _CLASS_PARTICIPLE = frozenset({
 #: without a measured row asking for it.
 _CLASS_ADJ_NOUN = {"musical": "music"}
 
+#: plural (or mass) nouns whose singular is a DIFFERENT lexeme, so the trailing
+#: `s` strip would collide them with an unrelated word: `news` → `new` made a
+#: "ordered a new couch" row a news item, and `goods`/`means` do the same
+#: (#8779 F23). A bounded list, not a stemmer — the rule stays recall-only.
+_CLASS_NO_STRIP = frozenset({
+    "news", "goods", "means", "series", "species", "headquarters",
+    "crossroads", "outskirts",
+})
+
+#: particles that close a reduced-relative RUN — "the events PUT TOGETHER and
+#: ORGANIZED by the club" keeps a particle between two participles, and a run
+#: stripper that stops at it leaves the verb as the class (#8779 F22).
+_CLASS_POSTMOD_ADV = frozenset({
+    "together", "back", "away", "off", "up", "down", "again", "over",
+    "through", "apart",
+})
+
 #: bare verbs that can follow `to` inside a class span — the INFINITIVE marker
 #: is in `_CLASS_ADJUNCT_PREP`, so "the things TO DO" reached the generic-head
 #: complement fallback and promoted the VERB `do` to the class vocabulary: a
@@ -3432,11 +3449,36 @@ def _class_stem(tok: str) -> str:
     t = tok.lower()
     if t in _CLASS_ADJ_NOUN:
         return _CLASS_ADJ_NOUN[t]
+    if t in _CLASS_NO_STRIP:
+        return t
     if t.endswith("ies") and len(t) > 4:
         t = t[:-3] + "y"
     elif t.endswith("s") and not t.endswith("ss") and len(t) > 3:
         t = t[:-1]
     return t
+
+
+def _class_drop_postmodifiers(tokens: list[str]) -> list[str]:
+    """Strip the trailing POST-MODIFIER run of a class noun phrase.
+
+    A token after the class's head noun is a reduced relative ("the concerts
+    HELD at …", "the events ORGANIZED AND HOSTED by …") and never class
+    vocabulary. Reduced relatives COORDINATE, so the run is stripped as a
+    run: trimming a single token promoted the next participle to "the
+    discriminator" and selected rows that merely used the verb — "organized
+    my desk this morning" was enumerated as an event of the class while the
+    real class row was dropped (#8779 F22). A word carrying the PLURAL marker
+    is a noun and ends the run, and the run may not consume everything (the
+    caller falls back to the head noun).
+    """
+    out = list(tokens)
+    while out and (
+            out[-1] in _CLASS_POSTMOD_ADV
+            or (not out[-1].endswith("s")
+                and (out[-1].endswith(("ed", "ing"))
+                     or out[-1] in _CLASS_PARTICIPLE))):
+        out.pop()
+    return out
 
 
 #: #8779 E1/E2 — the ORDERING-DIRECTION vocabulary of the class-plural head's
@@ -3659,10 +3701,8 @@ def _class_tokens(span: str) -> tuple[str, ...]:
         after = head[last_generic + 1:]
         if after and not any(_class_stem(w) in _CLASS_GENERIC
                              for w in after):
-            if cut < len(words) and not after[-1].endswith("s") and (
-                    after[-1].endswith(("ed", "ing"))
-                    or after[-1] in _CLASS_PARTICIPLE):
-                after = after[:-1]
+            if cut < len(words):
+                after = _class_drop_postmodifiers(after)
             run = after or head[:last_generic + 1]
         else:
             run = head[:last_generic + 1]
@@ -3674,18 +3714,14 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     # SUFFIX test misses irregulars, so a bounded list covers the common ones;
     # an unlisted one now costs only a stray selector (the head noun survives
     # the rule above), never the head itself.
-    # ⛔ and the PLURAL marker overrides the suffix test (#8779 F19): a
-    # plural `-ing`/`-ed` word is a NOUN, not a reduced relative, so "the
-    # morning MEETINGS at the office" kept only `morning` — which then
-    # selected "did my morning coffee run" and dropped the row that named the
-    # meeting. The stemmer hides the plural, so the RAW token decides.
-    raw_tail = next((w for w in reversed(run)
-                     if w not in _CLASS_STOPWORDS), "")
-    if cut < len(words) and len(out) > 1 and not raw_tail.endswith("s") \
-            and (out[-1].endswith(("ed", "ing"))
-                 or out[-1] in _CLASS_PARTICIPLE) \
-            and any(x not in _CLASS_GENERIC for x in out[:-1]):
-        out = out[:-1]
+    #: the PLURAL marker overrides the suffix test, and the run is stripped as
+    #: a RUN — see `_class_drop_postmodifiers`.
+    if cut < len(words):
+        kept = _class_drop_postmodifiers(
+            [w for w in run if w not in _CLASS_STOPWORDS])
+        if kept:
+            run = kept
+    out = _stems(run)
     # ⛔ the cut above is only correct while the HEAD noun phrase still carries
     # a DISCRIMINATIVE token. When it does not -- "the events AT THE JAZZ
     # FESTIVAL", whose head `event` is generic -- cutting leaves the
