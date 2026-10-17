@@ -849,7 +849,17 @@ def _paid_tier_floor(tier: str | None) -> int | None:
     operator reads, which is why it must come from the real ladder and not a
     hardcoded tier order. The ladder is read from ``pricing.json`` (the single
     source of truth for limits); the harm #8878 measured is the CAP, not the
-    label. ``None`` (Team = unlimited) ranks above any finite cap.
+    label. So the ladder is the ONLY input: an unrecognised tier resolves to
+    Free's cap (``pricing.tier_limits``: "Unknown tiers default to the Free
+    limits") and ``team`` resolves to its real 600 000 — neither is special.
+
+    ``None`` therefore does NOT mean "unlimited". It means the ladder could not
+    be READ at all (``tier_limits`` raised on a malformed ``pricing.json`` —
+    #750.8, a config fault), which is the only path that reaches it. Consumers
+    must treat ``None`` as "unrankable", never as "pays the most": the whole
+    point of ranking on the cap is that an unreadable ladder must not clear
+    (pinned by
+    ``tests/test_billing.py::TestReconcileSweep::test_an_unreadable_ladder_is_unrankable_not_unlimited``).
     """
     from tortoise.pricing import tier_limits
     try:
@@ -858,14 +868,40 @@ def _paid_tier_floor(tier: str | None) -> int | None:
         return None
 
 
+def _is_paid_tier(tier: str | None) -> bool:
+    """Whether a stored ``tier`` claims MORE entitlement than Free — from the
+    ladder, never from the presence of an identity.
+
+    The distinction decides ``unverified`` vs ``skipped`` in
+    ``reconcile_subscriptions``: a Stripe customer binding with no active
+    subscription is a routine state (``hosted_api`` persists
+    ``stripe_customer_id`` BEFORE the checkout session, so every abandoned
+    checkout leaves one) and holds no entitlement to verify, while a PAID tier
+    in that state is the thing a person must look at.
+
+    Uses ``_paid_tier_floor``, so an unrecognised tier (which resolves to
+    Free's cap) is not paid, and an UNRANKABLE ladder (``None``) is not treated
+    as paid either — the same "never claim what cannot be proved" direction
+    ``_drift_direction`` takes.
+    """
+    floor = _paid_tier_floor(tier)
+    free_floor = _paid_tier_floor("free")
+    if floor is None or free_floor is None:
+        return False
+    return floor > free_floor
+
+
 def _drift_direction(from_tier: str | None, to_tier: str | None) -> str | None:
     """``"up"`` when the repaired tier raises the enforced cap, ``"down"`` otherwise.
 
-    An UNRANKABLE pair (both caps are ``None``: unknown tier, or unlimited at
-    both ends) returns ``None`` — a third value, deliberately distinct from
-    ``"down"`` because it is not a downgrade either. Neither pages: the caller
-    pages only ``"up"``, and a change we cannot prove RAISED the customer's
-    entitlement must never page as a payable-customer-under-delivered event.
+    An UNRANKABLE pair — both floors ``None``, i.e. the pricing ladder could not
+    be read (a malformed ``pricing.json``, not an unrecognised tier: that
+    resolves to Free's cap and ranks normally) — returns ``None``. A third
+    value, deliberately distinct from ``"down"`` because it is not a downgrade
+    either, and neither pages: the caller pages only ``"up"``, and a change we
+    cannot prove RAISED the customer's entitlement must never page as a
+    payable-customer-under-delivered event. ``None`` here is a CONFIG FAULT to
+    look at, not a no-op.
     ``docs/infra-runbook.md`` §4.2 documents all three values.
     """
     before = _paid_tier_floor(from_tier)
@@ -994,23 +1030,36 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
     Returns a summary dict:
 
     - ``checked`` — orgs with a billing identity this pass attempted
-    - ``skipped`` — orgs with no ``subscription_id`` / ``stripe_customer_id``
-      (nothing to reconcile against; counted so a silent enumeration shrink is
-      visible)
+    - ``skipped`` — orgs with nothing to reconcile: no ``subscription_id`` /
+      ``stripe_customer_id`` (a free org that never checked out), or a Stripe
+      binding that never became a paid subscription (an abandoned checkout —
+      ``tier`` at or below Free's cap, so there is no entitlement to verify).
+      The second kind DID cost an attempt, so it is counted in ``checked`` as
+      well: ``checked`` is how many identity-bearing orgs the pass attempted,
+      and ``skipped`` says how many of them (plus the never-checked-out ones)
+      had nothing to verify. Counted so a silent enumeration shrink is visible
     - ``repaired`` / ``unchanged`` — stored tier changed / did not
     - ``unverified`` — Stripe answered but named NO active subscription for an
-      org that is stored as billed (``reconcile_org`` reports ``action:
+      org whose stored tier is PAID — i.e. one that claims more entitlement
+      than Free (``_is_paid_tier``; ``reconcile_org`` reports ``action:
       "noop"``). Counted SEPARATELY from ``unchanged`` because nothing was
       verified against a subscription: folding it into ``unchanged`` would
       report an unexamined org as verified-clean, which is exactly the
       read-only-reconciler failure the ``unrepaired`` guard exists to catch.
+      Decided from the LADDER, not from the presence of an identity: a customer
+      binding at the unpaid tier is an abandoned checkout, not a symptom, and
+      lands in ``skipped``.
       Deliberately NOT auto-downgraded — deciding that a stored-paid org with
       no active Stripe subscription loses its tier is a billing decision, not
       a reconcile detail.
     - ``drift`` — the repaired changes, each with ``direction``: ``up`` =
       the org was being under-delivered, ``down`` = a late downgrade/cancel
-      reached the mirror, ``None`` = the pair could not be ranked (neither
-      pages; see ``_drift_direction``)
+      reached the mirror, ``None`` = the pair could not be ranked because the
+      pricing ladder could not be READ (a config fault, not an unrecognised
+      tier — that ranks at Free's cap); neither ``down`` nor ``None`` pages
+      (see ``_drift_direction``). Each row also carries
+      ``from_max_nodes``/``to_max_nodes``: the enforced node cap before and
+      after, the number that actually refused the customer's writes.
     - ``unrepaired`` — orgs where Stripe resolved a tier the store did NOT end
       up holding. This is the mutation guard made observable: a "reconciler"
       that only READS the price and writes nothing lands here instead of
@@ -1073,9 +1122,24 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
                           f"{e.__class__.__name__}: {_scrub_secrets(str(e))}")
             continue
         if outcome.get("action") == "noop":
-            # Stripe answered and named no ACTIVE subscription for a stored-
-            # billed org: nothing was verified against a subscription, so this
-            # is not "unchanged" (see the docstring's ``unverified``).
+            # Stripe answered and named no ACTIVE subscription. Whether that is a
+            # symptom depends on what the STORE CLAIMS, so it is decided from
+            # the ladder and not from the presence of an identity:
+            # ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
+            # session, so EVERY abandoned checkout leaves a customer binding at
+            # ``tier=free``. That is a routine state with no entitlement to
+            # verify — counting it as ``unverified`` put healthy orgs in the
+            # operator's queue forever (and emitted a daily ``::warning::`` in
+            # the driver). ``unverified`` is kept for the case it names: a PAID
+            # tier with no active subscription.
+            if not _is_paid_tier(before_tier):
+                summary["skipped"] += 1
+                _logger.info(
+                    "billing reconcile: %s has a Stripe binding but no active "
+                    "subscription and is stored at the unpaid tier %r — "
+                    "nothing to verify (abandoned checkout)",
+                    org_id, before_tier)
+                continue
             summary["unverified"] += 1
             _logger.warning(
                 "billing reconcile: %s is stored as billed (tier=%r) but "

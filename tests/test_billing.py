@@ -2194,6 +2194,151 @@ class TestReconcileSweep:
         monkeypatch.setattr(sc, "get_control_plane", lambda: _Cp())
         assert len(bl._enumerate_billed_orgs(limit=3)) == 3
 
+    def test_limit_cannot_buy_a_partial_page(self, monkeypatch):
+        """The OTHER half of the name above, which that test cannot see.
+
+        ``limit`` must not be a way to publish an UNCERTIFIED page: hoisting the
+        truncation above the certificate check (a natural refactor — it is the
+        cheaper order) would re-open the partial-page fail-open whenever
+        ``limit`` is set, while ``test_limit_caps_processing_…`` stayed green
+        because its double is always ``complete=True``. The discriminating case
+        is ``limit`` PLUS ``complete=False``.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Truncated:
+            def query_all(self, table, **kw):
+                return [{"id": f"org-{i}"} for i in range(10)], False
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Truncated())
+        with pytest.raises(RuntimeError, match="CERTIFIED"):
+            bl._enumerate_billed_orgs(limit=3)
+
+    def test_abandoned_checkout_is_skipped_not_unverified(
+            self, monkeypatch, billing_client):
+        """A customer binding at the UNPAID tier is routine, not a symptom.
+
+        ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
+        session, so every abandoned checkout leaves a Stripe binding on a
+        ``tier=free`` row. Counting that as ``unverified`` put healthy orgs in
+        the operator's queue forever (and emitted a daily ``::warning::`` in the
+        driver) — ``docs/infra-runbook.md`` §4.2 tells the operator to look at
+        every non-zero ``unverified``. Where the org lands must be decided from
+        the LADDER (is this tier paid?), not from the presence of an identity.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="free", stripe_customer_id="cus_8878ab")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1, (
+            "the attempt WAS made (Stripe was called), so the org is checked")
+        assert summary["skipped"] == 1, (
+            "an abandoned checkout has no entitlement to verify, so it is "
+            f"skipped, not a person to look at — got {summary}")
+        assert summary["unverified"] == 0, (
+            "a customer binding at the UNPAID tier is not 'stored as billed' "
+            f"— got {summary}")
+        assert summary["repaired"] == 0 and summary["drift"] == []
+        assert self._row(sdk, org_id)[0] == "free"
+
+    def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
+        """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.
+
+        The old docstring said ``None`` = "Team = unlimited" and §4.2 said
+        ``direction: null`` = "both caps unlimited". Measured, both are false:
+        ``team`` is 600 000 and an unrecognised tier resolves to Free's 10 000
+        (``pricing.tier_limits``: "Unknown tiers default to the Free limits").
+        ``None`` is reachable only when the ladder RAISES (#750.8). A runbook
+        that calls it a benign no-op sends the operator past a config fault.
+        """
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+
+        # The real ladder: nothing here is unlimited.
+        assert bl._paid_tier_floor("team") == 600000
+        assert bl._paid_tier_floor("bogus-tier") == bl._paid_tier_floor("free")
+        assert bl._drift_direction("bogus-tier", "team") == "up"
+
+        # The only path to None: the ladder cannot be read at all.
+        def _unreadable(tier):
+            raise KeyError("pricing.json tier 'pro' missing required keys")
+
+        assert pricing.tier_limits is not _unreadable  # sanity: real symbol
+        original = pricing.tier_limits
+        pricing.tier_limits = _unreadable
+        try:
+            assert bl._paid_tier_floor("team") is None
+            assert bl._paid_tier_floor("free") is None
+            assert bl._drift_direction("pro", "team") is None
+        finally:
+            pricing.tier_limits = original
+
+    def test_supabase_mode_repairs_the_org_row_with_no_registry_sdk(
+            self, monkeypatch, stripe_env):
+        """The branch the HOSTED deployment actually takes (#8878 review P2).
+
+        Post-#669 the registry graph is deleted on the hosted lane, so
+        ``reconcile_subscriptions`` runs with ``sdk=None`` against the
+        control-plane ``organizations`` row. Without this test, the row-shape
+        handling, ``reconcile_org(None, …)``, the writes, and the
+        repaired/drift classification are exercised ONLY in registry mode —
+        i.e. everything except the path production uses.
+        """
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise import billing as bl
+
+        org_id = "11111111-1111-4111-8111-111111111111"
+
+        class _Cp(FakeControlPlane):
+            """The fake reports NO stated total (``total=None``), which the
+            enumeration correctly refuses — so this double states one, the
+            only thing a server-side count can supply (#5388)."""
+
+            def query_with_total(self, table, **kw):
+                kw.pop("count_exact", None)
+                rows = self.query(table, **kw)
+                return rows, len(rows)
+
+        cp = _Cp({"organizations": [{
+            "id": org_id,
+            "tier": "solo",              # the drift: billed Pro, stored Solo
+            "subscription_id": "sub_8878sb",
+            "stripe_customer_id": "cus_8878sb",
+            "subscription_status": "active",
+            "graph_size_cap": 25000,
+        }]})
+        # ``_supabase_mode()`` IS ``is_supabase_enabled()``; patching the seam
+        # keeps every branch in the pass (enumeration, identity read,
+        # ``apply_limits``) on the control plane instead of half of them
+        # falling back to a registry SDK this mode never constructs.
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878sb", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+
+        summary = bl.reconcile_subscriptions(None, notifier=False)
+
+        assert summary["checked"] == 1 and summary["repaired"] == 1, summary
+        assert summary["failed"] == [] and summary["unrepaired"] == []
+        assert [d["direction"] for d in summary["drift"]] == ["up"]
+        assert summary["drift"][0]["from_max_nodes"] == 25000
+        assert summary["drift"][0]["to_max_nodes"] == 100000
+        row = cp.tables["organizations"][0]
+        assert row["tier"] == "pro", "the org row was not repaired"
+        assert row["graph_size_cap"] == 100000, (
+            "the tier moved but the ENFORCED cap did not — the number that "
+            "refused the customer's writes")
+        assert row["subscription_status"] == "active", (
+            "the Stripe status never reached the row in the hosted path")
+
     def test_no_stripe_subscription_is_unverified_not_unchanged(
             self, monkeypatch, billing_client):
         """A stored-billed org Stripe names no active sub for was NOT verified.

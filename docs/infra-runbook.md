@@ -459,23 +459,38 @@ python -c 'from tortoise.billing import reconcile_org; import sys; print(reconci
 ```
 
 A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
-`failed` / `unrepaired` and one `drift` row per repaired org, each with a
-`direction`:
+`alerted` / `failed` / `unrepaired` and one `drift` row per repaired org, each
+carrying `from_tier` / `to_tier`, `from_max_nodes` / `to_max_nodes` (the
+enforced node cap before and after — the number that actually refused the
+customer's writes) and a `direction`:
 
 - `direction: "up"` — a paying org WAS being under-delivered. The reconciler
-  pages it through the billing notify channel (Resend + Telegram) and logs
-  `billing reconcile: …`; the daily driver also fails its run.
+  pages it through the billing notify channel (Resend + Telegram), and the
+  daily driver also fails its run. Counted in `alerted`.
 - `direction: "down"` — Stripe truth (a portal downgrade/cancellation) reached
   the mirror late. Reported, never paged.
-- `direction: null` — the before/after pair could not be ranked (both caps
-  unlimited, e.g. an unrecognised tier). Neither a downgrade nor an upgrade;
-  reported, never paged.
-- `unverified` — the org is stored as billed but Stripe answered with NO active
-  subscription. Nothing was verified against a subscription, so this is NOT
-  `unchanged` — and it is deliberately not auto-downgraded either. Counted and
-  logged loudly; a non-zero number is a person to look at.
+- `direction: null` — the before/after pair could not be ranked because the
+  pricing ladder could not be READ (`tier_limits` raised — a malformed or
+  incomplete `product/pricing.json`, #750.8). That is a **config fault, not a
+  no-op**: an unrecognised tier is NOT this case, it resolves to Free's cap and
+  ranks normally. Never paged; investigate the pricing file.
+- `unverified` — the org's stored tier is PAID (it claims more entitlement than
+  Free) but Stripe answered with NO active subscription. Nothing was verified
+  against a subscription, so this is NOT `unchanged` — and it is deliberately
+  not auto-downgraded either. Counted and logged loudly; a non-zero number is a
+  person to look at.
+- `skipped` — nothing to reconcile: no `subscription_id` / `stripe_customer_id`
+  at all, **or** a Stripe customer binding that never became a paid
+  subscription (every abandoned checkout leaves one — `hosted_api` persists
+  `stripe_customer_id` before the checkout session — and its `tier` is at or
+  below Free's cap, so there is no entitlement to verify). Routine; not a
+  symptom.
 - `unrepaired` — Stripe resolved a tier the store did NOT end up holding. That
   is a broken repair, not a clean pass; treat it as an incident.
+- `checked` / `repaired` / `unchanged` / `failed` — as named: orgs with a
+  billing identity this pass attempted, orgs whose stored tier moved, orgs that
+  already matched Stripe, and orgs that raised (Stripe outage, unknown price,
+  a control-plane write that matched no row).
 
 **Cadence.** `.github/workflows/billing-reconcile-cron.yml` runs the pass daily
 (04:43 UTC) with `INTERNAL_API_URL` + `FASTAPI_INTERNAL_KEY`, and the run FAILS
@@ -486,6 +501,9 @@ answers `503 enumeration_incomplete` (the pass could not certify the WHOLE
 fleet, so it compared an unknown fraction and refuses to report that as clean),
 when the response cannot be read as a summary, when any org `failed` to
 reconcile, when any org is `unrepaired`, or when any `drift` row went `up`.
+The page leg sources `.github/scripts/telegram-send.sh`, so the job starts with
+`actions/checkout` — a hosted runner's workspace is empty otherwise, and the
+source would fail before `tg_send` ran (a page step that can never deliver).
 
 **`202 already_running` is a no-op, and whether it is a failure depends on the
 trigger.** The endpoint answers it for a CONCURRENT pass (`nothing queues`, the

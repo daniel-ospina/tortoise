@@ -53,7 +53,13 @@ name: billing-reconcile-cron
 # The Telegram leg is what makes "PAGES" true rather than aspirational: a red
 # run alone only reaches whoever opens the Actions tab (a scheduled run also
 # emails whoever last touched the default branch, which is not an owner). The
-# runbook (§4.2) advertised the page before anything delivered one.
+# runbook (§4.2) advertised the page before anything delivered one. That leg
+# needs the repo ON the runner: `Page on failure` sources
+# `.github/scripts/telegram-send.sh`, and a GitHub-hosted runner's
+# `$GITHUB_WORKSPACE` starts empty, so `jobs.drive` runs `actions/checkout`
+# FIRST. Without it the `.` failed and, under `set -euo pipefail`, the step
+# exited before `tg_send` — a page step that could never deliver, which is the
+# same defect one layer down.
 #
 # RESIDUAL, stated rather than implied (the sibling backup driver's #596 header
 # covers BOTH legs; this one covers only the app-down leg): if GitHub silently
@@ -96,6 +102,20 @@ jobs:
       # and in the tests that RUN it (tests/test_deploy_workflow.py).
       EVENT_NAME: ${{ github.event_name }}
     steps:
+      # The `Page on failure` step SOURCES a repo script
+      # (`.github/scripts/telegram-send.sh`), and a GitHub-hosted runner's
+      # `$GITHUB_WORKSPACE` starts EMPTY — `actions/checkout` is the only thing
+      # that populates it. Without this, the `. <script>` line fails with "No
+      # such file or directory" and, under `set -euo pipefail`, the step exits
+      # non-zero BEFORE `tg_send` is ever called: every failure path fired no
+      # page at all, one layer under the very defect `33eb1364d` set out to
+      # close. `permissions: contents: read` above is sufficient for checkout,
+      # and the sibling #596 driver (`registry-backup-cron.yml`) checks out for
+      # exactly this reason.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Run billing reconcile pass
         # Secrets are bound in `env:` above and read QUOTED — never interpolated
         # into the shell text (#4361: substitution happens before bash parses,

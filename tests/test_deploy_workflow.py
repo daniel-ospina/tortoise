@@ -1529,8 +1529,12 @@ class TestBillingReconcileDriverVerdicts:
         """The header says the job "PAGES". A red run alone is not a page.
 
         This asserts the delivery leg exists and is wired to the failing paths
-        (``if: failure()``) using the repo's single Telegram sender, so the
-        claim is true rather than aspirational.
+        (``if: failure()``) using the repo's single Telegram sender — AND that
+        the sender can actually be sourced, which is the half that was missing:
+        string-presence alone is satisfied by a workflow whose page step dies
+        on `. .github/scripts/telegram-send.sh` because the runner never
+        checked the repo out. ``test_the_page_step_can_succeed`` below proves
+        the file is on the runner; this test pins the wiring.
         """
         page = _billing_steps().get("Page on failure")
         assert page is not None, (
@@ -1548,4 +1552,86 @@ class TestBillingReconcileDriverVerdicts:
         env = page.get("env") or {}
         assert "TELEGRAM_BOT_TOKEN" in env and "TELEGRAM_CHAT_ID" in env, (
             "the page step must bind both Telegram secrets in env: (#4361)"
+        )
+
+
+def _live_script_refs(job: dict) -> list[str]:
+    """Step names in ``job`` whose ``run:`` sources a repo script, LIVE.
+
+    Comment lines are stripped first: naming a script inside a comment (the
+    ``ai-review-gate.yml`` shape) delivers nothing and must not be read as a
+    dependency, or the guard below would demand a pointless checkout.
+    """
+    refs: list[str] = []
+    for step in job.get("steps") or []:
+        body = str(step.get("run", ""))
+        live = "\n".join(
+            line for line in body.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        if re.search(r"(^|[\s;.])`?\.github/scripts/", live):
+            refs.append(step.get("name") or step.get("uses") or "<unnamed>")
+    return refs
+
+
+_WORKFLOWS_DIR = (
+    Path(__file__).resolve().parent.parent / ".github" / "workflows"
+)
+
+
+class TestWorkflowScriptDependenciesAreOnTheRunner:
+    """A `run:` that sources `.github/scripts/<x>` needs a checkout first.
+
+    A GitHub-hosted runner's ``$GITHUB_WORKSPACE`` starts EMPTY; only
+    ``actions/checkout`` puts the repo there. A step that sources a repo script
+    without checking out dies on the ``.`` builtin — and under
+    ``set -euo pipefail`` it dies BEFORE whatever the step was supposed to do,
+    so the step's real work (delivering a page, recording a verdict) silently
+    never happens while every string-presence assertion about it still passes.
+
+    Scope: EVERY job of EVERY workflow file, so the class cannot come back in a
+    new driver. Jobs that only NAME a script in a comment are excluded (see
+    ``_live_script_refs``).
+    """
+
+    @staticmethod
+    def _cases() -> list[tuple[str, str, list[str], bool]]:
+        cases = []
+        for path in sorted(_WORKFLOWS_DIR.glob("*.yml")):
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(doc, dict):
+                continue
+            for job_name, job in (doc.get("jobs") or {}).items():
+                if not isinstance(job, dict):
+                    continue
+                refs = _live_script_refs(job)
+                if not refs:
+                    continue
+                checked_out = any(
+                    "actions/checkout" in str(s.get("uses", ""))
+                    for s in job.get("steps") or []
+                )
+                cases.append((path.name, job_name, refs, checked_out))
+        return cases
+
+    @pytest.mark.parametrize(
+        "workflow,job,refs,checked_out",
+        _cases(),
+        ids=[f"{w}::{j}" for w, j, _refs, _co in _cases()],
+    )
+    def test_a_job_sourcing_a_repo_script_checks_out_first(
+            self, workflow, job, refs, checked_out):
+        assert checked_out, (
+            f"{workflow} job {job!r} sources a repo script from {refs} but "
+            "never runs `actions/checkout` — $GITHUB_WORKSPACE is empty on a "
+            "hosted runner, so the source fails and the step's output is "
+            "never produced (#8878: the 'PAGES' leg could never fire)"
+        )
+
+    def test_the_case_list_is_not_empty(self):
+        """Guards the guard: a broken glob would empty the parametrization."""
+        cases = self._cases()
+        assert cases, "no workflow job sources a repo script — the glob broke"
+        assert any(w == "billing-reconcile-cron.yml" for w, _j, _r, _c in cases), (
+            "the billing reconcile driver must be among the covered jobs"
         )
