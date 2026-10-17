@@ -1,0 +1,88 @@
+# served-skills parity — the daily backstop for #4643.
+#
+# `daniel-ospina/tortoise-skills-and-integrations` (MIT, public) AUTHORS the
+# three reusable integration skills; this repo serves a DERIVED mirror of them
+# at `website/apps/dashboard/public/skills/`. Two gates hold that mirror:
+#
+#   * the per-PR offline arm (`tests/test_served_skills_parity.py`, via the
+#     `onboarding`/`core` surfaces and `tier1`) — served copy == pin;
+#   * the upstream arm (`--check-upstream`) — the pin is HONEST (its commit
+#     really hashes to the pinned sha256), CURRENT (the bytes at upstream `main`
+#     HEAD are still those bytes) and has the right SCOPE (upstream `skills/`
+#     equals the upstream directories the pin's `upstream_path`s bind, plus its
+#     declared `out_of_scope:` entries), so an
+#     upstream ADDITION or REMOVAL is reported instead of being invisible to a
+#     pin-keyed loop.
+#
+# The upstream arm runs at deploy time in `deploy-pages.yml` (so a stale mirror
+# cannot ship). This workflow is the second runner: without it, drift between
+# deploys is invisible until the next release — which is exactly when nobody is
+# looking at skill bytes.
+#
+# ⛔ It is NOT redundant with the deploy step. The deploy gate protects the
+# deployment; this one bounds staleness in TIME. Both are fail-closed: a drift
+# exits 1, and a side that cannot be read ("could not verify" — network,
+# 5xx, rate limit) ALSO exits 1, reported as a distinct reason so a red run is
+# not misdiagnosed as a drift.
+#
+# The push trigger from the AUTHOR repo is DECLARED here but not yet sent: a
+# workflow in the MIT repo cannot authenticate with its own GITHUB_TOKEN to
+# `POST /dispatches`, so the sender needs a narrowly scoped credential stored
+# there (#8748). Declaring the receiver now is deliberate — a sender built
+# against an event name no workflow listens on would be silent — and until it
+# exists the daily schedule bounds staleness to a day.
+name: skills-parity
+on:
+  schedule:
+    # Daily, off the hour so the run does not queue behind the other crons.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+  # `POST /repos/{owner}/{repo}/dispatches` with `event_type: skills-updated`
+  # (from a repo_dispatch-capable token) starts this job immediately. Declared
+  # here because #8748's sender is being built against this event name; a
+  # receiver that only listens on a schedule would make that credential silent.
+  repository_dispatch:
+    types: [skills-updated]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skills-parity
+  cancel-in-progress: true
+
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          # One uv version per repo — the same pin as `ci.yml` and
+          # `deploy-hosted.yml`. (`--no-project` below means uv.lock is not
+          # consulted here; the pin is about resolving reproducibly, not the lock.)
+          version: '0.12.3'
+      - name: The pin is honest, current and complete against the MIT repo (#4643)
+        # `--no-project --with pyyaml`: this tool's only third-party import is
+        # pyyaml, so there is no reason to sync the project env (and its `dev`
+        # group) once a day for a byte comparison. Same shape as the deploy step.
+        run: |
+          uv run --no-project --with pyyaml==6.0.3 python3 tools/served_skills_parity.py \
+            --check-upstream --report skills-parity-report.md
+        env:
+          # The upstream `skills/` listing is the one GitHub API call in the
+          # tool: 60 requests/hour unauthenticated, 5000/hour with a token.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Evidence for a red run: the report distinguishes DRIFT (bytes disagree —
+      # re-derive with `--sync`) from COULD NOT VERIFY (a side was unreadable —
+      # re-run). It is uploaded only when the gate fails, so a human diagnosing
+      # a red run does not have to re-run a network gate to read the reason.
+      - name: Publish the failure report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skills-parity-report
+          path: skills-parity-report.md
+          if-no-files-found: ignore
+          retention-days: 14

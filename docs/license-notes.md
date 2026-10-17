@@ -319,7 +319,7 @@ and asserted by `tests/test_served_skills_parity.py`:
 
 | Artifact | Authored in | Enforced by |
 |---|---|---|
-| `how-to-use-tortoise`, `tortoise-decide`, `tortoise-file-finding` | **`daniel-ospina/tortoise-skills-and-integrations`** (MIT, public) | the served copy in `website/apps/dashboard/public/skills/` is DERIVED. Pin: `config/served-skills-upstream.yml`. Gate: `tools/served_skills_parity.py --check` — offline served↔pin runs per-PR today; the pinned-bytes↔upstream-HEAD arm exists and is tested but is **not yet wired to a runner** (see the honest limit below). Derive: `--sync` |
+| `how-to-use-tortoise`, `tortoise-decide`, `tortoise-file-finding` | **`daniel-ospina/tortoise-skills-and-integrations`** (MIT, public) | the served copy in `website/apps/dashboard/public/skills/` is DERIVED. Pin: `config/served-skills-upstream.yml`. Gate: `tools/served_skills_parity.py --check` — the offline served↔pin arm in the per-PR suite, and the pin-honesty + pin-currency + scope arm in the `deploy-dashboard` job of `deploy-pages.yml` (before the build stages `public/`) and daily in `skills-parity.yml`. Derive: `--sync` |
 | `install-tortoise-skills.sh` | **`daniel-ospina/tortoise`** → `website/apps/dashboard/public/install-tortoise-skills.sh` | #3324 moved its source of truth here deliberately (the MIT repo's copy had gone stale). The MIT repo's remaining `install-tortoise-skills.sh` is a stale v1 duplicate — tracked by **#8747** |
 | `tortoise-onboarding` | **`daniel-ospina/tortoise`** → `tortoise/onboarding/SKILL.md` | byte-identity with its served mirror by `tests/test_onboarding_variants.py::test_m8_deploy_mirror_matches_canonical` + `cmp` in `deploy-pages.yml` (#3673) |
 
@@ -328,33 +328,53 @@ any historical commit, so `--check` also re-fetches the pinned commit's bytes
 and compares them with the bytes at upstream `main` HEAD. Both directions are
 mutation-measured (`tests/test_served_skills_parity.py`): a served copy edited
 in place reds the offline arm; an upstream edit to a pinned skill reds the
-currency arm; a hand-fabricated pin reds the honesty arm.
+currency arm; a hand-fabricated pin reds the honesty arm. The **scope** is
+checked too: upstream `skills/` must equal the set of upstream **directories**
+the pin binds through its `upstream_path`s (plus any entries the pin records
+under `out_of_scope:`), because both byte arms iterate the pin's own keys and
+would therefore never see an upstream skill we had never pinned. The binding is
+`upstream_path`, not the pin key: the served name may be shortened, so
+`skills.decide` may point at `skills/tortoise-decide/`.
 
-The currency arm compares **bytes, not the commit pointer**. An upstream commit
-that cannot change what we serve (a README edit, an unrelated skill, CI config)
-therefore does not red the gate and does not file a drift issue: the pinned
-sha256 is re-computed over the bytes at HEAD, so a real skill edit still fails.
+The currency arm compares **bytes, not the commit pointer**, so an upstream
+commit that changes no skill we serve does not red the gate and does not file a
+drift issue. "No skill we serve" means exactly: a README edit, CI config, or an
+edit to a skill already recorded under `out_of_scope:` — the pinned sha256 is
+re-computed over the bytes at HEAD, so an edit to a **pinned** skill still
+fails. A directory that is neither pinned nor declared is **not** in this class:
+the scope arm reds on it whether its bytes changed or not (below).
 
-**Its honest limit — state it, do not imply otherwise.** Only the offline arm
-(`served copy == pin`) runs today, in the per-PR suite. The `--check-upstream`
-arm is implemented and covered, but nothing schedules or deploys it yet: the
-deploy-time runner and the daily backstop are a `.github/workflows/*` change,
-and this lane's credential cannot push one — **#8129**. Until that lands, an
-upstream skill edit does **not** red anything by itself, and an in-place edit of
-a served copy *plus* a matching re-cut of the pin's `sha256:` would pass the
-per-PR arm — the two ways the mirror can still drift silently. Tracked as the
-wiring half of #4643 (the sender side of the dispatch is #8748); that change
-restores the current-tense claims here and in the installer's header.
+**Adding** an upstream skill is a different event, and it **is** red: a new
+`skills/<dir>/` that is neither pinned nor declared is reported by the scope arm
+as `upstream added '<dir>' … pin it or record it as out of scope`, and the gate
+exits non-zero. A directory that has been upstream **since before the pin** and
+was simply never declared reds the same way but is reported as *not pinned or
+declared* rather than as an addition — there is no upstream commit to go and
+look at. Both are deliberate, not an oversight in the sentence above: the byte
+arms iterate the pin's own keys, so a skill nobody pinned is invisible to every
+comparison — and an upstream capability would silently never reach the served
+set. The remedy for either is to pin it (`--sync`) or record it under
+`out_of_scope:`.
 
-**Trigger.** Once the wiring lands (#8129), a push to the author repo should be
-able to start the gate: the runner accepts a `repository_dispatch` of type
-`skills-updated`, and a daily schedule is the credential-free backstop so
-staleness is bounded and never silent. Nothing sends that dispatch yet — a
+**Where it runs — two runners, both failing closed.** The upstream arm is
+enforced by (1) the `deploy-dashboard` job of `deploy-pages.yml`, placed ahead
+of the build that stages `public/` so a stale mirror cannot deploy, and (2)
+`skills-parity.yml`, on a daily `schedule` and on `workflow_dispatch`, so drift
+between deploys is caught by the next morning rather than by the next release.
+Drift and "could not verify" are **reported separately and both exit non-zero**:
+a network error, an unreadable directory listing or a rate-limited API is not
+evidence that the mirror changed, and calling it drift would auto-file a false
+"the served mirror drifted" alarm — or teach people to re-run the gate. A side
+that cannot be read never passes.
+
+The remaining gap is the **instant** trigger, not enforcement: a push to the
+author repo cannot start this gate on its own. `skills-parity.yml` declares a
+`repository_dispatch` of type `skills-updated`, but **nothing sends one** — a
 workflow in the MIT repo cannot authenticate with its own `GITHUB_TOKEN`, so it
-needs a narrowly scoped credential stored there, **filed as #8748** rather than
-minted in this lane. Both halves are therefore *planned*, not in force: nothing
-in this tree runs `--check-upstream`, and this page must not be read as saying
-otherwise.
+needs a narrowly scoped credential stored there, **filed as #8748**. Until that
+lands, an upstream skill edit is caught within a day by the daily run, not
+within seconds. The receiver is declared rather than promised: a sender built
+against an event name no workflow listens on would be silent.
 
 **Not covered here, deliberately:** `tortoise-onboarding` is not part of the
 pin (it is served but has no upstream counterpart; whether it belongs in a
