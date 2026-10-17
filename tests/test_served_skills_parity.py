@@ -1231,14 +1231,26 @@ def _is_the_arm(args: list[str]) -> bool:
     file this tree ships.
     """
     operand = next((i for i, a in enumerate(args)
-                    if a.endswith("served_skills_parity.py")), None)
+                    if a.endswith("served_skills_parity.py")
+                    or a.replace("/", ".").endswith(
+                        "tools.served_skills_parity")), None)
     if operand is None:
         return False
     # `python -c 'pass' tools/served_skills_parity.py --check-upstream` runs no
-    # gate: the script is an argument to nothing. Same for `-m`.
-    if "-c" in args[:operand] or "-m" in args[:operand]:
+    # gate: the script is an argument to nothing.
+    if "-c" in args[:operand]:
         return False
-    if not _resolves_to_the_tool(args[operand]):
+    # `-m tools.served_skills_parity` is NOT that lookalike: `-m` puts the MODULE
+    # in the script slot, so `python3 -m tools.served_skills_parity
+    # --check-upstream` runs the arm on a real runner (`_runs_sync` already
+    # models the same form). Treating it as "an argument to nothing" was an
+    # instrument false positive: a working gate reported as no gate at all
+    # (review finding, P2).
+    if args[operand].endswith("served_skills_parity.py"):
+        if not _resolves_to_the_tool(args[operand]):
+            return False
+    elif not args[operand].replace("/", ".").endswith(
+            "tools.served_skills_parity"):
         return False
     tail = args[operand + 1:]
     # `main()`'s semantics are CUMULATIVE, not first-flag-wins:
@@ -1371,24 +1383,24 @@ def _body_mentions_sync_on_the_tool(body: str, env: dict | None = None) -> bool:
     # Per COMMAND, like `_runs_sync`: `--sync` must belong to the same segment.
     for segment in re.split(r"&&|\|\||;|\n", text):
         words = segment.replace("'", " ").replace('"', " ").split()
+        # Printing is not invoking: the tool's own remedy is echoed verbatim
+        # (`|| { echo "uv run python tools/served_skills_parity.py --sync"; }`),
+        # and that must not disarm an honest gate. Checked BEFORE the context
+        # rule, so an echoed remedy in an expression-bearing step is still just
+        # printing (review finding, P2).
+        if any(w in ("echo", "printf") or w.endswith(("/echo", "/printf"))
+               for w in words):
+            continue
+        # Unverifiable CONTEXT: `--sync` next to a `${{ ... }}` we do not model
+        # (`env['X']`, `vars.X`, ...) in the SAME command — that spelling names
+        # the tool without naming its path, so no argv is recorded. Fail closed.
+        # Scoped per SEGMENT: a body-wide test dropped honest gates that merely
+        # carried an expression elsewhere in the step (review finding, P2).
+        if "--sync" in segment and "$ {{".replace(" ", "") in segment:
+            return True
         named = [w for w in words
                  if w.endswith("served_skills_parity.py") and _resolves_to_the_tool(w)]
         if not named:
-            continue
-        if "$ {{".replace(" ", "") in segment or "${{" in segment:
-            # A context we do not model (`env['X']`, `vars.X`, …) still names the
-            # tool; unverifiable is the fail-CLOSED direction here.
-            return True
-        # An `echo`/`printf` segment PRINTS its argument — the tool's own remedy
-        # (`echo "uv run python tools/served_skills_parity.py --sync"`) must not
-        # disarm an honest gate, while a genuinely quoted operand
-        # (`python3 "$PWD/tools/served_skills_parity.py" --sync`) still counts
-        # (review finding, P2).
-        # Printing is not invoking: the tool's own remedy is echoed verbatim
-        # (`|| { echo "uv run python tools/served_skills_parity.py --sync"; }`),
-        # and that must not disarm an honest gate (review finding, P2).
-        if any(w in ("echo", "printf") or w.endswith(("/echo", "/printf"))
-               for w in words):
             continue
         for index, word in enumerate(words):
             if (word.endswith("served_skills_parity.py")
@@ -1424,12 +1436,9 @@ def _job_syncs(job: dict, inherited_env: dict | None = None) -> bool:
         _rc, calls = _execute_step(body, flags=_shell_flags(step), extra_env=merged)
         if any(_runs_sync(a) for a in calls):
             return True
-        # Fail-closed residual rule: `--sync` next to a context the harness does
-        # not model (`${{ env['X'] }}`, `${{ vars.X }}`, …) is UNVERIFIABLE, so it
-        # is the fail-closed direction. This closes the class instead of
-        # enumerating one context syntax per round (review finding, P2).
-        if "--sync" in body and "$ {{".replace(" ", "") in body:
-            return True
+        # The unmodelled-context rule lives in `_body_mentions_sync_on_the_tool`
+        # and is scoped per COMMAND — a body-wide version here disarmed honest
+        # gates that merely carried an expression elsewhere in the step.
         # Fail-closed text fallback for spellings the hermetic run cannot expand.
         if _body_mentions_sync_on_the_tool(body, merged):
             return True
@@ -1665,6 +1674,89 @@ def test_4643_a_piped_gate_under_the_pipefail_shell_is_still_a_runner(tmp_path):
     workflows = _workflows_with_mutation(tmp_path, mutate)
     assert "deploy-pages.yml" in _upstream_runners(workflows), (
         "a piped gate under `shell: bash` fails the step, so it is a runner")
+
+
+def test_4643_the_arm_is_recognised_through_every_legitimate_spelling(tmp_path):
+    """The harness must not call a gate that WORKS on the real runner "not a
+    runner". `$GITHUB_WORKSPACE`, `${{ github.workspace }}` (spaced and
+    unspaced) and the repo's own `-m` module idiom all execute the arm, and bash
+    cannot expand any of them here — so `_interpolate` (applied before bash sees
+    the script) and the `-m` operand rule are what keep this honest. Unguarded,
+    reverting either left the suite fully green (review finding, P2)."""
+    base = "uv run --no-project --with pyyaml==6.0.3 python3"
+    spellings = [
+        "tools/served_skills_parity.py --check-upstream",
+        '"$GITHUB_WORKSPACE/tools/served_skills_parity.py" --check-upstream',
+        '"${{ github.workspace }}/tools/served_skills_parity.py" --check-upstream',
+        '"${{github.workspace}}/tools/served_skills_parity.py" --check-upstream',
+        "-m tools.served_skills_parity --check-upstream",
+    ]
+    for index, spelling in enumerate(spellings):
+        workflows = tmp_path / f"arm-{index}"
+        workflows.mkdir()
+        for name in ("deploy-pages.yml", "skills-parity.yml"):
+            shutil.copyfile(WORKFLOWS / name, workflows / name)
+        path = workflows / "deploy-pages.yml"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        arm = next(s for s in doc["jobs"]["deploy-dashboard"]["steps"]
+                   if isinstance(s.get("run"), str)
+                   and "served_skills_parity" in s["run"])
+        arm["run"] = f"{base} {spelling}"
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        assert "deploy-pages.yml" in _upstream_runners(workflows), (
+            f"a gate spelled {spelling!r} works on the real runner but was "
+            f"reported as NOT a runner — an instrument false positive")
+
+
+def test_4643_an_expression_or_a_printed_remedy_does_not_disarm_a_gate(tmp_path):
+    """Two false rejects, both measured: (a) the unmodelled-context rule was
+    body-wide, so ANY `${{ … }}` in a step plus a `--sync` mention ANYWHERE in it
+    dropped an honest gate — including the `${{ github.workspace }}` spelling the
+    ARM half must recognise; (b) the tool's own remedy echoed verbatim
+    (`… || { echo "uv run python tools/served_skills_parity.py --sync"; }`) did
+    the same. Both must keep the runner; `${{ env['X'] }} --sync` and
+    `${{ vars.X }} --sync` must still drop it (review finding, P2)."""
+    base = "uv run --no-project --with pyyaml==6.0.3 python3"
+    ws = '"${{ github.workspace }}/tools/served_skills_parity.py"'
+    keep = [
+        (f"{base} {ws} --check-upstream  # never run --sync before this", None),
+        (f"{base} {ws} --check-upstream || {{ echo "
+         '\"uv run python tools/served_skills_parity.py --sync\"; exit 1; }', None),
+        (f"{base} {ws} --check-upstream || {{ echo "
+         '\"Fix: `uv run python tools/served_skills_parity.py --sync`\"; exit 1; }',
+         None),
+    ]
+    for index, (run, _) in enumerate(keep):
+        workflows = tmp_path / f"keep-{index}"
+        workflows.mkdir()
+        for name in ("deploy-pages.yml", "skills-parity.yml"):
+            shutil.copyfile(WORKFLOWS / name, workflows / name)
+        path = workflows / "deploy-pages.yml"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        arm = next(s for s in doc["jobs"]["deploy-dashboard"]["steps"]
+                   if isinstance(s.get("run"), str)
+                   and "served_skills_parity" in s["run"])
+        arm["run"] = run
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        assert "deploy-pages.yml" in _upstream_runners(workflows), (
+            f"an honest gate was disarmed by {run!r}")
+
+    for index, spelling in enumerate(("${{ env['PARITY_TOOL'] }}",
+                                      "${{ vars.PARITY_TOOL }}")):
+        workflows = tmp_path / f"escape-{index}"
+        workflows.mkdir()
+        for name in ("deploy-pages.yml", "skills-parity.yml"):
+            shutil.copyfile(WORKFLOWS / name, workflows / name)
+        path = workflows / "deploy-pages.yml"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        steps = doc["jobs"]["deploy-dashboard"]["steps"]
+        at = next(i for i, s in enumerate(steps)
+                  if isinstance(s.get("run"), str)
+                  and "served_skills_parity" in s["run"])
+        steps.insert(at, {"name": "sync", "run": f'{base} "{spelling}" --sync'})
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+            f"a --sync spelled through {spelling!r} still certified the job")
 
 
 def test_4643_a_sync_in_a_separate_step_still_disarms_the_job(tmp_path):
