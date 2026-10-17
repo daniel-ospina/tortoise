@@ -5664,8 +5664,11 @@ class TortoiseSDK:
         before/after (``tortoise/change_feed.py``), so "what changed for claim X
         since cursor C" is one call rather than a client-side replay across event
         types. It is an off-by-default additive response field (the recorded
-        ``response_fields`` carve-out), so with the switch off this response is
-        byte-identical.
+        ``response_fields`` carve-out): with the switch off the ``changes`` key is
+        absent and the reply's SHAPE is unchanged — ``events`` and ``next_cursor``
+        only. It is NOT byte-identical: the hard-delete ``PointRetracted`` payload
+        gained the ``deleted`` marker unconditionally, and this reply relays that
+        row verbatim under ``events`` (see ``config/surface-manifest.yml``).
         """
         from .event_store import read_after
 

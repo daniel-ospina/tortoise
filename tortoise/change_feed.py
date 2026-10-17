@@ -113,7 +113,11 @@ from typing import Any
 from .env_truthy import is_truthy
 
 #: The single switch for the whole feature. Unset/blank/garbage -> OFF, so the
-#: default surface (response shape AND event-store contents) is byte-identical.
+#: default surface is the pre-change one: the `changes` key is absent and no
+#: `PointRevised` reach is emitted. NOT byte-identical, because ONE payload key
+#: is unconditional — the hard-delete `PointRetracted` row carries
+#: `deleted: true` whether or not anything is switched on (see the module
+#: docstring).
 CHANGE_FEED_ENV = "TORTOISE_CHANGE_FEED"
 
 #: Payload keys that NAME claims rather than describe a changed value.

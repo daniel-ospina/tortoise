@@ -3,9 +3,12 @@
 WHAT THIS PINS
 --------------
 1. **Off by default.** With `TORTOISE_CHANGE_FEED` unset, `poll_events`' response
-   is byte-identical (no `changes` key) and `update_point`'s content edit writes
+   carries no `changes` key and `update_point`'s content edit writes
    NO `:GraphEvent` — the store's claim-transition contract
-   (`tests/test_event_store.py::test_content_edit_emits_nothing`) is intact.
+   (`tests/test_event_store.py::test_content_edit_emits_nothing`) is intact. The
+   response SHAPE is unchanged; it is NOT byte-identical, because the hard-delete
+   `PointRetracted` payload carries the `deleted` marker unconditionally (see
+   `tortoise/change_feed.py`'s module docstring).
 2. **PointRevised reaches the store when the feed is on** — the source half of
    indicator (1), drawn as an opt-in so the default stream is untouched.
 3. **The semantic feed is per-claim deltas** — one `poll_events` call returns
@@ -76,7 +79,7 @@ def _kinds(changes, claim_id):
     return [c["change"] for c in (g["changes"] if g else [])]
 
 
-# ── 1. the off switch is byte-identical ────────────────────────────────────
+# ── 1. the off switch adds no `changes` key ────────────────────────────────────
 
 def test_off_by_default_adds_no_changes_key(monkeypatch, sdk_factory, tmp_path):
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
@@ -159,8 +162,9 @@ def test_revision_type_is_filterable_when_enabled(monkeypatch, sdk_factory, tmp_
 def test_revision_type_is_nameable_even_when_off(monkeypatch, sdk_factory, tmp_path):
     """Registration is NOT conditional even though the emit is: with the switch
     off the type is accepted and the page is simply empty (no row can exist) —
-    never a `ValueError` that reads like a typo — and the reply stays
-    byte-identical (no `changes` key)."""
+    never a `ValueError` that reads like a typo — and the reply's SHAPE is
+    unchanged (no `changes` key). Not byte-identical: the hard-delete marker is
+    unconditional (see the module docstring)."""
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
     sdk = sdk_factory(tmp_path)
     try:
@@ -622,7 +626,8 @@ def test_existing_mcp_tool_relays_the_field_without_a_surface_change(
         monkeypatch, tmp_path):
     """The field is reachable through the EXISTING `tortoise_events_poll` tool:
     the tool's declared parameters are unchanged (MCP tool count +0), and the
-    off switch keeps its reply byte-identical.
+    off switch leaves the reply's SHAPE unchanged (no `changes` key; not
+    byte-identical, see the module docstring).
 
     That the served handler fingerprint is untouched is pinned separately by
     `tools/surface-guard.py` / `tools/surface_manifest.py check` (which compare
