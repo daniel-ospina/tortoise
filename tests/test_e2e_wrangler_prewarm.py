@@ -253,11 +253,19 @@ def _shell_words(text: str) -> list[str]:
                 out.append(ch)
         elif quote == "$'":
             # ANSI-C quoting: the escapes are TRANSLATED, because one of them can
-            # spell the token's `@` (see `_ANSI_C`). A backslash always consumes
-            # what follows, so neither the escape nor the quote can end the word.
+            # spell the token's `@` (see `_ANSI_C`). An escape never reaches past its
+            # SEGMENT: `\c` with no character left inside the `$'…'` is kept literal
+            # by bash and the closing quote then ends the segment (measured). Letting
+            # `\c` consume that quote left the scan in `$'…'` mode for the rest of the
+            # run, where a following `\0` truncated everything after it and three
+            # spellings of a real `wrangler@4` were reported as nothing at all.
             started = True
             if ansi_cut:
-                # Past the segment's NUL: bash has thrown the rest away.
+                # Past the segment's NUL: bash has thrown the rest away — but a
+                # backslash still escapes, so `\'` does not close the segment.
+                if ch == "\\" and i + 1 < len(text):
+                    i += 2
+                    continue
                 if ch == "'":
                     quote = ""
                     ansi_cut = False
@@ -302,7 +310,7 @@ def _shell_words(text: str) -> list[str]:
                             out.append(char)
                         i = m.end()
                         continue
-                elif nxt == "c" and i + 2 < len(text):
+                elif nxt == "c" and i + 2 < len(text) and text[i + 2] != "'":
                     char = _kept(ord(text[i + 2]) & 0x1F)
                     ansi_cut = char == ""
                     out.append(char)
@@ -942,6 +950,19 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
                 "npx --yes wrangler@4.127.0$'\\U00110000' --version",
                 "npx --yes wrangler@4.127.0$'\\q' --version"):
         assert _floating_wranglers(run) == {""}, run
+    # `\c` with nothing left inside its segment is kept LITERAL by bash and the
+    # quote closes it. Consuming that quote left the scan inside `$'…'` for the rest
+    # of the run, where a later `\0` swallowed everything after it — three spellings
+    # of a real `wrangler@4` then reported NOTHING.
+    assert _wrangler_invocations("npx --yes wrangler@4$'\\c' --version") == {"4"}
+    for run in ("echo $'\\c' \\0 ; npx --yes wrangler@4 --version",
+                "npx --yes $'\\c' ; wrangler\\@4 --version",
+                'npx --yes $\'\\c\' ; wrangler"@"4 --version'):
+        assert _floating_wranglers(run) == {"4"}, run
+    # …and a backslash inside a TRUNCATED segment still escapes, so `\'` does NOT
+    # close it: the discard runs to the real quote and `wran` joins `gler@4`, which
+    # is the float `wrangler@4` under bash (measured).
+    assert _wrangler_invocations("npx --yes wran$'\\0ab\\'cd'gler@4 --version") == {"4"}
     # A translated escape that is not a spec character makes the argument continue
     # past the pin, which is FLOATING — `\cA` is translated, not unreadable.
     assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\cA' --version") == {""}
