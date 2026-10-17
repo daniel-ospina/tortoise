@@ -2101,8 +2101,13 @@ def _resolve_config_path(include_env: bool = True, *,
         # (a poisoned TORTOISE_API_URL must not redirect the stored key).
         api_url = config.get("api_url") or "https://api.premiselabs.co"
         # #5109: a FILE-sourced key is the only case worth checking — an env
-        # key has no store on disk, and this is the seam every credential-USE
-        # path resolves through, so one call here covers all of them.
+        # key has no store on disk, and this is the seam every CLI
+        # credential-USE path resolves through, so one call here covers all of
+        # them. It is NOT the only in-repo reader of a credential store: the Pi
+        # capture hook (`tortoise/pi-hooks/tortoise-capture.ts::resolveConfig`)
+        # reads `~/.pi/agent/tortoise-config.json` on every `turn_end` and does
+        # not come through here, so it carries the sibling check
+        # (`warnIfCredentialStoreIsReadable`). Change one, change both.
         _warn_if_credential_store_is_readable(path)
         return path, config, api_key, api_url
     return None, None, None, None
