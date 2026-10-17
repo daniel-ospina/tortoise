@@ -1169,13 +1169,14 @@ def _execute_step(body: str, *, fail_arm: bool = False,
             stub.chmod(0o755)
         record = root / "argv.bin"
         script = root / "step.sh"
-        script.write_text(body, encoding="utf-8")
+        script.write_text(_interpolate(body, extra_env), encoding="utf-8")
         env = {
             "PATH": f"{bin_dir}:/usr/bin:/bin",
             "HOME": str(root),
             "TMPDIR": str(root),
             "PARITY_STUB_RECORD": str(record),
             "PARITY_STUB_FAIL_ARM": "1" if fail_arm else "0",
+            "GITHUB_WORKSPACE": str(REPO),
         }
         # A step's own `env:` is part of what it RUNS: without it, a step that
         # spells the tool `"$TOOL"` records an argv the guard cannot identify,
@@ -1332,6 +1333,23 @@ def _arm_steps(doc: dict) -> list[tuple[str, dict, dict]]:
             if _is_arm_step(step)]
 
 
+def _interpolate(body: str, env: dict | None = None) -> str:
+    """Expand the GitHub contexts a runner expands BEFORE the shell sees them.
+
+    bash cannot: `${{ … }}` dies with "bad substitution", so a step spelled that
+    way recorded NO argv and was judged disarmed — a false red on a gate that
+    works on the real runner (review finding, P2). Unhandled contexts are left in
+    place on purpose: `_body_mentions_sync_on_the_tool` treats a residual `${{`
+    next to a tool operand as UNVERIFIABLE and fails closed, so the class is
+    closed without enumerating every context and access syntax.
+    """
+    text = re.sub(r"\$\{\{\s*github\.workspace\s*\}\}", str(REPO), body)
+    for name, value in (env or {}).items():
+        text = re.sub(r"\$\{\{\s*env\." + re.escape(str(name)) + r"\s*\}\}",
+                      str(value), text)
+    return text.replace("$GITHUB_WORKSPACE", str(REPO))
+
+
 def _body_mentions_sync_on_the_tool(body: str, env: dict | None = None) -> bool:
     """Fail-closed fallback for spellings the hermetic run cannot expand.
 
@@ -1348,17 +1366,30 @@ def _body_mentions_sync_on_the_tool(body: str, env: dict | None = None) -> bool:
         if line.lstrip().startswith("#"):
             continue
         lines.append(line.split(" #", 1)[0])
-    text = "\n".join(lines)
-    # Interpolate the GitHub contexts the shell never sees (whitespace-tolerant).
-    text = re.sub(r"\$\{\{\s*github\.workspace\s*\}\}", str(REPO), text)
-    for name, value in (env or {}).items():
-        text = re.sub(r"\$\{\{\s*env\." + re.escape(str(name)) + r"\s*\}\}",
-                      str(value), text)
-    text = (text.replace("$GITHUB_WORKSPACE", str(REPO))
-                .replace("${PWD}", str(REPO)).replace("$PWD", str(REPO)))
+    text = _interpolate("\n".join(lines), env)
+    text = (text.replace("${PWD}", str(REPO)).replace("$PWD", str(REPO)))
     # Per COMMAND, like `_runs_sync`: `--sync` must belong to the same segment.
     for segment in re.split(r"&&|\|\||;|\n", text):
         words = segment.replace("'", " ").replace('"', " ").split()
+        named = [w for w in words
+                 if w.endswith("served_skills_parity.py") and _resolves_to_the_tool(w)]
+        if not named:
+            continue
+        if "$ {{".replace(" ", "") in segment or "${{" in segment:
+            # A context we do not model (`env['X']`, `vars.X`, …) still names the
+            # tool; unverifiable is the fail-CLOSED direction here.
+            return True
+        # An `echo`/`printf` segment PRINTS its argument — the tool's own remedy
+        # (`echo "uv run python tools/served_skills_parity.py --sync"`) must not
+        # disarm an honest gate, while a genuinely quoted operand
+        # (`python3 "$PWD/tools/served_skills_parity.py" --sync`) still counts
+        # (review finding, P2).
+        # Printing is not invoking: the tool's own remedy is echoed verbatim
+        # (`|| { echo "uv run python tools/served_skills_parity.py --sync"; }`),
+        # and that must not disarm an honest gate (review finding, P2).
+        if any(w in ("echo", "printf") or w.endswith(("/echo", "/printf"))
+               for w in words):
+            continue
         for index, word in enumerate(words):
             if (word.endswith("served_skills_parity.py")
                     and _resolves_to_the_tool(word)
@@ -1392,6 +1423,12 @@ def _job_syncs(job: dict, inherited_env: dict | None = None) -> bool:
         merged = {**(inherited_env or {}), **(env or {})} or None
         _rc, calls = _execute_step(body, flags=_shell_flags(step), extra_env=merged)
         if any(_runs_sync(a) for a in calls):
+            return True
+        # Fail-closed residual rule: `--sync` next to a context the harness does
+        # not model (`${{ env['X'] }}`, `${{ vars.X }}`, …) is UNVERIFIABLE, so it
+        # is the fail-closed direction. This closes the class instead of
+        # enumerating one context syntax per round (review finding, P2).
+        if "--sync" in body and "$ {{".replace(" ", "") in body:
             return True
         # Fail-closed text fallback for spellings the hermetic run cannot expand.
         if _body_mentions_sync_on_the_tool(body, merged):
