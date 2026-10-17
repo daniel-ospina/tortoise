@@ -36893,14 +36893,27 @@ async def billing_reconcile(request: Request):
                 result = await asyncio.to_thread(reconcile_subscriptions, None)
             else:
                 sdk = await asyncio.to_thread(_registry_sdk)
-                try:
+                # ⛔ Do NOT close the SDK from this request's ``finally``.
+                # ``asyncio.to_thread`` cannot cancel its thread, so a cancelled
+                # request (the driver's 600 s ceiling, a client disconnect) ran
+                # the ``finally`` while the pass was STILL writing through
+                # ``sdk`` — closing the projection mid-pass and losing every
+                # repair it had not yet committed, while the summary went
+                # nowhere (#8895 review P2). Close on COMPLETION instead, and
+                # shield the await so cancelling the request cannot cancel a
+                # pass that is already writing.
+                fut = asyncio.ensure_future(
                     # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
                     # rides a worker hand-off so it cannot hold the single uvicorn
                     # event loop (the #2988/#3498 class).
-                    result = await asyncio.to_thread(reconcile_subscriptions, sdk)
-                finally:
+                    asyncio.to_thread(reconcile_subscriptions, sdk))
+
+                def _close_when_finished(_f: asyncio.Future) -> None:
                     with suppress(Exception):
                         sdk.close()
+
+                fut.add_done_callback(_close_when_finished)
+                result = await asyncio.shield(fut)
         except BillingEnumerationError as exc:
             # The pass refuses to reconcile a fleet it cannot certify COMPLETE.
             # That is not a request error — it is "the source is unavailable or

@@ -734,7 +734,11 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
 def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     """Best-effort mirror repair from Stripe (boot reconcile, Task 8).
 
-    - Org has ``subscription_id`` → GET subscription → mirror.
+    - Org has ``subscription_id`` and it is ACTIVE → GET subscription → mirror.
+    - Org has ``subscription_id`` but it is INACTIVE → LIST the customer's
+      subscriptions → first active/trialing/past_due → mirror (this also
+      rewrites the stale pointer); with none active, mirror the stored one —
+      a real cancellation, which must still downgrade.
     - elif Org has ``stripe_customer_id`` (missed checkout event blind spot)
       → LIST subscriptions → first active/trialing/past_due → mirror.
     - else no-op.
@@ -775,7 +779,30 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     client = StripeClient()
     if sub_id:
         sub = client.get_subscription(sub_id)
-        summary = mirror_subscription(sdk, org_id, sub)  # gates tier on status
+        # A stored ``subscription_id`` is authoritative for IDENTITY, not for the
+        # org's CURRENT entitlement. A cancel-and-resubscribe whose
+        # ``checkout.session.completed`` was missed leaves the OLD (canceled) id
+        # stored forever, so mirroring it on sight would cap a paying org at the
+        # lower tier again — the exact bug this cadence exists to repair — and
+        # would report the row as a clean ``unchanged``. An INACTIVE stored
+        # subscription is therefore a pointer to repair, not the truth: prefer
+        # the active subscription the customer actually holds (mirroring it also
+        # rewrites ``subscription_id``, so the pointer heals), and fall back to
+        # the stored one only when there is none — a real cancellation, which
+        # must still downgrade.
+        if sub.get("status") in _ACTIVE_STATUSES or not customer_id:
+            summary = mirror_subscription(sdk, org_id, sub)  # gates tier on status
+            return {"org_id": org_id, "action": "mirror_subscription", **summary}
+        subs = client.list_subscriptions(customer_id)
+        for candidate in subs:
+            if candidate.get("status") in _ACTIVE_STATUSES:
+                summary = mirror_subscription(sdk, org_id, candidate)
+                return {
+                    "org_id": org_id,
+                    "action": "mirror_customer_first_active",
+                    **summary,
+                }
+        summary = mirror_subscription(sdk, org_id, sub)
         return {"org_id": org_id, "action": "mirror_subscription", **summary}
     subs = client.list_subscriptions(customer_id)
     for sub in subs:

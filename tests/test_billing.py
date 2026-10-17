@@ -380,6 +380,64 @@ class TestApplyLimitsAndReconcile:
         assert t["tier"] == "team"
         assert t["subscription_status"] == "active"
 
+    def test_reconcile_stale_subscription_id_falls_back_to_the_customer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8895 P1: a cancel-and-resubscribe whose
+        ``checkout.session.completed`` was missed leaves the OLD (canceled)
+        ``subscription_id`` stored forever. Mirroring it on sight caps a paying
+        org at the lower tier again — the very bug this cadence repairs — and
+        reports the row as a clean ``unchanged``. The stored id is authoritative
+        for IDENTITY, not for the CURRENT entitlement: an inactive one must
+        yield to the active subscription the customer actually holds, and
+        mirroring that one rewrites the stale pointer.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("stale-sub-pointer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_old', "
+            "t.stripe_customer_id='cus_1'",
+            params={"id": team["id"]},
+        )
+        stale = {"id": "sub_old", "status": "canceled",
+                 "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        active = {"id": "sub_new", "status": "active", "current_period_end": 9999,
+                  "cancel_at_period_end": False,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(stale))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [stale, active])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active"
+        assert t["tier"] == "team"           # the ACTIVE sub wins, not the stale id
+        assert t["subscription_id"] == "sub_new"   # stale pointer repaired
+        assert t["subscription_status"] == "active"
+
+    def test_reconcile_real_cancellation_still_downgrades(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8895 P1 guard: the customer-level fallback must NOT keep a canceled
+        org paid. With NO active subscription at the customer, the stored
+        (canceled) one is the truth and the org reverts to free."""
+        sdk = billing_sdk
+        team = sdk.org_create("real-cancel")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_gone', "
+            "t.stripe_customer_id='cus_1', t.tier='pro', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        stale = {"id": "sub_gone", "status": "canceled",
+                 "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(stale))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [stale])
+        reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "free"
+        assert t["subscription_status"] == "canceled"
+
     def test_reconcile_noop_without_identifiers(self, stripe_env, billing_sdk):
         sdk = billing_sdk
         team = sdk.org_create("noop-team")

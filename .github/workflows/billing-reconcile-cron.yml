@@ -127,6 +127,15 @@ jobs:
             exit 1
           fi
           out="$(mktemp)"
+          # This repository's Actions logs are PUBLIC, and the reconcile body
+          # carries per-org CUSTOMER identifiers (org id + billing state).
+          # Nothing is printed raw: the shell redacts org UUIDs and the summary
+          # below prints a stable fingerprint instead (#8895 review P2). An
+          # operator who needs the real ids re-reads the payload through the
+          # internal endpoint with FASTAPI_INTERNAL_KEY.
+          show_body() {
+            sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<org-id>/g' "$1" | head -c 2000 || true
+          }
           # `-m 600` is required, not decoration. `/v1/internal/` is
           # PREFIX-EXEMPT from the 10 s transport wait bound and has no
           # server-side ceiling (tests/test_transport_wait_bound.py: its CRON
@@ -140,11 +149,10 @@ jobs:
             -H "Authorization: Bearer ${FASTAPI_INTERNAL_KEY}")" || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::error::billing reconcile request failed (curl rc=${rc}; rc=28 is the 600 s ceiling expiring)"
-            cat "$out" || true
+            show_body "$out"
             exit 1
           fi
           echo "HTTP ${status}"
-          cat "$out"
           echo
           if [ "$status" = "202" ]; then
             # The endpoint answers 202 `already_running` for a CONCURRENT pass,
@@ -173,7 +181,24 @@ jobs:
             exit 1
           fi
           python3 - "$out" <<'PY'
-          import json, sys
+          import hashlib, json, sys
+
+          def redact_row(row):
+              """Replace a customer org id with a STABLE fingerprint.
+
+              The Actions log of this public repository must not publish which
+              customer is on which paid tier (#8895 review P2). A fingerprint
+              still lets an operator correlate one org across runs, which is
+              all the log needs.
+              """
+              if not isinstance(row, dict):
+                  return row
+              out = dict(row)
+              if "org_id" in out:
+                  digest = hashlib.sha256(
+                      str(out["org_id"]).encode()).hexdigest()[:10]
+                  out["org_id"] = f"org-{digest}"
+              return out
 
           try:
               data = json.load(open(sys.argv[1]))
@@ -221,6 +246,9 @@ jobs:
               print("::warning::the pass checked 0 orgs — a certified-empty fleet "
                     "is valid, but on a fleet with paying customers it is not")
           problems = []
+          failed = [redact_row(r) for r in failed]
+          unrepaired = [redact_row(r) for r in unrepaired]
+          drift_up = [redact_row(r) for r in drift_up]
           if failed:
               problems.append(f"{len(failed)} org(s) FAILED to reconcile: {failed}")
           if unrepaired:
