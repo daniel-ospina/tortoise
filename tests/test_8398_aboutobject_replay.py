@@ -52,6 +52,27 @@ def _nid(node) -> str:
     return node.get("id") or node.get("uuid")
 
 
+class _DirLog:
+    """Minimal ``EventLog`` over a DIRECTORY, in ``sorted(os.listdir())`` order.
+
+    ``rebuild`` takes one EventLog (a single file); ``rebuild_all`` reads a
+    directory. This adapter gives the single-file engine the same rotated-journal
+    view, so the two engines can be compared on identical input.
+    """
+
+    def __init__(self, path) -> None:
+        self.path = str(path)
+
+    def read_all(self):
+        out = []
+        for name in sorted(os.listdir(self.path)):
+            with open(os.path.join(self.path, name), encoding="utf-8") as fh:
+                for line in fh:
+                    if line.strip():
+                        out.append(json.loads(line))
+        return out
+
+
 def _counts(proj) -> dict[str, int]:
     return {
         rel: proj.g.query(
@@ -104,8 +125,14 @@ def test_the_observation_link_survives_a_rebuild(wired) -> None:
         f"{after[0]}): the Event→entity edge is wired live but not replayed")
 
 
-def test_every_about_rel_survives_and_replay_is_idempotent(wired) -> None:
-    """All four rels, and a second rebuild changes nothing (MERGE, not append)."""
+def test_replay_reproduces_the_live_about_counts(wired) -> None:
+    """The invariant is LIVE == REPLAY, per rel — not a count of four.
+
+    ``aboutDocument`` with a URL is NOT wired by the live write (it takes the
+    resolve-or-mint name path), so this test must not claim document coverage:
+    it asserts replay reproduces whatever live produced, per rel, and a second
+    rebuild changes nothing (MERGE, not append).
+    """
     sdk, proj, events, _journal = wired
     obj = _nid(sdk.create_object("TheObject"))
     sub = _nid(sdk.create_subject("TheSubject"))
@@ -120,7 +147,9 @@ def test_every_about_rel_survives_and_replay_is_idempotent(wired) -> None:
     after_two = _counts(proj)
 
     assert after_one == before, (
-        f"a rebuild changed the about* edge counts: {before} → {after_one}")
+        "a rebuild changed the about* edge counts per rel "
+        f"(aboutSubject/aboutObject/aboutPoint/aboutDocument): "
+        f"{before} → {after_one}")
     assert after_two == after_one, (
         "replay is not idempotent — a second rebuild kept adding edges: "
         f"{after_one} → {after_two}")
@@ -210,3 +239,32 @@ def test_the_link_survives_a_ROTATED_journal(wired) -> None:
         "the link was dropped because the EventRecorded replays before the "
         "ObjectRegistered in a rotated journal — the re-wire must be a trailing "
         "sweep, not inline")
+
+
+def test_the_EventLog_engine_also_reproduces_the_links(wired) -> None:
+    """The ``rebuild()`` (EventLog) engine feeds ``apply()`` one record at a time.
+
+    ``apply()`` wires inline, but its endpoints may not exist yet, so this engine
+    must ALSO buffer the record into a trailing sweep — the same forward-reference
+    treatment it gives ``EntityLinked``. Without that, a rotated journal drops the
+    link here while ``rebuild_all`` keeps it (two engines, two answers).
+    """
+    sdk, proj, events, journal = wired
+    obj = _nid(sdk.create_object("TheObject2"))
+    sdk.create_event("obs2", "event", aboutObject=obj)
+    before = _counts(proj)
+
+    with open(journal, encoding="utf-8") as fh:
+        records = [line for line in fh if line.strip()]
+    event_lines = [ln for ln in records if '"EventRecorded"' in ln]
+    rest = [ln for ln in records if '"EventRecorded"' not in ln]
+    os.remove(journal)
+    with open(os.path.join(str(events), "a-events.jsonl"), "w", encoding="utf-8") as fh:
+        fh.writelines(event_lines)
+    with open(os.path.join(str(events), "b-rest.jsonl"), "w", encoding="utf-8") as fh:
+        fh.writelines(rest)
+
+    proj.rebuild(_DirLog(events), confirm_destructive=True)
+    after = _counts(proj)
+    assert after["aboutObject"] == before["aboutObject"] >= 1, (
+        f"the EventLog rebuild lost the link: {before} → {after}")

@@ -1017,33 +1017,63 @@ class _EdgeHandlers:
         matched), so it repeats the live name path.
 
         Returns ``(wired, failed)`` — the caller reports ``failed`` so a rebuild
-        that could not re-wire a journaled link is never silent.
+        that could not re-wire a journaled link is never silent. Every skip that
+        costs a journaled link counts as ``failed``: a mystery ``how``, a ``rel``
+        outside the set, a ``targets`` that is not a list, an empty ``targets``.
+        "Wired" on the ``name`` path is MEASURED (the rel edge count must rise),
+        never assumed — a resolve-or-mint that wired nothing is a failure.
         """
         inner = payload.get("event", payload)
         source = inner.get("id") or inner.get("eventId")
         links = inner.get("aboutLinks") or []
-        if not isinstance(source, str) or not isinstance(links, list):
+        if not isinstance(source, str):
             return (0, 0)
+        if not isinstance(links, list):
+            return (0, 1)
         wired = failed = 0
         for link in links:
             if not isinstance(link, dict):
+                failed += 1
                 continue
             rel = link.get("rel")
             if rel not in _ABOUT_REPLAY_RELS:
+                # a journaled link this replay does not understand is a loss,
+                # not a non-event — it must be counted, not skipped
+                failed += 1
                 continue
             if link.get("how") == "id":
-                for value in link.get("targets") or []:
-                    ok = bool(value) and self.create_about_edge(
-                        source, value, rel,
-                        target_label=STRUCTURAL_REL_LABELS.get(rel))
+                targets = link.get("targets")
+                if not isinstance(targets, list) or not targets:
+                    failed += 1
+                    continue
+                for value in targets:
+                    ok = bool(value) and isinstance(value, str) and \
+                        self.create_about_edge(
+                            source, value, rel,
+                            target_label=STRUCTURAL_REL_LABELS.get(rel))
                     if ok:
                         wired += 1
                     else:
                         failed += 1
             elif link.get("how") == "name" and isinstance(link.get("value"), str):
+                before = self._count_about_rel(source, rel)
                 self._create_about_edges(source, link["value"])
-                wired += 1
+                if self._count_about_rel(source, rel) > before:
+                    wired += 1
+                else:
+                    failed += 1
+            else:
+                failed += 1
         return (wired, failed)
+
+    def _count_about_rel(self, source: str, rel: str) -> int:
+        """Count ``source``'s outgoing ``rel`` edges (``rel`` is validated by the
+        caller against ``_ABOUT_REPLAY_RELS`` before interpolation)."""
+        rows = self.g.query(
+            "MATCH (s) WHERE s.id=$sv OR s.eventId=$sv "
+            f"MATCH (s)-[r:{rel}]->() RETURN count(r)",
+            params={"sv": source}).result_set
+        return int(rows[0][0]) if rows and rows[0] else 0
 
     def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:
         """Link entity → Source via extractedFrom edge (Ontology v3.3).

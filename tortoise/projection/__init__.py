@@ -8161,7 +8161,19 @@ class FalkorProjection(
             # #8398: the about* links are GRAPH EDGES written live, not node
             # properties — so nothing replayed them and a rebuild silently
             # dropped every Event→entity link. Re-wire them from the record.
-            self.replay_about_links(ev)
+            # INLINE is correct for ``apply``'s live single-event caller (its
+            # endpoints exist); the whole-journal apply()-driven engines
+            # (``rebuild``/``recover_from_log``) ALSO buffer this type into a
+            # trailing sweep, exactly as they do for ``EntityLinked`` below —
+            # a forward reference here is wired there, and the count is reported
+            # there instead of being discarded.
+            _about_w, _about_f = self.replay_about_links(ev)
+            if _about_f:
+                logger.warning(
+                    "#8398: apply() could not re-wire %d journaled Event→entity "
+                    "about* link(s) (event %r) — its target is not in the graph "
+                    "yet; the whole-journal replay sweeps these",
+                    _about_f, ev.get("event_id") or ev.get("id"))
             return _replayed
         elif t == "EntityLinked":
             # #3664: the capture entity-attachment replay consumer — an
@@ -8622,6 +8634,10 @@ class FalkorProjection(
         # deferred terminalizer sweeps use.
         hard_deleted = hard_deleted_pairs(events)
         entity_link_events: list[tuple[int, dict]] = []
+        # #8398: EventRecorded replay links, buffered for the SAME reason as
+        # ``EntityLinked`` below — this engine feeds ``apply()`` ONE record at a
+        # time, so a link whose endpoint is created LATER would wire to nothing.
+        about_link_events: list[tuple[int, dict]] = []
         # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
         # keys + the ids it hard-deletes, so ``apply()`` can refuse a supersede
         # whose target the journal never leaves in place while NOT refusing a
@@ -8676,6 +8692,14 @@ class FalkorProjection(
                        journal_first_materialized=first_materialized,
                        journal_existence=epistemic_existence,
                        journal_seq=seq)
+            # #8398: buffer the record so its about* links are re-wired once
+            # every endpoint exists. The inline ``apply()`` wiring above already
+            # tried; these edges are idempotent MERGEs, so the sweep is a
+            # correction, never a duplicate.
+            if isinstance(ev, dict) and (
+                    ev.get("type") == "EventRecorded"
+                    or _norm(ev).get("type") == "EventRecorded"):
+                about_link_events.append((seq, ev))
         if deferred_corrects:
             # Guarded like the other two engines' sweeps: ``fold_deferred_*``
             # must never abort a post-wipe replay (the graph was already
@@ -8688,6 +8712,31 @@ class FalkorProjection(
                     "rebuild: deferred CORRECTS fold failed; %d edge(s) not "
                     "replayed", len(deferred_corrects))
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
+        # #8398: re-wire the journaled Event→entity about* links now that every
+        # endpoint the journal can restore exists. Reported, never raised — the
+        # graph was already wiped, so a failure must not abort the replay.
+        if about_link_events:
+            _wired = _failed = 0
+            for _al_seq, _al_ev in about_link_events:
+                self._replay_seq = _al_seq
+                try:
+                    _w, _f = self.replay_about_links(_al_ev)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "rebuild: about-link re-wire failed for event %r (#8398)",
+                        _al_ev.get("event_id") or _al_ev.get("id"))
+                    continue
+                _wired += _w
+                _failed += _f
+            if _wired:
+                logger.info(
+                    "rebuild: re-wired %d journaled Event→entity about* link(s) "
+                    "(#8398)", _wired)
+            if _failed:
+                logger.warning(
+                    "rebuild: %d journaled Event→entity about* link(s) could NOT "
+                    "be re-wired — the target was not restored by this replay; "
+                    "the live graph had these edges (#8398)", _failed)
         # #4125: pre-#4005 basename-url session Sources are re-materialised by
         # this replay (their `SourceCreated` line, and `_link_source`'s stub
         # mint from any PointAdded naming the bare basename) while the
