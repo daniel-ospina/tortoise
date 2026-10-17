@@ -9658,31 +9658,43 @@ class TortoiseSDK:
             "s.sourceKind=$sk",
             "s.sessionId=$sid",
             "s.capturedAt=$cap",
+            # Lane L5 (#5097): the update instant, GATED EXACTLY AS THE FOLD GATES
+            # IT — and placed BEFORE `s.contentHash` so the CASE can only ever
+            # read the PRE-write hash (`_upsert_source` relies on the same
+            # property for `version`, pinned at `version == 2`).
+            #
+            # A plain `coalesce` here kept the FIRST stamp forever while the
+            # record below always carries THIS call's instant, and
+            # `_upsert_source`'s ON MATCH writes `coalesce($updatedAt, $now)` on
+            # its hash-diff arm. So a second materialization whose transcript (and
+            # therefore hash) CHANGED left live on t1 and a replay on t2 — the
+            # divergence the previous comment claimed away (review P2). The two
+            # halves now move together: same-hash re-capture keeps the first
+            # stamp on both sides, a stub completion / hash change moves both.
+            "s.updatedAt=CASE WHEN s.contentHash IS NULL "
+            "OR s.contentHash <> $ch THEN $now "
+            "ELSE coalesce(s.updatedAt, $now) END",
             "s.contentHash=$ch",
             "s.summary=$sum",
             "s.topics=$topics",
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             "s.ingestedAt=coalesce(s.ingestedAt, $now)",
-            # Lane L5 (#5097): the write DOES update the node, so it stamps the
-            # update instant. Without it the journal carrier below could not
-            # replay faithfully: `_upsert_source`'s ON MATCH/bump arm stamps
-            # `coalesce($updatedAt, $now)` whenever the hash differs (a
-            # stub-completion, exactly this write), so a replay produced an
-            # `updatedAt` the live node did not have — live `None` vs a rebuilt
-            # replay-clock instant, i.e. the same divergence the #5024
-            # recorded-instant work closed on the create arm. `coalesce` keeps
-            # the FIRST write's stamp on a re-capture, so the value the record
-            # carries is the one the replay reproduces.
-            "s.updatedAt=coalesce(s.updatedAt, $now)",
         ]
         if event_id:
             set_clauses.append("s.eventId=$eid")
             params["eid"] = event_id
         proj = self._get_proj()
-        proj.g.query(
-            "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses),
+        # `RETURN s.validFrom, s.is_episodic` — the TWO properties this writer
+        # must NOT move but must not DESTROY on replay either (see the carrier
+        # note below). Read back from the node the write just completed, in the
+        # same statement, so the values are the ones it holds.
+        _rows = proj.g.query(
+            "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses)
+            + " RETURN s.validFrom, s.is_episodic",
             params=params,
-        )
+        ).result_set
+        prior_valid_from = _rows[0][0] if _rows else None
+        prior_is_episodic = _rows[0][1] if _rows else None
         if event_id:
             # Anchored ON CREATE by the shared derivation writer (#5199).
             proj.link_source_to_event(url, event_id)
@@ -9709,14 +9721,32 @@ class TortoiseSDK:
         # The payload carries THE VALUES THE WRITE STORED, never the caller's
         # raw input (the `_journal_entity_mutation` `state` rule, and here it
         # is also the #4911 rule: the redacted metadata is what must replay).
-        # `title` is passed explicitly as `None`: `_upsert_source` defaults a
-        # missing `title` to the MERGE key, which the live write never sets —
-        # omitting it would make the replayed Source gain a title live does not
-        # have. `validFrom` is deliberately absent: this writer mints no
-        # version window (the live node has none), and `_upsert_source`'s
-        # ON CREATE arm writes `$vf` (null ⇒ absent), which is the same state.
-        # `updatedAt` carries the instant the write stamped, so the fold's
-        # stub-completion arm reproduces it instead of the replay clock.
+        #
+        #   * `title=None` — this writer never sets one. The ON MATCH arm's
+        #     `coalesce($title, s.title)` then keeps whatever the node holds, and
+        #     the ON CREATE arm's `coalesce($title, $url)` reproduces the stub's
+        #     `title=url` instead of erasing it.
+        #   * `_stub_completion=True` — THIS RECORD COMPLETES A STUB, IT DOES NOT
+        #     CREATE A SOURCE (`_upsert_source` reads it as `$stub_completion`).
+        #     It suppresses the ON CREATE arm's three CREATOR-ONLY defaults, which
+        #     the live node never has (the M2 `_link_source` stub created it):
+        #     `id`, `version=1` and `externalId=''`. Without it a `rebuild_all` —
+        #     which folds `SourceCreated` in pass 1b, BEFORE pass 2 mints the stub
+        #     — recovered a session `:Source` carrying a version ordinal this
+        #     writer does not advance (review P1).
+        #   * it also admits this record's own prop spellings
+        #     (`_SOURCE_CAPTURE_REPLAY_PROPS`) to the passthrough WITHOUT widening
+        #     the caller surface a `create_source(**props)` call rides.
+        #   * `validFrom` and `is_episodic` are carried from the NODE
+        #     (`RETURN`ed above), because this writer must neither move nor erase
+        #     them: `_upsert_source`'s hash-diff arm writes `s.validFrom = $vf`,
+        #     and `$vf = null` REMOVES the property — so omitting the key cleared a
+        #     window a prior `create_source` (or the stub's `is_episodic`, the
+        #     #1486 discriminator) had established, i.e. a replay regression on a
+        #     RECORDED field (review P2). Carrying the node's own value makes the
+        #     fold's write a no-op on both arms.
+        #   * `updatedAt` carries the instant the write stamped, so the fold's
+        #     stub-completion arm reproduces it instead of the replay clock.
         #
         # ⚠️ `ingestedAt` is emitted too, but it is a KNOWN RESIDUAL and is not
         # claimed as faithful: the stub this write completes is created by the
@@ -9735,6 +9765,9 @@ class TortoiseSDK:
             title=None,
             ingestedAt=now,
             updatedAt=now,
+            validFrom=prior_valid_from,
+            is_episodic=prior_is_episodic,
+            _stub_completion=True,
             **{SOURCE_SEARCH_TEXT_FIELD: search_text},
             sessionId=session_id,
             capturedAt=now,
