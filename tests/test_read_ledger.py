@@ -1075,3 +1075,27 @@ def test_enabled_matches_the_funnels_own_flag_read(monkeypatch):
         else:
             monkeypatch.setenv(read_ledger.LEDGER_FLAG_ENV, value)
         assert read_ledger.enabled() is is_truthy(value)
+
+
+def test_a_naive_now_is_read_as_utc_not_a_crash(ledger):
+    """`_stamp` reads a naive stamp as UTC, so `now` must follow the same rule."""
+    read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger, at="2026-10-17T12:00:00+00:00")
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-17T12:00:00+00:00")
+    folded = fold(ledger, window_days=7, now=datetime(2026, 10, 17, 13))  # naive
+    assert next(iter(folded.rows.values())).read_count == 1
+
+
+def test_tenants_in_file_counts_the_file_even_with_tenant_given(ledger):
+    """It is a fact about the FILE — a `--tenant` run must not report 0."""
+    read_ledger.record_stock("Point", "a", nbytes=1, path=ledger, tenant_id="t1")
+    read_ledger.record_stock("Point", "b", nbytes=1, path=ledger, tenant_id="t2")
+    read_ledger.record_stock("Point", "c", nbytes=1, path=ledger)
+    import io
+    import json as _json
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert read_ledger._main(["--ledger", str(ledger), "--tenant", "t1", "--json"]) == 0
+    payload = _json.loads(buf.getvalue())
+    assert payload["tenants_in_file"] == 3, payload["tenants_in_file"]

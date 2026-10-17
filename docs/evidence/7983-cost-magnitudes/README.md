@@ -149,7 +149,7 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
    `f = 1` is 0.988× / 0.803× / 0.462×, so at today's keep-everything policy nothing is saved.
    (Dividing the measured DISK LINE — the only part of `rho` that is a value, since compute and plan are density assumptions — by §17.4.4's pre-measurement `778.7` mixes a price with a quantity:
    778.7 is a RATE ratio, valid only while the record occupies the cache's own 0.1499 GB.) The
-   coherent pair is 25× apart and no per-read measurement can resolve it: 5.2 blocks and 41–45 µs
+   coherent pair is 25× apart and no per-read measurement can resolve it: 5.2 blocks and 48–53 µs
    per miss do not make a compute tier. ⚠️ **The egress allowance is shared by the project**, so it
    holds only up to 1.04 misses/s/tenant at 40 tenants (0.042 at 1,000) — a real mix can exceed that
    and raise `rho`. **Neither a floor nor a ceiling:** the encoding bound and the miss-rate bound
@@ -182,8 +182,8 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   Point rows (`recall_gaps`, `issue_insight`, `search_sessions`, `get_events` and the printed session summary
   likewise record what they return) — but a caller that hands the funnel a `limit` far above what it
   surfaces is still a pool read, and `recall_state`'s OBJECT leg is uncounted: its rows carry `id`,
-  while an Object's key is `name`, so recording them could only emit `unresolved` (reported as "rows
-  with no key at all", which would be false); and **the
+  while an Object's key is `name`, so recording them could only emit `unresolved` (reported as a row with no
+  value for the label's contract field, which for a successful Object read would be a mis-statement); and **the
   `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and
   carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in
   a joinable coordinate. **Every one of them leaves a read out of the numerator, so every one biases

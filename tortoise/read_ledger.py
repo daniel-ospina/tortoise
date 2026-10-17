@@ -107,7 +107,9 @@ DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 EVENT_READ = "read"
 EVENT_STOCK = "stock"
 EVENT_CAPPED = "capped"
-#: A returned row the ledger could not ADDRESS (no key at all). Written as its
+#: A returned row the ledger could not ADDRESS — it carries no value for its
+#: label's contract field (an FTS `Subject`/`Object`/`Source` row carries `id`,
+#: never `name`/`url`). Written as its
 #: own event because a read the ledger cannot key is a HOLE in both the
 #: numerator and the denominator — dropping it silently would make the report
 #: claim a completeness it never had.
@@ -559,7 +561,9 @@ def row_key(label: str, row: Mapping[str, Any]) -> str | None:
 
     `label` is already half the coordinate, so a name-shaped fallback cannot
     collide across labels: `Subject.name` and `Object.name` stay distinct rows.
-    `None` means the row carried no key at all — counted as an UNRESOLVED read
+    `None` means the row carries no value for the label's CONTRACT field (an FTS
+    `Object` row carries `id`, not `name`; it is not keyless, it is unaddressable
+    in this coordinate) — counted as an UNRESOLVED read
     by the report rather than dropped silently, because a read the ledger cannot
     address is a hole in the denominator as well as in the numerator.
     """
@@ -726,6 +730,11 @@ def fold(
     cutoff_dt: datetime | None = None
     if window_days is not None:
         ref = now or datetime.now(UTC)
+        if ref.tzinfo is None:
+            # `_stamp` reads a naive event stamp as UTC; `now` follows the same
+            # rule, or the comparison raises TypeError out of a read-only report
+            # for the first caller who passes the natural naive datetime.
+            ref = ref.replace(tzinfo=UTC)
         cutoff_dt = ref - timedelta(days=window_days)
         cutoff = cutoff_dt.isoformat(timespec="seconds")
         out.window_started = cutoff
@@ -1059,8 +1068,11 @@ def _main(argv: list[str] | None = None) -> int:
     union_tenants = 0
     pooled_single_namespace = False
     mixed_namespace = False
+    all_tenants = _tenants_in_file(target)
+    tenant_count_in_file = len({t for t in all_tenants if t is not None}) + (
+        1 if None in all_tenants else 0
+    )
     if a.tenant is None:
-        all_tenants = _tenants_in_file(target)
         union_tenants = len({t for t in all_tenants if t is not None})
         # Every event under `tenant=None` is ONE namespace to the ledger — and a
         # hosted process serving many tenants writes exactly that unless the
@@ -1085,7 +1097,7 @@ def _main(argv: list[str] | None = None) -> int:
                     "lines_read": folded.lines_read,
                     "lines_skipped": folded.lines_skipped,
                     "reads_undated": folded.reads_undated,
-                    "tenants_in_file": union_tenants,
+                    "tenants_in_file": tenant_count_in_file,
                     "pooled_single_namespace": pooled_single_namespace,
                     "mixed_namespace": mixed_namespace,
                 },
@@ -1154,7 +1166,9 @@ def _main(argv: list[str] | None = None) -> int:
     if f.unregistered_reads or f.unresolved_reads:
         print(
             f"⚠️ reads outside the denominator: {f.unregistered_reads} unregistered, "
-            f"{f.unresolved_reads} with no key — f undercounts the numerator by these"
+            f"{f.unresolved_reads} with no value for their label's contract field "
+            f"(an FTS Subject/Object/Source row carries `id`, not `name`/`url`) — "
+            f"f undercounts the numerator by these"
         )
     if folded.lines_skipped:
         print(

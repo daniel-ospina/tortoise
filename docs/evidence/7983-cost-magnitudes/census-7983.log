@@ -1,5 +1,5 @@
 #7983 census — read-frequency instruments, measured on this tree
-Measured at: measure/7983-hot-fraction-and-rho@459f22912edf4893fb70144d42e97df389479ed5 on 2026-10-17T13:51:10Z
+Measured at: measure/7983-hot-fraction-and-rho@d15092bae9c5179177c7564aa5265575f57778c5 on 2026-10-17T19:21:32Z
 Census tree: 459f22912@459f22912edf4893fb70144d42e97df389479ed5 (committed tree — this lane's own change is excluded by construction)
 Excluded from the greps: *read_ledger.py — the instrument this lane adds; a census that counts its own answer cannot record the gap.
 Run with: --base <sha> for the committed tree, bare for the working tree.
@@ -77,20 +77,20 @@ check manufactures false confidence (AGENTS.md).
      no-op unless a tally is armed (tortoise/retrieval_metering.py).
 
 === 3. the residency declaration — WHAT is it a fact about? ===
-81:def residency_enabled() -> bool:
-91:class ResidencyDeclaration:
-105:    coverage: str = COVERAGE_COMPLETE
-106:    hot_keys: frozenset[str] | None = None
-107:    source: str | None = None
-134:def mark_residency(declaration: ResidencyDeclaration, *,
-161:def apply_residency(status: str | None, marker: str | None, *,
-190:def combine_residency(*markers: str | None) -> str | None:
-210:def _parse_hot_keys(raw: object) -> frozenset[str] | None:
-217:def read_declaration(g, *, timeout_ms: int = 500) -> ResidencyDeclaration:
-239:    coverage = row[0] if len(row) > 0 else None
-240:    hot_keys = _parse_hot_keys(row[1]) if len(row) > 1 else None
-251:def declare_residency(g, declaration: ResidencyDeclaration) -> None:
-275:def clear_residency(g) -> bool:
+459f22912:tortoise/residency.py:81:def residency_enabled() -> bool:
+459f22912:tortoise/residency.py:91:class ResidencyDeclaration:
+459f22912:tortoise/residency.py:105:    coverage: str = COVERAGE_COMPLETE
+459f22912:tortoise/residency.py:106:    hot_keys: frozenset[str] | None = None
+459f22912:tortoise/residency.py:107:    source: str | None = None
+459f22912:tortoise/residency.py:134:def mark_residency(declaration: ResidencyDeclaration, *,
+459f22912:tortoise/residency.py:161:def apply_residency(status: str | None, marker: str | None, *,
+459f22912:tortoise/residency.py:190:def combine_residency(*markers: str | None) -> str | None:
+459f22912:tortoise/residency.py:210:def _parse_hot_keys(raw: object) -> frozenset[str] | None:
+459f22912:tortoise/residency.py:217:def read_declaration(g, *, timeout_ms: int = 500) -> ResidencyDeclaration:
+459f22912:tortoise/residency.py:239:    coverage = row[0] if len(row) > 0 else None
+459f22912:tortoise/residency.py:240:    hot_keys = _parse_hot_keys(row[1]) if len(row) > 1 else None
+459f22912:tortoise/residency.py:251:def declare_residency(g, declaration: ResidencyDeclaration) -> None:
+459f22912:tortoise/residency.py:275:def clear_residency(g) -> bool:
 
 writers of the declaration:
 459f22912:tortoise/cache_projection.py:853:    declare_residency(g, declaration)
@@ -101,24 +101,24 @@ readers of the declaration:
 459f22912:tortoise/sdk.py:21416:            _residency = _read_declaration(
 
 === 4. the read surfaces, and whether a returned row carries a (label, key) ===
-12945:    def query(self, kind: str | None = None,
-21036:    def tortoise_fts_query(
-22951:    def recall_state(
-23489:    def recall_gaps(
-23618:    def recall_subgraph(self, seed: str, *,
-26896:    def search_sessions(self, query: str, *, agent: str | None = None,
+459f22912:tortoise/sdk.py:12945:    def query(self, kind: str | None = None,
+459f22912:tortoise/sdk.py:21036:    def tortoise_fts_query(
+459f22912:tortoise/sdk.py:22932:    def recall_state(
+459f22912:tortoise/sdk.py:23470:    def recall_gaps(
+459f22912:tortoise/sdk.py:23599:    def recall_subgraph(self, seed: str, *,
+459f22912:tortoise/sdk.py:26877:    def search_sessions(self, query: str, *, agent: str | None = None,
 
 the (label, key) contract:
-97:    "KEY_PROPERTY",
-271:KEY_PROPERTY: dict[str, str] = _read_key_property()
-561:    key_prop = KEY_PROPERTY[label]
-653:    key_prop = KEY_PROPERTY[node.label]
-692:    src_kp = KEY_PROPERTY[rel.src_label]
-693:    tgt_kp = KEY_PROPERTY[rel.tgt_label]
-791:    ⛔ **The LABEL is part of the coordinate, never discarded.** ``KEY_PROPERTY``
+459f22912:tortoise/cache_projection.py:97:    "KEY_PROPERTY",
+459f22912:tortoise/cache_projection.py:271:KEY_PROPERTY: dict[str, str] = _read_key_property()
+459f22912:tortoise/cache_projection.py:561:    key_prop = KEY_PROPERTY[label]
+459f22912:tortoise/cache_projection.py:653:    key_prop = KEY_PROPERTY[node.label]
+459f22912:tortoise/cache_projection.py:692:    src_kp = KEY_PROPERTY[rel.src_label]
+459f22912:tortoise/cache_projection.py:693:    tgt_kp = KEY_PROPERTY[rel.tgt_label]
+459f22912:tortoise/cache_projection.py:791:    ⛔ **The LABEL is part of the coordinate, never discarded.** ``KEY_PROPERTY``
 
 KEY_PROPERTY resolved at import:
 {'Point': 'id', 'Event': 'eventId', 'Subject': 'name', 'Object': 'name', 'Source': 'url', 'Session': 'id'}
 
 === 5. the ledger this census justifies (shipped by this lane) ===
-tortoise/read_ledger.py present: True
+tortoise/read_ledger.py present: False

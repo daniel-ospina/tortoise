@@ -57,6 +57,21 @@ def grep(pattern: str, dirs: tuple[str, ...]) -> tuple[int, str]:
     return run(["grep", "-rnE", pattern, *EXTRA, *dirs])
 
 
+def grep_file(pattern: str, path: str) -> tuple[int, str]:
+    """A single-file grep that respects `--base` like `grep()` does."""
+    if BASE:
+        return run(["git", "grep", "-nE", pattern, BASE, "--", path])
+    return run(["grep", "-nE", pattern, path])
+
+
+def path_exists(path: str) -> bool:
+    """Does the path exist in the tree being CENSUSED (base, or the worktree)?"""
+    if BASE:
+        rc, _out = run(["git", "cat-file", "-e", f"{BASE}:{path}"])
+        return rc == 0
+    return (ROOT / path).exists()
+
+
 def run(cmd: list[str]) -> tuple[int, str]:
     p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     return p.returncode, (p.stdout + p.stderr).strip()
@@ -106,8 +121,8 @@ def main() -> int:
           "(tortoise/retrieval_metering.py).")
 
     head("3. the residency declaration — WHAT is it a fact about?")
-    rc, out = run(["grep", "-nE", r"^(class |def |    coverage|    hot_keys|    source)",
-                   "tortoise/residency.py"])
+    rc, out = grep_file(r"^(class |def |    coverage|    hot_keys|    source)",
+                        "tortoise/residency.py")
     print(out)
     rc, out = grep("declare_residency\\(", ("tortoise", "tools"))
     print("\nwriters of the declaration:\n" + (out or "(none)"))
@@ -115,11 +130,11 @@ def main() -> int:
     print("\nreaders of the declaration:\n" + (out or "(none)"))
 
     head("4. the read surfaces, and whether a returned row carries a (label, key)")
-    rc, out = run(["grep", "-nE", r"^    def (search|query|recall_state|recall_gaps|"
-                                  r"recall_subgraph|search_sessions|tortoise_fts_query)\(",
-                   "tortoise/sdk.py"])
+    rc, out = grep_file(r"^    def (search|query|recall_state|recall_gaps|"
+                        r"recall_subgraph|search_sessions|tortoise_fts_query)\(",
+                        "tortoise/sdk.py")
     print(out)
-    rc, out = run(["grep", "-nE", r"KEY_PROPERTY", "tortoise/cache_projection.py"])
+    rc, out = grep_file(r"KEY_PROPERTY", "tortoise/cache_projection.py")
     print("\nthe (label, key) contract:\n" + out)
     rc, out = run(["uv", "run", "python", "-c",
                    "from tortoise.cache_projection import KEY_PROPERTY;"
@@ -127,8 +142,11 @@ def main() -> int:
     print("\nKEY_PROPERTY resolved at import:\n" + out)
 
     head("5. the ledger this census justifies (shipped by this lane)")
-    exists = (ROOT / "tortoise/read_ledger.py").exists()
-    print(f"tortoise/read_ledger.py present: {exists}")
+    # `--base`-aware: on the COMMITTED tree this must be False — that is the
+    # whole point of the census (nothing persisted per-key read state before
+    # this lane). Reading the worktree here printed `True` for the lane's own
+    # new file, inside the census that exists to show it did not exist.
+    print(f"tortoise/read_ledger.py present: {path_exists('tortoise/read_ledger.py')}")
     return 0
 
 
