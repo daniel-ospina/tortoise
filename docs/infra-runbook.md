@@ -428,7 +428,7 @@ row IS the entitlement (`billing.effective_tier` never derives upward), and its
 ONLY writer is the Stripe webhook. One missed or failed
 `customer.subscription.*` delivery therefore capped the org permanently.
 `billing.reconcile_org` repairs one org but had no production caller until
-#8878, so nothing ever compared the store against Stripe.
+issue #8878, so nothing ever compared the store against Stripe.
 
 **Do NOT diagnose this from `/v1/team`'s `checkout_price_id`.** That field is
 the CATALOG's default CTA price (`_default_checkout_price_id()` → pro monthly
@@ -436,31 +436,62 @@ for every org) plus the tier→price map — it describes the upgrade buttons, n
 what the org pays. The only server-side evidence of the price is the org's
 `subscription_id` / `stripe_customer_id` in Stripe.
 
-**Repair a specific org now** (internal key required):
+**Repair the FLEET now** (internal key required). There is no per-org route:
+this reconciles **every** billed org, and a run already in flight answers `202
+{"status": "already_running"}` having done nothing.
 
 ```bash
-curl -sS -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
+# --max-time is required, not decoration: /v1/internal/ is prefix-exempt from
+# the 10s transport-wait bound (hosted_api.py, the exemption's own comment), so
+# without it this hangs with nothing printed — in exactly the situation you run
+# it. `-f` turns a 4xx/5xx into an error instead of printing the error body as
+# if it were a summary; the bound sizes the pass (N orgs x a Stripe round-trip).
+curl -sS -f --max-time 600 -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" | jq .
 ```
 
-A pass returns `checked` / `repaired` / `unchanged` / `skipped` / `failed` /
-`unrepaired` and one `drift` row per repaired org, each with a `direction`:
+**Repair ONE org** — for the org in the ticket, call the per-org function
+instead (the route cannot target a single org):
+
+```bash
+# Supabase/control-plane mode: sdk may be None (the org row is authoritative).
+python -c 'from tortoise.billing import reconcile_org; import sys; print(reconcile_org(None, sys.argv[1]))' "$ORG_ID"
+```
+
+A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
+`failed` / `unrepaired` and one `drift` row per repaired org, each with a
+`direction`:
 
 - `direction: "up"` — a paying org WAS being under-delivered. The reconciler
   pages it through the billing notify channel (Resend + Telegram) and logs
   `billing reconcile: …`; the daily driver also fails its run.
 - `direction: "down"` — Stripe truth (a portal downgrade/cancellation) reached
   the mirror late. Reported, never paged.
+- `direction: null` — the before/after pair could not be ranked (both caps
+  unlimited, e.g. an unrecognised tier). Neither a downgrade nor an upgrade;
+  reported, never paged.
+- `unverified` — the org is stored as billed but Stripe answered with NO active
+  subscription. Nothing was verified against a subscription, so this is NOT
+  `unchanged` — and it is deliberately not auto-downgraded either. Counted and
+  logged loudly; a non-zero number is a person to look at.
 - `unrepaired` — Stripe resolved a tier the store did NOT end up holding. That
   is a broken repair, not a clean pass; treat it as an incident.
 
 **Cadence.** `.github/workflows/billing-reconcile-cron.yml` runs the pass daily
 (04:43 UTC) with `INTERNAL_API_URL` + `FASTAPI_INTERNAL_KEY`, and the run FAILS
-— i.e. it notifies — when the request fails, when any org `failed` to
-reconcile, when any org is `unrepaired`, or when any `drift` row went `up`.
+**and pages Telegram** when the request fails, when the response cannot be read
+as a summary, when any org `failed` to reconcile, when any org is `unrepaired`,
+or when any `drift` row went `up`.
 The driver is external deliberately (same reasoning as the backup sweep, #596):
 an in-process timer dies with the process and is invisible when the app is
 crash-looping — exactly when a missed delivery is most likely.
+
+⚠️ **Known residual — a driver that never runs is silent.** This covers the
+app-down leg only. If GitHub stops running the schedule (it disables schedules
+after ~60 days of repo inactivity — "a missing run looks like silence", §7.8),
+no request is made, so nothing fails and nothing pages; nothing watches for a
+MISSING pass. The backup driver (#596) covers that leg with a run stamp plus an
+out-of-band staleness check, and this one does not yet.
 
 ## 4.5 Local Development — Local Stays Local
 

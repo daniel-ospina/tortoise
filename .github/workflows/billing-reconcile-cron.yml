@@ -20,8 +20,11 @@ name: billing-reconcile-cron
 # then fails loudly, which is the signal).
 #
 # WHAT COUNTS AS A FAILURE. The endpoint (POST /v1/internal/billing/reconcile)
-# answers 200 with a summary. This job fails the run — i.e. it PAGES — when:
+# answers 200 with a summary. This job fails the run AND PAGES TELEGRAM when:
 #   * the request itself fails (app down / internal key wrong), or
+#   * the response cannot be read as a summary at all (not a JSON object, or
+#     missing any field the verdict below keys on — a shape change must fail
+#     closed, never read as a clean pass), or
 #   * `failed` is non-empty (a billed org could not be reconciled: a pass that
 #     verified nothing must not read as a clean pass), or
 #   * `unrepaired` is non-empty (Stripe resolved a tier the store did not end
@@ -31,9 +34,24 @@ name: billing-reconcile-cron
 #     through the billing notify channel — this is the independent leg that
 #     still fires if that channel is unconfigured).
 #
+# The Telegram leg is what makes "PAGES" true rather than aspirational: a red
+# run alone only reaches whoever opens the Actions tab (a scheduled run also
+# emails whoever last touched the default branch, which is not an owner). The
+# runbook (§4.2) advertised the page before anything delivered one.
+#
+# RESIDUAL, stated rather than implied (the sibling backup driver's #596 header
+# covers BOTH legs; this one covers only the app-down leg): if GitHub silently
+# stops running this schedule — it disables schedules after ~60 days of repo
+# inactivity, `docs/infra-runbook.md` records "a missing run looks like
+# silence" — no request is made, so nothing fails and nothing pages. Nothing
+# here watches for a MISSING pass. Closing that needs a run stamp plus an
+# out-of-band staleness check (the driver-disabled leg #596 built); it is not
+# claimed as covered here.
+#
 # Drift DOWN (a portal downgrade or cancellation the mirror had not seen) is
 # reported in the summary and is NOT a failure: it is Stripe truth arriving
-# late, not a customer being short-changed.
+# late, not a customer being short-changed. A `direction` of `null` (the pair
+# could not be ranked) is likewise not a failure.
 
 on:
   schedule:
@@ -79,17 +97,51 @@ jobs:
           python3 - "$out" <<'PY'
           import json, sys
 
-          data = json.load(open(sys.argv[1]))
-          drift_up = [d for d in data.get("drift", []) if d.get("direction") == "up"]
-          failed = data.get("failed", [])
-          unrepaired = data.get("unrepaired", [])
+          try:
+              data = json.load(open(sys.argv[1]))
+          except (OSError, ValueError) as exc:
+              print(f"::error::reconcile response is not JSON ({exc.__class__.__name__}) "
+                    "— the pass cannot be verified")
+              sys.exit(1)
+          if not isinstance(data, dict):
+              print("::error::reconcile response is not a JSON object — the pass "
+                    "cannot be verified")
+              sys.exit(1)
+          # Required BEFORE the verdict is computed. Every read below has a
+          # default, so a response that simply OMITS a field would read as a
+          # clean pass — the same "verified nothing, looked clean" failure this
+          # job exists to catch. A renamed/reshaped summary must page, not pass.
+          required = {"checked", "repaired", "unchanged", "unverified",
+                      "skipped", "drift", "unrepaired", "failed"}
+          missing = sorted(required - set(data))
+          if missing:
+              print(f"::error::reconcile summary is missing {missing} — the "
+                    "response contract changed, so a clean pass cannot be told "
+                    "from an unverified one; failing closed")
+              sys.exit(1)
+          drift_up = [d for d in data["drift"] if d.get("direction") == "up"]
+          failed = data["failed"]
+          unrepaired = data["unrepaired"]
           summary = (
-              f"checked={data.get('checked', 0)} repaired={data.get('repaired', 0)} "
-              f"up={len(drift_up)} unchanged={data.get('unchanged', 0)} "
-              f"skipped={data.get('skipped', 0)} failed={len(failed)} "
-              f"unrepaired={len(unrepaired)}"
+              f"checked={data['checked']} repaired={data['repaired']} "
+              f"up={len(drift_up)} unchanged={data['unchanged']} "
+              f"unverified={data['unverified']} skipped={data['skipped']} "
+              f"failed={len(failed)} unrepaired={len(unrepaired)}"
           )
           print(summary)
+          if data["unverified"]:
+              # Not a failure: Stripe answered and named no active subscription.
+              # Loud anyway — an org stored as billed that Stripe does not
+              # recognise is a person someone should look at.
+              print(f"::warning::{data['unverified']} org(s) are stored as billed "
+                    "but Stripe names no active subscription (not verified, not "
+                    "downgraded) — review them")
+          if data["checked"] == 0:
+              # Loud, never fatal. The enumeration is CERTIFIED complete before
+              # this point (an uncertifiable one raises and 500s), so 0 means a
+              # fleet with no billed org — a real state on a fresh deployment.
+              print("::warning::the pass checked 0 orgs — a certified-empty fleet "
+                    "is valid, but on a fleet with paying customers it is not")
           problems = []
           if failed:
               problems.append(f"{len(failed)} org(s) FAILED to reconcile: {failed}")
@@ -106,6 +158,31 @@ jobs:
                   print(f"::error::{p}")
               sys.exit(1)
           PY
+
+      - name: Page on failure
+        # `failure()` covers timeouts and any failing step above, which is the
+        # whole point: the leg that matters most (app down) is exactly the one
+        # where the in-app notify channel is unreachable, so the page must come
+        # from HERE. Deliberately Telegram and NOT an auto-filed issue: an issue
+        # ledger needs a resolve leg to retire it, and a stale open incident is
+        # the defect #8841 records. Best-effort by design — an undeliverable
+        # page must not turn a red run green (it stays red).
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ -z "${TELEGRAM_CHAT_ID:-}" ] || [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are unset — the failed reconcile pass was NOT paged. The red run is the only signal; configure the secrets or fix the runbook's claim."
+            exit 0
+          fi
+          . .github/scripts/telegram-send.sh
+          tg_send "$TELEGRAM_CHAT_ID" \
+            "billing reconcile FAILED — a paying org may be capped at the wrong tier. ${run_url}" \
+            || echo "::warning::the Telegram page was not delivered (see the log above) — the red run remains the signal"
+          exit 0
 
       - name: Summary
         if: always()

@@ -2117,6 +2117,137 @@ class TestReconcileSweep:
         with pytest.raises(RuntimeError):
             bl.reconcile_subscriptions(None, notifier=False)
 
+    def test_enumeration_walks_the_certifying_seam_not_a_single_page(
+            self, monkeypatch):
+        """#8878 review: the enumerate must use the seam that OWNS completeness.
+
+        ``SupabaseControlPlane.query`` is ONE PostgREST page and PostgREST caps a
+        row list at ``max_rows`` silently — a truncated read arrives as a
+        non-empty PARTIAL list with no error. Reading it as the fleet would
+        report a plausible ``checked=N`` and green the cron while every org past
+        the page was never compared to Stripe: the permanent silent cap #8878
+        exists to remove, re-created for a suffix of the fleet.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        seen: dict = {}
+
+        class _Cp:
+            def query_all(self, table, **kw):
+                seen["table"], seen["kw"] = table, kw
+                return [{"id": f"org-{i}"} for i in range(1200)], True
+
+            def query(self, *a, **kw):  # pragma: no cover - must not be used
+                raise AssertionError(
+                    "the single-page query() was used for the fleet — that is "
+                    "the truncating read #8878 exists to avoid")
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Cp())
+        rows = bl._enumerate_billed_orgs()
+        assert len(rows) == 1200, "a page past the first was dropped"
+        assert seen["table"] == "organizations"
+        assert seen["kw"]["cursor"] == "id"
+        # No `deleted_at IS NULL`: a soft-deleted org can still be BILLED, and
+        # excluding it would hide a live charge from the only pass that looks.
+        assert seen["kw"]["filters"] is None
+
+    def test_uncertifiable_enumeration_fails_closed(self, monkeypatch):
+        """``complete=False`` is a LOWER BOUND, never a clean pass."""
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Truncated:
+            def query_all(self, table, **kw):
+                return [{"id": "org-1"}], False
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Truncated())
+        with pytest.raises(RuntimeError, match="CERTIFIED"):
+            bl._enumerate_billed_orgs()
+
+    def test_seam_without_a_completeness_signal_refuses(self, monkeypatch):
+        """An older seam may certify by the SERVER's count; if it cannot, refuse.
+
+        A page nobody can vouch for must never be published as the fleet.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Opaque:
+            def query_with_total(self, table, **kw):
+                return [{"id": "org-1"}], None  # server stated no total
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Opaque())
+        with pytest.raises(RuntimeError, match="LOWER BOUND"):
+            bl._enumerate_billed_orgs()
+
+    def test_limit_caps_processing_without_weakening_certification(
+            self, monkeypatch):
+        """``limit`` is an ops/test cap on how many rows are PROCESSED."""
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Cp:
+            def query_all(self, table, **kw):
+                return [{"id": f"org-{i}"} for i in range(10)], True
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Cp())
+        assert len(bl._enumerate_billed_orgs(limit=3)) == 3
+
+    def test_no_stripe_subscription_is_unverified_not_unchanged(
+            self, monkeypatch, billing_client):
+        """A stored-billed org Stripe names no active sub for was NOT verified.
+
+        ``reconcile_org`` reports ``action="noop"`` for the missed-checkout
+        blind spot (customer id, no active subscription). Counting that as
+        ``unchanged`` reports an unexamined org as verified-clean — the exact
+        read-only-reconciler failure the ``unrepaired`` guard exists to catch.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8878n")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1
+        assert summary["unverified"] == 1, summary
+        assert summary["unchanged"] == 0, \
+            "an unverified org must never be reported as verified-clean"
+        assert summary["repaired"] == 0 and summary["drift"] == []
+        assert self._row(sdk, org_id)[0] == "pro", \
+            "no active subscription is not a licence to downgrade"
+
+    def test_one_orgs_store_failure_does_not_abort_the_pass(
+            self, monkeypatch, billing_client):
+        """The control plane fails with RuntimeError, not a BillingError.
+
+        ``update_org_billing`` raises ``RuntimeError`` when a PATCH matches no
+        row (an org deleted/renamed mid-pass). Narrowing the per-org guard to
+        the provider errors let one such row abort the whole fleet pass — on
+        every run, at the same point, because ordering is stable by id.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="solo", subscription_status="active",
+                   subscription_id="sub_8878r")
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878r", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+
+        def _boom(sdk_, oid):
+            raise RuntimeError("update_org_billing: no row matched")
+
+        monkeypatch.setattr(bl, "org_billing_identity", _boom)
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1
+        assert len(summary["failed"]) == 1, \
+            "a store failure for one org must be recorded, not propagated"
+        assert "no row matched" in summary["failed"][0]["error"]
+
     def test_internal_endpoint_repairs_a_drifted_org(
             self, monkeypatch, billing_client):
         """The production caller: POST /v1/internal/billing/reconcile.

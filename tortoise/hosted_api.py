@@ -36836,9 +36836,11 @@ async def webhooks_stripe(request: Request):
 # price, enforced at Solo's 25 000-node cap, every hosted write refused with
 # "upgrade your plan", reads still working so nothing looked broken.
 #
-# ``billing.reconcile_org`` has existed since #4726 but had NO production
-# caller (the boot reconcile thread was gone — #4262), so nothing ever
-# compared the store against Stripe. This endpoint is that caller, and the
+# ``billing.reconcile_org`` has existed since the #310 billing module (PR #778)
+# and had NO production caller since the boot reconcile thread went away
+# (#4262) — #4726 only re-routed it through the Supabase control-plane seam —
+# so nothing ever compared the store against Stripe. This endpoint is that
+# caller, and the
 # cadence is EXTERNAL (``.github/workflows/billing-reconcile-cron.yml`,
 # daily) for the same reason the backup pipeline chose an external driver
 # (#596): an in-process timer dies with the process, is invisible when the
@@ -36849,18 +36851,26 @@ _BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
 
 @app.post("/v1/internal/billing/reconcile")
 async def billing_reconcile(request: Request):
-    """Reconcile every billed org's mirror against live Stripe (#8878).
+    """Reconcile EVERY billed org's mirror against live Stripe (#8878).
 
     Internal-key only. Idempotent and safe to re-run: the pass reads Stripe
     truth and rewrites ``tier`` + its limits, which is exactly what the
     webhook would have written had the delivery arrived.
 
-    Returns the pass summary (``checked``/``repaired``/``drift``/
-    ``unrepaired``/``failed``) — ``drift`` entries with ``direction: "up"`` are
-    the payable-customer-under-delivered events, and each one is also paged
-    through the existing billing notify channel by the reconciler itself.
-    A concurrent run returns 202 ``already_running`` (the next scheduled run
-    retries; nothing queues).
+    FLEET-WIDE — there is no per-org targeting. An operator repairing one
+    customer runs ``billing.reconcile_org(sdk, org_id)`` directly (see
+    ``docs/infra-runbook.md`` §4.2), not this route.
+
+    Returns the pass summary (``checked``/``repaired``/``unchanged``/
+    ``unverified``/``skipped``/``drift``/``unrepaired``/``failed``). ``drift``
+    entries with ``direction: "up"`` are the payable-customer-under-delivered
+    events, and each one is also paged through the existing billing notify
+    channel by the reconciler itself. A concurrent run returns **202**
+    ``{"status": "already_running"}`` and does NO work (the next scheduled run
+    retries; nothing queues) — a caller must not read 202 as a completed pass.
+
+    Fails CLOSED on an uncertifiable enumeration (500), so the daily driver's
+    red run is the alarm rather than a partial pass reported as clean.
     """
     _check_internal(request)
     from tortoise.billing import reconcile_subscriptions
