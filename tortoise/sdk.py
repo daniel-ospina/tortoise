@@ -3056,7 +3056,8 @@ _ENTITY_MUTATION_RECORD_TYPE = "EntityMutated"
 
 
 def _raise_update_point_status_error(proj, id: str, *,
-                                   status_only: bool = False) -> None:
+                                   status_only: bool = False,
+                                   present: bool | None = None) -> None:
     """#432: error path for the update_point draft→live promote guard.
 
     Runs a diagnostic existence read ONLY when the guarded SET returned no
@@ -3076,11 +3077,22 @@ def _raise_update_point_status_error(proj, id: str, *,
     would report a landed write that did not happen: measured,
     ``update_point(status='live', confidence=0.42)`` returned success, left the
     confidence unset, and emitted ``PointRevised`` carrying it.
+
+    ``present`` lets a caller that ALREADY read the node say so, so this
+    diagnostic cannot probe a second time and claim ``No point`` for a node the
+    caller just saw — a node vanishing between the two reads is the rebuild
+    window, not a missing point.
     """
-    exists = proj.g.query(
-        "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
-    ).result_set[0][0]
-    if not exists:
+    if present is None:
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+        ).result_set
+        # `count()` is a single-row aggregate, so an EMPTY set means the
+        # statement did not run. Indexing it blind raises `IndexError`, which is
+        # not a retryable abort and would mask the abort that authorised the
+        # retry.
+        present = bool(rows[0][0]) if rows else False
+    if not present:
         raise ValueError(f"No point {id!r}")
     # #1088 / #8854 review round 5: an ALREADY-LIVE node is the idempotent
     # no-op the pre-write short-circuit implements. Reaching here means the
@@ -10428,7 +10440,8 @@ class TortoiseSDK:
                 # loud instead of journaling a revision the graph never made.
                 return len(_props_param) == 1
             _raise_update_point_status_error(
-                proj, id, status_only=len(_props_param) == 1)
+                proj, id, status_only=len(_props_param) == 1,
+                present=True)
             return False  # pragma: no cover — the helper always raises
 
         if has_object:

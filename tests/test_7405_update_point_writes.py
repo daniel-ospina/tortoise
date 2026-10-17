@@ -1734,3 +1734,77 @@ def test_a_live_status_only_promote_emits_no_point_revised(
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+_STATUS_READ = "RETURN n.status"
+
+
+class _VanishAfterTheStatusRead:
+    """Delete the node once the promote witness has read its STATUS.
+
+    Models the node disappearing between the witness's read and the diagnostic
+    probe: the status read proves the point EXISTS and is TERMINAL, so the
+    refusal is real, while a second presence probe would find nothing and could
+    only lie ``No point``.
+    """
+
+    def __init__(self, real, needle: str, pid: str) -> None:
+        self._real = real
+        self._needle = needle
+        self._pid = pid
+        self._aborted = False
+        self.vanished = False
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher and not self._aborted:
+            self._aborted = True
+            self._real.query(
+                "MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
+                params={"id": self._pid})
+            raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+        out = self._real.query(cypher, params=params, timeout=timeout)
+        if self._aborted and _STATUS_READ in cypher and not self.vanished:
+            self.vanished = True
+            self._real.query(
+                "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                params={"id": self._pid})
+        return out
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_the_terminal_diagnostic_does_not_claim_no_point_after_its_own_read(
+        tmp_path, monkeypatch):
+    """Presence comes from the witness's read, not a second probe (#8854 r5 P3).
+
+    The witness reads STATUS, proves the node exists and that it is terminal, and
+    only then raises. Re-probing presence would let a node that vanishes between
+    the two reads turn the documented illegal-transition error into
+    ``ValueError('No point …')``; and the re-probe's ``count()`` aggregate is
+    indexed blind, so a statement that does not run raises ``IndexError`` — a
+    STRUCTURAL failure that masks the abort which authorised the retry.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "promotevanish")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _VanishAfterTheStatusRead(proj.g, _POINT_PROMOTE_NEEDLE, pid)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="Illegal status transition"):
+            sdk.update_point(pid, status="live")
+        assert proxy.vanished, (
+            "the node never vanished after the status read — this test would "
+            "prove nothing")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
