@@ -1221,8 +1221,11 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     ONE client in this module stays plain, declared in
     `test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS`: ``_mounted_test_client``
     wraps a local ``Mount("/mcp", ...)`` parent that carries no
-    ``WaitBoundMiddleware``, so no read bound from it can be a transport
-    refusal.
+    ``WaitBoundMiddleware``, so the REST 504 arm cannot reach it. (The MCP
+    seam's own refusal is answered **200** with an error envelope —
+    ``mcp_server._await_under_mcp_wait_bound`` — and a bare
+    ``assert status_code == 200`` PASSES on that; that is the false-PASS arm,
+    #8763's subject, and this file makes no ``tools/call`` request at all.)
     """
     from fastapi.testclient import TestClient
 

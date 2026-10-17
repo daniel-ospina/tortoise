@@ -187,7 +187,7 @@ def client(monkeypatch):
     TORTOISE_SESSION_LLM_MOCK=1 installs the offline MockModel extractor so
     the LLM path runs with zero network.
     """
-    from fastapi.testclient import TestClient  # noqa: I001
+    from tests._verdict import verdict_client  # noqa: I001
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app, get_current_org
 
@@ -220,7 +220,7 @@ def client(monkeypatch):
             )
             ha_mod._update_onboarding_state(
                 "test-team-722", session_recording=True)
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 yield tc
 
 
@@ -1092,3 +1092,32 @@ def test_capture_extract_off_with_no_provider_discloses_both(
     assert _CAPTURE_NO_PROVIDER_WARNING in ctrl["warnings"], ctrl["warnings"]
     assert _CAPTURE_EXTRACTION_DISABLED_WARNING not in ctrl["warnings"], (
         "with extraction ON there is one reason — the setting is not off")
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seam.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/sessions`` is the
+    only route this file reads and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from fastapi.testclient import TestClient
+
+    from tests._verdict import verdict_client
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT, app
+
+    route = ("POST", "/v1/sessions")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/sessions answered" in message
