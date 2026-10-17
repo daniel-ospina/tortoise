@@ -62,7 +62,7 @@ import {
   HARNESS_STEPS,
   PI_CAPTURE_INSTALL,
   SKILLS_LIST,
-  UNIVERSAL_COMMAND,
+  CODEX_DESKTOP_COMMAND,
 } from './harnesses.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -70,8 +70,10 @@ const snapshot = JSON.parse(readFileSync(join(here, 'wizardPrompts.snapshot.json
 
 // Harnesses with a live wizard surface (chatgpt renders on none — #2698).
 const HARNESSES = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web']
-// Every harness the universal command covers, including the teach-human trio.
-const COMMAND_HARNESSES = Object.keys(UNIVERSAL_COMMAND)
+// #3430: the ONE config block still rendered (Codex Desktop). The per-harness
+// universal commands for agent-driven harnesses were deleted — they reached no
+// user, and pinning them let the suite assert a claim the product stopped making.
+const COMMAND_HARNESSES = ['codexDesktop']
 const KEY = 'tk_snapshot'
 const ONBOARDING_URL = 'https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md'
 
@@ -117,9 +119,9 @@ test('#4880: the rendered wizard copy matches the committed snapshot', () => {
   assert.equal(snapshot.workflowsSeparate, wizardWorkflowsText(KEY, 'separate'),
     'the rendered separate-mode workflows prompt drifted from the snapshot')
   const renderedCommands = {}
-  for (const harness of COMMAND_HARNESSES) renderedCommands[harness] = UNIVERSAL_COMMAND[harness](KEY)
+  for (const harness of COMMAND_HARNESSES) renderedCommands[harness] = CODEX_DESKTOP_COMMAND(KEY)
   assert.deepEqual(snapshot.commands, renderedCommands,
-    'the rendered universal commands drifted from the snapshot')
+    'the rendered config block drifted from the snapshot')
   assert.equal(snapshot.onboardingInstructions, ONBOARDING_INSTRUCTIONS,
     'the shared onboarding sentence drifted from the snapshot')
   assert.deepEqual(snapshot.captions, WIZARD_CAPTIONS,

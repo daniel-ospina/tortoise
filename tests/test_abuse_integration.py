@@ -41,6 +41,7 @@ from tortoise import abuse
 from tortoise.abuse import SupabaseAbuseStore
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tests.fake_control_plane import FakeControlPlane
 
 TEAM = "team-abuse-1"
@@ -138,7 +139,7 @@ def _auth(token=TOKEN_A):
 class TestRestSuspension:
     def test_suspended_team_403_with_appeal(self, env):
         env["fake"].rpc("abuse_suspend", {"p_org_id": TEAM})
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 403
         detail = r.json()["detail"]
@@ -155,7 +156,7 @@ class TestRestSuspension:
         abuse.mark_suspended(TEAM)
         assert abuse.is_suspended_signal(TEAM)
         fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 200  # degraded (accepted-by-scope)
         assert not abuse.is_suspended_signal(TEAM)  # self-heal tore it down
@@ -164,7 +165,7 @@ class TestRestSuspension:
     def test_unsuspend_restores_next_request(self, env):
         fake = env["fake"]
         fake.rpc("abuse_suspend", {"p_org_id": TEAM})
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 403
             fake.rpc("abuse_unsuspend", {"p_org_id": TEAM})
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
@@ -179,7 +180,7 @@ class TestRestSuspension:
         with abuse._SIGNAL_LOCK:
             abuse._SUSPENDED_SIGNAL.clear()
         abuse.set_engine(None)
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.get("/v1/team/keys", headers=_auth())
         assert r.status_code == 403  # durable suspended_at is the authority
 
@@ -197,7 +198,7 @@ class TestPointBurst:
         """False-positive failure mode: 6 points (> threshold 5) inside one
         window flag the team; further writes in-window stay 'breach'."""
         fake = env["fake"]
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
             org_row = fake.tables["organizations"][0]
@@ -237,7 +238,7 @@ class TestPointBurst:
         the window sum stays over threshold.
         """
         fake = env["fake"]
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
             assert fake.tables["organizations"][0]["flagged_at"] is not None
@@ -284,7 +285,7 @@ class TestPointBurst:
             "created_at": "2026-08-01T00:00:00+00:00",
             "expires_at": None, "revoked_at": None,
         }])
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             for _ in range(6):
                 r = tc.delete("/v1/team/keys/revoke-me", headers=_auth())
                 assert r.status_code in (200, 404), r.text
@@ -315,7 +316,7 @@ class TestKeyVelocity:
         events = [e for e in fake.tables["abuse_events"]
                   if e["event_type"] == "key_create"]
         assert len(events) == 11
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.post("/v1/points", headers=_auth(),
                         json={"content": "next hooked request",
                               "kind": "statement"})
@@ -335,7 +336,7 @@ class TestKeyVelocity:
         events = [e for e in fake.tables.get("abuse_events", [])
                   if e["event_type"] == "key_create"]
         assert events == []
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.post("/v1/points", headers=_auth(),
                         json={"content": "hooked", "kind": "statement"})
             assert r.status_code == 200
@@ -346,7 +347,7 @@ class TestKeyVelocity:
 
 class TestExfiltration:
     def test_per_key_velocity_notifies_once(self, env):
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             for _ in range(101):
                 assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
         velocity = [c for c in env["notified"]
@@ -361,7 +362,7 @@ class TestExfiltration:
 
     def test_fanout_team_velocity(self, env):
         """Two keys under the per-key limit, 101 together → team notify."""
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             for _ in range(60):
                 tc.get("/v1/team/keys", headers=_auth(TOKEN_A))
             for _ in range(40):
@@ -375,7 +376,7 @@ class TestExfiltration:
 
     def test_writes_not_counted_as_reads(self, env):
         """Delta 11: a POST burst never fires read velocity."""
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             for i in range(120):  # noqa: B007
                 pass  # threshold math below uses GET-only counting
             for i in range(101):
@@ -390,7 +391,7 @@ class TestExfiltration:
 class TestGeo:
     def test_new_country_notifies_then_quiet(self, env):
         fake = env["fake"]
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "US"})
             assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
             tc.get("/v1/team/keys", headers={**_auth(), "CF-IPCountry": "US"})
@@ -405,7 +406,7 @@ class TestGeo:
         assert geo and all(c[1]["email"] == "owner@abuse.test" for c in geo)
 
     def test_no_header_fail_open(self, env):
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
         assert env["notified"] == []
 
@@ -460,7 +461,7 @@ class TestSessionLane:
         """Regression: the key lane still records auth_ip (R4) + R3 reads
         after the session-lane fix — behavior unchanged."""
         fake = env["fake"]
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.get("/v1/team/keys",
                        headers={**_auth(), "CF-IPCountry": "CL"})
             assert r.status_code == 200
@@ -543,7 +544,7 @@ class TestMintGateAndAlerts:
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
-            with TestClient(env["app"]) as tc:
+            with verdict_client(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
                             json={"purpose": "recovery", "org_id": TEAM})
             assert r.status_code == 403
@@ -572,13 +573,13 @@ class TestMintGateAndAlerts:
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
-            with TestClient(env["app"]) as tc:
+            with verdict_client(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
                             json={"purpose": "recovery", "org_id": TEAM})
                 assert r.status_code == 200  # fail-open during drift (accepted)
                 assert "key" in r.json()  # the grant actually minted
             fake.missing_columns = None  # drift resolved
-            with TestClient(env["app"]) as tc:
+            with verdict_client(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
                             json={"purpose": "recovery", "org_id": TEAM})
             assert r.status_code == 403
@@ -599,7 +600,7 @@ class TestMintGateAndAlerts:
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
-            with TestClient(env["app"]) as tc:
+            with verdict_client(env["app"]) as tc:
                 r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
             assert r.status_code == 200
             types = {a["type"] for a in r.json()["alerts"]}
@@ -620,7 +621,7 @@ class TestMintGateAndAlerts:
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
-            with TestClient(env["app"]) as tc:
+            with verdict_client(env["app"]) as tc:
                 r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
             assert r.status_code == 200
             assert any(a["type"] == "flag" for a in r.json()["alerts"])
@@ -632,7 +633,7 @@ class TestMintGateAndAlerts:
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U_STRANGER}
         try:
-            with TestClient(env["app"]) as tc:
+            with verdict_client(env["app"]) as tc:
                 assert tc.get(f"/v1/team/alerts?org_id={TEAM}").status_code == 403
         finally:
             env["app"].dependency_overrides.clear()
@@ -642,7 +643,7 @@ class TestMintGateAndAlerts:
         fake = env["fake"]
         fake.tables["organizations"][0]["flagged_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 200
         assert r.json()["status"] == "flagged"
@@ -655,7 +656,7 @@ class TestTurnstileSignup:
         monkeypatch.setenv("TURNSTILE_SECRET_KEY", "secret")
         monkeypatch.setattr("httpx.post",
                             lambda *a, **k: _Resp({"success": False}))
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.post("/v1/signup/email", json={
                 "email": "cap@x.co", "password": "hunter2secret",
                 "cf-turnstile-response": "bad-token"})
@@ -666,7 +667,7 @@ class TestTurnstileSignup:
         monkeypatch.setenv("TURNSTILE_SECRET_KEY", "secret")
         monkeypatch.setattr("httpx.post",
                             lambda *a, **k: _Resp({"success": True}))
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.post("/v1/signup/email", json={
                 "email": "cap@x.co", "password": "hunter2secret",
                 "cf-turnstile-response": "good-token"})
@@ -676,7 +677,7 @@ class TestTurnstileSignup:
 
     def test_fail_open_without_secret(self, monkeypatch, env):
         monkeypatch.delenv("TURNSTILE_SECRET_KEY", raising=False)
-        with TestClient(env["app"]) as tc:
+        with verdict_client(env["app"]) as tc:
             r = tc.post("/v1/signup/email", json={
                 "email": "open@x.co", "password": "hunter2secret"})
         assert r.status_code != 400
@@ -832,3 +833,42 @@ class TestIntrospection:
         ha_src = Path(ha.__file__).read_text()
         i_cap = ha_src.find("len(body.conversation) + len(extracted)")
         assert i_cap != -1  # capture_session weights actual created Points
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. Twenty-five of this file's
+    twenty-six constructions are converted — every ``TestClient(env["app"])``
+    (the ``env`` fixture's hosted app, shared by all REST test classes) — so the
+    seam covers every REST read bound from them: ``GET /v1/team/keys`` (the
+    busiest), ``GET /v1/team`` (the route this pin drives),
+    ``DELETE /v1/team/keys/{kid}``, ``POST /v1/points``, ``POST /v1/session/key``,
+    ``POST /v1/signup/email`` and the session-JWT REST lane — none of them
+    exempt from the bound. The one construction left PLAIN is
+    ``TestMcp._mcp_client``: it wraps a local ``Starlette`` carrying ONLY
+    ``OrgResolutionMiddleware``, so no ``WaitBoundMiddleware`` is on its path
+    and none of its reads can be a refusal — its ``status_code == 200`` reads
+    are answered by that local echo route, never by the hosted app.
+
+    The plain-client control is the non-vacuity leg: it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if the
+    route is ever exempted (the middleware stops refusing, so the control's 504
+    assertion fails).
+    """
+    import tortoise.hosted_api as ha
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("GET", "/v1/team")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(ha.app) as raw:
+        assert raw.get(route[1]).status_code == 504
+    with verdict_client(ha.app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get(route[1])
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /v1/team answered" in message
