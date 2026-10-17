@@ -1056,9 +1056,17 @@ class _EdgeHandlers:
                     else:
                         failed += 1
             elif link.get("how") == "name" and isinstance(link.get("value"), str):
-                before = self._count_about_rel(source, rel)
+                # ⚠️ ``_create_about_edges`` is the rel-IGNORING
+                # Subject→Object→Event→Source→Point cascade, and a "name" link is
+                # one whose OWN rel resolved to nothing at write time — so live
+                # did NOT wire ``rel`` either; it wired whatever the cascade
+                # found. Measuring ``rel`` here would report failure for the
+                # reproduction live just made (and would report failure on every
+                # re-run of an already-wired link, because MERGE adds nothing).
+                # Measure the LINK instead: is the source now joined to a node
+                # carrying this value, by any about rel?
                 self._create_about_edges(source, link["value"])
-                if self._count_about_rel(source, rel) > before:
+                if self._count_about_to_value(source, link["value"]) > 0:
                     wired += 1
                 else:
                     failed += 1
@@ -1066,13 +1074,20 @@ class _EdgeHandlers:
                 failed += 1
         return (wired, failed)
 
-    def _count_about_rel(self, source: str, rel: str) -> int:
-        """Count ``source``'s outgoing ``rel`` edges (``rel`` is validated by the
-        caller against ``_ABOUT_REPLAY_RELS`` before interpolation)."""
+    def _count_about_to_value(self, source: str, value: str) -> int:
+        """Count the source's about edges reaching a node carrying ``value``.
+
+        The ``how: "name"`` success test: the cascade is rel-ignoring, so the
+        question is not "did ``rel`` appear" but "is this value linked at all".
+        Idempotent by construction — an already-wired link counts, so a re-run
+        does not report a failure that did not happen.
+        """
         rows = self.g.query(
-            "MATCH (s) WHERE s.id=$sv OR s.eventId=$sv "
-            f"MATCH (s)-[r:{rel}]->() RETURN count(r)",
-            params={"sv": source}).result_set
+            "MATCH (s:Event) WHERE s.id=$sv OR s.eventId=$sv "
+            "MATCH (s)-[r:aboutSubject|aboutObject|aboutEvent|aboutPoint|aboutDocument]->(t) "
+            "WHERE t.name=$tv OR t.url=$tv OR t.id=$tv OR t.eventId=$tv "
+            "RETURN count(r)",
+            params={"sv": source, "tv": value}).result_set
         return int(rows[0][0]) if rows and rows[0] else 0
 
     def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:

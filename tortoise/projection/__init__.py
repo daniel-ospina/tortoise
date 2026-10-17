@@ -8162,17 +8162,20 @@ class FalkorProjection(
             # properties — so nothing replayed them and a rebuild silently
             # dropped every Event→entity link. Re-wire them from the record.
             # INLINE is correct for ``apply``'s live single-event caller (its
-            # endpoints exist); the whole-journal apply()-driven engines
-            # (``rebuild``/``recover_from_log``) ALSO buffer this type into a
-            # trailing sweep, exactly as they do for ``EntityLinked`` below —
-            # a forward reference here is wired there, and the count is reported
-            # there instead of being discarded.
+            # endpoints exist). Of the whole-journal engines, ``rebuild`` and
+            # ``rebuild_all`` ALSO buffer this type into a trailing sweep — the
+            # same forward-reference treatment they give ``EntityLinked`` — so a
+            # link whose target is created later is wired there. The remaining
+            # replay callers (``recover_from_log``, ``backup.restore``) drive
+            # ``apply`` directly and have no sweep: for them this warning IS the
+            # report, and it names the event so the loss is locatable.
             _about_w, _about_f = self.replay_about_links(ev)
             if _about_f:
                 logger.warning(
                     "#8398: apply() could not re-wire %d journaled Event→entity "
                     "about* link(s) (event %r) — its target is not in the graph "
-                    "yet; the whole-journal replay sweeps these",
+                    "yet; ``rebuild``/``rebuild_all`` re-wire these in a "
+                    "trailing sweep, a direct ``apply`` replay cannot",
                     _about_f, ev.get("event_id") or ev.get("id"))
             return _replayed
         elif t == "EntityLinked":
@@ -8699,7 +8702,11 @@ class FalkorProjection(
             if isinstance(ev, dict) and (
                     ev.get("type") == "EventRecorded"
                     or _norm(ev).get("type") == "EventRecorded"):
-                about_link_events.append((seq, ev))
+                # NORMALIZED, matching the edge-message sweep below: a
+                # nested-payload record (``{"point": {…"type": "EventRecorded"}}``)
+                # must be replayed through its inner dict, or the sweep reads a
+                # shape with no ``aboutLinks`` and drops the link silently.
+                about_link_events.append((seq, _norm(ev)))
         if deferred_corrects:
             # Guarded like the other two engines' sweeps: ``fold_deferred_*``
             # must never abort a post-wipe replay (the graph was already
@@ -8720,7 +8727,7 @@ class FalkorProjection(
             for _al_seq, _al_ev in about_link_events:
                 self._replay_seq = _al_seq
                 try:
-                    _w, _f = self.replay_about_links(_al_ev)
+                    _w, _f = self.replay_about_links(self._norm(_al_ev))
                 except Exception:  # noqa: BLE001, RUF100
                     logger.exception(
                         "rebuild: about-link re-wire failed for event %r (#8398)",
@@ -12647,7 +12654,7 @@ class FalkorProjection(
             _about_wired = _about_failed = 0
             for _al_seq, _al_ev in about_link_events:
                 self._replay_seq = _al_seq
-                _w, _f = self.replay_about_links(_al_ev)
+                _w, _f = self.replay_about_links(self._norm(_al_ev))
                 _about_wired += _w
                 _about_failed += _f
             if _about_wired:

@@ -268,3 +268,25 @@ def test_the_EventLog_engine_also_reproduces_the_links(wired) -> None:
     after = _counts(proj)
     assert after["aboutObject"] == before["aboutObject"] >= 1, (
         f"the EventLog rebuild lost the link: {before} → {after}")
+
+
+def test_a_name_link_replays_without_a_false_failure(wired) -> None:
+    """A ``how:"name"`` link must not report a failure it did not have.
+
+    ``_create_about_edges`` is the rel-IGNORING cascade, and a name link is one
+    whose own rel resolved to nothing at write time — so live wired whatever the
+    cascade found, not ``rel``. Measuring ``rel`` reported failure for the
+    reproduction live just made, and reported failure again on every re-run of an
+    already-wired link (MERGE adds nothing). The link's PRESENCE is the test.
+    """
+    sdk, proj, events, journal = wired
+    sdk.create_event("nm", "event", aboutDocument="https://example.test/named")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    record = _event_records(journal, "nm")[0]
+    assert [lk["how"] for lk in record["aboutLinks"]] == ["name"]
+
+    wired_n, failed_n = proj.replay_about_links(record)
+    assert failed_n == 0, (
+        f"a name link reported failure although the value is linked: "
+        f"wired={wired_n} failed={failed_n}")
+    assert wired_n == 1
