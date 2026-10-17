@@ -1039,6 +1039,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_5509_name_keyed_identity_reads.py
   # #4643: the served-skill mirror's parity gate. The pin
   # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
   # through to `core` — without this registration a pin-only change ran no
