@@ -36827,6 +36827,70 @@ async def webhooks_stripe(request: Request):
         return JSONResponse(status_code=500, content={"detail": "processing failed"})
 
 
+# ── Billing mirror reconcile (#8878) ────────────────────────────────────
+#
+# The webhook above is the ONLY writer of the stored ``tier``, and the stored
+# tier IS the entitlement (``billing.effective_tier`` never derives upward).
+# One missed/failed delivery therefore capped a paying org at the lower tier
+# permanently — measured 2026-10-17 on the fleet's own org: billed on the Pro
+# price, enforced at Solo's 25 000-node cap, every hosted write refused with
+# "upgrade your plan", reads still working so nothing looked broken.
+#
+# ``billing.reconcile_org`` has existed since #4726 but had NO production
+# caller (the boot reconcile thread was gone — #4262), so nothing ever
+# compared the store against Stripe. This endpoint is that caller, and the
+# cadence is EXTERNAL (``.github/workflows/billing-reconcile-cron.yml`,
+# daily) for the same reason the backup pipeline chose an external driver
+# (#596): an in-process timer dies with the process, is invisible when the
+# app is crash-looping, and would re-introduce the boot-blocking Stripe call
+# #4262 removed.
+_BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
+
+
+@app.post("/v1/internal/billing/reconcile")
+async def billing_reconcile(request: Request):
+    """Reconcile every billed org's mirror against live Stripe (#8878).
+
+    Internal-key only. Idempotent and safe to re-run: the pass reads Stripe
+    truth and rewrites ``tier`` + its limits, which is exactly what the
+    webhook would have written had the delivery arrived.
+
+    Returns the pass summary (``checked``/``repaired``/``drift``/
+    ``unrepaired``/``failed``) — ``drift`` entries with ``direction: "up"`` are
+    the payable-customer-under-delivered events, and each one is also paged
+    through the existing billing notify channel by the reconciler itself.
+    A concurrent run returns 202 ``already_running`` (the next scheduled run
+    retries; nothing queues).
+    """
+    _check_internal(request)
+    from tortoise.billing import reconcile_subscriptions
+
+    if _BILLING_RECONCILE_INFLIGHT.locked():
+        return JSONResponse(status_code=202,
+                            content={"status": "already_running"})
+    async with _BILLING_RECONCILE_INFLIGHT:
+        from tortoise.supabase_control import is_supabase_enabled
+
+        # #4726 discipline: in Supabase mode the pass must NEVER construct a
+        # registry-namespaced SDK (a write vector post-#669 that RESURRECTS the
+        # deleted registry graph, #878) — ``reconcile_org``/``org_billing_identity``
+        # read the authoritative ``organizations`` row with ``sdk=None``.
+        if is_supabase_enabled():
+            sdk = None
+            result = await asyncio.to_thread(reconcile_subscriptions, None)
+        else:
+            sdk = await asyncio.to_thread(_registry_sdk)
+            try:
+                # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
+                # rides a worker hand-off so it cannot hold the single uvicorn
+                # event loop (the #2988/#3498 class).
+                result = await asyncio.to_thread(reconcile_subscriptions, sdk)
+            finally:
+                with suppress(Exception):
+                    sdk.close()
+    return result
+
+
 # ── OAuth 2.1 for remote MCP (#524) ─────────────────────────────────────
 # Authorization-code + PKCE server with DCR + RFC 8707 resource indicators,
 # Supabase-auth-backed (D2). Locked decisions in

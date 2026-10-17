@@ -1,0 +1,116 @@
+name: billing-reconcile-cron
+
+# The cadenced caller of the billing mirror reconciler (#8878).
+#
+# WHY THIS EXISTS. The stored `tier` on an org IS its entitlement
+# (`billing.effective_tier` never derives upward) and its ONLY writer is the
+# Stripe webhook. One missed/failed `customer.subscription.*` delivery
+# therefore capped a paying org at the lower tier PERMANENTLY: measured
+# 2026-10-17, the fleet's own org was billed on the Pro price and enforced at
+# Solo's 25 000-node cap, every hosted write refused with "upgrade your plan"
+# while reads kept working — i.e. silent, and unrecoverable without a human.
+#
+# WHY AN EXTERNAL DRIVER (and not an in-process timer or a boot thread). Same
+# reasoning the backup pipeline recorded in #596: a timer inside the app dies
+# with the process and is invisible when the app is crash-looping or the
+# deploy is wedged — exactly when a missed delivery is most likely. The boot
+# reconcile thread this would otherwise restore was removed at #4262 and
+# re-adding a boot-blocking Stripe call is a regression. This job has an
+# independent failure domain: it runs even when the app is down (the request
+# then fails loudly, which is the signal).
+#
+# WHAT COUNTS AS A FAILURE. The endpoint (POST /v1/internal/billing/reconcile)
+# answers 200 with a summary. This job fails the run — i.e. it PAGES — when:
+#   * the request itself fails (app down / internal key wrong), or
+#   * `failed` is non-empty (a billed org could not be reconciled: a pass that
+#     verified nothing must not read as a clean pass), or
+#   * `unrepaired` is non-empty (Stripe resolved a tier the store did not end
+#     up holding — a read-only reconciler is a BROKEN reconciler, #8878), or
+#   * any `drift` entry has direction "up" (a paying customer WAS being
+#     under-delivered; it is repaired now, and the reconciler also pages it
+#     through the billing notify channel — this is the independent leg that
+#     still fires if that channel is unconfigured).
+#
+# Drift DOWN (a portal downgrade or cancellation the mirror had not seen) is
+# reported in the summary and is NOT a failure: it is Stripe truth arriving
+# late, not a customer being short-changed.
+
+on:
+  schedule:
+    - cron: '43 4 * * *'   # daily, off the top of the hour (GH jitter)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: billing-reconcile
+  cancel-in-progress: false   # scheduled runs never overlap
+
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      INTERNAL_API_URL: ${{ secrets.INTERNAL_API_URL }}
+      FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+    steps:
+      - name: Run billing reconcile pass
+        # Secrets are bound in `env:` above and read QUOTED — never interpolated
+        # into the shell text (#4361: substitution happens before bash parses,
+        # so a secret is code there, not data).
+        run: |
+          set -euo pipefail
+          if [ -z "${INTERNAL_API_URL:-}" ] || [ -z "${FASTAPI_INTERNAL_KEY:-}" ]; then
+            echo "::error::INTERNAL_API_URL / FASTAPI_INTERNAL_KEY are unset — the billing reconciler cannot run."
+            exit 1
+          fi
+          out="$(mktemp)"
+          status="$(curl -sS -o "$out" -w '%{http_code}' \
+            -X POST "${INTERNAL_API_URL%/}/v1/internal/billing/reconcile" \
+            -H "Authorization: Bearer ${FASTAPI_INTERNAL_KEY}")"
+          echo "HTTP ${status}"
+          cat "$out"
+          echo
+          if [ "$status" != "200" ]; then
+            echo "::error::billing reconcile returned HTTP ${status}"
+            exit 1
+          fi
+          python3 - "$out" <<'PY'
+          import json, sys
+
+          data = json.load(open(sys.argv[1]))
+          drift_up = [d for d in data.get("drift", []) if d.get("direction") == "up"]
+          failed = data.get("failed", [])
+          unrepaired = data.get("unrepaired", [])
+          summary = (
+              f"checked={data.get('checked', 0)} repaired={data.get('repaired', 0)} "
+              f"up={len(drift_up)} unchanged={data.get('unchanged', 0)} "
+              f"skipped={data.get('skipped', 0)} failed={len(failed)} "
+              f"unrepaired={len(unrepaired)}"
+          )
+          print(summary)
+          problems = []
+          if failed:
+              problems.append(f"{len(failed)} org(s) FAILED to reconcile: {failed}")
+          if unrepaired:
+              problems.append(
+                  f"{len(unrepaired)} org(s) were NOT repaired (Stripe truth "
+                  f"did not reach the store): {unrepaired}")
+          if drift_up:
+              problems.append(
+                  f"{len(drift_up)} paying org(s) were being UNDER-DELIVERED "
+                  f"(repaired on this pass): {drift_up}")
+          if problems:
+              for p in problems:
+                  print(f"::error::{p}")
+              sys.exit(1)
+          PY
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Billing mirror reconcile (#8878)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "See the step log for the pass summary and any drift rows." >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

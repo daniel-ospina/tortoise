@@ -415,6 +415,53 @@ stall (the #2924 shape) reds. It complements
 `tests/test_health_ready_nonblocking.py`, which pins nonblocking *structure*
 in-process and names no client-visible budget.
 
+### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
+
+**Symptom.** A customer pays for a higher tier and is enforced at a lower one.
+Their writes fail with `Team points limit reached (…) — Upgrade your plan`
+(`-32006` / HTTP 402 `quota_exceeded`) while reads keep working — so the
+instrument that reports health still answers and only the writer fails. Their
+`GET /v1/team` shows the LOW tier with `subscription_status: "active"`.
+
+**Mechanism, stated so it is not re-diagnosed.** The stored `tier` on the org
+row IS the entitlement (`billing.effective_tier` never derives upward), and its
+ONLY writer is the Stripe webhook. One missed or failed
+`customer.subscription.*` delivery therefore capped the org permanently.
+`billing.reconcile_org` repairs one org but had no production caller until
+#8878, so nothing ever compared the store against Stripe.
+
+**Do NOT diagnose this from `/v1/team`'s `checkout_price_id`.** That field is
+the CATALOG's default CTA price (`_default_checkout_price_id()` → pro monthly
+for every org) plus the tier→price map — it describes the upgrade buttons, not
+what the org pays. The only server-side evidence of the price is the org's
+`subscription_id` / `stripe_customer_id` in Stripe.
+
+**Repair a specific org now** (internal key required):
+
+```bash
+curl -sS -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
+  -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" | jq .
+```
+
+A pass returns `checked` / `repaired` / `unchanged` / `skipped` / `failed` /
+`unrepaired` and one `drift` row per repaired org, each with a `direction`:
+
+- `direction: "up"` — a paying org WAS being under-delivered. The reconciler
+  pages it through the billing notify channel (Resend + Telegram) and logs
+  `billing reconcile: …`; the daily driver also fails its run.
+- `direction: "down"` — Stripe truth (a portal downgrade/cancellation) reached
+  the mirror late. Reported, never paged.
+- `unrepaired` — Stripe resolved a tier the store did NOT end up holding. That
+  is a broken repair, not a clean pass; treat it as an incident.
+
+**Cadence.** `.github/workflows/billing-reconcile-cron.yml` runs the pass daily
+(04:43 UTC) with `INTERNAL_API_URL` + `FASTAPI_INTERNAL_KEY`, and the run FAILS
+— i.e. it notifies — when the request fails, when any org `failed` to
+reconcile, when any org is `unrepaired`, or when any `drift` row went `up`.
+The driver is external deliberately (same reasoning as the backup sweep, #596):
+an in-process timer dies with the process and is invisible when the app is
+crash-looping — exactly when a missed delivery is most likely.
+
 ## 4.5 Local Development — Local Stays Local
 
 **Best practice: a self-hosted/local instance is intentionally local.** Do not
