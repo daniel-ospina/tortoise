@@ -2184,3 +2184,56 @@ def test_the_corrects_edge_refuses_a_reissue_that_lands_nothing(
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+def test_duplicate_tag_names_do_not_read_as_a_half_landed_sync(
+        tmp_path, monkeypatch):
+    """`tags=["a", "a"]` must not be witnessed against the RAW list length.
+
+    The engine stores ONE `:Tag` per name, so the landed DISTINCT-name count is
+    1 while an undeduped request asks for 2 — the FULL-SET rule then refuses a
+    sync that landed, the sentinel retries it, and the caller gets the stale
+    graph abort for a write that succeeded. Measured on a mutant without the
+    dedupe: `update_point(pid, tags=["dup", "dup"])` under one landing
+    graph-replaced abort raised `ResponseError('graph was deleted or replaced
+    …')` with the TAGGED edge present.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "tagdupe")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceGraph(proj.g, _TAGGED_NEEDLE, present=True)
+        proj.g = proxy
+
+        sdk.update_point(pid, tags=["7405dup", "7405dup"])  # must NOT raise
+
+        assert proxy.applied >= 1, "the retried tag sync never landed"
+        proj.g = proxy._real
+        names = [r[0] for r in proj.g.query(
+            "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) RETURN t.name",
+            params={"pid": pid}).result_set]
+        assert names == ["7405dup"], names
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_unhashable_tag_value_keeps_the_engine_error_family(tmp_path):
+    """A non-hashable tag must fail with the ENGINE's error, not a `TypeError`.
+
+    `tags=[{"name": "a"}]` is outside the public signature, so the engine is the
+    one that refuses it (`Property values can only be of primitive types …`,
+    the "db" family). Deduping the request for the witness must not raise
+    `TypeError: unhashable type` first: `_classify_db_failure` buckets that as
+    "structural", so the guard changes which error family the caller sees.
+    """
+    sdk = _sdk(tmp_path, "tagunhashable")
+    try:
+        pid = _pid(sdk)
+        with pytest.raises(redis_exc.ResponseError):
+            sdk.update_point(pid, tags=[{"name": "a"}])
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
