@@ -1320,6 +1320,15 @@ surfaces:
   - test_credential_store_mode_5109.py
   - test_sdk_retirement.py
   - test_record_schema_placement.py
+  # #8882 (Phase 2 mechanics): the OFFLINE re-typing of a logical dump —
+  # `tortoise/retype.py` matches no SOURCE_PATTERN, so a module-only change
+  # falls through to `core` and this guard runs with it. DB-free by
+  # construction: the subject IS a `tortoise-logical-dump-v1` dict, so both
+  # modes are pure functions and the file needs no graph, no URI and no
+  # carve-out registration. Its loop back to the Phase-4 loader is asserted
+  # against `hosted_backup`'s OWN primitives (`DUMP_FORMAT`,
+  # `_sanitize_label`), which keeps that half honest without a DB.
+  - test_retype_8882.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
   # inputs it reads select `core`: `tortoise/record_projection.py` matches no
