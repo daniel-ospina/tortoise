@@ -51,9 +51,12 @@ CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 PREWARM_STEP = "Pre-warm wrangler toolchain"
 
-#: A token is classified by its DOT COUNT, never by a lookahead that backtracks
+#: A token is classified by its SHAPE, never by a lookahead that backtracks
 #: mid-token (a lookahead happily matched `4.12` inside `4.127.0`): an EXACT pin
-#: is `4.127.0`, and anything else — `4`, `4.127`, `latest`, `next` — is floating.
+#: is three numeric components and nothing else — `4.127.0`. Anything else is
+#: floating: `4`, `4.127`, `latest`, `next`, the X-RANGES `4.127.x` / `4.x.x`
+#: (npm reads those as a moving window, `>=4.127.0 <4.128.0-0`), and a
+#: prerelease, which this rule refuses as an over-report rather than resolve.
 #: A dist-tag is an OFFENDER, not a non-match: the numeric-only form of this
 #: check could not see `wrangler@latest` at all, so such a step contributed
 #: nothing to the float/parity checks and was invisible to them.
@@ -96,14 +99,15 @@ _CONTINUATION = re.compile(r"\\\n")
 #:     while the filter dropped the line;
 #:   - round 4 — a word-boundary lookbehind: `$@wrangler@4` runs `wrangler@4`
 #:     (bash removes an empty `$@`), and the lookbehind read it as mid-word.
-#: A substring search cannot be defeated by any of THOSE: each is a line-level
-#: construct, and the scan does not read what a line means. What it can do is
-#: over-report — a mention in prose, a quoted string, a commented-out line, a
-#: longer word containing the token — and every over-report is declared and
-#: pinned with the arms, because refusing a correct step is recoverable and
-#: passing a floating one is not. Quoting that SPLITS the word itself is handled
-#: by `_UNQUOTE` below; an EMPTY EXPANSION inside it is the one form no text scan
-#: can read, and it is declared at `_exact_wranglers`.
+#: A substring search cannot be defeated by any of THOSE, because none of them
+#: removes a character from the token itself (round 4's `$@` PREPENDS; it does not
+#: split). What it can do is over-report — a mention in prose, a quoted string, a
+#: commented-out line, a longer word containing the token — and every over-report
+#: is declared and pinned with the arms, because refusing a correct step is
+#: recoverable and passing a floating one is not. Quoting that SPLITS the word is
+#: handled by `_UNQUOTE` below. What is left is an INTERPOLATION inside the word
+#: — `$X`, `${X}`, `$(…)`, `` `…` `` — which no text scan can read; it is declared
+#: and pinned as MISSED at `_exact_wranglers`.
 #:
 #: Shell removes quoting and escapes BEFORE it runs a word, so a token spelled
 #: `wrangler\@4`, `wran\gler@4`, `wrangler'@'4` or `"wrangler"@4` executes
@@ -113,6 +117,11 @@ _CONTINUATION = re.compile(r"\\\n")
 #: (an over-report, which this guard accepts) and can never split one apart.
 #: Order matters — the continuation fold runs FIRST, or deleting the backslash
 #: would leave `wrangler` and `@4` on two lines.
+#: DECLARED OVER-READ, stated rather than implied: shell does NOT remove a
+#: backslash before an ordinary character INSIDE double quotes, so
+#: `wrangler@"4.\127.0"` is the word `wrangler@4.\127.0` (which npm rejects) while
+#: this scan reads the pin `4.127.0`. Pinned with an arm. Telling the two apart
+#: needs the quote state the lexer this file replaced was removed for mis-tracking.
 _UNQUOTE = re.compile(r"[\\'\"`]")
 _INVOCATION = re.compile(r"wrangler@")
 
@@ -128,8 +137,9 @@ _INDIRECT_AFTER = ("$", "{")
 
 def _wrangler_invocations(run: str) -> set[str]:
     """Every `wrangler@<spec>` written in `run`, as a plain substring."""
-    # Shell removes a backslash-newline pair; nothing else is removed and no line
-    # is filtered — a pin inside a here-doc body or a quoted string is read too.
+    # Order: fold a backslash-newline pair, THEN drop quotes and escapes (an
+    # over-read, declared above). No line is filtered — a pin inside a here-doc
+    # body or a quoted string is read too.
     text = _UNQUOTE.sub("", _CONTINUATION.sub("", run))
     specs: set[str] = set()
     for at in _INVOCATION.finditer(text):
@@ -141,17 +151,18 @@ def _wrangler_invocations(run: str) -> set[str]:
         else:
             specs.add(literal.group(0))
     return specs
-#: DECLARED RESIDUAL (review round 5, NARROWED by round 6): an EMPTY EXPANSION
-#: inside the word — `wrangler$X@4`, `wrangler${X}@4` with `X` empty — executes
-#: `wrangler@4` while no text scan can see a literal `wrangler@`. The quoting and
-#: escaping forms the same review named (`wrangler\@4`, `wran\gler@4`,
-#: `wrangler'@'4`, `"wrangler"@4`) are NOT residual: `_UNQUOTE` deletes those
-#: characters before the scan, which turns each of them into a literal the guard
-#: reports (pinned by the arms in
+#: DECLARED RESIDUAL (review round 5; NARROWED by round 6; widened to the whole
+#: INTERPOLATION class by round 7): anything that puts a substitution INSIDE the
+#: word — `wrangler$X@4`, `wrangler${X}@4`, `wran$(echo gler)@4`,
+#: `` wran`echo gler`@4 `` — executes `wrangler@4` while no text scan can see a
+#: literal `wrangler@`. The quoting and escaping forms an earlier round also called
+#: residual (`wrangler\@4`, `wran\gler@4`, `wrangler'@'4`, `"wrangler"@4`) are NOT:
+#: `_UNQUOTE` deletes those characters before the scan, which turns each of them
+#: into a literal the guard reports (pinned by the arms in
 #: `test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range`). Closing
-#: the expansion case needs the shell's own variables, so the honest fix is at the
-#: lane: assert the wrangler version that actually resolved, rather than read it
-#: out of the script.
+#: the interpolation class needs the shell's own evaluation, so the honest fix is
+#: at the lane: assert the wrangler version that actually resolved, rather than
+#: read it out of the script.
 
 #: DECLARED RESIDUAL — what a text check cannot reach at all: two INDIRECT pins
 #: cannot be proved EQUAL to each other, so parity between a pre-warm and a boot
@@ -160,14 +171,22 @@ def _wrangler_invocations(run: str) -> set[str]:
 #: resolving it needs an install in the lane, not a regex.
 
 
+#: Three NUMERIC components and nothing else. A dot count alone is not enough:
+#: npm reads `4.127.x` / `4.x.x` / `4.127.X` as X-RANGES — node-semver resolves
+#: `4.127.x` to `>=4.127.0 <4.128.0-0`, a moving tarball — so a dot count called
+#: them EXACT and the guard passed a step whose fetch is not a pin at all.
+_EXACT_SPEC = re.compile(r"\d+\.\d+\.\d+")
+
+
 def _exact_wranglers(run: str) -> set[str]:
     """An EXACT pin (`4.127.0`) — the version that actually boots."""
-    return {v for v in _wrangler_invocations(run) if v.count(".") == 2}
+    return {v for v in _wrangler_invocations(run) if _EXACT_SPEC.fullmatch(v)}
 
 
 def _floating_wranglers(run: str) -> set[str]:
-    """A range (`4`, `4.127`) or dist-tag (`latest`) — never acceptable here."""
-    return {v for v in _wrangler_invocations(run) if v.count(".") != 2}
+    """Everything that is not an exact pin: a range (`4`, `4.127`, `4.127.x`), a
+    dist-tag (`latest`), a prerelease, or an empty (indirect) spec."""
+    return {v for v in _wrangler_invocations(run) if not _EXACT_SPEC.fullmatch(v)}
 
 #: The e2e jobs that serve this repo's `website/` (marketing + dashboard) and so
 #: share the pre-warm. A rename shows up here as a failure, not as silent loss.
@@ -450,12 +469,27 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     for run in ("wrangler\\@4 --version", "wran\\gler@4 --version",
                 "wrangler'@'4 --version", '"wrangler"@4 --version'):
         assert _floating_wranglers(run) == {"4"}, run
-    # The one form left: an EMPTY EXPANSION inside the word. bash runs
-    # `wrangler@4`; there is no literal to read, and no text scan can know that
-    # `X` is empty. Pinned so the limit is stated, not hidden — see the residual
-    # note above `_exact_wranglers`.
-    for run in ("wrangler$X@4 --version", "wrangler${X}@4 --version"):
+    # DECLARED OVER-READ (see `_UNQUOTE`): shell KEEPS a backslash before an
+    # ordinary character inside double quotes, so bash runs the invalid word
+    # `wrangler@4.\127.0` while this reads the pin. Pinned so the limit is stated.
+    assert _exact_wranglers('npx wrangler@"4.\\127.0" --version') == {"4.127.0"}
+    # An X-RANGE is not an exact pin: npm resolves `4.127.x` to a moving window
+    # (`>=4.127.0 <4.128.0-0`), so a dot-count classifier passed it as exact.
+    for spec in ("4.127.x", "4.x.x", "4.127.X", "4.127.0-rc.1"):
+        assert _floating_wranglers(f"npx --yes wrangler@{spec} --version") == {spec}, spec
+        assert _exact_wranglers(f"npx --yes wrangler@{spec} --version") == set(), spec
+    # The residual class: an INTERPOLATION inside the word. bash runs
+    # `wrangler@4`; there is no literal to read, and no text scan can evaluate the
+    # substitution. Pinned as MISSED so the limit is stated, not hidden — see the
+    # residual note above `_exact_wranglers`.
+    for run in ("wrangler$X@4 --version", "wrangler${X}@4 --version",
+                "wran$(echo gler)@4 --version", "wran`echo gler`@4 --version"):
         assert _wrangler_invocations(run) == set(), run
+    # …and the EXACT side of an empty spec, so "an empty spec is never exact" is
+    # pinned from BOTH directions: mutating `_exact_wranglers` to accept "" fails.
+    for run in ("npx --yes wrangler@$WRANGLER --version",
+                "npx --yes wrangler@4.127.${PATCH} --version"):
+        assert _exact_wranglers(run) == set(), run
 
     # An INDIRECT spec is floating, never exact — including a literal CUT SHORT by
     # an interpolation, which must not be read as the pin `4.127.`:
