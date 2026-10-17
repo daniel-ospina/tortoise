@@ -64,6 +64,91 @@ export function declNames(line) {
 }
 
 /**
+ * Walk `source` from the `(` at `open` to its matching `)`, skipping string and
+ * template literals and comments, so a `)` inside copy cannot end it early.
+ */
+function matchParen(source, open) {
+  let depth = 0
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i]
+    const next = source[i + 1]
+    if (ch === '/' && next === '/') { i = source.indexOf('\n', i); if (i === -1) return -1; continue }
+    if (ch === '/' && next === '*') { i = source.indexOf('*/', i + 2); if (i === -1) return -1; i++; continue }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch
+      i++
+      while (i < source.length && source[i] !== quote) { if (source[i] === '\\') i++; i++ }
+      continue
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++
+    else if (ch === ')' || ch === ']' || ch === '}') { depth--; if (depth === 0) return i }
+  }
+  return -1
+}
+
+/** Top-level comma-separated argument spans of the call at `open`..`close`. */
+function topLevelArgs(source, open, close) {
+  const spans = []
+  let depth = 0
+  let start = open + 1
+  for (let i = open + 1; i < close; i++) {
+    const ch = source[i]
+    const next = source[i + 1]
+    if (ch === '/' && next === '/') { i = source.indexOf('\n', i); if (i === -1) break; continue }
+    if (ch === '/' && next === '*') { i = source.indexOf('*/', i + 2); if (i === -1) break; i++; continue }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch
+      i++
+      while (i < close && source[i] !== quote) { if (source[i] === '\\') i++; i++ }
+      continue
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++
+    else if (ch === ')' || ch === ']' || ch === '}') depth--
+    else if (ch === ',' && depth === 0) { spans.push([start, i]); start = i + 1 }
+  }
+  spans.push([start, close])
+  return spans
+}
+
+/**
+ * #3726 defect 1: a deps array is the LAST argument of a HOOK call, located by
+ * ARITY rather than by the punctuation that happens to precede it.
+ *
+ * The old scan anchored on `}` or `]` before the comma, so an expression-bodied
+ * arrow whose deps array follows a parenthesised call was never scanned at all
+ * — measured on main.jsx: `useMemo(() => first(backupInfo && ...), [backupInfo])`
+ * at L7652 was skipped. Widening the anchor to `)` would also match an ordinary
+ * call taking an array literal (`foo(x, [a, b])`), which is not a deps array and
+ * would raise a false violation, so the anchor is the hook name instead.
+ *
+ *
+ * KNOWN LIMITATION (not fixed here, no live instance): the search runs over
+ * text, so a COMMENT that illustrates a hook call with a deps array would be
+ * analysed as code. Masking comments was tried and reverted — a character
+ * scanner cannot lex JSX prose (an apostrophe desyncs it) and its regex-
+ * literal blind spot blanked real code, which is a worse trade: it would miss
+ * real deps arrays to suppress a hypothetical one.
+ * @returns {Array<{start:number, inner:string}>}
+ */
+export function depsArrays(source) {
+  const out = []
+  const hooks = /\b(?:useMemo|useEffect|useLayoutEffect|useCallback)\s*\(/g
+  let m
+  while ((m = hooks.exec(source)) !== null) {
+    const open = m.index + m[0].length - 1
+    const close = matchParen(source, open)
+    if (close === -1) continue
+    const spans = topLevelArgs(source, open, close)
+    const [a, b] = spans[spans.length - 1]
+    const raw = source.slice(a, b)
+    const arg = raw.trim()
+    if (arg === '' || arg[0] !== '[]'.charAt(0)) continue
+    out.push({ start: a + raw.indexOf('['), inner: arg.slice(1, -1) })
+  }
+  return out
+}
+
+/**
  * Analyze source text for the #2426/#2621/#2709 bug class.
  *
  * A deps-array identifier is a violation when it is neither:
@@ -89,13 +174,9 @@ export function findTdzDeps(source) {
     }
   }
 
-  // Deps arrays: `}, [ ... ])` / `], [ ... ])` — the trailing `)` scopes the
-  // match to a hook call closing, not an arbitrary object literal.
-  const re = /[}\]]\s*,\s*\[([^\]]*)\]\s*\)/g
-  let m
-  while ((m = re.exec(source)) !== null) {
-    const lineNo = source.slice(0, m.index).split('\n').length
-    const names = m[1]
+  for (const deps of depsArrays(source)) {
+    const lineNo = source.slice(0, deps.start).split('\n').length
+    const names = deps.inner
       .split(',')
       .map((s) => s.trim())
       .filter((s) => /^[A-Za-z_$][\w$]*$/.test(s))
@@ -174,6 +255,53 @@ test('tdz tripwire: analyzer clears props, params, and earlier consts', () => {
     '}',
   ].join('\n')
   assert.deepEqual(findTdzDeps(good), [], 'no violations expected')
+})
+
+// ── #3726 defect 1: the shape the old punctuation anchor skipped ────────────
+test('#3726: analyzer scans a deps array that follows a parenthesised call', () => {
+  // Expression-bodied arrow: the last argument is `[lateMemo]` but it is
+  // preceded by `)` (the call that produced the value), not by `}` or `]`. The
+  // old anchor `/[}\]]\s*,\s*\[/` therefore skipped the array entirely and a
+  // later-declared const in it was invisible — one deps array in main.jsx
+  // (L7652) was missed by exactly this shape.
+  const bad = [
+    'function App() {',
+    '  const memo = React.useMemo(() => pick(ready, lateMemo), [lateMemo])',
+    '  const lateMemo = 1',
+    '  return memo',
+    '}',
+  ].join('\n')
+  assert.deepEqual(
+    findTdzDeps(bad).map((v) => v.name),
+    ['lateMemo'],
+    'a deps array after a parenthesised call must still be analysed',
+  )
+})
+
+test('#3726: a NON-hook call taking an array literal is not a deps array', () => {
+  // The cheap fix — widening the anchor to `)` — would also match this and
+  // report `lateArr` as a TDZ violation, which is a false red. Anchoring on the
+  // hook arity cannot: `describe(...)` is not a hook.
+  const source = [
+    'function App() {',
+    '  describe(pick(ready), [lateArr])',
+    '  const lateArr = 1',
+    '  return null',
+    '}',
+  ].join('\n')
+  assert.deepEqual(findTdzDeps(source), [],
+    'a plain call with an array-literal argument is not a hook deps array')
+})
+
+test('#3726: the analyzer reaches every hook deps array in main.jsx', () => {
+  // Population pin: the scan must not silently shrink. 41 = the 40 the old
+  // anchor found plus the parenthesised form at L7652 (#3726). A drop means the
+  // analyzer stopped seeing arrays it used to see.
+  const found = depsArrays(mainJsx)
+  assert.ok(found.length >= 41,
+    `expected >= 41 hook deps arrays in main.jsx, found ${found.length}`)
+  assert.ok(found.some((d) => d.inner.includes('backupInfo')),
+    'the L7652 parenthesised-form deps array must be scanned')
 })
 
 // ── the real file ───────────────────────────────────────────────────────────

@@ -87,11 +87,16 @@ test('review P1 / #3913: the build fork handler writes NO checkpoint step (the c
   // two acts the server OBSERVES (harness-connected + first-points-filed), so a
   // fork pick must record no step. The build branch still exists: a build pick
   // stays on the fork step so the catalog CARD renders, and self picks advance.
-  assert.ok(src.includes("if (forkId !== 'build')"),
+  // #3726 defect 2: quote-agnostic. Matching the literal with single quotes
+  // hard-coded false-redded this test on a pure re-quote ("which quote did the
+  // author use" is not a behaviour), while the checkpoint pin beside it stayed
+  // GREEN — the same hard-coding in the negative form is a false green, because
+  // the pattern simply stops matching the writer it exists to catch.
+  assert.ok(/if \(forkId !== ['"]build['"]\)/.test(src),
     'handleWizardFork still branches on the build pick (non-build picks advance, build stays for the card)')
   assert.ok(src.includes('Build catalog'),
     'the build catalog CARD still renders (only the write was removed)')
-  assert.ok(!/step: 'catalog-presented'/.test(src),
+  assert.ok(!/step:\s*['"]catalog-presented['"]/.test(src),
     'no catalog-presented checkpoint anywhere in main.jsx — #3913 removed the writer')
 })
 
