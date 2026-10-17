@@ -3074,6 +3074,16 @@ def _raise_update_point_status_error(proj, id: str) -> None:
     ).result_set[0][0]
     if not exists:
         raise ValueError(f"No point {id!r}")
+    # #1088 / #8854 review round 5: an ALREADY-LIVE node is the idempotent
+    # no-op the pre-write short-circuit implements. It reaches here only on a
+    # RETRY (the replay landed the node live between the abort and the
+    # re-issue), where reporting an illegal transition would contradict the
+    # door's own contract. Returning lets the arm finish as a no-op.
+    status = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
+    ).result_set
+    if status and status[0][0] == 'live':
+        return
     raise ValueError(
         f"Illegal status transition — update_point only promotes draft→live; "  # noqa: F541
         f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
@@ -10369,32 +10379,39 @@ class TortoiseSDK:
         # an empty result set (the caller's
         # ``_raise_update_point_status_error`` path is unchanged).
         def _promote_witness(result) -> bool:
-            """A refused promote keeps its documented `ValueError` (#8854 r3).
+            """A zero-row promote re-issue, classified by the node's STATUS.
 
-            ``update_point(status='live')`` refuses in the statement's own
-            WHERE guard, so a zero-row re-issue is legitimate whenever the
-            node EXISTS and is no longer promotable. The diagnostic below
-            separates that from "the rebuild has not replayed the node yet":
-            an ABSENT node returns False, so the sentinel keeps retrying and the
-            graph abort surfaces — raising ``_raise_update_point_status_error``
-            on absence would instead raise ``ValueError('No point …')``, which
-            is predicate-FALSE and abandons the 7-14 s window after ONE
-            re-issue (#8854 review round 4 P1).
+            PRESENCE is not PROMOTABILITY (#8854 review round 5 P1): the replay
+            can land the node as ``draft`` between the abort and the re-issue,
+            and calling ``_raise_update_point_status_error`` on it would report
+            an illegal transition for a node the very next re-issue promotes —
+            with a ``ValueError``, which is predicate-FALSE, so it would also
+            abandon the 7-14 s window. The read below decides:
+
+            - absent → False: keep retrying, the abort surfaces on exhaustion
+              (``ValueError('No point …')`` here would abandon the window).
+            - ``None`` / ``draft`` → False: re-issuing matches.
+            - ``live`` → the #1088 idempotent success for a STATUS-ONLY promote;
+              with other props nothing was applied, so keep it loud instead of
+              journaling a revision the graph never made.
+            - terminal → the documented ``ValueError``.
             """
             if result.result_set:
                 return True
-            _present_rows = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": id},
             ).result_set
-            # `count()` is a single-row aggregate, so an EMPTY result set means
-            # the statement did not run — indexing it blind raises `IndexError`,
-            # which `retryable_aborted_write` does not recognise, so it escapes
-            # as a STRUCTURAL failure and MASKS the abort that authorised the
-            # retry. Read "no row" as "not present" (the same premise
-            # `_landed_at_least_one` documents).
-            present = _present_rows[0][0] if _present_rows else 0
-            if not present:
+            if not rows:
                 return False
+            status = rows[0][0]
+            if status is None or status == 'draft':
+                return False
+            if status == 'live':
+                # #1088: already-live is an idempotent success for a
+                # STATUS-ONLY promote (the arm's post-check completes the
+                # no-op). With other props nothing was applied, so keep it
+                # loud instead of journaling a revision the graph never made.
+                return len(_props_param) == 1
             _raise_update_point_status_error(proj, id)
             return False  # pragma: no cover — the helper always raises
 

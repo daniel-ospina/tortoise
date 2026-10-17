@@ -974,9 +974,13 @@ class _AbortOnceThenSetStatus(_AbortOnceThenTerminalise):
         return self._real.query(cypher, params=params, timeout=timeout)
 
 
-def test_a_promote_refused_after_a_retry_keeps_its_illegal_transition(
+def test_a_promote_refused_by_a_terminal_status_keeps_its_illegal_transition(
         tmp_path, monkeypatch):
-    """A present-but-not-draft node keeps the documented ValueError."""
+    """A node that went TERMINAL in the retry window keeps the ValueError.
+
+    (A node that went LIVE is the #1088 idempotent no-op instead — pinned by
+    `test_a_status_only_promote_on_an_already_live_node_is_idempotent`.)
+    """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "promoterace")
@@ -984,7 +988,8 @@ def test_a_promote_refused_after_a_retry_keeps_its_illegal_transition(
         pid = sdk.create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
-        proxy = _AbortOnceThenSetStatus(proj.g, _POINT_PROMOTE_NEEDLE)
+        proxy = _AbortOnceThenSetStatus(
+            proj.g, _POINT_PROMOTE_NEEDLE, status="retracted")
         proj.g = proxy
 
         with pytest.raises(ValueError, match="Illegal status transition"):
@@ -1066,6 +1071,60 @@ def test_retract_mid_skew_does_not_claim_already_terminal(
         out = sdk.retract_point(pid)
         assert out["status"] == "retracted"
         assert proxy.matching >= 3, "the CAS was never re-issued after the skew"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_promote_on_a_draft_node_re_lands_after_a_transient_empty(
+        tmp_path, monkeypatch):
+    """PRESENCE is not PROMOTABILITY (#8854 review round 5 P1).
+
+    The replay lands the node as ``draft`` between the abort and the re-issue;
+    a presence-only witness reports an illegal transition (predicate-FALSE, so
+    the window is abandoned after one re-issue). The status read keeps retrying,
+    and the third attempt promotes.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "draftskew")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortThenEmptyThenPass(proj.g, _POINT_PROMOTE_NEEDLE)
+        proj.g = proxy
+
+        out = sdk.update_point(pid, status="live")
+
+        assert out["status"] == "live"
+        assert proxy.matching >= 3, "the promote was not re-issued after the skew"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_status_only_promote_on_an_already_live_node_is_idempotent(
+        tmp_path, monkeypatch):
+    """The #1088 outcome survives a retry (#8854 review round 5).
+
+    With status-only props, an already-live node is an idempotent success — not
+    an illegal transition, and not an abort.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "liveskew")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenSetStatus(
+            proj.g, _POINT_PROMOTE_NEEDLE, status="live")
+        proj.g = proxy
+
+        out = sdk.update_point(pid, status="live")
+
+        assert out["status"] == "live"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
