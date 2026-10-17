@@ -8204,12 +8204,23 @@ class FalkorProjection(
             _about_w, _about_f = (0, 0)
             if about_links_deferred:
                 # #8398: the CALLER owns a trailing sweep and will wire these
-                # once every endpoint exists. Wiring here would be wrong rather
-                # than merely early: the ``how:"name"`` path MINTS a Subject
-                # stub when its target is absent, so on a rotated journal this
-                # call would create a junk stub AND leave the real edge on the
-                # wrong label — replay ≠ live, reported as success. Skipping it
-                # is the only faithful option.
+                # once every endpoint exists. Wiring here is not so much WRONG
+                # as EARLY, and the cost is small and measured: on a rotated
+                # journal whose endpoint lands in a later file, this call meets
+                # a target that is not in the graph yet, counts it as a failure
+                # and warns ("apply() could not re-wire … its target is not in
+                # the graph yet"). Measured with ``about_links_deferred`` forced
+                # False on a journal rotated so the ``EventRecorded`` precedes
+                # its ``ObjectRegistered``: the resulting graph is IDENTICAL and
+                # the sweep re-wires the edge, so the only residue is a spurious
+                # ``failed`` count plus a warning that teaches readers to ignore
+                # the warning. It does NOT corrupt anything: the stub mint is
+                # ``MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name``,
+                # which cannot create a second same-name ``:Subject`` and lands
+                # on whatever node carries that name — the same node the live
+                # write addressed. So this is a structural fix (the sweep is the
+                # one faithful order), not a repair for an unreachable
+                # corrupting bug.
                 pass
             else:
                 # #8398 P2-5: GUARDED like every sibling sweep in this file.

@@ -975,11 +975,13 @@ class _EdgeHandlers:
 
         ``target_internal_ids`` — the FalkorDB internal ids the LIVE write must
         address, so the journal and the write come from ONE resolution rather
-        than two reads that could disagree. A LIST because a name may legally
-        have several carriers and every one of them is journaled in
-        ``targets`` — live then writes what the record says instead of pinning
-        an arbitrary row. ``None`` for the stub fallback (no node yet). ⛔ It
-        MUST NEVER be journaled: internal ids die at rebuild.
+        than two reads that could disagree. A LIST because a name — or a
+        document ``title`` — may legally have several carriers, and EVERY one of
+        them is journaled in ``targets``: BOTH arms of ``_resolve_about_edge_target``
+        (the name-keyed labels and the url-or-title-keyed document ``Source``)
+        resolve all their carriers, so no arm pins an arbitrary row and live
+        writes exactly what the record says. ``None`` for the stub fallback (no
+        node yet). ⛔ It MUST NEVER be journaled: internal ids die at rebuild.
 
         Returns ``(None, None)`` when the cascade wires nothing (an unwritable
         name — refused and logged, #7369).
@@ -1028,6 +1030,13 @@ class _EdgeHandlers:
         carriers resolves to all of them — see the ambiguity note in the
         non-``Source`` arm), or ``None`` when nothing matched. ⛔ Internal ids
         MUST NEVER be journaled: they die at rebuild.
+
+        ⛔ **NEITHER arm may ``LIMIT`` its probe.** A name — and a document's
+        ``title``, which is the same kind of mutable natural key (D2) — may be
+        held by several carriers, and the retired ``_try_about_edge`` MERGE'd
+        the edge against EVERY one of them. Both arms therefore resolve ALL
+        carriers and journal all of them in ``targets``; the ambiguity notes in
+        each arm are one argument, stated where the removal happened.
         """
         # #7369: `target_name` rides as a READ parameter here, and the engine
         # parses every parameter regardless of clause — an unwritable one
@@ -1038,16 +1047,40 @@ class _EdgeHandlers:
                 "aboutDocument edge", target_name, "name (read parameter)")
             return None, None
         if label == 'Source':
+            # ⛔ NEVER limit this probe either (review at b26bf2a2c). The
+            # retired ``_try_about_edge`` limited only its EXISTENCE probe and
+            # then MERGE'd the edge against EVERY matching document Source
+            # (``WHERE (e.url = $name OR e.title = $name) AND e.documentKind IS
+            # NOT NULL``), so a ``title`` held by several documents wired all of
+            # them. ``LIMIT 1`` here made live wire ONE — and wrote that
+            # backend-row-order pick into an append-only journal — so it cost
+            # every other carrier an edge ``origin/main`` gave it. That is both
+            # an undisclosed behaviour regression and the identical defect the
+            # non-``Source`` arm below removes; a title is a mutable natural key
+            # exactly as a name is (D2). Measured with three document Sources
+            # sharing ``title="Same Title"``: ``LIMIT 1`` wired and journaled
+            # one, the retired behaviour wired all three. So resolve ALL of
+            # them, journal EVERY url, and write every one.
             rows = self.g.query(
                 "MATCH (e:Source) WHERE (e.url = $name OR e.title = $name) "
                 "AND e.documentKind IS NOT NULL "
-                "RETURN ID(e), e.url LIMIT 1",
+                "RETURN ID(e), e.url",
                 params={"name": target_name},
             ).result_set
             if not rows:
                 return None, None
-            _internal, key = rows[0]
-            targets = [key] if key else []
+            # The journaled replay key for this arm is the node's ``url`` (D10:
+            # a document Source is url-keyed since #2489), so every url is a
+            # journaled target and the first is the ``resolve_key`` fallback.
+            # The internal ids are built from the SAME rows, so the live edge
+            # set is exactly the journaled ``targets`` set: a carrier with no
+            # ``url`` has nothing to journal, and live-wiring it would be an
+            # edge replay could never address. (Unreachable for a document
+            # ``:Source`` — ``url`` is its MERGE key — and kept aligned anyway
+            # so the invariant is true by construction, not by luck.)
+            targets = [url for _i, url in rows if url]
+            internals = [row[0] for row in rows if row[1]]
+            key = targets[0] if targets else None
             # A ``:Source`` is never a mintable stub here (aboutDocument is
             # resolve-only, D10 B1), so this link makes no mint claim.
             mint = False
@@ -1067,7 +1100,9 @@ class _EdgeHandlers:
             # ``targets`` (already a list, the id path journals several values
             # the same way) and every one of them is written. Nothing is picked,
             # so nothing arbitrary is pinned, and live writes exactly what the
-            # record says.
+            # record says. The ``Source`` arm above applies the SAME rule to a
+            # title — it carried the identical ``LIMIT 1`` until review at
+            # b26bf2a2c.
             rows = self.g.query(
                 f"MATCH (e:{label} {{name:$name}}) "
                 "RETURN ID(e), coalesce(e.id, e.eventId, e.name)",
@@ -1090,6 +1125,11 @@ class _EdgeHandlers:
             # direction — the invariant this whole path exists to establish.
             mint = label == "Subject" and any(
                 ident == target_name for _i, ident in rows)
+            # Same alignment as the ``Source`` arm: the live edge set is exactly
+            # the journaled ``targets`` set. (``name`` is the MATCH key on this
+            # arm, so ``coalesce`` can never be empty here — the filter is for
+            # the invariant, not for a reachable case.)
+            internals = [row[0] for row in rows if row[1]]
         return ({
             "rel": rel,
             "how": "id",
@@ -1097,7 +1137,7 @@ class _EdgeHandlers:
             "target_label": label,
             "resolve_key": key,
             "mint_if_absent": mint,
-        }, [row[0] for row in rows])
+        }, internals)
 
     def _create_about_edges(self, source_id: str, entity_name: str) -> dict | None:
         """Link entity (Point, Document, Event, or Object) to a named entity.
@@ -1246,9 +1286,19 @@ class _EdgeHandlers:
         decision — ``rel``, ``target_label``, ``resolve_key`` and
         ``mint_if_absent`` — and replay repeats THAT: the endpoint by id when it
         resolves, else the same label/key live matched on, minting only when the
-        live construction minted. ``how:"name"`` survives only for records
-        written before the fix (the journal is append-only, so those carry no
-        endpoint to repeat).
+        live construction minted.
+
+        ``how:"name"`` is DEFENSIVE, not a legacy path with data behind it.
+        ``aboutLinks`` is introduced by this unmerged change — it does not exist
+        on ``origin/main`` and no released version writes it — so no journal in
+        the wild can hold a ``how:"name"`` link. The only records that could
+        were written by an earlier commit of THIS branch, which did journal
+        ``{"rel", "value", "how": "name"}``; this branch is append-only too, so
+        a journal written by such a build still replays. The branch therefore
+        defends a form only this branch ever produced — delete it (and
+        ``test_a_LEGACY_name_link_record_still_replays``) freely if it becomes
+        dead weight. It is kept because dropping it would turn such a record
+        into a counted loss rather than the pre-fix behaviour it had.
 
         Returns ``(wired, failed)`` — the caller reports ``failed`` so a rebuild
         that could not re-wire a journaled link is never silent. Every skip that
@@ -1304,7 +1354,6 @@ class _EdgeHandlers:
                     # label — aborting a post-wipe replay).
                     failed += 1
                     continue
-                ok = False
                 # P2-8 (review at 2b9626072): a ``targets`` that is not a LIST
                 # is malformed, and iterating it as a sequence walks a STRING
                 # character by character — ``targets: "abcd"`` could WIRE to a
@@ -1315,21 +1364,47 @@ class _EdgeHandlers:
                 if not isinstance(targets, list):
                     failed += 1
                     continue
+                wired_before = wired
                 for value in targets:
                     if (isinstance(value, str) and value
                             and self.create_about_edge(
                                 source, value, rel, target_label=label)):
-                        ok = True
-                if not ok:
-                    target = resolve_structural_target(
-                        self.g, label, key, rel,
-                        mint=bool(link.get("mint_if_absent")))
-                    ok = bool(target) and self.wire_about_link(
-                        source, link, target["internal"])
-                if ok:
+                        wired += 1
+                # P2-2 (review at b26bf2a2c): account PER TARGET, exactly as
+                # the ``how:"id"`` arm below does. Collapsing a multi-carrier
+                # link into ONE boolean reported full success for a PARTIAL
+                # loss — measured: three same-name ``:Event`` carriers in one
+                # pinned link with one carrier gone returned ``(1, 0)`` while
+                # only two of the three journaled edges existed, so a journaled
+                # endpoint was lost with ``failed == 0`` and no warning. The
+                # contract above is per journaled ENDPOINT ("every skip that
+                # costs a journaled link counts as ``failed``"), not per link.
+                missing = len(targets) - (wired - wired_before)
+                if wired > wired_before:
+                    failed += missing
+                    continue
+                # Nothing resolved by VALUE. The legacy repair — ask the ONE key
+                # the record pinned — resolves AT MOST ONE node
+                # (``resolve_structural_target`` refuses an ambiguous key), so
+                # it is attempted once per LINK, never once per missing value:
+                # run per value it would re-wire (and re-count) the same node
+                # for every carrier that did not resolve, inventing wires. It
+                # covers the one-value link whose value is not a resolvable id
+                # (a url-keyed document Source), which is what it was added
+                # for.
+                target = resolve_structural_target(
+                    self.g, label, key, rel,
+                    mint=bool(link.get("mint_if_absent")))
+                if bool(target) and self.wire_about_link(
+                        source, link, target["internal"]):
                     wired += 1
+                    # ... and it repaired exactly ONE of the missing values.
+                    failed += max(missing - 1, 0)
                 else:
-                    failed += 1
+                    # An EMPTY ``targets`` still counts one loss (there is no
+                    # journaled endpoint to count, and a record claiming a link
+                    # that names nothing is a malformed record, not a no-op).
+                    failed += max(missing, 1)
             elif link.get("how") == "id":
                 targets = link.get("targets")
                 if not isinstance(targets, list) or not targets:
@@ -1345,12 +1420,14 @@ class _EdgeHandlers:
                     else:
                         failed += 1
             elif link.get("how") == "name" and isinstance(link.get("value"), str):
-                # ⚠️ LEGACY records only (written before the P1-2 fix): a
-                # ``how:"name"`` link carries no resolved endpoint, so replay
-                # has nothing to repeat but the rel-ignoring cascade. The
-                # journal is append-only, so these records cannot be repaired
-                # — they keep the pre-fix behaviour (and its drift) rather than
-                # being silently counted as losses. New writes carry
+                # ⚠️ DEFENSIVE only — see "``how:"name"`` is DEFENSIVE" above:
+                # no released version and no ``origin/main`` writes this form,
+                # so only a journal written by an EARLIER COMMIT OF THIS BRANCH
+                # can carry one. Such a link carries no resolved endpoint, so
+                # replay has nothing to repeat but the rel-ignoring cascade.
+                # The journal is append-only, so those records cannot be
+                # repaired — they keep the pre-fix behaviour (and its drift)
+                # rather than being silently counted as losses. New writes carry
                 # ``resolve_key`` above.
                 #
                 # ⚠️ ``_create_about_edges`` is the rel-IGNORING
@@ -1372,8 +1449,8 @@ class _EdgeHandlers:
     def _count_about_out(self, source: str) -> int:
         """Count the source's outgoing about edges — by ID only, never by name.
 
-        The ``how: "name"`` success test (LEGACY records only — post-#8398
-        records pin ``resolve_key`` and are measured by their own edge). A name
+        The ``how: "name"`` success test (DEFENSIVE records only — see
+        ``replay_about_links``: no released version writes that form). A name
         link's own rel resolved to nothing at write time, so the cascade is
         rel-ignoring and the honest question is only "did this record leave the
         Event joined to anything".

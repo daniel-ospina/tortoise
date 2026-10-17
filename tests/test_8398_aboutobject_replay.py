@@ -18,9 +18,11 @@ precise decision the live write will carry: ``{"rel", "how": "id",
 ``resolve_key`` / ``mint_if_absent`` for a name-path one. Replay never re-runs
 the cascade — it repeats that decision: the endpoint by id when it resolves,
 else the same label/key live matched on, minting only when the live construction
-minted. ``how: "name"`` survives as a LEGACY-ONLY branch (records written before
-that fix, uncorrectable because the journal is append-only), matching
-``replay_about_links``'s docstring. The record carries links as data, NOT as node
+minted. ``how: "name"`` survives as a DEFENSIVE branch only — ``aboutLinks``
+is introduced by this unmerged change (it does not exist on ``origin/main``), so
+no journal in the wild can hold that form and the branch defends records an
+earlier commit of this branch wrote — matching ``replay_about_links``'s
+docstring. The record carries links as data, NOT as node
 properties — an ``about*`` prop must never become a stored string property.
 
 Runnable with:
@@ -454,6 +456,19 @@ def test_a_name_link_to_an_EXISTING_node_replays_onto_that_node(wired) -> None:
 def test_recording_a_name_link_leaves_no_phase_two_drift(wired) -> None:
     """A caller ``aboutLinks`` prop must not collide with the journal field.
 
+    ⚠️ **Its own discriminating power is the PAIR, not either half** (measured
+    at b26bf2a2c, each half reverted separately): with only the two ``**``-splats
+    restored it stays GREEN (the reserved-name strip keeps ``aboutLinks`` out of
+    the journaled payload) and with only the strip removed it stays GREEN (one
+    bag cannot collide with itself). It goes red only when BOTH are reverted.
+    So read it as the end-to-end assertion — the public call returns a node,
+    writes exactly ONE ``EventRecorded``, and ``rebuild_all`` keeps the Event —
+    never as evidence that either fix is load-bearing. The per-half evidence
+    lives in ``test_the_EventRecorded_emit_is_ONE_bag_so_a_shared_key_cannot_
+    collide`` (the merge alone) and
+    ``test_a_caller_aboutLinks_prop_is_not_read_as_journal_data`` (the strip
+    alone), which is why the three exist together.
+
     P1-1, MEASURED at a38d6e775: ``create_event(..., aboutObject=oid,
     aboutLinks=["caller"])`` raised ``TypeError: _emit_event() got multiple
     values for keyword argument 'aboutLinks'`` — AFTER the live write had
@@ -497,6 +512,12 @@ def test_a_caller_aboutLinks_prop_is_not_read_as_journal_data(wired, caplog) -> 
     inline re-wire reads it as journal data and reports a phantom failure
     (measured: "#8398: apply() could not re-wire 1 journaled Event→entity
     about* link(s)").
+
+    **This test discriminates the STRIP alone** (measured at b26bf2a2c): with
+    ``aboutLinks`` removed from ``_RESERVED_EMIT_CALL_PROPS`` and the single-bag
+    emit intact it is the ONLY test that goes red, so it is the evidence that
+    the strip — not the merge — closes this half. The merge's own evidence is
+    ``test_the_EventRecorded_emit_is_ONE_bag_so_a_shared_key_cannot_collide``.
     """
     import logging
 
@@ -557,14 +578,20 @@ def test_apply_does_not_abort_when_the_about_re_wire_raises(wired, monkeypatch) 
 
 
 def test_a_LEGACY_name_link_record_still_replays(wired) -> None:
-    """A record written BEFORE the P1-2 fix carries no endpoint — it still replays.
+    """The ``how:"name"`` branch is DEFENSIVE — no journal in the wild has one.
 
-    The journal is append-only, so a deployment upgrading mid-stream has
-    ``how:"name"`` links in it. They cannot be repaired (there is no resolved
-    endpoint on them to repeat), so the legacy branch keeps their pre-fix
-    behaviour rather than reporting every one of them as a lost link. This pins
-    that branch AND documents the drift it keeps: the edge lands on whatever the
-    rel-ignoring cascade finds, not on the record's ``rel``.
+    ``aboutLinks`` is introduced by this unmerged change: ``git grep aboutLinks
+    origin/main -- tortoise/`` is empty, so no released version writes the field
+    and no deployment anywhere holds a ``how:"name"`` link. The only records
+    that could carry one were written by an EARLIER COMMIT OF THIS BRANCH (it
+    journaled ``{"rel", "value", "how": "name"}`` before the P1-2 fix pinned
+    the resolved endpoint). The branch therefore defends a form only this branch
+    ever produced — it is forward-compatible handling, not a migration path.
+
+    It is kept rather than deleted because dropping it would turn such a record
+    into a counted loss instead of the pre-fix behaviour it had, and this pins
+    that behaviour AND documents the drift it keeps: the edge lands on whatever
+    the rel-ignoring cascade finds, not on the record's ``rel``.
     """
     sdk, proj, _events, _journal = wired
     ev = _nid(sdk.create_event("legacy", "event"))
@@ -764,6 +791,12 @@ def test_the_EventRecorded_emit_is_ONE_bag_so_a_shared_key_cannot_collide(
     unreachable through a public door. Without this test the merge is
     defence-in-depth with no evidence it is a merge.
 
+    But this test is the MERGE's own discriminator, which is why it exists: with
+    the single-bag emit restored and the strip alone removed, this test stays
+    green and only ``test_a_caller_aboutLinks_prop_is_not_read_as_journal_data``
+    goes red (measured at b26bf2a2c); with the two splats restored and the strip
+    intact, this is the ONLY test that goes red.
+
     So the collision is constructed directly: the journaled payload is made to
     carry a key the write-time edge facts also carry — the exact overlap a
     second ``**`` bag would turn into ``TypeError: got multiple values for
@@ -795,3 +828,104 @@ def test_the_EventRecorded_emit_is_ONE_bag_so_a_shared_key_cannot_collide(
         {"rel": "aboutObject", "how": "id", "targets": [oid]}], (
         "the write-time edge facts must stay authoritative over the journaled "
         f"payload: {records[0]['aboutLinks']!r}")
+
+
+# ── Round 4 (third independent review at b26bf2a2c) ──────────────────────────
+
+
+def test_a_title_held_by_THREE_document_Sources_wires_them_ALL(wired) -> None:
+    """P2-1: the ``Source`` arm kept the ``LIMIT 1`` the OTHER arm documents away.
+
+    ``_resolve_about_edge_target``'s docstring promises "every one of them is
+    journaled in ``targets`` … instead of pinning an arbitrary row", and the
+    non-``Source`` arm spends 20 lines explaining why a bounded probe is wrong.
+    The ``Source`` arm 30 lines above it still ended ``RETURN ID(e), e.url LIMIT
+    1`` — while the retired ``_try_about_edge`` limited only its EXISTENCE probe
+    and then MERGE'd the edge against EVERY same-title document Source. So it
+    was both an undisclosed behaviour regression against ``origin/main`` and the
+    identical defect this PR removed one arm over.
+
+    THREE carriers, because a bounded probe (``LIMIT 2``) tells "one" from "many"
+    and still truncates at the third — a two-carrier fixture cannot see that.
+    """
+    sdk, proj, events, journal = wired
+    urls = set()
+    for i in range(3):
+        row = sdk.create_source(f"https://example.test/same/{i}", "document",
+                                title="Same Title", documentKind="report")
+        urls.add(row.get("url") or _nid(row))
+    assert len(urls) == 3, f"the carriers collapsed: {urls}"
+
+    sdk.create_event("titled", "event", aboutDocument="Same Title")
+
+    def edges() -> set:
+        return {
+            row[0] for row in proj.g.query(
+                "MATCH (e:Event {name:'titled'})-[:aboutDocument]->(t) "
+                "RETURN t.url").result_set
+        }
+
+    assert edges() == urls, (
+        "live did not wire EVERY same-title document Source — the retired "
+        f"behaviour, and the one whose journal replay can reproduce: {edges()}")
+
+    link = _event_records(journal, "titled")[0]["aboutLinks"][0]
+    assert link["rel"] == "aboutDocument", f"wrong rel: {link!r}"
+    assert sorted(link["targets"]) == sorted(urls), (
+        "the record pinned a subset of the carriers live addressed — an "
+        f"append-only journal cannot repair that: {link!r}")
+    assert link["mint_if_absent"] is False, (
+        f"an aboutDocument :Source is never mintable live: {link!r}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert edges() == urls, (
+        f"replay did not reproduce every journaled document endpoint: {edges()}")
+
+
+def test_a_PARTIAL_multi_carrier_loss_is_COUNTED_per_endpoint(wired) -> None:
+    """P2-2: a pinned link's success is per ENDPOINT, not per link.
+
+    The pinned arm collapsed every ``targets`` value into ONE boolean (``ok``),
+    so a link that lost SOME of its journaled endpoints reported full success —
+    while the ``how:"id"`` arm immediately below counts per value, so the two
+    arms disagreed about the same fact. Measured at b26bf2a2c: three same-name
+    ``:Event`` carriers in one link with one carrier gone, and
+    ``replay_about_links`` returned ``(1, 0)`` while only two of the three edges
+    existed. A lost journaled endpoint with ``failed == 0`` and no warning is
+    exactly what the docstring forbids ("Every skip that costs a journaled link
+    counts as ``failed``"; "a resolve-or-mint that joined nothing [is] a
+    failure, not a silent skip").
+    """
+    sdk, proj, _events, journal = wired
+    carriers = {_nid(sdk.create_event("Shared", "event")) for _ in range(3)}
+    assert len(carriers) == 3, f"the carriers collapsed: {carriers}"
+    sdk.create_event("dup", "event", aboutObject="Shared")
+
+    def edges() -> set:
+        return {
+            row[0] for row in proj.g.query(
+                "MATCH (e:Event {name:'dup'})-[:aboutEvent]->(t) "
+                "RETURN t.id").result_set
+        }
+
+    assert edges() == carriers, f"live did not wire every carrier: {edges()}"
+
+    record = _event_records(journal, "dup")[0]
+    link = record["aboutLinks"][0]
+    assert sorted(link["targets"]) == sorted(carriers), (
+        f"the fixture needs a multi-carrier pinned link: {link!r}")
+
+    gone = sorted(carriers)[0]
+    proj.g.query("MATCH (e:Event {id:$id}) DETACH DELETE e",
+                 params={"id": gone})
+    assert edges() == carriers - {gone}, (
+        "deleting the carrier did not take its edge with it — the fixture "
+        f"assumes it does: {edges()}")
+
+    wired_n, failed_n = proj.replay_about_links(record)
+    assert (wired_n, failed_n) == (2, 1), (
+        "a PARTIAL multi-carrier loss was reported as full success: "
+        f"wired={wired_n} failed={failed_n} for {len(link['targets'])} "
+        "journaled endpoints with one of them gone")
+    assert edges() == carriers - {gone}, (
+        f"the replay did not re-wire the surviving endpoints: {edges()}")
