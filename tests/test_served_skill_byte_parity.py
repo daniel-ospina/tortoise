@@ -55,6 +55,21 @@ def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
+def _code_only(block: str) -> str:
+    """Drop comment-only lines from a YAML slice.
+
+    Without this, a NEIGHBOUR's prose can satisfy a positive assertion and can
+    false-RED the negative one — both measured: putting ``sha256sum
+    "$SERVED_FILE"`` in the following step's comment preamble made the real
+    guard tautological while the suite stayed green, and ``?cb=`` in that same
+    preamble false-REDded a step containing no cache buster. Every assertion
+    here targets a COMMAND, so dropping comment lines weakens none of them.
+    """
+    return "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 def _step_block(text: str) -> str:
     """The YAML block for the served-skill step, from its name to the next step.
 
@@ -72,7 +87,8 @@ def _step_block(text: str) -> str:
     # both lets a neighbour's prose satisfy these assertions and lets a
     # neighbour's comment mentioning cache-busting false-RED the negative one.
     nxt = re.search(r"\n      - (?:name|uses):", text[start:])
-    return text[start:] if nxt is None else text[start : start + nxt.start()]
+    block = text[start:] if nxt is None else text[start : start + nxt.start()]
+    return _code_only(block)
 
 
 def _job_block(text: str, job: str) -> str:
@@ -87,7 +103,7 @@ def _job_block(text: str, job: str) -> str:
     assert m, f"job {job!r} not found in the workflow"
     nxt = re.search(r"^  [a-zA-Z0-9_-]+:", text[m.end() :], re.MULTILINE)
     end = m.end() + (nxt.start() if nxt else len(text))
-    return text[m.start() : end]
+    return _code_only(text[m.start() : end])
 
 
 def test_the_deploy_has_a_served_skill_byte_parity_step() -> None:
@@ -116,6 +132,13 @@ def test_the_step_compares_bytes_not_markers() -> None:
     assert re.search(r'sha256sum\s+"\$SERVED_FILE"', block), (
         "the served side must be hashed from the FETCHED bytes; hashing the "
         "canonical twice makes this comparison vacuous"
+    )
+    # Hashing both sides is not enough: the two digests must be compared TO EACH
+    # OTHER. `if [ "$EXPECTED" = "$EXPECTED" ]` hashes both inputs and is always
+    # true, leaving `exit 1` unreachable — a step that can never red.
+    assert re.search(r'if\s*\[\s*"\$SERVED"\s*=\s*"\$EXPECTED"\s*\]', block), (
+        "the comparison must relate the SERVED digest to the EXPECTED digest; "
+        "comparing a value to itself makes the guard always-green"
     )
 
 
