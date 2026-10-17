@@ -794,7 +794,8 @@ the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
   no-opped and reported success anyway.
 - **GitHub documents** — `tortoise_manage_sources(action="enable",
   source="github_documents")`; it starts the docs index job and reports the
-  `job_id` plus `started`. The REST twins stay for the dashboard
+  `job_id` and `state` — `started` when a new walk was minted,
+  `reused` when an in-flight one was adopted. The REST twins stay for the dashboard
   (`POST /v1/index/docs`, status `GET /v1/index/docs/{job_id}`). This source now
   HAS a tool: the surface approval and the manifest re-cut are recorded in
   `docs/product/canonical-mcp-tools.md` (#3540, under the #4282 rule). Pinned by

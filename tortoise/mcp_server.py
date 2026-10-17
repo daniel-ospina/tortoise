@@ -4453,10 +4453,12 @@ def _sources_view() -> dict:
 
         The two GitHub sources share a key set on purpose: a caller iterating
         `sources` must not need to know which of them happens to carry the
-        index state, and after this migration `list` is the ONLY MCP reader of
-        it (`tortoise_onboarding_state` / `tortoise_onboarding_github_status`
-        are REMOVED targets). The issues walk stamps `github_indexed`, the docs
-        walk `github_docs_indexed`.
+        index state. Both onboarding tools are off the TARGET list yet STILL
+        SERVED today: `tortoise_onboarding_state` returns the raw projection and
+        is therefore a second reader of this state, while
+        `tortoise_onboarding_github_status` is served but reads no index state.
+        "Removed" here is a target-list status, never the served surface. The
+        issues walk stamps `github_indexed`, the docs walk `github_docs_indexed`.
         """
         raw = _state_get(state, f"{prefix}_at")
         return {

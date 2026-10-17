@@ -95,14 +95,34 @@ def test_list_covers_all_three_sources_with_their_defaults(ctx):
     # The raw projection rides along — the tool must not hide state behind its
     # own interpretation of it.
     assert "onboarding" in out
-    # The two GitHub sources must expose the SAME key set: after this migration
-    # `list` is the only MCP reader of index state (`tortoise_onboarding_state`
-    # and `tortoise_onboarding_github_status` are REMOVED targets), so a caller
-    # iterating `sources` must not have to know which one carries it.
+    # The two GitHub sources must expose the SAME key set: a caller iterating
+    # `sources` must not have to know which one carries the index state. Both
+    # tools are off the TARGET list (`removed` there means "not a target", never
+    # "not served") and both are STILL SERVED today: `tortoise_onboarding_state`
+    # returns the raw projection, a second reader of this state, while
+    # `tortoise_onboarding_github_status` is served but reads no index state.
     issues = set(out["sources"]["github_issues"])
     documents = set(out["sources"]["github_documents"])
     assert issues == documents, (issues ^ documents)
     assert {"indexed", "indexed_at"} <= issues, issues
+
+
+def test_list_reports_the_issues_index_from_the_issues_key(ctx):
+    """A key set proves nothing about the VALUES: both sources share one helper,
+    so reading the wrong state key (`github_docs_indexed` for the issues source)
+    used to pass — the keys still matched."""
+    ctx["state"]["github_indexed"] = True
+    ctx["state"]["github_indexed_at"] = "2026-10-17T00:00:00+00:00"
+    ctx["state"]["github_docs_indexed"] = False
+    ctx["state"]["github_docs_indexed_at"] = None
+
+    out = m.tortoise_manage_sources("list")
+
+    assert out["sources"]["github_issues"]["indexed"] is True
+    assert (out["sources"]["github_issues"]["indexed_at"]
+            == "2026-10-17T00:00:00+00:00")
+    assert out["sources"]["github_documents"]["indexed"] is False
+    assert out["sources"]["github_documents"]["indexed_at"] is None
 
 
 def test_list_projects_each_github_source_from_its_own_intent_flag(ctx):

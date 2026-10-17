@@ -111,7 +111,7 @@ because #3540 (2026-10-17) added `tortoise_manage_sources`, which was never on t
 switches it retires were not target tools. The **served** surface moved the other way, **82 → 81**.
 
 > **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the
-> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `tortoise_manage_sources`) have a prefixed equivalent. The other **22** have none, and no target name exists verbatim.
+> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `tortoise_manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim.
 > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it.
 Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every
 *current* tool to its destination but does not name the target's replacing name.
