@@ -1201,9 +1201,9 @@ class TestGraphSurface:
         Deterministic (no load, no wall-clock wait): the SAME middleware the
         request meets in production (``hosted_api.WaitBoundMiddleware``, whose
         bound's only home is ``mcp_auth``) is forced to breach on this route.
-        The plain-client control is the non-vacuity leg — it would pass
-        unchanged if the route were ever EXEMPTED, turning this pin red instead
-        of letting the conversion become dead code.
+        The plain-client control is the non-vacuity leg — it goes RED if the
+        route is ever EXEMPTED (the middleware stops refusing), so the
+        conversion cannot silently become dead code.
 
         #8582 converted this file's `client` fixture, so the seam converts the
         refusal at construction rather than at the read; the bare

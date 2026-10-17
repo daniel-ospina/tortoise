@@ -1103,8 +1103,9 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     two routes — ``POST /v1/sessions`` and ``GET /v1/search`` — and neither is
     exempt from the bound; the sessions route is the one this pin drives. The
     plain-client control is the non-vacuity leg — it is the exact
-    ``assert 504 == 200`` shape this conversion removes, and it would pass
-    unchanged if the route were ever exempted.
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if
+    the route is ever exempted (the middleware stops refusing, so the
+    control's 504 assertion fails).
     """
     from fastapi.testclient import TestClient
 
