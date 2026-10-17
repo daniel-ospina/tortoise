@@ -748,7 +748,10 @@ connect** — turning issues off never disconnects GitHub for documents (the
   through the same tool surface the hosted wizard uses — one state path, never a
   second copy of the flag. **Self-hosted: the `agent_sessions` write lands (#8686)** — it goes
   through the owned onboarding-state node, so you may report the answer as
-  applied; the two GitHub sources are hosted-only.
+  applied. The two GitHub tiles are writable self-hosted too, but only in the OFF
+  direction: their `disable` intent write lands, while `enable` needs a connected
+  GitHub credential that a self-hosted team may not have — so never promise a
+  GitHub change on a deployment that has never connected one.
 - **An unbuilt integration is never faked.** Anything not in the inventory
   above is **coming soon**: say so plainly, honour a "yes" as interest rather
   than as a setup step, and **never** present it as available or connect it.

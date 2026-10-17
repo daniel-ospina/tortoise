@@ -4802,12 +4802,14 @@ def _set_source_state(source: str, enable: bool) -> dict:
             "The team's onboarding state could not be read (graph "
             "unavailable), so nothing was changed.")}
     # `session_recording` defaults ON (#1927), so `current_on` alone does not say
-    # whether the CAPTURE DISCLOSURE was ever accepted — `capture_revised` does.
-    # Short-circuiting on `current_on` alone skipped the consent write on a fresh
-    # install, where the default is already on: the SKILL's yes-branch ("both
-    # write session_recording + capture_revised") silently became a no-op.
-    consent_recorded = _state_get(state, "capture_revised") is True
-    if enable and current_on and consent_recorded:
+    # whether a session-recording WRITE has ever landed — `capture_revised` is
+    # that marker (both directions write it; there is no separate consent record
+    # and none should be invented, SKILL §5). Short-circuiting on `current_on`
+    # alone skipped the write on a fresh install, where the default is already
+    # on: the SKILL's yes-branch ("both write session_recording +
+    # capture_revised") silently became a no-op.
+    write_recorded = _state_get(state, "capture_revised") is True
+    if enable and current_on and write_recorded:
         _log_source_change(org_id, source, "enable", "already_on")
         return {
             "source": source,
@@ -4815,8 +4817,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
             **_source_payload(spec, "already_on"),
             "note": (
                 "Agent session recording is ON (#1927: an optional off-switch, "
-                "ToS-covered) and the capture disclosure is already accepted. "
-                "Nothing to change; use action=\"disable\" to stop it."
+                "ToS-covered) and a recording-state write is already on record, "
+                "so nothing changed. Use action=\"disable\" to stop it."
             ),
         }
     if not enable and not current_on:
