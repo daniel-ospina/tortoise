@@ -466,6 +466,12 @@
         "test-track-b"
       ]
     ],
+    "upstream": [
+      [
+        "skills-parity.yml",
+        "upstream"
+      ]
+    ],
     "uv-lock-check": [
       [
         "ci.yml",
@@ -513,7 +519,7 @@
       ]
     ]
   },
-  "gate_digest": "9233cb1ba7f9585b18c462f84d828a96ccd3aec1f0de229c8532b558adeaa2e9",
+  "gate_digest": "18e575b8f791e1c66477466705e5eed688446db47d4f33cf960d50d155e19b2f",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -537,5 +543,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-17T21:56:55Z"
+  "verified_at": "2026-10-17T22:47:29Z"
 }

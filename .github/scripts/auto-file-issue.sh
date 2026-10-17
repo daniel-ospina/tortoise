@@ -28,6 +28,14 @@
 #     * search FAILS → REFUSE to file, exit non-zero (never risk a duplicate:
 #       the red run IS the alert — #2706/#2140 — and a failed search cannot tell
 #       "no incident" from "cannot see incidents").
+#   `resolve --title <stable-key> [--why <text>]`   (#8841)
+#     * search OPEN issues for EXACTLY <stable-key>, authored by GitHub Actions;
+#     * found  → close it (state_reason=completed) and comment WHY. CLOSE FIRST,
+#       COMMENT SECOND; a failed search closes NOTHING;
+#     * absent → no-op, exit 0 (nothing to resolve is the DESIRED state);
+#     * the other half of the ledger: without it a recovered fault leaves an
+#       OPEN issue behind that claims a condition no longer true — measured on
+#       #7634 (21 green runs after filing; still open, 238 recurrences).
 #   <stable-key> is BOTH the issue title AND the dedupe key, so it must NOT
 #   embed a run id, a timestamp, or a count. Everything that varies per
 #   occurrence belongs in the BODY (which is rewritten on the issue only when
@@ -88,6 +96,10 @@ AUTO_FILE_BOT_LOGIN="github-actions[bot]"
 # derived from the issue itself (the visible, durable record) instead of from a
 # local counter that a re-run or a rewritten dedup object could reset.
 AUTO_FILE_MARKER="<!-- auto-file-occurrence -->"
+# Hidden marker identifying a RESOLUTION comment (the ledger's other end). Kept
+# distinct from the occurrence marker on purpose: `af_occurrence_count` counts
+# the occurrence marker, so a resolution note can never be read as a recurrence.
+AUTO_FILE_RESOLUTION_MARKER="<!-- auto-file-resolution -->"
 # The counting walk is BOUNDED: 20 pages x 100 comments. An incident with more
 # recurrences than that is already far past the point where the exact number
 # matters, and the bound keeps a pathological thread from hanging the cron.
@@ -272,14 +284,136 @@ af_file_or_comment() { # <stable-title> <body-file> <label>
   af_note "no open machine-authored issue for '${title}' — filed one (further occurrences will comment on it, not duplicate it)"
 }
 
+# ── RESOLUTION — closing the ledger when the STREAK ENDS ───────────────────
+#
+# WHY THIS EXISTS (#8841)
+#   Filing without resolving is a ledger that can only GROW: the first failure
+#   opens an issue, every later occurrence comments a `Recurrence #N`, and
+#   NOTHING ever closes it — so a RECOVERED fault leaves an OPEN issue behind,
+#   claiming a condition that is no longer true, and the next real recurrence is
+#   indistinguishable from the old one still being open.
+#   Measured on `deploy-hosted` (the first adopter of this substrate): #7634 was
+#   filed 2026-10-07T20:11Z; **21 runs then SUCCEEDED** (2026-10-09T23:20Z …
+#   2026-10-11T00:36Z) on that very key, and ten days later the issue was still
+#   OPEN carrying 238 `Recurrence` comments. Production was no longer behind for
+#   that window — the ledger said it was.
+#   The availability watchdog already closes its own incident on recovery
+#   (`availability-watchdog.sh`: "close first, comment second") and names this
+#   exact accumulation class. This is the same contract for the SHARED substrate,
+#   so each adopter does not re-invent — or forget — the closing half.
+#
+# CLOSE FIRST, COMMENT SECOND
+#   The watchdog's ordering, for its reason: a persistently failing close must not
+#   re-post the resolution note on EVERY run (the closed issue is what ends the
+#   repetition). A close that failed means the ledger is still open, and the next
+#   occurrence WILL comment on it again — so a comment here would be noise about a
+#   state this call could not change.
+#
+# NEVER CLOSE WHAT YOU CANNOT SEE
+#   The search is the authority. A failed/unparseable search returns 1 and closes
+#   NOTHING: "cannot see the ledger" is not "the ledger is resolved" (the same
+#   fail-closed direction as `af_open_issue`). A search that finds nothing is the
+#   DESIRED state — a no-op, not an error.
+#
+# SECURITY — same guards as the filing path
+#   The issue number comes from `af_open_issue` (reserved bot login AND exact
+#   title), so a stranger's look-alike on this PUBLIC repo can never be closed by
+#   a monitor; and the resolution comment's author is asserted from the write's
+#   own response, so the PAT trap fails loudly here too.
+af_close_issue() { # <issue-number> -> 0 closed / 1 failed
+  local n="${1:-}" resp state
+  case "$n" in
+    ''|*[!0-9]*) af_err "refusing to close a non-numeric issue id ('${n}')"; return 1 ;;
+  esac
+  # `state_reason=completed` keeps the close distinguishable from a
+  # `not_planned` dismissal in the closed-issue listing.
+  if ! resp="$(gh api "repos/${REPO}/issues/${n}" --method PATCH \
+      -f state=closed -f state_reason=completed 2>/dev/null)"; then
+    af_err "could not close ledger issue #${n} — it stays OPEN and the next occurrence will comment on it again"
+    return 1
+  fi
+  # Assert the EFFECT, not the call: a 200 whose body is not a closed issue has
+  # not resolved anything.
+  state="$(printf '%s' "$resp" | jq -r '.state // empty' 2>/dev/null || true)"
+  if [ "$state" != "closed" ]; then
+    af_err "the close of #${n} answered state='${state:-<none>}', not 'closed' — the ledger may still be OPEN"
+    return 1
+  fi
+  return 0
+}
+
+# Echoes 0 when the ledger for <stable-title> is now closed (or was already
+# absent), 1 when it could not be established that it is closed. The CALLER
+# decides severity: a red run may fail loudly, a green run must not be reddened
+# by bookkeeping.
+af_resolve() { # <stable-title> [<why-it-resolved>]
+  local title="${1:-}" why="${2:-}" n count body resp
+  [ -n "$title" ] || { af_err "a title (the dedupe key) is required"; return 2; }
+  [ -n "$(af_token)" ] || {
+    af_err "GH_TOKEN is not set — refusing to run a resolver that can neither see nor close the ledger (a blind resolver leaves a resolved finding OPEN forever)"
+    return 1
+  }
+  af_have_gh || { af_err "gh and jq are required"; return 1; }
+
+  n="$(af_open_issue "$title")"
+  case "$n" in
+    __ERR__)
+      af_err "ledger search failed — NOT claiming '${title}' is resolved; the issue stays OPEN until a run can see the ledger"
+      return 1 ;;
+    *[!0-9]*)
+      af_err "ledger search returned a non-numeric issue id ('${n}') — refusing to act"
+      return 1 ;;
+  esac
+  if [ -z "$n" ]; then
+    af_note "no open machine-authored ledger issue for '${title}' — nothing to resolve"
+    return 0
+  fi
+
+  count="$(af_occurrence_count "$n")"
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+
+  af_close_issue "$n" || return 1
+
+  body="✅ **Resolved** — the condition this issue tracks is no longer present."
+  if [ -n "$why" ]; then
+    body="${body}
+
+${why}"
+  fi
+  body="${body}
+
+Occurrences recorded while it was open: **${count}**. Resolved at \`$(date -u +%FT%TZ)\` — run: ${RUN_URL}
+
+The issue is CLOSED so the ledger cannot outlive the fault. The next recurrence
+files a FRESH issue: this ledger tracks one streak, not a permanent finding.
+
+${AUTO_FILE_RESOLUTION_MARKER}"
+
+  # `gh api` exits non-zero on an HTTP 4xx/5xx, so a lost comment fails loudly
+  # instead of reporting a record that was never written (#2140).
+  if ! resp="$(gh api "repos/${REPO}/issues/${n}/comments" --method POST \
+      -f body="$body" 2>/dev/null)"; then
+    af_err "#${n} was CLOSED but the resolution comment failed — the state is correct and the record is missing"
+    return 1
+  fi
+  af_actor_ok "$resp" || return 1
+  af_note "closed ledger issue #${n} for '${title}' (${count} recorded occurrence(s) while it was open)"
+  return 0
+}
+
 usage() {
   cat >&2 <<'USAGE'
 usage: auto-file-issue.sh file --title <stable-title> --body-file <path> [--label <label>]
+       auto-file-issue.sh resolve --title <stable-title> [--why <text>]
 
   Files at most ONE open issue for a monitor finding. <stable-title> is both the
   issue title and the dedupe key: no run id, timestamp or count in it. A second
   occurrence comments on the existing issue as "Recurrence #N" instead of
   filing. A failed dedupe search refuses to file (never risk a duplicate).
+
+  resolve closes the open issue for <stable-title> and records why (#8841) — the
+  other half of the ledger. Nothing open ⇒ a no-op (exit 0). A failed search
+  closes NOTHING (exit 1): "cannot see the ledger" is never "resolved".
 
 env: GH_TOKEN (or GITHUB_TOKEN) — MUST be the GitHub Actions token
      (secrets.GITHUB_TOKEN). The dedupe keys on author:app/github-actions, so a
@@ -292,18 +426,26 @@ USAGE
 }
 
 af_main() {
-  local cmd="${1:-}" title="" body_file="" label="bug"
+  local cmd="${1:-}" title="" body_file="" label="bug" why=""
   shift || true
-  [ "$cmd" = "file" ] || { usage; return 2; }
+  case "$cmd" in
+    file|resolve) ;;
+    *) usage; return 2 ;;
+  esac
   while [ $# -gt 0 ]; do
     case "$1" in
       --title)     title="${2:-}"; shift 2 ;;
       --body-file) body_file="${2:-}"; shift 2 ;;
       --label)     label="${2:-}"; shift 2 ;;
+      --why)       why="${2:-}"; shift 2 ;;
       -h|--help)   usage; return 0 ;;
       *)           af_err "unknown argument: $1"; usage; return 2 ;;
     esac
   done
+  if [ "$cmd" = "resolve" ]; then
+    af_resolve "$title" "$why"
+    return $?
+  fi
   af_file_or_comment "$title" "$body_file" "$label"
 }
 

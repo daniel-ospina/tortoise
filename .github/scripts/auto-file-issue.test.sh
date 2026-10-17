@@ -45,6 +45,17 @@
 #  22. a COMMENT authored by a non-bot fails loudly (the write-response check
 #      covers the adoption path too)
 #  23. a write response with NO user.login is refused (fail closed)
+#  24. RESOLVE (#8841): the open machine-authored issue is CLOSED (state=closed,
+#      state_reason=completed) and the resolution + streak length are recorded,
+#      with a marker that can never be counted as a recurrence
+#  25. resolve with nothing open is a clean no-op (no create, no close)
+#  26. a failed search closes NOTHING ("cannot see the ledger" is never "resolved")
+#  27. a forged/human-authored look-alike — and another App's bot — is NEVER closed
+#  28. CLOSE FIRST, comment second: a failed close posts no resolution comment
+#      (which would otherwise re-post on every green run), and a 200 that did not
+#      close is not a resolution
+#  29. no token → refuse before contacting GitHub
+#  30. the resolution comment's author is asserted (the PAT trap, on this path)
 #
 # Case 2 is the #3907 acceptance pin: it FAILS on the old behaviour (a duplicate
 # issue per run) and on the silent-drop behaviour (no comment at all).
@@ -155,6 +166,15 @@ case "$path" in
     [ "${STUB_CREATE_FAIL:-0}" = "1" ] && { echo "gh: create failed" >&2; exit 1; }
     printf '%s\n' "${fields[@]}" > "$STUB_TMP/created.txt"
     printf '%s' "${STUB_CREATE_JSON:-$DEFAULT_CREATE_JSON}" ;;
+  */issues/[0-9]*)
+    # PATCH close (#8841). Recorded separately from a create so the resolver's
+    # two writes (close, then comment) are distinguishable in the call log.
+    [ "${STUB_CLOSE_FAIL:-0}" = "1" ] && { echo "gh: patch failed" >&2; exit 1; }
+    printf '%s\n' "${fields[@]}" > "$STUB_TMP/closed.txt"
+    # A 200 whose body is not a CLOSED issue has resolved nothing; the fixture
+    # lets a case model that (STUB_CLOSE_STATE).
+    printf '{"number":%s,"state":"%s","user":{"login":"github-actions[bot]"}}' \
+      "${path##*/}" "${STUB_CLOSE_STATE:-closed}" ;;
   *) printf '{}' ;;
 esac
 exit 0
@@ -173,13 +193,26 @@ STABLE_TITLE="e2e-live reconcile: orphaned prod rows detected"
 
 reset_case() {
   : > "$STUB_TMP/calls.log"
-  rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt"
+  rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt" "$STUB_TMP/closed.txt"
   unset STUB_SEARCH_JSON STUB_SEARCH_FAIL STUB_CREATE_FAIL STUB_COMMENT_FAIL \
         STUB_COMMENTS_JSON STUB_COMMENTS_JSON_P2 STUB_COMMENTS_JSON_P3 \
         STUB_COMMENTS_FAIL STUB_SEARCH_JSON_P2 STUB_USER_LOGIN STUB_USER_FAIL \
-        STUB_CREATE_JSON STUB_COMMENT_LOGIN || true
+        STUB_CREATE_JSON STUB_COMMENT_LOGIN STUB_CLOSE_FAIL STUB_CLOSE_STATE || true
   export GH_TOKEN="test-token"
 }
+
+run_resolve() { # [<why>] -> RC, OUT
+  local so
+  if [ "$#" -gt 0 ]; then
+    so="$("$HELPER" resolve --title "$STABLE_TITLE" --why "$1" 2>&1)"
+  else
+    so="$("$HELPER" resolve --title "$STABLE_TITLE" 2>&1)"
+  fi
+  RC=$?
+  OUT="$so"
+}
+
+closed_fields() { [ -f "$STUB_TMP/closed.txt" ] && cat "$STUB_TMP/closed.txt" || echo ''; }
 
 run_helper() { # -> RC, OUT
   local so
@@ -463,6 +496,100 @@ export STUB_CREATE_JSON='{"number":900}'
 run_helper
 assert_eq "$RC" "1" "23. a response with no user.login → exit 1 (fail closed)"
 assert_contains "$OUT" "no user.login" "23. the refusal names the missing evidence"
+
+# ── 24-30: RESOLVE — the ledger's other half (#8841) ──────────────────────
+# Filing without closing is a ledger that can only grow: measured on #7634 (filed
+# 2026-10-07T20:11Z), 21 runs then SUCCEEDED on that key and the issue was still
+# open 10 days later with 238 recurrences. These cases pin that the closing half
+# exists, that it acts ONLY on a verified machine-authored issue, and that a
+# search it cannot trust closes NOTHING.
+echo
+echo "── 24: resolve closes the verified open ledger issue + records why ──────"
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_COMMENTS_JSON="$(comments_page 3 3)"
+run_resolve "the drift gate passed in this run."
+assert_eq "$RC" "0" "24. a found ledger issue is resolved (exit 0)"
+assert_contains "$(closed_fields)" "state=closed" "24. the close sets state=closed"
+assert_contains "$(closed_fields)" "state_reason=completed" "24. and marks it COMPLETED (not a not_planned dismissal)"
+assert_eq "$(count_calls 'GH POST repos/daniel-ospina/tortoise/issues$')" "0" "24. resolve never files an issue"
+assert_contains "$(commented)" "Resolved" "24. the resolution is recorded ON the issue"
+assert_contains "$(commented)" "the drift gate passed in this run." "24. the caller's evidence is carried into the record"
+assert_contains "$(commented)" "Occurrences recorded while it was open: **3**" "24. the streak length is closed out, not lost"
+assert_contains "$(commented)" "<!-- auto-file-resolution -->" "24. the resolution marker is distinct from the occurrence marker"
+assert_not_contains "$(commented)" "<!-- auto-file-occurrence -->" "24. and can never be counted as a recurrence"
+
+echo
+echo "── 25: nothing open → a clean no-op (never a new issue) ────────────────"
+reset_case
+run_resolve "recovered"
+assert_eq "$RC" "0" "25. nothing to resolve is the DESIRED state, not an error"
+assert_eq "$(count_calls 'GH POST')" "0" "25. no issue filed, no comment posted"
+assert_eq "$(count_calls 'PATCH')" "0" "25. and nothing closed"
+assert_contains "$OUT" "nothing to resolve" "25. the no-op is stated"
+
+echo
+echo "── 26: a failed SEARCH closes NOTHING (fail closed) ────────────────"
+reset_case
+export STUB_SEARCH_FAIL=1
+run_resolve "recovered"
+assert_eq "$RC" "1" "26. 'cannot see the ledger' is never 'resolved' — exit 1"
+assert_eq "$(count_calls 'PATCH')" "0" "26. nothing was closed on an untrusted search"
+assert_contains "$OUT" "stays OPEN" "26. the refusal says what is left open"
+
+echo
+echo "── 27: a FORGED/human-authored look-alike is never closed ──────────"
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42 "$STABLE_TITLE" "some-human" "User")"
+run_resolve "recovered"
+assert_eq "$RC" "0" "27. a stranger's look-alike is ignored (nothing of ours is open)"
+assert_eq "$(count_calls 'PATCH')" "0" "27. a PUBLIC-repo stranger's issue is NEVER closed by a monitor"
+assert_eq "$(count_calls 'GH POST')" "0" "27. and no resolution is claimed anywhere"
+
+echo
+echo "── 27b: another App's bot (renovate[bot]) is not ours either ────────"
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42 "$STABLE_TITLE" "renovate[bot]" "Bot")"
+run_resolve "recovered"
+assert_eq "$(count_calls 'PATCH')" "0" "27b. type==Bot is not a boundary — only the reserved login is"
+
+echo
+echo "── 28: CLOSE FIRST, comment second ──────────────────────────────"
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_CLOSE_FAIL=1
+run_resolve "recovered"
+assert_eq "$RC" "1" "28. a failed close is reported (the ledger is still open)"
+assert_eq "$(count_calls 'GH POST')" "0" "28. and NO resolution comment is posted — it would re-post on every run"
+assert_contains "$OUT" "stays OPEN" "28. the failure names the standing consequence"
+
+echo
+echo "── 28b: a 200 that did not close it is not a resolution ──────────────"
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_CLOSE_STATE="open"
+run_resolve "recovered"
+assert_eq "$RC" "1" "28b. the EFFECT is asserted from the write's own response, not the call"
+assert_contains "$OUT" "may still be OPEN" "28b. and the answer state is named"
+
+echo
+echo "── 29: no token → refuse before contacting GitHub ──────────────────"
+reset_case
+unset GH_TOKEN GITHUB_TOKEN || true
+run_resolve "recovered"
+assert_eq "$RC" "1" "29. a resolver without a token fails closed"
+assert_eq "$(count_calls 'GH')" "0" "29. nothing was contacted"
+assert_contains "$OUT" "GH_TOKEN is not set" "29. the refusal is loud"
+export GH_TOKEN="test-token"
+
+echo
+echo "── 30: the resolution comment's author is asserted too (PAT trap) ────"
+reset_case
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_COMMENT_LOGIN="some-human"
+run_resolve "recovered"
+assert_eq "$RC" "1" "30. a non-Actions author on the resolution comment fails loudly"
+assert_contains "$OUT" "REQUIRES the GitHub Actions token" "30. and the misuse is named"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

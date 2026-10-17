@@ -933,6 +933,9 @@ def test_bypass_values_are_env_bound_never_interpolated_into_shell():
 # notifier in `deploy-api` alone would have left a failed PACK SMOKE (which
 # silently blocks the whole deploy) unobserved.
 _ALERT_SITE_PREFIX = "Alert on failure (out-of-band)"
+# #8841: the ledger's other half — one resolve site per alert site, in the SAME
+# job, immediately BEFORE its alert step.
+_RESOLVE_SITE_PREFIX = "Resolve recovered alerts (out-of-band)"
 _ALERT_JOBS = ("packaging-smoke", "deploy-api", "post-deploy-verify")
 _ALERT_SCRIPT = (
     Path(__file__).resolve().parent.parent / ".github" / "scripts" / "deploy-api-alert.sh"
@@ -978,11 +981,20 @@ def _job_note_map() -> dict[str, str]:
 
 def _alert_sites() -> list[tuple[str, str, dict]]:
     """`(job, step-name, step)` for every out-of-band alert step in the workflow."""
+    return _sites_with_prefix(_ALERT_SITE_PREFIX)
+
+
+def _resolve_sites() -> list[tuple[str, str, dict]]:
+    """`(job, step-name, step)` for every recover-and-resolve step (#8841)."""
+    return _sites_with_prefix(_RESOLVE_SITE_PREFIX)
+
+
+def _sites_with_prefix(prefix: str) -> list[tuple[str, str, dict]]:
     doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
     sites = []
     for job_name, job in doc["jobs"].items():
         for step in job.get("steps", []):
-            if str(step.get("name", "")).startswith(_ALERT_SITE_PREFIX):
+            if str(step.get("name", "")).startswith(prefix):
                 sites.append((job_name, step["name"], step))
     return sites
 
@@ -1148,6 +1160,88 @@ def test_alert_step_ids_match_the_script_and_the_workflow():
             f"step {sid!r}: the script labels it {declared[sid]!r} but the workflow "
             f"names that step {wf_ids[sid]!r} — the alert would name a step that "
             f"does not exist"
+        )
+
+
+def test_recovered_deploy_alerts_are_resolved_out_of_band():
+    """#8841 — every alert site is RETIRED when its condition clears.
+
+    Filing without resolving is a ledger that can only grow. Measured on this
+    workflow's own `drift` key (#7634, filed 2026-10-07T20:11Z): **21 runs then
+    SUCCEEDED** (2026-10-09T23:20Z … 2026-10-11T00:36Z) and the issue was still
+    OPEN ten days later carrying 238 `Recurrence` comments — for that window the
+    standing alert claimed a condition that was no longer true, and each later
+    recurrence read as noise. Nothing mechanical ever ended a streak; the body
+    only ever told a human to.
+
+    So the resolve leg is pinned here exactly as the alert leg is: one site per
+    alert site, same job, the SAME per-step map (a key cannot be alerted on that
+    cannot be retired), the job-level key armed only by `job.status`, and
+    `always() && !cancelled()` so a partially red run still retires the steps
+    that passed.
+    """
+    sites = _resolve_sites()
+    assert {job for job, _n, _s in sites} == set(_ALERT_JOBS), (
+        f"every alert site needs a resolve site in the same job (an alert that is "
+        f"never retired is the stale-ledger defect #8841); got "
+        f"{sorted(job for job, _n, _s in sites)}, want {sorted(_ALERT_JOBS)}"
+    )
+
+    alert_sites = {job: step for job, _n, step in _alert_sites()}
+    for job_name, step_name, step in sites:
+        # ORDER: resolved BEFORE the alert, so the alert stays the job's LAST step
+        # (`test_failed_deploy_jobs_alert_out_of_band` pins that, and it must stay
+        # true: on a red run the alert is the last act, not bookkeeping).
+        names = [s.get("name") or "" for s in _jobs()[job_name]]
+        assert names.index(step_name) + 1 == names.index(alert_sites[job_name].get("name")), (
+            f"{step_name!r} must immediately PRECEDE {job_name}'s alert step — the "
+            f"alert has to remain the job's last act (a later `if: always()` failure "
+            f"would otherwise be reported by nothing)"
+        )
+
+        cond = str(step.get("if") or "")
+        assert "always()" in cond and "cancelled()" in cond, (
+            f"{step_name!r} must run on `always() && !cancelled()`: on a partially "
+            f"red run an EARLIER step that passed should still retire its stale "
+            f"alert, while a cancel observed nothing (got {cond!r})"
+        )
+
+        run = step.get("run", "")
+        assert "bash .github/scripts/deploy-api-alert.sh" in run, (
+            f"{step_name!r} must invoke the alert script by its exact path (a "
+            f"basename/symlinked form is not on a fresh runner)"
+        )
+        assert "--resolve" in run, f"{step_name!r} must pass --resolve (the retire mode)"
+
+        m = re.search(r"--job\s+(\S+)", run)
+        assert m and m.group(1) == job_name, (
+            f"{step_name!r} passes --job {m.group(1) if m else '<none>'!r} but lives in "
+            f"{job_name!r} — it would retire ANOTHER job's ledger keys, leaving its "
+            f"own stale"
+        )
+
+        # `job.status` is the ONLY evidence that the whole job is green, and the
+        # job-level fallback key (`… failed`, no step) must be retired on nothing
+        # less: a single step's `success` says nothing about a job that died later.
+        assert re.search(r'--job-status\s+"\$\{\{\s*job\.status\s*\}\}"', run), (
+            f"{step_name!r} must pass --job-status \"${{{{ job.status }}}}\" — without it "
+            f"the job-level failure key can never be retired, and a stale job-level "
+            f"alert outlives the fault"
+        )
+
+        env = step.get("env") or {}
+        assert env.get("GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}", (
+            f"{step_name!r} must close with the ACTIONS token: the ledger lookup keys "
+            f"on `author:app/github-actions`, so a PAT would find nothing and retire "
+            f"nothing (the #2706 trap, inverted)"
+        )
+
+        # PARITY: the resolve site reads the SAME `id=outcome` map as the alert.
+        # Any drift means a key can be filed and never retired (or vice versa).
+        assert _alert_passed_ids(run) == _alert_passed_ids(alert_sites[job_name].get("run", "")), (
+            f"{step_name!r} and {job_name}'s alert step must pass the SAME --steps ids "
+            f"in the same order — a key the alert files must be one the resolver can "
+            f"retire"
         )
 
 
