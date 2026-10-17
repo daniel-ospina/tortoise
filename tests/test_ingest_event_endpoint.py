@@ -631,6 +631,75 @@ def test_direct_route_entity_nested_props_declared_terminal_status_rejected_phas
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) RETURN count(n)") == 0
 
 
+@pytest.mark.parametrize("bad", [{"a": 1}, ["live"]])
+@pytest.mark.parametrize("spelling", ["top", "nested"])
+def test_direct_route_entity_unhashable_status_is_a_violation_not_a_crash(
+        sdk, bad, spelling):
+    """#7925 review P3: a bundle-supplied NON-STRING `status` escaped the guard.
+
+    The entity/Event terminal leg tested the declared value against
+    `self._INGEST_TERMINAL_STATUSES`, a FROZENSET, with no type check — so an
+    unhashable `status` raised `TypeError: unhashable type` out of
+    `_validate_bundle`, which documents itself as pure and "returns EVERY
+    violation". Measured pre-fix: `sdk._validate_bundle(bundle)` RAISED instead
+    of returning a list, and `ingest()` surfaced
+    `{"error": "unhashable type: 'dict'"}` rather than a validation message.
+
+    `:Subject` is the label whose WRITER also refuses a non-string status
+    (`create_entity(type='subject')` validates against `SUBJECT_STATUS_VALUES`),
+    so Phase 1 must reject it — otherwise the `TypeError` would merely be
+    traded for the mid-write abort this PR exists to prevent.
+    """
+    subject = {"ref": "s", "type": "subject", "name": "Gamma"}
+    if spelling == "top":
+        subject["status"] = bad
+    else:
+        subject["props"] = {"status": bad}
+    bundle = {
+        "points": [{"ref": "pX", "kind": "statement",
+                    "content": "must-not-commit"}],
+        "entities": [subject,
+                     {"ref": "o", "type": "object", "name": "Delta"}],
+        "connections": [{"from": "s", "to": "o", "operator": "IMPL"}],
+    }
+    # The assertion that is impossible pre-fix: a LIST is returned, not raised.
+    viols = sdk._validate_bundle(bundle)
+    msgs = [v["message"] for v in viols]
+    assert any("declares status" in m and ":Subject" in m for m in msgs), msgs
+    # …and it names the writer's vocabulary, so the message is actionable.
+    assert any("superseded" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    # ZERO mutation: neither the predecessor point nor the Subject committed.
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) RETURN count(n)") == 0
+
+
+def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
+    """#7925 review P3 (the other direction — guards the fix from over-rejecting).
+
+    Only `:Subject`'s writer validates its `status` vocabulary. The `:Object`
+    and `:Event` writers do NOT: measured on this head, a dict-valued `status`
+    on either is STORED, and `ingest()` completes. So Phase 1 must keep
+    accepting them — refusing here would reject bundles the writer accepts,
+    which is the over-rejection class round 4 of this PR already fixed once.
+
+    Pre-fix this test fails too: the frozenset membership test raised
+    `TypeError` before any of these writes could be reached.
+    """
+    bundle = {
+        "entities": [{"ref": "o1", "type": "object", "name": "Alpha",
+                      "status": {"a": 1}},
+                     {"ref": "o2", "type": "object", "name": "Beta"}],
+        "connections": [{"from": "o1", "to": "o2", "operator": "IMPL"}],
+    }
+    assert sdk._validate_bundle(bundle) == []
+    created = sdk.ingest(bundle)
+    assert created["created"]["connections"] == 1
+    assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 1
+
+
 @pytest.mark.parametrize("spelling", ["top", "nested"])
 def test_direct_route_event_declared_terminal_status_rejected_phase1(sdk, spelling):
     """#7925 review P1 (Event arm): the widening makes a bundle-local Event ref

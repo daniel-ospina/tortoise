@@ -3582,6 +3582,26 @@ def _item_effective_status(item: dict) -> str | None:
     return None
 
 
+def _item_declared_status(item: dict) -> tuple[bool, object]:
+    """``(declares, value)`` for an item's ``status`` — PRESENCE, not
+    truthiness, with ``_coerce_props``' precedence (top-level wins).
+
+    ``_item_effective_status`` above returns the same VALUE the writer sees,
+    but collapses "absent" and "explicitly ``None``" onto ``None``. Those are
+    different to the entity writers: an absent ``status`` takes the mint
+    default (``"live"``), while an explicit ``None`` is VALIDATED and
+    refused (``create_entity(type='subject', status=None)`` raises
+    ``Invalid status None``). Phase 1 cannot claim writer agreement without
+    the distinction, so it is kept here (#7925 review P3).
+    """
+    if "status" in item:
+        return True, item.get("status")
+    nested = item.get("props")
+    if isinstance(nested, dict) and "status" in nested:
+        return True, nested.get("status")
+    return False, None
+
+
 def _item_declares_outdated(item: dict) -> bool:
     """True when an ingest bundle item carries the server-managed legacy
     ``outdated`` flag — top-level OR nested under ``props``, the two spellings
@@ -15038,6 +15058,12 @@ class TortoiseSDK:
                     # :Subject then raised mid-write after earlier bundle
                     # items committed (measured).
                     declared = _item_effective_status(item)
+                    # The item's OWN declaration, presence-aware — the terminal
+                    # arms below read the bundle's first naming item (mint),
+                    # while the Subject vocabulary arm must read THIS item:
+                    # `create_subject` validates every item's props before the
+                    # merge, so a later item's invalid status raises too.
+                    _declares_status, own_status = _item_declared_status(item)
                     exists, hit = False, None
                     if elabel in ("Subject", "Object") \
                             and isinstance(name, str) and name:
@@ -15059,8 +15085,8 @@ class TortoiseSDK:
                                        f"edges to terminal endpoints are "
                                        f"rejected (#2422/#7925)",
                         })
-                    elif not exists and declared in \
-                            self._INGEST_TERMINAL_STATUSES:
+                    elif not exists and isinstance(declared, str) and \
+                            declared in self._INGEST_TERMINAL_STATUSES:
                         # Deliberately does NOT claim the node gets created
                         # for a name-merged label: a status that is terminal in
                         # the guard's vocabulary but outside the label's own
@@ -15090,6 +15116,39 @@ class TortoiseSDK:
                         violations.append({
                             "section": "connections", "index": i,
                             "message": message,
+                        })
+                    elif elabel == "Subject" and (
+                            _declares_status and (
+                                not isinstance(own_status, str)
+                                or own_status not in _SUBJECT_STATUS_VALUES)):
+                        # #7925 review P3: a non-terminal, INVALID status
+                        # escapes every arm above and is refused by the
+                        # WRITER instead — `create_entity(type='subject')`
+                        # validates against `SUBJECT_STATUS_VALUES` and raises
+                        # `Invalid status …` (measured for `{'a': 1}`, `5`,
+                        # `'bogus'` and an explicit `None`). Because
+                        # `create_subject` validates each item's props BEFORE
+                        # `_create_entity`, a bundle whose earlier items
+                        # already committed aborts mid-write. Refusing it here
+                        # keeps the same vocabulary the writer applies, so
+                        # Phase 1 cannot pass a shape step 3 rejects.
+                        #
+                        # `:Object` and `:Event` are deliberately NOT
+                        # refused: their writers do not validate, they
+                        # STORE the value (measured), so a refusal here would
+                        # reject bundles the writer accepts — the
+                        # over-rejection class this PR already fixed once.
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] "
+                                       f"bundle-local endpoint {v!r} "
+                                       f"declares status {own_status!r} for "
+                                       f"a :Subject — the writer validates "
+                                       f"against the declared lifecycle and "
+                                       f"refuses it mid-write, so the bundle "
+                                       f"is rejected at validation. Must be "
+                                       f"one of: "
+                                       f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
                         })
                     continue
                 if section != "points":
