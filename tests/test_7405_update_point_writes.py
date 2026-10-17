@@ -1852,6 +1852,62 @@ def test_a_live_status_only_promote_emits_no_point_revised(
             sdk.close()
 
 
+class _PromoteThenEmptyCount:
+    """The promote matches nothing AND the diagnostic's presence read is empty.
+
+    Two single-row statements answering with NO ROW: the guarded `SET` (so the
+    door falls through to the diagnostic) and the diagnostic's own `count(n)`.
+    """
+
+    _COUNT = "MATCH (n:Point {id:$id}) RETURN count(n)"
+
+    def __init__(self, real, promote_needle: str) -> None:
+        self._real = real
+        self._needle = promote_needle
+        self.count_reads = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._COUNT in cypher:
+            self.count_reads += 1
+            return _EmptyResult()
+        if self._needle in cypher:
+            return _EmptyResult()
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_the_promote_diagnostic_reads_an_empty_count_as_absent(tmp_path):
+    """An empty `count(n)` means ABSENT, never an ``IndexError``.
+
+    `count()` is a single-row aggregate, so no row means the statement did not
+    run. Indexing it blind raises `IndexError`, which is not a retryable abort:
+    it escapes as a STRUCTURAL failure and MASKS the abort that authorised the
+    retry — the caller sees an internal error instead of the graph one.
+    """
+    sdk = _sdk(tmp_path, "diagcount")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _PromoteThenEmptyCount(proj.g, _POINT_PROMOTE_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="No point"):
+            sdk.update_point(pid, status="live")
+
+        assert proxy.count_reads >= 1, (
+            "the diagnostic's presence read was never consulted — this test "
+            "would prove nothing")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 _STATUS_READ = "RETURN n.status"
 
 
