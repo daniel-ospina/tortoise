@@ -164,6 +164,10 @@ def test_a_restore_that_overruns_fails_loudly_and_names_the_block() -> None:
     assert "not a crash and not load" in message, (
         "the message does not distinguish the block from load — criterion 5"
     )
+    assert "off the air" in message, (
+        "the status paragraph no longer draws the conclusion that the instance was not "
+        "serving — removing it from the verdict line must not delete it from the account"
+    )
     assert "Do not retry" in message, "the message gives no recovery instruction"
 
     observation = raised.value.observation
@@ -331,6 +335,15 @@ def test_a_stalled_restore_on_a_SERVING_instance_does_not_blame_the_engine() -> 
     assert "ANSWERED" in message
     assert "NOT the #7846 blocked-engine signature" in message
     assert "Check the CALLER" in message
+    # #8827 review (cycle 11): the verdict line carried an unconditional tail — "so the
+    # instance did not serve normally during it" — that contradicts this very status, whose
+    # definition is "the instance WAS serving". An operator (or an alert rule matching
+    # "did not serve") reads the first sentence and is sent to the engine, which is the
+    # mis-blame the status exists to prevent. Pre-fix this assertion fails.
+    assert "did not serve normally" not in message, (
+        f"the opening sentence asserts a conclusion the CALLER_STALL verdict contradicts: "
+        f"{message}"
+    )
     assert not isinstance(raised.value, GraphRestoreSilentError)
     assert not isinstance(raised.value, GraphRestoreLostError)
 
@@ -518,6 +531,13 @@ def test_a_witness_fault_on_the_overrun_path_does_not_assert_the_block() -> None
         f"the instrument's own failure was reported as the engine's block: {message}"
     )
     assert "INSTRUMENT FAULT" in message
+    # #8827 review (cycle 11): on a non-transport witness fault every attempt raises, so
+    # ``witness_failures == witness_samples`` and the pre-fix verdict line opened by
+    # asserting the instance did not serve normally — about a run this same message calls
+    # "nothing was measured". Pre-fix this assertion fails.
+    assert "did not serve normally" not in message, (
+        f"an unmeasured instrument fault still asserts the instance did not serve: {message}"
+    )
     assert "PermissionError" in message, "the message does not name the witness failure"
 
 

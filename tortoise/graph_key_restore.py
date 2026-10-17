@@ -365,7 +365,19 @@ class RestoreObservation:
         )
 
     def _verdict_line(self) -> str:
-        """The measurement every diagnosis opens with — never a claim of its own."""
+        """The measurement every diagnosis opens with — never a claim of its own.
+
+        This holds on EVERY arm, the overrun included. The overrun arm used to append
+        "so the instance did not serve normally during it", unconditionally, and that
+        clause contradicted the driver's own status two layers up (#8827 review): on
+        ``CALLER_STALL`` (zero unanswered PINGs, no slow one) the very next sentence
+        says the instance WAS serving and the restore is stuck, and on an ``UNMEASURED``
+        instrument fault it asserts a verdict about a run the driver then calls
+        "nothing was measured". An operator — or an alert rule matching "did not serve"
+        — reads the FIRST sentence, which is the mis-blame class cycle 9 fixed inside
+        ``diagnosis()``. So the verdict line now reports the two measurements and stops;
+        the status-specific paragraph below draws the conclusion (the zero-sample arm
+        already worked this way)."""
         if self.witness_samples == 0:
             gave_up = (
                 f"returned after {self.restore_s:.2f}s"
@@ -381,14 +393,14 @@ class RestoreObservation:
             # Both signals, always: "0 of N went unanswered" on its own reads as "the
             # instance was serving", which is the very inversion the status avoids
             # (#8827 review). The slowest ANSWERED PING is what carries a latency-shaped
-            # block on this path.
+            # block on this path. NO conclusion here — see the docstring: the driver has
+            # already decided the status, and appending one contradicted it (#8827 review).
             return (
                 f"graph-key RESTORE of {self.graph!r} did not return within the "
                 f"{self.bound_s:g}s caller-side bound: {self.witness_failures} of "
                 f"{self.witness_samples} witness PINGs on a separate connection went "
                 f"unanswered (longest silence {self.silent_ms:.0f} ms) and the slowest "
-                f"ANSWERED one took {self.witness_max_latency_ms:.0f} ms, so the "
-                f"instance did not serve normally during it."
+                f"ANSWERED one took {self.witness_max_latency_ms:.0f} ms."
             )
         return (
             f"graph-key RESTORE of {self.graph!r} returned after {self.restore_s:.2f}s "
