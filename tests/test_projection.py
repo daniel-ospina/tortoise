@@ -2736,6 +2736,84 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
         params={"u": did}).result_set[0][0] == "legal"
 
 
+def test_5026_b6_retired_fields_do_not_survive_a_rebuild(tmp_path):
+    """B6, the THIRD DOOR — the REPLAY half (#5135, #5026).
+
+    The companion test above drives the BOUNDARY; this one fixes the end state
+    the boundary protects, because the two halves consult DIFFERENT sets:
+    `update_entity` refuses `_DOC_RETIRED_KEYS`, while `_fold_entity_mutation`'s
+    `:Source` arm drops whatever is not in `_SOURCE_NODE_PROP_NAMES`. Neither
+    set is derived from the other, so a later change that declares `content` on
+    the node (say, to stop a read filter dropping it) would silently retire the
+    replay deny while the boundary still refuses — the divergence between
+    deny-sets that produced the bypasses #5135 names.
+
+    The record driven here is the shape an EARLIER head wrote: the live
+    `update_entity` guard now refuses the keys before the write, but on any
+    deployment that already ran the unguarded head the bytes are in the journal,
+    and no fix to a live writer retires them. The fold re-applies the record's
+    map with `SET n += $s`, so without its declaration filter the retired fields
+    come back on EVERY rebuild.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(db_path=str(tmp_path / "b6_replay.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        did = "doc-b6-replay"
+        # A document IS a :Source keyed `url = doc id` (D10). `create_source`
+        # JOURNALS a SourceCreated, so the rebuild below re-materialises the
+        # node — without that the absence assertions below would pass vacuously
+        # against a node the wipe removed.
+        sdk.create_source(did, "document", documentKind="report",
+                          format="markdown")
+
+        # (1) The BOUNDARY still refuses every retired spelling, so the only way
+        # the keys can exist in the journal is a record written before the
+        # guard — which is exactly the residual this test covers.
+        for key, val in (("content", "FORGED BODY"),
+                         ("doc_status", "captured"),
+                         ("docStatus", "captured"),
+                         ("objectKind", "document"),
+                         ("object_kind", "document")):
+            with pytest.raises(ValueError, match="retired field"):
+                sdk.update_entity(did, **{key: val})
+
+        # (2) The pre-guard record, emitted through the REAL producer so the
+        # shape measured is the one that exists. `domain` rides the same map as
+        # a non-retired control: the filter must drop the retirement, not the
+        # mutation.
+        sdk._journal_entity_mutation(
+            "Source", did, "revise",
+            state={"content": "FORGED BODY", "doc_status": "captured",
+                   "docStatus": "captured", "objectKind": "document",
+                   "object_kind": "document", "domain": "legal"})
+        sdk.close()
+
+        proj.rebuild_all(str(events), confirm_destructive=True)
+
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$u}) RETURN s.content, s.doc_status, "
+            "s.docStatus, s.objectKind, s.object_kind, s.domain, s.format",
+            params={"u": did}).result_set
+        assert rows, "precondition: the rebuild lost the document :Source"
+        row = list(rows[0])
+        assert row[:5] == [None] * 5, (
+            f"retired field(s) survived the rebuild: {row!r}")
+        # The filter drops the retired KEYS, never the mutation: a deny that
+        # ate the whole map would silently lose legitimate recorded state.
+        assert row[5] == "legal", (
+            f"the non-retired key in the same record was dropped: {row!r}")
+        assert row[6] == "markdown", f"the document format was lost: {row!r}"
+    finally:
+        sdk.close()
+
+
 def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
     """B6, the FOURTH DOOR (review round 3): the retired fields must be
     SCRUBBED when a node is PROMOTED to a document, not merely refused on

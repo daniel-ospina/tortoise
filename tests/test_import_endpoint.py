@@ -1699,17 +1699,32 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     """#8818: the deterministic refusal pin for this module's client seam.
 
     No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
-    comes from the REAL ``WaitBoundMiddleware``. ``POST
-    /v1/organizations/{org}/import`` is the route this file reads most and it
-    is not exempt from the bound. The plain-client control is the non-vacuity
-    leg — it is the exact ``assert 504 == 200`` shape this conversion removes,
-    and it would pass unchanged if the route were ever exempted.
+    comes from the REAL ``WaitBoundMiddleware``. The converted ``tc`` reads
+    ``POST /v1/organizations/{org_id}/import`` (most of this file's reads) and
+    ``GET /v1/organizations/{org_id}/export``; neither is exempt from the
+    bound, and the import route is the one this pin drives. The plain-client
+    control is the non-vacuity leg — it is the exact ``assert 504 == 200``
+    shape this conversion removes, and it would pass unchanged if the route
+    were ever exempted.
     """
     from tortoise import mcp_auth
-    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+    from tortoise.hosted_api import (
+        _TRANSPORT_WAIT_BOUND_EXEMPT,
+        _TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX,
+    )
 
-    route = ("POST", "/v1/organizations/acme/import")
+    # ``WaitBoundMiddleware``'s exemption predicate is TWO arms: the exact
+    # ``(method, route_path)`` set, and the ``/v1/internal/`` prefix. Both are
+    # checked here, so neither arm can exempt this route behind the pin's back.
+    # ``get_route_path`` hands the middleware the CONCRETE request path, so the
+    # literal pair below is exactly what the first arm compares — the check is
+    # not vacuous. A *templated* member (``/v1/organizations/{org_id}/import``)
+    # could never match that concrete path, so it would be an inert entry and
+    # not an exemption at all: the two arms above are the whole effective
+    # surface. The 504 control is the independent leg proving the bound fires.
+    route = ("POST", f"/v1/organizations/{ORG_ID}/import")
     assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    assert not route[1].startswith(_TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX)
     monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
     with TestClient(app) as raw:
         assert raw.post(route[1], json={}).status_code == 504
@@ -1717,4 +1732,4 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
         tc.post(route[1], json={})
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
-    assert "POST /v1/organizations/acme/import answered" in message
+    assert f"POST {route[1]} answered" in message

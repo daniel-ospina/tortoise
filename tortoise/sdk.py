@@ -10022,6 +10022,71 @@ class TortoiseSDK:
                 "n", preserve_on_null=False)
             _embed_params[EMBEDDING_PROPERTY] = props.get(EMBEDDING_PROPERTY)
 
+        # ── #7951 §17.1 — THE OUTBOX ORDERING ON `update_point` ──────────────
+        # THE APPEND IS THE COMMIT POINT (§17.1 mechanism (1) in its OUTBOX
+        # form; the same ordering `create_point` took in increment 1 —
+        # `docs/plans/2026-10-14-7951-atomic-write-outbox.md`). The record is
+        # built from the WRITE INTENT (`props`, the very dict the `SET` below
+        # writes — never a post-write read-back) and appended BEFORE the cache
+        # write, so the derived store cannot lead the truth.
+        #
+        # WHY THIS DOOR. Until now this door wrote the node and only then
+        # emitted `PointRevised` — apply-first. `_emit_event` is deliberately
+        # best-effort (#4240: a journal failure must never crash a write that
+        # DID persist), so a failed append left the CACHE AHEAD OF THE JOURNAL
+        # with no repair path: `rebuild_all` replays the OLD value and the
+        # revision is gone. That is window (a) of the ordering contract at the
+        # top of this module — the one a replay cannot undo — on the SDK's most
+        # common mutation door.
+        #
+        # ⛔ THE PROMOTE ARM (`status='live'`) IS EXEMPT AND STAYS APPLY-FIRST.
+        # Its `SET` is GUARDED by a `WHERE` that can legitimately match nothing
+        # (an illegal transition, or a node that vanished) and the door then
+        # RAISES. Journalling first would record a promotion the graph REFUSED,
+        # and a replay would apply it — truth claiming a state the live write
+        # never reached, which is strictly worse than the window this fixes.
+        # That is the contract's exception 2 shape (the record can only be
+        # stated AFTER the write) and it is pinned by
+        # `tests/test_7951_update_point_outbox.py`:
+        # `test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
+        # `test_a_refused_promote_journals_no_revision`.
+        #
+        # ⛔ NOT ROUTED THROUGH THE FOLD YET. The writes below still go through
+        # the raw guarded handle, so no `_live_write_scope` is opened here: the
+        # §17.1 guard covers `FalkorProjection.apply`/`.query`, and a scope
+        # around a raw handle would authorize nothing (the same statement
+        # `create_point`'s scope makes about itself). Moving these writes onto
+        # the fold is increment 3, and that is when this door declares itself.
+        # #1904: content_hash is derived from content — keep it out of the
+        # event record (mirrors create_point's snapshot strip at emit).
+        # #4208: the vector this path just DERIVED from the content is stripped
+        # for the same reason — it is not owned by this record. The replay's
+        # `_revise_point` re-encodes from `new_content`, so a journalled copy
+        # would be dead weight, and #5004's presence-is-ownership rule would
+        # read the key as a producer claim the replay does not honour (the
+        # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        emit_props = {
+            k: v for k, v in props.items()
+            if k != "content_hash"
+            and not (_derived_embedding and k == "embedding")
+        }
+        _promote_arm = 'status' in props
+        if not _promote_arm:
+            # The append's OWN per-call outcome is the commit signal — a
+            # per-call value, not a delta of the shared
+            # `_journal_write_failures` counter, which a CONCURRENT writer on
+            # the same instance can move (#5612).
+            _record_committed = self._emit_event(
+                "PointRevised", id=id,
+                new_content=props.get("content"), **emit_props)
+            if _record_committed is False:
+                # No record ⇒ NO cache write: the revision is not applied, and
+                # the caller is told so rather than handed a silent success.
+                from .exceptions import WriteNotLandedError
+                raise WriteNotLandedError(
+                    id, getattr(proj, "graph_name", None),
+                    operation="update_point")
+
         if has_object:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2:
@@ -10101,22 +10166,15 @@ class TortoiseSDK:
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         result = self.get_point(id)
-        # #548: emit PointRevised event for rebuild parity
-        # #1904: content_hash is derived from content — keep it out of the
-        # event record (mirrors create_point's snapshot strip at emit).
-        # #4208: the vector this path just DERIVED from the content is stripped
-        # for the same reason — it is not owned by this record. The replay's
-        # `_revise_point` re-encodes from `new_content`, so a journalled copy
-        # would be dead weight, and #5004's presence-is-ownership rule would
-        # read the key as a producer claim the replay does not honour (the
-        # #5046 shape). A CALLER-supplied vector stays in the record, as before.
-        emit_props = {
-            k: v for k, v in props.items()
-            if k != "content_hash"
-            and not (_derived_embedding and k == "embedding")
-        }
-        self._emit_event("PointRevised", id=id,
-                         new_content=props.get("content"), **emit_props)
+        # #548: emit PointRevised event for rebuild parity.
+        # The PROMOTE arm's record is stated only now, AFTER its guarded write:
+        # the emit above ran for the unguarded arms (the outbox ordering), and
+        # this one may not precede a `SET` that can legitimately match nothing
+        # (see the outbox block above). The payload is the same dict either
+        # way — one record shape, one commit point per call.
+        if _promote_arm:
+            self._emit_event("PointRevised", id=id,
+                             new_content=props.get("content"), **emit_props)
         return result
 
     def delete_point(self, id: str) -> bool:

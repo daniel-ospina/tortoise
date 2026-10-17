@@ -191,6 +191,11 @@ its edges), and a test pins that scope.
 
 - **2** — the record projection on the live path + `last_applied_seq` (journal + record in ONE Postgres
   transaction); the dedup-hit/`update_point` door.
+  **LANDED SO FAR: the `update_point` DOOR (increment 2a)** —
+  `docs/plans/2026-10-17-7951-update-point-outbox.md`: the unguarded revision arms append
+  `PointRevised` before the cache write and a failed append skips the cache; the PROMOTE arm stays
+  apply-first (its guarded `WHERE` can refuse) and is pinned in both directions. **STILL OPEN:** the
+  record projection on the live path and `last_applied_seq` — still zero production call sites.
 - **3** — the cache driven from the *record*, and the fold made the live Point writer (which requires
   fixing residual 6 first: give `_upsert_point_props` presence-gated `baseline_*` clauses).
 - **4** — the remaining raw-handle doors (`_sync_tags`, `_link_source`, deletes, `onboarding/state.py`,
