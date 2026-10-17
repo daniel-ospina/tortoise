@@ -307,24 +307,35 @@ def test_same_title_from_a_previous_occurrence_is_refused(
     assert "does not describe this meeting" in capsys.readouterr().err
 
 
-def test_the_writers_default_title_cannot_ground_across_days(
+def test_a_state_from_the_day_after_the_meeting_is_refused(
         tmp_path, monkeypatch):
-    """``"Meeting"`` is cal-trigger.py's fallback, so equality names no event.
+    """The bound is one-directional: a LATER occurrence must not ground.
 
-    ``event.get("title", "Meeting")[:50]`` writes that literal for EVERY
-    title-less event, so two stores from different weeks collide on it. The day
-    arm still grounds the same day, which is why this is not an over-refusal.
+    ``started_at`` is the recording start and the artifact's ``date`` is the
+    meeting's date, so a state dated after the artifact is today's same-titled
+    call while yesterday's still-unprocessed artifact is re-run (only an
+    already-created note makes the re-run skip). ``abs()`` here would admit it —
+    pre-fix, this returned ``ATTENDEES``.
     """
     monkeypatch.setattr(
         bridge, "CAL_STATE_FILE",
-        str(_state_file(tmp_path, started_at="2026-10-05T09:00:00",
-                        event_title="Meeting")),
+        str(_state_file(tmp_path, started_at="2026-10-10T00:05:00",
+                        event_title=MEETING_TITLE)),
     )
-    assert bridge.get_calendar_attendees(MEETING_DATE, "Meeting") == []
+    assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == []
 
+
+def test_a_title_literally_meeting_still_grounds_across_midnight(
+        tmp_path, monkeypatch):
+    """No over-refusal: a genuine across-midnight recording titled "Meeting".
+
+    ``cal-trigger.py::get_upcoming_events`` always sets the ``title`` key, so its
+    ``"Meeting"`` fallback is unreachable and such a title is a real calendar
+    title, decided by the same one-day bound as any other.
+    """
     monkeypatch.setattr(
         bridge, "CAL_STATE_FILE",
-        str(_state_file(tmp_path, started_at="2026-10-09T10:55:00",
+        str(_state_file(tmp_path, started_at="2026-10-08T23:52:00",
                         event_title="Meeting")),
     )
     assert bridge.get_calendar_attendees(
