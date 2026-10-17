@@ -81,6 +81,13 @@ LEGAL_SPEC = re.compile(r"wrangler@\$\{WRANGLER_VERSION:\?")
 
 BARE_INVOCATION = re.compile(r"(?<![\w@$./-])wrangler(?![\w@])")
 
+#: A quoted LONE command word — `npx --yes "wrangler" pages deploy`. bash runs it as
+#: the binary, but ``_strip_quoted`` deletes whole quoted SEGMENTS (so a diagnostic
+#: is not an offence), and deleting the segment hid this spelling — one the module
+#: header names explicitly. A message is never a LONE ``wrangler`` token, so matching
+#: the quoted token itself cannot resurrect the diagnostic false positive.
+QUOTED_WRANGLER = re.compile(r"""(?<![\w@$-])["']wrangler["'](?![\w@])""")
+
 #: The only legal way the variable may be SET.
 DECLARATION = 'WRANGLER_VERSION="$(cat config/wrangler-version)"'
 
@@ -158,6 +165,21 @@ def _all_steps(jobs: dict) -> list[tuple[str, dict]]:
         for name, job in jobs.items()
         for step in (job.get("steps") or [])
     ]
+
+
+def _document_steps(doc: dict) -> list[tuple[str, dict]]:
+    """Steps from a WORKFLOW **or** a COMPOSITE ACTION.
+
+    A composite action declares `runs: steps:`, never `jobs:` — so reading only
+    `jobs:` yielded ZERO steps for every `.github/actions/*/action.yml`, and a
+    spec-less invocation inside one was invisible to every step arm while the
+    file was still in `_workflow_paths()` (the arm looked like it covered them).
+    """
+    steps = _all_steps(doc.get("jobs") or {})
+    runs = doc.get("runs") or {}
+    if isinstance(runs, dict) and runs.get("using") == "composite":
+        steps += [("<composite>", step) for step in (runs.get("steps") or [])]
+    return steps
 
 
 def _run(step: dict) -> str:
@@ -272,7 +294,10 @@ def _bare_invocations(code: str) -> list[str]:
     """Spec-less wrangler invocations — `npx wrangler`, `wrangler pages deploy`."""
     offences = []
     for lineno, line in enumerate(str(code or "").splitlines(), 1):
-        if BARE_INVOCATION.search(_strip_quoted(_cut_comment(line))):
+        uncommented = _cut_comment(line)
+        if BARE_INVOCATION.search(_strip_quoted(uncommented)) or QUOTED_WRANGLER.search(
+            uncommented
+        ):
             offences.append(f"line {lineno}: {line.strip()}")
     return offences
 
@@ -570,6 +595,11 @@ def test_the_bare_invocation_scan_ignores_messages_and_comments() -> None:
         'npx --yes wrangler pages deploy "$STAGE"',
         "npx wrangler --version",
         "wrangler pages deploy dist",
+        # A QUOTED lone command word is still a command: `_strip_quoted` removes
+        # quoted segments, so before #8852's review this spelling — named in the
+        # module header — passed the scan untouched.
+        'npx --yes "wrangler" pages deploy dist',
+        "npx --yes 'wrangler' pages deploy dist",
     ):
         assert _bare_invocations(code), code
     for code in (
@@ -600,7 +630,7 @@ def test_no_step_invokes_wrangler_without_a_spec_outside_the_declared_boots() ->
     offenders = []
     boots = 0
     for path in _workflow_paths():
-        for job, step in _all_steps(_load(path).get("jobs") or {}):
+        for job, step in _document_steps(_load(path)):
             name = step.get("name") or ""
             hits = _bare_invocations(_run(step))
             if name.startswith(BOOT_STEP_PREFIX):
