@@ -42,7 +42,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_async_client, verdict_client
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
 from tortoise import hosted_api as _ha_mod  # noqa: E402, RUF100
 from tortoise.hosted_api import (  # noqa: E402, F401, I001, RUF100
@@ -201,7 +201,7 @@ def api_client(supabase_cp):
         # clear at enter; pop-pin → restore __init__ → deterministic anchor
         # close → clear overrides at exit (replaces the local
         # _patch_tortoise_sdk_init copy).
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             yield tc, supabase_cp
 
 
@@ -360,7 +360,7 @@ class TestDynamicClientRegistration:
         monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patched_tortoise_sdk(os.path.join(tmpdir, "r.db")), \
-                TestClient(app) as tc:
+                verdict_client(app) as tc:
             # #2127: shared helper — the caller path arg is deliberately
             # dropped by the helper (documented); immaterial here (the 503
             # fires before any SDK construction). The helper additionally
@@ -2650,7 +2650,7 @@ class TestDcrCapacityPolicy:
         monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patched_tortoise_sdk(os.path.join(tmpdir, "r.db")), \
-                TestClient(app) as tc:
+                verdict_client(app) as tc:
             r = tc.post("/register", json={"client_name": "x",
                                             "redirect_uris": [REDIRECT]})
             assert r.status_code == 503
@@ -2713,9 +2713,8 @@ class TestDcrCapacityPolicy:
     @staticmethod
     def _burst(ips):
         async def _run():
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                            base_url="http://test") as ac:
                 return await asyncio.gather(*[
                     ac.post("/register",
                             json={"client_name": "burst",
@@ -3143,9 +3142,8 @@ class TestCimdOccupancy3669:
 
             hb = asyncio.ensure_future(_heartbeat())
             await asyncio.sleep(0.05)          # let the heartbeat settle
-            transport = httpx.ASGITransport(app=_ha_mod.app)
-            async with httpx.AsyncClient(
-                    transport=transport, base_url="http://testserver") as client:
+            async with verdict_async_client(
+                    _ha_mod.app, base_url="http://testserver") as client:
                 r = await client.get("/oauth/authorize", params=params)
             hb.cancel()
             with __import__("contextlib").suppress(asyncio.CancelledError):
@@ -3421,3 +3419,35 @@ class TestScopeAllowList:
                if t["revoked_at"] is None]
         assert [t["scope"] for t in acc] == ["mcp"]
         assert [t["scope"] for t in ref] == ["mcp"]
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``/register`` is the route the
+    concurrency and capacity legs of this file read and it is not exempt from
+    the bound. The plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+
+    TWO clients in this module stay plain, both declared in
+    `test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS`: ``_mounted_test_client``
+    wraps a local ``Mount("/mcp", ...)`` parent that carries no
+    ``WaitBoundMiddleware`` (the MCP half of the bound lives in the tool
+    dispatch, not in that parent), and this pin's own control.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/register")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post("/register", json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/register", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /register answered" in message

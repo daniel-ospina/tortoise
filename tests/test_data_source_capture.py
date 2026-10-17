@@ -47,10 +47,10 @@ import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._verdict import verdict_async_client, verdict_client
 from tortoise import demand, hosted_api
 from tortoise.hosted_api import app
 from tortoise.telegram_push import TelegramPushError
@@ -107,7 +107,7 @@ def client(tmp_path, monkeypatch):
         hosted_api.get_current_org_session_ungated)
     app.dependency_overrides[hosted_api.get_current_org_session_ungated] = (
         lambda: TEAM)
-    with TestClient(app) as c:
+    with verdict_client(app) as c:
         c._jsonl = tmp_path / "analytics_fallback.jsonl"
         c._override_org = TEAM
         yield c
@@ -396,7 +396,7 @@ def test_telegram_skipped_when_env_unset(tmp_path, monkeypatch):
     app.dependency_overrides[hosted_api.get_current_org_session_ungated] = (
         lambda: TEAM)
     try:
-        with TestClient(app) as c:
+        with verdict_client(app) as c:
             resp = _post(c)
             time.sleep(0.15)
     finally:
@@ -639,7 +639,7 @@ def test_cross_org_count_dedupes_per_org_not_per_click(tmp_path, monkeypatch):
     app.dependency_overrides[hosted_api.get_current_org_session_ungated] = (
         lambda: TEAM)
     try:
-        with TestClient(app) as c:
+        with verdict_client(app) as c:
             for _ in range(3):
                 assert _post(c, integration_key=KEY_A).status_code == 200
             app.dependency_overrides[
@@ -719,9 +719,8 @@ def test_demand_read_runs_off_the_event_loop(monkeypatch):
                     gaps.append(now - last)
                     last = now
 
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                            base_url="http://test") as ac:
                 tick = asyncio.create_task(_ticker())
                 await asyncio.sleep(0.15)  # the ticker must be mid-sleep
                 gaps.clear()
@@ -771,3 +770,30 @@ def test_demand_read_offload_refusal_is_unavailable_not_a_crash(monkeypatch):
         hosted_api._demand_store_rows_off_loop(None)) == (None, "unavailable")
     assert hosted_api._demand_click_count(None, KEY_A) is None, (
         "an unreadable store must never render as the click count 0")
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``/v1/data-sources/demand`` is
+    the route this file reads most and it is not exempt from the bound (its
+    ``/v1/internal/`` twin is, which is why the public path is the pin). The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("GET", "/v1/data-sources/demand")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.get("/v1/data-sources/demand").status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get("/v1/data-sources/demand")
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /v1/data-sources/demand answered" in message

@@ -916,6 +916,32 @@ def test_the_wiring_checker_discriminates():
 #: reading a refusal as a FAIL. This is the checkable restatement of #8582's
 #: Indicator (1), which a plain `grep` cannot discharge for a seam conversion.
 _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
+    # ── #8802: the remainder of the #8582 sweep ────────────────────────────
+    # Same seam, same declaration: every client these files build routes its
+    # responses through `require_answered`, so a transport wait-bound refusal is
+    # the contract's INCONCLUSIVE skip rather than an `assert 504 == 200` FAIL.
+    # +1 each: the refusal pin's own control client, which must stay PLAIN to
+    # observe the 504 it proves is real.
+    "tests/test_agent_signup_idempotency.py": (1, frozenset({"client"})),
+    # +2: the mount-only MCP parent (`_mounted_test_client` — a local
+    # `Mount("/mcp", ...)` Starlette carrying NO `WaitBoundMiddleware`) and the
+    # pin's control.
+    "tests/test_auth_flip.py": (2, frozenset({"rest_client"})),
+    "tests/test_billing.py": (1, frozenset({"billing_client", "env", "sb"})),
+    "tests/test_claim_endpoints.py": (1, frozenset({"client"})),
+    # +2: the R-13 rate-limit test's `TestClient(mini)` (a `mini` Starlette with
+    # only `RateLimitMiddleware` — no bound, so none of its reads can be a
+    # refusal) and the pin's control.
+    "tests/test_commit_endpoint.py": (2, frozenset({"client", "client_no_auth"})),
+    "tests/test_dashboard_login.py": (1, frozenset({"client"})),
+    "tests/test_data_source_capture.py": (1, frozenset({"client"})),
+    "tests/test_delivery_tenancy.py": (1, frozenset({"_sb_env", "_spine_env"})),
+    "tests/test_invite_fusion_http.py": (1, frozenset({"client"})),
+    # +2: `_mounted_test_client`'s mount-only parent (as in test_auth_flip) and
+    # the pin's control.
+    "tests/test_oauth_mcp.py": (2, frozenset({"api_client"})),
+    "tests/test_onboarding_endpoints.py": (1, frozenset({"client",
+                                                         "unauth_client"})),
     # +1: the pin's own control client, which must stay PLAIN to observe the 504.
     "tests/test_capture_loop_responsiveness.py": (1, frozenset({
         "_verdict_async_client"})),
