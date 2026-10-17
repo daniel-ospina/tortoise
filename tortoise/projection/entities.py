@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 # registers, or a node's IDENTITY is not a pure function of the journal (a
 # random stub id moved on every replay) and the reference fold cannot model
 # the stub at all.
+from tortoise.entity_identity import _IDENTITY_LABELS as _NAME_KEYED_LABELS
 from tortoise.ids import content_hash as _content_hash
 from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
@@ -57,6 +58,46 @@ from tortoise.vector_write import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: The two labels whose ``name`` is a NATURAL KEY rather than an identity, and
+#: therefore their MERGE key too (#7369). ONE declaration, borrowed from
+#: ``entity_identity``: that module owns the vocabulary (it is what its
+#: ``_require_identity_label`` refuses on), and a second hand-written tuple here
+#: is how a label gets silently omitted from one of the two sets — the exact
+#: drift ``tortoise/live.py``'s #2901 lesson records. ``projection/edges.py``
+#: already imports that module at scope, so this cannot cycle.
+#:
+#: See :func:`_name_holder_count` for why the count matters.
+def _name_holder_count(g, label: str, name: str) -> int:
+    """How many ``label`` nodes hold ``name`` — **any** status.
+
+    The two name-keyed labels MERGE by NAME (``MERGE (o:Object {name:$name})``,
+    #7369), so this count decides whether the name can serve as the MERGE key at
+    all. When it exceeds one, that pattern matches EVERY carrier and the
+    ``ON MATCH`` id write stamps ONE id onto ALL of them — duplicate-id
+    corruption (#8864): two distinct entities then answer every id-keyed read
+    (``MATCH (n {id:$x})``) as one.
+
+    ⛔ Count EVERY carrier, not only the LIVE ones. ``MERGE … {name:$name}``
+    matches terminal carriers too, so a ``status='superseded'`` twin is re-id'd
+    by the same ``ON MATCH`` clause — measured: one live + one superseded
+    carrier of a single name both come out carrying the incoming id. The
+    read-side predicate (``live._terminal_excluded``, as used by
+    ``entity_identity.resolve_entity_id``) is the WRONG count here precisely
+    because it excludes the terminal twin that participates in the corruption.
+
+    Cost: one index seek — ``Object.name`` / ``Subject.name`` are range-indexed
+    (``_RANGE_INDEX_LABEL_PROPS``).
+    """
+    if label not in _NAME_KEYED_LABELS:  # pragma: no cover - closed call set
+        raise RuntimeError(
+            f"projection: unsafe name-keyed label {label!r} "
+            f"({'/'.join(_NAME_KEYED_LABELS)} only)")
+    rows = g.query(
+        f"MATCH (n:{label} {{name:$name}}) RETURN count(n)",
+        params={"name": name}).result_set
+    return int(rows[0][0]) if rows else 0
 
 
 # #6239: live's TWO ``PointPromoted`` emitters are both gated on the Point's
@@ -3610,7 +3651,7 @@ class _EntityHandlers:
     # ── Entity nodes ───────────────────────────────────────────────
 
     def _upsert_subject(self, ev: dict) -> None:
-        """MERGE Subject by name (content-hash dedup)."""
+        """MERGE Subject by name (content-hash dedup), or by id once the name is shared."""
         sid = ev.get("id")
         name = ev.get("name", "")
         # #7369: `name` is the MERGE KEY (`MERGE (s:Subject {name:$name})`), and
@@ -3661,13 +3702,34 @@ class _EntityHandlers:
         # first (the shape tests/test_precision_leak_4028.py documents;
         # atomicity is not required). Emitted ONLY when a new embedding is being
         # written, so the ``ELSE s.embedding`` preserve branch is untouched and
-        # a fresh MERGE has nothing to remove. Key is ``name`` — the SAME key
-        # the MERGE uses (not ``id``), or this misses its own node.
-        clear_embedding(self.g, "(s:Subject {name:$name})", "s", {"name": name}, embedding)
+        # a fresh MERGE has nothing to remove. The pattern carries the SAME key
+        # the MERGE below uses (``merge_key``), or this misses its own node.
+        #
+        # #8864: WHICH key that is — `name` while it identifies exactly ONE
+        # carrier (the #452 content-hash dedup and the stub adoption below both
+        # depend on name-keying), and `id` once two or more carriers hold it.
+        # A name held by N nodes makes `MERGE (s:Subject {name:$name})` match ALL
+        # of them and the `ON MATCH` id write stamp ONE id onto EVERY one of
+        # them: duplicate-id corruption, after which every id-keyed read folds
+        # two distinct entities into one result set. The record's id IS the
+        # identity (#3590 R1), so an ambiguous name never has to be resolved to
+        # fold the record — it just stops being the key.
+        carriers = _name_holder_count(self.g, "Subject", name)
+        name_is_shared = carriers > 1
+        if name_is_shared:
+            logger.warning(
+                "projection: %d Subject carriers already hold the name %r — "
+                "a shared name cannot serve as the MERGE key; folding by id "
+                "%r instead, so one id is never stamped onto every same-name "
+                "carrier (#8864)", carriers, name, sid)
+        merge_key = "id" if name_is_shared else "name"
+        merge_value = sid if name_is_shared else name
+        clear_embedding(self.g, f"(s:Subject {{{merge_key}:$key}})", "s",
+                        {"key": merge_value}, embedding)
         _set_emb = set_embedding_clause("s")
         self.g.query(
-            "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
+            f"MERGE (s:Subject {{{merge_key}:$key}}) "
+            "ON CREATE SET s.id=$id, s.name=$name, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
             # #1423: status ON CREATE only — the Subject twin of the #1350
             # Object clause. Before this, `status` rode the extra-props lane
             # (`_SUBJECT_HANDLED` lacked it, #2295), which applies on MATCH as
@@ -3699,20 +3761,25 @@ class _EntityHandlers:
             # value under existing-wins (accepted divergence, #2295 plan).
             "            s.createdAt=coalesce(s.createdAt, $ca), "
             "            " + _set_emb,
-            params={"id": sid, "name": name,
+            params={"key": merge_value, "id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props. The anchor follows the
+        # MERGE key (#8864): a name-keyed MATCH would write the caller's props
+        # onto EVERY same-name carrier, which is the same over-reach as the id
+        # clobber.
         self._persist_extra_props(
-            "MATCH (n:Subject {name: $name})", {"name": name},
+            "MATCH (n:Subject {id: $id})" if name_is_shared
+            else "MATCH (n:Subject {name: $name})",
+            {"id": sid} if name_is_shared else {"name": name},
             ev, self._SUBJECT_HANDLED,
         )
 
     def _upsert_object(self, ev: dict) -> None:
-        """MERGE Object by name (content-hash dedup).
+        """MERGE Object by name (content-hash dedup), or by id once the name is shared.
 
         Objects are encoded via the Source→references→Object chain —
         embedding from name provides direct vector search capability
@@ -3755,12 +3822,32 @@ class _EntityHandlers:
         # #4524: as for Subject above — the embedded engine can silently
         # discard a ``vecf32`` overwrite, and this embedding sits inside
         # ON CREATE/ON MATCH, so PRE-REMOVE it in a separate query. Emitted
-        # only when a new vector is being written; key ``name``, the MERGE key.
-        clear_embedding(self.g, "(o:Object {name:$name})", "o", {"name": name}, embedding)
+        # only when a new vector is being written; key ``merge_key`` below — the
+        # SAME key the MERGE uses, or this misses its own node.
+        #
+        # #8864: WHICH key that is — `name` while exactly ONE carrier holds it
+        # (the #452 dedup and the stub adoption above depend on name-keying),
+        # `id` once two or more do. A shared name makes
+        # `MERGE (o:Object {name:$name})` match ALL the carriers and the
+        # `ON MATCH` id write stamp ONE id onto EVERY one of them, i.e.
+        # duplicate-id corruption: two distinct entities then answer every
+        # id-keyed read as one. See `_upsert_subject` for the shared rationale.
+        carriers = _name_holder_count(self.g, "Object", name)
+        name_is_shared = carriers > 1
+        if name_is_shared:
+            logger.warning(
+                "projection: %d Object carriers already hold the name %r — "
+                "a shared name cannot serve as the MERGE key; folding by id "
+                "%r instead, so one id is never stamped onto every same-name "
+                "carrier (#8864)", carriers, name, oid)
+        merge_key = "id" if name_is_shared else "name"
+        merge_value = oid if name_is_shared else name
+        clear_embedding(self.g, f"(o:Object {{{merge_key}:$key}})", "o",
+                        {"key": merge_value}, embedding)
         _set_emb = set_embedding_clause("o")
         self.g.query(
-            "MERGE (o:Object {name:$name}) "
-            "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
+            f"MERGE (o:Object {{{merge_key}:$key}}) "
+            "ON CREATE SET o.id=$id, o.name=$name, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
             "            o.status=coalesce($st, 'live'), "
             "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
@@ -3771,7 +3858,7 @@ class _EntityHandlers:
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
             "            " + _set_emb,
-            params={"id": oid, "name": name,
+            params={"key": merge_value, "id": oid, "name": name,
                     "ok": ok,
                     "st": ev.get("status"),  # #1350: status ON CREATE only —
                     # ON MATCH never touches it (the clobber guard: a
@@ -3792,9 +3879,13 @@ class _EntityHandlers:
                     "title": title,
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props. The anchor follows the
+        # MERGE key (#8864) — a name-keyed MATCH would write the caller's props
+        # onto EVERY same-name carrier.
         self._persist_extra_props(
-            "MATCH (n:Object {name: $name})", {"name": name},
+            "MATCH (n:Object {id: $id})" if name_is_shared
+            else "MATCH (n:Object {name: $name})",
+            {"id": oid} if name_is_shared else {"name": name},
             ev, self._OBJECT_HANDLED,
         )
 

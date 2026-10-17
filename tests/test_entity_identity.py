@@ -934,8 +934,8 @@ _ALLOWED_KEYED = {
         # `tortoise/vector_write.py::clear_embedding`, whose MATCH pattern is
         # built at runtime and passed as an argument, so this #3633 sweep cannot
         # see it. The read is dispositioned in that module's seam.
-        'self._persist_extra_props( "MATCH (n:Subject {name: $name})", {"name": name}, ev, self._SUBJECT_HANDLED, )': 1,
-        'self._persist_extra_props( "MATCH (n:Object {name: $name})", {"name": name}, ev, self._OBJECT_HANDLED, )': 1,
+        'self._persist_extra_props( "MATCH (n:Subject {id: $id})" if name_is_shared else "MATCH (n:Subject {name: $name})", {"id": sid} if name_is_shared else {"name": name}, ev, self._SUBJECT_HANDLED, )': 1,
+        'self._persist_extra_props( "MATCH (n:Object {id: $id})" if name_is_shared else "MATCH (n:Object {name: $name})", {"id": oid} if name_is_shared else {"name": name}, ev, self._OBJECT_HANDLED, )': 1,
         # #2729: the pack-declared fold dispatcher. `_fold_object_status`
         # MATCHes the Event's target by NAME (the prop the event carries) and
         # guards on the declaring kind, case-folded + form-widened
@@ -994,6 +994,16 @@ _ALLOWED_KEYED = {
 }
 
 _ALLOWED_FSTRING = {
+    'tortoise/projection/entities.py': {
+        # #8864: the name-keyed CARRIER COUNT that decides the MERGE key for the
+        # two name-keyed labels (`_name_holder_count`). It is a count, not an
+        # identity resolve: it returns how many carriers hold the name (ANY
+        # status — the MERGE matches terminal twins too), and it never returns
+        # or picks an id. The number's only job is "can the name be the key at
+        # all" — at >1 the fold keys on the record's own id, which is the
+        # identity of record (#3590 R1) and needs no name resolution.
+        'rows = g.query( f"MATCH (n:{label} {{name:$name}}) RETURN count(n)", params={"name": name}).result_set': 1,
+    },
     'tortoise/projection/edges.py': {
         # #5509 A: the non-stubbable labels' (Object/Event/Point) replay target
         # — `LIMIT 2` + `_refuse_ambiguous_target` on >1.
