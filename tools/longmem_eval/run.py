@@ -160,6 +160,11 @@ from .retrieve import (
     retrieve_for_question,
     run_integrity_gate,
 )
+from .server_posture import (
+    ServerPostureError,
+    enforce_server_posture,
+    resolve_activedefrag_policy,
+)
 from .stall_guard import (
     DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
     DEFAULT_EVAL_SOCKET_TIMEOUT_S,
@@ -6703,6 +6708,28 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 f"unknown --model {args.model!r}; known: {sorted(PROBE_MODELS)}")
         inject_model(args.model, query_prompt=args.query_prompt,
                      load_timeout=args.load_timeout)
+
+    # #2969 (suggested fix 3): the SERVER posture, before the embedder and the
+    # dataset download. The measured incident was a container in a continuous
+    # active-defrag loop that turned a ~25 min/question ingest into >4 h of
+    # silent grind; #3068 bounds the wait but does not make such a server a
+    # valid measurement target. Only ``--db`` runs have a graph server to
+    # check (the embedded lane is a local unix socket). The policy is
+    # resolved here too so a typo fails at RUN START, not mid-question.
+    if db_uri is not None:
+        try:
+            activedefrag_policy = resolve_activedefrag_policy()
+        except ValueError as _e:
+            raise SystemExit(str(_e)) from None
+        try:
+            enforce_server_posture(db_uri=db_uri,
+                                   policy=activedefrag_policy)
+        except ServerPostureError as e:
+            print("[longmem_eval] GRAPH-SERVER POSTURE GATE FAILED — aborting "
+                  "before the run starts (no questions executed):",
+                  file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            raise SystemExit(1) from e
 
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
     # the ~tens-of-MB download). EVERY run refuses to start when the dense
