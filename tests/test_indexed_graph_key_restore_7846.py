@@ -498,10 +498,18 @@ def test_graph_key_restore_of_an_indexed_graph_is_bounded_and_keeps_serving(
         )
 
     assert observation.payload_bytes > 0, "DUMP produced an empty payload"
-    assert observation.elapsed_s < _RESTORE_BOUND_S, (
-        f"the driver returned a restore of {observation.elapsed_s:.1f}s under a "
+    # `bound_s` bounds the RESTORE STEP, not `elapsed_s`: the latter is the caller-held
+    # time for the WHOLE sequence (DUMP + DEL + the bounded restore + the witness join +
+    # the recovery probe), so a restore that returns at 89 s under a 90 s bound
+    # legitimately reports elapsed_s > 90 while status == SERVED. Asserting on
+    # `elapsed_s` here failed with "it should have raised instead" and blamed the driver
+    # for behaving exactly as documented — a misfire that would send whoever raises
+    # TORTOISE_7846_NODES or runs on a slow engine after a non-bug (#8827 review).
+    assert observation.restore_s < _RESTORE_BOUND_S, (
+        f"the driver returned a RESTORE step of {observation.restore_s:.1f}s under a "
         f"{_RESTORE_BOUND_S:.0f}s bound — it should have raised instead"
     )
+    assert observation.restore_returned is True
     assert observation.status in (SERVED, BLOCKED), (
         f"a completed restore reported status={observation.status!r}"
     )

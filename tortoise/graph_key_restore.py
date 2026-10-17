@@ -34,8 +34,12 @@ explicit error the caller can act on"). ``restore_graph_key``:
    after it is finite but NOT free, and it is named here rather than folded away
    (#8827 review): the witness join (``witness_join_s``, 5 s by default, because a
    witness blocked inside its own PING is only released when that PING does) plus the
-   caller-supplied liveness probe's own timeout (``tcp_is_listening``'s 1 s default).
-   So the caller is held at most ``bound_s + witness_join_s + probe_timeout``, and
+   caller-supplied liveness probe's own timeout (``tcp_is_listening``'s 1 s default),
+   plus — on a COMPLETED run — the bounded ``recovery_probe_s`` window (1 s default) in
+   which the driver waits for the instance to answer once more. So the caller is held
+   at most ``bound_s + recovery_probe_s + witness_join_s + probe_timeout`` (the
+   recovery term is spent only when the restore returned; an overrun spends the whole
+   ``bound_s`` instead), and
    ``elapsed_s`` reports THAT number: it is captured when the observation is
    published, not at the bound, so the caller-held time in the data is the whole
    call and cannot drift below what the caller actually waited.
@@ -91,11 +95,16 @@ explicit error the caller can act on"). ``restore_graph_key``:
    thread). The second is why a 0.27 s block at 3 000 nodes is still reported rather
    than greened by a 1 s witness timeout. The three overrun states raise
    ``GraphRestoreSilentError`` / ``GraphRestoreLostError`` / ``GraphRestoreStalledError``
-   respectively, whose messages carry the measurement and the recovery instruction;
-   ``UNMEASURED`` raises ``GraphRestoreSilentError`` too (the caller still must not be
-   left hanging) but its message says the reading is unusable rather than serving a
-   verdict. The three are deliberately DIFFERENT errors: one restarts nothing and waits,
-   one needs a restart, and one is not the engine's fault at all.
+   respectively, whose messages carry the measurement and the recovery instruction.
+   ``UNMEASURED`` is reachable on BOTH paths, and the two behave differently: on a
+   COMPLETED restore it is RETURNED as an observation whose message says the reading is
+   unusable (the restore returned, so there is nothing to hang on), while on an OVERRUN
+   it RAISES ``GraphRestoreSilentError`` (the caller must not be left hanging) carrying
+   that same unusable-reading message rather than an engine verdict. So the exception
+   channel is not a measurement channel: no ``GraphRestoreSilentError`` does NOT mean the
+   run was measured — read ``observation.measured`` / ``status`` for that. The three
+   overrun errors are deliberately DIFFERENT: one restarts nothing and waits, one needs a
+   restart, and one is not the engine's fault at all.
 
 THE TRANSPORT PROBE IS THE DISCRIMINATOR, and it is deliberately transport-level. A
 server blocked on its serving thread still accepts connections (the kernel completes
@@ -157,10 +166,13 @@ FAILED = "failed"
 #: the #7846 block — the outage is unattributable (#8827 review).
 UNMEASURED = "unmeasured"
 
-#: The statuses that mean "the caller gave up rather than the restore returning".
-#: ``diagnosis()`` words its account around this, so a status and its message cannot
-#: disagree.
-_OVERRUN_STATUSES = frozenset({ALIVE_BUT_SILENT, INSTANCE_GONE, CALLER_STALL, UNMEASURED})
+# NOTE: there is deliberately no "overrun statuses" set here any more. It existed to let
+# ``_verdict_line`` decide "gave up vs returned" from ``status``, and ``UNMEASURED`` is
+# reachable on BOTH paths — so a restore that returned in 0.05 s was described as "did
+# not return within the 5s caller-side bound" (#8827 review). The driver already knows
+# which arm it is on: that fact is published as ``RestoreObservation.restore_returned``,
+# and every consequence (which error is raised, whether the recovery probe runs, how the
+# account is worded) reads that one flag instead of inferring it from a status.
 
 #: Default witness poll interval. Cheap enough not to load the instance, fine enough
 #: to bound the measured silence to ±this plus the witness client's own timeout.
@@ -271,6 +283,13 @@ class RestoreObservation:
     #: ``True`` = port accepts, ``False`` = refused, ``None`` = not probed (the
     #: restore returned, or no probe was supplied).
     instance_listening: bool | None
+    #: Whether the RESTORE call itself returned before ``bound_s``. The status cannot
+    #: stand in for it: ``UNMEASURED`` is reachable on BOTH paths, so keying the
+    #: account's wording on ``status`` made a restore that returned in 0.05 s describe
+    #: itself as "did not return within the 5s caller-side bound" (#8827 review). Every
+    #: other consequence of the split (which error is raised, whether the recovery probe
+    #: runs) already keys on this flag; publishing it puts the measurement in the data.
+    restore_returned: bool
     error: str | None = None
 
     @property
@@ -329,6 +348,7 @@ class RestoreObservation:
             "silence_started_s": self.silence_started_s,
             "silence_ended_s": self.silence_ended_s,
             "instance_listening": self.instance_listening,
+            "restore_returned": self.restore_returned,
             "error": self.error,
         }
 
@@ -348,16 +368,16 @@ class RestoreObservation:
         """The measurement every diagnosis opens with — never a claim of its own."""
         if self.witness_samples == 0:
             gave_up = (
-                f"did not return within the {self.bound_s:g}s caller-side bound"
-                if self.status in _OVERRUN_STATUSES
-                else f"returned after {self.restore_s:.2f}s"
+                f"returned after {self.restore_s:.2f}s"
+                if self.restore_returned
+                else f"did not return within the {self.bound_s:g}s caller-side bound"
             )
             return (
                 f"graph-key RESTORE of {self.graph!r} {gave_up}, and the witness took NO "
                 f"samples inside the window: nothing was measured, so nothing here is "
                 f"evidence about the instance in either direction."
             )
-        if self.status in _OVERRUN_STATUSES:
+        if not self.restore_returned:
             # Both signals, always: "0 of N went unanswered" on its own reads as "the
             # instance was serving", which is the very inversion the status avoids
             # (#8827 review). The slowest ANSWERED PING is what carries a latency-shaped
@@ -662,7 +682,10 @@ def restore_graph_key(
 
     Returns a :class:`RestoreObservation` for ``SERVED`` / ``BLOCKED`` / ``UNMEASURED``
     (see the module docstring's table; ``UNMEASURED`` is not a green — it says the
-    witness produced no reading a verdict may rest on).
+    witness produced no reading a verdict may rest on). ``UNMEASURED`` is RETURNED
+    here when the restore returned; it is the same status that RAISES
+    ``GraphRestoreSilentError`` when the restore overran, so a missing exception is not
+    evidence of a measurement — ``observation.measured`` is.
 
     ``bound_s`` bounds the ``restore`` call, NOT ``dump``/``delete``: those two run
     inline on the caller's thread here, before the worker starts, so their only limit
@@ -686,12 +709,12 @@ def restore_graph_key(
     and is ABANDONED at ``bound_s`` — never joined to completion — so the RESTORE call
     cannot hold the caller past the bound. The tail that follows is finite and named:
     ``witness_join_s`` (a witness blocked inside its own PING is released only when that
-    PING is) plus whatever timeout the ``listening`` callable carries, so the caller is
-    held at most ``bound_s + witness_join_s + probe_timeout`` — keep both small when
-    that tail matters, and read ``elapsed_s`` for the whole of it. ``recovery_probe_s`` is the
-    extra, bounded window in which a completed restore waits for the instance to
-    answer once more (the recovery edge that makes the silence attributable); it is
-    not part of ``bound_s``.
+    PING is) plus whatever timeout the ``listening`` callable carries, plus — on a
+    COMPLETED run — ``recovery_probe_s``, the bounded window in which the driver waits
+    for the instance to answer once more (the recovery edge that makes the silence
+    attributable; not part of ``bound_s``). So the caller is held at most
+    ``bound_s + recovery_probe_s + witness_join_s + probe_timeout`` — keep those small
+    when the tail matters, and read ``elapsed_s`` for the whole of it.
     """
     if bound_s <= 0:
         raise ValueError(f"bound_s must be positive, got {bound_s!r}")
@@ -827,6 +850,7 @@ def restore_graph_key(
             witness_max_latency_ms=max_latency_ms,
             blocked_latency_ms=blocked_latency_ms,
             instance_listening=None,
+            restore_returned=True,
             error=(
                 f"{type(error).__name__}: {error}"
                 if error is not None
@@ -915,6 +939,7 @@ def restore_graph_key(
         witness_max_latency_ms=max_latency_ms,
         blocked_latency_ms=blocked_latency_ms,
         instance_listening=instance_listening,
+        restore_returned=False,
         error=(
             f"restore did not return within the bound; {unmeasured_reason}"
             if unmeasured_reason is not None and instance_listening is not False

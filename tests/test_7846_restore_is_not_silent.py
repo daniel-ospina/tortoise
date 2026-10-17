@@ -553,6 +553,13 @@ def test_a_witness_fault_on_the_completed_path_is_not_a_green_SERVED() -> None:
     assert observation.error is not None and "PermissionError" in observation.error
     assert observation.as_dict()["measured"] is False
     assert "It is a BLOCKED server" not in observation.diagnosis()
+    # The restore RETURNED (0.05 s of a 5 s bound), so the account must say so: keyed on
+    # `status in _OVERRUN_STATUSES` alone this diagnosis opened with "did not return
+    # within the 5s caller-side bound" about a call that returned (#8827 review).
+    assert "did not return within" not in observation.diagnosis(), (
+        f"a COMPLETED unmeasured run is described as having overrun its bound: "
+        f"{observation.diagnosis()}"
+    )
 
 
 def test_a_zero_sample_completed_restore_is_not_a_green_SERVED() -> None:
@@ -581,6 +588,11 @@ def test_a_zero_sample_completed_restore_is_not_a_green_SERVED() -> None:
     )
     assert observation.measured is False
     assert observation.error is not None and "NO samples" in observation.error
+    assert observation.restore_returned is True
+    assert "did not return within" not in observation.diagnosis(), (
+        f"the restore returned immediately, yet the account claims it overran the "
+        f"bound: {observation.diagnosis()}"
+    )
 
 
 def test_the_three_silence_fields_describe_ONE_run() -> None:
@@ -849,3 +861,133 @@ def test_the_caller_held_time_reports_the_whole_call_including_the_TAIL() -> Non
         f"waited ({held:.2f}s) do not describe the same call"
     )
     assert observation.elapsed_s >= observation.restore_s
+
+
+def test_the_account_of_an_UNMEASURED_run_follows_the_MEASUREMENT_not_the_status() -> None:
+    """#8827 review: ``UNMEASURED`` is reachable on BOTH paths, so status cannot word it.
+
+    ``_OVERRUN_STATUSES`` contained ``UNMEASURED``, and ``_verdict_line`` keyed "gave up
+    vs returned" on it. But ``UNMEASURED`` is also set on the COMPLETED path (a witness
+    fault, or zero in-window samples), so a restore that returned in 0.05 s described
+    itself as "did not return within the 5s caller-side bound" — the account asserting
+    an event that did not happen, on the very channel an operator acts on. Both arms are
+    pinned here so the correction cannot overshoot in either direction.
+
+    Pre-fix this FAILS on every assertion: ``restore_returned`` does not exist
+    (``AttributeError``), and the completed run's diagnosis contains "did not return
+    within".
+    """
+
+    def wrongpass() -> None:
+        raise PermissionError("WRONGPASS invalid username-password pair")
+
+    completed = restore_graph_key(
+        **_call(),
+        restore=lambda _payload: "OK",
+        ping=wrongpass,
+        bound_s=5.0,
+        poll_interval_s=_POLL_S,
+    )
+
+    assert completed.status == UNMEASURED
+    assert completed.restore_returned is True, (
+        "the RESTORE call returned, but the observation says the caller gave up"
+    )
+    assert completed.as_dict()["restore_returned"] is True, (
+        "the published data omits the fact the restore returned"
+    )
+    assert "did not return within" not in completed.diagnosis(), (
+        f"a completed run is described as an overrun: {completed.diagnosis()}"
+    )
+    assert "returned after" in completed.diagnosis(), (
+        f"the completed run's own duration is not in the account: {completed.diagnosis()}"
+    )
+
+    def ping_far_too_slow() -> None:
+        time.sleep(1.0)
+
+    def never_returns(_payload):
+        time.sleep(1.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreSilentError) as raised:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=ping_far_too_slow,
+            bound_s=0.2,
+            witness_join_s=0.1,
+            poll_interval_s=_POLL_S,
+            listening=lambda: True,
+        )
+
+    overran = raised.value.observation
+    assert overran.status == UNMEASURED
+    assert overran.restore_returned is False, (
+        "the restore never returned, but the observation says it did"
+    )
+    assert overran.as_dict()["restore_returned"] is False
+    assert "did not return within the 0.2s caller-side bound" in overran.diagnosis(), (
+        f"an overrun no longer says the caller gave up: {overran.diagnosis()}"
+    )
+
+
+def _doc_sentences(text: str) -> list[str]:
+    """The doc text as sentences, newlines folded away (prose wraps mid-sentence)."""
+    return [" ".join(s.split()) for s in text.replace("\n", " ").split(".") if s.strip()]
+
+
+def test_the_module_states_the_UNMEASURED_split_and_the_WHOLE_caller_held_ceiling() -> None:
+    """#8827 review: the module prose was the wrong half of two documented facts.
+
+    ``UNMEASURED`` was documented as *raising* ``GraphRestoreSilentError`` unconditionally,
+    while on the COMPLETED path the driver logs and RETURNS — a caller pattern-matching on
+    the prose ("an unmeasured run raises, so no exception means it was measured") reads an
+    unmeasured run as success, which is the vacuous green this module exists to remove.
+    And the caller-held ceiling omitted ``recovery_probe_s`` (1 s by default), which the
+    completed path spends waiting for the recovery edge. Both are prose-only, so they are
+    pinned here rather than by a behavioural test — behaviour was already correct.
+
+    Pre-fix this FAILS both arms: the ceiling sentence reads
+    ``bound_s + witness_join_s + probe_timeout`` (no ``recovery_probe_s``), and no
+    sentence places ``UNMEASURED`` on both paths — the prose says only that it "raises".
+
+    The ``UNMEASURED`` arm is deliberately measured as ONE span naming BOTH paths: the
+    prose wraps across lines and the status table has no full stops, so a looser test
+    ("some sentence mentioning UNMEASURED also says *return*") passes on the pre-fix
+    text — the ``SERVED`` row's "restore returned" lands in the same span. That is a
+    vacuous guard, so the test asks for the split itself.
+    """
+    for where, doc in (
+        ("module docstring", tortoise.graph_key_restore.__doc__ or ""),
+        ("restore_graph_key docstring", restore_graph_key.__doc__ or ""),
+    ):
+        sentences = _doc_sentences(doc)
+        ceiling = [s for s in sentences if "held at most" in s]
+        assert ceiling, f"the {where} no longer states a caller-held ceiling"
+        assert any(
+            all(term in s for term in ("bound_s", "recovery_probe_s", "witness_join_s"))
+            for s in ceiling
+        ), (
+            f"the {where}'s ceiling omits ``recovery_probe_s``, which the completed path "
+            f"spends before publishing: {ceiling}"
+        )
+
+        if where == "module docstring":
+            unmeasured = [s for s in sentences if "UNMEASURED" in s]
+            split = [
+                s
+                for s in unmeasured
+                if "completed" in s.lower() and "overrun" in s.lower()
+            ]
+            assert split, (
+                "the module does not say that ``UNMEASURED`` behaves differently on the "
+                f"COMPLETED and OVERRUN paths (it is reachable on both): {unmeasured}"
+            )
+            assert any("return" in s.lower() for s in split), (
+                "the module never says a COMPLETED unmeasured run RETURNS — a caller "
+                f"reading it will expect an exception it never sees: {split}"
+            )
+            assert any("raise" in s.lower() for s in split), (
+                f"the module never says an OVERRUN unmeasured run RAISES: {split}"
+            )
