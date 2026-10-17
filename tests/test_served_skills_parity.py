@@ -1098,19 +1098,28 @@ _STUB = """#!/usr/bin/env bash
 printf '%s\\0' "${0##*/}" "$@" >> "$PARITY_STUB_RECORD"
 printf '\\036' >> "$PARITY_STUB_RECORD"
 if [ "${PARITY_STUB_FAIL_ARM:-0}" = "1" ]; then
-  # The real tool's own semantics (`main()`): `--check-upstream` and `--check`
-  # both run the upstream arm; a bare invocation (or one that only adds
-  # `--json`/`--report`) runs BOTH arms. `--check-local` leaves it out, `--sync`
-  # re-derives the mirror and returns 0 BEFORE either arm, and `--help` is
-  # argparse's exit 0. A stub that failed on `--sync` made a `--sync` step look
-  # like a fail-closed gate (review finding, P1), so the stub must agree with
-  # the predicate about what "the arm" is.
+  # The real tool's semantics (`main()`) are CUMULATIVE, not first-flag-wins:
+  # `--help` short-circuits (exit 0); `--sync` alone re-derives the mirror and
+  # runs no arm, and `--sync` COMBINED with a check flag is refused (exit 2); an
+  # arm flag ANYWHERE runs the arm, even alongside `--check-local`; a bare
+  # invocation (or one that only adds `--json`/`--report`) runs BOTH arms.
+  # A stub that disagreed with the predicate about any of these made a `--sync`
+  # step look fail-closed (review findings, P1/P2).
+  has_arm=0; has_sync=0; has_suppress=0
   for a in "$@"; do
     case "$a" in
-      --check-upstream|--check) exit 1 ;;
-      --check-local|--sync|--help|-h) exit 0 ;;
+      --help|-h) exit 0 ;;
+      --check-upstream|--check) has_arm=1 ;;
+      --sync) has_sync=1 ;;
+      --check-local) has_suppress=1 ;;
     esac
   done
+  if [ "$has_sync" = "1" ]; then
+    if [ "$has_arm" = "1" ]; then exit 2; fi
+    exit 0
+  fi
+  if [ "$has_arm" = "1" ]; then exit 1; fi
+  if [ "$has_suppress" = "1" ]; then exit 0; fi
   exit 1
 fi
 exit 0
@@ -1224,20 +1233,23 @@ def _is_the_arm(args: list[str]) -> bool:
     if not _resolves_to_the_tool(args[operand]):
         return False
     tail = args[operand + 1:]
+    # `main()`'s semantics are CUMULATIVE, not first-flag-wins:
+    #   * `--help` short-circuits argparse with exit 0 — no arm runs;
+    #   * `--sync` returns 0 before either arm, and COMBINED with a check flag
+    #     the tool refuses the invocation outright (exit 2), so it is never the
+    #     arm (review finding, P2);
+    #   * an arm flag ANYWHERE wins over `--check-local` — `--check-local
+    #     --check-upstream` runs the upstream arm and is a legitimate spelling.
+    if any(a in ("--help", "-h") for a in tail):
+        return False
+    if "--sync" in tail:
+        return False
     if any(flag in tail for flag in _ARM_FLAGS):
         return True
-    # A bare invocation runs BOTH arms (`main()`: `do_upstream = args.check or
-    # args.check_upstream or not (explicit or args.sync)`), and so does one that
-    # only adds `--json`/`--report`. Two spellings run NO arm and must not be
-    # certified as a runner:
-    #   * `--sync` re-derives the mirror and returns 0 before either arm runs —
-    #     a deploy step written that way rewrites the pin at deploy time and
-    #     gates nothing (review finding, P1);
-    #   * `--help` is argparse's exit 0.
-    # "Everything except `--check-local`" got both of these wrong.
-    if "--check-local" in tail or "--sync" in tail:
-        return False
-    return not any(a in ("--help", "-h") for a in tail)
+    # A bare invocation (or one that only adds `--json`/`--report`/`--root`)
+    # runs BOTH arms; `--check-local` on its own is the remaining spelling that
+    # does not.
+    return "--check-local" not in tail
 
 
 def _can_fail(unit: dict) -> bool:
@@ -1272,8 +1284,26 @@ def _is_arm_step(step: object) -> bool:
     rc, calls = _execute_step(body, flags=_shell_flags(step))
     if rc != 0 or not any(_is_the_arm(a) for a in calls):
         return False
+    # ⛔ A step that SYNCS **and** CHECKS is not a gate (review finding, P1).
+    # `--sync` re-derives the mirror and re-cuts the pin, so the check that
+    # follows grades bytes the same step just wrote from upstream — and those
+    # unreviewed bytes are exactly what the build stages. The tool refuses the
+    # combination inside one invocation for this reason ("a check in the same
+    # invocation would grade bytes it just overwritten"); certifying the
+    # two-invocation equivalent is the same hole one `&&` away.
+    if any(_runs_sync(a) for a in calls):
+        return False
     fail_rc, _ = _execute_step(body, fail_arm=True, flags=_shell_flags(step))
     return fail_rc != 0
+
+
+def _runs_sync(args: list[str]) -> bool:
+    """True iff this recorded command would run `--sync` on THIS tree's tool."""
+    operand = next((i for i, a in enumerate(args)
+                    if a.endswith("served_skills_parity.py")), None)
+    if operand is None or not _resolves_to_the_tool(args[operand]):
+        return False
+    return "--sync" in args[operand + 1:]
 
 
 def _arm_steps(doc: dict) -> list[tuple[str, dict, dict]]:
@@ -1603,6 +1633,13 @@ _DISARMAMENTS = [
     # This is the P1 class one argv away (review finding, P1).
     ("sync_instead_of_check", lambda s: s.update(
         run=s["run"].replace("--check-upstream", "--sync"))),
+    # `--sync && --check-upstream` is the two-invocation form of what the tool
+    # refuses inside one: the check grades the bytes `--sync` just rewrote. The
+    # compositional predicate ("ANY recorded argv is the arm") certified it
+    # while the deploy shipped unreviewed upstream bytes (review finding, P1).
+    ("sync_then_check", lambda s: s.update(
+        run="uv run --no-project --with pyyaml==6.0.3 python3 "
+            "tools/served_skills_parity.py --sync && " + s["run"])),
 ]
 
 
@@ -1682,6 +1719,13 @@ _ARM_SPELLINGS = [
      lambda s: s.update(run=s["run"].replace("--check-upstream", "--check"))),
     ("bare_invocation_runs_both_arms",
      lambda s: s.update(run=s["run"].replace(" --check-upstream", ""))),
+    # `main()` is cumulative: an arm flag anywhere wins over `--check-local`, so
+    # adding the upstream half to a step that already runs the offline arm is a
+    # legitimate spelling — the predicate must not call it decoration and push
+    # the maintainer to DROP `--check-local` (review finding, P2).
+    ("explicit_both_halves",
+     lambda s: s.update(run=s["run"].replace(
+         "--check-upstream", "--check-local --check-upstream"))),
 ]
 
 
@@ -1714,6 +1758,44 @@ def test_4643_the_arm_operand_must_be_the_shipped_tool():
                             "tools/served_skills_parity.py", "--check-upstream"])
 
 
+def test_4643_the_predicate_and_the_stub_agree_about_the_arm():
+    """The step-level verdict has two halves — the recorded argv is the arm, and
+    a failing arm fails the STEP — so a disagreement between the predicate and
+    the recording stub hides one of them. Reverting only the predicate, or only
+    the stub, left every other test green (review finding, P2), so each side is
+    pinned here directly.
+
+    The semantics are `main()`'s, which are cumulative: `--help` exits 0;
+    `--sync` alone runs no arm and combined with a check is refused (exit 2);
+    an arm flag anywhere wins over `--check-local`; bare runs both arms."""
+    tool = str(THE_TOOL)
+    arm = f"uv run --no-project --with pyyaml python3 {tool}"
+
+    assert _is_the_arm(["python3", tool]), "a bare invocation runs both arms"
+    assert _is_the_arm(["python3", tool, "--check-upstream"])
+    assert _is_the_arm(["python3", tool, "--check"])
+    assert _is_the_arm(["python3", tool, "--check-local", "--check-upstream"]), (
+        "an arm flag anywhere wins over --check-local: adding the upstream half "
+        "to a step that already runs the offline arm is legitimate")
+    assert not _is_the_arm(["python3", tool, "--check-local"])
+    assert not _is_the_arm(["python3", tool, "--sync"])
+    assert not _is_the_arm(["python3", tool, "--check-upstream", "--sync"]), (
+        "`--sync` with a check is refused by main() (exit 2) — it never runs "
+        "the arm, and it must not be certified as the gate")
+    assert not _is_the_arm(["python3", tool, "--help"])
+
+    assert _execute_step(arm, fail_arm=True)[0] != 0, (
+        "a bare invocation runs the arm, so a failing arm must fail the step")
+    assert _execute_step(f"{arm} --sync", fail_arm=True)[0] == 0, (
+        "the stub must not fail on `--sync` — that is what made a sync step "
+        "look fail-closed")
+    assert _execute_step(f"{arm} --sync --check-upstream", fail_arm=True)[0] == 2
+    assert _execute_step(f"{arm} --check-local --check-upstream",
+                         fail_arm=True)[0] != 0, (
+        "with --check-local present the arm still runs, so the step still fails")
+    assert _execute_step(f"{arm} --help", fail_arm=True)[0] == 0
+
+
 def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_path):
     """The control for the mutation table: without it, a predicate that returned
     False for everything would pass every case above. Both halves are asserted —
@@ -1738,3 +1820,18 @@ def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_pa
                          flags=_shell_flags(step))[0] != 0, (
         "a failing arm must fail the STEP — that is what 'failing closed' means "
         "to the runner, and it is the half a text scan cannot see")
+    # The `--no-project --with pyyaml` prefix is a review fix in its own right:
+    # a bare `uv run` syncs the whole project + `dev` group (jax, scikit-learn,
+    # playwright) from PyPI before the gate starts — minutes on every deploy,
+    # including a rollback — and adds PyPI as a fourth network dependency the
+    # step's "a network blip must never pass" comment does not price in. It was
+    # unguarded: reverting it in BOTH workflows left the suite fully green
+    # (review finding, P2). Asserted on the DERIVED runner set, so a new runner
+    # cannot arrive without it.
+    for name, doc in runners.items():
+        for _job_id, _job, gate in _arm_steps(doc):
+            body = str(gate.get("run") or "")
+            assert "--no-project" in body and "--with pyyaml" in body, (
+                f"{name}: the gate must run isolated (`uv run --no-project "
+                f"--with pyyaml…`) — a bare `uv run` syncs the whole project "
+                f"from PyPI before the gate starts")
