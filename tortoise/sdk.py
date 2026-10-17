@@ -3065,15 +3065,17 @@ def _raise_update_point_status_error(proj, id: str, *,
     not promotable → illegal-transition ValueError.
 
     #1088: an already-LIVE point is short-circuited in ``update_point``
-    (idempotent no-op), so a TERMINAL status reaching this error is never
-    resurrected by update_point. A ``live`` node CAN reach it, though — the
-    replay may land it live between the pre-write short-circuit and the guarded
-    ``SET`` — and that case is only an idempotent success when the caller asked
-    for NOTHING BUT the status (``status_only``). With other props the promote
-    matched nothing and nothing was applied, so returning silently would report
-    a landed write that did not happen: measured, ``update_point(status='live',
-    confidence=0.42)`` returned success, left the confidence unset, and emitted
-    ``PointRevised`` carrying it.
+    (idempotent no-op), so apart from that window the only statuses that reach
+    this error are the TERMINAL ones (``live.TERMINAL_EXCLUDED_STATUSES``:
+    retracted / superseded / outdated / archived / deprecated) — a terminal
+    point is never resurrected by update_point. A ``live`` node CAN reach it
+    too — the replay may land it live between the pre-write short-circuit and
+    the guarded ``SET`` — and that case is only an idempotent success when the
+    caller asked for NOTHING BUT the status (``status_only``). With other props
+    the promote matched nothing and nothing was applied, so returning silently
+    would report a landed write that did not happen: measured,
+    ``update_point(status='live', confidence=0.42)`` returned success, left the
+    confidence unset, and emitted ``PointRevised`` carrying it.
     """
     exists = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN count(n)", params={"id": id},
@@ -10687,7 +10689,7 @@ class TortoiseSDK:
         # this one may not precede a `SET` that can legitimately match nothing
         # (see the outbox block above). The payload is the same dict either
         # way — one record shape, one commit point per call.
-        if _promote_arm:
+        if _promote_arm and res.result_set:
             self._emit_event("PointRevised", id=id,
                              new_content=props.get("content"), **emit_props)
         return result

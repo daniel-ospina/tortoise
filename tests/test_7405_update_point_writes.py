@@ -1568,6 +1568,14 @@ def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
     A live node is exactly what a status-only promote wanted, so this must NOT
     raise — otherwise the ``live`` classification would turn an idempotent retry
     into a spurious error.
+
+    NOT pinned here: that the silent no-op also emits no ``PointRevised``. The
+    emit is gated on ``res.result_set``, which is empty on this path, matching
+    the probe-path short-circuit (which writes nothing and emits nothing) — but
+    this fixture's SDK has no event store configured, so ``poll_events`` reports
+    zero `PointRevised` events even for a promote that DID land and open a
+    positive control. An assertion here would pass for the wrong reason; the
+    gate is therefore reasoned and stated, not claimed as covered.
     """
     sdk = _sdk(tmp_path, "promoteidem")
     try:
@@ -1581,6 +1589,14 @@ def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
 
         assert out["status"] == "live"
         assert proxy.flipped, "fixture precondition: the node must have gone live"
+        proj.g = proxy._real
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status, n.confidence",
+            params={"id": pid}).result_set[0]
+        assert row[0] == "live"
+        assert row[1] is None, (
+            "a status-only promote writes nothing else, so no other prop may "
+            f"appear: saw {row[1]!r}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
