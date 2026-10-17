@@ -193,6 +193,27 @@ def test_a_nested_title_that_is_not_the_writers_truncation_is_refused(
         MEETING_DATE, "Weekly Team Standup (Engineering)") == ATTENDEES
 
 
+def test_truncated_title_ending_in_whitespace_still_grounds(tmp_path, monkeypatch):
+    """The cap counts RAW characters: a 50th-character space must not unmask it.
+
+    ``cal-trigger.py`` slices the raw title (``[:50]``), so a title whose 50th
+    character is whitespace stores ``...\u0020`` and strips to 49 normalised
+    characters. Testing the cap on the normalised length would refuse a state that
+    genuinely describes this meeting (the arm exists precisely for the
+    across-midnight case), so ``have_raw_len`` carries the raw length.
+    """
+    calendar_title = "A" * 49 + " " + "B" * 20
+    stored = calendar_title[:bridge._TITLE_WRITER_CAP]
+    assert stored.endswith(" ")
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-08T23:52:00",
+                        event_title=stored)),
+    )
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, calendar_title) == ATTENDEES
+
+
 def test_a_tiny_stored_title_cannot_ground_but_does_not_disqualify(
         tmp_path, monkeypatch):
     """A short prefix is not the writer's truncation, so it cannot ground.
