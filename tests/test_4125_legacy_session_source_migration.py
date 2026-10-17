@@ -39,6 +39,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import tortoise.session_source_migration as ssm
 from tortoise.consistency import recover_from_log
 from tortoise.file_indexer import derive_session_source_url
 from tortoise.ids import content_hash
@@ -131,6 +132,24 @@ def post_4005_commit(sdk, sid: str, *, doc_id: str = "doc_x1",
                       sourceDate="2026-01-01T00:00:00+00:00")
     sdk.link_source_to_entity(canonical, doc_id, "Document")
     return canonical
+
+
+def corpus_indexed_session_source(sdk, sid: str = "s1",
+                                  url: str = "corpus://notes/session.md",
+                                  event_id: str = "ev_1") -> str:
+    """The OTHER current producer of an ``agentSession`` Source.
+
+    ``sdk._index_process_unit`` writes ``(corpus://… Source)-[:references]->
+    (Event)`` with ``sourceKind='agentSession'`` and ``session_id`` on the
+    indexed Event — a keyed, LIVE identity that is fully attributable and must
+    never be treated as a pre-#4005 candidate (#8229 review, P1).
+    """
+    sdk.create_source(url, "agentSession", provenance_spans=list(SPANS),
+                      is_episodic=True)
+    g_of(sdk).query("MERGE (e:Event {id:$eid}) SET e.session_id=$sid",
+                    params={"eid": event_id, "sid": sid})
+    sdk.link_source_to_entity(url, event_id, "Event")
+    return url
 
 
 # ── read helpers ──────────────────────────────────────────────────────────
@@ -381,6 +400,76 @@ class TestMigration:
         assert after["title"] == before["title"] == canonical
 
 
+class TestIdentityDerivation:
+    """The canonical url comes from the shared derivator, on the RAW id."""
+
+    def test_a_padded_session_id_derives_the_identity_the_writers_address(
+            self, sdk):
+        """``session_id=' s1 '`` must derive ``session: s1 ``, never ``session:s1``.
+
+        Layer-1 accepts a padded id VERBATIM (``CommitPayload`` rejects only a
+        blank one) and every producer — ``_materialize_session_source``,
+        ``derive_session_source_url`` in the commit path, and ``delete_session``
+        — addresses the RAW spelling. Stripping the id before concatenating
+        ``session:`` minted ``session:s1``, a THIRD identity no writer, reader or
+        deleter reaches, and then DELETED the legacy node after moving its
+        provenance onto it: the leak #4125 removes, re-created (#8229 review,
+        P2).
+
+        (1) FAILS if the canonical url is hand-built from the STRIPPED id:
+            ``canonical_created`` reads ``['session:s1']`` and a duplicate
+            identity appears in the graph.
+        (2) REACHABLE: a padded id passes Layer-1 and is written as given.
+        """
+        s, _ = sdk
+        padded = " s1 "
+        pre_4005_commit(s, padded)
+
+        report = reconcile_legacy_session_sources(g_of(s))
+
+        expected = derive_session_source_url(padded)
+        assert expected == "session: s1 "
+        assert report["canonical_created"] == [expected], (
+            "the canonical identity must come from the shared derivator, on "
+            "the unmodified session id")
+        assert "session:s1" not in agent_session_urls(s), (
+            "a third session-Source identity was minted from the stripped id")
+        # The padded identity is the WRITER's spelling, so nothing is deleted on
+        # a guess: the legacy node keeps its edges and the run reports the
+        # reason instead of claiming a successful migration.
+        assert report["migrated"] == []
+        assert report["ambiguous"] == [LEGACY_URL]
+        assert "surrounding whitespace" in report["notes"][LEGACY_URL]
+        assert props(s, LEGACY_URL) != {}, "the legacy node was deleted"
+        assert [u for _, u in extracted_from(s)] == [LEGACY_URL]
+
+    def test_the_pre_fix_hash_refusal_uses_the_canonical_content_hash(
+            self, monkeypatch):
+        """The refusal is pinned to ``tortoise.ids.content_hash``, not a copy.
+
+        Re-deriving ``sha256(str(url))`` inline keeps the refusal true only
+        until ``content_hash`` changes (algorithm, prefix, normalisation), at
+        which point every real pre-fix placeholder would be carried onto the
+        canonical node as a current-version anchor (§4.6 / #3998).
+
+        (1) FAILS on a local ``hashlib`` copy: the spy below would never be
+            called, so ``calls`` stays empty.
+        (2) REACHABLE: the real helper is what the module must call, and the
+            spy delegates to it so the assertion stays meaningful.
+        """
+        calls: list[str] = []
+
+        def spy(text: str) -> str:
+            calls.append(text)
+            return content_hash(text)
+
+        monkeypatch.setattr(ssm, "content_hash", spy)
+
+        assert is_pre_fix_url_hash(LEGACY_URL, content_hash(LEGACY_URL))
+        assert calls == [LEGACY_URL], (
+            "is_pre_fix_url_hash does not go through content_hash")
+
+
 class TestAttribution:
     def test_find_reports_the_candidate_and_the_session_it_is_attributed_to(
             self, sdk):
@@ -452,6 +541,82 @@ class TestAttribution:
         expected = {"claim from s1": "session:s1", "claim from s2": "session:s2"}
         assert {contents[pid]: url for pid, url in extracted_from(s)} == expected
         assert agent_session_urls(s) == ["session:s1", "session:s2"]
+
+    def test_a_corpus_indexed_agent_session_source_is_never_a_candidate(self, sdk):
+        """The OTHER current producer is excluded, reported, and left intact.
+
+        ``_index_process_unit`` mints an ``agentSession`` ``:Source`` at
+        ``corpus://<corpus>/<rel-path>`` and wires ``references`` to an indexed
+        Event carrying ``session_id`` — so a ``sourceKind``-only predicate would
+        find it FULLY ATTRIBUTABLE, move its ``references`` edge, and
+        ``DETACH DELETE`` the corpus node (losing its ``corpus://`` identity,
+        ``_searchText`` and ``format``), manufacturing the very duplicate
+        #4125 removes (#8229 review, P1).
+
+        (1) FAILS if the candidate predicate is ``sourceKind``-alone: the
+            report would list the corpus url as a candidate, the census would
+            move, and the source would be gone.
+        (2) REACHABLE: the fixture is the indexer's real write shape —
+            ``create_source``, an Event with ``session_id``, and
+            ``link_source_to_entity(..., 'Event')`` — not a hand-invented one.
+        """
+        s, _ = sdk
+        corpus_url = corpus_indexed_session_source(s, "s1")
+        before = census(s)
+
+        report = reconcile_legacy_session_sources(g_of(s))
+
+        assert report["candidates"] == [], (
+            "a keyed corpus:// agentSession Source was selected as a legacy "
+            "basename candidate")
+        assert report["migrated"] == [] and report["canonical_created"] == []
+        assert report["other_agent_session"] == [corpus_url], (
+            "the excluded producer must be REPORTED, not silently skipped")
+        assert census(s) == before, "a non-candidate was written to"
+        # The corpus node and its references edge survive byte-for-byte.
+        assert agent_session_urls(s) == [corpus_url]
+        assert [tuple(r) for r in g_of(s).query(
+            "MATCH (a:Source {url:$u})-[:references]->(e:Event) "
+            "RETURN e.id", params={"u": corpus_url}).result_set] == [("ev_1",)]
+
+    def test_a_blocked_node_stays_blocked_on_the_next_run(self, sdk):
+        """A re-run must not re-diagnose a BLOCKED node as identity-less.
+
+        Run 1 moves every attributable edge off a node with an unmovable
+        relation (partial progress is reported, not rolled back), so run 2 holds
+        no attribution carrier at all. Computing ``blocking`` after the
+        attribution early-exit made run 2 report ``unattributed`` — erasing the
+        offending relation type (the only actionable diagnosis) and telling the
+        operator "no session derivable", which is false (#8229 review, P2).
+
+        (1) FAILS if ``_rel_types``/``_blocking_rel_types`` run only on the
+            attribution path: run 2's ``blocked`` is empty and ``unattributed``
+            names the node.
+        (2) REACHABLE: ``mysteryRel`` is an out-of-tree relation, and run 1
+            provably moves both attributable edges away.
+        """
+        s, _ = sdk
+        pre_4005_commit(s, "s1")
+        g_of(s).query("MERGE (o:Object {name:'outsider'}) "
+                      "WITH o MATCH (old:Source {url:$u}) "
+                      "CREATE (old)-[:mysteryRel]->(o)", params={"u": LEGACY_URL})
+
+        first = reconcile_legacy_session_sources(g_of(s))
+        assert first["blocked"] == {LEGACY_URL: ["mysteryRel"]}
+        assert first["ambiguous"] == [LEGACY_URL]
+        after_first = census(s)
+
+        second = reconcile_legacy_session_sources(g_of(s))
+
+        assert second["candidates"] == [LEGACY_URL]
+        assert second["blocked"] == {LEGACY_URL: ["mysteryRel"]}, (
+            "the unmovable relation is still the obstacle — it must be named")
+        assert second["ambiguous"] == [LEGACY_URL]
+        assert second["unattributed"] == [], (
+            "the node's identity WAS derivable; only an unmovable relation "
+            "blocks it")
+        assert "no attributable edges remain" in second["notes"][LEGACY_URL]
+        assert census(s) == after_first, "the re-run rewrote a blocked node"
 
     def test_an_unmovable_relation_blocks_the_delete_and_is_reported(self, sdk):
         """A relation this reconciler does not know is never traded for a guess.
@@ -718,12 +883,19 @@ class TestOperatorCli:
         the assertion independent of the lane's namespace seam.
         """
         db = str(tmp_path / "cli4125.db")
+        # The env change comes FIRST (#8229 review, P1): with a URI still
+        # ambient, the SDK construction below hands an EXPLICIT db_path to
+        # `FalkorProjection`, which arms the Epic #1647 test redirect — the
+        # setup write then lands on the lane's server graph while the
+        # scheme-less CLI reads the never-written embedded file (measured:
+        # `0 legacy node(s)`). A scheme-less value fails
+        # `_is_supported_uri_scheme`, so the redirect is inert for BOTH halves.
+        monkeypatch.setenv("TORTOISE_DB_URI", db)
         s = TortoiseSDK(db)
         try:
             pre_4005_commit(s, "s1")
         finally:
             s.close()
-        monkeypatch.setenv("TORTOISE_DB_URI", db)
 
         monkeypatch.setattr(sys, "argv", [_CLI_PATH.name, "--dry-run"])
         assert _cli.main() == 0
@@ -739,6 +911,56 @@ class TestOperatorCli:
             assert agent_session_urls(s2) == ["session:s1"]
         finally:
             s2.close()
+
+    def test_dry_run_reports_the_plan_the_live_run_would_execute(
+            self, tmp_path, monkeypatch, capsys):
+        """``--dry-run`` must print the real plan, including blocked nodes.
+
+        The dry-run arm used to build its own report with ``migrated`` /
+        ``ambiguous`` / ``blocked`` / ``edges_repointed`` hardcoded empty, so the
+        self-contradicting summary ``N legacy node(s) → 0 migrated … 0 blocked``
+        printed for EVERY graph — including one whose live run migrates a node —
+        and the ``⚠️ … unmovable relation(s) … LEFT IN PLACE`` line was
+        unreachable in the mode built to be read before the destructive run
+        (#8229 review, P2).
+
+        (1) FAILS if the dry-run report is hand-built: the migratable graph
+            prints ``0 migrated`` instead of ``1 migrated``, and the blocked
+            graph prints ``0 blocked`` with no relation named.
+        (2) REACHABLE: two real graphs — one migratable, one blocked by an
+            out-of-tree ``mysteryRel``.
+        """
+        migratable = str(tmp_path / "cli4125_ok.db")
+        monkeypatch.setenv("TORTOISE_DB_URI", migratable)
+        s = TortoiseSDK(migratable)
+        try:
+            pre_4005_commit(s, "s1")
+        finally:
+            s.close()
+
+        monkeypatch.setattr(sys, "argv", [_CLI_PATH.name, "--dry-run"])
+        assert _cli.main() == 0
+        out = capsys.readouterr().out
+        assert "1 legacy node(s) → 1 migrated" in out, out
+        assert "0 blocked" in out, out
+
+        blocked_db = str(tmp_path / "cli4125_blocked.db")
+        monkeypatch.setenv("TORTOISE_DB_URI", blocked_db)
+        s2 = TortoiseSDK(blocked_db)
+        try:
+            pre_4005_commit(s2, "s1")
+            g_of(s2).query(
+                "MERGE (o:Object {name:'outsider'}) "
+                "WITH o MATCH (old:Source {url:$u}) "
+                "CREATE (old)-[:mysteryRel]->(o)", params={"u": LEGACY_URL})
+        finally:
+            s2.close()
+
+        assert _cli.main() == 0
+        out = capsys.readouterr().out
+        assert "1 legacy node(s) → 0 migrated" in out, out
+        assert "1 ambiguous, 1 blocked" in out, out
+        assert "unmovable relation(s) ['mysteryRel'] — LEFT IN PLACE" in out, out
 
     def test_embedded_target_selection_is_one_graph(self):
         """A scheme-less --db is an embedded store: one graph, named ``''``.

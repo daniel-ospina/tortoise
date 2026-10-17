@@ -136,16 +136,21 @@ def main() -> int:
             proj = open_projection(uri, gname)
             try:
                 if args.dry_run:
-                    # The read-only audit: candidates + the attribution the
-                    # migration WOULD use. Nothing is written.
+                    # The read-only audit: the SAME plan the live run would
+                    # execute — `reconcile_legacy_session_sources(dry_run=True)`
+                    # writes nothing (`_merge_metadata` is skipped and the move
+                    # primitives short-circuit to a count) and returns the SAME
+                    # report shape, so `migrated` / `edges_repointed` /
+                    # `ambiguous` / `blocked` mean one thing in both modes
+                    # (#8229 review, P2: the hand-built plan below hardcoded
+                    # those to empty, so a blocked migration pre-flighted as
+                    # clean). `find_legacy_session_sources` stays as the
+                    # per-node audit detail (it is the only shape carrying the
+                    # attribution that justifies a move).
                     found = find_legacy_session_sources(proj.g)
-                    report = {
-                        "dry_run": True, "candidates": [c["url"] for c in found],
-                        "candidate_detail": found,
-                        "canonical_created": [], "migrated": [],
-                        "unattributed": [c["url"] for c in found if not c["sessions"]],
-                        "ambiguous": [], "blocked": {}, "edges_repointed": 0,
-                    }
+                    report = reconcile_legacy_session_sources(
+                        proj.g, dry_run=True)
+                    report["candidate_detail"] = found
                 else:
                     report = reconcile_legacy_session_sources(proj.g)
             finally:
@@ -171,8 +176,17 @@ def main() -> int:
             for url in report["unattributed"]:
                 print(f"          ⚠️ {url}: no session derivable — LEFT IN PLACE")
             for url, rels in (report.get("blocked") or {}).items():
+                note = (report.get("notes") or {}).get(url)
                 print(f"          ⚠️ {url}: unmovable relation(s) {rels} — "
-                      "LEFT IN PLACE")
+                      "LEFT IN PLACE" + (f" ({note})" if note else ""))
+            other = report.get("other_agent_session") or []
+            if other:
+                # Not candidates: another producer's LIVE, keyed identity (the
+                # indexer's `corpus://` agentSession Source). Reported so the
+                # audit is not silent about a population it leaves alone.
+                print(f"          ℹ️ {len(other)} keyed agentSession Source(s) "
+                      f"left alone (not the pre-#4005 basename identity): "
+                      f"{', '.join(other)}")
 
     if args.json:
         print(json.dumps(reports, indent=2, default=str))

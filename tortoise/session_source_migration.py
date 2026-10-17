@@ -61,6 +61,19 @@ node's own metadata is merged only when the attribution is unambiguous (exactly
 one session): a mixed node's ``contentHash``/``provenance_spans`` describe no
 single session.
 
+THE CANDIDATE POPULATION (a bare filename, not "every agentSession url")
+=======================================================================
+The pre-#4005 identity was ``os.path.basename(ref.path)`` — a BARE FILENAME.
+That is the predicate, and it is deliberately narrow: the indexer mints its OWN
+``agentSession`` Source from the SAME ``sourceKind`` whose url is
+``corpus://<corpus>/<rel-path>`` (``file_indexer.derive_source_url``), keyed,
+live and correct. A ``sourceKind``-only predicate would select it, move its
+``references`` edges (its target Event carries ``session_id``, so it IS
+attributable) and delete the corpus node — destroying its corpus identity,
+``_searchText`` and ``format``, and manufacturing the duplicate this migration
+exists to remove (#8229 review, P1). Those urls are therefore excluded and
+REPORTED (``find_other_agent_session_sources``), never rewritten.
+
 THE PRE-FIX CONTENT HASH IS NOT AN ANCHOR
 =========================================
 Pre-#4005 the legacy node's ``contentHash`` was ``content_hash(url)`` — a hash
@@ -92,11 +105,13 @@ hard-delete re-assert), and it is why the CLI stays runnable at any time.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
+
+from tortoise.file_indexer import derive_session_source_url
+from tortoise.ids import content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -104,13 +119,16 @@ __all__ = [
     "CANONICAL_PREFIX",
     "MOVABLE_SOURCE_RELS",
     "find_legacy_session_sources",
+    "find_other_agent_session_sources",
     "is_pre_fix_url_hash",
     "reconcile_after_replay",
     "reconcile_legacy_session_sources",
 ]
 
 #: The canonical session-Source prefix (ONTOLOGY §4.6, #4005). A legacy node is
-#: an ``agentSession`` ``:Source`` whose url does NOT start with it.
+#: an ``agentSession`` ``:Source`` whose url does NOT start with it. Used ONLY
+#: for the candidate FILTER — the identity itself is always derived through
+#: :func:`tortoise.file_indexer.derive_session_source_url`, never concatenated.
 CANONICAL_PREFIX = "session:"
 
 #: Relationship types this reconciler will MOVE off a legacy node. A closed,
@@ -135,7 +153,30 @@ _LEGACY_CANDIDATES = (
     "WHERE old.sourceKind = 'agentSession' "
     "  AND old.url IS NOT NULL "
     "  AND NOT old.url STARTS WITH $prefix "
+    # The pre-#4005 identity was `os.path.basename(ref.path)` — a BARE
+    # FILENAME. A url carrying a scheme or a path separator is a DIFFERENT,
+    # CURRENT producer's identity (the indexer's `corpus://<corpus>/<rel>`
+    # `agentSession` Source from `_index_process_unit`), which is keyed, live
+    # and correct: rewriting it would trade a working identity for a duplicate
+    # (the exact defect #4125 exists to remove) and destroy its `_searchText`/
+    # `format`/`version`/`capturedAt`. Narrowed here, and reported by
+    # `find_other_agent_session_sources` so a third producer is surfaced rather
+    # than silently rewritten.
+    "  AND NOT old.url CONTAINS '://' "
+    "  AND NOT old.url CONTAINS '/' "
     "RETURN old.url, properties(old) ORDER BY old.url"
+)
+
+#: ``agentSession`` Sources that are NOT legacy candidates — a live, keyed
+#: identity from another producer. Reported (never rewritten) so an operator can
+#: see a population this migration deliberately leaves alone.
+_OTHER_AGENT_SESSION_SOURCES = (
+    "MATCH (s:Source) "
+    "WHERE s.sourceKind = 'agentSession' "
+    "  AND s.url IS NOT NULL "
+    "  AND NOT s.url STARTS WITH $prefix "
+    "  AND (s.url CONTAINS '://' OR s.url CONTAINS '/') "
+    "RETURN s.url ORDER BY s.url"
 )
 
 # A Point's own session id. Both spellings: the in-tree write paths use
@@ -179,7 +220,12 @@ def is_pre_fix_url_hash(url: str, stored_hash: str | None) -> bool:
     """
     if not stored_hash or not url:
         return False
-    return stored_hash == hashlib.sha256(str(url).encode("utf-8")).hexdigest()
+    # The comparison is pinned to the CANONICAL helper, not to a copy of it
+    # (#8229 review, P2): re-deriving `sha256(str(url))` here would keep the
+    # refusal true only until `tortoise/ids.content_hash` changes, at which
+    # point every real pre-fix placeholder would be carried onto the canonical
+    # node as a current-version anchor (§4.6 / #3998).
+    return stored_hash == content_hash(str(url))
 
 
 # ── graph helpers ─────────────────────────────────────────────────────────
@@ -195,12 +241,25 @@ def _scalar(g, cypher: str, **params) -> Any:
     return rows[0][0] if rows and rows[0] else None
 
 
-def _clean_sid(value: Any) -> str | None:
-    """A usable session id, or ``None`` — a blank/None id attributes nothing."""
+def _usable_sid(value: Any) -> str | None:
+    """A usable session id, or ``None`` — a blank/None id attributes nothing.
+
+    The id is returned **UNMODIFIED** (#8229 review, P2). Stripping it here and
+    concatenating ``session:`` would mint an identity no writer or reader
+    reaches: Layer-1 accepts a padded ``session_id`` verbatim
+    (``CommitPayload._non_blank_session_id``), and every producer —
+    ``_materialize_session_source``, ``derive_session_source_url`` in the commit
+    path, ``delete_session`` — addresses the RAW spelling. ``strip()`` only
+    DECIDES usability; the identity comes from the shared derivator.
+    """
     if not isinstance(value, str):
         return None
-    sid = value.strip()
-    return sid or None
+    return value if value.strip() else None
+
+
+def _canonical_url(sid: str) -> str:
+    """The ONE canonical derivation (#4005) — never concatenated locally."""
+    return derive_session_source_url(sid)
 
 
 def _degree(g, url: str) -> int:
@@ -227,21 +286,26 @@ def _attribution(g, url: str) -> dict:
 
     The carriers are exhaustive for the in-tree writers: the hosted commit path
     wires ``extractedFrom`` from POINTS only (``create_point(...
-    extractedFrom=)``, hosted_api.py) and the connector/capture paths wire
-    ``(Source)-[:references]->(Event)`` — an OUTGOING edge, whose target carries
-    no session and so is treated as unattributable (moved only when the node's
-    attribution is unambiguous, never silently discarded).
+    extractedFrom=)``, hosted_api.py) and the pre-fix path wired
+    ``(legacy)-[:references]->(doc)`` where the Document carries ``sessionId``.
+
+    A ``references`` target MAY also carry a session through the indexer's Event
+    shape (``_session_event_write`` sets ``session_id``), so the target's own id
+    is read rather than assumed absent (#8229 review, P1 — the earlier claim
+    that such a target "carries no session" was false). An unattributable
+    target is still moved only when the node's attribution is unambiguous, never
+    silently discarded.
     """
     point_sessions: dict[str, str | None] = {}
     for row in _rows(g, _POINT_EDGE_SESSIONS, u=url):
         pid = row[0]
         if isinstance(pid, str):
-            point_sessions[pid] = _clean_sid(row[1] if len(row) > 1 else None)
+            point_sessions[pid] = _usable_sid(row[1] if len(row) > 1 else None)
     ref_sessions: dict[str, str | None] = {}
     for row in _rows(g, _REF_TARGET_SESSIONS, u=url):
         key = row[0]
         if isinstance(key, str):
-            ref_sessions[key] = _clean_sid(row[1] if len(row) > 1 else None)
+            ref_sessions[key] = _usable_sid(row[1] if len(row) > 1 else None)
     sessions = {s for s in point_sessions.values() if s}
     sessions |= {s for s in ref_sessions.values() if s}
     return {
@@ -421,9 +485,8 @@ def reconcile_after_replay(projection, *, engine: str) -> dict | None:
     if report["unattributed"] or report["ambiguous"] or report["blocked"]:
         logger.warning(
             "%s: %d legacy session Source(s) could NOT be migrated "
-            "(%d unattributed, %d ambiguous%s) — no canonical identity is "
-            "derivable for them from the journal; they stay in place and need "
-            "an operator decision (#4125)",
+            "(%d unattributed, %d ambiguous%s) — they stay in place and need "
+            "an operator decision (#4125)%s",
             engine,
             # ``blocked`` ⊆ ``ambiguous`` (a node blocked by an unmovable
             # relation is never deleted, so it lands in ``ambiguous`` too) —
@@ -432,7 +495,13 @@ def reconcile_after_replay(projection, *, engine: str) -> dict | None:
             len(report["unattributed"]), len(report["ambiguous"]),
             ", {} blocked by an unmovable relation".format(
                 len(report["blocked"]))
-            if report["blocked"] else "")
+            if report["blocked"] else "",
+            # Only the UNATTRIBUTED arm may claim "no identity derivable": a
+            # blocked node's identity was derived and its edges moved (#8229
+            # review, P2 — the blanket claim was false for exactly that node).
+            "; no canonical identity is derivable for the unattributed ones "
+            "from the journal" if report["unattributed"] else "",
+        )
     return report
 
 
@@ -455,6 +524,20 @@ def _blocking_rel_types(out_types, in_types) -> list[str]:
 
 
 # ── public surface ────────────────────────────────────────────────────────
+
+
+def find_other_agent_session_sources(g) -> list[str]:
+    """READ-ONLY: ``agentSession`` Sources this migration deliberately LEAVES.
+
+    The candidate predicate is the pre-#4005 identity — a BARE FILENAME. A
+    keyed url (``corpus://<corpus>/<rel>``, from the indexer's
+    ``_index_process_unit``) is live and correct, so it is never rewritten; it
+    is REPORTED here so a third ``agentSession`` producer is visible to an
+    operator instead of silently absent from the audit (#8229 review, P1).
+    """
+    return [r[0] for r in _rows(g, _OTHER_AGENT_SESSION_SOURCES,
+                                prefix=CANONICAL_PREFIX)
+            if r and isinstance(r[0], str) and r[0]]
 
 
 def find_legacy_session_sources(g) -> list[dict]:
@@ -489,18 +572,25 @@ def reconcile_legacy_session_sources(g, *, dry_run: bool = False) -> dict:
     Returns:
       ``candidates``         legacy ``agentSession`` urls found,
       ``migrated``           urls fully re-pointed and deleted,
-      ``unattributed``       urls with no derivable session (left in place),
-      ``ambiguous``          urls still holding edges afterwards (left in place),
+      ``unattributed``       urls with no derivable session and no unmovable
+                             relation (left in place),
+      ``ambiguous``          urls still holding edges afterwards (left in place;
+                             ``blocked`` is a SUBSET of it),
       ``blocked``            url -> relationship types that blocked a delete,
+      ``notes``              url -> why a candidate was left in place,
+      ``other_agent_session``  live keyed ``agentSession`` urls NOT migrated
+                             (another producer's identity, reported only),
       ``edges_repointed``    edges moved onto a canonical node,
       ``canonical_created``  canonical urls the run minted,
       ``dry_run``            the flag this call carried.
     """
     report: dict = {
         "candidates": [], "migrated": [], "unattributed": [], "ambiguous": [],
-        "blocked": {}, "edges_repointed": 0, "canonical_created": [],
+        "blocked": {}, "notes": {}, "edges_repointed": 0,
+        "canonical_created": [], "other_agent_session": [],
         "dry_run": bool(dry_run),
     }
+    report["other_agent_session"] = find_other_agent_session_sources(g)
     for row in _rows(g, _LEGACY_CANDIDATES, prefix=CANONICAL_PREFIX):
         url = row[0]
         if not isinstance(url, str) or not url:
@@ -509,20 +599,49 @@ def reconcile_legacy_session_sources(g, *, dry_run: bool = False) -> dict:
         props = row[1] if len(row) > 1 and isinstance(row[1], dict) else {}
         att = _attribution(g, url)
         sessions = att["sessions"]
-        if not sessions:
-            # No derivable canonical identity: never invent one.
-            report["unattributed"].append(url)
-            continue
 
+        # The relation census is INDEPENDENT of the attribution and is computed
+        # BEFORE the attribution early-exit (#8229 review, P2). A run that moved
+        # every attributable edge off a blocked node leaves it with no carriers
+        # left; computing `blocking` only on the way to a move would re-report
+        # that node as `unattributed` on every later run — erasing the one
+        # actionable diagnosis (the offending relation type) and claiming "no
+        # session derivable", which is false.
         out_types, in_types = _rel_types(g, url)
         blocking = _blocking_rel_types(out_types, in_types)
         if blocking:
             report["blocked"][url] = blocking
+
+        if not sessions:
+            if blocking:
+                # Attribution already consumed by an earlier run: the node is
+                # BLOCKED, not identity-less — say so, and keep its immovability
+                # (and `blocked ⊆ ambiguous`, the invariant the warning counts).
+                report["ambiguous"].append(url)
+                report["notes"][url] = (
+                    "no attributable edges remain — unmovable relation(s) "
+                    f"{blocking} still block the delete")
+            else:
+                # No derivable canonical identity: never invent one.
+                report["unattributed"].append(url)
+            continue
+
         single = sessions[0] if len(sessions) == 1 else None
         moved = 0
         if single is not None:
             # Unambiguous: everything on the node belongs to this one session.
-            canonical_url = f"{CANONICAL_PREFIX}{single}"
+            canonical_url = _canonical_url(single)
+            if single != single.strip():
+                # The identity is derived from the RAW id (Layer-1 accepts a
+                # padded one verbatim, and every writer/deleter addresses that
+                # spelling), so the migration cannot mint a second, unreachable
+                # `session:<stripped>` (#8229 review, P2). A padded url is also
+                # not reliably addressable by the engine's exact-match lookup,
+                # so nothing below can be assumed to move — say so.
+                report["notes"][url] = (
+                    f"session id carries surrounding whitespace; the derived "
+                    f"canonical url {canonical_url!r} is the writer's spelling "
+                    f"but cannot be addressed by an exact-match lookup")
             created = (not _canonical_exists(g, canonical_url)) if dry_run else \
                 _merge_metadata(g, url, canonical_url, props, carry=True)
             if created:
@@ -540,7 +659,13 @@ def reconcile_legacy_session_sources(g, *, dry_run: bool = False) -> dict:
             # The pre-fix collision: one node, several sessions. Move only the
             # edges that NAME a session; nothing else can be attributed.
             for sid in sessions:
-                canonical_url = f"{CANONICAL_PREFIX}{sid}"
+                canonical_url = _canonical_url(sid)
+                if sid != sid.strip():
+                    report["notes"].setdefault(
+                        url, f"session id {sid!r} carries surrounding "
+                             f"whitespace; the derived canonical url "
+                             f"{canonical_url!r} is the writer's spelling but "
+                             f"cannot be addressed by an exact-match lookup")
                 created = (not _canonical_exists(g, canonical_url)) if dry_run \
                     else _merge_metadata(g, url, canonical_url, props, carry=False)
                 if created:
