@@ -980,9 +980,13 @@ def classify_question(question: str) -> AssemblyShape | None:
     # branch is entered first and its `_relative_match`/`_RE_AGO_OTHER` guard
     # fires. That is the SAFE direction (legacy answers), but it is a routing
     # change, and it is recorded rather than implied. The NAMED-HOLIDAY forms
-    # are NOT in that list: they are rejected here too (the anchor clause
-    # below), so "… in the past two months on Christmas?" keeps the day-scoped
-    # lookup `main` gave it instead of dropping the named day (#8779 F12).
+    # are in that list TOO, and one step further down: the question is
+    # exempted from the day-lookup surface so this branch can decide it, and
+    # the branch then ABSTAINS (the anchor clause below) — so it reaches
+    # NEITHER shape and `classify_question` returns `None` where `main`
+    # returned `relative-date-lookup`. The named day is DROPPED, not
+    # preserved; measured at F17, and the earlier comment here claimed the
+    # opposite.
     #
     # A binary `first … or …` ordering question is DIFFERENT: it names two
     # subjects, so the shape ("names NO subjects") must not claim it — but at
@@ -1017,11 +1021,15 @@ def classify_question(question: str) -> AssemblyShape | None:
         residual = q[:m_cls.start("window")] + " " + q[m_cls.end("window"):]
         if (_RE_AGO_OTHER.search(residual)
                 # ⛔ the SAME surface as `_RE_AGO_OTHER`, for the anchors that
-                # regex does not hold: a weekday/weekend/`valentine` anchor
-                # already rejects above, and any OTHER named holiday must
-                # reject here too — the case split by which vocabulary a
-                # question happens to use is the defect, not the rule.
-                or _named_fixed_date_anchor(residual)
+                # regex does not hold: any calendar anchor in the residual —
+                # a named holiday, a WEEKDAY form (`this past Saturday`, `past
+                # weekend`), or a weekend form — means the question is not a
+                # pure relative-window enumeration. `_named_fixed_date_anchor`
+                # only held the FIXED_DATE family, so `this past weekend`,
+                # `past weekend` and `past Saturday` slipped it and FIRED
+                # here, dropping the named day that `main` resolved (#8779
+                # F18). `find_anchor_spans` is the whole surface.
+                or find_anchor_spans(residual)
                 or _RE_FREQUENCY.search(q)
                 or _RE_ADVICE.search(q) or _RE_OR_CHAIN.search(q)
                 or _RE_DURATION.search(q)
@@ -3388,6 +3396,19 @@ _CLASS_PARTICIPLE = frozenset({
 #: without a measured row asking for it.
 _CLASS_ADJ_NOUN = {"musical": "music"}
 
+#: bare verbs that can follow `to` inside a class span — the INFINITIVE marker
+#: is in `_CLASS_ADJUNCT_PREP`, so "the things TO DO" reached the generic-head
+#: complement fallback and promoted the VERB `do` to the class vocabulary: a
+#: row reading "I do not remember the name" was enumerated as a thing-to-do
+#: and the real class row was not (#8779 F21). Bounded on purpose, like
+#: `_CLASS_PARTICIPLE`; an unlisted verb costs the same false include the
+#: list prevents, and a NOUN after `to` ("the trips TO PARIS") is unaffected.
+_CLASS_INFINITIVE = frozenset({
+    "do", "attend", "go", "see", "visit", "make", "take", "try", "use",
+    "find", "get", "have", "know", "learn", "meet", "read", "run", "watch",
+    "buy", "send", "write", "call", "check", "review", "join", "host",
+})
+
 
 def _class_stem(tok: str) -> str:
     """Deterministic class-token stem — ONE function for BOTH the question's
@@ -3552,7 +3573,15 @@ def _class_span_without_instruction(span: str) -> str:
     """
     scrubbed = _RE_CLASS_ORDER_INSTRUCTION.sub(" ", _as_str(span))
     scrubbed = re.sub(r"\s+", " ", scrubbed)
-    return scrubbed.strip(" ,;:-")
+    cleaned = scrubbed.strip(" ,;:-")
+    # ⛔ an interposed possessive ends the span AT the possessive
+    # ("… the concerts WITH my friend"), so the preposition that governed it
+    # is left dangling and the rendered header named a truncated, ungrammatical
+    # class ("CLASS ORDER (the concerts with)") (#8779 F20).
+    words = cleaned.split()
+    while words and words[-1].lower() in _CLASS_ADJUNCT_PREP:
+        words.pop()
+    return " ".join(words)
 
 
 def _class_tokens(span: str) -> tuple[str, ...]:
@@ -3630,7 +3659,7 @@ def _class_tokens(span: str) -> tuple[str, ...]:
         after = head[last_generic + 1:]
         if after and not any(_class_stem(w) in _CLASS_GENERIC
                              for w in after):
-            if cut < len(words) and (
+            if cut < len(words) and not after[-1].endswith("s") and (
                     after[-1].endswith(("ed", "ing"))
                     or after[-1] in _CLASS_PARTICIPLE):
                 after = after[:-1]
@@ -3645,8 +3674,16 @@ def _class_tokens(span: str) -> tuple[str, ...]:
     # SUFFIX test misses irregulars, so a bounded list covers the common ones;
     # an unlisted one now costs only a stray selector (the head noun survives
     # the rule above), never the head itself.
-    if cut < len(words) and len(out) > 1 and (
-            out[-1].endswith(("ed", "ing")) or out[-1] in _CLASS_PARTICIPLE) \
+    # ⛔ and the PLURAL marker overrides the suffix test (#8779 F19): a
+    # plural `-ing`/`-ed` word is a NOUN, not a reduced relative, so "the
+    # morning MEETINGS at the office" kept only `morning` — which then
+    # selected "did my morning coffee run" and dropped the row that named the
+    # meeting. The stemmer hides the plural, so the RAW token decides.
+    raw_tail = next((w for w in reversed(run)
+                     if w not in _CLASS_STOPWORDS), "")
+    if cut < len(words) and len(out) > 1 and not raw_tail.endswith("s") \
+            and (out[-1].endswith(("ed", "ing"))
+                 or out[-1] in _CLASS_PARTICIPLE) \
             and any(x not in _CLASS_GENERIC for x in out[:-1]):
         out = out[:-1]
     # ⛔ the cut above is only correct while the HEAD noun phrase still carries
@@ -3689,7 +3726,8 @@ def _class_tokens(span: str) -> tuple[str, ...]:
         # a PRONOUN in the span means it is a CLAUSE ("after I graduated"),
         # which names no class — the generic head then stays a WEAK filter
         # rather than becoming a verb.
-        if rest and not any(w in _CLASS_PRONOUN for w in rest):
+        if rest and not any(w in _CLASS_PRONOUN for w in rest) \
+                and rest[0] not in _CLASS_INFINITIVE:
             complement = _stems(rest)
             if complement:
                 out = complement

@@ -5159,6 +5159,25 @@ def test_class_vocabulary_excludes_clauses_appositives_and_postmodifiers():
     assert not _class_owns_row(
         {"content": "filled out the form for the insurance"}, formal)
     assert _class_tokens("my musical gigs") == ("music", "gig")
+    # a PLURAL `-ing`/`-ed` word is a NOUN, not a reduced relative — the
+    # suffix test alone ate the head noun, leaving only the modifier as the
+    # selector (#8779 F19)
+    assert _class_tokens("the morning meetings at the office") == \
+        ("morning", "meeting")
+    assert _class_tokens("the weekly trainings at the gym") == \
+        ("weekly", "training")
+    assert _class_tokens("the concerts organized by the club") == \
+        ("concert",)
+    # an INFINITIVE complement names no class; the generic head stays a weak
+    # filter rather than becoming the verb (#8779 F21)
+    assert resolve_class_window(
+        "What is the order of the things to do I attended in the past two "
+        "months?", "2026-09-10").tokens == ("thing",)
+    # ... and the rendered class name never keeps the dangling preposition an
+    # interposed possessive left behind (#8779 F20)
+    assert resolve_class_window(
+        "What is the order of the concerts with my friend I attended in the "
+        "past two months?", "2026-09-10").class_phrase == "the concerts"
 
 
 def test_class_order_instruction_is_terminal_not_a_class_prefix():
@@ -5240,19 +5259,24 @@ def test_class_direction_vocabulary_is_a_stoplist():
 
 
 def test_class_plural_abstains_on_a_named_holiday_anchor():
-    """#8779 F12: a question that ALSO names a calendar day is the day-scoped
-    lookup `main` routed (``relative-date-lookup``), not a class enumeration —
-    the shape must not claim it and drop the named day.
+    """#8779 F12/F18: a question that ALSO names a calendar day is a day-scoped
+    lookup at `main` (``relative-date-lookup``), not a class enumeration — the
+    shape must not claim it and drop the named day.
 
-    A weekday/weekend/``valentine`` anchor already abstained through
-    ``_RE_AGO_OTHER``; the OTHER holidays (Christmas, Halloween, New Year's
-    day, the fourth of July, …) did not, so the disposition depended purely on
-    which vocabulary the regex happened to hold. The shared calendar-anchor
-    finder now owns the whole table, so every holiday agrees with
-    ``last Saturday`` and with the plain class question (the control).
+    ⛔ the outcome is `None`, NOT the lookup `main` gave it: the question is
+    exempted from the day-lookup surface so this branch can decide it, and the
+    branch then abstains — so it reaches NEITHER shape and falls through to
+    legacy. That is the safe direction and it is recorded in the plan's §6,
+    not claimed as preservation. `_RE_AGO_OTHER` held only SOME of the
+    weekday forms and ``_named_fixed_date_anchor`` only the FIXED_DATE family,
+    so `this past weekend` / `past weekend` / `past Saturday` slipped both
+    and FIRED the shape over the two-month window (#8779 F18). The shared
+    calendar-anchor finder now owns the whole table.
     """
     for anchor in ("Christmas", "New Year's day", "Halloween",
-                   "Valentine's day", "the fourth of July", "last Saturday"):
+                   "Valentine's day", "the fourth of July", "last Saturday",
+                   "this past Saturday", "past Saturday", "this past weekend",
+                   "past weekend", "the past weekend", "this weekend"):
         q = ("What is the order of the concerts I attended in the past two "
              f"months on {anchor}?")
         assert classify_question(q) is None, (anchor, classify_question(q))

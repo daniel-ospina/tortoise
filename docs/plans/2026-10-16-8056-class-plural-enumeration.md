@@ -296,7 +296,7 @@ probe can separate linear from quadratic.
 
 ## 6. Residuals (recorded, not hidden)
 
-- **Three `main`-routed constructs now land on `None` (safe direction).** The
+- **`main`-routed constructs that now land on `None` (safe direction).** The
   class-plural branch is entered before the rest of `classify_question`, so
   `"… in the past two months, most recently?"` (main: `AGO_RELATIVE`) and
   `"… in the past two months last Saturday?"` (main: `RELATIVE_DATE`) are
@@ -312,6 +312,15 @@ probe can separate linear from quadratic.
   Handing the question back to the day-lookup surface once the body declines
   is the follow-up fix, and both the classifier comment and the earlier
   version of this bullet that claimed the lookup was kept are corrected here.
+  **F18 widened it:** `_RE_AGO_OTHER` held only SOME weekday forms and
+  `_named_fixed_date_anchor` only the FIXED_DATE family, so `this past
+  weekend`, `past weekend`, `the past weekend`, `this weekend`, `this past
+  Saturday` and `past Saturday` slipped BOTH guards and FIRED the shape over
+  the two-month window — a main-firing construct landing on a *different
+  firing shape*, which §6's first version did not cover. The shared
+  calendar-anchor finder now owns the whole table, so these join the `None`
+  family above instead of answering a two-month enumeration for a
+  named-day question.
 
 - **The class filter runs after the fetch cap.** `port.window_rows` fetches
   `cap` points + `cap` events (cap = `PER_ENTITY_FANOUT_CAP` = 200) newest-first
@@ -330,6 +339,12 @@ probe can separate linear from quadratic.
   recall-only: it turned `formal` into `form` and enumerated "filled out the
   FORM for the insurance" as a *formal event* — a false include, which this
   design does not accept. A pair outside the alias list costs recall only.
+- **Three more false-include classes were closed by measurement** (each was a
+  word-class error, not a recall trade): a PLURAL `-ing`/`-ed` word is a noun,
+  so "the morning MEETINGS at the office" no longer loses its head to the
+  reduced-relative rule (F19); an INFINITIVE complement names no class, so
+  "the things TO DO" no longer promotes the verb `do` (F21); and a class name
+  never keeps the preposition an interposed possessive left dangling (F20).
 - **The docker-lane end-to-end pin is not added** (no docker in this lane). The
   hermetic `_assemble_connected` tests drive the same orchestration, and
   `tests/test_assembly_sdk.py` passes unchanged, but the docker/SDK golden for
