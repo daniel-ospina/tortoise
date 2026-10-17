@@ -94,10 +94,11 @@ commands that remove or MOVE an existing entry, and both are explicit by design
 REFUSES an entry that another lane's ref or ``[<lane-key>]`` marker names: pinning
 it here would leave it claimed by both lanes, and ``check`` would then call a bare
 ``git stash pop`` safe on work that is not this lane's (#8773 review P1). It also
-refuses an entry already ENUMERATED by the register that is not provably this
-lane's — nothing was dropped, so `recover` would only mint ownership (pass ``-m``
-to assert the recovery deliberately). A peer's entry is restored with bare
-``git stash store`` or from its own lane.
+refuses any entry that is not provably this lane's when NOTHING was dropped —
+whether the register ENUMERATES it or ``refs/stash`` still NAMES it (an emptied
+reflog) — because `recover` would only mint ownership; pass ``-m`` to assert the
+recovery deliberately. A peer's entry is restored with bare ``git stash store`` or
+from its own lane.
 
 USAGE
 -----
@@ -777,29 +778,29 @@ def _release_stale_guard(ref: str, sha: str) -> None:
 def _reap_stale_guards() -> None:
     """Release guards whose OWNER WORKTREE is gone and whose object has another handle.
 
-    A guard left by a removed worktree is never released by any other command:
-    `prune` only unpins the guards IT created, and `recover` refuses a sha that is
-    already in the register unless `-m`. Once its object is named by the register
-    or a lane ref the guard is redundant, and left alone it blocks gc forever
-    (#8822 review P2).
+    A guard left by a removed worktree is not released by any ROUTINE command:
+    `prune` only unpins the guards IT created, and `recover` reaches one only via
+    the explicit `-m` assertion (which releases every guard for that sha). Once
+    its object is named by the register or a lane ref the guard is redundant, and
+    left alone it blocks gc forever (#8822 review P2).
 
     Both conditions are required: a LIVE owner key may be a prune in flight, whose
     guard is its only protection during a positional delete; a DEAD owner's guard
     for an object no other ref names is the LAST handle on that object.
 
     Residual windows (documented, not closable with git's ref API): every input is
-    a snapshot. Whichever evidence is USED is the freshest read before the
-    `update-ref -d` — the register when it names the object, `_refs_pointing_at`
-    when it does not (it is therefore read only in that branch) — so a peer
-    `stash clear` is at most one subprocess ahead of the unpin. Liveness is
-    re-read for each CANDIDATE (dead owner and another handle), because fleet
-    worktree paths are REUSED: a worktree created at a removed path derives the
-    SAME lane key, and without the re-read its in-flight prune's guards would be
-    judged dead here.
+    a snapshot. The evidence read (the register when it names the object, else
+    `_refs_pointing_at` — read only in that branch) is followed by exactly one
+    liveness re-read before the `update-ref -d`, so a peer `stash clear` is at most
+    one subprocess ahead of the unpin. Liveness is re-read for each CANDIDATE (dead
+    owner and another handle), because fleet worktree paths are REUSED: a worktree
+    created at a removed path derives the SAME lane key, and without the re-read its
+    in-flight prune's guards would be judged dead here.
     """
     guards = _guard_refs()
     if not guards:
         return
+    released = 0
     keys, stale, why = _live_lane_keys()
     if keys is None:
         print(f"kept   {len(guards)} prune guard(s) — `git worktree list` {why}, so a "
@@ -813,7 +814,7 @@ def _reap_stale_guards() -> None:
               f"({', '.join(stale)}); a stale path can hide a LIVE lane key, so run "
               "`git worktree prune` to enable reaping")
         return
-    for i, (ref, sha, owner) in enumerate(guards):
+    for ref, sha, owner in guards:
         if not owner or owner in keys:
             continue
         try:
@@ -823,14 +824,20 @@ def _reap_stale_guards() -> None:
             # the guard we drop the object's LAST handle (#8822 review P1).
             present = {r["sha"] for r in _shared_register()}
         except LaneStashError:
-            print(f"kept   {len(guards) - i} prune guard(s) — the shared register "
+            # `released`, not `i`: `i` is how many candidates were EXAMINED, and the
+            # guards skipped as live-owner are still held refs blocking gc. Report
+            # the number actually kept (#8822 review P2).
+            print(f"kept   {len(guards) - released} prune guard(s) — the shared register "
                   "could not be read, so no further guard was checked")
             return
         if sha in present:
-            # `present` is the freshest evidence: release on it directly.
+            # `present` is the evidence; `_owner_may_be_live` re-reads liveness
+            # (one subprocess) before the unpin, so the register is at most one
+            # read old.
             if _owner_may_be_live(owner, ref, sha):
                 continue
             _release_stale_guard(ref, sha)
+            released += 1
             continue
         others = {
             r for r in _refs_pointing_at(sha)
@@ -840,10 +847,12 @@ def _reap_stale_guards() -> None:
         }
         if not others:
             continue
-        # Here `_refs_pointing_at` is the freshest read, taken above.
+        # `_refs_pointing_at` is the evidence here, likewise followed by exactly one
+        # liveness re-read before the unpin.
         if _owner_may_be_live(owner, ref, sha):
             continue
         _release_stale_guard(ref, sha)
+        released += 1
 
 
 def _refs_pointing_at(sha: str) -> set[str]:
@@ -1533,9 +1542,9 @@ def cmd_prune(args: argparse.Namespace) -> int:
             "know the entry is safe."
         )
     if args.apply:
-        # Guards left by REMOVED worktrees are otherwise un-releasable: `prune` only
-        # unpins the guards it created, and `recover` refuses a register-listed sha
-        # without `-m` (#8822 review P2).
+        # Guards left by REMOVED worktrees are not released by any routine command:
+        # `prune` only unpins the guards it created, and `recover` reaches one only
+        # through the explicit `-m` assertion (#8822 review P2).
         _reap_stale_guards()
     if not doomed:
         if not orphan:
