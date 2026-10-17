@@ -2814,8 +2814,9 @@ def _journal_safe_params(params, cypher=None):
     # A READ still has to be gated. FalkorDB PARSES every parameter regardless
     # of clause, so an unwritable value in a read ``MATCH {prop:$p}`` aborts a
     # replay after the wipe exactly as a write does — skipping reads here
-    # RE-OPENED the hole (measured: ``resolve_source_key``,
-    # ``_try_about_edge``, and a plain dict in ``about_entities``).
+    # RE-OPENED the hole (measured: ``resolve_source_key``, the about-name
+    # cascade's ``_resolve_about_edge_target`` probe — ``_try_about_edge``
+    # before #8398 renamed it — and a plain dict in ``about_entities``).
     #
     # What the clause buys is a cheap route for the two dominant READ shapes:
     # scalars, and an id LIST (``WHERE p.id IN $ids``). Neither needs the
@@ -8181,7 +8182,21 @@ class FalkorProjection(
                 # is the only faithful option.
                 pass
             else:
-                _about_w, _about_f = self.replay_about_links(ev)
+                # #8398 P2-5: GUARDED like every sibling sweep in this file.
+                # ``apply`` is driven directly by the engines that have NO
+                # trailing sweep (``backup.restore``, ``consistency``), so an
+                # engine error or a malformed link escaping here aborted the
+                # RESTORE — contradicting this patch's own "Reported, never
+                # raised" policy. The record has already folded above, so the
+                # loss is the LINK, and it is counted and reported below.
+                try:
+                    _about_w, _about_f = self.replay_about_links(ev)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "apply: #8398 about-link re-wire raised for event %r "
+                        "— the record folded, its links did not",
+                        ev.get("event_id") or ev.get("id"))
+                    _about_w, _about_f = 0, 1
             if _about_f:
                 logger.warning(
                     "#8398: apply() could not re-wire %d journaled Event→entity "

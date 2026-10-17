@@ -29,6 +29,7 @@ import os
 
 import pytest
 
+from tortoise.projection import _replay_write_scope
 from tortoise.sdk import TortoiseSDK
 
 ABOUT_RELS = ("aboutSubject", "aboutObject", "aboutPoint", "aboutDocument")
@@ -161,7 +162,13 @@ def test_replay_reproduces_the_live_about_counts(wired) -> None:
 
 
 def test_the_record_journals_the_precise_link_form(wired) -> None:
-    """``how`` is decided LIVE (resolved → ``id``, else the name path)."""
+    """The record carries the RESOLVED link, for BOTH paths.
+
+    ``how`` is decided live: a value that resolved against the rel's own target
+    label journals ``id`` with its value. A value that did not resolves through
+    the rel-IGNORING cascade, so the record must pin what the cascade actually
+    produced — here a ``:Subject`` stub under ``aboutSubject``, NOT the
+    ``aboutDocument`` the caller asked for (#8398 review P1-2). """
     sdk, _proj, _events, journal = wired
     obj = _nid(sdk.create_object("TheObject"))
     sdk.create_event("marked", "event", aboutObject=obj,
@@ -174,8 +181,16 @@ def test_the_record_journals_the_precise_link_form(wired) -> None:
     assert links["aboutObject"]["targets"] == [obj], (
         "the RESOLVED target value must be journaled, so replay repeats an exact "
         f"endpoint instead of re-deriving the cascade: {links['aboutObject']!r}")
-    assert links["aboutDocument"]["how"] == "name", (
-        "a value that did not resolve must journal as the name path")
+    assert "aboutSubject" in links, (
+        "an unresolved aboutDocument value takes the rel-IGNORING cascade, which "
+        f"mints a Subject stub under aboutSubject: {record['aboutLinks']!r}")
+    pinned = links["aboutSubject"]
+    assert (pinned["how"] == "id" and pinned["target_label"] == "Subject"
+            and pinned["resolve_key"] == "https://example.test/doc"
+            and pinned["mint_if_absent"] is True), (
+        "the cascade's answer must be PINNED (rel, label, resolve key, and the "
+        f"mint claim) for replay to repeat it: {pinned!r}")
+    assert pinned["targets"] == ["https://example.test/doc"], pinned
 
 
 def test_about_links_never_become_node_properties(wired) -> None:
@@ -271,23 +286,27 @@ def test_the_EventLog_engine_also_reproduces_the_links(wired) -> None:
 
 
 def test_a_name_link_replays_without_a_false_failure(wired) -> None:
-    """A ``how:"name"`` link must not report a failure it did not have.
+    """A cascade-resolved link must not report a failure it did not have.
 
-    ``_create_about_edges`` is the rel-IGNORING cascade, and a name link is one
-    whose own rel resolved to nothing at write time — so live wired whatever the
-    cascade found, not ``rel``. Measuring ``rel`` reported failure for the
-    reproduction live just made, and reported failure again on every re-run of an
-    already-wired link (MERGE adds nothing). The link's PRESENCE is the test.
+    ``_create_about_edges`` is the rel-IGNORING cascade, and an unresolved
+    ``aboutDocument`` value is one whose OWN rel resolved to nothing at write time
+    — so live wireed a Subject stub under ``aboutSubject``, not ``aboutDocument``.
+    Measuring the caller's ``rel`` would report failure for the reproduction live
+    just made (and again on every re-run of an already-wired link, because MERGE
+    adds nothing). The record now PINS the cascade's answer, so replay measures
+    the link it was told to make — and the link's PRESENCE is still the test.
     """
     sdk, proj, events, journal = wired
     sdk.create_event("nm", "event", aboutDocument="https://example.test/named")
     proj.rebuild_all(str(events), confirm_destructive=True)
     record = _event_records(journal, "nm")[0]
-    assert [lk["how"] for lk in record["aboutLinks"]] == ["name"]
+    assert [lk["rel"] for lk in record["aboutLinks"]] == ["aboutSubject"], (
+        "the record must pin the rel the cascade produced, not the rel the "
+        f"caller asked for: {record['aboutLinks']!r}")
 
     wired_n, failed_n = proj.replay_about_links(record)
     assert failed_n == 0, (
-        f"a name link reported failure although the value is linked: "
+        f"a pinned link reported failure although the value is linked: "
         f"wired={wired_n} failed={failed_n}")
     assert wired_n == 1
 
@@ -351,3 +370,182 @@ def test_a_document_target_survives_a_rotated_journal(wired) -> None:
     assert _counts(proj) == before, (
         f"the document link was lost across a rotated journal: "
         f"{before} → {_counts(proj)}")
+
+
+# ── Round 2 (adversarial review at a38d6e775) ────────────────────────────────
+
+
+def test_a_name_link_replays_the_REL_and_NODE_live_produced(wired) -> None:
+    """P1-2: journaled name links must not re-run the cascade at replay.
+
+    ``_create_about_edges`` is the rel-IGNORING Subject→Object→Event→Source→Point
+    cascade, so ``aboutObject="Acme"`` with no ``Acme`` node wired
+    ``aboutSubject`` to a fresh Subject stub — not ``aboutObject``. Journaling
+    that as ``how:"name"`` made replay re-ask a LATER graph: once the caller
+    registers the Object, the cascade answers ``aboutObject``. Different rel,
+    different node, and silent — ``_count_about_out`` only asks "is the source
+    joined to anything", so the wrong-rel landing counted as success.
+
+    MEASURED on the shipped code (a38d6e775):
+      LIVE  : [['aboutSubject', ['Subject'], 'Acme']]
+      REPLAY: [['aboutObject',  ['Object'],  'Acme']]
+    """
+    sdk, proj, events, journal = wired
+
+    def edges() -> list:
+        return proj.g.query(
+            "MATCH (e:Event {name:'m'})-[r]->(t) "
+            "RETURN type(r), labels(t), t.name").result_set
+
+    sdk.create_event("m", "event", aboutObject="Acme")   # no Acme node yet
+    sdk.create_object("Acme")                            # registered LATER
+    live = edges()
+    assert live == [["aboutSubject", ["Subject"], "Acme"]], (
+        f"the live cascade did not mint the Subject stub: {live}")
+
+    record = _event_records(journal, "m")[0]
+    assert [link["rel"] for link in record["aboutLinks"]] == ["aboutSubject"], (
+        "the record must pin the rel the LIVE cascade produced, not the rel the "
+        f"caller asked for: {record['aboutLinks']!r}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert edges() == live, (
+        "replay re-ran the name cascade against the END-OF-JOURNAL graph and "
+        f"landed on a different rel/node: live={live} replay={edges()}")
+
+
+def test_a_name_link_to_an_EXISTING_node_replays_onto_that_node(wired) -> None:
+    """The other name-path outcome: the cascade RESOLVED an existing node.
+
+    Live matched the Object by name (its id is ``obj-<sha26>``, so the id-keyed
+    classification misses and the name path runs). The record must carry that
+    endpoint, and replay must land on the same node — not re-run the cascade and
+    land on the Subject branch a later registration makes available.
+    """
+    sdk, proj, events, journal = wired
+    obj = _nid(sdk.create_object("Acme"))
+    sdk.create_event("n", "event", aboutObject="Acme")
+    sdk.create_subject("Acme")   # a same-name Subject registered AFTER the link
+
+    def edges() -> list:
+        return proj.g.query(
+            "MATCH (e:Event {name:'n'})-[r]->(t) "
+            "RETURN type(r), labels(t), t.id").result_set
+
+    live = edges()
+    assert live == [["aboutObject", ["Object"], obj]], (
+        f"live did not resolve the existing Object by name: {live}")
+    record = _event_records(journal, "n")[0]
+    assert [link["rel"] for link in record["aboutLinks"]] == ["aboutObject"], (
+        f"the record dropped the resolved rel: {record['aboutLinks']!r}")
+    assert record["aboutLinks"][0]["targets"] == [obj], (
+        "the record must carry the endpoint live resolved: "
+        f"{record['aboutLinks']!r}")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert edges() == live, (
+        f"replay did not reproduce the live endpoint: {live} → {edges()}")
+
+
+def test_recording_a_name_link_leaves_no_phase_two_drift(wired) -> None:
+    """A caller ``aboutLinks`` prop must not collide with the journal field.
+
+    P1-1, MEASURED at a38d6e775: ``create_event(..., aboutObject=oid,
+    aboutLinks=["caller"])`` raised ``TypeError: _emit_event() got multiple
+    values for keyword argument 'aboutLinks'`` — AFTER the live write had
+    committed and BEFORE anything was journaled, so the Event was live-only and
+    the next ``rebuild_all`` silently deleted it. On ``origin/main`` that call
+    works, i.e. it was a regression.
+
+    Three things must hold at once: the call returns a node, exactly ONE
+    ``EventRecorded`` line is written, and the record carries the links the SDK
+    RESOLVED (never the caller's prop, which is not journal data).
+    """
+    sdk, proj, events, journal = wired
+    oid = _nid(sdk.create_object("Collide"))
+
+    node = sdk.create_event("collide", "event", aboutObject=oid,
+                            aboutLinks=["caller"])
+    assert _nid(node), f"create_event returned no node: {node!r}"
+
+    records = _event_records(journal, "collide")
+    assert len(records) == 1, (
+        "the Event was written live but journaled "
+        f"{len(records)} times — a caller `aboutLinks` prop broke the record: "
+        f"{[r.get('type') for r in _records(journal)]}")
+    assert records[0]["aboutLinks"] == [
+        {"rel": "aboutObject", "how": "id", "targets": [oid]}], (
+        "the record must carry the links the SDK resolved, not the caller's "
+        f"prop: {records[0]['aboutLinks']!r}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert proj.g.query(
+        "MATCH (e:Event {name:'collide'}) RETURN e.id").result_set == [[_nid(node)]], (
+        "the Event was live-only: `rebuild_all` destroyed it")
+
+
+def test_a_caller_aboutLinks_prop_is_not_read_as_journal_data(wired, caplog) -> None:
+    """P1-1 (second half): ``aboutLinks`` is a ``_emit_event`` call-collision name.
+
+    It rides a ``**props`` splat, so it is unreachable via
+    ``inspect.signature`` — the derived-coverage test cannot see it. Without the
+    reserved-set strip the caller's prop reaches the live fold, where ``apply``'s
+    inline re-wire reads it as journal data and reports a phantom failure
+    (measured: "#8398: apply() could not re-wire 1 journaled Event→entity
+    about* link(s)").
+    """
+    import logging
+
+    sdk, _proj, _events, _journal = wired
+    oid = _nid(sdk.create_object("Collide"))
+    with caplog.at_level(logging.WARNING):
+        sdk.create_event("collide", "event", aboutObject=oid,
+                         aboutLinks=["caller"])
+    assert "#8398: apply() could not re-wire" not in caplog.text, (
+        "the caller's `aboutLinks` prop was interpreted as journal data by the "
+        f"live fold: {caplog.text[-2000:]}")
+
+
+def test_a_flat_list_aboutLinks_record_never_becomes_a_node_property(wired) -> None:
+    """P2-2: the drop must be DECLARED, not incidental.
+
+    ``aboutLinks`` is record DATA. A record whose field is a list of dicts happens
+    to be filtered by ``_is_persistable_prop_value``, but a FLAT list is a
+    persistable value — measured on the shipped code, replaying one yields
+    ``node aboutLinks = [['aboutObject:obj-1']]``, a property live never had.
+    """
+    sdk, proj, _events, _journal = wired
+    ev = _nid(sdk.create_event("flat", "event"))
+    with _replay_write_scope():
+        proj.apply({"type": "EventRecorded", "id": ev, "eventId": ev,
+                    "name": "flat", "eventKind": "event",
+                    "aboutLinks": ["aboutObject:obj-1"]})
+    row = proj.g.query(
+        "MATCH (e:Event {id:$id}) RETURN e.aboutLinks",
+        params={"id": ev}).result_set
+    assert row == [[None]], (
+        "a flat-list `aboutLinks` record folded onto the Event as a node "
+        f"property live never had: {row}")
+
+
+def test_apply_does_not_abort_when_the_about_re_wire_raises(wired, monkeypatch) -> None:
+    """P2-5: ``apply``'s inline re-wire must be guarded like both sweeps.
+
+    ``backup.restore`` and ``consistency.py`` drive ``apply`` directly and have no
+    trailing sweep, so an engine error or a malformed link escaping this call
+    aborts the RESTORE — contradicting the patch's own "Reported, never raised"
+    policy. The record must still fold (the fold precedes the re-wire).
+    """
+    sdk, proj, _events, _journal = wired
+    ev = _nid(sdk.create_event("boom", "event"))
+
+    def _raise(_payload):
+        raise RuntimeError("engine error mid re-wire")
+
+    monkeypatch.setattr(proj, "replay_about_links", _raise)
+    with _replay_write_scope():
+        proj.apply({"type": "EventRecorded", "id": ev, "eventId": ev,
+                    "name": "boom2", "eventKind": "event"})
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id}) RETURN e.name",
+        params={"id": ev}).result_set == [["boom2"]], (
+        "the record did not fold before the failing re-wire")
