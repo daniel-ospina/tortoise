@@ -10527,6 +10527,22 @@ class TortoiseSDK:
         # does not re-issue blindly (a blind retry appends a SECOND delete
         # record for one intent). Re-raise the engine error only when no record
         # was committed.
+        #
+        # ⚠️ SCOPE: this wraps the `DETACH DELETE` ONLY, and that is the one
+        # statement whose failure would misreport a LANDED destruction. The
+        # statements after it stay bare deliberately (#7951 review round 2):
+        #   * `_emit_event("PointRetracted", …)` is best-effort by construction
+        #     (#4240) — it never raises, so there is nothing to wrap.
+        #   * the orphan-tag GC is a RETRIED write that can still exhaust, but
+        #     its failure leaves orphan `:Tag` rows, not a lost or an unapplied
+        #     destruction: the node is already gone and the record already
+        #     says so. A re-issue finds no node and returns False, so it
+        #     cannot append a second record.
+        #   * `_mark_dirty` / `invalidate_messages` are cache bookkeeping; a
+        #     failure there is a stale-confidence report, not a state lie.
+        # Widening this wrap would convert those into a "the delete did not
+        # happen" claim that is FALSE after the DETACH DELETE landed — the
+        # class of wrong answer this whole increment exists to remove.
         try:
             self._graph_write_with_retry(
                 lambda: proj.g.query(

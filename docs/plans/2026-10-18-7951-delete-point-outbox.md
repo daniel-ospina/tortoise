@@ -69,12 +69,17 @@ append refuses the delete instead of performing an unrecorded destruction.**
 
 ## 3. Ordering contract (unchanged, applied)
 
-**Journal first, then project** — module top of `tortoise/sdk.py`, argued from the two crash windows:
-die between append and cache ⇒ the cache is **`extra_in_cache`** (it holds a node the record no
-longer has — the §17.1 second-writer signature, *not* a lag, which is `missing_in_cache`) and
-replay resolves it destructively; die between cache and
-append ⇒ the cache is **ahead of truth with no repair path**. On a delete the second window's harm is
-resurrection, which is strictly worse than loss and is why the delete door is worth a unit of its own.
+**Journal first, then project** — module top of `tortoise/sdk.py`, argued from the two crash windows.
+The divergence class each window produces DEPENDS ON THE DOOR, and this plan's earlier draft
+generalized the delete's class to all of them (review round 2):
+
+| door | die between append and cache | replay | die between cache and append |
+|---|---|---|---|
+| `create_point` / `update_point` | `missing_in_cache` — the record exists, the node does not | materialises the write | ahead of truth, no repair path |
+| `delete_point` | **`extra_in_cache`** — the cache holds a node the record no longer has (§17.1's second-writer signature, *not* a lag) | **removes** the node, destructively | resurrection on the next rebuild |
+
+On a delete the second window's harm is resurrection, which is strictly worse than loss and is why
+the delete door is worth a unit of its own.
 
 **Why journal-first is sound here even though the delete is conditional-looking.** The existing
 existence probe runs first, so a no-op delete journals nothing (T4). A concurrent delete between the
@@ -100,13 +105,15 @@ delete is unconditional once the probe passes, so the record can and must preced
 | T5 | the record's declared shape drifts in with an ordering fix | `test_the_delete_record_keeps_its_declared_shape` (one record, `op=delete`, `label=Point`, no `state`, no JSONL `PointRetracted`) | no (guard) |
 | T6 | the `:GraphEvent` subscriber surface silently changes | `test_the_graph_event_row_is_still_written_after_the_delete` (`poll_events` still reports `PointRetracted` with `deleted: true`) | no (guard) |
 | T7 | the `None` outcome (no journal / nothing to log — the DEFAULT embedded shape) is read as a refusal, so every delete on every journal-less SDK fails closed | `test_a_journal_less_sdk_still_deletes` (journal-less SDK ⇒ `delete_point` returns `True` and the node is gone) | no (guard) |
-| T8 | the evidence probe restores a BOUND method onto the guarded handle's class, so sections 2-4 silently address section 1's graph | `test_the_evidence_probe_rebinds_the_guarded_handle_per_instance` (patch → restore ⇒ the class attribute is the class FUNCTION again, and a second SDK's write is visible only on its OWN underlying handle) | **YES** (against the pre-fix PROBE, not the door) — its restore assigned `proj.g.query` (bound) to the class, so SDK #2's write lands in SDK #1's graph |
+| T8 | an append that LANDS and then raises is reported as committed | `test_an_append_that_lands_then_raises_is_reported_as_unconfirmed` (append writes then raises ⇒ refusal with `record_committed=False`, `DETACH DELETE` not issued, record on disk, replay removes the Point) | **YES** — the pre-change door ignored `_emit_event`'s outcome, so no refusal is raised at all |
+| T9 | the evidence probe restores a BOUND method onto the guarded handle's class, so sections 2-4 silently address section 1's graph | `test_the_evidence_probe_rebinds_the_guarded_handle_per_instance` (patch → restore ⇒ the class attribute is the class FUNCTION again, and a second SDK's write is visible only on its OWN underlying handle) | **YES** (against the pre-fix PROBE, not the door) — its restore assigned `proj.g.query` (bound) to the class, so SDK #2's write lands in SDK #1's graph |
 
-**Measured** (`TORTOISE_TEST_CARVE_OUT=1`, embedded lane): `3 failed, 5 passed` on the pre-change
-source (`origin/main`'s `tortoise/sdk.py` — T1/T2/T3 red, T4-T8 green), `8 passed` after. The guards
-(T4-T7) pass on both sides by design and say so in their docstrings rather than implying detection
-power. T8 is a guard on the EVIDENCE ARTIFACT, not on the door: it is red against the pre-fix probe
-(whose restore put a BOUND method on the guarded handle's class) and green against the fixed one.
+**Measured** (`TORTOISE_TEST_CARVE_OUT=1`, embedded lane): `4 failed, 5 passed` on the pre-change
+source (`origin/main`'s `tortoise/sdk.py` — T1/T2/T3/T8 red, T4-T7/T9 green), `9 passed` after. The
+guards (T4-T7) pass on both sides by design and say so in their docstrings rather than implying
+detection power. T9 is a guard on the EVIDENCE ARTIFACT, not on the door: it is red against the
+pre-fix probe (whose restore put a BOUND method on the guarded handle's class) and green against the
+fixed one.
 
 ## 5. Wiring Check
 
@@ -117,7 +124,8 @@ power. T8 is a guard on the EVIDENCE ARTIFACT, not on the door: it is red agains
 | `_journal_entity_mutation` returns the per-call outcome | code | same (T2); `tests/test_unjournaled_mutation_class.py` (45 tests, unchanged shape) | done |
 | the no-op delete still journals nothing | code | same (T4) | done |
 | the journal-less (`None`) outcome is not a refusal | code | same (T7) | done |
-| the evidence probe measures each SDK's OWN graph | evidence | same (T8); `docs/evidence/7951-delete-point-outbox/probes/delete_order_probe.py` | done |
+| an append that LANDS then raises is reported as unconfirmed | code | same (T8) | done |
+| the evidence probe measures each SDK's OWN graph | evidence | same (T9); `docs/evidence/7951-delete-point-outbox/probes/delete_order_probe.py` | done |
 | module-top KNOWN DEVIATIONS corrected | docs | `tortoise/sdk.py` module top | done |
 | test-file classification | config | `config/ci-surfaces.yml` — six-surface dual-registration + a `durations` row; `python tools/ci_selection.py --integrity` green | done |
 | executable demonstration | evidence | `docs/evidence/7951-delete-point-outbox/` (probe + verbatim log, exit 0; re-measured at this head — section 3 now prints the `record_committed=True` arm) | done |
