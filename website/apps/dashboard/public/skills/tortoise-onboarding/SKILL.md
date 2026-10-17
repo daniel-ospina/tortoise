@@ -734,8 +734,10 @@ GitHub's two sources are **separately enable-able** and share **one OAuth
 connect** — turning issues off never disconnects GitHub for documents (the
 `github_connected` key is the connection, never a per-source toggle).
 
-- **Ask, then honour the answer.** A "no" writes nothing (a source absent from
-  the projection is off, not enabled); a "yes" writes the per-source enable
+- **Ask, then honour the answer.** A "no" writes nothing (an UNSET key is not
+  off: it means the product default, which for these flags is **on** — the
+  tool's `enabled` and `default` fields say which); a "yes" writes the
+  per-source enable
   intent through the same tool surface the hosted wizard uses
   (`tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")` / the onboarding-state path) — one state path,
   never a second copy of the flag. **Self-hosted: this tile's write lands
@@ -776,7 +778,11 @@ the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
 
 - **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
   `tortoise_manage_sources(action="enable", source="github_issues")`; read `tortoise_onboarding_github_status`
-  (or `tortoise_onboarding_state`).
+  (or `tortoise_onboarding_state`). ⏺ **`disable` here is INTENT, not custody:**
+  it writes `issues_enabled=false`, which no server-side reader honours yet, so
+  an in-flight index run is not cancelled and the connection (with the docs
+  source) stays. The tool's own payload reports `enforcement: "intent-only"` —
+  repeat that rather than telling a user the source has stopped.
 - **Agent-session recording** — `tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")`
   (`enabled`); read it back from `tortoise_onboarding_state`, which reports the
   stored operational keys under `operational` (#8686). **Self-hosted this is the

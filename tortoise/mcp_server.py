@@ -4378,29 +4378,44 @@ _SOURCE_ROSTER: dict[str, dict] = {
 }
 
 
+_UNAVAILABLE = object()
+
+
 def _state_get(state: dict, key: str):
     """Read an onboarding key, tolerating the self-host NESTED shape (#3540).
 
     The hosted projection is FLAT, but `read_selfhost_state` puts the
-    operational keys under `state["operational"]` (and may report that sub-read
-    as the string `"unavailable"`). Reading only the top level made `list`
-    report `agent_sessions.enabled: true` for a stored
+    operational keys under `state["operational"]`, and reports that sub-read as
+    the STRING `"unavailable"` when the graph is down. Reading only the top
+    level made `list` report `agent_sessions.enabled: true` for a stored
     `operational.session_recording: false`, and made `enable` answer
     `already_on` while writing nothing — the pinned re-enable path
     (`tortoise/onboarding/SKILL.md`, "re-sets the setting regardless") stranded
     on the self-host leg.
+
+    `_UNAVAILABLE` is returned (not `None`) when the sub-read failed: an
+    unreadable projection must not be reported as the product default.
     """
     if key in state:
         return state[key]
     operational = state.get("operational")
+    if operational == "unavailable":
+        return _UNAVAILABLE
     if isinstance(operational, dict):
         return operational.get(key)
     return None
 
 
-def _flag_on(state: dict, key: str, default: bool = True) -> bool:
-    """Read an enable-intent flag, honouring its documented default."""
+def _flag_on(state: dict, key: str, default: bool = True):
+    """True/False for an enable-intent flag, or None when it is UNKNOWN.
+
+    `None` is not a third opinion: it is what an unreadable projection must
+    produce, so `list` can emit `enabled: null` instead of fabricating the
+    product default.
+    """
     value = _state_get(state, key)
+    if value is _UNAVAILABLE:
+        return None
     return default if value is None else bool(value)
 
 
@@ -4459,6 +4474,51 @@ def _sources_view() -> dict:
     }
 
 
+def _source_payload(spec: dict, status: str, **extra) -> dict:
+    """The fields EVERY state-change payload carries (#3540).
+
+    A caller branching on `enforcement` — the field that tells intent from
+    custody — must not hit KeyError on one of the documented `status` values,
+    and `default` must not appear on only some responses.
+    """
+    return {"status": status,
+            "enforcement": spec["enforcement"],
+            "default": spec["default"],
+            "enable_flag": spec["enable_flag"],
+            **extra}
+
+
+def _spawn_index_runner(runner, job_id: str, org_id: str,
+                        gh_org: str | None) -> bool:
+    """Start the async index walk WITHOUT assuming this thread has a loop.
+
+    FastMCP runs a SYNC tool on a worker thread, where
+    `asyncio.get_event_loop()` returns a loop that is not running and
+    `create_task` schedules nothing. The retired handler had the same shape;
+    now that this is the ONLY path, the walk must not depend on the caller's
+    thread. A dedicated thread with its own loop is safe because `_run_indexing`
+    holds no loop-bound state — the REST twin creates the same coroutine on
+    uvicorn's loop.
+    """
+    import threading
+
+    def _target() -> None:
+        import asyncio as _a
+        try:
+            _a.run(runner(job_id, org_id, gh_org, None))
+        except Exception:
+            _log.warning("index run failed (job=%s)", job_id, exc_info=True)
+
+    try:
+        threading.Thread(target=_target, name=f"index-{job_id}",
+                         daemon=True).start()
+    except Exception:
+        _log.warning("index runner could not be started (job=%s)", job_id,
+                     exc_info=True)
+        return False
+    return True
+
+
 def _set_source_state(source: str, enable: bool) -> dict:
     """Switch one source on or off, within the caller's own permission.
 
@@ -4470,9 +4530,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
     org_id = _current_org_id.get()
     if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    import asyncio as _asyncio
-
     from tortoise.hosted_api import (
+        _INDEX_JOB_OWNERS,
+        _INDEX_JOBS,
         _github_credentials,
         _run_docs_indexing,
         _run_indexing,
@@ -4495,15 +4555,18 @@ def _set_source_state(source: str, enable: bool) -> dict:
         # behaviour #1924 removed.
         flag = spec["enable_flag"]
         current_on = _flag_on(state, flag)
+        if current_on is None:
+            _log_source_change(org_id, source,
+                               "enable" if enable else "disable",
+                               "refused_state_unavailable")
+            return {"error": (
+                "The team's onboarding state could not be read (graph "
+                "unavailable), so nothing was changed.")}
         if not enable:
             if not current_on:
                 _log_source_change(org_id, source, "disable", "already_off")
-                return {
-                    "status": "already_off",
-                    "source": source,
-                    "scope": "source",
-                    "enable_flag": flag,
-                }
+                return {"source": source, "scope": "source",
+                        **_source_payload(spec, "already_off")}
             # Ruling B: "the change is attributable" — the ATTEMPT is logged
             # before the write, so a crash inside the write still leaves it on
             # the record (the outcome line follows).
@@ -4511,11 +4574,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
             _update_onboarding_state(org_id, _echo=False, **{flag: False})
             _log_source_change(org_id, source, "disable", "ok")
             return {
-                "status": "disabled",
                 "source": source,
                 "scope": "source",
-                "enable_flag": flag,
-                "enforcement": spec["enforcement"],
+                **_source_payload(spec, "disabled"),
                 "connection_untouched": True,
                 "sibling_untouched": spec["sibling"],
                 "note": (
@@ -4556,45 +4617,58 @@ def _set_source_state(source: str, enable: bool) -> dict:
                     "accepts credentials."
                 )
             }
+        if not gh_org:
+            # The REST twin refuses this exact case with 400 "GitHub org
+            # unknown. Re-connect." A `None` here reaches the walk as
+            # f"{org}/{repo}" — a success response over a walk with no org.
+            _log_source_change(org_id, source, "enable",
+                               "refused_no_github_org")
+            return {
+                "error": (
+                    "GitHub org unknown for this team's stored credential. "
+                    "Re-connect with tortoise_onboarding_github_connect."
+                )
+            }
         kind = "docs" if source == "github_documents" else "github"
+        runner = _run_docs_indexing if kind == "docs" else _run_indexing
         job_id, is_new = _start_index_job(org_id, kind=kind)
-        if is_new:
-            runner = _run_docs_indexing if kind == "docs" else _run_indexing
-            try:
-                _asyncio.get_event_loop().create_task(
-                    runner(job_id, org_id, gh_org, None))
-            except RuntimeError:
-                # The flag is written AFTER the job exists: a write that lands
-                # while the response reports failure is a lie in the other
-                # direction (the source reads enabled, nothing runs).
-                _log_source_change(org_id, source, "enable",
-                                   "error_no_event_loop")
-                return {"error": "No running event loop"}
+        if is_new and not _spawn_index_runner(runner, job_id, org_id, gh_org):
+            # Evict the claim we just minted: leaving it makes the ORG's next
+            # start (this tool, or POST /v1/index/*) a silent 30-minute no-op.
+            _INDEX_JOBS.pop(job_id, None)
+            _INDEX_JOB_OWNERS.pop(job_id, None)
+            _log_source_change(org_id, source, "enable", "error_spawn")
+            return {"error": ("The index job could not be started; nothing "
+                              "was left claimed. Retry.")}
         if not current_on:
             _update_onboarding_state(org_id, _echo=False, **{flag: True})
         _log_source_change(org_id, source, "enable", "ok")
         return {
-            "status": "enabled",
             "source": source,
             "scope": "source",
-            "enable_flag": flag,
-            "enforcement": spec["enforcement"],
-            "default": spec["default"],
+            **_source_payload(spec, "enabled"),
             "job_id": job_id,
-            "started": is_new,
+            # `started: false` read as "nothing is running" when it actually
+            # meant "an in-flight job was reused". Say which.
+            "state": "started" if is_new else "reused",
         }
 
     # agent_sessions — the #1927 optional off-switch (ENFORCED, unlike the
     # GitHub intent flags: capture honours `session_recording`).
     current_on = _flag_on(state, "session_recording")
+    if current_on is None:
+        _log_source_change(org_id, source,
+                           "enable" if enable else "disable",
+                           "refused_state_unavailable")
+        return {"error": (
+            "The team's onboarding state could not be read (graph "
+            "unavailable), so nothing was changed.")}
     if enable and current_on:
         _log_source_change(org_id, source, "enable", "already_on")
         return {
-            "status": "already_on",
             "source": source,
             "scope": "source",
-            "default": "on",
-            "enforcement": spec["enforcement"],
+            **_source_payload(spec, "already_on"),
             "note": (
                 "Agent session recording is ON by default (#1927: an optional "
                 "off-switch, ToS-covered). Nothing to change; use action="
@@ -4605,24 +4679,16 @@ def _set_source_state(source: str, enable: bool) -> dict:
         # Symmetry with the GitHub branch: repeating a switch that is already
         # off does not write (and does not pay the projection round trip).
         _log_source_change(org_id, source, "disable", "already_off")
-        return {
-            "status": "already_off",
-            "source": source,
-            "scope": "source",
-            "default": spec["default"],
-            "enforcement": spec["enforcement"],
-        }
+        return {"source": source, "scope": "source",
+                **_source_payload(spec, "already_off")}
     _log_source_change(org_id, source,
                        "enable" if enable else "disable", "attempt")
     _update_onboarding_state(org_id, _echo=False, session_recording=enable,
                              capture_revised=True)
     _log_source_change(org_id, source,
                        "enable" if enable else "disable", "ok")
-    return {"status": "enabled" if enable else "disabled",
-            "source": source, "scope": "source",
-            "enable_flag": spec["enable_flag"],
-            "enforcement": spec["enforcement"],
-            "default": spec["default"]}
+    return {"source": source, "scope": "source",
+            **_source_payload(spec, "enabled" if enable else "disabled")}
 
 
 def tortoise_manage_sources(action: str,

@@ -32,7 +32,8 @@ from tortoise import hosted_api as ha
 def ctx(monkeypatch):
     """Org context + stubbed control-plane seams; nothing touches a real plane."""
     m._current_org_id.set("org_test")
-    calls: dict = {"writes": [], "cleared": False, "logs": [], "jobs": []}
+    calls: dict = {"writes": [], "cleared": False, "logs": [], "jobs": [],
+                   "events": []}
 
     state = {"github_connected": True, "session_recording": True,
              "issues_enabled": True, "docs_enabled": True}
@@ -43,11 +44,13 @@ def ctx(monkeypatch):
     monkeypatch.setattr(
         m, "_log_source_change",
         lambda org, src, act, out, scope="source", **kw:
-            calls["logs"].append((org, src, act, out, scope)),
+            (calls["logs"].append((org, src, act, out, scope)),
+             calls["events"].append(("log", out)))[0],
     )
 
     def _update(org_id, _echo=True, **fields):
         calls["writes"].append(fields)
+        calls["events"].append(("write", fields))
         state.update(fields)
         return dict(state)
 
@@ -299,12 +302,17 @@ def test_selfhost_nested_operational_flags_are_honoured(ctx, monkeypatch):
 
 # ── a NEW job must be spawned by the source's OWN runner ──────────────────
 def test_enable_spawns_the_matching_runner_when_the_job_is_new(ctx, monkeypatch):
-    """`is_new=False` used to make this branch unreachable in the suite.
+    """Dispatched from a WORKER THREAD, which is how FastMCP runs a sync tool.
 
-    Swapping `_run_docs_indexing` and `_run_indexing` passed every test, so
-    `enable(github_documents)` could have run the issues indexer unnoticed.
+    On such a thread `asyncio.get_event_loop()` returns a loop that is not
+    running, so `create_task` scheduled nothing while the tool answered
+    `enabled` and left a minted job claim blocking the org for 30 minutes.
+    Calling this on an asyncio loop (as the previous version of this test did)
+    hid that entirely.
     """
-    import asyncio
+    import time
+
+    import anyio
 
     ran: list[tuple[str, str]] = []
 
@@ -321,15 +329,59 @@ def test_enable_spawns_the_matching_runner_when_the_job_is_new(ctx, monkeypatch)
     monkeypatch.setattr(ha, "_run_docs_indexing", _docs)
     monkeypatch.setattr(ha, "_run_indexing", _issues)
 
-    async def _go():
-        result = m.tortoise_manage_sources("enable", "github_documents")
-        await asyncio.sleep(0)  # let the scheduled task start
-        return result
+    result: dict = {}
 
-    out = asyncio.run(_go())
-    assert out["started"] is True
-    assert ran == [("docs", "job-docs")], (
-        "github_documents must spawn the DOCS runner")
+    # anyio (not a bare thread) is FastMCP's own dispatch: it propagates the
+    # contextvars that carry the org, while the tool body still runs on a
+    # worker thread with NO running loop — the exact production context.
+    async def _go():
+        return await anyio.to_thread.run_sync(
+            lambda: m.tortoise_manage_sources("enable", "github_documents"))
+
+    result.update(anyio.run(_go))
+    assert "error" not in result, result
+    assert result["state"] == "started"
+
+    for _ in range(100):
+        if ran:
+            break
+        time.sleep(0.05)
+    assert ran == [("docs", result["job_id"])], (
+        "github_documents must spawn the DOCS runner, from a worker thread")
+
+
+# ── honest states: unknown is not "on", and no org is not success ────────
+def test_unreadable_state_is_not_reported_as_on(ctx, monkeypatch):
+    monkeypatch.setattr(m, "_onboarding_state",
+                        lambda: {"operational": "unavailable"})
+
+    listed = m.tortoise_manage_sources("list")
+    assert listed["sources"]["agent_sessions"]["enabled"] is None
+
+    out = m.tortoise_manage_sources("enable", "agent_sessions")
+    assert "could not be read" in out["error"]
+    assert ctx["writes"] == [], "an unknown state must not be written over"
+
+
+def test_enable_refuses_when_the_stored_credential_has_no_org(ctx, monkeypatch):
+    """The REST twin refuses this with 400; `None` reaches the walk as
+    `f"{org}/{repo}"`, so a success answer would be a lie."""
+    monkeypatch.setattr(ha, "_github_credentials", lambda org_id: ("enc", None))
+
+    out = m.tortoise_manage_sources("enable", "github_issues")
+
+    assert "GitHub org unknown" in out["error"]
+    assert ctx["writes"] == []
+    assert ctx["jobs"] == []
+
+
+def test_every_enable_flag_is_a_registered_state_key():
+    """A mistyped flag is silently dropped by the router (fail-closed) while
+    the tool still answers `disabled` — so pin the key to the registry."""
+    from tortoise.hosted_api import _ALLOWED_STATE_KEYS
+
+    for source, spec in m._SOURCE_ROSTER.items():
+        assert spec["enable_flag"] in _ALLOWED_STATE_KEYS, source
 
 
 # ── refusals and writes are attributable ──────────────────────────────────
@@ -342,12 +394,19 @@ def test_refusals_are_logged_too(ctx):
     assert "refused_source" in outcomes
 
 
-def test_a_write_logs_the_attempt_before_the_outcome(ctx):
-    """A crash inside the write must still leave the attempt on the record."""
+def test_a_write_logs_the_attempt_before_the_write(ctx):
+    """A crash inside the write must still leave the attempt on the record.
+
+    Asserted against the WRITE's position in the event stream, not merely
+    against the order of two log lines: moving the "attempt" line after the
+    write used to leave every test green.
+    """
     m.tortoise_manage_sources("disable", "agent_sessions")
 
-    outcomes = [entry[3] for entry in ctx["logs"]]
-    assert outcomes[:2] == ["attempt", "ok"], outcomes
+    kinds = [kind for kind, _payload in ctx["events"]]
+    assert "write" in kinds, ctx["events"]
+    first_write = kinds.index("write")
+    assert ("log", "attempt") in ctx["events"][:first_write], ctx["events"]
 
 
 def test_disabling_an_already_off_session_writes_nothing(ctx):
