@@ -804,23 +804,40 @@ def test_an_over_long_line_is_dropped_loudly_and_not_counted(ledger):
     assert fold(ledger).stock_keys == 0
 
 
-def test_the_internal_scans_still_pass_record_reads_false():
-    """A structural guard on the three call sites, which no behaviour test drives.
+def test_the_funnel_does_not_import_the_ledger_unless_the_flag_is_set():
+    """The BEHAVIOURAL half of "off means not imported": flag read first.
 
-    Deleting the argument leaves every behavioural test green (the call sites are
-    population scans, not fixtures), so the argument's PRESENCE is what is pinned.
+    A source census cannot see a pool site that omits the flag; this pins the
+    ordering the module promises (one env lookup, then a guarded import).
     """
     src = (Path(__file__).resolve().parents[1] / "tortoise" / "sdk.py").read_text()
-    # Count CALL SITES, not mentions: the helper's comment names the flag too, and
-    # a call site always has it alone at the start of its line.
-    # The three population scans pass it as a bare keyword; the funnel's three
-    # CANDIDATE-pool call sites carry a comment after the comma.
+    flag_at = src.index('is_truthy(os.environ.get("TORTOISE_READ_LEDGER"))')
+    import_at = src.index("from . import read_ledger as _read_ledger")
+    assert flag_at < import_at, "the flag must be read before the import"
+    assert "_read_ledger_enabled and" in src or "_read_ledger_enabled:" in src
+
+
+def test_the_internal_readers_pass_record_reads_false():
+    """A CENSUS, not an invariant: the call sites are not driven by fixtures.
+
+    Deleting one of these arguments leaves every behavioural test green — the
+    sites are population scans and candidate pools — so their presence is pinned
+    here. The count is a FLOOR on purpose: a new pool reader should add a site,
+    not turn this red.
+    """
+    root = Path(__file__).resolve().parents[1] / "tortoise"
+    src = (root / "sdk.py").read_text()
     sites = [ln for ln in src.splitlines() if ln.strip().startswith("_record_reads=False")]
-    assert len(sites) == 10, sites
-    assert src.count("_record_reads: bool = True") == 2, "query() and the FTS funnel"
-    # `session_continuity` is a fourth internal scan, in its own module.
-    other = (Path(__file__).resolve().parents[1] / "tortoise" / "session_continuity.py").read_text()
-    assert "_record_reads=False" in other
+    assert len(sites) >= 10, sites
+    # The three functions that accept the flag (query, the FTS funnel, the tag
+    # accessor): a new one is fine, losing one is not.
+    assert src.count("_record_reads: bool = True") >= 3, "query / funnel / tag accessor"
+    assert (
+        "session_continuity.py"
+        and "_record_reads=False" in (root / "session_continuity.py").read_text()
+    )
+    # The extractor's link-before-create prior is a write-path self-read.
+    assert "_record_reads=False" in (root / "extractor_v2.py").read_text()
 
 
 def test_an_unknown_tenant_with_the_env_path_does_not_crash(tmp_path, monkeypatch, capsys):
@@ -837,25 +854,29 @@ def test_an_unknown_tenant_with_the_env_path_does_not_crash(tmp_path, monkeypatc
 
 
 def test_a_torn_batch_reports_the_whole_lines_that_landed(ledger, monkeypatch):
-    """A PREFIX that lands must be counted, not rounded to zero or to the batch.
+    """A PREFIX that lands must be counted — not rounded to zero, not to the batch.
 
-    The earlier test's write RAISED on the second call, which reaches the
-    `except` and returns 0 without ever exercising the prefix arithmetic.
+    The earlier test's write RAISED on the second call, which short-circuits to
+    the `except` and returns 0 without ever exercising the prefix arithmetic
+    (`blob[:written].count(b"\\n")`). Here the second write returns 0, which is
+    the real short-write shape.
     """
     real_write = os.write
     state = {"n": 0}
 
-    def one_line_then_stop(fd, data):
+    def two_lines_then_stop(fd, data):
         state["n"] += 1
         if state["n"] == 1:
-            return real_write(fd, data)
+            second_nl = data.index(b"\n", data.index(b"\n") + 1) + 1
+            return real_write(fd, data[:second_nl])
         return 0
 
-    monkeypatch.setattr(read_ledger.os, "write", one_line_then_stop)
-    # 10 events; the first json line is written whole, then the write stops.
-    got = read_ledger.record_rows("Point", [{"id": f"p{i}"} for i in range(1)], path=ledger)
-    assert got == 1, "one whole read line landed"
+    monkeypatch.setattr(read_ledger.os, "write", two_lines_then_stop)
+    torn = read_ledger.record_rows("Point", [{"id": f"q{i}"} for i in range(4)], path=ledger)
     monkeypatch.setattr(read_ledger.os, "write", real_write)
+    assert torn == 2, "two whole read lines landed; the other two did not"
+    # Both landed lines are readable — the count is not a guess about the batch.
+    assert fold(ledger).lines_read == 2
 
 
 def test_a_numeric_key_is_stored_as_its_string(ledger):

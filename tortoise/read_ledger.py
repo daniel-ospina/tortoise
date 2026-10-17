@@ -73,6 +73,7 @@ it must not be world-readable just because the umask says so.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -332,7 +333,16 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # instruction ("rotate it") would get a silent, read-free ledger whose
         # first report says f = 0 — the measurement-window trap this module
         # exists to refuse.
-        if size >= cap:
+        blob = "".join(lines).encode()
+        # ⛔ THE BATCH ITSELF COUNTS. Checking only the pre-write size lets one
+        # batch cross the bound by its own length and land with NO `capped`
+        # marker until a later append happens at all (measured: 37,090 B written
+        # under a 200 B cap, `capped: false`) — "bounded in bytes" and "a
+        # truncated window is never reported as quiet" both fail for it.
+        # The marker below costs a few dozen bytes; the bound is a ceiling on
+        # EVENTS, not a hard file-size limit, and the marker is what makes the
+        # truncation audible.
+        if size >= cap or size + len(blob) > cap:
             # The marker decision reads the FILE's tail, never a process latch: a
             # rotated ledger that caps AGAIN must say so again, or the second stop
             # is silent and `fold()` reports `capped: false` over a file it
@@ -370,7 +380,6 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
                 LEDGER_MAX_BYTES_ENV,
             )
             return 0
-        blob = "".join(lines).encode()
         # 0600 on CREATE: the ledger holds tenant identifiers (`Subject.name`,
         # `Object.name`, `Source.url`), so it must not be world-readable just
         # because the umask says so. `os.open` is the only portable way to pass
@@ -379,23 +388,27 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # under a looser umask) is chmod'ed the first time this process writes to
         # it. Trusting the create mode alone would leave tenant identifiers
         # world-readable on exactly the files it was added for.
-        if key not in _mode_checked or size == 0:
-            # `size == 0` means a ROTATED (truncated/replaced) file: the latch is
-            # per process, and skipping the check because this process once
-            # tightened the OLD inode leaves the new one world-readable — the
-            # privacy reason 0600 exists.
+        st = None
+        with contextlib.suppress(OSError):
+            st = target.stat()
+        # ⛔ THE LATCH IS THE INODE, NOT THE PATH. A per-path latch survives a
+        # ROTATION — this process "already checked" the file and the NEW inode
+        # (which an operator's rotation may have created 0644, with bytes
+        # already in it) is never tightened, leaving the tenant identifiers 0600
+        # exists for world-readable in exactly the rotation case.
+        _ino = (st.st_dev, st.st_ino) if st is not None else None
+        if _ino is None or _ino not in _mode_checked:
             try:
-                st = target.stat()
+                if st is not None and stat.S_ISREG(st.st_mode) and (st.st_mode & 0o077):
+                    os.chmod(target, 0o600)
                 # ⛔ REGULAR FILES ONLY: pointing the env var at a DIRECTORY (or a
                 # device) must not have its mode rewritten as a side effect of a
                 # measurement — the tightest permission is not automatically the
                 # right one for something that is not our file.
-                if stat.S_ISREG(st.st_mode) and (st.st_mode & 0o077):
-                    os.chmod(target, 0o600)
             except OSError:  # pragma: no cover — not ours to fail the read path
                 pass
-            if len(_mode_checked) < 64:
-                _mode_checked.add(key)
+            if _ino is not None and len(_mode_checked) < 64:
+                _mode_checked.add(_ino)
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             # `os.write` may write FEWER bytes than asked (a full disk, a pipe).

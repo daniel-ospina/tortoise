@@ -132,8 +132,10 @@ class _StubQuerySDK:
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query_points_by_tag(self, tag):
-        self.calls.append(("query_points_by_tag", tag))
+    def query_points_by_tag(self, tag, *, _record_reads=True):
+        # #7983: the real accessor takes the read-ledger opt-out, so the double
+        # must too — a paginated caller passes `_record_reads=False`.
+        self.calls.append(("query_points_by_tag", tag, _record_reads))
         return self.tag_points
 
     def tortoise_fts_query(self, query=None, **kwargs):
@@ -193,7 +195,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(tag="pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
 
     def test_tag_takes_precedence_over_text(self, query_sdk):
         """Documented precedence: tag mode wins when both are provided."""
@@ -342,7 +344,7 @@ class TestDeprecatedAliases:
         from tortoise.mcp_server import tortoise_query_points_by_tag
         result = tortoise_query_points_by_tag("pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
 
 
 class TestToolFunctions:

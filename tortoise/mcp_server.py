@@ -23,7 +23,8 @@ from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
                           _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
-                          _supersede_window_end, _now_iso)
+                          _supersede_window_end, _now_iso,
+                          _ledger_record as _ledger_record_page)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
@@ -1972,6 +1973,26 @@ def tortoise_create_point(kind: str, content: str,
     return result
 
 
+def _public_filters(filters: Any) -> dict:
+    """A caller's filter dict MINUS the SDK's private `_`-prefixed switches.
+
+    #7983: a remote caller must not be able to switch the read ledger off with a
+    query parameter — a caller-controlled switch on a measurement presented as
+    authoritative. Dropping the keys here means the same dict means the same
+    thing on the paginated and the plain path.
+
+    A non-mapping `filters` raises `TypeError`, which is the type the plain path
+    raised before this existed (**unpack of a str); the dict comprehension that
+    replaced it raised `AttributeError` from `.items()` instead, which no caller
+    or test expected.
+    """
+    if filters is None:
+        return {}
+    if not isinstance(filters, dict):
+        raise TypeError("filters must be a mapping")
+    return {k: v for k, v in filters.items() if not str(k).startswith("_")}
+
+
 def tortoise_query(kind: str | None = None,
                    filters: Any = None,
                    text: str | None = None,
@@ -2025,7 +2046,10 @@ def tortoise_query(kind: str | None = None,
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
     if tag is not None:
-        rows = _safe(_get_org_sdk().query_points_by_tag, tag)
+        # #7983: a PAGINATED caller receives one page, so the tag population
+        # must not be recorded as read (f HIGH); record the page it serves.
+        rows = _safe(_get_org_sdk().query_points_by_tag, tag,
+                     _record_reads=not paginated)
         if not isinstance(rows, list):
             return rows
         # query_points_by_tag has no retracted exclusion in the SDK — mirror
@@ -2038,7 +2062,9 @@ def tortoise_query(kind: str | None = None,
         if page is not None:
             eff_offset = (page - 1) * eff_limit
         total = len(rows)
-        return {"results": rows[eff_offset:eff_offset + eff_limit],
+        page_rows = rows[eff_offset:eff_offset + eff_limit]
+        _ledger_record_page("Point", page_rows)  # #7983: the page, not the tag
+        return {"results": page_rows,
                 "total": total,
                 "hasMore": eff_offset + eff_limit < total}
     if text:
@@ -2057,8 +2083,7 @@ def tortoise_query(kind: str | None = None,
                      # #7983: the SAME underscore drop as the plain path below,
                      # so one filter dict cannot be a private switch here and a
                      # property filter there.
-                     **{k: v for k, v in (filters or {}).items()
-                        if not str(k).startswith("_")})
+                     **_public_filters(filters))
     # #7983: a caller-supplied filter may not set the SDK's PRIVATE switches
     # (they start with `_`), or a remote agent could turn the read ledger off
     # with a query parameter — a caller-controlled switch on a measurement that
@@ -2066,7 +2091,7 @@ def tortoise_query(kind: str | None = None,
     # same dict means the same thing on both the paginated and the plain path.
     result = _safe(_get_org_sdk().query, kind,
                    include_retracted=include_retracted,
-                   **{k: v for k, v in (filters or {}).items() if not str(k).startswith("_")})
+                   **_public_filters(filters))
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion

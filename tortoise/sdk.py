@@ -13388,8 +13388,15 @@ class TortoiseSDK:
         ).result_set
         return [{"name": row[0], "count": row[1]} for row in rows]
 
-    def query_points_by_tag(self, tag: str) -> list[dict]:
-        """Return Points connected via TAGGED edge to the given Tag name."""
+    def query_points_by_tag(self, tag: str, *,
+                            _record_reads: bool = True) -> list[dict]:
+        """Return Points connected via TAGGED edge to the given Tag name.
+
+        #7983: this returns the WHOLE tag population, so recording it is right
+        for the SDK caller and wrong for a paginated user that receives one
+        page of it — that caller passes ``_record_reads=False`` and records the
+        page it serves. Recording the population would bias ``f`` HIGH.
+        """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) "
@@ -13398,7 +13405,8 @@ class TortoiseSDK:
             params={"tag": tag},
         ).result_set
         points = [r[0] for r in rows]
-        _ledger_record("Point", points)  # #7983: a product read of these keys
+        if _record_reads:
+            _ledger_record("Point", points)  # #7983: a product read of these keys
         return points
 
     def list_namespaces(self) -> list[dict]:
@@ -20766,6 +20774,9 @@ class TortoiseSDK:
                 "repo_stats": None,
             }
 
+        # #7983: the semantic pool opted out above; the hits that SURVIVE the
+        # gate are what the caller receives, so record those (this is the read).
+        _ledger_record("Point", semantic_hits)
         data_points: list[dict] = []
         for h in semantic_hits:
             dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
@@ -23305,9 +23316,9 @@ class TortoiseSDK:
         _ledger_record(
             "Point", [i for i in out if i.get("entity_type") == "point"]
         )
-        _ledger_record(
-            "Object", [i for i in out if i.get("entity_type") == "object"]
-        )
+        # NOT the Object leg: an Object's key is `name`, and these rows carry
+        # `id`, so recording them could only emit `unresolved` — reported as
+        # "rows with no key at all", which is false. Named as a hole instead.
         if read_status_out is not None:
             # B6 (#3892): the composite is derived AFTER the pipeline, from the
             # rows the caller actually RECEIVES. The filters, the rerank and
@@ -23716,6 +23727,8 @@ class TortoiseSDK:
             if r["gaps_ranking"]["load"] >= min_load
             and r["gaps_ranking"]["support"] <= max_support
         ][:limit]
+        # #7983: the pool above opted out; the rows the caller RECEIVES are a read.
+        _ledger_record("Point", ranked)
         return ranked
 
     def recall_subgraph(self, seed: str, *,
@@ -27097,7 +27110,10 @@ class TortoiseSDK:
                 key=lambda item: (item[0], item[1].get("startedAt") or ""),
                 reverse=True,
             )
-            return [props for _, props in ranked[offset:offset + limit]]
+            out = [props for _, props in ranked[offset:offset + limit]]
+            # #7983: the candidate pool opted out; the page handed back is a read.
+            _ledger_record("Event", out)
+            return out
 
         # ── Legacy keyword fallback (no FTS/vector contribution) ──
         # Preserves the pre-#244 CONTAINS surface (name + keywords) plus the
@@ -27157,10 +27173,12 @@ class TortoiseSDK:
                 "MATCH (e:Event {eventKind: $ek}) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
                 params={"ek": eventKind, "lim": limit}
             ).result_set]
-        return [r[0] for r in proj.g.query(
+        out = [r[0] for r in proj.g.query(
             "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
             params={"lim": limit}
         ).result_set]
+        _ledger_record("Event", out)  # #7983: a served page, not a pool
+        return out
 
     def get_session(self, session_id: str) -> dict | None:
         """Get a single agent session by session_id.

@@ -35,7 +35,7 @@ magnitudes, and this issue is those two magnitudes.
 
 | quantity | measurable at `459f22912`? | what this lane did | measured value |
 |---|---|---|---|
-| **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py`, hooked into the four caller-facing row-returning read paths (`get_point` deliberately excluded — the write paths read through it)) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 8.64%** over 200 proxy queries — **a proxy mix, not a tenant** |
+| **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py`, hooked into the caller-facing row-returning read sites (`get_point` deliberately excluded — the write paths read through it)) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 8.64%** over 200 proxy queries — **a proxy mix, not a tenant** |
 | **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 3.55** at 1,000 tenants/project (**88.7** at 40, **710** at 5) — ⚠️ **the disk line is measured, the compute+plan lines are the doc's DENSITY ASSUMPTIONS**, so `rho` is an assumption over a measurement, and only the disk line is a value |
 
 ---
@@ -177,11 +177,12 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   returning `url`/`sourceKind`/count — not a `properties(n)` reader, and the single most joinable row
   shape of the set); **the state and traversal paths** (`traverse`, `recall_state`'s related-point/
   object readers, `get_historical_knowledge`); **a POOL read of the FTS funnel** — its internal pool
-  callers opt out (`_record_reads=False`) and `recall_state` records the rows it RETURNS (both legs),
-  but a caller that hands the funnel a `limit` far above what it surfaces is still a pool read, and
-  **`search_sessions` (`tortoise_search_sessions`) is uncounted end-to-end** — its pool read opts out
-  and nothing records the session rows it returns, so that MCP surface is entirely outside the
-  ledger; and **the
+  callers opt out (`_record_reads=False`) and record the slice they SERVE — `recall_state` its
+  Point rows (`recall_gaps`, `issue_insight`, `search_sessions` and the printed session summary
+  likewise record what they return) — but a caller that hands the funnel a `limit` far above what it
+  surfaces is still a pool read, and `recall_state`'s OBJECT leg is uncounted: its rows carry `id`,
+  while an Object's key is `name`, so recording them could only emit `unresolved` (reported as "rows
+  with no key at all", which would be false); and **the
   `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and
   carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in
   a joinable coordinate. **Every one of them leaves a read out of the numerator, so every one biases
