@@ -2901,8 +2901,9 @@ def _journal_safe_params(params, cypher=None):
     # A READ still has to be gated. FalkorDB PARSES every parameter regardless
     # of clause, so an unwritable value in a read ``MATCH {prop:$p}`` aborts a
     # replay after the wipe exactly as a write does — skipping reads here
-    # RE-OPENED the hole (measured: ``resolve_source_key``,
-    # ``_try_about_edge``, and a plain dict in ``about_entities``).
+    # RE-OPENED the hole (measured: ``resolve_source_key``, the about-name
+    # cascade's ``_resolve_about_edge_target`` probe — ``_try_about_edge``
+    # before #8398 renamed it — and a plain dict in ``about_entities``).
     #
     # What the clause buys is a cheap route for the two dominant READ shapes:
     # scalars, and an id LIST (``WHERE p.id IN $ids``). Neither needs the
@@ -6960,6 +6961,73 @@ def _merge_hard_delete(out, rid, seq, labels) -> None:
             by_label[label] = seq
 
 
+def _about_link_payload(record):
+    """The part of a #8398 ``EventRecorded`` record that ADDRESSES its Event.
+
+    ONE definition of the nested-vs-flat ambiguity, shared by BOTH readers of
+    the record: the gate that decides whether to hand the record to
+    ``replay_about_links`` and that reader itself. ``event`` is not a reserved
+    name on every writer (``EventAPI.add_event`` and the miner journal use the
+    nested ``{event: {id, …}}`` form; a caller PROP may legally be called
+    ``event``), so the two shapes are ambiguous at that key. The nested form is
+    authoritative ONLY when its payload carries the record's address
+    (``id``/``eventId``, the two keys ``_upsert_event`` reads); otherwise the
+    record IS the payload and the ``event`` value is inert data.
+
+    ⛔ Two independent copies of this rule is what let the writers of this
+    branch drift six lines apart: ``replay_about_links`` was taught the
+    address check while the gate in front of it kept unwrapping ``event``
+    unconditionally, so for a caller-prop record the gate could not read the
+    address (``None``), declined to drop a record the journal had hard-deleted,
+    and the sweep then reported the very falsehood the gate exists to remove.
+    Both callers now resolve the payload HERE, so the rule cannot drift again.
+    """
+    inner = record.get("event") if isinstance(record, dict) else None
+    if isinstance(inner, dict) and ("id" in inner or "eventId" in inner):
+        return inner
+    return record
+
+
+def _about_link_event_hard_deleted(hard_delete_seqs, seq, record) -> bool:
+    """True when the journal hard-DELETES the Event that owns this record's
+    #8398 ``about*`` links at a seq AFTER ``record``'s own (#8398 review P2-2).
+
+    A hard-deleted Event is not a LOST link: live does not have those edges
+    either — ``delete`` removes the node and its edges, and the replay's own
+    hard-delete pass removes it on the way in. Counting it inflates the
+    ``failed`` number the #8398 sweep advertises as the honest signal, and emits
+    the false warning "the live graph had these edges". Measured: create an
+    Event with ``aboutObject`` → ``delete(event_id)`` → ``rebuild_all`` reported
+    "1 journaled Event→entity about* link(s) could NOT be re-wired — the live
+    graph had these edges", neither half of which was true.
+
+    This is the SAME staleness rule the sibling sweep applies through
+    ``fold_deferred_entity_links(entity_link_events, hard_delete_seqs)``: state
+    it once here rather than re-deriving it per engine. The label is always
+    ``"Event"`` (the record type is ``EventRecorded``), and a later re-creation
+    of the same id is judged on its own seq — ``_hard_delete_suppresses`` is
+    strictly "a delete AFTER this record", so a re-created-and-relinked Event
+    survives.
+
+    ⚠️ This is the SOURCE half only: a record whose Event is gone loses ALL its
+    links, so the caller drops the record. The ENDPOINT (target) half of the same
+    rule belongs to the individual link — one target can be deleted while its
+    siblings survive — and lives in ``replay_about_links`` via ``_target_stale``
+    (#8398 4th review P2-1: this function used to be the WHOLE rule, so a journal
+    holding an Event→entity link to a since-deleted Object warned on every
+    rebuild with neither half of the warning true).
+
+    The record's address is read through ``_about_link_payload`` — the SAME
+    resolver ``replay_about_links`` uses — so a caller ``event`` prop can hide
+    neither the reader's source nor this gate's subject (#8398 6th review P2).
+    """
+    if not isinstance(record, dict):
+        return False
+    inner = _about_link_payload(record)
+    rid = inner.get("id") or inner.get("eventId")
+    return _hard_delete_suppresses(hard_delete_seqs, rid, "Event", seq)
+
+
 def _hard_delete_suppresses(hard_delete_seqs, endpoint_id, label,
                             seq) -> bool:
     """True when a recorded hard delete of ``(label, endpoint_id)`` lands AFTER
@@ -7977,7 +8045,8 @@ class FalkorProjection(
     def apply(self, event: dict, *, journal_object_surviving=None,
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
-              journal_existence=None) -> None:
+              journal_existence=None,
+              about_links_deferred: bool = False) -> None:
         # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
         # A fold is the cache WRITE of the record/cache split, so on a
         # journal-backed projection it is legal only when a sanctioned scope is
@@ -8251,7 +8320,63 @@ class FalkorProjection(
                 ev, journal_first_materialized=journal_first_materialized,
                 journal_seq=journal_seq)
         elif t == "EventRecorded":
-            return self._upsert_event(ev)
+            _replayed = self._upsert_event(ev)
+            # #8398: the about* links are GRAPH EDGES written live, not node
+            # properties — so nothing replayed them and a rebuild silently
+            # dropped every Event→entity link. Re-wire them from the record.
+            # INLINE is correct for ``apply``'s live single-event caller (its
+            # endpoints exist). Of the whole-journal engines, ``rebuild`` and
+            # ``rebuild_all`` ALSO buffer this type into a trailing sweep — the
+            # same forward-reference treatment they give ``EntityLinked`` — so a
+            # link whose target is created later is wired there. The remaining
+            # replay callers (``recover_from_log``, ``backup.restore``) drive
+            # ``apply`` directly and have no sweep: for them this warning IS the
+            # report, and it names the event so the loss is locatable.
+            _about_w, _about_f = (0, 0)
+            if about_links_deferred:
+                # #8398: the CALLER owns a trailing sweep and will wire these
+                # once every endpoint exists. Wiring here is not so much WRONG
+                # as EARLY, and the cost is small and measured: on a rotated
+                # journal whose endpoint lands in a later file, this call meets
+                # a target that is not in the graph yet, counts it as a failure
+                # and warns ("apply() could not re-wire … its target is not in
+                # the graph yet"). Measured with ``about_links_deferred`` forced
+                # False on a journal rotated so the ``EventRecorded`` precedes
+                # its ``ObjectRegistered``: the resulting graph is IDENTICAL and
+                # the sweep re-wires the edge, so the only residue is a spurious
+                # ``failed`` count plus a warning that teaches readers to ignore
+                # the warning. It does NOT corrupt anything: the stub mint is
+                # ``MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name``,
+                # which cannot create a second same-name ``:Subject`` and lands
+                # on whatever node carries that name — the same node the live
+                # write addressed. So this is a structural fix (the sweep is the
+                # one faithful order), not a repair for an unreachable
+                # corrupting bug.
+                pass
+            else:
+                # #8398 P2-5: GUARDED like every sibling sweep in this file.
+                # ``apply`` is driven directly by the engines that have NO
+                # trailing sweep (``backup.restore``, ``consistency``), so an
+                # engine error or a malformed link escaping here aborted the
+                # RESTORE — contradicting this patch's own "Reported, never
+                # raised" policy. The record has already folded above, so the
+                # loss is the LINK, and it is counted and reported below.
+                try:
+                    _about_w, _about_f = self.replay_about_links(ev)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "apply: #8398 about-link re-wire raised for event %r "
+                        "— the record folded, its links did not",
+                        ev.get("event_id") or ev.get("id"))
+                    _about_w, _about_f = 0, 1
+            if _about_f:
+                logger.warning(
+                    "#8398: apply() could not re-wire %d journaled Event→entity "
+                    "about* link(s) (event %r) — its target is not in the graph "
+                    "yet; ``rebuild``/``rebuild_all`` re-wire these in a "
+                    "trailing sweep, a direct ``apply`` replay cannot",
+                    _about_f, ev.get("event_id") or ev.get("id"))
+            return _replayed
         elif t == "EntityLinked":
             # #3664: the capture entity-attachment replay consumer — an
             # idempotent about* edge MERGE keyed on the flat logical ids
@@ -8711,6 +8836,10 @@ class FalkorProjection(
         # deferred terminalizer sweeps use.
         hard_deleted = hard_deleted_pairs(events)
         entity_link_events: list[tuple[int, dict]] = []
+        # #8398: EventRecorded replay links, buffered for the SAME reason as
+        # ``EntityLinked`` below — this engine feeds ``apply()`` ONE record at a
+        # time, so a link whose endpoint is created LATER would wire to nothing.
+        about_link_events: list[tuple[int, dict]] = []
         # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
         # keys + the ids it hard-deletes, so ``apply()`` can refuse a supersede
         # whose target the journal never leaves in place while NOT refusing a
@@ -8760,11 +8889,22 @@ class FalkorProjection(
                 if edge is not None:
                     deferred_corrects.append(edge)
                 continue
+            _is_evrec = isinstance(ev, dict) and (
+                ev.get("type") == "EventRecorded"
+                or _norm(ev).get("type") == "EventRecorded")
             self.apply(ev, journal_object_surviving=journal_object_surviving,
                        journal_object_deleted=journal_object_deleted,
                        journal_first_materialized=first_materialized,
                        journal_existence=epistemic_existence,
-                       journal_seq=seq)
+                       journal_seq=seq,
+                       about_links_deferred=_is_evrec)
+            # #8398: buffer the record so its about* links are re-wired once
+            # every endpoint exists — deferred above, wired in the sweep below.
+            if _is_evrec:
+                # NORMALIZED, matching the edge-message sweep: a nested-payload
+                # record must be replayed through its inner dict, or the sweep
+                # reads a shape with no ``aboutLinks`` and drops the link.
+                about_link_events.append((seq, _norm(ev)))
         if deferred_corrects:
             # Guarded like the other two engines' sweeps: ``fold_deferred_*``
             # must never abort a post-wipe replay (the graph was already
@@ -8777,6 +8917,41 @@ class FalkorProjection(
                     "rebuild: deferred CORRECTS fold failed; %d edge(s) not "
                     "replayed", len(deferred_corrects))
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
+        # #8398: re-wire the journaled Event→entity about* links now that every
+        # endpoint the journal can restore exists. Reported, never raised — the
+        # graph was already wiped, so a failure must not abort the replay.
+        # #8398 review P2-2: drop the records whose EVENT the journal
+        # hard-deletes later — the sibling sweep above applies the same rule
+        # through ``fold_deferred_entity_links``, and without it this sweep
+        # accused the replay of a loss live never had (see
+        # ``_about_link_event_hard_deleted``).
+        about_link_events = [
+            (_al_s, _al_e) for _al_s, _al_e in about_link_events
+            if not _about_link_event_hard_deleted(
+                hard_delete_seqs, _al_s, _al_e)]
+        if about_link_events:
+            _wired = _failed = 0
+            for _al_seq, _al_ev in about_link_events:
+                self._replay_seq = _al_seq
+                try:
+                    _w, _f = self.replay_about_links(
+                        self._norm(_al_ev), hard_delete_seqs, _al_seq)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "rebuild: about-link re-wire failed for event %r (#8398)",
+                        _al_ev.get("event_id") or _al_ev.get("id"))
+                    continue
+                _wired += _w
+                _failed += _f
+            if _wired:
+                logger.info(
+                    "rebuild: re-wired %d journaled Event→entity about* link(s) "
+                    "(#8398)", _wired)
+            if _failed:
+                logger.warning(
+                    "rebuild: %d journaled Event→entity about* link(s) could NOT "
+                    "be re-wired — the target was not restored by this replay; "
+                    "the live graph had these edges (#8398)", _failed)
         # #4125: pre-#4005 basename-url session Sources are re-materialised by
         # this replay (their `SourceCreated` line, and `_link_source`'s stub
         # mint from any PointAdded naming the bare basename) while the
@@ -10288,6 +10463,12 @@ class FalkorProjection(
         # journal order, which is what makes a ``clear`` followed by a
         # ``set`` land on the ``set`` (last writer wins, per edge).
         edge_message_events: list[tuple[int, dict]] = []
+        # #8398: ``EventRecorded`` replay links, buffered for the SAME reason as
+        # ``edge_message_events`` — the replay stream is filename order, not
+        # chronology, and pass-1a hoists only Points/Operators, so an inline
+        # wiring would need the target Object/Subject/Source to already exist.
+        # Wired in a trailing sweep once every entity registration has folded.
+        about_link_events: list[tuple[int, dict]] = []
         # #2488: per-id highest journal seq of a same-id INLINE updatedAt
         # writer (PointRevised / PointPromoted — pass-1b applies both
         # inline; they never enter the deferred list); a PointInvalidated
@@ -10863,6 +11044,10 @@ class FalkorProjection(
                 edge_message_events.append((seq, ev))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
+                # #8398: BUFFER the about* links — see ``about_link_events`` at
+                # its declaration. Wired in a trailing sweep, because the replay
+                # stream is filename order and the target may not exist yet.
+                about_link_events.append((seq, ev))
             elif t == "SubjectAdded":
                 self._upsert_subject(ev)
             elif t == "ObjectRegistered":
@@ -12667,6 +12852,48 @@ class FalkorProjection(
                     "re-created by any journaled event (#5380)",
                     _em_ev.get("event_id"), _em_ev.get("src"),
                     _em_ev.get("tgt"), _em_ev.get("rel"))
+
+        # #8398 trailing sweep: re-wire the journaled Event→entity about*
+        # links. Runs HERE, after every entity registration and after the
+        # edge-message sweep, so a rotated journal whose registration landed in
+        # a later file cannot lose the link. A link the sweep cannot re-wire is
+        # REPORTED — an un-reported drop is the defect this fixes.
+        # #8398 review P2-2: a record whose EVENT the journal hard-deletes later
+        # is skipped, never counted as failed — the sibling
+        # ``fold_deferred_entity_links`` applies the same rule, and live has no
+        # such edges either (see ``_about_link_event_hard_deleted``).
+        about_link_events = [
+            (_al_s, _al_e) for _al_s, _al_e in about_link_events
+            if not _about_link_event_hard_deleted(
+                hard_delete_seqs, _al_s, _al_e)]
+        if about_link_events:
+            _about_wired = _about_failed = 0
+            for _al_seq, _al_ev in about_link_events:
+                self._replay_seq = _al_seq
+                # Guarded like the other sweeps in this engine: ``fold_*`` must
+                # never abort a post-wipe replay (the graph was already
+                # DETACH DELETE'd above), so a failure is logged, not raised.
+                try:
+                    _w, _f = self.replay_about_links(
+                        self._norm(_al_ev), hard_delete_seqs, _al_seq)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "rebuild_all: about-link re-wire failed for event %r "
+                        "(#8398)",
+                        _al_ev.get("event_id") or _al_ev.get("id"))
+                    continue
+                _about_wired += _w
+                _about_failed += _f
+            if _about_wired:
+                logger.info(
+                    "rebuild: re-wired %d journaled Event→entity about* link(s)",
+                    _about_wired)
+            if _about_failed:
+                logger.warning(
+                    "rebuild: %d journaled Event→entity about* link(s) could "
+                    "NOT be re-wired — the target node was not restored by this "
+                    "replay (#8398); the live graph had these edges",
+                    _about_failed)
         # #5380 indicator 4 (the MIXED case): the report below is gated on
         # ``not _edge_msg_journaled`` — zero records or nothing. Once a
         # #5380-era journal has recorded even ONE edge message that flag stays
