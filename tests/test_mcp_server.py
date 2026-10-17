@@ -203,6 +203,9 @@ class TestQueryConsolidation:
         result = tortoise_query(tag="pricing", text="semantic query")
         assert result == query_sdk.tag_points
         assert query_sdk.calls[-1][0] == "query_points_by_tag"
+        # #7983: the accessor never records — it runs BEFORE the retracted
+        # filter, so recording there would count Points the caller never gets.
+        assert query_sdk.calls[-1][2] is False
 
     def test_tag_pagination_opts_out_of_recording_the_population(self, query_sdk):
         """#7983: ONE page is served, so the tag POPULATION is not a read.

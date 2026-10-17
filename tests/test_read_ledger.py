@@ -921,3 +921,53 @@ def test_a_torn_tail_is_repaired_before_the_next_batch(ledger):
     # unregistered reads — the point is that they are READ, not lost).
     assert folded.unregistered_reads == 2, folded
     assert folded.lines_skipped == 1, "the fragment is one damaged line, not three"
+
+
+def test_a_non_utc_stamp_is_compared_as_a_time_not_a_string(ledger):
+    """`at=` is public, and lexical order is chronological only on ONE offset.
+
+    With `now` = 2026-10-18T18:00Z the 7-day cutoff is 2026-10-11T18:00Z, so
+    `2026-10-11T23:00:00+09:00` (= 14:00Z) is OUTSIDE even though its string sorts
+    after every UTC stamp of that day, and `2026-10-12T03:00:00+09:00` (= 18:00Z)
+    is exactly ON the cutoff even though its string sorts after it.
+    `2026-10-17T23:00:00+09:00` (= 14:00Z) is EARLIER than
+    `2026-10-17T15:00:00+00:00`, so the "last read" must be the latter — a string
+    compare picks the former.
+    """
+    read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger, at="2026-10-01T00:00:00+00:00")
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-11T12:00:00+00:00")  # before
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-11T23:00:00+09:00")  # 14:00Z
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-12T03:00:00+09:00")  # 18:00Z
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-17T23:00:00+09:00")  # 14:00Z
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-17T15:00:00+00:00")  # latest
+    ref = datetime.fromisoformat("2026-10-18T18:00:00+00:00")
+    folded = fold(ledger, window_days=7, now=ref)
+    row = next(iter(folded.rows.values()))
+    assert row.read_count == 3, "only the three at/after the cutoff"
+    assert row.last_read_at == "2026-10-17T15:00:00+00:00", row.last_read_at
+
+
+def test_a_union_of_tenants_is_flagged_in_the_report(ledger, capsys):
+    """Forgetting `--tenant` pools tenants and biases `f` DOWN — say so."""
+    read_ledger.record_stock("Point", "a", nbytes=1, path=ledger, tenant_id="t1")
+    read_ledger.record_stock("Point", "b", nbytes=1, path=ledger, tenant_id="t2")
+    assert read_ledger._main(["--ledger", str(ledger)]) == 0
+    out = capsys.readouterr().out
+    assert "UNION" in out and "2 tenants" in out
+    assert read_ledger._main(["--ledger", str(ledger), "--tenant", "t1"]) == 0
+    assert "UNION" not in capsys.readouterr().out
+
+
+def test_the_capped_first_batch_still_creates_a_0600_file(tmp_path, monkeypatch):
+    """`open(mode="ab")` would create it at the umask's mode on this path."""
+    import stat as _stat
+
+    path = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv(LEDGER_MAX_BYTES_ENV, "10")
+    monkeypatch.setenv("TORTOISE_READ_LEDGER_PATH", str(path))
+    ledger_path = read_ledger.ledger_path()
+    assert ledger_path == path
+    read_ledger.record_rows("Point", [{"id": f"p{i}"} for i in range(5)], path=path)
+    assert path.exists()
+    assert _stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert read_ledger.fold(path).capped is True

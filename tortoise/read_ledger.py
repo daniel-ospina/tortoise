@@ -347,7 +347,12 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
             # is silent and `fold()` reports `capped: false` over a file it
             # truncated — the "truncated window read as a quiet one" failure.
             if not _tail_is_capped(target):
-                with open(target, "ab") as fh:
+                # ⛔ 0600 ON THIS PATH TOO: `open(mode="ab")` creates the file at
+                # the umask's mode, and this branch runs on the FIRST append when
+                # one batch already exceeds a small cap — the tightest permission
+                # the module documents would not be the one the file has.
+                _fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(_fd, "ab") as fh:
                     # ⛔ A crash can leave a TORN final line with no newline.
                     # Appending the marker onto it makes the marker unparseable
                     # (so `fold` reports `capped: false` over a truncated file)
@@ -594,6 +599,34 @@ def record_rows(
 # ════════════════════════════════════════════════════════════════════════════
 
 
+def _stamp_cmp(a: str, b: str) -> int:
+    """Chronological comparison of two stamps (string fallback if unparseable)."""
+    da, db = _stamp(a), _stamp(b)
+    if da is not None and db is not None:
+        return (da > db) - (da < db)
+    return (a > b) - (a < b)
+
+
+def _stamp(value: Any) -> datetime | None:
+    """Parse an event's `at` into an aware datetime, or `None`.
+
+    ⛔ STAMPS ARE COMPARED AS TIMES, NOT AS STRINGS. `at=` is a public parameter,
+    and lexical order is chronological only when every stamp carries the SAME UTC
+    offset: `2026-10-11T01:00:00+09:00` is 16:00Z, so a string compare puts it
+    AFTER `2026-10-11T18:00:00+00:00` and a window can count a read from outside
+    itself, or pick an earlier read as the latest. A naive stamp is read as UTC
+    (the module writes UTC, `Z` or `+00:00`); an unparseable one falls back to
+    `None`, which every caller treats as "no time" rather than as a comparison.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 @dataclass
 class StockRow:
     """One `(label, key)` of the stock, with what the ledger observed about it."""
@@ -660,9 +693,11 @@ def fold(
         return out
     pending: dict[tuple[str | None, str, str], list[str | None]] = {}
     cutoff = None
+    cutoff_dt: datetime | None = None
     if window_days is not None:
         ref = now or datetime.now(UTC)
-        cutoff = (ref - timedelta(days=window_days)).isoformat(timespec="seconds")
+        cutoff_dt = ref - timedelta(days=window_days)
+        cutoff = cutoff_dt.isoformat(timespec="seconds")
         out.window_started = cutoff
         out.window_ended = ref.isoformat(timespec="seconds")
     with open(target, encoding="utf-8", errors="replace") as fh:
@@ -700,7 +735,8 @@ def fold(
                 continue
             if kind == EVENT_UNRESOLVED:
                 at = ev.get("at")
-                if cutoff is not None and isinstance(at, str) and at < cutoff:
+                _at_dt = _stamp(at)
+                if cutoff_dt is not None and (_at_dt is None or _at_dt < cutoff_dt):
                     continue
                 out.unresolved_reads += 1
                 continue
@@ -724,11 +760,14 @@ def fold(
                         # fraction excludes it and reports its coverage).
                         row.nbytes = None
                 at = ev.get("at")
-                if at and (row.first_written_at is None or at < row.first_written_at):
+                if at and (
+                    row.first_written_at is None or _stamp_cmp(at, row.first_written_at) < 0
+                ):
                     row.first_written_at = at
             elif kind == EVENT_READ:
                 at = ev.get("at")
-                if cutoff is not None and isinstance(at, str) and at < cutoff:
+                _at_dt = _stamp(at)
+                if cutoff_dt is not None and (_at_dt is None or _at_dt < cutoff_dt):
                     continue
                 row = out.rows.get(ident)
                 if row is None:
@@ -741,7 +780,7 @@ def fold(
                     pending.setdefault(ident, []).append(at)
                     continue
                 row.read_count += 1
-                if at and (row.last_read_at is None or at > row.last_read_at):
+                if at and (row.last_read_at is None or _stamp_cmp(at, row.last_read_at) > 0):
                     row.last_read_at = at
             else:
                 out.lines_skipped += 1
@@ -754,9 +793,9 @@ def fold(
             out.unregistered_reads += len(stamps)
             continue
         row.read_count += len(stamps)
-        latest = max((s for s in stamps if isinstance(s, str)), default=None)
-        if latest and (row.last_read_at is None or latest > row.last_read_at):
-            row.last_read_at = latest
+        for stamp in (s for s in stamps if isinstance(s, str)):
+            if row.last_read_at is None or _stamp_cmp(stamp, row.last_read_at) > 0:
+                row.last_read_at = stamp
     return out
 
 
@@ -967,6 +1006,15 @@ def _main(argv: list[str] | None = None) -> int:
             f"{len(seen.rows):,} key(s) under {len(others)} other tenant(s)"
         )
         return 2
+    # A UNION IS ALSO A WRONG NUMBER, and it is the easy mistake: `f` is per
+    # tenant, so forgetting `--tenant` on a file that holds three folds three
+    # stocks and three read sets into one ratio — which biases `f` DOWN and so
+    # FLATTERS the split. The typo'd tenant is refused above; this is the same
+    # number class, so it is flagged the same way (named by COUNT — the
+    # identifiers stay out of a report that may be pasted into an issue).
+    union_tenants = 0
+    if a.tenant is None:
+        union_tenants = len({t for t in _tenants_in_file(target) if t is not None})
     f = hot_fraction(folded)
     if a.json:
         # `lines_skipped` / `lines_read` are fold-level facts, not `f`'s: a torn
@@ -977,6 +1025,7 @@ def _main(argv: list[str] | None = None) -> int:
                     **f.as_dict(),
                     "lines_read": folded.lines_read,
                     "lines_skipped": folded.lines_skipped,
+                    "tenants_in_file": union_tenants,
                 },
                 indent=2,
             )
@@ -985,6 +1034,12 @@ def _main(argv: list[str] | None = None) -> int:
     print(f"ledger           : {a.ledger or ledger_path()}")
     if a.tenant is not None:
         print(f"tenant           : {a.tenant}")
+    if union_tenants > 1:
+        print(
+            f"⚠️ UNION         : this file holds {union_tenants} tenants and NO "
+            f"--tenant was given — f is per tenant, so this reading pools them "
+            f"and biases f DOWN (flattering the split). Pass --tenant."
+        )
     if f.first_event_at is not None:
         print(f"file spans from  : {f.first_event_at}  (a rotation restarts this)")
     print(

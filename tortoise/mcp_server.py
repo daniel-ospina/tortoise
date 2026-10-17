@@ -2054,10 +2054,12 @@ def tortoise_query(kind: str | None = None,
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
     if tag is not None:
-        # #7983: a PAGINATED caller receives one page, so the tag population
-        # must not be recorded as read (f HIGH); record the page it serves.
-        rows = _safe(_get_org_sdk().query_points_by_tag, tag,
-                     _record_reads=not paginated)
+        # #7983: record what this call SERVES — the post-filter population for an
+        # unpaginated caller, the one page for a paginated one. Never inside the
+        # accessor: it runs BEFORE the retracted filter below, so it would count
+        # Points the caller never receives (f HIGH, the direction that must not
+        # happen), and the two tag modes would measure different things.
+        rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
         # query_points_by_tag has no retracted exclusion in the SDK — mirror
@@ -2065,6 +2067,7 @@ def tortoise_query(kind: str | None = None,
         if not include_retracted:
             rows = [r for r in rows if r.get("status") != "retracted"]
         if not paginated:
+            _ledger_record_page("Point", rows)  # #7983: the served population
             return rows
         eff_offset = offset if offset is not None else 0
         if page is not None:

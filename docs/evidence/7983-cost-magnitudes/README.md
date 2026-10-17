@@ -172,8 +172,9 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   exhaustive list would date the moment a reader is added): **`recall_subgraph`** (graph expansion:
   expander nodes, not keyed lookups); **`diary_read`, `session_context`, `list_dedup_candidates`,
   `list_drafts`, `belief_timeline`, `get_org_structure`** (caller-facing `RETURN properties(n)`
-  readers — five of them registered MCP tools — several returning `Point.id`, so their rows WOULD be
-  joinable and only the missing hook excludes them); **`list_sources`** (a `Source` projection
+  readers — FOUR of these six are registered MCP tools (`tortoise_diary_read`,
+  `tortoise_session_context`, `tortoise_list_dedup_candidates`, `tortoise_belief_timeline`); several
+  return `Point.id`, so their rows WOULD be joinable and only the missing hook excludes them); **`list_sources`** (a `Source` projection
   returning `url`/`sourceKind`/count — not a `properties(n)` reader, and the single most joinable row
   shape of the set); **the state and traversal paths** (`traverse`, `recall_state`'s related-point/
   object readers, `get_historical_knowledge`); **a POOL read of the FTS funnel** — its internal pool
