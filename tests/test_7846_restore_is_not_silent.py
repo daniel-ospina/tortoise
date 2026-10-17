@@ -121,7 +121,12 @@ def test_the_silence_during_a_blocking_restore_is_measured_and_ends_with_it() ->
 
     assert observation.status == BLOCKED
     assert observation.witness_failures > 0, "a blocked witness PING was counted as answered"
-    assert observation.silent_ms >= 200, (
+    # A LOWER BOUND, not the block itself: the run is clipped at the last sample inside
+    # the window, so a starved poll (0.01 s nominal) can lose up to one interval at the
+    # tail — measured 199.7 ms for this same 300 ms block on a loaded host. The claim
+    # being pinned is that the silence was MEASURED rather than inferred from the
+    # restore's duration, so the margin is coarse on purpose.
+    assert observation.silent_ms >= 150, (
         f"the 300 ms block was measured as {observation.silent_ms:.0f} ms"
     )
     assert observation.silence_started_s is not None
@@ -292,6 +297,16 @@ def test_a_block_shorter_than_the_witness_timeout_is_still_reported() -> None:
     )
     assert observation.blocked_ms >= 200
     assert observation.silent is False
+    # #8827 review cycle 9: the completed BLOCKED path with no unanswered PING fell
+    # through to the "every PING answered and none was slow enough" account — the
+    # opposite of the verdict, about the one run whose slow PING is the whole evidence.
+    diagnosis = observation.diagnosis()
+    assert "none was slow enough" not in diagnosis, (
+        f"a latency-measured block is reported as an unblocked instance: {diagnosis}"
+    )
+    assert f"{observation.witness_max_latency_ms:.0f} ms" in diagnosis, (
+        f"the diagnosis does not report the slow PING that IS the block: {diagnosis}"
+    )
 
 
 def test_a_stalled_restore_on_a_SERVING_instance_does_not_blame_the_engine() -> None:
@@ -671,3 +686,166 @@ def test_a_non_positive_bound_is_refused() -> None:
     instance = _FakeInstance()
     with pytest.raises(ValueError):
         _observe(instance, lambda _payload: "OK", bound_s=0)
+
+
+def test_an_overrun_with_a_REFUSED_port_is_a_death_even_though_every_PING_answered() -> None:
+    """#8827 review cycle 9: hard transport evidence must outrank the witness inference.
+
+    The process dies inside the last poll interval before the bound, so no witness PING
+    is in flight and NONE fails — ``failures == 0`` with a non-empty sample list. The
+    refusal is the same observation's own ``instance_listening is False``.
+
+    Pre-fix the caller-stall branch came first, so this run raised
+    ``GraphRestoreStalledError`` and told the operator "the instance was serving … check
+    the CALLER … before suspecting the engine" about a server process that was gone.
+    """
+    instance = _FakeInstance()  # PINGs answer: the witness records no failure at all
+
+    def never_returns(_payload):
+        time.sleep(5.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreLostError) as raised:
+        _observe(instance, never_returns, bound_s=0.2, listening=lambda: False)
+
+    observation = raised.value.observation
+    assert observation.witness_samples > 0, "no sample was attributed — wrong window"
+    assert observation.witness_failures == 0, (
+        "the premise is a run where every in-window PING answered"
+    )
+    assert observation.instance_listening is False
+    assert observation.status == INSTANCE_GONE, (
+        f"a REFUSED port was reported as {observation.status!r}, so the operator is told "
+        f"to check their own client while the process is gone"
+    )
+    message = str(raised.value)
+    assert "died during the restore" in message
+    assert "Check the CALLER" not in message
+    assert not isinstance(raised.value, GraphRestoreStalledError), (
+        "a refused port was raised as a caller-side stall"
+    )
+
+
+def test_an_overrun_whose_answered_PINGs_were_SLOW_is_not_blamed_on_the_caller() -> None:
+    """#8827 review cycle 9: a slow ANSWERED PING is the block, on the overrun path too.
+
+    The caller gives the witness a timeout below ``bound_s`` (this module's own advice),
+    so nothing fails to answer while the serving thread sits inside the rebuild — every
+    PING merely takes ~300 ms. Nothing fails, yet the instance is visibly not serving.
+
+    Pre-fix the overrun path discarded the latency signal entirely and reported
+    ``CALLER_STALL``: "the instance was serving, so this is NOT the #7846 blocked-engine
+    signature … Check the CALLER".
+    """
+    instance = _FakeInstance()
+
+    def slow_ping() -> None:
+        # Answered — but only once the work queued ahead of it on the serving thread is
+        # done, which is exactly what the rebuild does to the witness.
+        time.sleep(0.3)
+        instance.pings += 1
+
+    def never_returns(_payload):
+        time.sleep(5.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreSilentError) as raised:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=slow_ping,
+            bound_s=0.2,
+            poll_interval_s=_POLL_S,
+            witness_join_s=5.0,
+            listening=lambda: True,
+        )
+
+    observation = raised.value.observation
+    assert observation.witness_failures == 0, "the slow PING answered — nothing failed"
+    assert observation.witness_max_latency_ms >= observation.blocked_latency_ms, (
+        f"the answered-but-slow PING was not recorded ({observation.witness_max_latency_ms:.0f} ms)"
+    )
+    assert observation.blocked_ms >= observation.blocked_latency_ms
+    assert observation.status == ALIVE_BUT_SILENT, (
+        f"the block was measured and then reported as {observation.status!r} — the caller "
+        f"is blamed for an instance that was queued behind its own rebuild"
+    )
+    message = str(raised.value)
+    assert "Check the CALLER" not in message
+    assert "NOT the #7846 blocked-engine signature" not in message
+    assert f"{observation.witness_max_latency_ms:.0f} ms" in message, (
+        f"the measurement that decided this verdict is not in the message: {message}"
+    )
+    assert not isinstance(raised.value, GraphRestoreStalledError)
+
+
+def test_the_caller_held_time_reports_the_whole_call_including_the_TAIL() -> None:
+    """#8827 review cycle 9: ``elapsed_s`` must not stop at the bound.
+
+    On the overrun path the caller is held for ``bound_s`` PLUS the witness join (a
+    witness blocked inside its own PING is only released when that PING is) PLUS the
+    liveness probe's own timeout. ``elapsed_s`` was captured at the bound, before both,
+    so an observation could say "caller held 0.2s" about a call the caller waited ~0.9s
+    for — the same measurement-vs-operation drift this driver exists to remove.
+
+    Pre-fix the ``elapsed_s`` assertion below fails (it reads ~0.2s against a ~0.9s
+    call); the docstring's promise of "never past its own bound" is corrected alongside
+    it, to the additive term asserted here.
+    """
+    instance = _FakeInstance()
+
+    def ping_that_never_lands() -> None:
+        time.sleep(1.5)  # still in flight when the witness is joined and abandoned
+        instance.pings += 1  # ... and only then does the sample land, past the window
+
+    def slow_probe() -> bool:
+        time.sleep(0.2)  # a real tcp probe carries a timeout; this models its cost
+        return True
+
+    bound_s, join_s, probe_s = 0.2, 0.5, 0.2
+
+    def never_returns(_payload):
+        time.sleep(5.0)
+        return "OK"
+
+    started = time.perf_counter()
+    with pytest.raises(GraphRestoreSilentError) as raised:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=ping_that_never_lands,
+            bound_s=bound_s,
+            witness_join_s=join_s,
+            poll_interval_s=_POLL_S,
+            listening=slow_probe,
+        )
+    held = time.perf_counter() - started
+    observation = raised.value.observation
+
+    assert held >= bound_s + join_s + probe_s - 0.15, (
+        f"the scenario did not exercise the tail: the caller was held only {held:.2f}s"
+    )
+    # The documented ceiling: the bound, plus the two named tail terms the caller owns.
+    assert held <= bound_s + join_s + probe_s + 0.6, (
+        f"the caller was held {held:.2f}s, past the bound + witness join + probe timeout "
+        f"({bound_s + join_s + probe_s:.2f}s) — the abandoned restore worker was joined "
+        f"to completion instead of abandoned"
+    )
+    assert observation.restore_s >= bound_s * 0.9, (
+        f"the RESTORE step is reported as {observation.restore_s:.2f}s on a {bound_s}s "
+        f"bound: the overrun vanished from the split"
+    )
+    assert observation.elapsed_s >= observation.restore_s + join_s * 0.8, (
+        f"elapsed_s ({observation.elapsed_s:.2f}s) does not carry the tail the caller "
+        f"also waited for (RESTORE step {observation.restore_s:.2f}s + a {join_s}s "
+        f"witness join)"
+    )
+    assert observation.elapsed_s >= held - 0.2, (
+        f"the caller waited {held:.2f}s but elapsed_s reports {observation.elapsed_s:.2f}s — "
+        f"the published caller-held time excludes the tail the operation needed"
+    )
+    assert abs(held - observation.elapsed_s) < 0.35, (
+        f"elapsed_s ({observation.elapsed_s:.2f}s) and the wall time the caller actually "
+        f"waited ({held:.2f}s) do not describe the same call"
+    )
+    assert observation.elapsed_s >= observation.restore_s

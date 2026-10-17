@@ -30,7 +30,15 @@ explicit error the caller can act on"). ``restore_graph_key``:
    hazard (#8827 review). ``bound_s`` is a hard caller-side read bound on the
    ``restore`` call only. If the restore has not returned by then, the caller gets an
    error instead of a hang; the worker is a daemon and is abandoned (never joined to
-   completion), so a blocked restore can never block the caller past its own bound.
+   completion), so the RESTORE call can never hold the caller past the bound. The TAIL
+   after it is finite but NOT free, and it is named here rather than folded away
+   (#8827 review): the witness join (``witness_join_s``, 5 s by default, because a
+   witness blocked inside its own PING is only released when that PING does) plus the
+   caller-supplied liveness probe's own timeout (``tcp_is_listening``'s 1 s default).
+   So the caller is held at most ``bound_s + witness_join_s + probe_timeout``, and
+   ``elapsed_s`` reports THAT number: it is captured when the observation is
+   published, not at the bound, so the caller-held time in the data is the whole
+   call and cannot drift below what the caller actually waited.
    ``dump`` and ``delete`` run INLINE on the caller's thread *before* the worker is
    started, so ``bound_s`` does NOT cover them: their only limit is whatever socket
    timeout the caller's own client carries. Give that client a socket timeout below
@@ -227,11 +235,16 @@ class RestoreObservation:
     graph: str
     status: str
     bound_s: float
-    #: How long the CALLER was held by the whole sequence — ``dump`` -> ``delete`` ->
-    #: ``restore``. ``bound_s`` covers the RESTORE step only (``dump``/``delete`` run
-    #: inline on the caller's thread before the worker starts), so this number and
+    #: How long the CALLER was held — from before ``dump()`` to the moment this
+    #: observation was PUBLISHED, so it includes the tail that explaining an overrun
+    #: needs (the witness join, the liveness probe, and on a completed run the bounded
+    #: recovery probe). ``bound_s`` covers the RESTORE step only (``dump``/``delete``
+    #: run inline on the caller's thread before the worker starts), so this number and
     #: ``restore_s`` are reported separately rather than one standing for both
-    #: (#8827 review).
+    #: (#8827 review). ``elapsed_s >= restore_s`` always; a caller-held time that
+    #: stopped at the bound would under-report the call by up to
+    #: ``witness_join_s + probe_timeout``, which is the same measurement-vs-operation
+    #: drift this driver exists to remove (#8827 review cycle 9).
     elapsed_s: float
     #: How long the RESTORE step itself took — the step ``bound_s`` bounds.
     restore_s: float
@@ -345,12 +358,17 @@ class RestoreObservation:
                 f"evidence about the instance in either direction."
             )
         if self.status in _OVERRUN_STATUSES:
+            # Both signals, always: "0 of N went unanswered" on its own reads as "the
+            # instance was serving", which is the very inversion the status avoids
+            # (#8827 review). The slowest ANSWERED PING is what carries a latency-shaped
+            # block on this path.
             return (
                 f"graph-key RESTORE of {self.graph!r} did not return within the "
-                f"{self.bound_s:g}s caller-side bound, and the instance did not serve "
-                f"during it: {self.witness_failures} of {self.witness_samples} witness "
-                f"PINGs on a separate connection went unanswered (longest silence "
-                f"{self.silent_ms:.0f} ms)."
+                f"{self.bound_s:g}s caller-side bound: {self.witness_failures} of "
+                f"{self.witness_samples} witness PINGs on a separate connection went "
+                f"unanswered (longest silence {self.silent_ms:.0f} ms) and the slowest "
+                f"ANSWERED one took {self.witness_max_latency_ms:.0f} ms, so the "
+                f"instance did not serve normally during it."
             )
         return (
             f"graph-key RESTORE of {self.graph!r} returned after {self.restore_s:.2f}s "
@@ -429,6 +447,23 @@ class RestoreObservation:
                 f"re-blocks the instance for another full rebuild. The abandoned restore "
                 f"may still complete — check with a PING on a separate connection before "
                 f"restarting anything."
+            )
+        if self.witness_max_latency_ms >= self.blocked_latency_ms:
+            # Measured, no PING went unanswered — but a slow ANSWERED one IS the block,
+            # seen from inside its own duration. Reaching the branch below would say
+            # "none was slow enough" about the run whose slow PING is the whole evidence
+            # (#8827 review cycle 9), on both the completed BLOCKED path and the overrun
+            # ALIVE_BUT_SILENT path this now also covers.
+            return (
+                f"{verdict} No witness PING went unanswered, but the slowest ANSWERED "
+                f"one took {self.witness_max_latency_ms:.0f} ms (threshold "
+                f"{self.blocked_latency_ms:.0f} ms): the command waited on the serving "
+                f"thread, queued behind the index rebuild, so the instance was NOT "
+                f"serving normally. This is the #7846 block measured from inside its own "
+                f"duration — not load (a loaded server answers, only slower than this) "
+                f"and not the caller. Do not retry: a retry re-blocks the instance for "
+                f"another full rebuild. The abandoned restore may still complete — check "
+                f"with a PING on a separate connection before restarting anything."
             )
         # Measured, every PING answered, no slow one: nothing was wrong with the instance.
         return (
@@ -648,8 +683,12 @@ def restore_graph_key(
             already loud; this driver does not replace it).
 
     ``ping`` must own its OWN connection. The restore runs on a daemon worker thread
-    and is ABANDONED at ``bound_s`` — never joined to completion — so a blocked
-    restore cannot hold the caller past its own bound. ``recovery_probe_s`` is the
+    and is ABANDONED at ``bound_s`` — never joined to completion — so the RESTORE call
+    cannot hold the caller past the bound. The tail that follows is finite and named:
+    ``witness_join_s`` (a witness blocked inside its own PING is released only when that
+    PING is) plus whatever timeout the ``listening`` callable carries, so the caller is
+    held at most ``bound_s + witness_join_s + probe_timeout`` — keep both small when
+    that tail matters, and read ``elapsed_s`` for the whole of it. ``recovery_probe_s`` is the
     extra, bounded window in which a completed restore waits for the instance to
     answer once more (the recovery edge that makes the silence attributable); it is
     not part of ``bound_s``.
@@ -697,7 +736,6 @@ def restore_graph_key(
         raise
     worker.join(bound_s)
     restore_s = time.perf_counter() - started
-    elapsed_s = time.perf_counter() - op_started
     completed = not worker.is_alive()
     # Boundary in WITNESS time: the restore is over here, so samples taken after
     # this point (the recovery probe) describe liveness, not attribution. Counting
@@ -712,6 +750,9 @@ def restore_graph_key(
         deadline_s=witness_join_s,
         recovery_s=recovery_probe_s if completed else 0.0,
     )
+    # `elapsed_s` is the caller-held time and is captured HERE, after the join and the
+    # recovery probe, because those are time the caller also waited (#8827 review).
+    elapsed_s = time.perf_counter() - op_started
     # Attribution uses only samples inside the operation window; the recovery probe
     # may still add samples afterwards, and those may not be blamed on the restore.
     attributed = [s for s in samples if s[0] <= window_end_s]
@@ -826,21 +867,36 @@ def restore_graph_key(
     else:
         probe = listening()
         instance_listening = probe if probe is None else bool(probe)
-    if not failures and attributed:
-        # Every sample ANSWERED, so the instance was serving and the overrun is the
-        # CALLER's. Both conditions are required: with zero samples `not failures`
-        # is vacuously true, and "every one of the 0 witness PINGs ANSWERED" is the
-        # pre-fix false reading delivered in a confident voice (#8827 review).
-        status = CALLER_STALL
-    elif instance_listening is False:
-        # The refused port is a measurement in its own right, so this stays above the
-        # unmeasured branch — and its message must say the process is GONE, never
-        # "check the caller" (#8827 review).
+    # Re-measure HERE: the probe (and the witness join above) is time the caller spent
+    # waiting for this answer, so `elapsed_s` must include it or the published
+    # caller-held time is short by exactly the tail the overrun path adds (#8827
+    # review).
+    elapsed_s = time.perf_counter() - op_started
+    # The order is evidence BEFORE inference (#8827 review): a REFUSED port is a
+    # measurement in its own right and outranks "every PING answered", which is only
+    # an inference about the polls that happened to be in window. With the inference
+    # first, a process that died inside the last poll interval before the bound was
+    # reported as ``CALLER_STALL`` — the one status whose message says "do NOT restart,
+    # check the CALLER" — while ``instance_listening is False`` sat in the same
+    # observation.
+    if instance_listening is False:
+        # Hardest evidence there is: nothing accepted the connection, so the process is
+        # gone. Its message must say so, never "check the caller".
         status = INSTANCE_GONE
     elif not measured:
         # The instrument faulted, or the witness never got a reading: nothing can be
-        # attributed, and neither is the block.
+        # attributed, and neither is the block. (`CALLER_STALL` implies `measured`, so
+        # this cannot swallow a real caller stall.)
         status = UNMEASURED
+    elif not failures and max_latency_ms < blocked_latency_ms:
+        # Every sample ANSWERED **and none was slow**: the instance really was serving,
+        # so the overrun is the CALLER's. Both conditions are required: with zero samples
+        # `not failures` is vacuously true ("every one of the 0 witness PINGs ANSWERED"),
+        # and a slow ANSWERED PING is the block itself — a caller who follows this
+        # module's own advice (witness timeout below ``bound_s``) lands exactly there, and
+        # must not be told to check their client on an instance that was visibly not
+        # serving (#8827 review).
+        status = CALLER_STALL
     else:
         status = ALIVE_BUT_SILENT
     observation = RestoreObservation(
