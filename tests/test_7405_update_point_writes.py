@@ -1407,3 +1407,92 @@ def test_a_tagged_update_that_never_retries_pays_no_read_back(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+class _AbortPromoteThenEmptyPresence(_AbortOnceGraph):
+    """Abort the promote ``SET`` once, then answer the STATUS read with no row.
+
+    ``_promote_witness`` reads ``MATCH (n:Point {id:$id}) RETURN n.status`` — a
+    single-row read, so an empty result set means the statement did not run.
+    That is the shape this proxy produces once the retry is authorised.
+    """
+
+    _PRESENCE = "MATCH (n:Point {id:$id}) RETURN n.status"
+
+    def __init__(self, real, promote_needle: str) -> None:
+        super().__init__(real, promote_needle, present=True)
+        self.presence_reads = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._PRESENCE in cypher:
+            # The witness's own read: no row at all (the statement did not run).
+            self.presence_reads += 1
+            return _EmptyResult()
+        if self._needle in cypher:
+            # The promote `SET`: abort the first attempt, then answer every
+            # re-issue with ZERO rows — the "replay has not restored it yet"
+            # shape. `_promote_witness` only consults the presence read when the
+            # SET returned no row, so both halves are required to reach it.
+            self.matching += 1
+            if self.matching == 1:
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            return _EmptyResult()
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+
+def test_a_promote_witness_reads_an_empty_status_row_as_absent(
+        tmp_path, monkeypatch):
+    """An empty status read is "absent", never an ``IndexError``.
+
+    Indexing ``result_set[0][0]`` blind raises ``IndexError``, which
+    ``retryable_aborted_write`` does not recognise — so it escapes as a
+    STRUCTURAL failure and MASKS the abort that authorised the retry, replacing
+    a caller-actionable graph error with an internal one.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "promoteempty")
+    try:
+        # The promote arm engages only on a DRAFT point (`WHERE n.status = 'draft'`),
+        # so a live `_pid` never issues the statement under test.
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortPromoteThenEmptyPresence(proj.g, _POINT_PROMOTE_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, status="live")
+
+        assert proxy.presence_reads >= 1, (
+            "the witness was never consulted — this test would prove nothing")
+        assert proxy.matching >= 2, "the promote SET was never re-issued"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_non_string_tag_list_is_still_witnessed(tmp_path):
+    """A HASHABLE non-string tag list must not disable the landing check.
+
+    ``tags=[1, 2]`` is a legal write — the engine creates both ``:Tag`` nodes
+    and raises nothing — so treating "not all str" as unwitnessed re-opens the
+    false success this arm closes: under an abort that wiped the Point, the
+    reconciler's MERGEs match nothing and the call returned a success dict with
+    no read-back at all. The witness is disabled only for entries it cannot
+    dedupe (UNHASHABLE ones), where the engine owns the error.
+    """
+    sdk = _sdk(tmp_path, "nonstrtags")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _TAGGED_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, tags=[1, 2])
+
+        assert proxy.vanished, "fixture precondition: the Point must be gone"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()

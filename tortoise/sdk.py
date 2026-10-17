@@ -10611,17 +10611,30 @@ class TortoiseSDK:
             # `None` makes the witness vacuous there instead of inventing a
             # non-landing on a write that was never asked to make edges.
             _sync_raw_tags = props["tags"] or []
-            # DEDUPE for the count only, and only for the shapes that can be a
-            # count: `dict.fromkeys` raises `TypeError` on an unhashable entry
-            # (e.g. `tags=[{"name": "a"}]`), which would re-bucket the engine's
-            # own `ResponseError` from "db" to "structural". A list that is not
-            # all strings is therefore left UNWITNESSED (vacuously true) so the
-            # engine keeps owning the error it already raised before #7405.
-            _sync_wanted = (
-                list(dict.fromkeys(_sync_raw_tags))
-                if isinstance(_sync_raw_tags, (list, tuple))
-                and all(isinstance(t, str) for t in _sync_raw_tags)
-                else None)
+            # DEDUPE for the count only. A list is witnessed whenever its entries
+            # are HASHABLE, which is the condition `dict.fromkeys` actually
+            # needs: `tags=["a", 1]` is a legal tag list (the engine creates
+            # both `:Tag` nodes and raises nothing), so disabling the witness for
+            # it would re-open the very false success this arm closes — measured:
+            # under an abort that wiped the Point, `tags=[1, 2]` returned a
+            # success dict with no read-back at all.
+            #
+            # An UNHASHABLE entry (e.g. `tags=[{"name": "a"}]`) must NOT raise
+            # here: a `TypeError` would re-bucket the engine's own
+            # `ResponseError: Property values can only be of primitive types`
+            # from the "db" family to "structural". Leave the witness vacuous
+            # on that shape so the ENGINE keeps owning the error it raises.
+            if isinstance(_sync_raw_tags, (list, tuple)):
+                try:
+                    _sync_wanted = list(dict.fromkeys(_sync_raw_tags))
+                except TypeError:
+                    _sync_wanted = None
+            else:
+                # A NON-ARRAY value (a number/dict, outside the public signature
+                # but tolerated and pinned by `test_update_non_list_tags_no_crash`)
+                # derives no edges BY DESIGN (#8333 owns that), so it must not be
+                # witnessed against a count.
+                _sync_wanted = None
 
             def _sync() -> None:
                 nonlocal _sync_attempts
