@@ -193,12 +193,14 @@ One primitive, in `tools/lane_stash.py`:
 - **Orphan retention.** When an emptied register leaves `refs/stash` pointing at an entry no pin and
   no applied-record names, `prune` retains it; it now guard-pins the object rather than relying on
   `refs/stash`, because the reconciliation's `stash store` can move that ref and would otherwise have
-  destroyed the handle the retention message just promised. A retained guard has exactly one
-  lifetime: it is released once `recover` puts the entry back under `refs/lane` — under **any** lane
-  key, since another worktree may be the one to rescue it — or when a prune's `finally` sees the sha
-  back in the register. `lane_stash list` prints any still held and, per guard, whether another ref
-  names the object, so the namespace can be enumerated and cleared rather than silently keeping
-  objects un-gc-able forever.
+  destroyed the handle the retention message just promised. A retained guard has exactly two
+  lifetimes: it is released once `recover` puts the entry back under `refs/lane` — under **any** lane
+  key, since another worktree may be the one to rescue it — or when the prune that created it sees
+  the sha back in the register, which releases **only its own** guard: a foreign guard for the same
+  sha may belong to a concurrent prune that is still deleting positions, and "in the register" is
+  exactly the transient state a guard exists for. `lane_stash list` prints any still held and, per
+  guard, whether another ref names the object, so the namespace can be enumerated and cleared rather
+  than silently keeping objects un-gc-able forever.
 
 Out of scope (reported, not absorbed): the skills text (`using-git-worktrees`, `commit-workflow`) is
 a symlink to agent-infra and belongs to agent-infra #1264; the `main-worktree-guard` extension

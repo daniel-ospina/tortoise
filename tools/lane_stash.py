@@ -1010,6 +1010,12 @@ def cmd_check(args: argparse.Namespace) -> int:
     rows = _shared_register()
     entries = _parse_entries(key)
     head = _stash_head()
+    # `pop` moves a lane pin to the durable applied ref, so THIS lane's applied
+    # records are ownership evidence too, and they are what makes an unpinned
+    # register entry reclaimable by `prune --apply` (#8773 review P2).
+    applied = _applied_shas(key)
+    unpinned = [r for r in rows if not r["pinned"]]
+    reclaimable_unpinned = sum(1 for r in unpinned if r["sha"] in applied)
 
     verdict = {
         "lane": key,
@@ -1017,7 +1023,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         "linked_worktree": is_linked_worktree(),
         "lane_entries": len(entries),
         "shared_entries": len(rows),
-        "unpinned_shared": sum(1 for r in rows if not r["pinned"]),
+        "unpinned_shared": len(unpinned),
+        "unpinned_reclaimable": reclaimable_unpinned,
+        "unpinned_refused": len(unpinned) - reclaimable_unpinned,
         "bare_pop_target": rows[0]["sha"] if rows else None,
         "bare_pop_branch": rows[0]["branch"] if rows else None,
         "safe": True,
@@ -1038,9 +1046,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     if rows:
         top = rows[0]
-        # `pop` moves a lane pin to the durable applied ref, so THIS lane's applied
-        # records are ownership evidence too (#8773 review P2).
-        own_shas = {e["sha"] for e in entries} | _applied_shas(key)
+        own_shas = {e["sha"] for e in entries} | applied
         kind, reason = _entry_ownership(top, key, own_shas)
         if kind == "foreign":
             # A foreign lane ref or marker OUTRANKS this lane's own pin: a
@@ -1097,13 +1103,27 @@ def cmd_check(args: argparse.Namespace) -> int:
                   f"branch={rows[0]['branch']!r}  {rows[0]['subject']}")
         else:
             print("shared register: empty")
-        if verdict["unpinned_shared"]:
-            print(f"  note: {verdict['unpinned_shared']} shared entr"
-                  f"{'y is' if verdict['unpinned_shared'] == 1 else 'ies are'} pinned by no "
-                  "lane ref (bare-git debris) — prune will refuse to touch "
-                  f"{'it' if verdict['unpinned_shared'] == 1 else 'them'}")
+        if unpinned:
+            # Report the SAME retention decision `prune` makes: an unpinned entry
+            # THIS lane recorded applied IS reclaimable, so calling all of them
+            # "refused" contradicted prune on the state `pop` creates by design
+            # (#8773 review P2).
+            parts = []
+            if reclaimable_unpinned:
+                parts.append(
+                    f"{reclaimable_unpinned} reclaimable by `prune --apply` (this lane "
+                    f"recorded {'it' if reclaimable_unpinned == 1 else 'them'} applied)")
+            refused = len(unpinned) - reclaimable_unpinned
+            if refused:
+                parts.append(f"{refused} refused (no handle)")
+            print(f"  note: {len(unpinned)} shared entr"
+                  f"{'y is' if len(unpinned) == 1 else 'ies are'} pinned by no lane ref: "
+                  + "; ".join(parts))
         if verdict["safe"]:
-            print("VERDICT: SAFE — a bare `git stash pop` here would take this branch's own entry")
+            # "THIS lane's own", never "this branch's": a branch name identifies a
+            # BRANCH, never a lane — the framing every HAZARD reason refutes
+            # (#8773 review P2).
+            print("VERDICT: SAFE — a bare `git stash pop` here would take THIS lane's own entry")
         else:
             print("VERDICT: HAZARD — do not run a bare `git stash pop`/`git stash drop` here")
             for r in verdict["reasons"]:
@@ -1190,9 +1210,9 @@ def cmd_recover(args: argparse.Namespace) -> int:
                     f"register (position {row['pos']}) and is not provably this lane's — "
                     "nothing was dropped, so there is nothing to recover. `recover` would "
                     "PIN it to this lane, and `check` would then clear a bare `git stash "
-                    "pop` on another lane's work. Restore it with `lane_stash pop <id>` "
-                    "or `git stash apply <sha>`, or pass -m <message> to assert the "
-                    "recovery explicitly."
+                    "pop` on another lane's work. Restore it with `git stash apply <sha>` "
+                    "(it works for any sha), or pass -m <message> to assert the recovery "
+                    "explicitly."
                 )
             break
     if not _store_into_register(args.sha, subject, key):
@@ -1440,11 +1460,15 @@ def cmd_prune(args: argparse.Namespace) -> int:
             final = None
         for sha, (guard_ref, _subject) in guarded.items():
             if final is not None and sha in final:
-                # Release under ANY lane key: once the sha is back in the register
-                # a guard is redundant wherever it lives, and a guard left by a
-                # PREVIOUS prune (or another, since-removed worktree) would
-                # otherwise block gc forever (#8773 review P2).
-                _guard_release_all(sha)
+                # Release ONLY this prune's own guard. A FOREIGN guard for the same
+                # sha may belong to a CONCURRENT prune in another lane that still
+                # has to finish deleting positions — being "in the register" is
+                # exactly the transient state a guard exists for, so releasing it
+                # under every key would strip a live peer's protection. A guard
+                # orphaned by a removed worktree is still enumerable by `list` and
+                # released by `recover` once the object has a durable lane pin
+                # (#8773 review P2).
+                _guard_unpin(guard_ref, sha)
             elif final is None:
                 print(f"kept   guard ref {guard_ref} for {sha[:12]} — the shared register "
                       "could NOT be read, so this guard is retained conservatively; check "

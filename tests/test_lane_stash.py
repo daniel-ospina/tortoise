@@ -230,6 +230,27 @@ def test_check_is_safe_when_the_top_entry_is_this_branch(repo):
     check = repo.lane(repo.a, "check")
     assert check.returncode == 0, _fail(check)
     assert "SAFE" in check.stdout
+    # the safe verdict must speak of the LANE, never the branch: a branch name
+    # identifies a branch, never a lane (#8773 review P2).
+    assert "THIS lane's own entry" in check.stdout, check.stdout
+
+
+def test_check_advisory_matches_prune_reclaimability(repo):
+    """`check` must not call an applied entry "prune will refuse to touch".
+
+    The normal post-`pop` state is an unpinned register entry that `prune --apply`
+    WILL reclaim (this lane recorded it applied); the advisory contradicted prune
+    on the state the tool creates by design (#8773 review P2).
+    """
+    repo.dirty(repo.a, "f.txt", "base\na\n")
+    assert repo.lane(repo.a, "push", "-m", "A").returncode == 0
+    assert repo.lane(repo.a, "pop").returncode == 0
+    check = repo.lane(repo.a, "check")
+    assert "1 reclaimable by `prune --apply`" in check.stdout, check.stdout
+    assert "refused" not in check.stdout, check.stdout
+    # and prune agrees: the same state is reclaimable
+    assert repo.lane(repo.a, "prune", "--apply").returncode == 0
+    assert repo.stash_shas() == []
 
 
 def test_check_is_safe_on_an_empty_register(repo):
@@ -1947,12 +1968,14 @@ def test_list_reports_a_guard_left_by_another_lane(repo):
     assert f"[lane {b_key} — not this lane]" in listed.stdout, listed.stdout
 
 
-def test_prune_releases_a_guard_left_under_another_lane(repo, monkeypatch, capsys):
-    """A guard is redundant once its sha is back in the register — under ANY key.
+def test_prune_does_not_release_another_lanes_guard_for_an_unpinned_entry(
+    repo, monkeypatch, capsys,
+):
+    """A live peer prune's guard must not be deleted just because a sha is registered.
 
-    Another lane (or a since-removed worktree) can leave a guard for an entry this
-    prune is about to keep. Releasing only this prune's own guard left that ref
-    blocking gc forever (#8773 review P2).
+    Being in the register is the TRANSIENT state a guard exists for: two lanes can
+    each classify the same unpinned entry as kept, and the first to finish must not
+    strip the other's protection while it is still deleting positions (#8773 P2).
     """
     mod = _load_tool()
     repo.dirty(repo.a, "f.txt", "base\ndoomed\n")
@@ -1970,7 +1993,13 @@ def test_prune_releases_a_guard_left_under_another_lane(repo, monkeypatch, capsy
     remaining = repo.git(
         "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
     ).stdout.split()
-    assert ghost not in remaining, f"a foreign guard for a live entry leaked: {remaining}"
+    assert ghost in remaining, (
+        "a foreign guard for an UNPINNED entry is a peer prune's live protection and "
+        f"must not be released: {remaining}"
+    )
+    # and it stays enumerable, so it cannot leak silently either
+    listed = repo.lane(repo.a, "list")
+    assert ghost in listed.stdout, listed.stdout
 
 
 def test_an_unreadable_ref_list_is_a_state_error_not_safe(repo, monkeypatch):
