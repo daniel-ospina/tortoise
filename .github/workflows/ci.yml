@@ -253,13 +253,19 @@ jobs:
                          # #8293: the SEO keyword + agent-limiter harness.
                          "tests/test_blog_seo_meta.mjs", "tests/test_deck_view.mjs",
                          # #8816: the wrangler pin is an INPUT to this job — the
-                         # version file, the guard that pins its shape, and the
-                         # two workflows that carry the spec. Without them a
-                         # version-only (or guard-only) PR would not run the job
-                         # whose toolchain it changes.
+                         # version file, the guard that pins its shape, and BOTH
+                         # workflows that carry the wiring: `deploy-pages.yml`
+                         # (the two deploy assertions) and this file, which carries
+                         # three of the five consumers and every boot step. Without
+                         # them a version-only (or guard-only, or
+                         # `ci.yml`-wiring-only) PR would not run the job whose
+                         # toolchain it changes. `legal-e2e` is deliberately
+                         # ungated, so it runs either way; `dashboard_e2e` already
+                         # names `ci.yml` below for its own reasons.
                          "config/wrangler-version",
                          "tests/test_e2e_wrangler_prewarm.py",
-                         ".github/workflows/deploy-pages.yml"),
+                         ".github/workflows/deploy-pages.yml",
+                         ".github/workflows/ci.yml"),
                   # #3501: the BFF auth suites live here and had NO path entry —
                   # a suite-only PR could not trigger the job that runs them.
                   startswith("tests/e2e/auth/"),
@@ -434,8 +440,10 @@ jobs:
               # dist rebuild ran against the previous bundle — is GONE: the job
               # builds before it boots.)
               "dashboard_e2e": any_file(
-                  # #8816: same inputs as the `website` gate — the version file,
-                  # the guard, and the workflow file whose boot this job runs.
+                  # #8816: the wrangler inputs — the version file, the guard, and
+                  # the workflow that carries this job's install/boot. `ci.yml` is
+                  # also named at the END of this gate for its own reasons
+                  # (#2982-era), so it is not repeated here.
                   isfile("config/wrangler-version",
                          "tests/test_e2e_wrangler_prewarm.py"),
                   isfile("tests/e2e/test_keys_table_mixed.py"),

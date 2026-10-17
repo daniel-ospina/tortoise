@@ -13,6 +13,15 @@ on:
       # committed dist carried that signal under website/**; the artifact is
       # untracked now, so the input is named explicitly.
       - 'product/pricing.json'
+      # #8816: `config/wrangler-version` is an INPUT to BOTH deploy steps — each
+      # reads it and asserts the resolved wrangler against it. Before this entry
+      # the pin only moved when a wrangler bump edited this workflow (which
+      # self-deploys, #1118); after the pin moved to `config/`, a bump is a
+      # config-only change and would trigger NOTHING here, so the bump that may
+      # fix a `pages deploy` / Functions-bundling problem would not deploy until
+      # some unrelated `website/**` push. Same reasoning the `ci.yml` `changes`
+      # gates already applied to the same file.
+      - 'config/wrangler-version'
       # #1118: workflow changes must self-deploy — the #1113 merge (which
       # added the dashboard job) did NOT trigger this workflow because the
       # workflow file wasn't in its own paths filter; it required manual
@@ -181,13 +190,13 @@ jobs:
       # enumeration, so it cannot notice a nested file on its own.
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
-          # `${RUNNER_TEMP:?}` and not `$RUNNER_TEMP`: the next command is
-          # `rm -rf "$STAGE"`, and an unset RUNNER_TEMP would make that a delete
-          # of `/pages-upload`. Runners always set it; fail fast if one does not.
           # #8816: the wrangler version has ONE source, config/wrangler-version,
           # read here — before any `cd` makes the relative path meaningless.
           WRANGLER_VERSION="$(cat config/wrangler-version)"
           : "${WRANGLER_VERSION:?config/wrangler-version is empty}"
+          # `${RUNNER_TEMP:?}` and not `$RUNNER_TEMP`: the next command is
+          # `rm -rf "$STAGE"`, and an unset RUNNER_TEMP would make that a delete
+          # of `/pages-upload`. Runners always set it; fail fast if one does not.
           STAGE="${RUNNER_TEMP:?RUNNER_TEMP is set by the runner — refusing to derive a stage path from an empty value}/pages-upload"
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
