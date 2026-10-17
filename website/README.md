@@ -76,8 +76,19 @@ that classification (it is top-level only) — add it to the exclude list **and*
 to the post-deploy 404 assertion step by hand (a nested `*.md` is at least
 covered by the blanket `*.md` exclusion, but that is a coincidence, not a pin).
 
-For local troubleshooting only, `npx wrangler pages deploy <dir>` still works —
-but never point it at `website/` itself.
+For local troubleshooting only, this still works — but never deploy `website/`
+itself, and never a floating `wrangler@4`: the version has one home (#8816).
+Wrangler resolves `functions/` against the **cwd** exactly as the deploy step
+above does, so a troubleshooting run needs the upload root as its cwd too: the
+staged snippet deploys `$STAGE`, and a preview serves `website/` from inside it
+— never from the repository root, which has no `functions/` at all.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+WRANGLER_VERSION="$(cat config/wrangler-version)"
+# wrangler resolves `functions/` from the cwd: serve website/ FROM website/.
+cd website && npx --yes "wrangler@${WRANGLER_VERSION:?}" pages dev . --port 8788
+```
 
 ## Waitlist form (#373)
 

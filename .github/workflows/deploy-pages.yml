@@ -226,9 +226,14 @@ jobs:
           # deploy. tests/test_pages_bindings.py pins this cwd by execution.
           cd "$STAGE"
           # #8816: ASSERTED against what npm resolved, not just declared. A declared
-          # "4" resolves to 4.151.1 and fails here; `:?` refuses an empty value
-          # instead of letting `wrangler@` float to latest. The verify and the
-          # deploy share this one shell, so the value proved is the value used.
+          # "4" fails here whatever the npm cache holds — `wrangler --version`
+          # never prints a bare "4", so the comparison cannot accept one. What this
+          # line CANNOT see is a float SPELLING on the command line (`npx
+          # wrangler@4`): a warm cache can serve the pinned tarball for it and print
+          # the pin itself, so the guard's text arms, not this line, are what forbid
+          # that spelling; `:?` refuses an empty value instead of letting
+          # `wrangler@` float to latest. The verify and the deploy share this one
+          # shell, so the value proved is the value used.
           got="$(npx --yes "wrangler@${WRANGLER_VERSION:?}" --version | tr -d '[:space:]')"
           if [ "$got" != "$WRANGLER_VERSION" ]; then
             echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"

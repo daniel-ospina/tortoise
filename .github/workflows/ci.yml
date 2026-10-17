@@ -1631,11 +1631,15 @@ jobs:
       - name: Install and verify the wrangler toolchain (#8816)
         run: |
           # ONE source for the version: config/wrangler-version, read here and
-          # nowhere else in this file. The value is ASSERTED against the version
-          # npm actually resolved, so the check is exact for every spelling a
-          # text scan cannot see: a declared "4" resolves to 4.151.1 and fails,
-          # and so does an empty declaration. The boot steps below then run bare
-          # `wrangler` — no spec at the call site, so nothing can drift.
+          # nowhere else in this file. The value is ASSERTED against what npm
+          # actually resolved: this step installs GLOBALLY, so a declared "4" is
+          # resolved against the REGISTRY to the highest 4.x (4.151.1) and fails
+          # that comparison whatever the npm cache holds — a global range install
+          # is a registry resolution, not a local node_modules lookup. `:?`
+          # refuses an empty value before it can float to latest. The TEXT arms
+          # in the guard stop a float being WRITTEN; this assertion is the
+          # runtime backstop on the binary the lane boots. The boot steps below
+          # then run bare `wrangler` — no spec at the call site, so nothing drifts.
           #
           # This replaces the best-effort pre-warm (#2178/#8744): an assertion
           # needs a resolved binary, so the last of the three attempts is hard.
@@ -1812,11 +1816,15 @@ jobs:
       - name: Install and verify the wrangler toolchain (#8816)
         run: |
           # ONE source for the version: config/wrangler-version, read here and
-          # nowhere else in this file. The value is ASSERTED against the version
-          # npm actually resolved, so the check is exact for every spelling a
-          # text scan cannot see: a declared "4" resolves to 4.151.1 and fails,
-          # and so does an empty declaration. The boot steps below then run bare
-          # `wrangler` — no spec at the call site, so nothing can drift.
+          # nowhere else in this file. The value is ASSERTED against what npm
+          # actually resolved: this step installs GLOBALLY, so a declared "4" is
+          # resolved against the REGISTRY to the highest 4.x (4.151.1) and fails
+          # that comparison whatever the npm cache holds — a global range install
+          # is a registry resolution, not a local node_modules lookup. `:?`
+          # refuses an empty value before it can float to latest. The TEXT arms
+          # in the guard stop a float being WRITTEN; this assertion is the
+          # runtime backstop on the binary the lane boots. The boot steps below
+          # then run bare `wrangler` — no spec at the call site, so nothing drifts.
           #
           # This replaces the best-effort pre-warm (#2178/#8744): an assertion
           # needs a resolved binary, so the last of the three attempts is hard.
@@ -2006,11 +2014,15 @@ jobs:
       - name: Install and verify the wrangler toolchain (#8816)
         run: |
           # ONE source for the version: config/wrangler-version, read here and
-          # nowhere else in this file. The value is ASSERTED against the version
-          # npm actually resolved, so the check is exact for every spelling a
-          # text scan cannot see: a declared "4" resolves to 4.151.1 and fails,
-          # and so does an empty declaration. The boot steps below then run bare
-          # `wrangler` — no spec at the call site, so nothing can drift.
+          # nowhere else in this file. The value is ASSERTED against what npm
+          # actually resolved: this step installs GLOBALLY, so a declared "4" is
+          # resolved against the REGISTRY to the highest 4.x (4.151.1) and fails
+          # that comparison whatever the npm cache holds — a global range install
+          # is a registry resolution, not a local node_modules lookup. `:?`
+          # refuses an empty value before it can float to latest. The TEXT arms
+          # in the guard stop a float being WRITTEN; this assertion is the
+          # runtime backstop on the binary the lane boots. The boot steps below
+          # then run bare `wrangler` — no spec at the call site, so nothing drifts.
           #
           # This replaces the best-effort pre-warm (#2178/#8744): an assertion
           # needs a resolved binary, so the last of the three attempts is hard.

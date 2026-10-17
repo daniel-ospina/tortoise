@@ -1,20 +1,29 @@
 """The wrangler pin is one artefact, ASSERTED against what actually resolved (#8816).
 
-The pin used to be a string repeated in twelve `run:` blocks, and the guard that
-"checked" it read that text. Reading text cannot see a spec written as
+The pin used to be a string repeated twelve times across nine `run:` blocks, and the guard that
+"checked" it read that text. The old guard's text scan could not see a spec written as
 `wran\\gler@4`, `"wrangler"@4` or `wrangler$X@4`, cannot see a bare `wrangler`,
 and never looked at `deploy-pages.yml` at all — where `wrangler@4` floated in
 production. Two measurements decided the replacement (bash 5, node 22):
 
   * `wrangler --version` prints the bare resolved version on stdout;
-  * a float declaration can never equal its own resolution — `wrangler@4`
-    resolves to 4.151.1, so `[ "$got" = "$WRANGLER_VERSION" ]` fails.
+  * a DECLARED float fails that comparison whatever the cache holds and whatever
+    lane resolves it: the comparison's right-hand side is the full `X.Y.Z` the
+    pin must be, and `wrangler --version` never prints a bare `4`. What the
+    assertion cannot see is a float SPELLING on the command line — an `npx` spec
+    (`npx wrangler@4`) can be served the pinned tarball from a warm cache, and
+    that prints the pin itself, which the comparison accepts (measured here:
+    `npx --yes "wrangler@4" --version` printed 4.127.0). In the three e2e jobs a
+    float spelling is not excused that way either — `npm install -g` resolves the
+    range against the REGISTRY, so `wrangler@4` becomes 4.151.1 and the
+    comparison reds. Either way the caveat is about a SPELLING the text arms must
+    refuse, not about the assertion being blind to a float DECLARATION.
 
 So the version now lives in ONE file, `config/wrangler-version`, and the lane
-ASSERTS the version it got against it. That is exact for every spelling,
-including the ones no text scan can see, because it compares an observation to a
-declaration. The boot steps then run bare `wrangler`, so there is no spec at the
-call site to float, and the deploy steps assert before they upload.
+ASSERTS the version it got against it — a comparison between an observation and a
+declaration, which is exact whenever the pin differs from what a float resolves
+to. The boot steps then run bare `wrangler`, so there is no spec at the call site
+to float, and the deploy steps assert before they upload.
 
 What is left for THIS file is the shape that keeps those properties true:
 
@@ -38,18 +47,30 @@ spec arm to read: `npx --yes wrangler pages deploy` resolves to the registry's
 latest without writing a spec down anywhere. Two arms cover it — one restricted
 to the deploy paths, where the assertion validates the declared spec rather than
 the spec on the upload line, and one over EVERY step: a bare `wrangler` is legal
-only in the five declared boot steps (which run the binary the verify step
-proved).
+only in the five declared boot steps and in the verify step's own quoted
+`"$(wrangler --version …)"` probe (which is what proves the binary the boots then
+run).
 
-The removed machinery is the point, not an accident: with no spec at the call
-site there is no shell word-splitting to model. The residual is stated rather
-than hidden — a NEW step can always be written with `wrangler@4`, and a version
-can reach npm through a spelling that never appears in these files at all (a
-shell alias, a function, or a wrapper script naming its own version), which no
-text scan over the workflows can see. The spec and invocation arms refuse the
-first in every workflow file, the executed harnesses in
-`tests/test_pages_bindings.py` prove the deploy step's assertion, and the arms
-below EXECUTE the manual deploy script rather than grepping its path.
+What this file replaced is gone: the pre-warm's own probe install, its reset of the
+shared `_npx` prefix, and its version read out of script text. The install and the
+assertion that remain are the lane's own, and the arms below REQUIRE them. The
+division of labour is: the TEXT arms stop a float spelling being WRITTEN here, and
+the assertion is the runtime check on the binary the lane actually runs — neither
+alone is the guard.
+
+Where the text arms stop is stated rather than hidden. Within a line the spec scan
+resolves the two things bash does to a word that a reader would not see — quote
+removal and backslash escaping — and nothing else; it does not join a word split
+across a line continuation or a YAML fold. So these are NOT seen, by design: a spec
+that reaches npm through an alias, a function, a wrapper script or a file written
+first and executed later; a spec assembled at run time (`$(printf …)`); and a
+version passed to a third-party ACTION rather than a shell (`uses:
+cloudflare/wrangler-action` with `with: wranglerVersion:`), which no `run:` scan
+reads. A NEW step can always be written with `wrangler@4` — the spec and
+invocation arms refuse that in every workflow file, every composite action and the
+command docs, the executed harnesses in `tests/test_pages_bindings.py` prove the
+deploy step's assertion, and the arms below EXECUTE the manual deploy script
+rather than grepping its path.
 """
 
 from __future__ import annotations
@@ -81,6 +102,10 @@ LEGAL_SPEC = re.compile(r"wrangler@\$\{WRANGLER_VERSION:\?")
 
 BARE_INVOCATION = re.compile(r"(?<![\w@$./-])wrangler(?![\w@])")
 
+#: Pseudo job name for a step that lives in a composite action, which has no
+#: `jobs:` — arms that read a JOB's config must skip it rather than look it up.
+COMPOSITE = "<composite>"
+
 #: A quoted LONE command word — `npx --yes "wrangler" pages deploy`. bash runs it as
 #: the binary, but ``_strip_quoted`` deletes whole quoted SEGMENTS (so a diagnostic
 #: is not an offence), and deleting the segment hid this spelling — one the module
@@ -96,6 +121,8 @@ DECLARATION = 'WRANGLER_VERSION="$(cat config/wrangler-version)"'
 #: an inline `WRANGLER_VERSION="4.151.1"` — is an offender.
 LEGAL_TOKENS = (
     "${WRANGLER_VERSION:?",
+    "${WRANGLER_VERSION}",
+    "$WRANGLER_VERSION",
     '= "$WRANGLER_VERSION"',
     '!= "$WRANGLER_VERSION"',
     "declared ${WRANGLER_VERSION}",
@@ -119,16 +146,24 @@ def _is_constant_false(gate: object) -> bool:
     return bool(_CONSTANT_FALSE.match(str(gate).strip()))
 
 
-def _fenced_blocks(text: str) -> str:
-    """The contents of every ``` fence, joined — the parts a reader would PASTE."""
-    out, inside = [], False
-    for line in text.splitlines():
+def _fenced_blocks(text: str) -> list[list[tuple[int, str]]]:
+    """Every ``` fence as its lines `(file line number, line)` — the parts a
+    reader would PASTE. Grouped per FENCE (not flattened) so a fence can be
+    judged on its own, and numbered with the FILE's line, because joining the
+    fences and numbering the result points a reader at the wrong line."""
+    blocks, inside, current = [], False, []
+    for lineno, line in enumerate(text.splitlines(), 1):
         if line.lstrip().startswith("```"):
+            if inside:
+                blocks.append(current)
+                current = []
             inside = not inside
             continue
         if inside:
-            out.append(line)
-    return "\n".join(out)
+            current.append((lineno, line))
+    if current:
+        blocks.append(current)
+    return blocks
 
 def _workflow_paths() -> list:
     """Every file that can carry a `run:` — workflows AND composite actions.
@@ -141,7 +176,10 @@ def _workflow_paths() -> list:
     paths = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
     actions = REPO_ROOT / ".github" / "actions"
     if actions.is_dir():
-        paths += sorted(actions.glob("*/action.yml")) + sorted(actions.glob("*/action.yaml"))
+        # Recursive: `uses: ./.github/actions/a/b` is legal, so a one-level glob
+        # leaves the nested ones in no population at all (measured: a literal
+        # `wrangler@4` there survived every arm).
+        paths += sorted(p for p in actions.rglob("action.y*ml") if p.is_file())
     assert paths, "no workflows found — the repo root probe is wrong"
     return paths
 
@@ -178,7 +216,7 @@ def _document_steps(doc: dict) -> list[tuple[str, dict]]:
     steps = _all_steps(doc.get("jobs") or {})
     runs = doc.get("runs") or {}
     if isinstance(runs, dict) and runs.get("using") == "composite":
-        steps += [("<composite>", step) for step in (runs.get("steps") or [])]
+        steps += [(COMPOSITE, step) for step in (runs.get("steps") or [])]
     return steps
 
 
@@ -189,7 +227,7 @@ def _run(step: dict) -> str:
 def _steps_named(name: str) -> list[tuple[str, dict]]:
     out = []
     for path in _workflow_paths():
-        for job_name, step in _all_steps(_load(path).get("jobs") or {}):
+        for job_name, step in _document_steps(_load(path)):
             if (step.get("name") or "") == name:
                 out.append((job_name, step))
     return out
@@ -242,6 +280,7 @@ def _cut_comment(line: str) -> str:
             at_word_start = False
         i += 1
     return line
+
 
 
 def _strip_quoted(line: str) -> str:
@@ -343,31 +382,96 @@ def test_no_workflow_declares_the_version_as_an_env_key() -> None:
         walk(_load(path), path.name)
 
 
-def test_every_version_mention_is_a_read_or_an_asserted_spec() -> None:
+#: A segment that ASSIGNS the variable — the shape that gives the pin a home.
+_ASSIGNMENT = re.compile(r"^(?:export\s+|declare\s+)?WRANGLER_VERSION\s*=")
+_SEGMENT = re.compile(r"\|\||&&|[;|]")
+
+
+def _mention_offences(text: str) -> list[str]:
+    """Lines whose use of `WRANGLER_VERSION` is neither the declaration nor a read.
+
+    Judged per SEGMENT, not per line or per token: a line may assign a literal and
+    still name the variable elsewhere (`V="4.1"  # see $V`), and it may also hold
+    the declaration AND a second assignment. The value is read to the end of its
+    segment, because the legal value contains spaces.
+    """
     offenders = []
-    for path in _workflow_paths():
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if "WRANGLER_VERSION" not in line:
-                continue
-            if DECLARATION in line:
-                continue
-            if any(token in line for token in LEGAL_TOKENS):
-                continue
-            offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    for lineno, line in enumerate(text.splitlines(), 1):
+        code = _cut_comment(line)
+        if "WRANGLER_VERSION" not in code:
+            continue
+        assignment_bad = False
+        for segment in _SEGMENT.split(code):
+            segment = segment.strip()
+            match = _ASSIGNMENT.match(segment)
+            if match and not segment[match.end():].strip().startswith(
+                '"$(cat config/wrangler-version)"'
+            ):
+                assignment_bad = True
+                break
+        if assignment_bad:
+            offenders.append(f"{lineno}: {code.strip()}")
+            continue
+        if DECLARATION in code:
+            continue
+        if any(token in code for token in LEGAL_TOKENS):
+            continue
+        offenders.append(f"{lineno}: {code.strip()}")
+    return offenders
+
+
+def test_every_version_mention_is_a_read_or_an_asserted_spec() -> None:
+    offenders = [
+        f"{path.name}:{hit}"
+        for path in _workflow_paths()
+        for hit in _mention_offences(path.read_text(encoding="utf-8"))
+    ]
     assert not offenders, "WRANGLER_VERSION used outside the declared shapes:\n" + "\n".join(
         offenders
     )
 
 
 def test_every_wrangler_spec_is_the_asserted_form() -> None:
-    offenders = []
+    """Every `wrangler@…` here must be the asserted form.
+
+    The scan is a WORD-LEVEL model, and deliberately bounded: it cuts comments
+    and resolves the two things bash does to a word that a reader would not see —
+    it removes quotes and resolves backslash escapes — then looks for a
+    `wrangler@` spec. Nothing else is modelled. A message that must NAME a bad
+    spelling therefore belongs in a comment (`_cut_comment` removes it before this
+    scan), which is the live style; no step in this repo writes `wrangler@…` into
+    a message, and the earlier attempts to exempt one built a shell parser whose
+    defects cost more than the exemption was worth (measured: with no exemption at
+    all, every arm still passes).
+    """
+    offenders = set()
     for path in _workflow_paths():
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            # `_cut_comment`, not a whole-line strip: a TRAILING comment naming a
-            # spec (`… --version  # was wrangler@4`) is prose too, and reading it
-            # as code makes this arm fail on a correct workflow.
-            code = _cut_comment(line)
-            for match in re.finditer(r"wrangler@\S*", code):
+        for where, token in _floating_specs(path.read_text(encoding="utf-8")):
+            offenders.add(f"{path.name}:{where}: {token}")
+    assert not offenders, (
+        "wrangler spec is not the asserted variable form (a literal spec cannot be "
+        "verified against what resolved):\n" + "\n".join(sorted(offenders))
+    )
+
+
+def _floating_specs(text: str) -> list[tuple[int, str]]:
+    """`(line, token)` for every `wrangler@…` in CODE that is not the asserted form.
+
+    CODE means: comments removed, then the two things bash does to a word that a
+    reader would not see — quotes removed and backslash escapes resolved. A
+    message is NOT exempt: a step that must name a bad spelling writes it in a
+    comment, which this removes before the scan.
+    """
+    found = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        # `_cut_comment`, not a whole-line strip: a TRAILING comment naming a
+        # spec (`… --version  # was wrangler@4`) is prose too, and reading it as
+        # code makes the arm fail on a correct workflow.
+        code = _cut_comment(line)
+        # The word bash actually runs. A legal quoted spec still matches
+        # LEGAL_SPEC in that form.
+        for variant in (code, re.sub(r"[\"']|\\(.)", r"\1", code)):
+            for match in re.finditer(r"wrangler@\S*", variant):
                 token = match.group(0)
                 if LEGAL_SPEC.match(token):
                     continue
@@ -376,11 +480,62 @@ def test_every_wrangler_spec_is_the_asserted_form() -> None:
                 # `~`, `$`, quote, backslash, `{`) is an offender.
                 if len(token) > len("wrangler@") and token[len("wrangler@")] in "`).,;:":
                     continue
-                offenders.append(f"{path.name}:{lineno}: {token}")
-    assert not offenders, (
-        "wrangler spec is not the asserted variable form (a literal spec cannot be "
-        "verified against what resolved):\n" + "\n".join(offenders)
-    )
+                found.append((lineno, token))
+    return found
+
+
+def test_a_spec_may_be_named_in_a_comment_but_not_in_a_message() -> None:
+    """The exemption that kept re-staling is replaced by a rule.
+
+    Three review cycles built a shell parser to tell a message from a command, and
+    each one opened a spelling it did not see (`echo …; npx wrangler@4`,
+    `| /bin/sh`, a spec staged in a variable). With no exemption at all every arm
+    still passes on the real tree, so the rule is now unconditional: a step that
+    must name a float writes it in a COMMENT, which the scan removes.
+    """
+    assert _floating_specs("        run: echo \"refusing wrangler@4\""), \
+        "a message naming a float must be refused — the rule is stated, not inferred"
+    assert not _floating_specs("  # was: npx --yes wrangler@4 pages deploy dist"), \
+        "a COMMENT naming a float must pass — that is the sanctioned way to name it"
+    assert not _floating_specs(
+        '  run: npx --yes "wrangler@${WRANGLER_VERSION:?}" pages deploy dist'
+    ), "the asserted form must pass, quoted or not"
+    # Every capability the docstring advertises, pinned: removing any one of them
+    # (a one-token edit) must red THIS arm, not sit green behind a claim.
+    assert _floating_specs('  run: npx --yes "wrangler"@4 pages deploy dist'), \
+        "a quote-split spec is the word bash builds — quote removal is advertised"
+    assert _floating_specs(r"  run: npx --yes wran\gler@4 pages deploy"), \
+        "a backslash-split spec is the word bash runs — resolving it is advertised"
+    assert not _floating_specs(
+        '  run: npx --yes "wrangler@${WRANGLER_VERSION:?}" --version  # was wrangler@4'
+    ), "a TRAILING comment naming a spec is prose — cutting it is advertised"
+
+    # The mention rule's own self-tests: this arm carried the false negative that
+    # `V="4.1"  # see $V` slipped through, and nothing but a transcript pinned it.
+    declared = 'WRANGLER_VERSION="$(cat config/wrangler-version)"'
+    assert _mention_offences(declared) == [], "the declaration must pass"
+    assert _mention_offences("  " + declared) == [], "an indented declaration must pass"
+    assert _mention_offences("echo pinned; " + declared) == [], \
+        "the declaration after a separator must pass"
+    # The false negative this commit exists to fix: a SECOND assignment on the
+    # same line, which the old `DECLARATION in line` shortcut waved through.
+    assert _mention_offences(declared + '; WRANGLER_VERSION="4.151.1"'), \
+        "a second assignment beside the declaration must red"
+    assert _mention_offences(declared + ' || WRANGLER_VERSION="4.151.1"'), \
+        "a literal reached through `||` must red"
+    assert _mention_offences('WRANGLER_VERSION="4.151.1"  # see $WRANGLER_VERSION'), \
+        "a literal behind a comment mention must red"
+    assert _mention_offences('export WRANGLER_VERSION="4.151.1"'), \
+        "`export` does not make a literal legal"
+    assert _mention_offences('WRANGLER_VERSION="$(cat /tmp/elsewhere)"'), \
+        "only the ONE artefact is a legal source — a second file is a second home"
+    assert _mention_offences(
+        'WRANGLER_VERSION="$(cat /tmp/elsewhere)"; echo "$WRANGLER_VERSION"'
+    ), "a second source must red EVEN when the line also reads the variable legally"
+    assert _mention_offences('echo "pinned: ${WRANGLER_VERSION}"') == [], \
+        "a plain read must pass"
+    assert _mention_offences('echo "WRANGLER_VERSION=$WRANGLER_VERSION"') == [], \
+        "printing the NAME with the value assigns nothing"
 
 
 def test_each_workflow_reads_the_version_at_least_once() -> None:
@@ -483,6 +638,10 @@ def test_the_verify_step_is_unconditional() -> None:
             f"{job}: the install-and-verify step is gated by `if: {step['if']}` — a gate "
             "that skips it leaves the pin unverified while the run is green"
         )
+        if job == COMPOSITE:
+            # Checked above for its own `if:`; a composite action has no job-level
+            # gate to read (`jobs[job]` would KeyError).
+            continue
         job_cfg = _load(WORKFLOWS / "ci.yml")["jobs"][job]
         gate = job_cfg.get("if")
         if gate is not None:
@@ -515,7 +674,10 @@ def test_the_version_check_is_an_equality_against_the_declared_value() -> None:
     """The assertion must compare, not merely print — a print cannot fail a job."""
 
     for job, step in _steps_named(VERIFY_STEP):
-        run = _run(step)
+        # CODE only: a comment naming the comparison satisfied the raw-text
+        # version of this arm (measured) — the same defect the retry arm already
+        # carries a `_cut_comment` fix and a self-test for.
+        run = "\n".join(_cut_comment(line) for line in _run(step).splitlines())
         assert re.search(r'\[ "\$got" = "\$WRANGLER_VERSION" \]', run), (
             f"{job}: no `[ \"$got\" = \"$WRANGLER_VERSION\" ]` comparison — the resolved "
             "version is not asserted"
@@ -620,8 +782,10 @@ def test_no_step_invokes_wrangler_without_a_spec_outside_the_declared_boots() ->
     survived every arm. A bare `wrangler` is therefore legal in exactly one place:
     the five declared boot steps, which run the binary the verify step proved
     (`test_boot_steps_carry_no_spec_and_keep_their_retry` pins that there are
-    exactly five and that each carries no spec). Everything else — a new step, a
-    new job, a deploy line — is an offender.
+    exactly five and that each carries no spec), and in the verify step's own
+    DOUBLE-QUOTED `"$(wrangler --version …)"` probe — the same call unquoted is an
+    offender (measured). Everything else — a new step, a new job, a deploy line —
+    is an offender.
 
     The scan is quote- and comment-aware (`_strip_quoted` / `_cut_comment`), so a
     diagnostic that NAMES wrangler, or a commented-out old command, is not an
@@ -731,9 +895,12 @@ def test_the_manual_deploy_script_pins_the_same_version() -> None:
         f"the manual deploy restates the pinned version ({declared}); it must read "
         f"{VERSION_SOURCE}, or a bump edits one place and drifts in another"
     )
-    for match in re.finditer(r"wrangler@\S*", code):
-        assert LEGAL_SPEC.match(match.group(0)), (
-            f"manual deploy spec {match.group(0)!r} is not the asserted variable form"
+    # The SAME word model as the workflow arm: a quote- or backslash-split spec
+    # here is the word bash runs, and a second regex would not see it (measured:
+    # `npx --yes "wrangler"@4 pages deploy` in this script passed every arm).
+    for _where, token in _floating_specs(code):
+        raise AssertionError(
+            f"manual deploy spec {token!r} is not the asserted variable form"
         )
 
 
@@ -824,9 +991,9 @@ def test_the_manual_deploy_resolves_the_version_from_either_invocation(
 def test_no_document_shows_a_floating_wrangler_spec() -> None:
     """A README example is a command someone will paste.
 
-    `website/README.md` showed `npx --yes wrangler@4 pages deploy` next to two
-    shipped steps that assert 4.127.0 — the exact drift this change removes,
-    stated as guidance. Every spec in these files must be the asserted form, and
+    `website/README.md` recommended `npx --yes wrangler@4 pages deploy` while the
+    workflows pinned 4.127.0 — the exact drift this change removes, stated as
+    copy-pasteable guidance in a fence. Every spec in these files must be the asserted form, and
     the version must come from the one artefact.
     """
 
@@ -836,21 +1003,90 @@ def test_no_document_shows_a_floating_wrangler_spec() -> None:
         text = path.read_text(encoding="utf-8")
         # Only FENCED code, not prose: a doc may legitimately name the bad
         # spelling while explaining why it is bad.
-        code = "\n".join(
-            line for line in _fenced_blocks(text).splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        offenders = [
-            token
-            for token in re.findall(r"wrangler@[^\s`\"')]+", code)
-            if not LEGAL_SPEC.match(token)
+        blocks = [
+            [(n, line) for n, line in block if not line.lstrip().startswith("#")]
+            for block in _fenced_blocks(text)
         ]
+        code = "\n".join(line for block in blocks for _n, line in block)
+        # Same word model as the workflow arm — quote- and backslash-split specs
+        # are the words bash builds, and a separate regex missed them (measured).
+        offenders = [token for _where, token in _floating_specs(code)]
         assert not offenders, (
             f"{rel} still shows a copy-pasteable wrangler spec that is not the "
             f"asserted form ({offenders}) — it would ship whatever npm serves"
         )
-        if "wrangler@" in code:
-            assert "config/wrangler-version" in text, (
-                f"{rel} shows a wrangler command without pointing at "
+        # Per LINE, so the reported number is the file's.
+        bare = [
+            f"line {lineno}: {hit.split(': ', 1)[-1]}"
+            for block in _fenced_blocks(text)
+            for lineno, line in block
+            for hit in _bare_invocations(line)
+        ]
+        assert not bare, (
+            f"{rel} shows a spec-less wrangler command ({bare}) — a paste of it "
+            "runs whatever npm serves, with nothing asserting what that was"
+        )
+        # Per FENCE, not file-wide: a fence that shows a wrangler spec must also
+        # show where the version comes from, or it teaches a literal (`V=4`) while
+        # another fence satisfies a whole-file substring check.
+        for block in blocks:
+            shown = "\n".join(line for _n, line in block)
+            # EVERY fence: a reader copies a literal even from a fence that shows
+            # no spec, and the next command they type uses it.
+            assert not re.search(r"WRANGLER_VERSION=[\"']?\d", shown), (
+                f"{rel}: a fence assigns WRANGLER_VERSION a literal — it must read "
+                "config/wrangler-version, or a bump drifts here"
+            )
+            if "wrangler@" not in shown:
+                continue
+            assert "config/wrangler-version" in shown, (
+                f"{rel}: a fence shows a wrangler spec without reading "
                 "config/wrangler-version — the version has one home"
             )
+
+
+#: `cd` into the REPOSITORY ROOT — correct for reading (`cat
+#: config/wrangler-version`), wrong for uploading, because wrangler takes
+#: `functions/` from the cwd.
+_ROOT_CD = re.compile(
+    r"^cd\s+[\"']?\$\(\s*git\s+rev-parse\s+--show-toplevel\s*\)[\"']?\s*$"
+)
+
+#: An UPLOAD — the two wrangler subcommands that read `functions/` off the cwd.
+_UPLOAD = re.compile(r"\bpages\s+(?:deploy|dev)\b")
+
+
+def test_no_document_uploads_from_the_repository_root() -> None:
+    """A fence that uploads must `cd` into the upload root first.
+
+    `wrangler` resolves `functions/` against the process cwd — never against the
+    directory it uploads — so a fence that reads the version from the repo root
+    and then uploads from there ships a site with NO Functions: dead auth on a
+    green deploy (#3620). `website/README.md` carried exactly that shape while
+    the paragraph above it documented the failure it causes — `cd "$(git rev-parse
+    --show-toplevel)"` and the upload two lines later — because reading the
+    version from the root is right and uploading from it is not, and the fence
+    did only the first.
+
+    Judged PER FENCE and in reading order, splitting on `&&`/`;` so
+    `cd "$STAGE" && … pages deploy` counts as the `cd` it is. A comment naming
+    the command does not count (`_cut_comment`, as elsewhere in this file).
+    """
+
+    for rel in COMMAND_DOCS:
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        offenders = []
+        for block in _fenced_blocks(text):
+            cwd_is_upload_root = False
+            for lineno, line in block:
+                for segment in re.split(r"&&|;", _cut_comment(line)):
+                    segment = segment.strip()
+                    if segment.startswith("cd "):
+                        cwd_is_upload_root = not _ROOT_CD.match(segment)
+                    elif _UPLOAD.search(segment) and not cwd_is_upload_root:
+                        offenders.append(
+                            f"{rel}:{lineno}: uploads with the repository root as "
+                            f"the cwd ({segment}) — `functions/` is resolved from "
+                            "the cwd, so this ships a site with no Functions"
+                        )
+        assert not offenders, "\n".join(offenders)
