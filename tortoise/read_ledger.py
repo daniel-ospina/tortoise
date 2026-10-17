@@ -72,6 +72,7 @@ it must not be world-readable just because the umask says so.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -130,7 +131,10 @@ def label_for_entity_type(entity_type: str) -> str:
 
 #: The record's key columns, per label — `public.node_identity.key_property`
 #: generated from the label (#7955's identity contract). The RECORD is the
-#: authority; `tests/test_read_ledger.py` pins this map against the migration.
+#: authority; `tests/test_read_ledger.py` pins this map against the MIGRATION (`public.node_identity`).
+#: ⚠️ It is NOT pinned against `cache_projection.KEY_PROPERTY`, which derives from
+#: the same placement doc by a different route — that is the pair that can drift,
+#: and nothing here would notice.
 KEY_FIELDS: dict[str, str] = {
     "Point": "id",
     "Event": "eventId",
@@ -147,11 +151,6 @@ KEY_FIELDS: dict[str, str] = {
 MAX_LINE_BYTES = 4096
 
 _warned: set[str] = set()
-
-#: Ledger files this PROCESS has already capped. Once a file is capped it stays
-#: capped: re-writing the marker on every later event would grow the file past
-#: the very bound it is meant to hold.
-_capped: set[str] = set()
 
 
 def _tail_is_capped(target: Path) -> bool:
@@ -177,13 +176,23 @@ def tenant() -> str | None:
 
 
 def ledger_path() -> Path:
-    """The ledger file: the env override, else beside the embedded store."""
+    """The ledger file: the env override, else one file per STORE TARGET.
+
+    `resolve_db_path()` falls through to the embedded default for a SERVER URI
+    (`docker://`, `redis://`) — it has no local file to point at — so using its
+    directory alone would put EVERY graph on the host in one file, with
+    `tenant = None`. `fold` would then union several stocks and read sets into one
+    ratio, biasing `f` DOWN (the flattering direction) with nothing flagged. The
+    store's own identity is therefore part of the filename.
+    """
     explicit = os.environ.get(LEDGER_PATH_ENV)
     if explicit:
         return Path(explicit).expanduser()
     from .config import resolve_db_path
 
-    return Path(resolve_db_path()).expanduser().parent / "read_ledger.jsonl"
+    store = os.environ.get("TORTOISE_DB_URI") or str(resolve_db_path())
+    tag = hashlib.sha256(store.encode()).hexdigest()[:12]
+    return Path(resolve_db_path()).expanduser().parent / f"read_ledger-{tag}.jsonl"
 
 
 def _now() -> str:
@@ -257,11 +266,11 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # open and cannot see another appender's bytes — the case a multi-process
         # ledger exists for.
         size = target.stat().st_size if target.exists() else 0
-        # The cap is measured EVERY append and `_capped` is only a warn-once
-        # latch — never a permanent stop. A rotated (truncated or replaced) file
-        # must start recording again, or an operator who follows the warning's
-        # own instruction ("rotate it") would get a silent, read-free ledger
-        # whose first report says f = 0: the measurement-window trap this module
+        # The cap is measured EVERY append, from the FILE, and there is no
+        # process latch: a rotated (truncated or replaced) file must start
+        # recording again, or an operator who follows the warning's own
+        # instruction ("rotate it") would get a silent, read-free ledger whose
+        # first report says f = 0 — the measurement-window trap this module
         # exists to refuse.
         if size >= cap:
             # The marker decision reads the FILE's tail, never a process latch: a
@@ -280,7 +289,6 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
                             + "\n"
                         ).encode()
                     )
-            _capped.add(key)
             _warn_once(
                 "capped",
                 "read ledger %s: reached its %d B bound — no "
@@ -474,6 +482,9 @@ class LedgerFold:
     capped: bool = False
     lines_read: int = 0
     lines_skipped: int = 0
+    #: The earliest `at` the FILE contains. A rotated ledger starts a new window,
+    #: and this is the only thing in the report that says so.
+    first_event_at: str | None = None
 
     @property
     def stock_keys(self) -> int:
@@ -481,7 +492,11 @@ class LedgerFold:
 
 
 def fold(
-    path: Path | str | None = None, *, window_days: float | None = None, now: datetime | None = None
+    path: Path | str | None = None,
+    *,
+    window_days: float | None = None,
+    now: datetime | None = None,
+    tenant: str | None = None,
 ) -> LedgerFold:
     """Read the ledger and fold it.
 
@@ -493,6 +508,12 @@ def fold(
     """
     target = Path(path) if path is not None else ledger_path()
     out = LedgerFold()
+    #: `f` is a PER-TENANT quantity — `(1 − f) × cache` is one tenant's saving — so
+    #: a fold that unions tenants answers a question nobody asked. `tenant=None`
+    #: keeps the single-namespace case (a self-hosted instance) and folds
+    #: everything a single-tenant deployment ever writes; a multi-tenant ledger
+    #: must pass one.
+    tenant_filter = tenant
     if not target.exists():
         return out
     pending: dict[tuple[str | None, str, str], list[str | None]] = {}
@@ -513,9 +534,21 @@ def fold(
             except ValueError:
                 out.lines_skipped += 1
                 continue
+            at_any = ev.get("at")
+            if isinstance(at_any, str) and (
+                out.first_event_at is None or at_any < out.first_event_at
+            ):
+                out.first_event_at = at_any
             kind = ev.get("event")
             if kind == EVENT_CAPPED:
+                # FILE-level, like `first_event_at`, and handled BEFORE the tenant
+                # filter: the marker carries no tenant (it is the FILE that
+                # stopped), so filtering first would report a capped ledger as
+                # quiet to anyone who passes `--tenant` — the truncation the
+                # module exists to refuse.
                 out.capped = True
+                continue
+            if tenant_filter is not None and ev.get("tenant") != tenant_filter:
                 continue
             if kind == EVENT_UNRESOLVED:
                 at = ev.get("at")
@@ -533,7 +566,15 @@ def fold(
                 if row is None:
                     row = out.rows[ident] = StockRow(label=label, key=key)
                 if ev.get("bytes") is not None:
-                    row.nbytes = int(ev["bytes"])
+                    try:
+                        row.nbytes = int(ev["bytes"])
+                    except (TypeError, ValueError):
+                        # A hand-edited or half-rewritten `bytes` must not take
+                        # the report down, and the EVENT is not lost: the key
+                        # exists, its width is simply unknown — which is exactly
+                        # what `nbytes is None` means everywhere else (the byte
+                        # fraction excludes it and reports its coverage).
+                        row.nbytes = None
                 at = ev.get("at")
                 if at and (row.first_written_at is None or at < row.first_written_at):
                     row.first_written_at = at
@@ -592,6 +633,9 @@ class HotFraction:
     unresolved_reads: int
     window_started: str | None
     window_ended: str | None
+    #: Earliest event IN THE FILE. After a rotation this is recent while the
+    #: history is gone — the report says so instead of implying a long window.
+    first_event_at: str | None
     capped: bool
 
     @property
@@ -650,6 +694,7 @@ class HotFraction:
             "unresolved_reads": self.unresolved_reads,
             "window_started": self.window_started,
             "window_ended": self.window_ended,
+            "first_event_at": self.first_event_at,
             "capped": self.capped,
         }
 
@@ -679,6 +724,7 @@ def hot_fraction(folded: LedgerFold) -> HotFraction:
         unresolved_reads=folded.unresolved_reads,
         window_started=folded.window_started,
         window_ended=folded.window_ended,
+        first_event_at=folded.first_event_at,
         capped=folded.capped,
     )
 
@@ -698,6 +744,11 @@ def _main(argv: list[str] | None = None) -> int:
         default=None,
         help="count only reads inside this trailing window",
     )
+    ap.add_argument(
+        "--tenant",
+        default=None,
+        help="fold ONE tenant (required when the ledger holds several: f is per tenant)",
+    )
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
@@ -708,7 +759,7 @@ def _main(argv: list[str] | None = None) -> int:
         # instrument exists to remove.
         print(f"no ledger at {target} — nothing has been recorded there")
         return 2
-    folded = fold(a.ledger, window_days=a.window_days)
+    folded = fold(a.ledger, window_days=a.window_days, tenant=a.tenant)
     f = hot_fraction(folded)
     if a.json:
         # `lines_skipped` / `lines_read` are fold-level facts, not `f`'s: a torn
@@ -725,6 +776,10 @@ def _main(argv: list[str] | None = None) -> int:
         )
         return 0
     print(f"ledger           : {a.ledger or ledger_path()}")
+    if a.tenant is not None:
+        print(f"tenant           : {a.tenant}")
+    if f.first_event_at is not None:
+        print(f"file spans from  : {f.first_event_at}  (a rotation restarts this)")
     print(
         f"window           : {f.window_started or '(all recorded events)'}"
         + (f" → {f.window_ended}" if f.window_ended else "")

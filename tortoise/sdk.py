@@ -5179,8 +5179,11 @@ def _read_stored_number(value, default):
 def _ledger_record(label: str, rows: list[dict]) -> None:
     """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
 
-    Called by the row-returning read paths that have a known LABEL: `query()`,
-    `paginated_query()`, `get_point()` and `query_points_by_tag()`. The FTS
+    Called by the caller-facing row-returning read paths that have a known
+    LABEL: `query()`, `paginated_query()` and `query_points_by_tag()`.
+    ⛔ NOT `get_point()` — it is the internal accessor the WRITE paths use
+    (`_emit_event` and the dedupe/promote checks), so counting it would mark
+    written-but-never-read nodes as read and bias `f` HIGH (#8877). The FTS
     funnel records its rows through the same module INLINE (it resolves the
     label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path: `traverse`,
     `recall_state`'s related readers and `get_historical_knowledge` read by
@@ -13128,11 +13131,14 @@ class TortoiseSDK:
             params={"id": id},
         ).result_set
         props = rows[0][0] if rows else {}
-        # #7983: this is a product READ of exactly one key — the ledger's
-        # instrument for `f` must see it, or `f` reports the key as never read
-        # while a caller is fetching it by id (the flattering direction).
-        if props:
-            _ledger_record("Point", [props])
+        # #7983: NOT recorded, deliberately. `get_point` is the SDK's INTERNAL
+        # accessor: write paths call it to build events (`_emit_event("PointAdded",
+        # point=self.get_point(mid))`) and to check dedupe/promote/approval state,
+        # so recording it makes a node written and never read look READ — biasing
+        # `f` HIGH, i.e. AGAINST the split, and destroying the one-directional
+        # caveat §17.4.6 relies on. A caller-facing read-by-id path is a coverage
+        # hole (#8877); the right fix is a seam that separates the two, not a hook
+        # that counts every internal check as a caller read.
         return props
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:

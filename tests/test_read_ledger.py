@@ -330,10 +330,11 @@ def hooked_sdk(ledger, monkeypatch):
 def test_every_row_returning_read_path_feeds_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    Each of `query()`, `get_point()` and `query_points_by_tag()` returns Point
-    rows, so each must record exactly ONE read per returned key — no more (a
-    double record inflates `f`) and no fewer (a missed record inflates the
-    never-read mass, which flatters the split).
+    Each of `query()`, `paginated_query()` and `query_points_by_tag()` returns
+    Point rows to a CALLER, so each must record exactly ONE read event per
+    returned key — no fewer (a missed record inflates the never-read mass, which
+    flatters the split) and no more (a double record overstates how many reads a
+    key gets, which is the same class of wrong as a lost one).
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -356,8 +357,10 @@ def test_every_row_returning_read_path_feeds_the_ledger(hooked_sdk):
 
     folded = fold()
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
-    # read_count == 1, not >= 1: a DOUBLE record would inflate `f`.
-    assert counts == {"p1": 1, "p2": 1, "p3": 1, "p7": 1, "p8": 1, "p9": 1}
+    # `p7` stays at ZERO: `get_point` is the internal accessor the write paths
+    # use, so it must record NOTHING — if it ever starts recording, a
+    # written-but-never-read node looks read and `f` is biased HIGH.
+    assert counts == {"p1": 1, "p2": 1, "p3": 1, "p7": 0, "p8": 1, "p9": 1}
     assert folded.unresolved_reads == 0
 
 
@@ -562,3 +565,99 @@ def test_a_second_cap_on_a_rotated_ledger_still_says_so(ledger, monkeypatch):
     for i in range(50):
         read_ledger.record_stock("Point", f"q{i}", nbytes=10, path=ledger)
     assert fold(ledger).capped is True, "the second cap must write its own marker"
+
+
+def test_a_corrupt_bytes_value_is_a_skipped_line_not_a_crash(ledger):
+    """A hand-edited field must not take the report down.
+
+    The module's contract is that a bad line is COUNTED (`lines_skipped`) and the
+    window declared incomplete — not that one non-numeric `bytes` raises out of
+    `fold()` and out of the CLI.
+    """
+    read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger)
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write(
+            '{"at":"2026-01-01T00:00:00+00:00","event":"stock","label":"Point","key":"p2","bytes":"lots"}\n'
+        )
+    folded = fold(ledger)
+    assert folded.stock_keys == 2, "the EVENT is not lost: both keys are registered"
+    assert folded.rows[(None, "Point", "p2")].nbytes is None, "unknown width, not a zero"
+    assert folded.lines_skipped == 0, "the line itself was readable"
+    assert hot_fraction(folded).bytes_known_stock_keys == 1, (
+        "the byte denominator reports its own coverage rather than absorbing the field"
+    )
+
+
+def test_each_store_target_gets_its_own_default_ledger(tmp_path, monkeypatch):
+    """Two stores on one host must not share a default ledger.
+
+    `resolve_db_path()` has no local file for a server URI and falls through to
+    the embedded default, so a path derived from run name alone would pool every
+    graph into one file with `tenant = None` — and `fold` would union their stocks
+    and read sets, biasing `f` DOWN (the flattering direction).
+    """
+    monkeypatch.delenv("TORTOISE_READ_LEDGER_PATH", raising=False)
+    import tortoise.config as config
+
+    monkeypatch.setattr(config, "resolve_db_path", lambda *a, **k: tmp_path / "graph.db")
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@localhost:6379/one")
+    first = read_ledger.ledger_path()
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@localhost:6379/two")
+    second = read_ledger.ledger_path()
+    assert first != second, "two targets, two files"
+    assert first.parent == second.parent == tmp_path
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    embedded = read_ledger.ledger_path()
+    assert embedded != first, "the embedded store is its own target"
+    assert read_ledger.ledger_path() == embedded, "and it is STABLE across calls"
+
+
+def test_f_is_folded_per_tenant(ledger):
+    """`f` is a PER-TENANT ratio: `(1 − f) × cache` is one tenant's saving.
+
+    A ledger that unions tenants answers a question nobody asked, and no field
+    said which tenant the number described.
+    """
+    for tenant in ("a", "b"):
+        for i in range(4):
+            read_ledger.record_stock(
+                "Point", f"{tenant}{i}", nbytes=10, tenant_id=tenant, path=ledger
+            )
+    read_ledger.record_rows("Point", [{"id": "a0"}, {"id": "a1"}], tenant_id="a", path=ledger)
+    read_ledger.record_rows("Point", [{"id": "b0"}], tenant_id="b", path=ledger)
+
+    a = hot_fraction(fold(ledger, tenant="a"))
+    b = hot_fraction(fold(ledger, tenant="b"))
+    assert (a.stock_keys, a.read_keys) == (4, 2)
+    assert (b.stock_keys, b.read_keys) == (4, 1)
+    assert a.f_keys == 0.5 and b.f_keys == 0.25
+    both = hot_fraction(fold(ledger))
+    assert both.stock_keys == 8, "no filter still folds the whole file"
+
+
+def test_the_report_names_the_files_own_start(ledger, capsys):
+    """A rotated ledger must not read as a long, quiet window.
+
+    Rotation restarts the file, and the only evidence of the earlier window left
+    behind is that the earliest event is recent. The report has to say so.
+    """
+    read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger)
+    first = fold(ledger).first_event_at
+    assert first is not None
+    assert read_ledger._main(["--ledger", str(ledger)]) == 0
+    out = capsys.readouterr().out
+    assert "file spans from" in out and first in out
+
+
+def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypatch):
+    """The `capped` marker is a FILE fact and carries no tenant.
+
+    Filtering it out with everything else would report a truncated ledger as a
+    quiet one on exactly the per-tenant path `--tenant` added.
+    """
+    monkeypatch.setattr(read_ledger, "_max_bytes", lambda: 300)
+    for i in range(40):
+        read_ledger.record_stock("Point", f"p{i}", nbytes=10, tenant_id="t1", path=ledger)
+    assert fold(ledger).capped is True
+    assert fold(ledger, tenant="t1").capped is True, "the truncation is file-level"
+    assert fold(ledger, tenant="someone-else").capped is True

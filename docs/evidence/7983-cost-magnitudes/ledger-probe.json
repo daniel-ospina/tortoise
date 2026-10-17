@@ -12,6 +12,11 @@
     "Session": 0
   },
   "stock_keys": 10457,
+  "stock_capped_labels": [],
+  "stock_truncated": false,
+  "pool_rows": 2000,
+  "pool_eligible_points": 5092,
+  "pool_is_storage_order": true,
   "bytes_per_resident_node": 1672,
   "nodes_before": 21110,
   "nodes_after": 21110,
@@ -31,5 +36,6 @@
   "unresolved_reads": 0,
   "window_started": null,
   "window_ended": null,
+  "first_event_at": "2026-10-17T15:51:09+00:00",
   "capped": false
 }

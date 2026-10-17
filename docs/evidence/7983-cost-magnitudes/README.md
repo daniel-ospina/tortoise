@@ -13,9 +13,10 @@ aboutObjects: "#7983, #7954, #7950, STORAGE-ARCHITECTURE.md §17.4, Postgres rec
 
 **Measured at:** `measure/7983-hot-fraction-and-rho@459f22912edf4893fb70144d42e97df389479ed5`
 on **2026-10-17**. Everything below is measured on that tree; the code this lane adds
-(`tortoise/read_ledger.py` plus the `_ledger_record` hook at `query`, `paginated_query`, `get_point`
-and `query_points_by_tag`, the FTS funnel recording inline — five read paths; graph expansion and
-three direct-Cypher readers are NOT hooked, see #8877) is the only change.
+(`tortoise/read_ledger.py` plus the `_ledger_record` hook at `query`, `paginated_query`,
+`query_points_by_tag`, and the FTS funnel inline — deliberately NOT `get_point`, which the write paths
+read through; graph expansion and three direct-Cypher readers are NOT hooked either) is the only
+change.
 
 **The design being measured:** `docs/architecture/STORAGE-ARCHITECTURE.md` **§17.4** — the two-store
 cost model whose closed form is `1 / (f + (1 + rho) / ratio)`. It is complete except for two
@@ -31,7 +32,7 @@ magnitudes, and this issue is those two magnitudes.
 
 | quantity | measurable at `459f22912`? | what this lane did | measured value |
 |---|---|---|---|
-| **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py`, hooked into five row-returning read paths) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 8.64%** over 200 proxy queries — **a proxy mix, not a tenant** |
+| **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py`, hooked into the four caller-facing row-returning read paths (`get_point` deliberately excluded — the write paths read through it)) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 8.64%** over 200 proxy queries — **a proxy mix, not a tenant** |
 | **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 3.54** at the doc's 1,000-tenant density (**88.5** at its 40-tenant cache density) — ⚠️ **the disk line is measured, the compute+plan lines are the doc's DENSITY ASSUMPTIONS**, so `rho` is an assumption over a measurement, and only the disk line is a value |
 
 ---
@@ -121,8 +122,11 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
    because the record stores the 384-d vector as `jsonb` decimal text where the cache stores
    `vecf32` — the encoding gap §5.2 measured on the journal (~4×), now measured on the record.
    ⚠️ **Indicative, not a per-node ratio:** the bench plants 89,701 `:Point`s while the cache's
-   1,672 B/node is a blend over the live graph's real mix (~half `GraphEvent`). The closed form uses
-   dollars on both lines and never divides one node count by the other. The
+   1,672 B/node is a blend over the live graph's real mix (~half `GraphEvent`). ⛔ **And it is an
+   input, not just a sanity check:** `ratio` = `C ÷ D` puts the 0.1499 GB mixed-label cache against
+   the Points-only 0.1916 GB record, so this population mismatch is inside 609 / 365 and every
+   break-even below. Direction unknown (a real mix adds cheaper `GraphEvent` nodes ⇒ smaller `D` ⇒
+   higher `ratio` ⇒ a LOWER, harder break-even; the vector lower bound pushes the other way). The
    planted vector used 6 decimal places (~9.5 chars/float) where §5.2 measured the journal's real
    encoding at 21.9 chars/float, so **0.1916 GB is a LOWER BOUND at that column type**.
 2. **`rho` is dominated by TENANT DENSITY, not by any per-read cost.** At §17.4.3's 40-tenant
