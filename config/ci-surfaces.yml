@@ -1056,6 +1056,11 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
+  # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
+  # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
+  # narrower, and the hook it pins lives in the read funnel every surface uses.
+  - test_read_ledger.py
   - test_5509_name_keyed_identity_reads.py
   # #4643: the served-skill mirror's parity gate. The pin
   # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
