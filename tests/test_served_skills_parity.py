@@ -342,14 +342,17 @@ def test_4643_an_upstream_commit_that_cannot_change_what_we_serve_is_not_drift(
         monkeypatch, tmp_path, capsys):
     """CURRENCY IS ABOUT BYTES, NOT THE COMMIT POINTER (review finding, P2).
 
-    The MIT repo also takes commits that cannot change what we serve — a README
-    edit, a new unrelated skill, CI config (`6ebf0c9` is itself such a commit).
-    Keying currency on `HEAD == pinned` reds the dashboard deploy for a reason
-    unrelated to the artifact, auto-files a FALSE "the served mirror drifted"
-    P2, and diagnoses the cause as "a skill changed there" — which did not
-    happen. The pinned bytes still guard the arm: they are compared against what
-    upstream has at HEAD, so a real skill edit reds (the test above) and an
-    unrelated commit is green.
+    The MIT repo also takes commits that change no skill we serve — a README
+    edit, CI config, an edit to a skill that is neither pinned nor listed under
+    `out_of_scope:` (`6ebf0c9` is itself such a commit). Keying currency on
+    `HEAD == pinned` reds the dashboard deploy for a reason unrelated to the
+    artifact, auto-files a FALSE "the served mirror drifted" P2, and diagnoses
+    the cause as "a skill changed there" — which did not happen. The pinned
+    bytes still guard the arm: they are compared against what upstream has at
+    HEAD, so a real skill edit reds (the test above) and an unrelated commit is
+    green. ⛔ An ADDITION is not this case: a new upstream skill is red by the
+    scope arm (see `test_4643_an_upstream_addition_is_reported_not_invisible`),
+    because a skill nobody pinned is invisible to every byte arm.
     """
     manifest = sp.load_manifest(MANIFEST)
     root = _mirror_root(tmp_path, manifest)
@@ -877,15 +880,22 @@ def test_4643_the_ownership_table_states_the_rule_per_artifact():
 #     help: a bare failing line already aborts it, so `; exit 0` is NOT a
 #     disarmament there and is not claimed as one.
 #
-# Step-level `continue-on-error:` and `if:` are judged statically because they
-# are workflow semantics no shell can see; a step whose failure the runner is
-# told to swallow cannot be where a failing-closed gate lives.
+# `continue-on-error:` and `if:` are judged statically, at BOTH levels, because
+# they are workflow semantics no shell can see: a unit whose failure the runner
+# is told to swallow cannot be where a failing-closed gate lives. The STEP is
+# judged by `_is_arm_step`; the JOB that owns it is judged by `_can_fail(job)`
+# in `_upstream_runners`, because GitHub reports a job with
+# `continue-on-error: true` — or one skipped by `if:` — as GREEN, so the same
+# silent-green-with-no-gate shape survives one level up (review finding, P2,
+# measured: each left 49/49 green while the dashboard deployed nothing).
 #
-# Declared bounds (what this does NOT decide, and why that is safe): the
-# JOB-level `if:`/`continue-on-error:` of the job that owns the step, and
-# reachability of the workflow itself, are not modelled — the deploy step's
-# placement before `npm run build` and the daily workflow's triggers are
-# asserted separately below.
+# Declared bounds (what this does NOT decide, and why that is safe): reachability
+# of the workflows THEMSELVES is not decided here, but the two facts that make
+# them reachable are asserted below — the deploy step's placement before
+# `npm run build` (same test) and the daily workflow's `on.schedule` cron
+# (`test_4643_the_daily_backstop_is_actually_scheduled`), since
+# `workflow_dispatch` alone needs a human and `repository_dispatch` has no
+# sender yet (#8748).
 
 #: One JSON-free record per interpreter call: argv NUL-separated, then an RS.
 _STUB = """#!/usr/bin/env bash
@@ -955,13 +965,19 @@ def _is_the_arm(args: list[str]) -> bool:
     return args.index("--check-upstream") > operand
 
 
-def _can_fail(step: dict) -> bool:
-    """A step the runner will not let fail cannot gate anything."""
-    coe = step.get("continue-on-error")
+def _can_fail(unit: dict) -> bool:
+    """A STEP or JOB the runner will not let fail cannot gate anything.
+
+    The same rule applies at both levels, so it is deliberately one function: a
+    step that swallows its status cannot gate, and neither can a job doing the
+    same — `continue-on-error: true` on the job leaves the run green while the
+    gate fails, and `if:` other than `always()` skips the gate entirely.
+    """
+    coe = unit.get("continue-on-error")
     if coe is not None and not (coe is False or str(coe).strip().lower() == "false"):
         return False
-    if "if" in step:
-        return str(step["if"]).strip() in {"always()", "${{ always() }}"}
+    if "if" in unit:
+        return str(unit["if"]).strip() in {"always()", "${{ always() }}"}
     return True
 
 
@@ -985,9 +1001,11 @@ def _is_arm_step(step: object) -> bool:
     return fail_rc != 0
 
 
-def _arm_steps(doc: dict) -> list[tuple[str, dict]]:
-    return [(name, step)
-            for name, job in (doc.get("jobs") or {}).items()
+def _arm_steps(doc: dict) -> list[tuple[str, dict, dict]]:
+    """`(job_id, job, step)` for every step that EXECUTES the arm — the job is
+    carried so its own `if:`/`continue-on-error:` can be judged with it."""
+    return [(job_id, job, step)
+            for job_id, job in (doc.get("jobs") or {}).items()
             if isinstance(job, dict)
             for step in (job.get("steps") or [])
             if _is_arm_step(step)]
@@ -1002,7 +1020,12 @@ def _upstream_runners(workflows: Path | None = None) -> dict[str, dict]:
     runners: dict[str, dict] = {}
     for path in sorted({*root.glob("*.yml"), *root.glob("*.yaml")}):
         doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if _arm_steps(doc):
+        # The OWNING JOB must be allowed to fail too: with `continue-on-error:
+        # true` the job is torn down and GitHub still reports the run green,
+        # and `if: false` skips it — either way the arm never gates a deploy
+        # and every surface here still says "failing closed" (P2, measured:
+        # both left 49/49 green).
+        if any(_can_fail(job) for _, job, _ in _arm_steps(doc)):
             runners[path.name] = doc
     return runners
 
@@ -1030,7 +1053,10 @@ def test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it():
     assert deploy_doc is not None, (
         f"the arm must run in the workflow whose `deploy-dashboard` job builds "
         f"and uploads the dashboard — otherwise a stale mirror deploys green. "
-        f"Runners found: {sorted(runners)}")
+        f"A workflow whose `deploy-dashboard` job carries `continue-on-error:` "
+        f"or an `if:` other than `always()` does not count: GitHub reports that "
+        f"run GREEN while the arm fails or is skipped, so nothing deploys and "
+        f"nothing reds. Runners found: {sorted(runners)}")
     # …and ORDER matters: the claim is "before the build stages public/", so the
     # arm's step must precede the dashboard build in that job. A moved step is a
     # check that gates nothing that ships.
@@ -1072,12 +1098,112 @@ def test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it():
             "promises a runner nobody wrote is the same false claim in reverse")
 
 
+# ── "the daily backstop" is a TRIGGER, and a trigger can be deleted ────────
+#
+# Review finding (P2), measured: deleting `schedule:`/`cron:` from
+# `skills-parity.yml` left 49/49 green. Nothing read the triggers — the runner
+# predicate reads `jobs:` only — yet `schedule:` is the single thing that makes
+# this a *second* runner. `workflow_dispatch` needs a human and
+# `repository_dispatch` has no sender (#8748), so without the cron the workflow
+# runs only when someone clicks it: the exact P1 shape (a gate that reads as a
+# gate and gates nothing) while every prose claim stays true — the header's "the
+# daily backstop", "bounds staleness to a day", §7.1's "caught by the next
+# morning". A comment claiming that coverage without it is the claim-mismatch
+# class this file polices.
+
+def _triggers(doc: dict) -> dict:
+    """A workflow doc's `on:` block.
+
+    PyYAML parses the bare `on:` key as the boolean ``True`` (YAML 1.1
+    truthiness) — the repo pins that behaviour in
+    `tests/test_required_set_sync.py::test_a_workflow_parse_uses_the_boolean_on_key`
+    — and the string form is read too, for a quoted ``"on":``. A non-mapping
+    form (``on: [push]``) carries no schedule, so it is reported as an empty
+    mapping rather than crashing.
+    """
+    trig = doc.get("on")
+    if trig is None:
+        trig = doc.get(True)
+    return trig if isinstance(trig, dict) else {}
+
+
+def _scheduled_crons(doc: dict) -> list[str]:
+    """The usable cron entries under `on.schedule` — `[]` if unscheduled."""
+    schedule = _triggers(doc).get("schedule")
+    if not isinstance(schedule, list):
+        return []
+    return [str(entry.get("cron") or "").strip()
+            for entry in schedule
+            if isinstance(entry, dict) and str(entry.get("cron") or "").strip()]
+
+
+def test_4643_the_daily_backstop_is_actually_scheduled():
+    """The trigger is the gate's other half: an arm that only runs when a human
+    clicks it bounds nothing, and no amount of fail-closed logic inside it
+    changes that. Asserted from the workflow DOC (parsed, not grepped) so
+    commenting the block out is caught too."""
+    doc = yaml.safe_load(
+        (WORKFLOWS / "skills-parity.yml").read_text(encoding="utf-8")) or {}
+    crons = _scheduled_crons(doc)
+    assert crons, (
+        "`skills-parity.yml` must carry `on.schedule` with a cron entry — it is "
+        "the only thing that makes this a SECOND runner: `workflow_dispatch` "
+        "needs a human, and `repository_dispatch` has no sender yet (#8748). "
+        "Without it, drift between deploys is invisible until the next release "
+        "— the P1 shape, with the header's 'daily backstop' still claiming "
+        "otherwise")
+    for cron in crons:
+        assert len(cron.split()) == 5, (
+            f"{cron!r} is not a five-field cron spec — GitHub rejects the "
+            "workflow outright, which looks like 'scheduled' in review and "
+            "runs never")
+    assert "workflow_dispatch" in _triggers(doc), (
+        "the daily backstop must also be runnable on demand: a human diagnosing "
+        "a drift needs to re-run it without waiting for 06:17")
+
+
+#: Each keeps every prose claim and removes the only runner that needs no human.
+#: The control is the test above: it asserts the REAL file does carry a cron, so
+#: a predicate that returned `[]` for everything cannot pass both halves.
+_TRIGGER_DISARMAMENTS = [
+    ("schedule_trigger_removed", lambda t: t.pop("schedule", None)),
+    ("schedule_entry_emptied", lambda t: t.update(schedule=[])),
+    ("cron_expression_blanked",
+     lambda t: t.update(schedule=[{**e, "cron": ""} for e in t["schedule"]])),
+]
+
+
+@pytest.mark.parametrize("name,mutate", _TRIGGER_DISARMAMENTS,
+                         ids=[n for n, _ in _TRIGGER_DISARMAMENTS])
+def test_4643_an_unscheduled_backstop_is_not_a_backstop(name, mutate):
+    """Review finding (P2), measured on the pre-fix tree: removing
+    `schedule:`/`cron:` from `skills-parity.yml:35-37` left **49 passed**.
+
+    Each case below is a way to keep the file, the step, the stubbed arm and
+    every sentence about daily protection — and lose the schedule. The mutation
+    is applied to the PARSED doc read from the real file, so a case that no
+    longer removes the schedule reds here instead of passing silently."""
+    doc = yaml.safe_load(
+        (WORKFLOWS / "skills-parity.yml").read_text(encoding="utf-8")) or {}
+    assert _scheduled_crons(doc), (
+        f"{name}: the real `skills-parity.yml` carries no cron to remove — a "
+        "mutation that no-ops proves nothing. The schedule guard above is the "
+        "one that must red here")
+    mutate(_triggers(doc))
+    assert _scheduled_crons(doc) == [], (
+        f"{name}: the mutation left a usable cron ({_scheduled_crons(doc)}) — "
+        "this case is dead and proves nothing")
+
+
 # ── the wiring guard cannot be disarmed (mutation-proved) ─────────────────
 
-def _workflows_with_mutation(tmp_path: Path, mutate) -> Path:
+def _workflows_with_mutation(tmp_path: Path, mutate, mutate_job=None) -> Path:
     """The REAL workflows, with `mutate(step)` applied to deploy-pages.yml's arm
     step — so every assertion below is about an edit someone could actually make
     to the file that ships, not about a synthetic workflow.
+
+    `mutate_job` is applied to that step's OWNING JOB (`deploy-dashboard`), for
+    the disarmaments that take the job's teeth rather than the step's.
 
     Only the two workflows that carry the arm are copied: the predicate is read
     per-step, and the control test below asserts the UNMUTATED file is a runner,
@@ -1094,6 +1220,8 @@ def _workflows_with_mutation(tmp_path: Path, mutate) -> Path:
                if isinstance(s.get("run"), str)
                and "served_skills_parity" in s["run"])
     mutate(arm)
+    if mutate_job is not None:
+        mutate_job(doc["jobs"]["deploy-dashboard"])
     path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
     return out
 
@@ -1131,6 +1259,41 @@ def test_4643_a_runner_that_cannot_fail_is_not_a_runner(tmp_path, name, mutate):
         f"{name}: the step still reads as the gate but cannot fail — the "
         "wiring guard must stop calling it a runner (it is the P1 class: a "
         "gate that gates nothing, with every surface green)")
+
+
+#: Each leaves the arm STEP intact and takes the JOB's teeth instead — the same
+#: silent green one level up, where GitHub reports the run as a success.
+_JOB_DISARMAMENTS = [
+    ("job_continue_on_error",
+     lambda job: job.update(**{"continue-on-error": True})),
+    ("job_skipped_by_if", lambda job: job.update(**{"if": "false"})),
+]
+
+
+@pytest.mark.parametrize("name,mutate", _JOB_DISARMAMENTS,
+                         ids=[n for n, _ in _JOB_DISARMAMENTS])
+def test_4643_a_job_that_cannot_fail_is_not_a_runner(tmp_path, name, mutate):
+    """Review finding (P2), measured on the pre-fix predicate: both of these
+    left **49 passed**. The guard judged `continue-on-error`/`if:` on the STEP
+    only, and the job carries neither, so the claim "the runner can fail the
+    job" was false at the job level while `\u00a77.1` said "two runners, both
+    failing closed".
+
+    What it costs: `continue-on-error: true` on the job takes the dashboard
+    deploy down and GitHub still reports GREEN; `if: false` skips the job
+    entirely. Either way the dashboard silently STOPS DEPLOYING — no red, no
+    page, and the mirror drifts with every claim here intact."""
+    workflows = _workflows_with_mutation(tmp_path, lambda step: None,
+                                         mutate_job=mutate)
+    assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+        f"{name}: the job owning the arm step is not allowed to fail, so a "
+        "failing upstream arm leaves the run GREEN and the dashboard deploys "
+        "nothing — the wiring guard must stop calling this a runner")
+    # …and the other workflow is untouched: the job rule must not be a blanket
+    # "no workflow is a runner", which would pass this case for the wrong reason.
+    assert "skills-parity.yml" in _upstream_runners(workflows), (
+        f"{name}: only the mutated workflow lost its runner — the job-level "
+        "rule leaked into a workflow whose own job is fine")
 
 
 def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_path):

@@ -58,12 +58,15 @@ WHY CURRENCY COMPARES BYTES, NOT THE COMMIT POINTER
 
 The currency arm compares the PINNED sha256 against the bytes at upstream HEAD.
 It deliberately does NOT require `HEAD == pinned`: the MIT repo also takes
-commits that cannot change what we serve (a README edit, a new unrelated skill,
-CI config). Keying on the pointer reds the dashboard deploy and auto-files a
-"the mirror drifted" P2 for a commit that changed none of the three files — a
-false alarm on the one signal humans are asked to trust, and a wrong diagnosis
-("a skill changed there") for a cause that did not happen. A skill edit still
-reds (the bytes at HEAD differ from the pin); an unrelated commit does not.
+commits that change no skill we serve (a README edit, CI config, an edit to a
+skill that is neither pinned nor listed under `out_of_scope:`). Keying on the
+pointer reds the dashboard deploy and auto-files a "the mirror drifted" P2 for a
+commit that changed none of the three files — a false alarm on the one signal
+humans are asked to trust, and a wrong diagnosis ("a skill changed there") for a
+cause that did not happen. A skill edit still reds (the bytes at HEAD differ from
+the pin); an unrelated commit does not. ⛔ An upstream ADDITION is a different
+event and IS red, by the scope arm above — this paragraph bounds what the
+CURRENCY arm reports, never what the gate does.
 
 FAIL-CLOSED, EVERY TIME
 

@@ -333,10 +333,20 @@ checked too: upstream `skills/` must equal the pin's keys (plus any entries the
 pin records under `out_of_scope:`), because both byte arms iterate the pin's
 own keys and would therefore never see an upstream skill we had never pinned.
 
-The currency arm compares **bytes, not the commit pointer**. An upstream commit
-that cannot change what we serve (a README edit, an unrelated skill, CI config)
-therefore does not red the gate and does not file a drift issue: the pinned
-sha256 is re-computed over the bytes at HEAD, so a real skill edit still fails.
+The currency arm compares **bytes, not the commit pointer**, so an upstream
+commit that changes no skill we serve — a README edit, CI config, an edit to a
+skill that is neither pinned nor listed under `out_of_scope:` — does not red
+the gate and does not file a drift issue: the pinned sha256 is re-computed over
+the bytes at HEAD, so an edit to a **pinned** skill still fails.
+
+**Adding** an upstream skill is a different event, and it **is** red: a new
+`skills/<dir>/` that is neither pinned nor declared is reported by the scope arm
+as `upstream added '<dir>' … pin it or record it as out of scope`, and the gate
+exits non-zero. That is deliberate, not an oversight in the sentence above: both
+byte arms iterate the pin's own keys, so a skill nobody pinned is invisible to
+every comparison — and an upstream capability would silently never reach the
+served set. The remedy is to pin it (`--sync`) or record it under
+`out_of_scope:`.
 
 **Where it runs — two runners, both failing closed.** The upstream arm is
 enforced by (1) the `deploy-dashboard` job of `deploy-pages.yml`, placed ahead
