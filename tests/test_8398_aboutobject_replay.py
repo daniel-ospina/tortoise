@@ -929,3 +929,120 @@ def test_a_PARTIAL_multi_carrier_loss_is_COUNTED_per_endpoint(wired) -> None:
         "journaled endpoints with one of them gone")
     assert edges() == carriers - {gone}, (
         f"the replay did not re-wire the surviving endpoints: {edges()}")
+
+
+def test_a_hard_deleted_LINK_TARGET_is_not_RESURRECTED(wired, caplog) -> None:
+    """A link whose TARGET the journal hard-deletes later is stale, not lost.
+
+    The sweep applied the #8398 staleness rule to the record's EVENT only, so a
+    hard-deleted target was still re-wired — and, because the Subject-stub
+    fallback journals ``mint_if_absent``, RE-MINTED. Measured at 208f96eb8:
+    ``create_event(aboutObject="Acme")`` with no ``Acme`` node mints
+    ``(:Subject {name:"Acme", id:"Acme"})`` and wires ``aboutSubject``;
+    ``delete("Acme")`` (the SDK door, so the journal carries
+    ``EntityMutated op=delete label=Subject``) empties the live graph again; then
+    ``rebuild_all`` reported ``wired=1, failed=0`` — SUCCESS — while FABRICATING
+    the Subject and its edge back. ``derived != replay(journal)`` in the
+    fabrication direction, and the counters this PR advertises as its honest
+    signal said nothing.
+
+    Asserted on NODES and EDGES, not on a bare count: a count can agree with a
+    fabricated graph.
+    """
+    import logging
+
+    sdk, proj, events, journal = wired
+
+    def subjects() -> set:
+        return {row[0] for row in proj.g.query(
+            "MATCH (s:Subject) RETURN s.id").result_set}
+
+    def edges() -> set:
+        return {(row[0], row[1]) for row in proj.g.query(
+            "MATCH (e:Event)-[:aboutSubject]->(t:Subject) "
+            "RETURN e.id, t.id").result_set}
+
+    ev = _nid(sdk.create_event("e", "event", aboutObject="Acme"))
+    link = _event_records(journal, "e")[0]["aboutLinks"][0]
+    assert link.get("resolve_key") == "Acme" and link.get("mint_if_absent") is True, (
+        "the fixture needs the Subject-stub path (the one that MINTS on replay): "
+        f"{link!r}")
+    assert subjects() == {"Acme"}, f"live did not mint the stub: {subjects()}"
+    assert edges() == {(ev, "Acme")}, f"live did not wire the edge: {edges()}"
+
+    # The TARGET, through the SDK door — the only door that journals the delete.
+    assert sdk.delete("Acme") is True, "the Subject was not deleted"
+    assert subjects() == set(), (
+        "live kept the hard-deleted Subject — the fixture is not measuring a "
+        f"delete: {subjects()}")
+    assert edges() == set(), f"live kept the deleted Subject's edge: {edges()}"
+
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert subjects() == set(), (
+        "rebuild_all RESURRECTED the hard-deleted link target — the stub was "
+        f"re-minted from an append-only record: {subjects()}")
+    assert edges() == set(), (
+        f"rebuild_all re-wired the stale aboutSubject edge: {edges()}")
+    assert "could NOT be re-wired" not in caplog.text, (
+        "the sweep reported a loss for a link the journal legitimately deleted "
+        f"— live never had it: {caplog.text[-2000:]}")
+
+    # Both engines: ``rebuild`` sweeps through its own call site.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild(_DirLog(journal.parent), confirm_destructive=True)
+    assert subjects() == set(), (
+        f"rebuild resurrected the hard-deleted link target: {subjects()}")
+    assert edges() == set(), f"rebuild re-wired the stale edge: {edges()}"
+    assert "could NOT be re-wired" not in caplog.text, (
+        f"the EventLog sweep reported a phantom loss: {caplog.text[-2000:]}")
+
+
+def test_a_hard_deleted_ID_TARGET_is_not_a_FALSE_failure(wired, caplog) -> None:
+    """... and the same rule on the ``how: "id"`` form, where it was a lie.
+
+    A registered Object target journals ``{"rel": "aboutObject", "how": "id",
+    "targets": [...]}`` — no ``resolve_key``. Hard-deleting it left the sweep
+    trying to re-wire an endpoint live no longer has, so ``rebuild_all``
+    reported ``1 journaled Event→entity about* link(s) could NOT be re-wired —
+    the target node was not restored by this replay; the live graph had these
+    edges``. BOTH halves are false: the target WAS deleted on purpose (not
+    merely "not restored"), and ``DETACH DELETE`` removed those edges live, so
+    the live graph never had them. That inflates ``failed`` — the honest signal
+    this PR advertises — and trains readers to ignore the warning.
+    """
+    import logging
+
+    sdk, proj, events, journal = wired
+
+    def objects() -> set:
+        return {row[0] for row in proj.g.query(
+            "MATCH (o:Object) RETURN o.id").result_set}
+
+    def edges() -> set:
+        return {(row[0], row[1]) for row in proj.g.query(
+            "MATCH (e:Event)-[:aboutObject]->(t:Object) "
+            "RETURN e.id, t.id").result_set}
+
+    obj = _nid(sdk.create_object("Gone"))
+    ev = _nid(sdk.create_event("obs", "observation", aboutObject=obj))
+    link = _event_records(journal, "obs")[0]["aboutLinks"][0]
+    assert link.get("how") == "id" and not link.get("resolve_key"), (
+        f"the fixture needs the id-resolved arm: {link!r}")
+    assert objects() == {obj}, f"live did not create the Object: {objects()}"
+    assert edges() == {(ev, obj)}, f"live did not wire the edge: {edges()}"
+
+    assert sdk.delete(obj) is True, "the Object was not deleted"
+    assert objects() == set() and edges() == set(), (
+        f"live kept the hard-deleted Object / its edge: {objects()} {edges()}")
+
+    with caplog.at_level(logging.WARNING):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert objects() == set(), (
+        f"rebuild_all resurrected the hard-deleted Object: {objects()}")
+    assert edges() == set(), (
+        f"rebuild_all re-wired an edge to a hard-deleted Object: {edges()}")
+    assert "could NOT be re-wired" not in caplog.text, (
+        "a deliberately hard-deleted target was reported as a replay loss: "
+        f"{caplog.text[-2000:]}")

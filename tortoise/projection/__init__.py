@@ -8803,7 +8803,8 @@ class FalkorProjection(
             for _al_seq, _al_ev in about_link_events:
                 self._replay_seq = _al_seq
                 try:
-                    _w, _f = self.replay_about_links(self._norm(_al_ev))
+                    _w, _f = self.replay_about_links(
+                        self._norm(_al_ev), hard_delete_seqs, _al_seq)
                 except Exception:  # noqa: BLE001, RUF100
                     logger.exception(
                         "rebuild: about-link re-wire failed for event %r (#8398)",
@@ -12742,7 +12743,8 @@ class FalkorProjection(
                 # never abort a post-wipe replay (the graph was already
                 # DETACH DELETE'd above), so a failure is logged, not raised.
                 try:
-                    _w, _f = self.replay_about_links(self._norm(_al_ev))
+                    _w, _f = self.replay_about_links(
+                        self._norm(_al_ev), hard_delete_seqs, _al_seq)
                 except Exception:  # noqa: BLE001, RUF100
                     logger.exception(
                         "rebuild_all: about-link re-wire failed for event %r "

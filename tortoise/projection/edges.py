@@ -1250,7 +1250,8 @@ class _EdgeHandlers:
                     created = True
         return created
 
-    def replay_about_links(self, payload: dict) -> tuple[int, int]:
+    def replay_about_links(self, payload: dict, hard_delete_seqs=None,
+                           seq: int | None = None) -> tuple[int, int]:
         """Re-wire the ``about*`` edges journaled WITH an ``EventRecorded`` record.
 
         #8398: ``create_event(aboutObject=…)`` wires its links as GRAPH EDGES,
@@ -1310,7 +1311,45 @@ class _EdgeHandlers:
         the LINK's presence, not by ``rel``: a name link's own rel resolved to
         nothing at write time, so live wired whatever the rel-ignoring cascade
         found.
+
+        ⛔ **A link whose TARGET the journal hard-deletes later is STALE, not
+        lost (#8398 review).** ``hard_delete_seqs`` + ``seq`` are the replay's
+        own hard-delete map (``journal_hard_delete_seqs``) and this record's
+        seq; a target endpoint the journal hard-deletes at a later seq is
+        SKIPPED — never counted as ``failed``, never re-minted — because live
+        has no such edge either (``delete`` DETACH-DELETEs it) and a mint would
+        FABRICATE a node the live graph no longer holds. This mirrors
+        ``fold_deferred_entity_links`` (``entities.py``), which tests BOTH
+        endpoints for exactly this reason, and it REUSES the same
+        ``_hard_delete_suppresses`` predicate rather than re-deriving "stale".
+        Measured at 208f96eb8 before this: ``create_event(aboutObject="Acme")``
+        (Subject-stub fallback) → ``delete("Acme")`` → ``rebuild_all``
+        RESURRECTED ``(:Subject {id:"Acme"})`` and its edge and reported
+        ``wired=1, failed=0``; for an id-resolved ``Object`` target it instead
+        reported one false failure with the warning "the target node was not
+        restored by this replay … the live graph had these edges", both halves
+        false.
+
+        ``hard_delete_seqs is None`` means "no staleness information" (the
+        ``apply``-style callers that see ONE record with no journal-wide view),
+        which keeps the pre-existing behaviour exactly.
         """
+        # The label-aware staleness helper lives next to its sibling reader; the
+        # lazy import mirrors ``entities.py`` and avoids the import cycle.
+        from tortoise.projection import _hard_delete_suppresses
+
+        def _target_stale(endpoint_id, endpoint_label) -> bool:
+            """True when the journal hard-DELETES this target AFTER ``seq``.
+
+            ONE definition of "stale" (``_hard_delete_suppresses``), label-
+            scoped, so a delete that cannot remove THIS label never suppresses
+            the edge (#3722 cycle 6). ``seq is None`` disables the check.
+            """
+            if hard_delete_seqs is None or seq is None:
+                return False
+            return _hard_delete_suppresses(
+                hard_delete_seqs, endpoint_id, endpoint_label, seq)
+
         inner = payload.get("event", payload)
         source = inner.get("id") or inner.get("eventId")
         links = inner.get("aboutLinks") or []
@@ -1364,8 +1403,20 @@ class _EdgeHandlers:
                 if not isinstance(targets, list):
                     failed += 1
                     continue
+                # #8398 review: drop the endpoints the journal hard-deletes
+                # AFTER this record. A stale endpoint is not a loss and must
+                # never be re-minted (``resolve_structural_target`` would mint
+                # a Subject stub the live graph no longer has).
+                key_stale = _target_stale(key, label)
+                live_targets = [
+                    value for value in targets
+                    if not (isinstance(value, str)
+                            and _target_stale(value, label))]
+                if not live_targets and key_stale:
+                    # EVERY journaled endpoint is stale — the whole link is.
+                    continue
                 wired_before = wired
-                for value in targets:
+                for value in live_targets:
                     if (isinstance(value, str) and value
                             and self.create_about_edge(
                                 source, value, rel, target_label=label)):
@@ -1379,7 +1430,9 @@ class _EdgeHandlers:
                 # endpoint was lost with ``failed == 0`` and no warning. The
                 # contract above is per journaled ENDPOINT ("every skip that
                 # costs a journaled link counts as ``failed``"), not per link.
-                missing = len(targets) - (wired - wired_before)
+                # Counted over the LIVE endpoints only: a stale target is not
+                # a missing one.
+                missing = len(live_targets) - (wired - wired_before)
                 if wired > wired_before:
                     failed += missing
                     continue
@@ -1392,14 +1445,24 @@ class _EdgeHandlers:
                 # covers the one-value link whose value is not a resolvable id
                 # (a url-keyed document Source), which is what it was added
                 # for.
-                target = resolve_structural_target(
-                    self.g, label, key, rel,
-                    mint=bool(link.get("mint_if_absent")))
+                # ⛔ A hard-deleted key must NOT reach here: the repair MINTS
+                # when ``mint_if_absent`` (the Subject-stub fallback journals
+                # exactly that), which is how a rebuild FABRICATED a node the
+                # live graph had deleted.
+                target = None
+                if not key_stale:
+                    target = resolve_structural_target(
+                        self.g, label, key, rel,
+                        mint=bool(link.get("mint_if_absent")))
                 if bool(target) and self.wire_about_link(
                         source, link, target["internal"]):
                     wired += 1
                     # ... and it repaired exactly ONE of the missing values.
                     failed += max(missing - 1, 0)
+                elif key_stale:
+                    # No repair is possible (or wanted) for a stale key: only
+                    # the LIVE endpoints can count as genuinely missing.
+                    failed += missing
                 else:
                     # An EMPTY ``targets`` still counts one loss (there is no
                     # journaled endpoint to count, and a record claiming a link
@@ -1410,7 +1473,18 @@ class _EdgeHandlers:
                 if not isinstance(targets, list) or not targets:
                     failed += 1
                     continue
-                for value in targets:
+                # #8398 review: same staleness rule on the id-resolved form —
+                # the target label is the one the rel implies.
+                label = STRUCTURAL_REL_LABELS.get(rel)
+                live_targets = [
+                    value for value in targets
+                    if not (isinstance(value, str)
+                            and _target_stale(value, label))]
+                if not live_targets:
+                    # every journaled endpoint was hard-deleted after this
+                    # record: live has no such edge, so this is not a loss
+                    continue
+                for value in live_targets:
                     ok = bool(value) and isinstance(value, str) and \
                         self.create_about_edge(
                             source, value, rel,
