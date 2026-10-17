@@ -355,7 +355,10 @@ response_fields:
     (tortoise/change_feed.py is the fold's ONE home; issue-2353), so answering what-changed-for-claim-X is one call
     instead of a client-side replay across event types. `before` is OBSERVED only AND SCOPED TO THE PAGE it was
     observed in — the fold sees one page, so a page boundary falling between a claim's revisions omits `before`
-    for that delta rather than inventing one; it is never back-filled from a `precondition`, which rides its own
+    for that delta rather than inventing one; and a hard-delete row (the one whose `change` is "deleted") ENDS the
+    incarnation, so the next event for that id reports no `before` either, however much of the window was
+    observed before it — the destroyed node's fields are not the new node's history. It is never
+    back-filled from a `precondition`, which rides its own
     key. A transition's write-path guarantee rides its own `precondition` key, never a fabricated
     `before`. THE SAME SWITCH also emits the store half — `PointRevised` records reach the `:GraphEvent` store
     only while it is on, because that store's shape is the claim-TRANSITION contract

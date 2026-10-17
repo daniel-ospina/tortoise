@@ -528,6 +528,36 @@ def test_dedupe_delta_reports_the_event_without_inventing_fields():
     assert deltas[1]["after"] == {}
 
 
+def test_only_a_hard_delete_clears_the_observation():
+    """A dedupe row folds to `{}` but the subject is still there.
+
+    The hard-delete path drops the claim's observed state, so the re-create that
+    follows reports no `before`. A `DedupeRecorded` / `DedupeRejected` row also
+    folds to an empty `after` and must NOT — keying the drop on `not after`
+    instead of `_is_hard_delete` would silently forget a live claim's history and
+    nothing else here would notice, because for a dedupe row the two rules are
+    indistinguishable in the reply. Pure fold: fails if the pop is keyed on an
+    empty `after`.
+    """
+    from tortoise.change_feed import aggregate_changes
+
+    events = [
+        {"seq": 1, "ts": "t1", "event_id": "e1", "type": "PointAdded",
+         "payload": {"id": "p"}},
+        {"seq": 2, "ts": "t2", "event_id": "e2", "type": "PointRevised",
+         "payload": {"id": "p", "new_content": "v1"}},
+        {"seq": 3, "ts": "t3", "event_id": "e3", "type": "DedupeRecorded",
+         "payload": {"id": "p"}},
+        {"seq": 4, "ts": "t4", "event_id": "e4", "type": "PointRevised",
+         "payload": {"id": "p", "new_content": "v2"}},
+    ]
+    deltas = aggregate_changes(events)[0]["changes"]
+    assert [d["change"] for d in deltas] == [
+        "created", "revised", "dedupe-recorded", "revised"
+    ]
+    assert deltas[3]["before"] == {"content": "v1"}
+
+
 def test_promoted_precondition_admits_an_unset_prior_status():
     """`PointPromoted` has two producers: `promote_point` CASes `status='draft'`
     and capture auto-promotion admits an UNSET status too (sdk.py:3990-3995). A

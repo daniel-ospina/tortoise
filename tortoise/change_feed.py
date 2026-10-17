@@ -33,6 +33,13 @@ when the window observed none — a content revision reports content
 before→after because the previous revision is in the window, and a claim's FIRST
 event in the window reports no ``before`` rather than a fabricated one.
 
+Observation is necessary but NOT sufficient: a hard-delete row (``change:
+deleted``) ENDS the incarnation, so the fold drops the claim's observed state and
+the next event for that id reports no ``before`` however much of the window was
+observed before it. The destroyed node's fields are not the history of the node
+that replaced it, and reporting them would describe a content transition that
+never happened.
+
 A transition whose write path enforces a precondition carries that precondition
 in its OWN key, ``precondition``, which is a property of the EVENT TYPE and
 never of the observation. Keeping the two apart is load-bearing: a consumer must
@@ -65,8 +72,10 @@ introduction onward.
 ---------------------------------------------------
 The fold sees ONE page — the rows ``read_after(..., limit=limit)`` returned —
 so ``before`` is a property of the page, not of the claim's history. The same
-event reports ``before`` when its predecessor is in the page, and NO ``before``
-when a page boundary falls between them; a client that pages therefore loses
+event reports ``before`` when its predecessor is in the page (and no hard delete
+intervened), and NO ``before``
+when a page boundary falls between them or an intervening hard delete ended the
+incarnation; a client that pages therefore loses
 ``before`` for exactly those claims whose events straddle a boundary. It is
 still never invented (an unobserved field is absent, never back-filled from a
 ``precondition``), but "the window observed no earlier value" and "the window
