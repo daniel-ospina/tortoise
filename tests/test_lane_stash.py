@@ -2094,6 +2094,81 @@ def test_prune_retains_guards_while_a_worktree_registration_is_stale(
     )
 
 
+def test_reap_re_reads_the_register_before_each_release(repo, monkeypatch, capsys):
+    """The k-th release must not be decided from a read k subprocesses old.
+
+    Two dead-owner guards whose objects are both registered, then a peer drops the
+    SECOND between the two releases. A single read for the whole loop releases
+    both and makes the second guard the object's last handle (#8822 review P1).
+    """
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\none\n")
+    repo.git("stash", "push", "-q", "-m", "one", cwd=repo.b)
+    sha_one = repo.stash_sha()
+    repo.dirty(repo.b, "f.txt", "base\ntwo\n")
+    repo.git("stash", "push", "-q", "-m", "two", cwd=repo.b)
+    sha_two = repo.stash_sha()
+    assert sha_one and sha_two and sha_one != sha_two
+    # refname order decides the release order: ...50/<sha_one> then ...51/<sha_two>
+    repo.git("update-ref", f"refs/pi-lane-prune-guard/deadlane-55555550/{sha_one}", sha_one)
+    repo.git("update-ref", f"refs/pi-lane-prune-guard/deadlane-55555551/{sha_two}", sha_two)
+
+    rows = None
+    calls = {"n": 0}
+    monkeypatch.chdir(repo.a)
+    rows = mod._shared_register()
+    assert {r["sha"] for r in rows} == {sha_one, sha_two}
+
+    def scripted():
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the peer's drop lands after the first release
+            return [r for r in rows if r["sha"] != sha_two]
+        return list(rows)
+
+    monkeypatch.setattr(mod, "_shared_register", scripted)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert not any(sha_one in r for r in refs), (
+        f"the first guard's object is still registered and named by lane refs: {refs}"
+    )
+    assert any(sha_two in r for r in refs), (
+        "the second guard is now the object's LAST handle and must be kept: " f"{refs}"
+    )
+
+
+def test_reap_reports_and_retains_when_the_worktree_list_cannot_be_read(
+    repo, monkeypatch, capsys,
+):
+    """An unreadable worktree list is not evidence: nothing is released, and it says so."""
+    mod = _load_tool()
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-66666666/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    real_git = mod._git
+
+    def failing(*args, **kwargs):
+        if tuple(args[:2]) == ("worktree", "list"):
+            return subprocess.CompletedProcess(args, 1, "", "boom")
+        return real_git(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_git", failing)
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    mod._reap_stale_guards()
+    out = capsys.readouterr().out
+    assert "could not be read" in out, out
+    assert dead in repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+
+
 def test_check_does_not_name_prune_as_reclaimable_on_a_diverged_register(repo):
     """`check` must not advertise `prune --apply` on a state prune refuses.
 

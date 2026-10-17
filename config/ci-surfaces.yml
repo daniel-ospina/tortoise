@@ -4572,7 +4572,7 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
   test_collision_preflight.py: 3.6
-  # #8051: 88 tests. 250.0 is from LOCAL readings on this
+  # #8051: 90 tests. 250.0 is from LOCAL readings on this
   # fleet-loaded host (subprocess + real-git harness): 173s / 182s at 61 tests
   # (head 876dabfe), 187s at 69, 192s at 76, 198s at 79, 223s at 82, 241s at 83,
   # 250s at 83, 227s at 87. The weight this replaces — 160.0, published with an "88-169s"
