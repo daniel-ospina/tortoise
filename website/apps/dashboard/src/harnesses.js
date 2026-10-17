@@ -846,7 +846,8 @@ export function analyticsHarnessOf(leaf) {
 // Contract (DE2E-5), and where each clause is now pinned:
 //   • every harness reaching a connected state verifiable via tortoise_health —
 //     pinned on the RENDERED step-2 prompt for all six non-chatgpt harnesses
-//     plus the workflows prompt (harnesses.test.js);
+//     (harnesses.test.js; the workflows prompt is asserted too, but it embeds
+//     that same step-2 text, so it is a restatement, not second coverage);
 //   • the key never lands in a project-scoped/committable config (env-var
 //     indirection) — pinned on the rendered prompt, never on a literal (the
 //     test key is itself `tt_`-prefixed, so "contains tt_" proves nothing).

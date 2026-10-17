@@ -69,8 +69,11 @@ test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, in
 test('#3430: the ONE rendered config block survives; the unrendered per-harness blocks are gone', () => {
   // #3430: `UNIVERSAL_COMMAND` carried one block per harness, but only the Codex
   // Desktop leaf was ever rendered — `main.jsx` imports and renders exactly that
-  // one call (`rg -n 'UNIVERSAL_COMMAND' src/main.jsx` at the parent commit shows
-  // the import plus a single render site). The other seven were copy no user saw,
+  // one call — measured at `6b38829fc` (the parent of the #3430 commit), where
+  // `rg -n 'UNIVERSAL_COMMAND' src/main.jsx` returns exactly two hits: the import
+  // and render site :8780. Naming the sha matters: at `da525339a` the same command
+  // returns nothing, so "the parent commit" would not reproduce. The other seven
+  // were copy no user saw,
   // while `DE2E-5` asserted against them: the suite could keep passing while the
   // product said something else. The constant is now that one block.
   assert.equal(typeof CODEX_DESKTOP_COMMAND, 'function')
@@ -219,9 +222,11 @@ test('DE2E-5: the RENDERED self-install prompts carry the MCP URL and the skill 
 })
 
 test('DE2E-5: EVERY harness verifies through tortoise_health — the clause is 6 harnesses, not 4', () => {
-  // #3430 review, cycle 1: the deleted universal commands each ended in a
-  // `tortoise_health` verify, so dropping them silently narrowed a CONTRACT that
-  // is stated for every harness. `HARNESS_SELF_INSTALL` is only 4 of the 6 that
+  // #3430 review, cycle 1: the deleted universal commands for the SIX
+  // agent/connector harnesses each ended in a `tortoise_health` verify (chatgpt's
+  // was the one deliberate exception — it verifies IN CHAT, which is why the loop
+  // below excludes it and why the old block's pin said so). Dropping them silently
+  // narrowed a CONTRACT; `HARNESS_SELF_INSTALL` is only 4 of the 6 that
   // render a prompt, and the two connector leaves (claude-desktop, claude-web)
   // were left covered by nothing but a snapshot `deepEqual` — which passes for
   // any text change regenerated in the same commit, so it cannot protect a
@@ -234,7 +239,10 @@ test('DE2E-5: EVERY harness verifies through tortoise_health — the clause is 6
     const step2 = wizardPromptText(h, 2, KEY, 'included') || ''
     assert.match(step2, /tortoise_health/, `${h}: rendered step 2 names the verify tool`)
   }
-  // …and the connector leaves' other delivery surface: the workflows prompt.
+  // …and the connector leaves' other delivery surface: the workflows prompt. This is
+  // belt-and-braces on the SAME fact, not independent coverage — WORKFLOWS_PROMPT
+  // alone carries no `tortoise_health`; the match comes from the embedded
+  // `wizardPromptText('claude-web', 2, …)` already asserted above.
   assert.match(wizardWorkflowsText(KEY, 'included'), /tortoise_health/,
     'the workflows prompt (the connector leaves\' delivery surface) names the verify tool')
 })
@@ -291,7 +299,7 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — steps + skills-as-
     'chatgpt capture row renders a reason (never undefined)')
 })
 
-test('the RENDERED connect copy never inlines a Bearer header or a project config', () => {
+test('the RENDERED wizard prompts never inline a Bearer header or a project config', () => {
   // #3430: retargeted onto rendered surfaces. The dead `UNIVERSAL_COMMAND.cursor`
   // / `.pi` blocks were the old home of this check; the config files they
   // described are now written by the AGENT from the rendered prompt, so what is
@@ -303,12 +311,20 @@ test('the RENDERED connect copy never inlines a Bearer header or a project confi
   // project config file that gets committed.
   const piPrompt = wizardPromptText('pi', 1, KEY, 'included')
   assert.match(piPrompt, /shell profile/, 'pi prompt sends the key to the shell profile')
-  assert.ok(!/Authorization["\s:]*Bearer/i.test(piPrompt), 'pi prompt never inlines a Bearer header')
+  // ⛔ `["\s:=]*` — the `=` matters: the shipped literal-header form is
+  // `Authorization = "Bearer …"` (CODEX_DESKTOP_COMMAND offers it as the documented
+  // fallback), and a class without `=` cannot see it. Measured: the narrow class
+  // returns false for exactly the form the product ships.
+  assert.ok(!/Authorization["\s:=]*Bearer/i.test(piPrompt), 'pi prompt never inlines a Bearer header')
   assert.ok(!piPrompt.includes('.mcp.json'), 'pi prompt names no project config file — the agent writes it')
+  // Scope: the WIZARD PROMPTS (agent-driven harnesses). The Codex Desktop block is
+  // deliberately out of scope — it offers `Authorization = "Bearer ${key}"` as the
+  // documented no-shell fallback, in a private file the copy tells the human to
+  // chmod 600. That is a designed exception, not an oversight.
   for (const h of HARNESS_SELF_INSTALL) {
     for (const step of [1, 2]) {
       const text = wizardPromptText(h, step, KEY, 'included') || ''
-      assert.ok(!/Authorization["\s:]*Bearer/i.test(text),
+      assert.ok(!/Authorization["\s:=]*Bearer/i.test(text),
         `${h}/${step}: rendered copy never inlines a Bearer header`)
     }
   }
