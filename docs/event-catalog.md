@@ -10,20 +10,64 @@
 |---|---|---|---|---|
 | `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt` and — since #5004 — `embedding` plus, on a creating record, its identity keys (see the JSONL shape notes below). `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
-| `PointRetracted` | 1 | `TortoiseSDK.retract_point` (**tombstone** — `status='retracted'`, node kept; the JSONL line is what makes it durable) AND `TortoiseSDK.delete_point` / `TortoiseSDK.delete` (**hard delete** — emitted as a **`:GraphEvent`-only subscriber row**, no JSONL line; the durable record for that delete is the `EntityMutated` row below, because one event type must not carry two live end-states, #3300) | `id` | SDK |
+| `PointRetracted` | 1 | `TortoiseSDK.retract_point` (**tombstone** — `status='retracted'`, node kept; the JSONL line is what makes it durable) AND `TortoiseSDK.delete_point` / `TortoiseSDK.delete` (**hard delete** — emitted as a **`:GraphEvent`-only subscriber row**, no JSONL line; the durable record for that delete is the `EntityMutated` row below, because one event type must not carry two live end-states, #3300) | `id`, plus `deleted: true` on the HARD-delete producer only (#2353 — written UNCONDITIONALLY, because the marker records what the write path did and a reader-gated one mislabels every unswitched writer's deletes) | SDK |
 | `EntityMutated` | 1 | The ONE write-surface record for durable entity mutation — `TortoiseSDK._update_entity` (`restatus` when `status` is written — on a `:Point`-carrying node the value is first validated against `POINT_STATUS_VALUES` and the record is written against the `:Point` label so it folds, #3311; otherwise `revise`), `TortoiseSDK._delete_entity` and `delete_point` (`delete`). #1423 adds the Subject lane's producer — `commit_ops._apply_subject_supersession` (`supersede`: `status`/`supersededBy`/`supersededAt` on a `:Subject`; a Subject `status` written through the generic surface is validated against `SUBJECT_STATUS_VALUES`, ONTOLOGY §4.2, and refused otherwise). Designed on #3299; the op set was extended by #3312 (unjournaled update), #3300 (Point delete) and #1423 (Subject supersede). **`rename` is fold-supported but NOT yet produced** (and the fold applies `state`, so a rename record must carry the new name as `state["name"]` — the top-level `name` field is currently unread) — a `name`-bearing write withholds its record and warns, because journalling it drops a legacy name-keyed `ObjectSuperseded` on replay (#3377 returned to open; #4769 lands rename journalling together with the structural sweep-ordering fix). Fold: `projection._fold_entity_mutation`, dispatching on `op` | `id`, `op`, `label`, plus `state` (the mutation's OWN keys — never a `properties(n)` snapshot — carrying the values the graph STORED; **absent for `op="delete"`**) and `name` (rename only) | SDK — **JSONL ONLY**: deliberately NOT in `_GRAPH_EVENT_TYPES`, so it rides the rebuild journal and not the `:GraphEvent` store |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
 | `PointInvalidated` | 1 | `TortoiseSDK.invalidate_point` (#2488) | `id`, `corrected_by` | SDK |
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
 | `OperatorPromoted` | 1 | `TortoiseSDK.promote_point` R16 (#785) | `point` (full snapshot), `id` | SDK |
 | `OperatorAnnotated` | 1 | `TortoiseSDK.annotate_operator` | `id`, `bias`, `precision`, `consistency`, `directness` | SDK |
+| `PointRevised` | 1 | `TortoiseSDK.update_point(**props)` — the JSONL journal for every content/validity/status revision (#548). **This is the ONE registered type whose emit path is conditional:** it reaches the `:GraphEvent` store only while `TORTOISE_CHANGE_FEED` is truthy (#2353), because that store's default emit set is the claim-TRANSITION contract (`sdk._GRAPH_EVENT_TYPES`, which is NOT widened by this type — see the ⚠️ note below) | payload = the caller's props VERBATIM plus `id` (a store revision carries the same bare domain payload the JSONL line does: `new_content`, `validTo`, `status`, `annotator_*`, caller extras…) | SDK — JSONL always; `:GraphEvent` only under the switch |
 | `ObjectSuperseded` | 1 | hosted commit endpoint (`hosted_api._execute_commit_writes` §6b) + capture (`sdk._extract_session_v2`) + eval (`tools/longmem_eval/ingest_v2`) — entity-level supersession records; ALL THREE emit via the shared `commit_ops.apply_supersessions` (id-style kwargs — #1350/#2164/#2193) | `id`, `name`, `supersedes_by`, `session_id`, `evidence` — id-style kwargs. The GraphEvent payload carries all five for every producer; the JSONL line carries them only when the producing SDK is built with an `event_log_path`. In-tree JSONL exercisers build `event_log_path`-configured SDKs and drive `commit_ops.apply_supersessions` (which routes through `sdk._emit_event`): `tests/test_capture_session.py` (`test_apply_supersessions_legacy_idless_object_reaches_jsonl`) plus the #2194 suite (`test_object_registered_journal.py`) — an in-tree exerciser therefore predates #2194. The other `event_log_path`-configured in-tree SDK — offline mining, `tortoise/mining.py` — never emits `ObjectSuperseded` (no supersession path: Object writes are `ObjectRegistered` via `api.add_object`) | Hosted commit endpoint / SDK capture / eval ingest (all via `commit_ops.apply_supersessions`) |
 
 > ⛔ **`ClaimStateChanged` is NOT an event type** (plan-review P1). Every claim
 > transition maps to one of the eleven concrete types above; **challenged is a
 > DERIVED condition** (NAND-operator-edge presence on a live point), not a
 > state or event. Content edits via `update_point` (non-status props) emit
-> NOTHING.
+> NOTHING to the `:GraphEvent` store **by default**.
+>
+> ⚠️ **`PointRevised` is a JSONL-only record BY DEFAULT, and that is a recorded
+> decision, not an accident** — `docs/plans/2026-08-08-432-subscriptions-plan.md`
+> §Task 3 ("Content edits (`update_point` non-status props) emit NOTHING
+> (plan-review P1) — the emit set is exactly these five hooks"), pinned by
+> `tests/test_event_store.py::test_content_edit_emits_nothing`. The same holds
+> for `EntityMutated` (above), `SourceVersioned`, `EntityLinked`,
+> `SessionRecorded`/`SessionDeleted` and the other journal-carrier records.
+> **#2353 is the one exception and it is OPT-IN:** with `TORTOISE_CHANGE_FEED`
+> truthy (1/true/yes/on; unset or 0 means OFF) `PointRevised` ALSO reaches the
+> `:GraphEvent` store, so `poll_events` can report before→after for content,
+> validity and status via the semantic change feed (`tortoise/change_feed.py`,
+> an off-by-default `changes` response field — see
+> `docs/product/mcp-sdk-surface.md` → *Recorded response fields*). Off, the
+> emitted set above is unchanged. Widening the DEFAULT emit set would reverse the
+> plan-review ruling; that is an owner decision, not a lane's.
+>
+> Registration is the other half of that exception, and it is NOT conditional:
+> `PointRevised` is the twelfth member of `CLAIM_EVENT_TYPES`, which is the
+> READ-side catalog (`poll_events`' `types=` filter and
+> `webhook_delivery._validated_types` consult it — never `sdk._GRAPH_EVENT_TYPES`).
+> Registration is what makes `types=["PointRevised"]` and a `PointRevised` webhook
+> subscription legal instead of a hard `ValueError`, so the store can never hold a
+> row a caller cannot name (#2353 review P2). The eleven unconditional members are
+> exactly `sdk._GRAPH_EVENT_TYPES`.
+>
+> **Two more notes on what the feed reports, both under the same switch.**
+> (1) `PointRetracted` has TWO producers with different end-states (#3300):
+> `retract_point`'s tombstone (`status='retracted'`, terminal-guarded) and
+> `delete_point` / the capture stale-turn sweep's HARD delete (node destroyed,
+> no guard). Their payloads were identical, so the feed reported the tombstone
+> reading for a destroyed node. The hard-delete producer adds `deleted: true`
+> to its payload, and the fold reports that producer as `change: "deleted"`
+> with NO `status` and NO precondition; without the marker the row is the
+> tombstone, the type's remaining producer. The marker is written
+> UNCONDITIONALLY (#2353 review P1): gating it on the READING
+> process's switch folded an unswitched writer's hard deletes as tombstones.
+> Rows written before the marker existed carry nothing that separates the two
+> producers and are read as tombstones — a stated residual.
+> (2) `PointPromoted`'s reported `precondition` is the UNION both producers
+> enforce — `status` in `[draft, null]` — because capture auto-promotion admits
+> an UNSET status (`status IS NULL OR status = 'draft'`) and emits the same type,
+> so `draft` alone would overstate the capture leg (#2353 review P2).
 >
 > The EventAPI/CLI/ingest path emits its own legacy events (`PointAdded`,
 > `PointRetracted`, `PointsMerged`, `IngestStarted`) to the EventLog JSONL —
@@ -230,7 +274,7 @@ traversals, EP propagation; see §5 guard).
 |---|---|---|
 | `seq` | int | Per-graph monotonic, atomic in-graph counter (`GraphEventMeta.last_seq`). Indexed. |
 | `ts` | string | ISO8601 UTC (node-level canonical; NOT re-embedded in payload). |
-| `type` | string | One of the eleven registered types above. |
+| `type` | string | One of the eleven `sdk._GRAPH_EVENT_TYPES` members above — plus `PointRevised` while `TORTOISE_CHANGE_FEED` is truthy (the twelfth registered `CLAIM_EVENT_TYPES` member; the emit gate is `sdk.py::_emit_event`). |
 | `payload` | string | JSON of the **bare domain payload** (codec encode/decode wiring deferred to the first upcaster task — node props are canonical for v1). |
 | `event_id` | string | Server-side ULID; **unique** (app-side dedup + unique constraint on production FalkorDB). |
 

@@ -638,6 +638,11 @@ def test_ontology_records_the_2350_precision_layer():
     carries the per-end-precision / 3-state-end paragraph referencing its home
     module.
 
+    The changelog block lives in ``docs/ONTOLOGY-CHANGELOG.md`` since the
+    model/changelog split (this branch, #8745): ``ONTOLOGY.md`` is the model and
+    states the §4.7 contract; the per-model-change record, including the v3.28
+    entry, is read from the changelog file.
+
     Fails on the pre-#2350 doc (merge base ``ce9d97e0``): there the v3.28 entry
     names only #3998, and neither the §4.7 heading, ``validToPrecision`` nor
     ``tortoise/validity.py`` appears. The previous version of this test asserted
@@ -646,10 +651,12 @@ def test_ontology_records_the_2350_precision_layer():
     import re
     from pathlib import Path
 
-    doc = (Path(__file__).resolve().parent.parent
-           / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
-    v328 = re.search(r"Changelog v3\.28 \(([^)]*)\)", doc)
-    assert v328, "ONTOLOGY carries no Changelog v3.28 entry"
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
+    changelog = (root / "docs" / "ONTOLOGY-CHANGELOG.md").read_text(
+        encoding="utf-8")
+    v328 = re.search(r"Changelog v3\.28 \(([^)]*)\)", changelog)
+    assert v328, "the ONTOLOGY changelog carries no Changelog v3.28 entry"
     assert "#2350" in v328.group(1), (
         "the v3.28 changelog entry does not record #2350: " + v328.group(1))
     assert "Per-end precision and the 3-state end" in doc, (

@@ -241,6 +241,19 @@ def test_real_tree_i1_live_read_was_recorded() -> None:
     assert record.get("live_result") == "SATISFIED"
 
 
+def test_real_tree_viii_b_declaration_home_has_no_unregistered_reader() -> None:
+    """I11 on the REAL tree: no tool/test reads the settings declaration as data.
+
+    The required `python-ci` leg runs `mergify_config_guard.py --static`, which is
+    the CI gate; this pins the same property in the pytest surface so a new prose
+    mention is caught here by name. `tools/ci_check_repair.py` named the
+    declaration home in two comments and was reported as an authoritative reader
+    even though it reads neither the file nor its contents.
+    """
+    readers = mcg._settings_readers(ROOT)
+    assert readers == [], f"unregistered declaration-home readers: {readers}"
+
+
 # ---------------------------------------------------------------------------
 # Clause fixtures (i)-(viii) — the plan's named fixture per clause
 # ---------------------------------------------------------------------------

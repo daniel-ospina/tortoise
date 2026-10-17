@@ -31,6 +31,7 @@ from tortoise.hosted_api import app, get_current_org, get_current_user  # noqa: 
 from tortoise.mcp_server import create_http_app
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_async_client, verdict_client
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM, TEAM_TIER_TEAM, TOKEN, _key_row, _membership_row,
@@ -78,7 +79,7 @@ def rest_client(monkeypatch, supabase_fake):
         # clear at enter; pop-pin → restore __init__ → deterministic anchor
         # close → clear overrides at exit (replaces the local
         # _patch_tortoise_sdk_init copy).
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             yield tc, supabase_fake
 
 
@@ -968,8 +969,6 @@ class TestSessionKeyMintConcurrency:
         load-bearing), not today's interleaving."""
         import asyncio
 
-        import httpx
-
         from tortoise.hosted_api import app
 
         _, fake = rest_client
@@ -983,9 +982,8 @@ class TestSessionKeyMintConcurrency:
         ])
 
         async def _run():
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+            async with verdict_async_client(app,
+                                            base_url="http://test") as ac:
                 async def _mint(_i):
                     return await ac.post("/v1/session/key",
                                          json={"purpose": "recovery"})
@@ -1207,3 +1205,37 @@ class TestSessionKeyMintSerialization1879:
             f"the single key_create event must name the CREATED key "
             f"({created['id']}), got {events[0]}")
         assert all(e["key_id"] != "other-old" for e in events), events
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/session/key`` is the
+    route the concurrency legs read and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+
+    ONE client in this module stays plain, declared in
+    `test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS`: ``_mounted_test_client``
+    wraps a local ``Mount("/mcp", ...)`` parent that carries no
+    ``WaitBoundMiddleware``, so no read bound from it can be a transport
+    refusal.
+    """
+    from fastapi.testclient import TestClient
+
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/session/key")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post("/v1/session/key", json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/session/key", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/session/key answered" in message

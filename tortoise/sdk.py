@@ -2254,7 +2254,7 @@ def _write_capture_turns(
         # subscriber surface. The JSONL half is the ``EntityMutated``
         # op=delete record the replay folds — NOT ``PointRetracted``, whose
         # fold tombstones (the wrong meaning for a removal).
-        sdk._emit_event("PointRetracted", {"id": tid})
+        sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
         sdk._journal_entity_mutation("Point", tid, "delete")
     for i, _turn in enumerate(windowed):
         turn_id = _capture_turn_id(session_id, i, turn_offset)
@@ -2330,6 +2330,7 @@ def _write_session_and_turns(
     capture_lane: str | None = None,
     client_captured_at: float | None = None,
     client_captured_at_source: str | None = None,
+    source: str | None = None,
     actor_user_id: str | None = None,
     machine_id: str | None = None,
     model: str | None = None,
@@ -2463,6 +2464,16 @@ def _write_session_and_turns(
         # have (piece 12 — 'unknown' must be excludable from a pass).
         if client_captured_at_source:
             session_record["client_captured_at_source"] = client_captured_at_source
+    # #3516 §D: the transcript stem the capture came from. Set-only-when-present
+    # AND set-if-absent (``coalesce``), the machine_id/model rule below rather
+    # than the harness rule: the store-sync backstop ships the SAME session
+    # after the hook, and a backstop entry that carries a different (or no)
+    # transcript stem must never overwrite the stem the hook observed — a
+    # plain SET would let the weaker, later producer relabel the record.
+    if source:
+        merge_sets.append("s.source=coalesce(s.source, $src)")
+        merge_params["src"] = source
+        session_record["source"] = source
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
@@ -2714,6 +2725,18 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 
 # Event types that write to the :GraphEvent store (#432). Other types
 # (e.g. PointRevised) only write to the JSONL event log (#548).
+#
+# ⚠️ THIS SET IS THE STORE'S **CLAIM-TRANSITION** CONTRACT, AND ITS SHAPE IS A
+# RECORDED DECISION — do not widen it by reflex. `docs/plans/2026-08-08-432-
+# subscriptions-plan.md` §Task 3: "Content edits (`update_point` non-status
+# props) emit NOTHING (plan-review P1) — the emit set is exactly these five
+# hooks; every claim transition maps to exactly one", pinned by
+# `tests/test_event_store.py::test_content_edit_emits_nothing` and restated in
+# `docs/event-catalog.md`. #2353 asks for `PointRevised` in this store, so the
+# addition is drawn as an **opt-in** one at the emit hook below (`_emit_event`)
+# rather than by adding the type here: the default stream stays byte-identical,
+# and the semantic change feed (`tortoise/change_feed.py`) is what consumes the
+# revisions once an operator switches it on.
 _GRAPH_EVENT_TYPES = frozenset({
     "PointAdded",
     "OperatorAdded",
@@ -2727,6 +2750,41 @@ _GRAPH_EVENT_TYPES = frozenset({
     "ObjectSuperseded",  # #1350: Object status fold source (supersession)
     "PointInvalidated",  # #2488: invalidate_point — outdated flag + CORRECTS (no status)
 })
+
+
+def _change_feed_enabled() -> bool:
+    """Is the #2353 semantic change feed (and its PointRevised store half) on?
+
+    One switch for both halves: the revision record is the feed's SOURCE, so a
+    feed without revisions would silently under-report. Default OFF — `enabled()`
+    resolves unset/blank/garbage to False (`tortoise/env_truthy.py`), which is
+    what keeps the store's documented transition-only contract intact unless an
+    operator opts in.
+    """
+    from .change_feed import enabled
+
+    return enabled()
+
+
+def _deleted_point_payload(id: str) -> dict:
+    """The `PointRetracted` store payload for a HARD delete (#2353, #3300).
+
+    `PointRetracted` has two producers with different end-states: this hard
+    delete (the node is gone) and `retract_point`'s tombstone
+    (`status='retracted'`, node kept). The payloads were byte-identical, so the
+    semantic change feed could not tell them apart and reported the tombstone
+    reading — a fabricated `after` whose `precondition` contradicted its own
+    `before`.
+
+    The `deleted` marker is written UNCONDITIONALLY. It states what THIS call
+    did, so it cannot depend on whether the READING process has the change feed
+    switched on: a deployment whose writer has it off and whose reader has it on
+    would otherwise fold every hard delete it sees as a tombstone. Rows written
+    before the marker existed keep their old `{"id": ...}` shape and are read
+    as tombstones — a residual the change feed documents rather than hides.
+    """
+    return {"id": id, "deleted": True}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # #7951 — THE JOURNAL ORDERING CONTRACT. Read this before adding a writer.
@@ -3112,7 +3170,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
     operator ``--upgrade-all`` path (projection maps ``source_path`` →
-    ``d.sourcePath`` via ``_SOURCE_HANDLED``/``_DOC_RETIRED``); a tenant setting them turns the
+    ``d.sourcePath`` via ``_SOURCE_HANDLED``/``_DOC_PASSTHROUGH_HANDLED``); a tenant setting them turns the
     graph into a file-read oracle. ``id`` overrides on entity surfaces mutate
     node identity / mint tenant-chosen Document ids. Both are rejected with a
     clear ValueError (fail-closed). ``api.add_document``'s explicit
@@ -5711,6 +5769,17 @@ class TortoiseSDK:
         'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
         Types are validated against the EventCodec registry (unknown → ValueError).
         Events live in THIS SDK's graph namespace (the org partition).
+
+        #2353: when ``TORTOISE_CHANGE_FEED`` is truthy the response ALSO carries
+        ``changes`` — the same page folded into per-claim semantic deltas with
+        before/after (``tortoise/change_feed.py``), so "what changed for claim X
+        since cursor C" is one call rather than a client-side replay across event
+        types. It is an off-by-default additive response field (the recorded
+        ``response_fields`` carve-out): with the switch off the ``changes`` key is
+        absent and the reply's SHAPE is unchanged — ``events`` and ``next_cursor``
+        only. It is NOT byte-identical: the hard-delete ``PointRetracted`` payload
+        gained the ``deleted`` marker unconditionally, and this reply relays that
+        row verbatim under ``events`` (see ``config/surface-manifest.yml``).
         """
         from .event_store import read_after
 
@@ -5744,7 +5813,12 @@ class TortoiseSDK:
                 raise ValueError("cursor expired — replay from tail")
         evs = read_after(proj, after_seq, types=types, limit=limit)
         last = evs[-1]["seq"] if evs else after_seq
-        return {"events": evs, "next_cursor": self._encode_cursor(last)}
+        result: dict = {"events": evs, "next_cursor": self._encode_cursor(last)}
+        if _change_feed_enabled():
+            from .change_feed import aggregate_changes
+
+            result["changes"] = aggregate_changes(evs)
+        return result
 
     _EVENT_PURGE_ATTR = "_tortoise_last_purge"
     _EVENT_PURGE_LAST: float = 0.0  # process-level gate (P1 review fix)
@@ -5807,7 +5881,9 @@ class TortoiseSDK:
         **Graph event store (#432):** written when *type_* is in
         ``_GRAPH_EVENT_TYPES`` (11 registered types — PointAdded,
         OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated,
-        PointInvalidated, plus the promote/dedupe/object-supersede types).
+        PointInvalidated, plus the promote/dedupe/object-supersede types) — and,
+        under ``TORTOISE_CHANGE_FEED`` only, ``PointRevised`` too (#2353; see the
+        gate below).
         The payload is taken from *payload* if given, otherwise synthesized
         from ``point["id"]`` or *id* + *extra*.
 
@@ -5850,7 +5926,15 @@ class TortoiseSDK:
         old ``event.update(extra)`` precedence.
         """
         # ── Graph event store (#432) ──────────────────────────────
-        if type_ in _GRAPH_EVENT_TYPES:
+        # #2353: `PointRevised` (content/validity/status revisions) is a
+        # JSONL-only record by default — the store carries claim TRANSITIONS,
+        # see `_GRAPH_EVENT_TYPES` above. It reaches the store only under the
+        # change-feed switch, which is also what makes a poll able to report
+        # before→after for content, validity and status. Off (the default) the
+        # emitted events, and therefore `poll_events`' response, are
+        # byte-identical to before this change.
+        if type_ in _GRAPH_EVENT_TYPES or (
+                type_ == "PointRevised" and _change_feed_enabled()):
             # #2600: copy FIRST — a caller-reused payload dict must never
             # gain an unexpected key from the actor merge below; then merge
             # the ContextVar actor (set by mcp_auth middleware / hosted
@@ -10097,12 +10181,17 @@ class TortoiseSDK:
         # Two stores, one meaning each:
         #   * :GraphEvent ONLY (payload style, `id=` omitted) — the subscriber
         #     surface is UNCHANGED; `tortoise_events_poll` still sees the
-        #     point-delete lifecycle row.
+        #     point-delete lifecycle row. #2353: the payload gains
+        #     `deleted: true` (`_deleted_point_payload`) so the change feed can
+        #     tell this hard delete from `retract_point`'s tombstone. The marker
+        #     is UNCONDITIONAL — it records what this write did, and gating it on
+        #     the reader's switch mislabelled every hard delete performed by an
+        #     unswitched writer.
         #   * JSONL ONLY (`EntityMutated` is not in _GRAPH_EVENT_TYPES) — the
         #     replay journal carries the honest hard-delete record, whose fold is
         #     `_delete_entity_by_id`. No `state`: the recorded shape carries
         #     "nothing for a delete".
-        self._emit_event("PointRetracted", {"id": id})
+        self._emit_event("PointRetracted", _deleted_point_payload(id))
         self._journal_entity_mutation("Point", id, "delete")
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
@@ -26833,7 +26922,17 @@ class TortoiseSDK:
             # sess[0..6] mapping is unchanged, and the SDK read must serve the
             # SAME extraction status the hosted surfaces do (#5498 binds the
             # three key sets to one declaration).
-            "s.capture_ok, s.capture_extractor",
+            "s.capture_ok, s.capture_extractor, "
+            # #3516: the capture-provenance triplet, APPENDED AFTER #3520's
+            # columns (sess[9..11]). #3520 landed on main first and took
+            # sess[7]/sess[8], so these must FOLLOW it — a union that placed
+            # them at sess[7] would have silently re-bound `extraction` to the
+            # provenance columns, which is the positional corruption this
+            # projection's own header warns about.
+            # The SDK read is BOUND to `SESSION_READ_FIELDS` by the parity
+            # test, so this lane cannot serve a different vocabulary from the
+            # hosted endpoint it mirrors.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -26897,6 +26996,11 @@ class TortoiseSDK:
             # part of the SDK read by construction rather than a second
             # opinion).
             "extraction": session_extraction_status(sess[7], sess[8]),
+            # #3516 §B / #3515 piece 12: the floor's inputs + the producer lane.
+            # sess[9..11] — they follow #3520's columns, which hold 7 and 8.
+            "client_captured_at": sess[9],
+            "client_captured_at_source": sess[10],
+            "capture_lane": sess[11],
             "extracted": extracted_count,
             "turn_points": turn_points,
             "extracted_points": extracted_points,
@@ -29071,8 +29175,10 @@ class TortoiseSDK:
             an ACT and is recorded durably: one of ``present`` / ``deleted``.
             ``offline`` / ``access_revoked`` are CONDITIONS, observed live and
             NEVER stored (the owner's #3998 ruling, Option A, 2026-10-14) —
-            passing one is refused with a message saying so, and the read path
-            derives it through ``raw_state.resolve_raw_availability``. The
+            passing one is refused with a message saying so; the observation is
+            caller-supplied — a caller that has actually probed the raw routes
+            it through ``raw_state.resolve_raw_availability`` (no shipped reader
+            supplies one today, #8740). The
             deletion marker is BOUNDED by ``raw_state.RAW_DELETION_MARKER_TTL``
             (bounded metadata about the link back to the raw — never a
             retention period on user content, R1). Validated strictly (an
@@ -29081,7 +29187,10 @@ class TortoiseSDK:
             cannot resurrect a raw deleted between the two writes. Pass
             ``raw_state="present"`` to record that a raw came BACK — that is
             the only way to move a state off an absence, by design. The state
-            rides the ``SourceCreated`` journal, so it survives ``rebuild_all``.
+            rides the ``SourceCreated`` / ``SourceVersioned`` journal (a state
+            change riding a version transition is journalled as
+            ``SourceVersioned``; see ``docs/ONTOLOGY.md`` §4.6), so it survives
+            ``rebuild_all``.
             ⚠️ This is the write half of the two-store model: the graph keeps
             identity + version + availability and NEVER the bytes, so props
             that would carry raw payload are refused (see ``_SOURCE_EXTRA_PROPS``

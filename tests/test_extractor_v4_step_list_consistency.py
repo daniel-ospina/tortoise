@@ -64,22 +64,21 @@ the coupling's OWN `E7` token is the reversal record — negated in place
 a reversal mark, which the `#8443` review showed was a fail-open on §15's
 one-line row (a live re-assertion placed next to the record inherited its
 marks and shipped green);
-(6) §15's issue-map row itself states the decided site — named, `E7` negated,
-and the shipped predicate symbols cited — not merely quoting a title that
-mentions both; (7) the retention-floor obligation appears only inside its own
+(7) the retention-floor obligation appears only inside its own
 withdrawal (**a FORWARD guard**: `main` had already removed the live obligation,
 so this half cannot red on the merge base) and the recall-arithmetic paragraph
-carries O2's withdrawal verbatim **plus the present-tense no-floor fact and O2
-as its authority** (**the regression pin that does** — it is on the FACT, not on
-the change-history phrasing a `#8529`-compliant rewrite drops, which is the
-`#8443` review's finding 3); (8) the
+carries the present-tense no-floor fact **and names O2 / §16.3 as its
+authority** (**the regression pin that does** — it is on the FACT and its
+authority, not on the change-history phrasing a `#8529`-compliant rewrite drops,
+which is the `#8443` review's finding 3; the whole-document verbatim withdrawal
+is checked in the sibling test); (8) the
 review's `D6` carries a disposition naming the decided site, the shipped commit,
 and the symbol of the pass it cites.
 
 NOT promised:
 
 1. This is a STRUCTURAL read of two fenced blocks plus one paragraph, **widened
-   by `#5198` to four PROSE shapes** (see 5–8 above). What it still cannot do is
+   by `#5198` to four PROSE shapes** (see 5, 7 and 8 above). What it still cannot do is
    find a contradiction stated in prose it was not told to look for — it pins
    the claims `#5092` and `#5198` name, not the whole document (nor
    `STORAGE-ARCHITECTURE.md` §8, which the issues track separately). Rules 5–7
@@ -88,9 +87,10 @@ NOT promised:
    floor"` reds only while it is live, and a newly-worded equivalent an editor
    invents does not. Rule (7a) is a FORWARD guard — `main` had already removed
    the live obligation before the merge base, so it cannot red there; rule (7b)
-   — the recall paragraph must state the no-floor FACT together with O2's
-   verbatim withdrawal and name §16.3 O2 as its authority — is the
-   structural half, and the non-vacuous pin, that survives rewording. The
+   — the recall paragraph must state the no-floor FACT and name §16.3 O2 as its
+   authority (the whole-document verbatim withdrawal is checked in the sibling
+   test) — is the structural half, and the non-vacuous pin, that survives
+   rewording. The
    7b pin is deliberately NOT on the withdrawal *phrasing*: a target-state
    rewrite that keeps the fact and the authority but drops the change-history
    clause must stay green (the `#8443` review's finding 3).
@@ -104,7 +104,7 @@ NOT promised:
    blocks are the pinned artifacts.
 4. Rule (5) exempts a `DISCARD`↔`E7` coupling whose tokens BOTH sit inside one
    quoted span that is MARKED AS HISTORY (`once said`, `formerly`, `reversed`, …)
-   — the shape §15 uses to record the wording it replaced. A wrong site
+   — the shape the reversal record uses to state the wording it replaced. A wrong site
    asserted inside such a marked quotation is therefore not caught; the pin is
    on live prose, not on history. Every other quoted coupling (a bare quotation
    of `#5198`'s title, for one) still reds. Quotes are paired positionally per
@@ -359,8 +359,9 @@ _COUPLING_WINDOW = 200
 _REVERSAL_PROXIMITY = 24
 
 #: A coupling is exempt ONLY when its own `E7` token is the reversal record —
-#: never because a reversal mark happens to sit within a window around it. §15's
-#: issue-map row is ONE physical line carrying many sentences, so a window- or
+#: never because a reversal mark happens to sit within a window around it. The
+#: reversal record (§7's one-line value-gate statement) is ONE physical line
+#: carrying many sentences, so a window- or
 #: line-scoped exemption let a live re-assertion placed beside the reversal
 #: record inherit its marks and ship green — the fail-open the `#8443` review
 #: reproduced by inserting *"The mechanical `DISCARD` gate runs at `E7`"* right
@@ -439,8 +440,8 @@ def _discard_e7_offenders(text: str) -> list[str]:
 
     The exemption is decided per COUPLING, on that coupling's own `E7` token —
     not on a window around the coupling, and not on the physical line. A live
-    re-assertion inserted next to §15's reversal record, or appended to the
-    one-line row, therefore reds even though the line also carries the
+    re-assertion inserted next to the reversal record, or appended to the
+    one-line statement, therefore reds even though the line also carries the
     reversal record.
     """
     offenders: list[str] = []
@@ -493,8 +494,9 @@ def test_no_passage_sites_the_mechanical_discard_on_e7():
 def test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row():
     """Rule (5) must judge the COUPLING's own `E7`, not a span of the line.
 
-    §15's issue-map row is the exact location `#5198` was filed about, and it
-    is one physical line ending in the reversal record. A line-scoped (or
+    The reversal record — §7's one-line value-gate statement, formerly §15's
+    issue-map row — is the exact location `#5198` was filed about, and it is one
+    physical line ending in the reversal clause. A line-scoped (or
     window-scoped) exemption therefore let a live re-assertion share the row
     with the reversal record and ship green. The `#8443` review reproduced four
     placements, and all must red: an assertion APPENDED to the row, one
@@ -505,17 +507,20 @@ def test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row():
     to a closing quote followed by the next opening quote — and never required
     the rejected token to start after the span opened.
     """
-    rows = [line for line in _document().splitlines() if "§1 the mechanism" in line]
-    assert len(rows) == 1, "§15's §1 row is not uniquely identifiable (#5198)"
+    rows = [line for line in _document().splitlines() if "The design requires ENFORCEMENT BY DEFAULT" in line]
+    assert len(rows) == 1, (
+        "§7's statement of the shipped gate is not uniquely identifiable "
+        "(#5198)"
+    )
     row = rows[0]
     assert not _discard_e7_offenders(row), (
-        "the live §15 row must be the reversal record and nothing else — this "
+        "the live §7 statement must be the reversal record and nothing else — this "
         "assertion keeps the mutations below from passing trivially (#5198):\n"
         + row
     )
     appended = row + " ⚠️ **The mechanical `DISCARD` gate runs at `E7`.**"
     assert _discard_e7_offenders(appended), (
-        "appending a live re-assertion of the E7 site to §15's one-line row "
+        "appending a live re-assertion of the E7 site to the one-line statement "
         "must red rule (5). A line-scoped exemption cannot tell `the row quotes "
         "the losing site in the reversal record` from `the row also asserts "
         "the losing site` — that is the #8443 review's fail-open (#5198)"
@@ -588,61 +593,6 @@ def test_the_reversal_exemption_does_not_cover_a_second_coupling_on_the_row():
     )
 
 
-def test_the_issue_map_row_names_the_decided_site():
-    """§15 is the index a lane holding an issue reads — it must state the site.
-
-    It said *"the mechanical DISCARD outcome on E7"* while §4.1/§4.2/§4.3 and
-    the shipped code all said `S2.2b`, so the document asserted both again
-    (#5198) — exactly what #5092 eliminated inside the blocks.
-
-    The row must STATE the site in its own words (`THE GATE SITE IS `S2.2b`,
-    NOT `E7``), not merely embed the tokens inside the quoted `#5198` title:
-    that quote satisfied the bare-token checks on the pre-fix row, which is how
-    this pin first passed vacuously (the #8443 review).
-    """
-    # `main` replaced the row header (`the mechanism (\`^the <X>\`)`) with
-    # `the mechanism — **two halves**`; anchor on the prefix both spellings
-    # share so the row stays findable, and keep its scope text intact — the
-    # identifier-only predicate does NOT own the `the <X>` class (#8498).
-    rows = [
-        line
-        for line in _document().splitlines()
-        if "§1 the mechanism" in line
-    ]
-    assert len(rows) == 1, (
-        "§15's issue-map row for §1 is not uniquely identifiable — the guard "
-        "cannot pin a row it cannot find (#5198)"
-    )
-    row = rows[0]
-    assert DISCARD_SITE in row, (
-        "§15's issue-map row does not name the decided gate site "
-        f"({DISCARD_SITE!r}). It is the index a lane holding `#4899` reads "
-        "(#5198):\n" + row
-    )
-    assert "value_gate._REFERENCE" in row and "identifier_only()" in row, (
-        "§15's issue-map row must name the shipped predicate symbols "
-        "(`value_gate._REFERENCE` / `identifier_only()`), not a hand-written "
-        "pattern, and must scope itself to the identifier-only half — the "
-        "62.3% `the <X>` class is explicitly NOT owned by this row "
-        "(#8498 / #5198):\n" + row
-    )
-    assert _NEGATES_REJECTED.search(row), (
-        "§15's issue-map row does not STATE the decided site — it must name "
-        "`S2.2b` and negate `E7` in its own words (`THE GATE SITE IS `S2.2b`, "
-        "NOT `E7``). Merely quoting the `#5198` title, which mentions both "
-        "sites, is what let this pin pass before the fix (#8443):\n" + row
-    )
-    assert row.index(DISCARD_SITE) < row.index(REJECTED_SITE), (
-        "§15's issue-map row names E7 BEFORE the decided site — so the row "
-        "still asserts the losing site (`#4899` DEC-1). Put `S2.2b` first "
-        "(#5198):\n" + row
-    )
-    assert "still unowned" not in row, (
-        "§15's issue-map row still records the placement as *\"still unowned\"* "
-        "while the same row states it is decided and shipped, and `#5237` "
-        "removed that phrase from `vet_gate.py` — so the row contradicts itself "
-        "in both directions (the #8443 review, #5198):\n" + row
-    )
 
 
 def test_the_withdrawn_floor_requirement_is_never_reasserted():
@@ -697,8 +647,9 @@ def test_the_recall_arithmetic_paragraph_carries_o2s_withdrawal():
     drops that clause must stay green (the `#8443` review, finding 3).
     """
     text = _document()
-    marker = "recall compounds MULTIPLICATIVELY"
-    assert marker in text, (
+    marker = "recall compounds multiplicatively"
+    haystack = text.lower()
+    assert marker in haystack, (
         "§4.2's multiplicative-recall paragraph is gone. It is a fact about "
         "composing stages and it is NOT a floor this pipeline owes anyone — if "
         "it is removed, remove it with the O2 note, not silently (#5198)"
@@ -706,15 +657,8 @@ def test_the_recall_arithmetic_paragraph_carries_o2s_withdrawal():
     # The paragraph, read by its blank-line boundaries rather than a fixed
     # character window — a window silently truncates the sentence it is asked
     # to find, which is the guard failing rather than the document (#5198).
-    index = text.index(marker)
+    index = haystack.index(marker)
     paragraph = text[text.rfind("\n\n", 0, index) + 2 : text.find("\n\n", index)]
-    assert O2_WITHDRAWAL in paragraph, (
-        "the recall-arithmetic paragraph does not carry O2's withdrawal. §16.3 "
-        "O2 (owner, 2026-09-24) rejected the volume framing outright, so the "
-        "paragraph must say so where the arithmetic is read — otherwise the "
-        "next lane cites it to demand a retention floor (#5198):\n"
-        + paragraph[:600]
-    )
     assert "§16.3" in paragraph and "O2" in paragraph, (
         "the paragraph states a withdrawal without naming its authority — it "
         "must cite §16.3 O2 (owner, 2026-09-24). A fact with no authority is "

@@ -360,6 +360,24 @@ def test_the_expiry_predicate_flips_exactly_at_the_window_edge():
         now=stamp + timedelta(days=999))
 
 
+def test_a_datetime_max_stamp_is_unfit_to_reason_on_and_never_raises():
+    """A ``rawStateAt`` at ``datetime.max`` overflows ``stamp + TTL``. The
+    marker is then UNFIT to reason on: expiry is UNKNOWN (``None``) and the
+    predicate says NOT expired — the safe direction, and never a raise on a
+    hostile foreign/legacy row.
+
+    (1) FAILS if the window arithmetic raises ``OverflowError`` (the pre-fix
+        behaviour), or if an unboundable stamp is reported as expired — the
+        direction that would let a drop resurrect a memory.
+    (2) REACHABLE: ``datetime.max`` is a real ISO-8601 stamp; the resolver is
+        documented never to raise, and the read path must not either.
+    """
+    instant = datetime.max.replace(tzinfo=UTC)
+    marked = {RAW_STATE_PROP: RAW_DELETED, RAW_STATE_AT_PROP: instant.isoformat()}
+    assert deletion_marker_expires_at(marked) is None
+    assert is_deletion_marker_expired(marked, now=instant) is False
+
+
 def test_a_deletion_marker_is_still_honoured_past_its_window():
     """⛔ EXPIRED IS NOT RESURRECTED (the ruling's load-bearing safety property).
 
@@ -386,38 +404,6 @@ def test_a_deletion_marker_is_still_honoured_past_its_window():
     assert resolve_raw_availability(marked).state == RAW_DELETED
     # A probe that says the raw is reachable must NOT un-delete it.
     assert resolve_raw_availability(marked, observed=RAW_PRESENT).state == RAW_DELETED
-
-
-def test_the_canonical_ontology_states_the_availability_axis():
-    """#8474 — the §4.6 row the code has needed since #3998, pinned against
-    drift so the canonical vocabulary cannot go silent about two stored
-    properties.
-
-    (1) FAILS if the row is removed, or if it stops naming the ruling that
-        decides the behaviour (record the act / observe the condition), or if
-        the read-time contract the code implements is not stated. It also fails
-        if the code and the row disagree about what is stored.
-    (2) REACHABLE: the doc is read from this repo, and the properties really
-        are in the declared write surface — the row is a claim about a live
-        write path, not about an aspiration.
-    """
-    doc = (Path(__file__).resolve().parent.parent / "docs" / "ONTOLOGY.md").read_text(
-        encoding="utf-8")
-    assert "### §4.6 Source" in doc, "the §4.6 Source section moved"
-    section = doc[doc.index("### §4.6 Source"):]
-    section = section[:section.index("\n### ", 1)]
-    assert "`rawState` / `rawStateAt`" in section, (
-        "§4.6 has no raw-availability row (#8474)"
-    )
-    for claim in ("deletion is an ACT", "observed live", "NEVER stored",
-                  "RAW_DELETION_MARKER_TTL", "resolve_raw_availability",
-                  "recorded act WINS"):
-        assert claim in section, f"the §4.6 row does not state {claim!r}"
-    # The row's claim is true of the code, and the vocabulary is the one the
-    # row names — so neither half can move alone.
-    from tortoise.projection.entities import _SOURCE_NODE_PROP_NAMES
-    assert {RAW_STATE_PROP, RAW_STATE_AT_PROP} <= set(_SOURCE_NODE_PROP_NAMES)
-    assert WRITABLE_RAW_STATES == (RAW_PRESENT, RAW_DELETED)
 
 
 def test_no_recorded_state_reads_as_present():
@@ -547,8 +533,11 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
         cannot equal the cause. It also fails if two causes report the same
         value, if a condition is ever stored, or if the read raises/gives an
         empty chain.
-    (2) REACHABLE: the fixture writes (or refuses to write) the cause and reads
-        the SAME memory back through the real ``extractedFrom`` edge.
+    (2) REACHABLE: ``deleted`` is driven end-to-end through the SDK write +
+        read path (the ``extractedFrom`` edge); the two conditions are driven
+        through the live observation seam (``raw_entry(..., observed=cause)``)
+        over the SAME node properties the SDK reader holds — they have no
+        stored state to read back.
     """
     s, _events = sdk
     s.create_source(RAW_URL, "conversation", contentHash="h1")

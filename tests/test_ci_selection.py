@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shlex
 import shutil
@@ -114,6 +115,13 @@ def test_docs_scanning_gates_stay_in_tier1():
         "`sdk`-registered and docker-lane, so a docs-only `docs/ONTOLOGY.md` "
         "edit never runs it; without this hermetic pin the §4.7 coverage-rule "
         "drift lands green (#4309 class, same as #5142/#2881)"
+    )
+    assert "test_8474_ontology_record.py" in tier1, (
+        "#8474 §4.6 rawState/rawStateAt availability doc↔code pin must be in "
+        "tier1 — `docs/` is in NON_PYTHON_PREFIXES, so a docs-only "
+        "`docs/ONTOLOGY.md` edit selects no surface and runs only tier1; "
+        "without this hermetic pin the §4.6 row's ruling/contract drift lands "
+        "green (#4309 class, same as #5142/#7818/#2881)"
     )
     assert "test_7818_plan_record_5362.py" in tier1, (
         "#7818/#5362 plan-record pin must be in tier1 — the #5362 plan's "
@@ -864,9 +872,18 @@ def test_root_file_read_by_a_test_is_never_allowlisted():
     itself is pinned by `test_no_allowlisted_root_file_has_a_reader`. It REDs if
     the removed blanket `*.md`-at-root clause is reintroduced (it admitted
     README.md).
+
+    #8785: CHANGELOG.md, CONTRIBUTING.md and CLAUDE.md are deliberately NOT in
+    this list. They are prose whose CONTENT no test or tool reads (their only
+    mentions are docstrings, a generated-doc link, or `record-review.sh`'s
+    basename case), so they are reprieved to the tier-1 smoke by
+    `NON_CODE_DOC_PATHS` — pinned by
+    `test_non_code_doc_paths_have_no_content_reader`. Every name below IS read
+    (README.md by `test_embedded_durability_claim.py:62`; AGENTS.md by the
+    base-subset pin; `.gitignore` by `test_kind_index.py:290`; …) and keeps FULL.
     """
-    for name in ("README.md", "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md",
-                 "LICENSE", "MEMORY.md", "CLAUDE.md", "index.md",
+    for name in ("README.md", "AGENTS.md",
+                 "LICENSE", "MEMORY.md", "index.md",
                  ".gitignore", ".env.example", "fly.toml", "pyproject.toml",
                  ".python-version"):
         r = _sel([name])
@@ -931,6 +948,206 @@ def test_subdirectory_markdown_is_unaffected():
     r_tortoise = _sel(["tortoise/NOTES.md"])
     assert r_tortoise["full"] is False
     assert r_tortoise["surfaces"] == ["core"]
+
+
+# ---------------------------------------------------------------------------
+# #8785: a non-Python prose diff must not reserve the FULL test surface.
+#
+# The selector classified a root-level or `.github/` prose file as an UNKNOWN
+# PATH (no NON_PYTHON_PREFIXES match, no SOURCE_PATTERNS claim) and failed
+# closed to the whole matrix. These tests pin the distinction the fix adds —
+# "no surface matched because the file is not code" (drop -> tier-1 smoke)
+# versus "no surface matched because the path is unclassified and might carry
+# code" (still FULL).
+# ---------------------------------------------------------------------------
+
+_READ_CALLS = frozenset({"open", "read_text", "read_bytes", "read",
+                         "readlines", "load", "loads", "loadtxt"})
+
+# The CI roots the selector's surface map is built on. `scripts/` is a tracked
+# SYMLINK, so it must be walked on disk, not read from `git ls-files`.
+_NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
+
+# A shell read operation. `read\b` deliberately does NOT match "reads" (word
+# boundary), so prose like "pi's loader reads AGENTS.md" is not a read op.
+_SHELL_READ_RE = re.compile(r"(?:^|[^\w])(?:cat|grep|egrep|rg|source|read)\b|<")
+
+
+def _content_read_in_shell(source: str, path: str) -> bool:
+    """Line-level read-op detector for `.sh` files (never `ast.parse`)."""
+    name = path.rsplit("/", 1)[-1]
+    for line in source.splitlines():
+        if name not in line:
+            continue
+        if _SHELL_READ_RE.search(line):
+            return True
+    return False
+
+
+def test_non_code_doc_paths_are_prose():
+    """#8785 review (B, P2): the tuple reprieves NON-CODE DOCUMENTATION.
+
+    Every member must be a prose file. Without this, a code-bearing path can be
+    added and satisfies BOTH the liveness and no-content-reader ratchets while
+    silently dropping its own guard to the tier-1 smoke — the
+    #1349/#3332/#3616 silent-drop class this tuple exists to avoid. (Measured:
+    `entrypoint.sh` passes every other new test and skips
+    `tests/test_boot_regressions.py`, which is not in tier1.)
+    """
+    for name in sorted(cs.NON_CODE_DOC_PATHS):
+        assert name.endswith(".md"), (
+            f"{name} is not a prose doc — NON_CODE_DOC_PATHS must not reprieve "
+            "a code-bearing path")
+
+
+def _content_read_in_py(source: str, path: str) -> bool:
+    """Whether `source` READS `path`'s content (not merely names it).
+
+    A literal equal to `path` (or ending in `/<path>`) anywhere inside a
+    read-call expression — including the callee's OWN receiver, which is how
+    `(ROOT / "README.md").read_text()` receives the path.
+
+    ⛔ SCOPE, stated rather than overclaimed (same honest-scope limit as the
+    #6787 mention census): this is a LITERAL-PATH read detector. It does NOT see
+    an indirect read through a parameter/parametrize value, a glob/walk, or a
+    shell `grep -r`. Before adding a member, grep the whole tree yourself.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        callee = fn.attr if isinstance(fn, ast.Attribute) else (
+            fn.id if isinstance(fn, ast.Name) else "")
+        if callee not in _READ_CALLS:
+            continue
+        for lit in ast.walk(node):
+            if (isinstance(lit, ast.Constant) and isinstance(lit.value, str)
+                    and (lit.value == path or lit.value.endswith("/" + path))):
+                return True
+    return False
+
+
+def _content_readers_of(path: str) -> list[str]:
+    """Files under the five CI roots that READ `path`'s content.
+
+    ⛔ The roots are WALKED on disk, not read from `git ls-files`: `scripts/` is
+    a tracked SYMLINK, so the listing returns the link itself and the ~70 files
+    behind it are never scanned — the same gap #6787 cycle 4 P3 found in the
+    sibling mention census. Shell files use a line-level read-op pattern, never
+    `ast.parse` (which returns False on every `.sh`).
+
+    ⚠️ SCOPE, stated rather than overclaimed (cycle-2 review P2): `scripts/` is
+    a symlink to an ABSOLUTE machine-local path, so it DANGLES on the Ubuntu CI
+    runner (`python-ci.yml` / `ci.yml` say so) and this walk silently skips that
+    root there — the root is reached only where the symlink resolves. That is
+    the SAME CI limitation the sibling `_readers_of` grep has, and it is not
+    closable from inside the repo. A future member whose ONLY reader lives under
+    `scripts/` cannot rely on this ratchet on CI: grep the whole tree before
+    adding one.
+    """
+    name = path.rsplit("/", 1)[-1]
+    out: list[str] = []
+    for root in _NON_CODE_DOC_ROOTS:
+        base = REPO / root
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=True):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            for fn in filenames:
+                if not fn.endswith((".py", ".sh", ".bash")):
+                    continue
+                f = Path(dirpath) / fn
+                rel = str(f.relative_to(REPO))
+                if rel in _SELF_NAMERS:
+                    continue
+                try:
+                    source = f.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if name not in source:
+                    continue
+                if f.suffix == ".py":
+                    if _content_read_in_py(source, path):
+                        out.append(rel)
+                elif _content_read_in_shell(source, path):
+                    out.append(rel)
+    return sorted(out)
+
+
+def test_non_code_doc_paths_exist():
+    """Liveness ratchet (#6787 review cycle 2 P3): a member absent from the
+    tree skips the matrix for nothing, so membership must name real files."""
+    for name in sorted(cs.NON_CODE_DOC_PATHS):
+        assert (REPO / name).exists(), (
+            f"{name} is a NON_CODE_DOC_PATHS member but does not exist in the "
+            "tree — a dead entry that skips the matrix for nothing")
+
+
+def test_non_code_doc_paths_have_no_content_reader():
+    """#8785: no member may be READ by a test/tool.
+
+    Reprieving a file a guard reads is the silent-hole class (#1349/#4309),
+    strictly worse than the provisioning cost the reprieve removes.
+    """
+    offenders = {name: _content_readers_of(name)
+                 for name in sorted(cs.NON_CODE_DOC_PATHS)
+                 if _content_readers_of(name)}
+    assert not offenders, (
+        "NON_CODE_DOC_PATHS member(s) are READ — dropping them to the tier-1 "
+        f"smoke would skip those guards on the PR that edits the file: {offenders}")
+
+
+def test_non_code_docs_select_tier1_not_full(monkeypatch):
+    """#8785: a prose doc no guard reads selects the tier-1 smoke, not FULL."""
+    members = sorted(cs.NON_CODE_DOC_PATHS)
+    assert members, "NON_CODE_DOC_PATHS is empty — the reprieve is inert"
+    for path in members:
+        r = _sel([path])
+        assert r["full"] is False, f"{path} must not select the full matrix: {r}"
+        assert r["surfaces"] == [], path
+        assert set(r["test_files"]) == _tier1(), path
+        assert r["slow_run"] is False and r["carve_out_run"] is False, path
+
+    # NON-VACUITY: against the pre-fix selector (no reprieve) the SAME paths are
+    # full/ALL. Disabling the tuple must therefore RED this test — that is what
+    # proves it exercises the fix rather than restating the docs-only default.
+    monkeypatch.setattr(cs, "NON_CODE_DOC_PATHS", frozenset())
+    for path in members:
+        pre = _sel([path])
+        assert pre["full"] is True and pre["test_files"] == "ALL", (
+            f"non-vacuity: {path} must be FULL without the reprieve, got {pre}")
+
+
+def test_unclassified_paths_still_fail_closed_after_the_doc_reprieve():
+    """CONTROL for the non-vacuity above: the reprieve must NOT soften the
+    unknown-path branch. A `.md` not in the census, a code-like extension, a
+    build file and a new subsystem all still reserve the FULL matrix."""
+    for name in ("NOTES.md", "some_new_thing.xyz", "mystery.conf",
+                 "mystery-dir/x.py", "Makefile", "Dockerfile", "uv.lock",
+                 "build.sh"):
+        r = _sel([name])
+        assert r["full"] is True, f"{name} must fail closed to full, got {r}"
+        assert r["test_files"] == "ALL", name
+
+
+def test_doc_reprieve_is_per_path_not_per_diff():
+    """Mixed diffs: dropping the prose must not drop the code, and a
+    docs+unknown diff must still escalate."""
+    r = _sel(["CONTRIBUTING.md", "tortoise/api.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"] and "core" in r["surfaces"]
+
+    # The measured #8726 shape: two prose files, no Python -> tier-1 smoke.
+    r2 = _sel(["CONTRIBUTING.md", ".github/pull_request_template.md"])
+    assert r2["full"] is False and r2["surfaces"] == []
+    assert r2["slow_run"] is False and r2["carve_out_run"] is False
+
+    r3 = _sel(["CONTRIBUTING.md", "mystery-dir/thing.xyz"])
+    assert r3["full"] is True
 
 
 def test_new_engine_module_maps_to_core():
@@ -1682,6 +1899,34 @@ def test_ci_timing_tool_change_fails_closed_to_full():
     assert r["full"] is True
     assert r["test_files"] == "ALL"
     assert "core" in r["surfaces"]
+
+
+def test_ci_check_repair_tool_change_fails_closed_to_full():
+    # #8375 item 1: tools/ci_check_repair.py CLOSES and REOPENS pull requests, and
+    # re-runs workflow runs, on a schedule and unattended (the workflow and the
+    # launchd fallback both call it with `--apply`). Its suite lives in
+    # tests/test_ci_check_repair.py and is registered in the `ci-surfaces.yml`
+    # `core` surface — which covers edits of the TEST file, NOT of the tool. No
+    # SOURCE_PATTERNS entry matches the tool, so without the TOOL_CARVEOUTS entry
+    # the flat `tools/` prefix swallows it, `changed` comes back empty and select()
+    # takes the docs-only early return (surfaces=[], tier-1 smoke) — an early
+    # return that BYPASSES the `if not matched: matched.add("core")` fallback, so
+    # NOT ONE of the 74 guards would run on the PR that changes the tool. This was
+    # measured on the real path before the carve-out:
+    #   --changed-files tools/ci_check_repair.py -> surfaces=[] full=False
+    # `tools/ci_selection.py --integrity` cannot catch it: it only asks whether the
+    # test file is CLASSIFIED. ALL FOUR paths are asserted because all four decide
+    # whether the repair runs and what it does: the entry point (the macOS
+    # `bash -s`/TCC handoff), the local fallback, and the installer whose plist
+    # decides whether the job is ARMED. Mutation check: removing any entry filters
+    # that path out (docs-only early return) and fails the asserts below.
+    for path in ("tools/ci_check_repair.py", "tools/ci_check_repair_launchd.py",
+                 "tools/ci-check-repair-local.sh",
+                 "tools/install-ci-check-repair-schedule.sh"):
+        r = _sel([path])
+        assert r["full"] is True, (path, r)
+        assert r["test_files"] == "ALL", (path, r)
+        assert "core" in r["surfaces"], (path, r)
 
 
 def test_pr_lead_time_tool_change_fails_closed_to_full():
@@ -6148,6 +6393,41 @@ def _workflow_files(wf_dir: Path) -> list[Path]:
     return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
 
 
+def _compiled_run_scalar_size(run: str) -> int:
+    """The length GitHub measures for a `run:` scalar: the script PLUS its spans.
+
+    GitHub compiles a `run:` that contains `${{ }}` and applies its 21000-byte cap
+    to the COMPILED scalar, so the expression text is charged ON TOP of the raw
+    script. Measuring the raw scalar alone under-reports: on 2026-10-16 it read
+    `ci.yml`'s `changes` gate as 20944 — "56 bytes under" — while GitHub measured
+    21010 and refused to load the workflow, so the branch ran zero jobs for eight
+    commits (#8734).
+    """
+    spans = re.findall(r"\$\{\{.*?\}\}", run)
+    return len(run.encode("utf-8")) + sum(len(s.encode("utf-8")) for s in spans)
+
+
+def test_compiled_run_scalar_measure_counts_expression_spans():
+    """The #8734 fixture: a scalar GitHub refuses must measure OVER, not under.
+
+    The pin below is worth its green only if its measure reproduces the refusal
+    it exists to prevent. This freezes the incident's exact shape — 20944 raw
+    UTF-8 bytes plus the 66 bytes of `${{ inputs.main_health }}` and
+    `${{ github.event.pull_request.base.sha }}` = 21010 — which GitHub refused
+    even though the raw count read as 56 bytes of HEADROOM. A revert to the
+    raw-only measure reddens here instead of shipping the zero-job outage again.
+    """
+    span_main = "${{ inputs.main_health }}"
+    span_base = "${{ github.event.pull_request.base.sha }}"
+    run = "x" * (20944 - len(span_main) - len(span_base)) + span_main + span_base
+    raw = len(run.encode("utf-8"))
+    compiled = _compiled_run_scalar_size(run)
+    assert raw == 20944, "fixture must reproduce the incident's raw size"
+    assert compiled == 21010, "the compiled measure must charge the expression spans"
+    assert compiled > 21000, "the fixture is a scalar GitHub actually refuses"
+    assert raw <= 21000, "the pre-#8734 raw-only measure called this safe"
+
+
 def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
     """#6253: GitHub compiles a `run:` that contains `${{ }}`, capped at 21000 bytes.
 
@@ -6160,6 +6440,13 @@ def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
     pin guards exactly the scalars GitHub compiles. actionlint catches expression
     SYNTAX but not this length (#6253), which is why the invariant is pinned here
     — a comment added to a script this size re-arms a silent full-CI outage.
+
+    Because the cap is on the COMPILED scalar, the measure must be the compiled
+    size: the 2026-10-16 incident was `ci.yml`'s `changes` gate at 20944 raw PLUS
+    66 bytes of expression spans = 21010, which a raw-only measure read as 56
+    bytes of headroom while GitHub was refusing the file and the branch ran zero
+    jobs for eight commits (#8734). Expression spans are counted here, so a
+    script cannot hide behind the difference between the two measures.
     """
     limit = 21000
     expr = "${{"
@@ -6173,7 +6460,9 @@ def test_expression_bearing_run_scalars_stay_under_githubs_21000_byte_cap():
                 run = step.get("run")
                 if not isinstance(run, str) or expr not in run:
                     continue
-                size = len(run.encode("utf-8"))
+                # The compiled scalar: the script plus every expression span, as
+                # GitHub assembles it before applying the cap.
+                size = _compiled_run_scalar_size(run)
                 if size > limit:
                     offenders.append((wf.name, job_id, step.get("name", "?"), size))
     assert not offenders, (
@@ -7394,3 +7683,20 @@ def test_mergify_guard_step_is_wired_fail_closed():
     assert step.get("if", "always()") in ("always()", "${{ always() }}"), (
         "the guard step must be unconditional: any other `if:` drops enforcement "
         "on the events it excludes")
+
+
+def test_lane_stash_guard_runs_on_a_tools_only_change():
+    # #8051: `tests/test_lane_stash.py` (registered `core`) guards
+    # `tools/lane_stash.py` — the lane-scoped stash that stops a bare
+    # `git stash pop` from applying and dropping a peer lane's entry, a
+    # repo-global `refs/stash` hazard with three recorded occurrences.
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and the tool matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a tools-only diff was
+    # filtered out BEFORE the "not matched -> core" fallback: the pin never ran
+    # on the file it exists to hold (the #1349/#3332/#3616 silent-drop class).
+    # Mutation check: removing the CORE_ALSO entry fails the arm below
+    # (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/lane_stash.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_lane_stash.py" in r["test_files"], r

@@ -9,6 +9,8 @@ updated: 2026-08-10
 
 # Tortoise — Canonical Documents
 
+> For the complete documentation catalog organized by the Diátaxis framework (Tutorials, How-To Guides, Reference, Explanation, and the Engineering & Fleet Ledger), see the [Documentation Index](docs/00_index.md).
+
 ## Architecture
 
 - [MCP Server](tortoise/mcp_server.py) — Agent-facing tools via FastMCP (primary interface; 58 tools)

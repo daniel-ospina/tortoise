@@ -33,6 +33,7 @@ doc_status: draft
 |--------------------|---------------------------------|-------------------|
 | tenant-provision   | Auth hook (after_user_created)  | false (self-auth) |
 | waitlist-subscribe | Landing waitlist capture (#373) | false (anon POST) |
+| deck-view          | Gated deck view capture (#8732) | false (anon POST) |
 
 `verify_jwt=false` on tenant-provision is required (auth hooks send no user
 JWT); caller auth is enforced inside the function (#802): the hook's
@@ -44,6 +45,7 @@ provisioning target. Bare anon-key calls → 401.
 | Table                | Purpose                                            |
 |----------------------|----------------------------------------------------|
 | waitlist_subscribers | Waitlist emails (#373): unique email, consent, RLS |
+| deck_views           | Gated deck views (#8732): email, deck, viewed_at; RLS, service role only. A view is NOT a subscription — nothing here joins the mailing list. |
 
 ## Waitlist Abuse Controls (#373)
 
@@ -64,6 +66,10 @@ remain as defense-in-depth).
 ## Related
 
 - Landing page: `website/index.html`
-- Edge function: `supabase/functions/waitlist-subscribe/`
-- Migration: `supabase/migrations/0005_waitlist_subscribers.sql`
+- Investor page: `website/investors.html`
+- Edge functions: `supabase/functions/waitlist-subscribe/`,
+  `supabase/functions/deck-view/`, `supabase/functions/tenant-provision/`
+- Migrations: `supabase/migrations/0005_waitlist_subscribers.sql`,
+  `supabase/migrations/*_deck_views.sql`
 - Waitlist issue: [#373](https://github.com/daniel-ospina/tortoise/issues/373)
+- Investor deck issue: [#8732](https://github.com/daniel-ospina/tortoise/issues/8732)

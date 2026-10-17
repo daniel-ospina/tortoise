@@ -94,6 +94,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # construction. (Reviewer read: without this entry the new test file reds
     # test_markers→test-slow (b)→python-ci-gate, blocking the change.)
     "test_session_capture_status.py": {"registry": "prod-coupled"},
+    # #3516: `_seed_team_graphs(sdk, org, ...)` seeds the Team through
+    # `_make_sdk(namespace="registry")._get_registry()`, i.e. the CANONICAL
+    # namespace PROD code resolves for the registry control plane — the same
+    # construction and the same seed→resolution coupling as
+    # test_session_capture_status / test_github_connect / test_agent_signup.
+    # A `test_*` rename would seed a DIFFERENT graph than the endpoint under
+    # test reads. Same `prod-coupled` class as its neighbours above.
+    "test_3516_client_captured_at.py": {"registry": "prod-coupled"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     # #7677: the retry-idempotency tests drive REAL org creation through the
     # registry control plane — `_make_sdk(namespace="registry")._get_registry()`

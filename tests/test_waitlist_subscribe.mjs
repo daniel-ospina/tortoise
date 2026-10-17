@@ -331,5 +331,39 @@ stubFetch(() => jsonResponse(201, [{ id: "x" }]));
   assert(res.status === 400 && res.headers.get("access-control-allow-origin"), "oversize body → 400 + ACAO");
 }
 
+// ── 13. Attribution source — allow-listed, landing page is the fallback ───
+// The value lands in the row an operator reads, so the client chooses from the
+// list rather than naming its own source. An unrecognised source is a client
+// bug, not a reason to refuse a subscriber: it falls back, exactly as every row
+// behaved before the field was accepted.
+async function insertSource(body) {
+  reset();
+  stubFetch((call) => call.url.includes("/rest/v1/")
+    ? jsonResponse(201, [{ id: "x", email: "src@example.com" }])
+    : jsonResponse(200, { id: "mail_1" }));
+  const res = await handle(post(body), ENV);
+  const insert = calls.find((c) => c.url.includes("/rest/v1/"));
+  return { status: res.status, source: insert ? JSON.parse(insert.body).source : null };
+}
+{
+  const listed = await insertSource({ email: "src@example.com", source: "investors" });
+  assert(listed.status === 200 && listed.source === "investors", "allow-listed source is written: investors");
+
+  const gated = await insertSource({ email: "src@example.com", source: "investors_gate" });
+  assert(gated.status === 200 && gated.source === "landing_page",
+    "an unknown source falls back rather than being written (a gate view is not a signup)");
+
+  const absent = await insertSource({ email: "src@example.com" });
+  assert(absent.source === "landing_page", "absent source falls back to landing_page");
+
+  const unknown = await insertSource({ email: "src@example.com", source: "partner_portal" });
+  assert(unknown.status === 200 && unknown.source === "landing_page",
+    "unknown source is coerced, not refused (200 + landing_page)");
+
+  const wrongType = await insertSource({ email: "src@example.com", source: 42 });
+  assert(wrongType.status === 200 && wrongType.source === "landing_page",
+    "non-string source falls back rather than throwing");
+}
+
 console.log(failures === 0 ? `\n✅ All ${"waitlist"} handler tests passed` : `\n❌ ${failures} assertion(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

@@ -38,6 +38,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._verdict import verdict_client
 from tests.test_hosted_api import _patch_tortoise_sdk_init
 from tortoise.auth import hash_api_key
 
@@ -67,7 +68,7 @@ def _spine_env(tmp_path):
     def_pt = default_sdk.create_point(
         "default-secret", content="default-secret")
     default_sdk.close()
-    tc = TestClient(ha_mod.app)
+    tc = verdict_client(ha_mod.app)
     return sdk, tid, g, tc, def_pt["id"]
 
 
@@ -988,7 +989,7 @@ def _sb_env(monkeypatch, fake_cls=None):
     tmpdir = _tempfile.mkdtemp()
     patched = patched_tortoise_sdk(os.path.join(tmpdir, "sb.db"))
     patched.__enter__()
-    tc = TestClient(ha_mod.app)
+    tc = verdict_client(ha_mod.app)
     tc.__enter__()
     ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: {"org_id": _SB_TEAM, "key_id": None,
@@ -1073,3 +1074,31 @@ def test_patch_rename_supabase_unique_violation_maps_409_not_500(monkeypatch):
         assert r.json()["detail"] == "Graph name already exists"
     finally:
         _sb_teardown(tc, handles)
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/sessions`` is the
+    route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/sessions")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(ha_mod.app) as raw:
+        assert raw.post("/v1/sessions", json={}).status_code == 504
+    with verdict_client(ha_mod.app) as tc, \
+            pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/sessions", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/sessions answered" in message

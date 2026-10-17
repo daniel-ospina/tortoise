@@ -2789,10 +2789,12 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
     Returns {events: [...], next_cursor}. after=None → tail (oldest retained).
     Expired cursor → structured error ('cursor expired — replay from tail');
     malformed cursor → 'invalid cursor'. types: comma-free list of event types
-    (11 registered claim types: PointAdded, OperatorAdded, PointRetracted,
+    (12 registered claim types: PointAdded, OperatorAdded, PointRetracted,
     PointSuperseded, OperatorAnnotated, PointPromoted, OperatorPromoted,
-    DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated)
-    or None for all.
+    DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated,
+    PointRevised) or None for all. `PointRevised` rows exist, and the response
+    additionally carries `changes` (per-claim before→after deltas, #2353), only
+    while `TORTOISE_CHANGE_FEED` is enabled.
 
     readOnlyHint covers user-visible state: the poll NEVER mutates user
     content. A rare maintenance purge (retention) may run at most once per

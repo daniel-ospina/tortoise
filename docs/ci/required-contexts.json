@@ -390,6 +390,12 @@
         "relay"
       ]
     ],
+    "repair": [
+      [
+        "ci-check-repair.yml",
+        "repair"
+      ]
+    ],
     "schema-drill": [
       [
         "ci.yml",
@@ -503,7 +509,7 @@
       ]
     ]
   },
-  "gate_digest": "47403bbd52ac30d57831dae4c9b53a5c900eb209f3340b5ebb4887ab94fd20a4",
+  "gate_digest": "75eea667eaec1a3a1012860214caa71af8013994036294a246d14ef48a911165",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -527,5 +533,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-15T00:29:44Z"
+  "verified_at": "2026-10-16T19:11:26Z"
 }

@@ -462,7 +462,7 @@ class EventAPI:
         indexer passes the real ``corpus://`` Source url so no phantom Source
         is merged — the override rides the JOURNALED event, so replay honors
         it); ``domain`` is persisted as ``d.domain`` via ``_persist_extra_props``
-        (intentionally NOT in ``_DOC_RETIRED`` — the persistence IS the
+        (intentionally NOT in ``_DOC_PASSTHROUGH_HANDLED`` — the persistence IS the
         intent); ``suppress_embedding`` skips the unconditional embedding call
         (new-path docs; the legacy branch computes as today — SC4).
         #5422: ``content_hash`` is the document's **version anchor** on the
