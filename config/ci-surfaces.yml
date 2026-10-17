@@ -3021,6 +3021,17 @@ surfaces:
   # is a SHARED_MODULE (full matrix), so the registration is what pins the file
   # to a surface at all — without it `--integrity` reds on an unclassified file.
   - test_5275_required_read_path.py
+  # #8491 (in-repo READ path). `integrations/crm/twenty/bridge.py` matched no
+  # SOURCE_PATTERNS entry AND `integrations/` is a flat NON_PYTHON_PREFIXES
+  # entry, so a bridge.py-only change was dropped before the fallback and
+  # selected NO surface at all (measured: `select(['integrations/crm/twenty/
+  # bridge.py'])` → surfaces=[], 45 tier-1 files) — the guard for the reader of
+  # `~/.minutes/cal-trigger-state.json` never ran on the PR that changes it, the
+  # #1349/#3332/#6138 silent-drop class. Registered here AND wired through the
+  # CORE_ALSO entry in tools/ci_selection.py (the documented remedy for this
+  # class). This file pins that calendar attendees are grounded on the meeting's
+  # OWN evidence before they become CRM contacts/opportunities.
+  - test_8491_cal_attendee_grounding.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -4383,6 +4394,17 @@ durations:
   # post-merge run that includes it. Do NOT drop the row without re-deriving
   # the coverage floor at that head.
   test_5275_required_read_path.py: 20.0
+  # #8491: MEASURED locally at the head that ships it (24 tests;
+  # `TORTOISE_TEST_CARVE_OUT=1` embedded lane, hermetic — no server, no network;
+  # the wiring pin loads the ~5,500-line manifest and dominates, and the five
+  # `process_meeting` arms each parse YAML and drive the pipeline). Warm runs of
+  # the whole file spread 5.2-8.9s across two hosts under fleet load, so 9.0 is
+  # the observed MAXIMUM rounded up — the conservative side for the shard-balance
+  # veto, not a floor (a single reading was quoted here before and was below four
+  # of the observed runs). Refresh from the first post-merge run that includes
+  # it. Do NOT drop the row without re-deriving the 90% coverage floor at that
+  # head (#4348 trap — the surface entry alone does not cover it).
+  test_8491_cal_attendee_grounding.py: 9.0
   test_shared_state_concurrency.py: 0.2
   test_shared_state_events.py: 0.2
   test_shared_state_events_claim.py: 0.1
