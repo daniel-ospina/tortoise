@@ -811,10 +811,13 @@ def test_the_funnel_does_not_import_the_ledger_unless_the_flag_is_set():
     ordering the module promises (one env lookup, then a guarded import).
     """
     src = (Path(__file__).resolve().parents[1] / "tortoise" / "sdk.py").read_text()
-    flag_at = src.index('is_truthy(os.environ.get("TORTOISE_READ_LEDGER"))')
-    import_at = src.index("from . import read_ledger as _read_ledger")
+    # rindex: the helper BEFORE the funnel has its own flag check, so `index`
+    # resolved to that one and the assertion held whatever the funnel did.
+    flag_at = src.rindex('is_truthy(os.environ.get("TORTOISE_READ_LEDGER"))')
+    import_at = src.rindex("from . import read_ledger as _read_ledger")
     assert flag_at < import_at, "the flag must be read before the import"
-    assert "_read_ledger_enabled and" in src or "_read_ledger_enabled:" in src
+    assert "_read_ledger_enabled:" in src, "the import is guarded by the flag"
+    assert flag_at < import_at
 
 
 def test_the_internal_readers_pass_record_reads_false():
@@ -971,3 +974,43 @@ def test_the_capped_first_batch_still_creates_a_0600_file(tmp_path, monkeypatch)
     assert path.exists()
     assert _stat.S_IMODE(path.stat().st_mode) == 0o600
     assert read_ledger.fold(path).capped is True
+
+
+def test_the_tenant_coordinate_is_reachable_from_the_request_context(monkeypatch):
+    """Nothing sets the env var per request, so `None` would pool every org.
+
+    A hosted process serves many tenants from ONE process; if the ledger could
+    only be partitioned by an env var, its per-tenant `f` would be unreachable in
+    the shape the product actually produces — and the union would bias `f` DOWN
+    with nothing to notice.
+    """
+    from tortoise import mcp_auth
+
+    monkeypatch.delenv(read_ledger.LEDGER_TENANT_ENV, raising=False)
+    # The REAL ContextVar, set/reset — not a lambda. `_current_org_id` is a
+    # ContextVar in production, so mocking it as a callable pins a shape the
+    # callee never has (and would pass over a `.get()` that is missing).
+    token = mcp_auth._current_org_id.set("org-42")
+    try:
+        assert read_ledger.tenant() == "org-42"
+    finally:
+        mcp_auth._current_org_id.reset(token)
+    monkeypatch.setenv(read_ledger.LEDGER_TENANT_ENV, "explicit")
+    assert read_ledger.tenant() == "explicit", "the env override still wins"
+
+
+def test_an_undated_read_under_a_window_is_counted_not_dropped(ledger):
+    """Every other loss is counted; a silent one makes the report read complete."""
+    read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger, at="2026-10-01T00:00:00+00:00")
+    read_ledger.record_read("Point", "p1", path=ledger, at="not-a-date")
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-17T00:00:00+00:00")
+    folded = fold(ledger, window_days=7, now=datetime.fromisoformat("2026-10-18T18:00:00+00:00"))
+    assert folded.reads_undated == 1
+    assert next(iter(folded.rows.values())).read_count == 1
+
+
+def test_an_unpartitioned_reading_says_so(ledger, capsys):
+    """`tenant=None` everywhere is one namespace — and MAY be a union."""
+    read_ledger.record_stock("Point", "a", nbytes=1, path=ledger)
+    assert read_ledger._main(["--ledger", str(ledger)]) == 0
+    assert "NOT PARTITIONED" in capsys.readouterr().out

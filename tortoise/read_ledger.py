@@ -200,8 +200,28 @@ def enabled() -> bool:
 
 
 def tenant() -> str | None:
-    """The tenant partition, or `None` for one unpartitioned ledger."""
-    return os.environ.get(LEDGER_TENANT_ENV) or None
+    """The tenant partition: the env override, else the CURRENT ORG, else `None`.
+
+    ⛔ THE PER-TENANT COORDINATE MUST BE REACHABLE, or `f` is a pooled number on
+    exactly the deployment it matters for. Nothing sets the env var per request
+    and a hosted process serves MANY tenants from one process, so defaulting to
+    `None` folded every tenant's stock and reads together — a union that biases
+    `f` DOWN (flattering the split), with no flag, because there was no second
+    tenant value to notice. The MCP layer already knows the org per request, so
+    the ledger asks it (fail-soft: no auth context, no request, or an import
+    cycle all mean "no partition", never an exception into the read path).
+    """
+    who = os.environ.get(LEDGER_TENANT_ENV)
+    if who:
+        return who
+    try:
+        # local import: the auth module imports a lot, and a cycle here must not
+        # take a read down.
+        from .mcp_auth import _current_org_id  # a ContextVar, NOT a callable
+
+        return _current_org_id.get() or None
+    except Exception:  # pragma: no cover — a measurement never breaks a read
+        return None
 
 
 def ledger_path() -> Path:
@@ -652,6 +672,9 @@ class LedgerFold:
     #: a read of a key whose bytes are outside the denominator.
     unregistered_reads: int = 0
     unresolved_reads: int = 0
+    #: Reads whose `at` could not be placed in the window (counted, never dropped
+    #: silently). A missing stamp is a caller error, not a quiet exclusion.
+    reads_undated: int = 0
     window_started: str | None = None
     window_ended: str | None = None
     capped: bool = False
@@ -767,7 +790,14 @@ def fold(
             elif kind == EVENT_READ:
                 at = ev.get("at")
                 _at_dt = _stamp(at)
-                if cutoff_dt is not None and (_at_dt is None or _at_dt < cutoff_dt):
+                if cutoff_dt is not None and _at_dt is None:
+                    # A read with no parseable stamp cannot be placed in the
+                    # window. Dropping it SILENTLY would leave the numerator
+                    # short with the report reading as complete — every other
+                    # loss in this module is counted, so this one is too.
+                    out.reads_undated += 1
+                    continue
+                if cutoff_dt is not None and _at_dt < cutoff_dt:
                     continue
                 row = out.rows.get(ident)
                 if row is None:
@@ -1013,8 +1043,16 @@ def _main(argv: list[str] | None = None) -> int:
     # number class, so it is flagged the same way (named by COUNT — the
     # identifiers stay out of a report that may be pasted into an issue).
     union_tenants = 0
+    pooled_single_namespace = False
     if a.tenant is None:
-        union_tenants = len({t for t in _tenants_in_file(target) if t is not None})
+        all_tenants = _tenants_in_file(target)
+        union_tenants = len({t for t in all_tenants if t is not None})
+        # Every event under `tenant=None` is ONE namespace to the ledger — and a
+        # hosted process serving many tenants writes exactly that unless the
+        # tenant coordinate is known. `tenant()` now asks the auth context, so
+        # this shape means "no context available", i.e. a reading that MAY be a
+        # union and cannot prove it is not.
+        pooled_single_namespace = bool(all_tenants) and all_tenants <= {None}
     f = hot_fraction(folded)
     if a.json:
         # `lines_skipped` / `lines_read` are fold-level facts, not `f`'s: a torn
@@ -1025,7 +1063,9 @@ def _main(argv: list[str] | None = None) -> int:
                     **f.as_dict(),
                     "lines_read": folded.lines_read,
                     "lines_skipped": folded.lines_skipped,
+                    "reads_undated": folded.reads_undated,
                     "tenants_in_file": union_tenants,
+                    "pooled_single_namespace": pooled_single_namespace,
                 },
                 indent=2,
             )
@@ -1034,6 +1074,13 @@ def _main(argv: list[str] | None = None) -> int:
     print(f"ledger           : {a.ledger or ledger_path()}")
     if a.tenant is not None:
         print(f"tenant           : {a.tenant}")
+    if pooled_single_namespace:
+        print(
+            "⚠️ NOT PARTITIONED: every event carries tenant=None — if this "
+            "process serves more than one tenant, this f is a POOLED union "
+            "(biased DOWN). Give the ledger a tenant (TORTOISE_READ_LEDGER_TENANT, "
+            "or a request context) to keep them apart."
+        )
     if union_tenants > 1:
         print(
             f"⚠️ UNION         : this file holds {union_tenants} tenants and NO "
