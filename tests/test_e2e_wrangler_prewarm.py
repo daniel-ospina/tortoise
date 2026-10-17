@@ -151,6 +151,24 @@ _SPEC_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _WORD_END = " \t\n|&;()<>"
 _DQUOTE_ESCAPES = '$`"\\\n'
 
+#: ANSI-C (`$'…'`) escapes. The set is CLOSED — bash documents it — and it is
+#: TRANSLATED rather than skipped because an escape can spell the token's `@`:
+#: `wrangler$'\100'4` runs `wrangler@4`, so reading the escape as its letter (`1`)
+#: made a real float invisible to the guard while every check stayed green
+#: (measured end to end on a parsed job body). The same table keeps a CORRECT pin
+#: correct: `wrangler@$'\064'.127.0` is `wrangler@4.127.0`.
+_ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+           "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\",
+           "'": "'", '"': '"', "?": "?"}
+_ANSI_OCTAL = re.compile(r"[0-7]{1,3}")
+_ANSI_HEX = re.compile(r"[0-9A-Fa-f]{1,2}")
+_ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{4}"), 8: re.compile(r"[0-9A-Fa-f]{8}")}
+#: An escape this scan does not model becomes this sentinel. It cannot appear in
+#: an exact pin, so a SPEC carrying it is floating by the whole-word test — the
+#: scan will not guess what the escape spells. (The octal escape for NUL produces
+#: it too, and a NUL inside a spec is not the pin either.)
+_UNREADABLE = "\x00"
+
 
 def _shell_words(text: str) -> list[str]:
     """Every shell WORD in `text`, as shell would present each one.
@@ -211,14 +229,30 @@ def _shell_words(text: str) -> list[str]:
             else:
                 out.append(ch)
         elif quote == "$'":
-            # ANSI-C quoting: a backslash escapes the next character (so `\''` is
-            # a LITERAL quote, not the end of the string). The escape sequence is
-            # collapsed to its character; the exact translation of `\n`/`\x41`
-            # does not matter here — what matters is that neither the escape nor
-            # the quote can end the word.
+            # ANSI-C quoting: the escapes are TRANSLATED, because one of them can
+            # spell the token's `@` (see `_ANSI_C`). A backslash always consumes
+            # what follows, so neither the escape nor the quote can end the word.
             started = True
             if ch == "\\" and i + 1 < len(text):
-                out.append(text[i + 1])
+                nxt = text[i + 1]
+                octal = _ANSI_OCTAL.match(text, i + 1)
+                if octal:
+                    out.append(chr(int(octal.group(0), 8) & 0xFF))
+                    i = octal.end()
+                    continue
+                if nxt == "x":
+                    m = _ANSI_HEX.match(text, i + 2)
+                    if m:
+                        out.append(chr(int(m.group(0), 16)))
+                        i = m.end()
+                        continue
+                elif nxt in ("u", "U"):
+                    m = _ANSI_UNICODE[4 if nxt == "u" else 8].match(text, i + 2)
+                    if m:
+                        out.append(chr(int(m.group(0), 16)))
+                        i = m.end()
+                        continue
+                out.append(_ANSI_C.get(nxt, _UNREADABLE))
                 i += 2
                 continue
             if ch == "'":
@@ -293,6 +327,10 @@ def _wrangler_invocations(run: str) -> set[str]:
     text = _CONTINUATION.sub("", run)
     specs: set[str] = set()
     for word in _shell_words(text):
+        # A word carrying `_UNREADABLE` cannot equal the pin, so it is refused by
+        # the whole-word test below — no separate check, which would otherwise
+        # refuse a CORRECT step whose script merely contains such an escape
+        # somewhere else (`echo $'\cA'` has nothing to do with wrangler).
         at = word.find("wrangler@")
         if at < 0:
             continue
@@ -790,6 +828,16 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
                 "npx --yes ''#wrangler@4.127.0 --version"):
         assert _exact_wranglers(run) == set(), run
         assert _floating_wranglers(run) == {""}, run
+    # An ANSI-C escape can SPELL the token's `@`: `wrangler$'\100'4` is
+    # `wrangler@4`. Reading the escape as its letter made that float invisible.
+    for run in ("npx --yes wrangler$'\\100'4 --version",
+                "npx --yes wrangler$'\\x40'4 --version"):
+        assert _floating_wranglers(run) == {"4"}, run
+    # …and the same escapes can spell a CORRECT pin, which must stay exact.
+    assert _exact_wranglers("npx --yes wrangler@$'\\064'.127.0 --version") == {"4.127.0"}
+    # An escape this scan does NOT model makes the word unreadable, and unreadable
+    # is FLOATING (fail-closed) rather than silently clean.
+    assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\cA' --version") == {""}
     # A BACKSLASH BEFORE AN ORDINARY CHARACTER inside double quotes is KEPT by
     # shell, so `wrangler@"4.\\127.0"` runs the invalid word `wrangler@4.\\127.0`
     # (npm rejects it). Reading the quoting is what lets this be REFUSED rather
