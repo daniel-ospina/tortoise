@@ -1,21 +1,23 @@
 """The wrangler pin is one artefact, ASSERTED against what actually resolved (#8816).
 
-The pin used to be a string repeated in twelve `run:` blocks, and the guard that
+The pin used to be a string repeated twelve times across nine `run:` blocks, and the guard that
 "checked" it read that text. The old guard's text scan could not see a spec written as
 `wran\\gler@4`, `"wrangler"@4` or `wrangler$X@4`, cannot see a bare `wrangler`,
 and never looked at `deploy-pages.yml` at all — where `wrangler@4` floated in
 production. Two measurements decided the replacement (bash 5, node 22):
 
   * `wrangler --version` prints the bare resolved version on stdout;
-  * a float declaration fails that comparison wherever npm resolves the spec
-    against the REGISTRY. The three e2e jobs install with `npm install -g
-    "wrangler@${VERSION}"`, so a declared `4` becomes 4.151.1 there and the
-    comparison reds whatever the cache holds; an `npx` lane (`deploy-pages.yml`,
-    `deploy.sh`) can instead be served the pinned tarball from a warm cache and
-    print the pin itself, so in THOSE lanes the assertion is not the float guard
-    — the TEXT arms below are. Which lane gets which is stated, not assumed:
-    claiming the warm-cache caveat for the global-install lane understates a
-    guard that does catch a float there.
+  * a DECLARED float fails that comparison whatever the cache holds and whatever
+    lane resolves it: the comparison's right-hand side is the full `X.Y.Z` the
+    pin must be, and `wrangler --version` never prints a bare `4`. What the
+    assertion cannot see is a float SPELLING on the command line — an `npx` spec
+    (`npx wrangler@4`) can be served the pinned tarball from a warm cache, and
+    that prints the pin itself, which the comparison accepts (measured here:
+    `npx --yes "wrangler@4" --version` printed 4.127.0). In the three e2e jobs a
+    float spelling is not excused that way either — `npm install -g` resolves the
+    range against the REGISTRY, so `wrangler@4` becomes 4.151.1 and the
+    comparison reds. Either way the caveat is about a SPELLING the text arms must
+    refuse, not about the assertion being blind to a float DECLARATION.
 
 So the version now lives in ONE file, `config/wrangler-version`, and the lane
 ASSERTS the version it got against it — a comparison between an observation and a
@@ -45,8 +47,9 @@ spec arm to read: `npx --yes wrangler pages deploy` resolves to the registry's
 latest without writing a spec down anywhere. Two arms cover it — one restricted
 to the deploy paths, where the assertion validates the declared spec rather than
 the spec on the upload line, and one over EVERY step: a bare `wrangler` is legal
-only in the five declared boot steps (which run the binary the verify step
-proved).
+only in the five declared boot steps and in the verify step's own quoted
+`"$(wrangler --version …)"` probe (which is what proves the binary the boots then
+run).
 
 What this file replaced is gone: the pre-warm's own probe install, its reset of the
 shared `_npx` prefix, and its version read out of script text. The install and the
@@ -118,6 +121,8 @@ DECLARATION = 'WRANGLER_VERSION="$(cat config/wrangler-version)"'
 #: an inline `WRANGLER_VERSION="4.151.1"` — is an offender.
 LEGAL_TOKENS = (
     "${WRANGLER_VERSION:?",
+    "${WRANGLER_VERSION}",
+    "$WRANGLER_VERSION",
     '= "$WRANGLER_VERSION"',
     '!= "$WRANGLER_VERSION"',
     "declared ${WRANGLER_VERSION}",
@@ -828,9 +833,12 @@ def test_the_manual_deploy_script_pins_the_same_version() -> None:
         f"the manual deploy restates the pinned version ({declared}); it must read "
         f"{VERSION_SOURCE}, or a bump edits one place and drifts in another"
     )
-    for match in re.finditer(r"wrangler@\S*", code):
-        assert LEGAL_SPEC.match(match.group(0)), (
-            f"manual deploy spec {match.group(0)!r} is not the asserted variable form"
+    # The SAME word model as the workflow arm: a quote- or backslash-split spec
+    # here is the word bash runs, and a second regex would not see it (measured:
+    # `npx --yes "wrangler"@4 pages deploy` in this script passed every arm).
+    for _where, token in _floating_specs(code):
+        raise AssertionError(
+            f"manual deploy spec {token!r} is not the asserted variable form"
         )
 
 
@@ -938,11 +946,9 @@ def test_no_document_shows_a_floating_wrangler_spec() -> None:
             for block in _fenced_blocks(text)
         ]
         code = "\n".join(line for block in blocks for _n, line in block)
-        offenders = [
-            token
-            for token in re.findall(r"wrangler@[^\s`\"')]+", code)
-            if not LEGAL_SPEC.match(token)
-        ]
+        # Same word model as the workflow arm — quote- and backslash-split specs
+        # are the words bash builds, and a separate regex missed them (measured).
+        offenders = [token for _where, token in _floating_specs(code)]
         assert not offenders, (
             f"{rel} still shows a copy-pasteable wrangler spec that is not the "
             f"asserted form ({offenders}) — it would ship whatever npm serves"
