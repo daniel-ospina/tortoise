@@ -357,6 +357,21 @@ def _as_calendar_day(value) -> _date | None:
 # title stays silent and the day arm decides.
 _TITLE_WRITER_CAP = 50
 
+# ``cal-trigger.py`` also falls back to this title when the calendar event
+# carries none (``event.get("title", "Meeting")[:50]``), so a store whose
+# ``event_title`` normalises to it names NO event: every title-less event writes
+# the same value, and equality with an artifact's ``title: Meeting`` is a
+# collision, not evidence. It may still be grounded by the DAY arm.
+_TITLE_WRITER_DEFAULT = "meeting"
+
+# The title arm exists for ONE event recorded ACROSS MIDNIGHT (the meeting starts
+# at 23:52, the artifact is written the next calendar day), so it is bounded to
+# that distance. Further apart is another OCCURRENCE of a recurring title ("Intro
+# Call", "1:1", "Weekly Sync"): grounding on the title alone would promote a
+# previous occurrence's calendar participants into this meeting's CRM at machine
+# confidence — #8491's stated harm, on the arm this grounding fix itself adds.
+_TITLE_ARM_MAX_DAY_GAP = 1
+
 
 def _title_relation(want_title: str, have_title: str,
                     have_raw_len: int) -> str | None:
@@ -392,6 +407,22 @@ def _title_relation(want_title: str, have_title: str,
     return "different"
 
 
+def _title_arm_grounds(relation: str | None, want_day: _date | None,
+                       have_day: _date | None, have_title: str) -> bool:
+    """Whether the TITLE ALONE may ground the state for this meeting.
+
+    Requires the writer's default title to be absent (it names no event) and BOTH
+    calendar days to be known: the bound is the whole point of the arm, and an
+    unreadable ``started_at`` leaves the distance unknown, so the state's age is
+    unknowable — refuse rather than guess, exactly as the no-evidence case does.
+    """
+    if relation != "same" or have_title == _TITLE_WRITER_DEFAULT:
+        return False
+    if not want_day or not have_day:
+        return False
+    return abs((want_day - have_day).days) <= _TITLE_ARM_MAX_DAY_GAP
+
+
 def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
                            meeting_title: str = None) -> list:  # noqa: RUF013
     """Calendar attendees for THE MEETING under process — never a neighbour's.
@@ -410,8 +441,11 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
 
     Grounding therefore comes from the artifact's OWN evidence, since the state
     has no id to match on: the same ``event_title`` (compared on the writer's
-    50-character truncation, so a long calendar title can still match), or the
-    same local calendar day (state ``started_at`` vs the meeting ``date``).
+    50-character truncation, so a long calendar title can still match) **within
+    one calendar day** of the artifact — the across-midnight case the arm exists
+    for, never a previous occurrence of the same recurring title
+    (``_title_arm_grounds``) — or the same local calendar day (state
+    ``started_at`` vs the meeting ``date``).
 
     A state whose title names a DIFFERENT event is DISQUALIFYING evidence — it
     says the store describes another call — so the day arm cannot rescue it: a
@@ -419,12 +453,14 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     (``watchdog.sh`` re-enters on failure) meets, and it is the #8491 harm
     narrowed, not removed. "Different" means two titles that do not nest, at any
     length. The day arm therefore decides every case where the title cannot
-    SPEAK: no ``event_title`` at all, or two titles that nest without the
+    SPEAK: no ``event_title`` at all, two titles that nest without the
     writer's 50-character cap explaining it — the stored title shorter than the
     artifact's (a series variant), or the artifact's shorter than the stored one
-    (a cut-short artifact title) (``_title_relation``). Neither arm matches — or
-    no evidence was supplied — and this returns ``[]``: refuse rather than guess,
-    so an ungrounded attendee is never written as a contact.
+    (a cut-short artifact title) (``_title_relation``) — or two EQUAL titles that
+    sit more than one calendar day apart, which is a previous occurrence of a
+    recurring title rather than this recording (``_title_arm_grounds``). Neither
+    arm matches — or no evidence was supplied — and this returns ``[]``: refuse
+    rather than guess, so an ungrounded attendee is never written as a contact.
     """
     if not os.path.exists(CAL_STATE_FILE):
         return []
@@ -452,9 +488,10 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     have_day = _as_calendar_day(state.get("started_at"))
 
     relation = _title_relation(want_title, have_title, len(raw_have_title))
-    grounded = relation == "same" or bool(
-        want_day and have_day and want_day == have_day
-        and relation != "different")
+    same_day = bool(want_day and have_day and want_day == have_day)
+    grounded = _title_arm_grounds(
+        relation, want_day, have_day, have_title) or bool(
+        same_day and relation != "different")
     if not grounded:
         print(
             "⚠️  cal-trigger state does not describe this meeting "

@@ -289,6 +289,59 @@ def test_state_from_the_same_event_title_is_applied(tmp_path, monkeypatch):
     assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == ATTENDEES
 
 
+def test_same_title_from_a_previous_occurrence_is_refused(
+        tmp_path, monkeypatch, capsys):
+    """A recurring title is NOT evidence across occurrences — only ages ≤ 1 day.
+
+    ``Intro Call`` / ``1:1`` / ``Weekly Sync`` are the same string every week, so
+    an unbounded title arm promotes the PREVIOUS occurrence's participants into
+    this meeting's CRM at machine confidence — #8491's stated harm, on the arm
+    the grounding fix adds (pre-fix, this returned ``ATTENDEES``).
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-04T09:00:00",
+                        event_title=MEETING_TITLE)),
+    )
+    assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == []
+    assert "does not describe this meeting" in capsys.readouterr().err
+
+
+def test_the_writers_default_title_cannot_ground_across_days(
+        tmp_path, monkeypatch):
+    """``"Meeting"`` is cal-trigger.py's fallback, so equality names no event.
+
+    ``event.get("title", "Meeting")[:50]`` writes that literal for EVERY
+    title-less event, so two stores from different weeks collide on it. The day
+    arm still grounds the same day, which is why this is not an over-refusal.
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-05T09:00:00",
+                        event_title="Meeting")),
+    )
+    assert bridge.get_calendar_attendees(MEETING_DATE, "Meeting") == []
+
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-09T10:55:00",
+                        event_title="Meeting")),
+    )
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, "Meeting") == ATTENDEES
+
+
+def test_an_equally_titled_state_of_unknown_age_is_refused(
+        tmp_path, monkeypatch):
+    """The title arm's bound needs a readable ``started_at``; unknown → refuse."""
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="not-a-timestamp",
+                        event_title=MEETING_TITLE)),
+    )
+    assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == []
+
+
 def test_unparseable_dates_do_not_ground(tmp_path, monkeypatch):
     """A timestamp nobody can read is evidence of nothing → refuse."""
     monkeypatch.setattr(
@@ -424,6 +477,26 @@ def test_process_meeting_still_seeds_crm_when_grounded(
     assert crm_calls["created_opportunities"] == [
         (f"person-{a['email']}", f"{a['name']} — First call 2026-10-09")
         for a in ATTENDEES]
+
+
+def test_process_meeting_does_not_seed_crm_from_a_previous_occurrence(
+        tmp_path, monkeypatch, crm_calls):
+    """End to end: last week's same-titled call must contribute NO contacts.
+
+    The weekly-recurring shape of #8491: the state's ``event_title`` equals the
+    artifact's, the recording is a week old, and ``process_meeting`` must still
+    create zero Persons and zero "First call" Opportunities (pre-fix it created
+    both, for both attendees).
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-02T11:03:00",
+                        event_title=MEETING_TITLE)),
+    )
+    result = bridge.process_meeting(str(_meeting_md(tmp_path)))
+    assert crm_calls["created_people"] == []
+    assert crm_calls["created_opportunities"] == []
+    assert result["status"] in {"ok", "partial"}
 
 
 # ── the wiring that keeps this file running on its own subject ──────────────
