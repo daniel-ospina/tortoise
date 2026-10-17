@@ -1079,6 +1079,12 @@ def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
             continue
         tok = cfg.get("signup_token") if isinstance(cfg, dict) else None
         if isinstance(tok, str) and tok:
+            # #5109: the `st_` recovery token is a full credential in its own
+            # right (64 hex — it recovers the whole org, #1709), and this is the
+            # ONE reader that hands it out. Same check as the api_key resolver: a
+            # reader that validates its neighbour and not itself is how a store
+            # `chmod`ed open stays unnoticed on the recovery path.
+            _warn_if_credential_store_is_readable(path)
             return tok, path
     return None, None
 
@@ -1972,6 +1978,55 @@ class _ConfigError(Exception):
     """Candidate config file exists but is corrupt or unreadable."""
 
 
+#: Credential stores already warned about, keyed by path — ONCE PER PROCESS.
+#: A long-lived CLI caller (`tortoise session drain` in a loop, the per-turn
+#: reflex) resolves the same store hundreds of times; a line per resolution
+#: would drown the one warning that matters.
+_CREDENTIAL_MODE_WARNED: set[str] = set()
+
+
+def _warn_if_credential_store_is_readable(path: Path) -> None:
+    """#5109: say so when a credential store is group/other-readable.
+
+    EVERY writer of this store already pins it closed — `os.open(..., 0o600)`
+    for the tmp and `os.chmod(home_dir, 0o700)` for the directory (#1708) — but
+    until now **nothing verified that on READ**, so a store whose mode had
+    drifted (restored from a backup, re-created by hand, copied without `-p`)
+    was used silently at whatever mode it carried. That is the one half of the
+    #5109 class the repo can still check for itself: the file is correctly
+    permissioned at WRITE time by our own code, and the exposure this issue
+    records came from everything that READ it.
+
+    What this is, and is not:
+
+    * It WARNS, it does not refuse. A store behind a `0700` parent is not
+      actually reachable by another user (`0644` behind `0700` is the
+      corrected reading of #5109's own 2026-10-09 measurement), so refusing
+      would over-block a setup that is not exposed — the fail-closed direction
+      for a *gate*, the wrong one for a *hazard hint*.
+    * It NEVER prints the credential. The message carries the path and the
+      mode only — a warning that quotes what it is warning about would write
+      the secret into the very transcript this issue is about.
+    * It goes to **stderr**, always. `--json` callers own stdout; a warning
+      there would corrupt the payload (`_write_mcp_config_file`'s
+      `status_to_stderr` exists for exactly this reason).
+    * It cannot fail the command. A store we cannot `stat` is not this
+      check's business — credential resolution already succeeded by reading it.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        return
+    if not mode & 0o077:  # no group/other bits at all → nothing to say
+        return
+    key = str(path)
+    if key in _CREDENTIAL_MODE_WARNED:
+        return
+    _CREDENTIAL_MODE_WARNED.add(key)
+    print(f"⚠️  {path} is mode {mode:04o} — group/other can read the credential "
+          f"stored in it. Fix: chmod 600 {path}", file=sys.stderr)
+
+
 def _resolve_config_path(include_env: bool = True, *,
                          global_only: bool = False) -> tuple[Path | None, dict | None, str | None, str | None]:
     """Shared config resolver — env → cwd/.tortoise → ~/.tortoise/credentials.json (#1708 D1/D5/D6).
@@ -2045,6 +2100,15 @@ def _resolve_config_path(include_env: bool = True, *,
         # from the SAME file or the built-in default only — never from env
         # (a poisoned TORTOISE_API_URL must not redirect the stored key).
         api_url = config.get("api_url") or "https://api.premiselabs.co"
+        # #5109: a FILE-sourced key is the only case worth checking — an env
+        # key has no store on disk, and this is the seam every CLI
+        # credential-USE path resolves through, so one call here covers all of
+        # them. It is NOT the only in-repo reader of a credential store: the Pi
+        # capture hook (`tortoise/pi-hooks/tortoise-capture.ts::resolveConfig`)
+        # reads `~/.pi/agent/tortoise-config.json` on every `turn_end` and does
+        # not come through here, so it carries the sibling check
+        # (`warnIfCredentialStoreIsReadable`). Change one, change both.
+        _warn_if_credential_store_is_readable(path)
         return path, config, api_key, api_url
     return None, None, None, None
 
