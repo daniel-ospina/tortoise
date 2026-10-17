@@ -30,9 +30,9 @@ hash used to pass everything. Two runners execute it — the `deploy-dashboard`
 job of `deploy-pages.yml` and the daily `skills-parity.yml` — and the assertions
 below derive that fact by EXECUTING each step's real `run:` block (recording
 interpreter stubs on `PATH`, #4494's lesson) rather than by reading its text, so
-`echo …`, `… || true`, `…; exit 0` and `continue-on-error:` are not mistaken for
-a gate. A lane that lands only one of the two runners is still forced to be
-honest about it instead of red-ing. `docs/license-notes.md` §7.1 must name
+`echo …`, `… || true`, `… | tee …` and `continue-on-error:` are not mistaken
+for a gate. Both runners are asserted, so landing only one of the two reds.
+`docs/license-notes.md` §7.1 must name
 whichever runners exist, and must name no runner that does not.
 
 The pin itself carries no assertion here: `test_4643_the_pin_covers_exactly_the_
@@ -1117,8 +1117,30 @@ exit 0
 _STUBBED = ("uv", "uvx", "python", "python3")
 
 
-def _execute_step(body: str, *, fail_arm: bool = False) -> tuple[int, list[list[str]]]:
+def _shell_flags(step: object) -> tuple[str, ...]:
+    """The flags GitHub actually runs this step with.
+
+    GitHub's implied default on Linux is `bash -e {file}`; `shell: bash` is
+    `bash --noprofile --norc -eo pipefail {file}`. The distinction is load-bearing
+    here: WITHOUT `pipefail` a trailing `| tee` makes the step exit 0 while the
+    arm fails, so such a gate is disarmed in CI — and a harness that always ran
+    `-o pipefail` would certify it anyway (review finding, P2).
+    """
+    if not isinstance(step, dict):
+        return ("-e",)
+    shell = str(step.get("shell") or "").strip()
+    if shell == "bash" or "pipefail" in shell:
+        return ("-e", "-o", "pipefail")
+    return ("-e",)
+
+
+def _execute_step(body: str, *, fail_arm: bool = False,
+                  flags: tuple[str, ...] = ("-e",)) -> tuple[int, list[list[str]]]:
     """RUN a step's real `run:` body; return (exit status, recorded argvs).
+
+    `flags` must be the shell THIS step gets on the runner (`_shell_flags`), not
+    the strictest shell available — see that function for why the difference is a
+    real disarmament and not a detail.
 
     Hermetic by construction: the stubs are the only interpreters on PATH, the
     cwd is a throwaway directory, and the environment is an allowlist — so a
@@ -1143,7 +1165,7 @@ def _execute_step(body: str, *, fail_arm: bool = False) -> tuple[int, list[list[
             "PARITY_STUB_FAIL_ARM": "1" if fail_arm else "0",
         }
         proc = subprocess.run(
-            ["bash", "-e", "-o", "pipefail", str(script)],
+            ["bash", *flags, str(script)],
             cwd=root, env=env, capture_output=True, text=True, timeout=60,
         )
         calls: list[list[str]] = []
@@ -1234,10 +1256,10 @@ def _is_arm_step(step: object) -> bool:
         return False
     if not _can_fail(step):
         return False
-    rc, calls = _execute_step(body)
+    rc, calls = _execute_step(body, flags=_shell_flags(step))
     if rc != 0 or not any(_is_the_arm(a) for a in calls):
         return False
-    fail_rc, _ = _execute_step(body, fail_arm=True)
+    fail_rc, _ = _execute_step(body, fail_arm=True, flags=_shell_flags(step))
     return fail_rc != 0
 
 
@@ -1499,6 +1521,13 @@ _DISARMAMENTS = [
         run="if " + s["run"] + "; then true; fi")),
     # Executed in the background: the step returns before the arm can fail it.
     ("arm_backgrounded", lambda s: s.update(run=s["run"] + " &")),
+    # A PIPELINE hides the arm's status. Neither runner declares `shell:`, so both
+    # get GitHub's implied default `bash -e` — no `pipefail` — and `| tee` exits 0
+    # on a failing arm. Piping a gate's output through `tee`/`tail` for visibility
+    # is the most idiomatic way to disarm it, and the pre-fix harness ran `-o
+    # pipefail` regardless, so it certified a gate CI had already disarmed
+    # (review finding, P2).
+    ("piped_to_tee", lambda s: s.update(run=s["run"] + " | tee arm.log")),
 ]
 
 
@@ -1507,10 +1536,14 @@ def test_4643_a_runner_that_cannot_fail_is_not_a_runner(tmp_path, name, mutate):
     """Review finding (P2), measured on the pre-fix code: all of these stayed
     GREEN through `test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it`
     — the predicates read the step's TEXT only, so `echo`, `|| true`,
-    `; exit 0`, `|| :` and `continue-on-error:` kept every surface claiming a
+    `| tee`, `|| :` and `continue-on-error:` kept every surface claiming a
     fail-closed gate that could no longer fail. `\u00a77.1`'s "two runners, both
     failing closed", `skills-parity.yml`'s header and this file all still
-    passed, and only a human reading the diff would have noticed."""
+    passed, and only a human reading the diff would have noticed.
+
+    `; exit 0` is deliberately NOT in this list: under `bash -e` a bare failing
+    line already aborts the step, so appending `; exit 0` disarms nothing and a
+    case for it could never red."""
     workflows = _workflows_with_mutation(tmp_path, mutate)
     assert "deploy-pages.yml" not in _upstream_runners(workflows), (
         f"{name}: the step still reads as the gate but cannot fail — the "
@@ -1611,10 +1644,11 @@ def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_pa
 
     step = next(s for s in runners["deploy-pages.yml"]["jobs"]["deploy-dashboard"]
                 ["steps"] if _is_arm_step(s))
-    rc, calls = _execute_step(step["run"])
+    rc, calls = _execute_step(step["run"], flags=_shell_flags(step))
     assert rc == 0, calls
     assert any(_is_the_arm(argv) for argv in calls), (
         f"the step must EXECUTE the arm; recorded calls: {calls}")
-    assert _execute_step(step["run"], fail_arm=True)[0] != 0, (
+    assert _execute_step(step["run"], fail_arm=True,
+                         flags=_shell_flags(step))[0] != 0, (
         "a failing arm must fail the STEP — that is what 'failing closed' means "
         "to the runner, and it is the half a text scan cannot see")
