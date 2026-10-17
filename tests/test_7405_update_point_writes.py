@@ -634,6 +634,14 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
         sdk.annotate_operator(op, bias=0.2, precision=0.8,
                               consistency=0.7, directness=0.9)
         assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY], seen
+
+        # A TERMINAL point reaches `_mark_dirty`'s extra clear SET, so the
+        # bound is a RANGE, not a number (#8854 review round 3 P2).
+        sdk.retract_point(src)
+        seen.clear()
+        sdk.update_point(src, confidence=0.3)
+        assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY,
+                        "_mark_dirty terminal ep_dirty clear SET"], seen
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -808,6 +816,129 @@ def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
 
         assert sdk.update_point(missing, confidence=0.5) == {}
         assert proxy.matching >= 2, "the aborted statement was never re-issued"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _GraphAbortThenSlotAbortEmptyGraph:
+    """Wipe + graph abort, then a write-slot abort, then pass through.
+
+    Models a rebuild — which is ITSELF a concurrent writer — followed by
+    ordinary write-slot contention inside the same retry window. The
+    graph-replaced abort must stay LATCHED: if the gate re-reads the LATEST
+    abort, the write-slot one disarms the witness and the zero-row re-issue
+    reports success again.
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+        self.matched_rows = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query("MATCH (n:Point) DETACH DELETE n")
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            if self.matching == 2:
+                raise redis_exc.ResponseError(_WRITE_SLOT)
+            res = self._real.query(cypher, params=params, timeout=timeout)
+            self.matched_rows += (res.result_set[0][0]
+                                  if res.result_set else 0)
+            return res
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_later_write_slot_abort_does_not_disarm_the_witness(
+        tmp_path, monkeypatch):
+    """The graph-abort latch survives a later, state-independent abort.
+
+    A rebuild is a concurrent writer, so a write-slot refusal arriving after a
+    graph-replaced one is not exotic. Gating on the LATEST abort let the slot
+    abort disarm a witness that had been legitimately armed, and the next
+    zero-row re-issue returned success — the false-success this PR closes.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "mixed")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _GraphAbortThenSlotAbortEmptyGraph(
+            proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, confidence=0.9)
+
+        assert proxy.matching >= 3, "the sequence never reached the re-issue"
+        assert proxy.matched_rows == 0, "nothing landed, so nothing may report it"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _AbortOnceThenTerminalise:
+    """Abort once AND mark the point terminal — a rebuild replaying the record.
+
+    ``retract_point`` appends ``PointRetracted`` BEFORE its CAS, so a rebuild
+    that replays that record makes the re-issued CAS match nothing through the
+    statement's OWN guard. The zero-row result is then legitimate and must
+    keep the documented ``ValueError``, not report a graph replacement.
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query("MATCH (n:Point) SET n.status = 'retracted'")
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_retract_that_lost_the_race_still_raises_already_terminal(
+        tmp_path, monkeypatch):
+    """A legitimately empty re-issue keeps the documented ValueError.
+
+    The graph was never replaced, so reporting one would name a cause that did
+    not occur (and `_classify_db_failure` would bucket it as "db").
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "lostrace")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenTerminalise(proj.g, _RETRACT_CAS_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.retract_point(pid)
+        assert proxy.matching >= 2, "the aborted CAS was never re-issued"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
