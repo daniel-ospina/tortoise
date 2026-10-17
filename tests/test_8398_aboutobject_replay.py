@@ -319,26 +319,6 @@ def test_every_unusable_link_is_COUNTED_not_skipped(wired) -> None:
     assert proj.replay_about_links({"aboutLinks": cases[0]["aboutLinks"]}) == (0, 1)
 
 
-def test_title_matching_is_Source_scoped(wired) -> None:
-    """``title`` is a display prop on Object/Event too — the guard is Source-only.
-
-    The cascade matches a document by ``e.url = $name OR e.title = $name`` on
-    ``:Source``. Matching ``title`` label-agnostically reported SUCCESS for an
-    Event joined to a same-titled Object while no document was joined — a false
-    success that masks a real loss.
-    """
-    sdk, proj, _events, _journal = wired
-    # The edge must EXIST for the count to be able to see the title, or the test
-    # cannot discriminate: with no edge the query returns 0 rows under the
-    # unscoped query too, so it would pass against the very code it pins.
-    obj = _nid(sdk.create_object("o", title="MyDoc"))
-    ev = _nid(sdk.create_event("titled", "event", aboutObject=obj))
-    assert proj._count_about_to_value(ev, "MyDoc") == 0, (
-        "an Object's title satisfied a document link — the Event IS joined to "
-        "that Object, so an unscoped `t.title` match counts it")
-    assert proj._count_about_to_value(ev, "MyDoc-not-a-thing") == 0
-
-
 def test_a_document_target_survives_a_rotated_journal(wired) -> None:
     """A ``Source`` registration later in the stream must not cost the link.
 

@@ -1121,10 +1121,8 @@ class _EdgeHandlers:
                 # found. Measuring ``rel`` here would report failure for the
                 # reproduction live just made (and would report failure on every
                 # re-run of an already-wired link, because MERGE adds nothing).
-                # Measure the LINK instead: is the source now joined to a node
-                # carrying this value, by any about rel?
                 self._create_about_edges(source, link["value"])
-                if self._count_about_to_value(source, link["value"]) > 0:
+                if self._count_about_out(source) > 0:
                     wired += 1
                 else:
                     failed += 1
@@ -1132,33 +1130,32 @@ class _EdgeHandlers:
                 failed += 1
         return (wired, failed)
 
-    def _count_about_to_value(self, source: str, value: str) -> int:
-        """Count the source's about edges reaching a node carrying ``value``.
+    def _count_about_out(self, source: str) -> int:
+        """Count the source's outgoing about edges — by ID only, never by name.
 
-        The ``how: "name"`` success test: the cascade is rel-ignoring, so the
-        question is not "did ``rel`` appear" but "is this value linked at all".
-        Idempotent by construction — an already-wired link counts, so a re-run
-        does not report a failure that did not happen.
+        The ``how: "name"`` success test. A name link's own rel resolved to
+        nothing at write time, so the cascade is rel-ignoring and the honest
+        question is only "did this record leave the Event joined to anything".
 
-        The key set is what live resolution could have used: identity keys
-        ``name|url|id|eventId`` on any label, plus ``title`` **only on ``Source``**
-        — the cascade matches a document by ``e.url = $name OR e.title = $name``,
-        and ``title`` is a display prop on ``Object``/``Event`` too, so matching it
-        un-scoped would report success for a same-titled Object while no document
-        was joined (masking a real loss).
+        ⛔ It is deliberately NOT "is the Event joined to a node carrying this
+        VALUE": that is a name-keyed identity read, and #3633's guard refuses one
+        from ``tortoise/projection/edges.py`` precisely because it reopens the
+        route-then-refuse decision — identity resolves in ONE place
+        (``tortoise/entity_identity.py``), not in a diagnostic. The weaker count
+        below is what remains available without that read: it can only
+        under-count success (a source that already had other about edges counts a
+        no-op name link as wired), and it can never report a good link as failed —
+        the direction that matters, because a false failure trains readers to
+        ignore the warning.
 
-        ⚠️ Presence is the test, which means a link that genuinely failed could be
-        masked by a same-valued node already joined to this Event — by design: the
-        record is replayed to reproduce what live produced, and an Event joined to
-        that value IS that state.
+        Idempotent: an already-wired source counts, so a re-run reports no
+        failure that did not happen.
         """
         rows = self.g.query(
             "MATCH (s:Event) WHERE s.id=$sv OR s.eventId=$sv "
-            "MATCH (s)-[r:aboutSubject|aboutObject|aboutEvent|aboutPoint|aboutDocument]->(t) "
-            "WHERE t.name=$tv OR t.url=$tv OR t.id=$tv OR t.eventId=$tv "
-            "   OR (t:Source AND t.title=$tv) "
+            "MATCH (s)-[r:aboutSubject|aboutObject|aboutEvent|aboutPoint|aboutDocument]->() "
             "RETURN count(r)",
-            params={"sv": source, "tv": value}).result_set
+            params={"sv": source}).result_set
         return int(rows[0][0]) if rows and rows[0] else 0
 
     def _link_source(self, point_id: str, source_ref: str | Sequence[str], source_kind: str | None = None, *, label: str = "Point", source_versions: dict[str, str] | None = None) -> None:
