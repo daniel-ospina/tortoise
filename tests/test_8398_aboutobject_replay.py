@@ -337,3 +337,37 @@ def test_title_matching_is_Source_scoped(wired) -> None:
         "an Object's title satisfied a document link — the Event IS joined to "
         "that Object, so an unscoped `t.title` match counts it")
     assert proj._count_about_to_value(ev, "MyDoc-not-a-thing") == 0
+
+
+def test_a_document_target_survives_a_rotated_journal(wired) -> None:
+    """A ``Source`` registration later in the stream must not cost the link.
+
+    The URL resolves to the `Source` at write time, so this journals the exact
+    ``how:"id"`` form and replay wires it by value. Pinned as a regression for the
+    rotated-journal case on the DOCUMENT rel specifically (the other rotated
+    tests use ``aboutObject``), NOT as a pin on the deferral: measured, ``apply``'s
+    inline call plus the trailing sweep produce the same result here, because the
+    ``id`` path cannot mint — the stub hazard exists only on the ``name`` path,
+    where minting is symmetric with live.
+    """
+    sdk, proj, events, journal = wired
+    url = "https://example.test/docs/late-report"
+    sdk.create_source(url, sourceKind="document")
+    sdk.create_event("late-doc", "event", aboutDocument=url)
+    before = _counts(proj)
+    assert before["aboutDocument"] == 1, f"live did not wire the document: {before}"
+
+    with open(journal, encoding="utf-8") as fh:
+        records = [line for line in fh if line.strip()]
+    event_lines = [ln for ln in records if '"EventRecorded"' in ln]
+    rest = [ln for ln in records if '"EventRecorded"' not in ln]
+    os.remove(journal)
+    with open(os.path.join(str(events), "a-events.jsonl"), "w", encoding="utf-8") as fh:
+        fh.writelines(event_lines)
+    with open(os.path.join(str(events), "b-rest.jsonl"), "w", encoding="utf-8") as fh:
+        fh.writelines(rest)
+
+    proj.rebuild(_DirLog(events), confirm_destructive=True)
+    assert _counts(proj) == before, (
+        f"the document link was lost across a rotated journal: "
+        f"{before} → {_counts(proj)}")

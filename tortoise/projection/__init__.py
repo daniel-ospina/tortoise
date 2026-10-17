@@ -7883,7 +7883,8 @@ class FalkorProjection(
     def apply(self, event: dict, *, journal_object_surviving=None,
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
-              journal_existence=None) -> None:
+              journal_existence=None,
+              about_links_deferred: bool = False) -> None:
         # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
         # A fold is the cache WRITE of the record/cache split, so on a
         # journal-backed projection it is legal only when a sanctioned scope is
@@ -8169,7 +8170,18 @@ class FalkorProjection(
             # replay callers (``recover_from_log``, ``backup.restore``) drive
             # ``apply`` directly and have no sweep: for them this warning IS the
             # report, and it names the event so the loss is locatable.
-            _about_w, _about_f = self.replay_about_links(ev)
+            _about_w, _about_f = (0, 0)
+            if about_links_deferred:
+                # #8398: the CALLER owns a trailing sweep and will wire these
+                # once every endpoint exists. Wiring here would be wrong rather
+                # than merely early: the ``how:"name"`` path MINTS a Subject
+                # stub when its target is absent, so on a rotated journal this
+                # call would create a junk stub AND leave the real edge on the
+                # wrong label — replay ≠ live, reported as success. Skipping it
+                # is the only faithful option.
+                pass
+            else:
+                _about_w, _about_f = self.replay_about_links(ev)
             if _about_f:
                 logger.warning(
                     "#8398: apply() could not re-wire %d journaled Event→entity "
@@ -8690,22 +8702,21 @@ class FalkorProjection(
                 if edge is not None:
                     deferred_corrects.append(edge)
                 continue
+            _is_evrec = isinstance(ev, dict) and (
+                ev.get("type") == "EventRecorded"
+                or _norm(ev).get("type") == "EventRecorded")
             self.apply(ev, journal_object_surviving=journal_object_surviving,
                        journal_object_deleted=journal_object_deleted,
                        journal_first_materialized=first_materialized,
                        journal_existence=epistemic_existence,
-                       journal_seq=seq)
+                       journal_seq=seq,
+                       about_links_deferred=_is_evrec)
             # #8398: buffer the record so its about* links are re-wired once
-            # every endpoint exists. The inline ``apply()`` wiring above already
-            # tried; these edges are idempotent MERGEs, so the sweep is a
-            # correction, never a duplicate.
-            if isinstance(ev, dict) and (
-                    ev.get("type") == "EventRecorded"
-                    or _norm(ev).get("type") == "EventRecorded"):
-                # NORMALIZED, matching the edge-message sweep below: a
-                # nested-payload record (``{"point": {…"type": "EventRecorded"}}``)
-                # must be replayed through its inner dict, or the sweep reads a
-                # shape with no ``aboutLinks`` and drops the link silently.
+            # every endpoint exists — deferred above, wired in the sweep below.
+            if _is_evrec:
+                # NORMALIZED, matching the edge-message sweep: a nested-payload
+                # record must be replayed through its inner dict, or the sweep
+                # reads a shape with no ``aboutLinks`` and drops the link.
                 about_link_events.append((seq, _norm(ev)))
         if deferred_corrects:
             # Guarded like the other two engines' sweeps: ``fold_deferred_*``
@@ -12654,7 +12665,17 @@ class FalkorProjection(
             _about_wired = _about_failed = 0
             for _al_seq, _al_ev in about_link_events:
                 self._replay_seq = _al_seq
-                _w, _f = self.replay_about_links(self._norm(_al_ev))
+                # Guarded like the other sweeps in this engine: ``fold_*`` must
+                # never abort a post-wipe replay (the graph was already
+                # DETACH DELETE'd above), so a failure is logged, not raised.
+                try:
+                    _w, _f = self.replay_about_links(self._norm(_al_ev))
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "rebuild_all: about-link re-wire failed for event %r "
+                        "(#8398)",
+                        _al_ev.get("event_id") or _al_ev.get("id"))
+                    continue
                 _about_wired += _w
                 _about_failed += _f
             if _about_wired:
