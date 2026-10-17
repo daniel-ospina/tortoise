@@ -4531,6 +4531,13 @@ durations:
   test_7405_remaining_writes.py: 2.0  # #7405/#8698: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — merging origin/main is where the fast pool crossed the DURATION_COVERAGE_MIN floor, which is how this row was found. NO pool figure or percentage is restated here on purpose (each base merge re-stales it; see the #4387 row above). Do NOT drop the row without re-deriving the floor at that head. Refresh from the first post-merge run that includes it.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
+  test_manage_sources_3540.py: 1.5  # #3540 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED this turn: sum of testcase/@time over the file's 15 tests = 1.52s (0.78s of it is the one-time `tortoise.mcp_server` import in the first test); the file is DB-free and monkeypatched, so conftest setup is the once-per-leg cost the method attributes to no file. Without this row the file packs at the flat 2.0s default and `tools/ci_selection.py --integrity` reds the durations coverage floor — the surface entry alone does not cover it (#4348 trap). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
+  # The two rows below arrived with the origin/main merge, unmeasured and IN the fast
+  # pool, which is what pushed coverage under the 90% floor on this branch (#3400).
+  # Both are measured locally under the same `# unmeasured` convention; refresh from
+  # the first post-merge run that includes them.
+  test_5509_name_keyed_identity_reads.py: 134.1  # #5509: LOCAL reading (13 tests, junit sum 134.06s — 132.7s of it in TestBeliefTimelineIdentityRead, which drives the real graph). Carried here because its merge into this branch is what took durations coverage below the floor.
+  test_7936_reference_fold_label_rekey.py: 4.0  # #7936: LOCAL reading (10 tests, junit sum 4.04s). Same reason as the row above.
   eval/retrieval/test_integration.py: 1523.4
   # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
   # It is NOT presented as a measurement — it carries the branch's local reading under the

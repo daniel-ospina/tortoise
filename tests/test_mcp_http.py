@@ -1043,9 +1043,7 @@ class TestOnboardingToolGating:
 
     ONBOARDING_TOOLS = {  # noqa: RUF012
         "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
-        "tortoise_onboarding_session_recording",
-        "tortoise_onboarding_github_connect",
-        "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+        "tortoise_onboarding_github_connect", "tortoise_onboarding_github_status",
         "tortoise_onboarding_seed",  # #1999 (W3)
     }
 

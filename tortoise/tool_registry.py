@@ -1296,8 +1296,8 @@ def get_write_tool_names() -> frozenset[str]:
     Covers the SERVED set (#3883): a retired name still answers through the
     warning shim, so a write served under a retired name must not be recorded as
     a read. Since #4474 two retired shims ARE writers (`tortoise_ingest_corpus`,
-    `tortoise_index_sessions`), so the served census (47) exceeds the live census
-    (45) — the derivation over the served set is what keeps them counted, and it
+    `tortoise_index_sessions`), so the served census (48) exceeds the live census
+    (44) — the derivation over the served set is what keeps them counted, and it
     stops the census from silently shrinking when a live writer is retired."""
     return frozenset(
         t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
@@ -1621,7 +1621,8 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # many and TRUNCATED the value when the table rendered (MD056). The word "or"
     # says the same thing and cannot break a table.
     "tortoise_onboarding_github_index":
-        'tortoise_manage_sources(action="enable", source="github_issues")',
+        'tortoise_manage_sources(action="enable", source="github_issues")'
+        ' (no per-repo scope: it indexes every connected repo)',
     "tortoise_onboarding_session_recording":
         'tortoise_manage_sources(action="enable" or "disable", '
         'source="agent_sessions")',

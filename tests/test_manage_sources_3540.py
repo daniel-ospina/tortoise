@@ -46,7 +46,7 @@ def ctx(monkeypatch):
             calls["logs"].append((org, src, act, out, scope)),
     )
 
-    def _update(org_id, **fields):
+    def _update(org_id, _echo=True, **fields):
         calls["writes"].append(fields)
         state.update(fields)
         return dict(state)
@@ -73,9 +73,6 @@ def test_the_tool_takes_no_credential_parameter():
     """
     params = set(inspect.signature(m.tortoise_manage_sources).parameters)
     assert params == {"action", "source"}
-    forbidden = ("token", "secret", "password", "credential", "api_key",
-                 "code", "pat")
-    assert not [p for p in params for f in forbidden if f in p.lower()]
 
 
 # ── list ────────────────────────────────────────────────────────────────────
@@ -85,7 +82,11 @@ def test_list_covers_all_three_sources_with_their_defaults(ctx):
     assert set(out["sources"]) == {"github_issues", "github_documents",
                                    "agent_sessions"}
     assert out["sources"]["agent_sessions"]["default"] == "on"
-    assert out["sources"]["github_issues"]["default"] == "off"
+    # The GitHub flags are ON by default in the PRODUCT (`issues_enabled: True`
+    # / `docs_enabled: True` in both default dicts, #1924), so a `default: "off"`
+    # here would sit next to `enabled: true` in the same payload.
+    assert out["sources"]["github_issues"]["default"] == "on"
+    assert out["sources"]["github_documents"]["default"] == "on"
     # The raw projection rides along — the tool must not hide state behind its
     # own interpretation of it.
     assert "onboarding" in out
@@ -257,3 +258,102 @@ def test_the_retired_switches_point_at_this_call():
         pointer = by_name[name].retired_use_instead
         assert "tortoise_manage_sources" in pointer
         assert arg in pointer
+
+
+# ── defaults are the product's, not this tool's invention ──────────────────
+def test_defaults_match_the_products_own_default_state(ctx):
+    """`list` must not report a default the product does not implement.
+
+    Derived from `DEFAULT_ONBOARDING_STATE` rather than restated, so the two
+    cannot drift apart again.
+    """
+    from tortoise.hosted_api import DEFAULT_ONBOARDING_STATE as defaults
+
+    out = m.tortoise_manage_sources("list")
+    for source, spec in m._SOURCE_ROSTER.items():
+        expected = "on" if defaults.get(spec["enable_flag"], True) else "off"
+        assert out["sources"][source]["default"] == expected, source
+
+
+# ── the self-host projection NESTS the operational keys ────────────────────
+def test_selfhost_nested_operational_flags_are_honoured(ctx, monkeypatch):
+    """`read_selfhost_state` returns `operational: {...}`, not a flat dict.
+
+    Reading only the top level reported `agent_sessions.enabled: true` for a
+    stored `operational.session_recording: false`, and made `enable` answer
+    `already_on` while writing nothing — stranding the pinned re-enable path
+    ("re-sets the setting regardless of capture_revised").
+    """
+    nested = {"operational": {"session_recording": False,
+                               "github_connected": True}}
+    monkeypatch.setattr(m, "_onboarding_state", lambda: dict(nested))
+
+    listed = m.tortoise_manage_sources("list")
+    assert listed["sources"]["agent_sessions"]["enabled"] is False
+
+    out = m.tortoise_manage_sources("enable", "agent_sessions")
+    assert out["status"] == "enabled", "a stored OFF flag must not read as on"
+    assert ctx["writes"] == [{"session_recording": True,
+                              "capture_revised": True}]
+
+
+# ── a NEW job must be spawned by the source's OWN runner ──────────────────
+def test_enable_spawns_the_matching_runner_when_the_job_is_new(ctx, monkeypatch):
+    """`is_new=False` used to make this branch unreachable in the suite.
+
+    Swapping `_run_docs_indexing` and `_run_indexing` passed every test, so
+    `enable(github_documents)` could have run the issues indexer unnoticed.
+    """
+    import asyncio
+
+    ran: list[tuple[str, str]] = []
+
+    async def _docs(job_id, org_id, gh_org, repo):
+        ran.append(("docs", job_id))
+
+    async def _issues(job_id, org_id, gh_org, repo):
+        ran.append(("issues", job_id))
+
+    monkeypatch.setattr(ha, "_github_credentials",
+                        lambda org_id: ("enc-token", "acme"))
+    monkeypatch.setattr(ha, "_start_index_job",
+                        lambda org_id, kind: (f"job-{kind}", True))
+    monkeypatch.setattr(ha, "_run_docs_indexing", _docs)
+    monkeypatch.setattr(ha, "_run_indexing", _issues)
+
+    async def _go():
+        result = m.tortoise_manage_sources("enable", "github_documents")
+        await asyncio.sleep(0)  # let the scheduled task start
+        return result
+
+    out = asyncio.run(_go())
+    assert out["started"] is True
+    assert ran == [("docs", "job-docs")], (
+        "github_documents must spawn the DOCS runner")
+
+
+# ── refusals and writes are attributable ──────────────────────────────────
+def test_refusals_are_logged_too(ctx):
+    m.tortoise_manage_sources("nonsense", "github_issues")
+    m.tortoise_manage_sources("enable", "not_a_source")
+
+    outcomes = [entry[3] for entry in ctx["logs"]]
+    assert "refused_action" in outcomes
+    assert "refused_source" in outcomes
+
+
+def test_a_write_logs_the_attempt_before_the_outcome(ctx):
+    """A crash inside the write must still leave the attempt on the record."""
+    m.tortoise_manage_sources("disable", "agent_sessions")
+
+    outcomes = [entry[3] for entry in ctx["logs"]]
+    assert outcomes[:2] == ["attempt", "ok"], outcomes
+
+
+def test_disabling_an_already_off_session_writes_nothing(ctx):
+    ctx["state"]["session_recording"] = False
+
+    out = m.tortoise_manage_sources("disable", "agent_sessions")
+
+    assert out["status"] == "already_off"
+    assert ctx["writes"] == [], "an idempotent disable must not write"

@@ -514,6 +514,10 @@ class TestGraphBoundTeamSurfaceReject:
         "tortoise_onboarding_github_index": {"org": "acme"},
         "tortoise_onboarding_github_status": {},
         "tortoise_pack_install": {"manifest_yaml": "x: 1"},
+        # #3540: the consolidated org-level writer. It replaced two entries in
+        # this sweep; leaving it out would let its reject be deleted with the
+        # suite still green.
+        "tortoise_manage_sources": {"action": "list"},
     }
 
     def test_every_team_surface_tool_rejects_graph_bound(self):
@@ -1151,12 +1155,15 @@ class TestStdioEntrypointToolRegistration:
             onboarding = {
                 "tortoise_onboarding_demo_create",
                 "tortoise_onboarding_state",
-                "tortoise_onboarding_session_recording",
                 "tortoise_onboarding_github_connect",
-                "tortoise_onboarding_github_index",
                 "tortoise_onboarding_github_status",
                 "tortoise_onboarding_seed",  # #1999 (W3)
             }
+            # #3540: the two retired switches are no longer advertised; the
+            # consolidated replacement is steady-state and stays listed.
+            assert "tortoise_manage_sources" in names
+            assert "tortoise_onboarding_session_recording" not in names
+            assert "tortoise_onboarding_github_index" not in names
             missing = onboarding - set(names)
             assert not missing, f"missing onboarding tools: {sorted(missing)}"
         finally:

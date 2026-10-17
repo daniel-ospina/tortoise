@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: b2490d9053d3b6c3913129e4874c10bfc9a599b8
+cut_at_commit: 8eac5bfa43e80f6d61b2a438fcc57776a3786113
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -499,7 +499,8 @@ retired:
   http_policy: true
   approval: null
 - name: tortoise_onboarding_github_index
-  use_instead: tortoise_manage_sources(action="enable", source="github_issues")
+  use_instead: 'tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes
+    every connected repo)'
   sdk_method: null
   http_policy: true
   approval: null
@@ -2358,7 +2359,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_manage_sources
-  served_from: tortoise/mcp_server.py:54bb926ad420f52b
+  served_from: tortoise/mcp_server.py:6afa283d45e7b7a4
   served_attributes: c535c2fe97bf2889
   family: onboarding
   family_rank: 6

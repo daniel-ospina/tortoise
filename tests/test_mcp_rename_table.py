@@ -61,7 +61,8 @@ RETIRED_LITERAL: dict[str, str] = {
     # #3540 ruling B: the two per-source switches retired into the ONE
     # consolidated source-management operation (net one tool fewer).
     "tortoise_onboarding_github_index":
-        'tortoise_manage_sources(action="enable", source="github_issues")',
+        'tortoise_manage_sources(action="enable", source="github_issues")'
+        ' (no per-repo scope: it indexes every connected repo)',
     "tortoise_onboarding_session_recording":
         'tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")',
     "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',

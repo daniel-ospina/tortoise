@@ -712,10 +712,13 @@ change it any time from `Settings → Memory sources`.
 > self-hosted install — the write lands, and the state read reports the stored
 > operational keys under `operational` (`tortoise_onboarding_state` /
 > `GET /v1/onboarding/state`), so reversibility **may** be promised for that
-> tile (#8686). Self-hosted the OTHER tiles still have no write path: their
-> only writer is the dashboard `PATCH /v1/onboarding/state`, which the daemon
-> does not mount, and `tortoise_onboarding_github_connect` has no self-hosted
-> team context — so do not promise changes to those.
+> tile (#8686). Self-hosted, the two GitHub tiles are writable through
+> `tortoise_manage_sources` as well (the flag write lands on the deployment's
+> own `:OnboardingState` node via the self-host branch of
+> `_update_onboarding_state`), but they still need a CONNECTED GitHub
+> credential, and `tortoise_onboarding_github_connect` has no self-hosted team
+> context — so do not promise a GitHub change on a deployment that has never
+> connected one.
 
 The pinned order and the per-source state keys are the dashboard's tile
 inventory (`website/apps/dashboard/src/integrationsGrid.js`, one declaration
@@ -780,12 +783,13 @@ the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
   ONE connect-style leg that works** — both the write and the read-back land on
   the deployment's own node. Both were fixed by #8686; before it, the write
   no-opped and reported success anyway.
-- **GitHub documents** — the enable route (`POST /v1/index/docs`) and its job
-  status have **no MCP tool yet**; adding one expands the agent-facing surface
-  and needs owner approval plus a `config/surface-manifest.yml` re-cut
-  (#4282). Until then this source is dashboard-only — do **not** invent a tool
-  name for it. Pinned by `tests/test_tool_registry.py`
-  (`TestAgentAddressableIntegrations`).
+- **GitHub documents** — `tortoise_manage_sources(action="enable",
+  source="github_documents")`; it starts the docs index job and reports the
+  `job_id` plus `started`. The REST twins stay for the dashboard
+  (`POST /v1/index/docs`, status `GET /v1/index/docs/{job_id}`). This source now
+  HAS a tool: the surface approval and the manifest re-cut are recorded in
+  `docs/product/canonical-mcp-tools.md` (#3540, under the #4282 rule). Pinned by
+  `tests/test_tool_registry.py` (`TestAgentAddressableIntegrations`).
   **Extracting claims FROM those documents is a self-hosted CLI verb, not a
   tool** (#1724): `tortoise mine-docs --dir <corpus> --db <graph>` walks the
   staged corpus and writes **draft** `statement` Points with

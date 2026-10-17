@@ -82,7 +82,7 @@ not something to reconcile silently.
 | 62 | `tortoise_mitigate_operator` | `tool_registry.py:520` | **no replacement** | `adjust_relationship` | absent |
 | 63 | `tortoise_onboarding_demo_create` | `tool_registry.py:1175` | **no replacement** | `REMOVED` | absent |
 | 64 | `tortoise_onboarding_github_connect` | `tool_registry.py:1250` | **no replacement** | `REMOVED` | absent |
-| 65 | `tortoise_onboarding_github_index` | `tool_registry.py:1260` | `tortoise_manage_sources(action="enable", source="github_issues")` | `manage_sources` | warning shim |
+| 65 | `tortoise_onboarding_github_index` | `tool_registry.py:1260` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | warning shim |
 | 66 | `tortoise_onboarding_github_status` | `tool_registry.py:1270` | **no replacement** | `REMOVED` | absent |
 | 67 | `tortoise_onboarding_seed` | `tool_registry.py:1194` | **no replacement** | `REMOVED` | absent |
 | 68 | `tortoise_onboarding_session_recording` | `tool_registry.py:1240` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | warning shim |
@@ -205,7 +205,7 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_list_pointkinds` | `graph_overview` | `tortoise_overview(section="pointkinds")` | `graph_overview` | AGREE |
 | `tortoise_list_sources` | `graph_overview` | `tortoise_overview(section="sources")` | `graph_overview` | AGREE |
 | `tortoise_list_tags` | `graph_overview` | `tortoise_overview(section="tags")` | `graph_overview` | AGREE |
-| `tortoise_onboarding_github_index` | `manage_sources` | `tortoise_manage_sources(action="enable", source="github_issues")` | `manage_sources` | AGREE |
+| `tortoise_onboarding_github_index` | `manage_sources` | `tortoise_manage_sources(action="enable", source="github_issues") (no per-repo scope: it indexes every connected repo)` | `manage_sources` | AGREE |
 | `tortoise_onboarding_session_recording` | `manage_sources` | `tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")` | `manage_sources` | AGREE |
 | `tortoise_paginated_query` | `search_knowledge` | `tortoise_query(offset=..., limit=...)` | `search_knowledge` | AGREE |
 | `tortoise_query_points_by_tag` | `search_knowledge` | `tortoise_query(tag=...)` | `search_knowledge` | AGREE |

@@ -12744,8 +12744,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         else:
             detail = ("Session recording is disabled for this team. Enable it "
                       "in the dashboard (Memory sources > Agent sessions) or "
-                      "via tortoise_onboarding_session_recording to capture "
-                      "sessions.")
+                      "via tortoise_manage_sources(action=\"enable\", "
+                      "source=\"agent_sessions\") to capture sessions.")
         raise HTTPException(status_code=409, detail=detail)
 
     # #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL — a missing
