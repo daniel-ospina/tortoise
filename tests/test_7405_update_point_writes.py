@@ -502,8 +502,10 @@ def test_a_retried_tag_sync_still_sweeps_the_orphaned_tag(tmp_path):
     left to delete, and a counter-gated sweep would be SKIPPED — stranding an
     orphan ``:Tag`` that ``list_tags`` reports as ``count: 0`` while a rebuilt
     graph (which replays the reconciler from a clean state) has none. The sweep
-    is therefore forced on the retried update path, so it is a function of the
-    caller's tag list and not of the attempt.
+    is therefore forced on every attempt AFTER the first
+    (``sweep_orphans=(_sync_attempts > 1)``), so a retry that follows a landed
+    ``DELETE r`` still sweeps, while the first attempt keeps the graph-wide
+    ``:Tag`` scan off the SDK's hottest mutation door.
     """
     sdk = _sdk(tmp_path, "taggc")
     try:
@@ -1014,6 +1016,149 @@ def test_a_promote_on_an_absent_node_still_surfaces_the_abort(
             sdk.update_point(pid, status="live")
         assert proxy.matching >= 3, (
             "an absent node must keep retrying, not raise after one re-issue")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _EmptyResult:
+    """A result that matched nothing without raising (the transient window)."""
+
+    def __init__(self) -> None:
+        self.result_set: list = []
+        self.rows: list = []
+
+
+class _AbortThenEmptyThenPass(_AbortOnceThenTerminalise):
+    """Abort once, then answer ZERO rows while the node is still LIVE.
+
+    The transient state #8854(b) narrows: the node is absent when the CAS runs
+    (a rebuild mid-replay) and restored — live — before the diagnostic read.
+    Presence alone is not terminality.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            if self.matching == 2:
+                return _EmptyResult()
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+
+def test_retract_mid_skew_does_not_claim_already_terminal(
+        tmp_path, monkeypatch):
+    """A LIVE node restored between the CAS and the read is not terminal.
+
+    Pins the terminality guard: a presence-only witness raises
+    ``ValueError('already terminal')`` here, for a point that is live.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "skew")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortThenEmptyThenPass(proj.g, _RETRACT_CAS_NEEDLE)
+        proj.g = proxy
+
+        out = sdk.retract_point(pid)
+        assert out["status"] == "retracted"
+        assert proxy.matching >= 3, "the CAS was never re-issued after the skew"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_tag_witness_counts_NAMES_not_edges(tmp_path, monkeypatch):
+    """The duplicate-id fan-out must not read as a non-landing tag sync.
+
+    ``MATCH (p:Point {id:$id})`` matches every node carrying that id, so the
+    edge count exceeds the requested NAME count on the documented duplicate
+    shape. Counting DISTINCT tag names keeps the witness a name comparison.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "duptag")
+    try:
+        pid = _pid(sdk)
+        other = _pid(sdk)
+        proj = sdk._get_proj()
+        # Make the id non-unique — the shape `_mark_dirty` and the per-key
+        # witness already account for.
+        proj.g.query("MATCH (n:Point {id:$other}) SET n.id = $pid",
+                     params={"other": other, "pid": pid})
+        proxy = _AbortOnceGraph(proj.g, _TAGGED_NEEDLE, present=True)
+        proj.g = proxy
+
+        sdk.update_point(pid, tags=["dup-tag"])
+
+        assert proxy.applied >= 1, "the tag sync never landed"
+        tags = {r[0] for r in proj.g.query(
+            "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) RETURN t.name",
+            params={"pid": pid}).result_set}
+        assert tags == {"dup-tag"}, tags
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _AbortOnceThenEmptyRows:
+    """Abort once, then answer the SAME statement with an empty result set.
+
+    ``RETURN count(n)`` is a single-row aggregate, so an empty ``result_set``
+    means the statement did not run at all — the premise ``_landed_at_least_one``
+    documents. The per-key loop reads that same shape and must treat it as "this
+    key did not land", never index it.
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            return _EmptyResult()
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_per_key_attempt_with_no_result_row_is_a_non_landing(
+        tmp_path, monkeypatch):
+    """An empty per-key result set must not escape as ``IndexError``.
+
+    ``_write_props`` reads ``result_set[0][0]`` for every key. An empty result
+    set there means the statement did not run (the same premise
+    ``_landed_at_least_one`` guards for). Indexing it blind raises
+    ``IndexError``, which ``retryable_aborted_write`` does not recognise — it
+    escapes as a STRUCTURAL failure and masks the abort that authorised the
+    retry (#8854 review P3). Read as "this key did not land", the witness keeps
+    the call loud with its original error type instead.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "emptyrows")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenEmptyRows(proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, confidence=0.42)
+        assert proxy.matching >= 2, "the per-key SET was never re-issued"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

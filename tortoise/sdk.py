@@ -3079,6 +3079,7 @@ def _raise_update_point_status_error(proj, id: str) -> None:
         f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
     )
 
+
 class _WriteNotLanded(Exception):
     """Internal: an AUTHORISED re-issue completed without applying anything.
 
@@ -10489,11 +10490,19 @@ class TortoiseSDK:
                         return True
                     applied = True
                     for key, val in _props_param.items():
-                        matched = proj.g.query(
+                        _key_rows = proj.g.query(
                             "MATCH (n:Point {id:$id}) SET n += $props "
                             "RETURN count(n)",
                             params={"id": id, "props": {key: val}},
-                        ).result_set[0][0]
+                        ).result_set
+                        # An EMPTY result set is not a number: `count()` is a
+                        # single-row aggregate, so "no row" means the statement
+                        # did not run (`_landed_at_least_one`'s own premise).
+                        # Read it as "this key did not land" — indexing it blind
+                        # raises `IndexError`, which is not a retryable abort, so
+                        # it would escape as a STRUCTURAL failure and MASK the
+                        # abort that authorised the retry (#8854 review P3).
+                        matched = _key_rows[0][0] if _key_rows else 0
                         if not matched:
                             applied = False
                     return applied
@@ -10591,7 +10600,7 @@ class TortoiseSDK:
                     return 0
                 rows = proj.g.query(
                     "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "
-                    "WHERE t.name IN $names RETURN count(t)",
+                    "WHERE t.name IN $names RETURN count(DISTINCT t.name)",
                     params={"pid": id, "names": _sync_wanted},
                 ).result_set
                 return int(rows[0][0]) if rows else 0
