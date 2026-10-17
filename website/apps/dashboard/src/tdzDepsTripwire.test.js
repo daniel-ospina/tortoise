@@ -85,10 +85,9 @@ export function declNames(line) {
  * (a `/\[/` regex inside a hook body desynchronised the paren walk) while
  * inventing violations for a hook call written in a comment or a string.
  *
- * @returns {Array<{start:number, line:number, inner:string}>}
+ * @returns {Array<{start:number, line:number, inner:string, names:string[]}>}
  */
 export function depsArrays(source) {
-  const HOOKS = new Set(['useMemo', 'useEffect', 'useLayoutEffect', 'useCallback'])
   const out = []
   const stack = [parseModule(source)]
   while (stack.length) {
@@ -105,16 +104,10 @@ export function depsArrays(source) {
     // direction, in the one guard that exists for a silent white-screen.
     // No live instance today (no optional hook call in main.jsx).
     if (!/CallExpression$/.test(node.type)) continue
-    const callee = node.callee
-    const name = callee?.type === 'Identifier' ? callee.name
-      // `React?.useMemo(…)` parses as CallExpression with an
-      // OptionalMemberExpression callee, so requiring MemberExpression
-      // dropped it — the same fail-open direction as the call side.
-      : /^(Optional)?MemberExpression$/.test(callee?.type) && !callee.computed && callee.property?.type === 'Identifier' ? callee.property.name
-      : null
-    if (!name || !HOOKS.has(name)) continue
+    const name = calleeName(node.callee)
     const last = node.arguments[node.arguments.length - 1]
-    if (!last || last.type !== 'ArrayExpression') continue
+    if (!name || !last || last.type !== 'ArrayExpression') continue
+    if (!isDepsHook(name, node.arguments)) continue
     // The NAMES come from the elements, not from splitting the inner text: a
     // comment inside the array (`[a, // why\n lateB]`) swallowed the identifier
     // that followed it — the same hand-lexing hazard the AST seam removes.
@@ -132,6 +125,48 @@ export function depsArrays(source) {
     })
   }
   return out.sort((a, b) => a.start - b.start)
+}
+
+/**
+ * The hook's NAME from its callee, in any spelling that is statically known:
+ * `useMemo`, `React.useMemo`, `React?.useMemo` (OptionalMemberExpression) and
+ * `React['useMemo']` (a COMPUTED member with a static string key).
+ *
+ * #3726 cycle 4: the computed form and the custom-hook population were the last
+ * two shapes origin/main's punctuation anchor caught and the first AST revision
+ * did not — a narrowing that the identity pin structurally cannot see, because
+ * `found` is produced by the same function (`useThing(() => …, [lateX])` added
+ * tomorrow would be invisible to the #2426/#2621/#2709 guard). A DYNAMIC key
+ * (`React[hookName]`) is unresolvable statically and stays out of scope.
+ */
+function calleeName(callee) {
+  if (!callee) return null
+  if (callee.type === 'Identifier') return callee.name
+  if (!/^(Optional)?MemberExpression$/.test(callee.type)) return null
+  const property = callee.property
+  if (!callee.computed) return property?.type === 'Identifier' ? property.name : null
+  return property?.type === 'StringLiteral' ? property.value : null
+}
+
+/** The four hooks React defines that take `(callback, deps)`. */
+const DEPS_HOOKS = new Set(['useMemo', 'useEffect', 'useLayoutEffect', 'useCallback'])
+
+/**
+ * Is this call a hook carrying a deps array?
+ *
+ * The four `DEPS_HOOKS` are the `(callback, deps)` built-ins. EVERY other hook is
+ * scanned too — built-in (`useSyncExternalStore`) or CUSTOM (`useThing(fn, deps)`)
+ * — because the arrow/deps shape is a React-wide convention and an allow-list is
+ * a silent population narrowing. The guard that keeps the widening honest is
+ * ARITY: the deps array must be the LAST of at least two arguments. That is what
+ * excludes `useState([a, b])` — an array INITIAL VALUE, its only argument, which
+ * a bare `/^use/` prefix rule would have misread as deps (7 such sites in
+ * main.jsx today). Residual, stated: a hook that takes the deps array as its ONLY
+ * argument is not scanned; no such hook exists here.
+ */
+function isDepsHook(name, args) {
+  if (!/^use[A-Z]/.test(name)) return false
+  return DEPS_HOOKS.has(name) || args.length >= 2
 }
 
 /**
@@ -400,6 +435,60 @@ test('#3726: `React?.useMemo(…)` (optional MEMBER) is scanned too', () => {
     assert.deepEqual(findTdzDeps(source).map((v) => v.name), ['lateOM'],
       `an optional member callee must not hide the deps array: ${call}`)
   }
+})
+
+test('#3726: a COMPUTED-MEMBER hook callee (`React[\'useMemo\']`) is scanned too', () => {
+  // The callee had to be non-computed, so a computed member with a STATIC key —
+  // which origin/main's `}, […]` anchor caught — was skipped: a population
+  // narrowing the identity pin cannot see (the same function produces `found`).
+  for (const call of ["React['useMemo'](() => 1, [lateCM])", 'React["useEffect"](fn, [lateCM])']) {
+    const source = [
+      'function App() {',
+      `  ${call}`,
+      '  const lateCM = 1',
+      '  return null',
+      '}',
+    ].join('\n')
+    assert.deepEqual(findTdzDeps(source).map((v) => v.name), ['lateCM'],
+      `a computed member callee with a static key must not hide the deps array: ${call}`)
+  }
+})
+
+test('#3726: a CUSTOM hook carrying a deps array is scanned (no allow-list narrowing)', () => {
+  // The allow-list of four names meant `useThing(() => …, [lateCustom])` — added
+  // tomorrow — was invisible to the #2426/#2621/#2709 guard, and the identity pin
+  // could not notice, because it is produced by the same scanner. Every `use[A-Z]`
+  // hook is scanned now; `useSyncExternalStore` (a real one in main.jsx) is here
+  // too even though it takes no deps array, so the test is about the population.
+  for (const call of ['useThing(() => 1, [lateCustom])', 'useSyncExternalStore(subscribe, getSnapshot, [lateCustom])']) {
+    const source = [
+      'function App() {',
+      `  ${call}`,
+      '  const lateCustom = 1',
+      '  return null',
+      '}',
+    ].join('\n')
+    assert.deepEqual(findTdzDeps(source).map((v) => v.name), ['lateCustom'],
+      `a hook outside the four built-ins must not hide its deps array: ${call}`)
+  }
+})
+
+test('#3726: an array INITIAL STATE is not a deps array (the widening must not invent one)', () => {
+  // The guard on the widening. `/^use/` on its own would read `useState([a, b])`
+  // as a deps array — 7 such sites exist in main.jsx — and report the array's
+  // ELEMENTS as TDZ violations (a false red). A deps array is the last of at least
+  // two arguments; an initial state is the only argument.
+  const source = [
+    'function App() {',
+    '  const [keys, setKeys] = React.useState([lateA, lateB])',
+    '  const [text, setText] = React.useState([])',
+    '  const lateA = 1',
+    '  const lateB = 2',
+    '  return null',
+    '}',
+  ].join('\n')
+  assert.deepEqual(findTdzDeps(source), [],
+    'a useState initial VALUE is not deps — inventing a violation here would red the suite on correct code')
 })
 
 test('#3726: a comment inside a deps array does not swallow the next name', () => {
