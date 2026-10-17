@@ -2,8 +2,10 @@
 accounting is exact.
 
 Hermetic: temp dirs and committed fixtures only — no Docker, no FalkorDB, no
-network. Nothing is monkeypatched; the property under test is the tool's
-arithmetic over bytes that are really on disk.
+network. The accounting tests are not monkeypatched; the property under test is
+the tool's arithmetic over bytes that are really on disk. The one exception is
+`test_probe_vector_width_is_derived_from_the_embedder`, which monkeypatches
+`tortoise.embeddings.EMBEDDING_DIM` on purpose — that rotation IS the property.
 
 Why these tests exist
 =====================
@@ -575,6 +577,20 @@ def test_probe_pins_its_published_outputs(
     assert keys_added == 202
     assert growth == vector_growth + keys_added
 
+    # WHERE those 202 B come from, and why they are not a second charge for
+    # keys the baseline already has: the committed record carries #5004's three
+    # identity keys at its TOP LEVEL (the fixture's stub values), while `point`
+    # carries none — and `stamp_journal_embedding` writes the identity INSIDE
+    # the payload, which is where the producers put it. Pinning the placement is
+    # what makes the NOTE in the probe's own output (`"... plus #5004's identity
+    # keys at the record's TOP LEVEL ..."`) a checked claim instead of prose: a
+    # fixture edit that dropped the baseline stubs, or a stamp that stopped
+    # attesting inside `point`, reds here.
+    for key in ("embedding_model", "embedding_revision", "embedding_text_hash"):
+        assert key in plain_point               # baseline: at the record level
+        assert key not in plain_point["point"]  # ... and NOT in the payload
+        assert key in stamped_point["point"]    # the stamp adds the payload copy
+
     # The published whole-corpus figures, measured through the tool the probe
     # itself uses (`measure`), on the bytes the probe itself writes.
     committed_dir = tmp_path / "committed"
@@ -604,6 +620,9 @@ def test_probe_pins_its_published_outputs(
     assert "p50    219 B" in out                 # the corpus p50, published 3×
     assert "8,414 B (21.9 chars/float)" in out
     assert "42,070 / 51,346 B (81.9%)" in out
+    # The NOTE the README pastes states WHERE the baseline's identity keys sit —
+    # the placement the 202 B attribution above depends on.
+    assert "#5004's identity keys at the record's TOP LEVEL" in out
 
 
 @pytest.mark.parametrize("bad", ["not json at all", "[1, 2, 3]", "42", '"s"'])

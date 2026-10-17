@@ -68,8 +68,11 @@ vector: 384-d, BAAI/bge-small-en-v1.5, stamped through stamp_journal_embedding (
   of which the vector's bytes:                                 8,414 B (21.9 chars/float)
   NOTE: 'as committed' is the committed record UNCHANGED — the
   PointAdded one already carries a 2-element placeholder vector
-  [0.1, 0.2] plus #5004's identity keys, so it is NOT a vectorless
-  record: growth over it understates the vector's own cost.
+  [0.1, 0.2] plus #5004's identity keys at the record's TOP LEVEL (the
+  fixture's 'm1'/'r1'/'th1' stubs), so it is NOT a vectorless record:
+  growth over it understates the vector's own cost. The +202 B in the
+  decomposition is the POINT-payload copies the stamp inserts, where
+  production writes them — not a second charge for the baseline keys.
 
 == the 29-type corpus, measured WHOLE (all 39 committed records — a record-type mix, NOT an operation mix)
   as committed        39 records     8,711 B  mean   223.4 B  p50    218 B  p95    336 B  max    570 B
@@ -90,7 +93,7 @@ VERDICT: a measurement, not a bound — the retention/rotation/checkpoint shape 
 | input | what is real about it |
 |---|---|
 | record shapes | the committed corpus `supabase/tests/fixtures/record_projection_journal.jsonl` — all 39 records, 29 emitted event types |
-| WHICH record of a type | the **fullest** committed record of that type (`probe.richest_by_type`). Ten types appear more than once, and taking the last one would have measured `PointAdded`'s *minimal* shape (246 B — no `kind`, no `content_hash`, no identity keys, no `point.subtype`), understating a create by ~3.4% and reporting a baseline no writer emits. The published rows are therefore the production-shaped records: `PointAdded` 570 B **as committed** — that committed record already carries a 2-element placeholder vector `[0.1, 0.2]` and #5004's three identity keys, so it is **not** a vectorless record (a genuinely vectorless `PointAdded` is smaller still) — and `EntityLinked` 249 B. |
+| WHICH record of a type | the **fullest** committed record of that type (`probe.richest_by_type`). Ten types appear more than once, and taking the last one would have measured `PointAdded`'s *minimal* shape (246 B — no `kind`, no `content_hash`, no identity keys, no `point.subtype`), understating a create by ~3.4% and reporting a baseline no writer emits. The published rows are therefore the production-shaped records: `PointAdded` 570 B **as committed** — that committed record already carries a 2-element placeholder vector `[0.1, 0.2]` and #5004's three identity keys at the record's **top level** (the fixture's `"m1"` / `"r1"` / `"th1"` stubs), so it is **not** a vectorless record (a genuinely vectorless `PointAdded` is smaller still). The `+202 B` the decomposition charges to those keys is the **point-payload** copies `stamp_journal_embedding` inserts inside `point`, where production writes them — the baseline's top-level stubs are not charged twice. Pinned by `test_probe_pins_its_published_outputs` — and `EntityLinked` 249 B. |
 | the corpus re-encoded | every record is round-tripped `json.loads` → `json.dumps` with the writer's DEFAULT separators (comma-space between items, colon-space after a key), which is exactly what `EventLog.append` writes (`json.dumps(event, ensure_ascii=False)`). The committed fixture is compact, so **`tools/journal_growth.py <fixture>` reports the file's own 8,023 B** while this table's `as committed` row reports **8,711 B** for the same 39 records in the bytes a live journal stores. Both are correct; they are different bytes. |
 | the vector | width = the pinned embedder's (`tortoise.embeddings.EMBEDDING_MODEL`, BAAI/bge-small-en-v1.5, **384**); encoded by `tortoise.embeddings.stamp_journal_embedding` — the SAME seam `TortoiseSDK._emit_event` and `EventAPI._point` call — so the float reprs and the `embedding_model` / `embedding_revision` / `embedding_text_hash` identity keys are production code, not a probe re-implementation |
 | the vector's values | a seeded unit vector. Bytes do not depend on which text was encoded: same width, same range, same repr length |
@@ -112,7 +115,9 @@ replay re-encodes it); only a CALLER-supplied vector rides that record.
    decomposes exactly: the 8,414 B of vector text *replaces* the 10 B
    placeholder `[0.1, 0.2]` (**+8,404 B**) and the three identity keys #5004
    stamps (`embedding_text_hash`, `embedding_model`, `embedding_revision`) add
-   the remaining **202 B**. So the vector's encoding is ~98% of the growth and
+   the remaining **202 B** — inserted inside `point`, where the producers write
+   them; the committed fixture's stub copies sit at the record's top level and
+   are part of the 570 B baseline, not a second charge. So the vector's encoding is ~98% of the growth and
    the `stamp_journal_embedding` seam is not what costs memory — the encoding
    is. (The committed baseline is not vectorless; see the probe's NOTE.)
 2. **Creates dominate; revisions are cheap.** A content or metadata revision is
@@ -167,5 +172,5 @@ needs its own decision and its own tests.
 
 ```console
 $ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_journal_growth.py -q
-25 passed
+26 passed
 ```

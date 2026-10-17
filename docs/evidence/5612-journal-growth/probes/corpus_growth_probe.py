@@ -160,8 +160,11 @@ def main() -> int:
           f"({len(json.dumps(emb)) / VECTOR_WIDTH:.1f} chars/float)")
     print("  NOTE: 'as committed' is the committed record UNCHANGED — the")
     print("  PointAdded one already carries a 2-element placeholder vector")
-    print("  [0.1, 0.2] plus #5004's identity keys, so it is NOT a vectorless")
-    print("  record: growth over it understates the vector's own cost.")
+    print("  [0.1, 0.2] plus #5004's identity keys at the record's TOP LEVEL (the")
+    print("  fixture's 'm1'/'r1'/'th1' stubs), so it is NOT a vectorless record:")
+    print("  growth over it understates the vector's own cost. The +202 B in the")
+    print("  decomposition is the POINT-payload copies the stamp inserts, where")
+    print("  production writes them — not a second charge for the baseline keys.")
     print()
 
     with tempfile.TemporaryDirectory() as tmp:
