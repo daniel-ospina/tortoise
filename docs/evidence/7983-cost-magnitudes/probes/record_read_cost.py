@@ -23,8 +23,11 @@ Shape of the planted tenant: `S` = the §17.4.2 stock, 89,701 resident nodes /
 tenant. The content width is CALIBRATED to the dogfood MEAN — measured
 2026-10-17 in `graph-content-census.json` (`avg(size(content))` = **1,121.4 B**,
 max 19,061 B, and 4,145/10,374 = **39.96%** of Points carry a 384-d vector) — and
-the planted width is measured back and PRINTED, so no figure here depends on the
-generator expression. ⚠️ **The dogfood TAIL (max 19,061 B, the TOAST regime) is
+the planted width is measured back and PRINTED — on BOTH bases, because they are
+different populations: 1,121.4 B is the mean over the Points that CARRY content
+(5,080 of 10,374 = 49.0%), while the mean over ALL Points is **549.1 B**
+(5,696,946 B ÷ 10,374), which is what a per-NODE footprint needs. The plant
+therefore NULLs content on 51% of rows, exactly as the dogfood graph does. ⚠️ **The dogfood TAIL (max 19,061 B, the TOAST regime) is
 deliberately NOT planted**, so the per-tenant footprint this reports is a
 **LOWER BOUND** for a tenant whose text hits the tail.
 
@@ -138,7 +141,9 @@ def plant(conn, tenants: int, nodes_per_tenant: int) -> None:
                 (org_id, graph_id, node_key, node_label, id, content, status,
                  point_kind, embedding, created_at)
             SELECT %(org)s, %(graph)s, 'p-' || g, 'Point', 'p-' || g,
-                   'claim ' || g || ' ' || repeat('x', 1021 + (g %% 201)),
+                   CASE WHEN g %% 100 < 49
+                        THEN 'claim ' || g || ' ' || repeat('x', 1021 + (g %% 201))
+                        ELSE NULL END,
                    'live', 'fact',
                    CASE WHEN g %% 5 < 2 THEN (
                         SELECT jsonb_agg(round(sin(g * 0.001 + j)::numeric, 6))
@@ -181,13 +186,17 @@ def measure(conn, tenants: int) -> dict:
     # generator expression (the dogfood mean motivates the calibration; see the
     # module docstring — the 19 kB tail is deliberately NOT planted).
     cur.execute(
-        "SELECT avg(length(content)), max(length(content)) FROM public.point "
-        "WHERE org_id = %s AND graph_id = %s",
+        "SELECT avg(length(content)), max(length(content)), "
+        "       sum(coalesce(length(content), 0))::numeric / count(*), "
+        "       avg(CASE WHEN content IS NOT NULL THEN 1.0 ELSE 0.0 END) "
+        "FROM public.point WHERE org_id = %s AND graph_id = %s",
         ("rho7983-org-0", "rho7983-graph-0"),
     )
-    avg_c, max_c = cur.fetchone()
+    avg_c, max_c, overall_c, carry = cur.fetchone()
     out["planted_content_bytes_avg"] = round(float(avg_c), 1)
     out["planted_content_bytes_max"] = int(max_c)
+    out["planted_content_bytes_overall"] = round(float(overall_c), 1)
+    out["planted_content_carry_share"] = round(float(carry), 4)
     cur.execute(
         "SELECT pg_column_size(t) FROM public.point t WHERE org_id = %s LIMIT 2000",
         ("rho7983-org-0",),
@@ -236,10 +245,18 @@ def arithmetic(m: dict) -> None:
     per_tenant_gb = m["bytes_per_tenant"] / 1e9
     disk_line = per_tenant_gb * RATE_DISK_GB_MONTH
     print("\n── measured ────────────────────────────────────────────────")
+    # BOTH means, because they are different populations and the footprint needs
+    # the OVERALL one: `avg()` skips NULLs, so quoting 1,121.4 B per NODE applies
+    # the content-carrying mean to the ~51% of Points that carry none.
     print(
-        f"planted content width          : {m['planted_content_bytes_avg']:.0f} B mean, "
-        f"{m['planted_content_bytes_max']} B max (the dogfood MEAN 1,121.4 B; the "
-        f"19,061 B TAIL is NOT planted)"
+        f"planted content width          : {m['planted_content_bytes_avg']:.0f} B mean "
+        f"over the {m['planted_content_carry_share']:.1%} of Points that CARRY "
+        f"content, {m['planted_content_bytes_overall']:.0f} B over ALL of them "
+        f"(dogfood: 1,121.4 B / 549.1 B at the same two bases)"
+    )
+    print(
+        "  ⚠️ the dogfood's 19,061 B content TAIL is NOT planted — no TOAST regime "
+        "— so the footprint below is a LOWER BOUND for a tenant that hits it"
     )
     print(
         f"record row width                : {m['row_bytes_median']:.0f} B median, "

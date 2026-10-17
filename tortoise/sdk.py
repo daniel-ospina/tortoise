@@ -5176,6 +5176,22 @@ def _read_stored_number(value, default):
         return default
 
 
+def _ledger_record(label: str, rows: list[dict]) -> None:
+    """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
+
+    Every product read path that returns ROWS calls this with the label those
+    rows come from, so the ledger sees all of them — not just the FTS funnel.
+    OFF by default and never imported when off: one env lookup (the #4097 truthy
+    contract), and a ledger failure is swallowed inside the module (a measurement
+    may not break the thing it measures).
+    """
+    if not rows or not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
+        return
+    from . import read_ledger
+
+    read_ledger.record_rows(label, rows)
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -13081,6 +13097,11 @@ class TortoiseSDK:
             params={**params, "skip": skip, "limit": limit},
         ).result_set
         results = [r[0] for r in rows]
+        # #7983: a product READ of these Point keys — the ledger's instrument for
+        # `f` must see the structural query path, not only the FTS funnel, or the
+        # keys it serves are reported as never read (the flattering direction for
+        # the split's own saving).
+        _ledger_record("Point", results)
 
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
@@ -13096,7 +13117,13 @@ class TortoiseSDK:
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        return rows[0][0] if rows else {}
+        props = rows[0][0] if rows else {}
+        # #7983: this is a product READ of exactly one key — the ledger's
+        # instrument for `f` must see it, or `f` reports the key as never read
+        # while a caller is fetching it by id (the flattering direction).
+        if props:
+            _ledger_record("Point", [props])
+        return props
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
@@ -13344,7 +13371,9 @@ class TortoiseSDK:
             "ORDER BY p.createdAt DESC",
             params={"tag": tag},
         ).result_set
-        return [r[0] for r in rows]
+        points = [r[0] for r in rows]
+        _ledger_record("Point", points)  # #7983: a product read of these keys
+        return points
 
     def list_namespaces(self) -> list[dict]:
         """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""
@@ -21355,7 +21384,8 @@ class TortoiseSDK:
         # extracts no key and returns a byte-identical response (#4097's truthy
         # contract, the one every other boolean env read in the tree uses).
         _read_ledger = None
-        if is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
+        _read_ledger_enabled = is_truthy(os.environ.get("TORTOISE_READ_LEDGER"))
+        if _read_ledger_enabled:
             from . import read_ledger as _read_ledger
 
         def _with_read_status(rows: list[dict]) -> list[dict]:
@@ -21386,7 +21416,7 @@ class TortoiseSDK:
                 read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
-            if _read_ledger is not None and rows:
+            if _read_ledger is not None and rows and _read_ledger_enabled:
                 # The ledger never changes the answer: it records the
                 # `(label, key)` of every row this read returned, and a ledger
                 # failure is swallowed inside the module (a measurement may not
@@ -21436,7 +21466,19 @@ class TortoiseSDK:
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
         # entity_type stays "document").
-        label = "Source" if entity_type == "document" else entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+        # The alias mapping lives in `read_ledger` (next to the key contract) so
+        # the ledger's coordinate and this funnel cannot disagree: an OPERATOR is
+        # a :Point and a document IS a :Source, so recording either under its
+        # caller-facing name would be a key the stock can never join. The
+        # fallback is the pre-existing expression, kept byte-identical for the
+        # default (flag-off) deployment. The two are not pinned to each other by a
+        # test (the fallback is unused once the ledger is on); what IS pinned is
+        # the mapping itself, alias by alias.
+        label = (
+            _read_ledger.label_for_entity_type(entity_type)
+            if _read_ledger is not None
+            else ("Source" if entity_type == "document" else entity_type.capitalize())
+        )
         # Operator: Point nodes with is_operator=true, kind=op_type
         # Source: Source nodes, kind=sourceKind
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind", "operator": "op_type", "source": "sourceKind"}[entity_type]

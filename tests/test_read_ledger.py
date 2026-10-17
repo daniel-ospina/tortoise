@@ -40,6 +40,7 @@ They run on the embedded carve-out (``TORTOISE_TEST_CARVE_OUT=1``) or a
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -244,6 +245,51 @@ def test_a_batch_is_one_append(ledger, monkeypatch):
     # All 200 lines landed in that one write; none of the keys was ever
     # registered as stock, so every one is a reported hole.
     assert fold(ledger).unregistered_reads == 200
+
+
+def test_rotation_restarts_recording(ledger, monkeypatch):
+    """The cap is a warn-once latch on the FILE, never a permanent stop.
+
+    The warning tells an operator to rotate the ledger. If the latch outlived
+    the file, the rotated ledger would record nothing for the rest of the
+    process and its first report would read `f = 0` — "nothing has been read
+    since we started watching" misread as "nothing is read".
+    """
+    monkeypatch.setattr(read_ledger, "_max_bytes", lambda: 400)
+    for i in range(50):
+        read_ledger.record_stock("Point", f"p{i}", nbytes=10, path=ledger)
+    assert fold(ledger).capped is True  # the cap fired and said so
+    # ── rotate: the operator truncates/replaces the file ────────────────────
+    ledger.write_text("")
+    assert read_ledger.record_stock("Point", "p1", nbytes=10, path=ledger) is True
+    assert read_ledger.record_read("Point", "p1", path=ledger) is True
+    assert fold(ledger).rows[(None, "Point", "p1")].read_count == 1
+
+
+def test_an_existing_world_readable_ledger_is_tightened(ledger):
+    """0600 on create cannot tighten an inode that already exists."""
+    ledger.write_text("")  # created by the OS default mode here
+    os.chmod(ledger, 0o644)
+    read_ledger.record_stock("Subject", "acme", nbytes=10, path=ledger)
+    assert (ledger.stat().st_mode & 0o777) == 0o600
+
+
+def test_an_operator_is_recorded_as_a_point():
+    """`operator` is a caller-facing alias, not a graph label.
+
+    Operators are `:Point` nodes with `is_operator = true`. Recording them under
+    `("Operator", id)` would be a coordinate the stock (registered as `Point`)
+    can never join, so their reads would land in `unregistered` and the nodes
+    would stay in the never-read mass — the flattering direction.
+    """
+    assert read_ledger.label_for_entity_type("operator") == "Point"
+    assert read_ledger.label_for_entity_type("document") == "Source"
+    # …and the aliases land on a label the key contract knows.
+    assert "Point" in read_ledger.KEY_FIELDS
+    assert "Source" in read_ledger.KEY_FIELDS
+    # Every other caller-facing type is its own label.
+    for et in ("point", "event", "subject", "object", "source"):
+        assert read_ledger.label_for_entity_type(et) == et.capitalize()
 
 
 def test_label_is_part_of_the_coordinate(ledger):

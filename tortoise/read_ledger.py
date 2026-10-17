@@ -105,6 +105,26 @@ EVENT_CAPPED = "capped"
 #: claim a completeness it never had.
 EVENT_UNRESOLVED = "unresolved"
 
+#: Caller-facing entity types that are NOT graph labels: a document IS a
+#: `:Source` (D10, ONTOLOGY v3.15 §4.4) and an OPERATOR IS A `:Point`
+#: (`is_operator: true`), so recording `("Operator", id)` or `("Document", id)`
+#: would be a coordinate the stock (registered under the real label) can never
+#: join — the read then sits in `unregistered` and its node stays in the
+#: never-read mass, which is the flattering direction.
+ENTITY_TYPE_TO_LABEL: dict[str, str] = {"document": "Source", "operator": "Point"}
+
+
+def label_for_entity_type(entity_type: str) -> str:
+    """The graph LABEL a caller-facing `entity_type` reads from.
+
+    `point→Point`, `event→Event`, `subject→Subject`, `object→Object`, plus the
+    two aliases above. Kept here, next to `KEY_FIELDS`, so a reader can check the
+    two together — and pinned by a test that walks every alias the SDK can
+    hand it.
+    """
+    return ENTITY_TYPE_TO_LABEL.get(entity_type, entity_type.capitalize())
+
+
 #: The record's key columns, per label — `public.node_identity.key_property`
 #: generated from the label (#7955's identity contract). The RECORD is the
 #: authority; `tests/test_read_ledger.py` pins this map against the migration.
@@ -183,6 +203,9 @@ def _warn_once(key: str, msg: str, *args: object) -> None:
 #: exists because the tests pass many, and a module-level set may not grow with
 #: the number of distinct paths a process ever sees.
 _dirs_made: set[str] = set()
+#: Paths whose 0600 mode has been checked once this process (the check is a
+#: `stat`, and the answer cannot change unless someone chmods the file).
+_mode_checked: set[str] = set()
 
 
 def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> int:
@@ -228,7 +251,13 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # open and cannot see another appender's bytes — the case a multi-process
         # ledger exists for.
         size = target.stat().st_size if target.exists() else 0
-        if size >= cap or key in _capped:
+        # The cap is measured EVERY append and `_capped` is only a warn-once
+        # latch — never a permanent stop. A rotated (truncated or replaced) file
+        # must start recording again, or an operator who follows the warning's
+        # own instruction ("rotate it") would get a silent, read-free ledger
+        # whose first report says f = 0: the measurement-window trap this module
+        # exists to refuse.
+        if size >= cap:
             if key not in _capped and not _tail_is_capped(target):
                 with open(target, "ab") as fh:
                     fh.write(
@@ -256,7 +285,19 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # 0600 on CREATE: the ledger holds tenant identifiers (`Subject.name`,
         # `Object.name`, `Source.url`), so it must not be world-readable just
         # because the umask says so. `os.open` is the only portable way to pass
-        # a creation mode through `O_APPEND`; an existing file keeps its mode.
+        # a creation mode through `O_APPEND` — and it cannot TIGHTEN an existing
+        # inode, so a file someone pre-created (a restored backup, an earlier run
+        # under a looser umask) is chmod'ed the first time this process writes to
+        # it. Trusting the create mode alone would leave tenant identifiers
+        # world-readable on exactly the files it was added for.
+        if key not in _mode_checked:
+            try:
+                if target.exists() and (target.stat().st_mode & 0o077):
+                    os.chmod(target, 0o600)
+            except OSError:  # pragma: no cover — not ours to fail the read path
+                pass
+            if len(_mode_checked) < 64:
+                _mode_checked.add(key)
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             os.write(fd, blob)
