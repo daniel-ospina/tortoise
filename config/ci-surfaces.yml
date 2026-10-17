@@ -1605,6 +1605,16 @@ surfaces:
   # match no named pattern, so they fall through to `core`: without THIS entry
   # the guard would not run on a change to the site it was written for.
   - test_bounded_raw_clients_3065.py
+  # #2969 (residual): the resolved socket bound must be the wait the caller
+  # actually gets — `_bounded_server_socket_kwargs()` carries the bounded retry
+  # policy too, so redis-py's function-signature default (3 retries) cannot
+  # multiply the knob by ~4. The subject is
+  # `tortoise/projection/__init__.py` (a SHARED_MODULE: it selects the full
+  # matrix on its own), but the pin also guards the `retry=` key that
+  # `session_indexer.py` / `backup.py` / `__main__.py` / `acl_graph_users.py`
+  # spread — those fall through to `core`, so this registration is what runs
+  # the guard on a change to any of them.
+  - test_socket_bound_not_multiplied_2969.py
   - test_boot_regressions.py
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
@@ -5591,6 +5601,7 @@ durations:
   test_vet_gate_5005.py: 0.5
   test_vocab_gating_by_graph.py: 5.1
   test_bounded_raw_clients_3065.py: 3.0
+  test_socket_bound_not_multiplied_2969.py: 4.0  # unmeasured — file ADDED BY THIS PR (#3400 trap: the refresher samples push-to-main runs only, so a new file packs at the flat 2.0s default and drops duration coverage under the 90% floor). Local embedded-lane reading: 7.2s for the 5 tests including first-import of redis/falkordb/tortoise.projection; the two timing tests themselves are ~1.0s + ~2.2s. Refresh from the first post-merge run.
   test_entity_identity.py: 4.1
   test_3589_3326_salvage.py: 4.2
   test_5388_org_enumeration_completeness.py: 2.5

@@ -29,7 +29,7 @@ from collections import defaultdict
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
@@ -163,8 +163,8 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
     return value
 
 
-def _bounded_server_socket_kwargs() -> dict[str, float | None]:
-    """The product's bounded socket policy, as server-client kwargs.
+def _bounded_server_socket_kwargs() -> dict[str, Any]:
+    """The product's bounded server-client policy, as constructor kwargs.
 
     ONE resolution point for every raw server-lane client the package builds:
     the projection's host branch, ``session_indexer``'s graph-entity lookup,
@@ -179,11 +179,25 @@ def _bounded_server_socket_kwargs() -> dict[str, float | None]:
     pre-#2850 literals (5s connect / 10s read), so neither knob reached them
     either — the same defect, one step milder (bounded, but not tunable).
 
-    The returned pair is byte-identical to what the host branch has always
+    The socket pair is byte-identical to what the host branch has always
     passed, so a knob set for the product is now set for every product client:
     ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` / ``TORTOISE_DB_SOCKET_TIMEOUT``
     (parsed by ``_resolve_socket_timeout``, which fails loud on a typo) with
     ``_socket_timeouts()`` supplying the default.
+
+    The dict ALSO carries ``retry`` (#2969 residual), because a socket bound
+    multiplied by the client's own retry loop is not the bound the operator
+    set. On the pinned ``redis 7.4.1`` a bare ``redis.Redis``/``FalkorDB``
+    carries ``Retry(ExponentialWithJitterBackoff(), retries=3)`` as a
+    FUNCTION-SIGNATURE default, and ``TimeoutError`` is one of its supported
+    errors — so a 1s read bound was measured parking the caller for **7.57s**
+    (and the eval lane's 120s bound for ~8 minutes), the exact 4x-amplification
+    the owner measured as ``184s ~= 4 x 45s`` on #2969. The multiplier is not
+    visible at any call site, which is why the same pin lives here rather than
+    at five constructors that could each forget it. ``_embedded_retry()`` is
+    the SAME one-retry policy #3350 installed on the embedded lane, so the
+    product has one retry policy, not two, and the worst case is statically
+    ``(1 + retries) * socket_timeout + backoff``.
 
     NOT for the embedded (unix-socket) lane: redis-py's ``Redis.__init__``
     drops ``socket_connect_timeout`` on that branch (see
@@ -198,6 +212,7 @@ def _bounded_server_socket_kwargs() -> dict[str, float | None]:
             _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
         "socket_timeout": _resolve_socket_timeout(
             _SOCKET_TIMEOUT_ENV, read_to),
+        "retry": _embedded_retry(),
     }
 
 
@@ -359,10 +374,19 @@ _EMBEDDED_RETRY_CAP = 1.0
 
 
 def _embedded_retry():
-    """Bounded retry policy for the embedded client (#3350).
+    """The product's ONE bounded retry policy (#3350, reused on the server
+    lane by #2969).
 
-    See ``_EMBEDDED_RETRY_COUNT`` for why this exists. Built per call rather
-    than shared so no state is aliased across clients.
+    The name is history: #3350 introduced it for the embedded client, whose
+    window was the first one measured (~59s for one wedged ``RETURN 1``). The
+    HOST lane carried the identical defect — redis-py's function-signature
+    default, multiplied through ``_bounded_server_socket_kwargs()`` — so the
+    same policy is installed there too rather than a second one drifting
+    beside it. See ``_EMBEDDED_RETRY_COUNT`` for why one retry and not zero
+    (one reconnect for a real transport blip, with a bound that can be computed
+    from the knob) or the dependency default (which nobody at the call site
+    chose and which a version bump can change). Built per call rather than
+    shared so no state is aliased across clients.
     """
     from redis.backoff import ExponentialWithJitterBackoff
     from redis.retry import Retry as _Retry
@@ -7345,6 +7369,11 @@ class FalkorProjection(
             # #3065: the bounds come from the shared resolution point rather
             # than being spelled out here — the same values, so the remaining
             # raw clients can share this exact pair instead of a copy of it.
+            # #2969: that dict ALSO carries `retry` — the bound alone is not
+            # the wait, because the client's own retry loop multiplies it
+            # (measured 7.57s for a 1s bound on the dependency default). One
+            # retry, i.e. `2 x socket_timeout + backoff`, is the policy the
+            # embedded lane already installs (#3350).
             self.db = guarded_client(FalkorDB, host=host, port=port,
                                      username=username, password=password,
                                      ssl=ssl,

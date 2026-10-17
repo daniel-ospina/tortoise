@@ -75,6 +75,12 @@ _BOUND_LIVES_ELSEWHERE = {
 # 1. The one resolution point
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _socket_pair(kwargs: dict) -> dict:
+    """The resolver's SOCKET half, so the pinned pairs below stay about the
+    bound while the retry policy is pinned separately (#2969)."""
+    return {k: v for k, v in kwargs.items() if k != "retry"}
+
+
 def test_the_resolver_defaults_to_a_bounded_read_and_connect():
     """Both keys must be PRESENT and positive.
 
@@ -89,7 +95,7 @@ def test_the_resolver_defaults_to_a_bounded_read_and_connect():
     )
 
     kwargs = _bounded_server_socket_kwargs()
-    assert kwargs == {
+    assert _socket_pair(kwargs) == {
         "socket_connect_timeout": _DB_CONNECT_TIMEOUT_DEFAULT,
         "socket_timeout": _DB_SOCKET_TIMEOUT_DEFAULT,
     }
@@ -107,7 +113,7 @@ def test_the_resolver_follows_the_per_lane_knobs(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", "3")
     monkeypatch.setenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", "0.5")
 
-    assert _bounded_server_socket_kwargs() == {
+    assert _socket_pair(_bounded_server_socket_kwargs()) == {
         "socket_connect_timeout": 0.5,
         "socket_timeout": 3.0,
     }
@@ -122,10 +128,14 @@ def test_the_resolver_keeps_the_explicit_unbounded_opt_out(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", "none")
     monkeypatch.setenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", "off")
 
-    assert _bounded_server_socket_kwargs() == {
+    assert _socket_pair(_bounded_server_socket_kwargs()) == {
         "socket_connect_timeout": None,
         "socket_timeout": None,
     }
+    # #2969: the retry policy is INDEPENDENT of the bound's opt-out. Disabling
+    # the bound must not also change the multiplier, or the two knobs would
+    # interact in a way no call site can see.
+    assert _bounded_server_socket_kwargs()["retry"]._retries == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -318,15 +328,17 @@ def test_the_resolved_read_bound_interrupts_a_stalled_read(monkeypatch):
 
     server, held, port = _silent_peer()
     try:
-        # ``retry`` is pinned to zero attempts ON PURPOSE: a client that
-        # retries multiplies the bound (the documented `2 x socket_timeout`
-        # worst case of #3350), so a default retry policy would measure the
-        # product's retry budget rather than the socket read this test is
-        # about. Still bounded either way — a finite retry count is not a
-        # hang — but this assertion is about the BOUND.
+        # ``retry`` is pinned to zero attempts ON PURPOSE: this test is about
+        # the SOCKET BOUND, not the multiplier. The resolver now carries its
+        # own bounded retry (#2969), so it is overridden here rather than
+        # letting the product's `2 x socket_timeout` budget (measured in
+        # ``test_socket_bound_not_multiplied_2969.py``) land in this
+        # assertion.
+        kwargs = {k: v for k, v in _bounded_server_socket_kwargs().items()
+                  if k != "retry"}
         client = redis.Redis(host="127.0.0.1", port=port,
                              retry=Retry(NoBackoff(), 0),
-                             **_bounded_server_socket_kwargs())
+                             **kwargs)
         started = time.monotonic()
         with pytest.raises(redis.exceptions.TimeoutError):
             client.execute_command("PING")

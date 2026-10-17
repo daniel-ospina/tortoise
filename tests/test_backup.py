@@ -221,7 +221,12 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     # reached the snapshot path. The connect bound is therefore the product's
     # 2s (the value #2850 chose to beat a 5s health-check budget), and
     # ``test_bounded_raw_clients_3065.py`` pins the knob override end to end.
-    assert instances[0].kwargs == {
+    # #2969: the same resolver also carries the bounded RETRY policy, so the
+    # configured read bound is not multiplied by redis-py's default (3
+    # retries -> ~4x). Popped here because ``Retry`` has no value equality.
+    kwargs = dict(instances[0].kwargs)
+    retry = kwargs.pop("retry")
+    assert kwargs == {
         "host": "falkordb-cloud.example.com",
         "port": 6380,
         "username": None,
@@ -230,6 +235,10 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
         "socket_connect_timeout": 2.0,
         "socket_timeout": 10.0,
     }
+    assert retry._retries == 1, (
+        "the snapshot client must not inherit redis-py's default retry "
+        "multiplier — one wedged BGSAVE would hold the pool for ~4 x the "
+        "configured bound (#2969)")
     assert instances[0].connection.commands == [("BGSAVE",)]
 
 
