@@ -38,12 +38,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from tortoise.consistency import (
     _PROJECTION_STATE_FORMAT,
     _PROJECTION_STATE_FORMAT_HISTORY,
     check_consistency,
     projection_state_path,
+    record_projection_state,
 )
 from tortoise.projection import FalkorProjection
 
@@ -154,11 +156,16 @@ def test_a_graph_only_non_point_belief_write_is_an_unrecorded_mutation(tmp_path)
 
 
 def test_a_graph_only_non_point_status_write_is_an_unrecorded_mutation(tmp_path):
-    """The same blind spot on ``status`` — the field the entity leg DOES compare.
+    """The same blind spot on ``status``, on the label the COMPARISON bounds out.
 
-    The comparison only decides the keys the JOURNAL states, so a status the
-    journal never wrote on that node is skipped there too; only the baseline can
-    see it. FAILS IF: the digest ignores a non-Point node's ``status``.
+    ``status`` is a field the entity leg compares for Object/Subject ONLY
+    (``entity_parity_bounds["status_compared"]``; ``Event`` carries
+    ``eventStatus`` under a different name and has no such lifecycle fold), so
+    on an ``:Event`` NEITHER half decided it before this change — the
+    comparison skips a key the journal never stated for that node, and the
+    Point-only digest could not move. Only the widened baseline can see it, and
+    that asymmetry is stated in ``_entity_node_view``.
+    FAILS IF: the digest ignores a non-Point node's ``status``.
     """
     proj, log_path, _events = _built(tmp_path)
     try:
@@ -177,6 +184,198 @@ def test_a_graph_only_non_point_status_write_is_an_unrecorded_mutation(tmp_path)
         "digest (#7936)")
     assert second["ok"] is False, second
     assert second["divergence"] == "unrecorded-mutation", second["divergence"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# The index's LABEL SET — one home (the drift that would reopen the bug)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_the_graph_view_label_set_has_one_home(monkeypatch):
+    """The index's labels are DERIVED from the entity fold's declaration.
+
+    A hand-copied label literal is a fail-open with no pin: a fourth creation
+    row in ``_ENTITY_CREATION`` grows ``_REFERENCE_FOLD_ENTITY_LABELS`` through
+    ``_ENTITY_CREATION_EVENT_LABEL``, the label-set pins all stay green, and
+    ``_graph_view`` keeps indexing the old labels — so a graph-only node of the
+    new label leaves ``db_hash`` unmoved, which is exactly the bug this file
+    exists for, returned for a new label. ``_ENTITY_CREATION`` is the declared
+    single home; this pins ``_graph_view``'s set to it.
+
+    Pinned on the QUERY, not only on the constant (review): a constant-level
+    pin cannot see a re-inlined literal in ``_graph_view`` — the constant would
+    still be correct while the query emitted the old labels — so the emitted
+    Cypher is read back through a stub projection with the constant
+    monkeypatched to a single label. FAILS IF: the ``WHERE`` clause stops being
+    built from ``_GRAPH_VIEW_LABELS``.
+    """
+    from tortoise import consistency
+    from tortoise.projection import _ENTITY_ID_PROP, _REFERENCE_FOLD_ENTITY_LABELS
+
+    _GRAPH_VIEW_LABELS = consistency._GRAPH_VIEW_LABELS
+    assert set(_GRAPH_VIEW_LABELS) == {"Point"} | set(
+        _REFERENCE_FOLD_ENTITY_LABELS), _GRAPH_VIEW_LABELS
+    # Order, not just set membership: `Point` first (the lifecycle the Point
+    # leg was built around) and the rest sorted, so the emitted predicate is
+    # deterministic. `tuple(sorted(x))` was always truthy — a no-op assertion.
+    expected_labels = ("Point", *sorted(_REFERENCE_FOLD_ENTITY_LABELS))
+    assert expected_labels == _GRAPH_VIEW_LABELS, _GRAPH_VIEW_LABELS
+    # A duplicate would emit a redundant `n:X OR n:X` predicate and hide an
+    # accidental subtraction from the tuple.
+    assert len(set(_GRAPH_VIEW_LABELS)) == len(_GRAPH_VIEW_LABELS)
+    # A label with no `_ENTITY_ID_PROP` entry is indexed under NOTHING —
+    # `_graph_view_key` returns None for every node of it, which is the same
+    # silent drop the derivation exists to close.
+    assert all(label in _ENTITY_ID_PROP for label in _GRAPH_VIEW_LABELS), (
+        _GRAPH_VIEW_LABELS)
+
+    class _RecordingProjection:
+        def __init__(self):
+            self.cyphers: list[str] = []
+
+        def query(self, cypher, *args, **kwargs):
+            self.cyphers.append(cypher)
+            return SimpleNamespace(result_set=[])
+
+    monkeypatch.setattr(consistency, "_GRAPH_VIEW_LABELS", ("Point",))
+    recorder = _RecordingProjection()
+    assert consistency._graph_view(recorder) == {}
+    assert recorder.cyphers == [
+        "MATCH (n) WHERE n:Point RETURN labels(n), properties(n)"], (
+            recorder.cyphers)
+
+
+def test_a_key_collision_is_resolved_deterministically():
+    """Two nodes claiming ONE ``(label, id)`` key resolve the same way in ANY
+    row order — the digest is a pure function of the graph, not of the store.
+
+    The ``Event``/``id`` fallback means a faithful ``:Event {eventId:'X'}`` and
+    a graph-only ``:Event {id:'X'}`` BOTH key as ``('Event','X')``. ``db_hash``
+    is documented as a pure function of the GRAPH, so the survivor may not be
+    whichever row the store returned LAST: that lets one graph hash two ways,
+    which reads as a false ``unrecorded-mutation``. The label's OWN match key
+    (``eventId``) outranks the fallback, and within one class the canonical
+    rendering decides — both order-independent.
+
+    FAILS IF: the view is last-row-wins (both directions of the collision then
+    disagree). The residual is pinned too (#8879): a collision still keeps ONE
+    entry, so the losing node is not separately visible — stated in
+    ``_graph_view``'s docstring and in ``baseline_digest_does_not_cover``, and
+    filed rather than silently absorbed.
+    """
+    from tortoise.consistency import _graph_view
+
+    faithful = {"eventId": "collide-7936", "id": "collide-7936",
+                "name": "faithful"}
+    graph_only = {"id": "collide-7936", "name": "graph-only"}
+
+    class _StubRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query(self, cypher, *args, **kwargs):
+            return SimpleNamespace(result_set=self.rows)
+
+    def _row(props):
+        return [["Event"], props]
+
+    forward = _graph_view(_StubRows([_row(faithful), _row(graph_only)]))
+    reverse = _graph_view(_StubRows([_row(graph_only), _row(faithful)]))
+    assert forward == reverse, (forward, reverse)
+    assert forward == {("Event", "collide-7936"): faithful}, forward
+    # …and the residual, explicitly: ONE entry, so the losing graph-only node
+    # is not in the digest (#8879 — close it and this assertion should flip).
+    assert len(forward) == 1, forward
+
+    # Same class (both keyed by the fallback): the canonical rendering decides,
+    # not row order.
+    left = {"id": "dup-7936", "name": "aaa"}
+    right = {"id": "dup-7936", "name": "bbb"}
+    same_forward = _graph_view(_StubRows([_row(left), _row(right)]))
+    assert same_forward == _graph_view(_StubRows([_row(right), _row(left)])), (
+        "a same-class collision depends on row order")
+    # ⛔ The equality above is VACUOUS if the fallback is ever deleted (two empty
+    # views are equal), so pin the cardinality too — otherwise this half of the
+    # test silently stops testing anything (#8873 review).
+    assert len(same_forward) == 1, same_forward
+
+
+def test_a_graph_only_id_only_event_is_digest_covered(tmp_path):
+    """An ``:Event`` carrying ``id`` but no ``eventId`` is still indexed.
+
+    The entity WRITERS address an ``:Event`` by ``eventId``, but the BELIEF
+    fold matches every epistemic label with ``MATCH (n:{label} {id:$id})``
+    (``epistemic_label_queries``) — so an ``id``-only Event has a writable
+    belief while an ``eventId``-only index key finds nothing. Keyed on
+    ``eventId`` alone, the narrowing this test would guard is silent: the node
+    is dropped from the digest and a graph-only belief write on it leaves
+    ``db_hash`` unmoved. RED on a build whose ``_graph_view`` keys Event by
+    ``eventId`` only.
+    """
+    proj, log_path, _events = _built(tmp_path)
+    try:
+        first = _verdict(log_path, proj, record_state=True)
+        assert first["ok"] is True, first
+        proj.g.query(
+            "CREATE (e:Event {id:'id-only-event-7936', name:'id-only', "
+            "eventKind:'test', startedAt:'2026-01-01T00:00:00Z'})")
+        second = _verdict(log_path, proj, record_state=False)
+        proj.g.query(
+            "MATCH (e:Event {id:'id-only-event-7936'}) "
+            "SET e.confidence=0.31")
+        third = _verdict(log_path, proj, record_state=False)
+    finally:
+        proj.close()
+
+    assert second["db_hash"] != first["db_hash"], (
+        "a graph-only id-only :Event is not in the baseline index (#7936)")
+    assert second["divergence"] == "unrecorded-mutation", second["divergence"]
+    assert third["db_hash"] != second["db_hash"], (
+        "a belief write on an id-only :Event did not move the baseline — the "
+        "index keys Event by `eventId` alone, while the belief fold matches it "
+        "by `id` (#7936)")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# The hazard the widening must NOT introduce — a false GREEN (#8873 review)
+# ═══════════════════════════════════════════════════════════════════════
+def test_an_id_only_event_cannot_satisfy_the_presence_of_a_buried_one(tmp_path):
+    """The ``id`` fallback is DIGEST-ONLY — it must not launder a burial.
+
+    ``_graph_view`` indexes an ``:Event`` carrying ``id`` but no ``eventId``, by
+    that ``id``, because the BELIEF fold matches that shape (``{id:$id}``) and a
+    graph-only belief write there must move ``db_hash``.
+
+    If the entity COMPARISON shared that key, then burying the faithful
+    ``:Event`` and leaving an ``id``-only node at the same value would answer
+    PRESENT: the presence check finds the impostor, ``_entity_node_view``
+    compares only status + belief (identical on an impostor carrying neither),
+    and the burial reads CLEAN. **A false GREEN is the one verdict this file
+    exists to prevent**, so the comparison leg keys on the DECLARED prop alone.
+
+    Mutation: delete the ``props.get(id_prop[label]) != eid`` guard in
+    ``_entities_from_view`` -> this test reds with ``ok=True``.
+    """
+    proj, log_path, _events = _built(tmp_path)
+    try:
+        first = _verdict(log_path, proj, record_state=True)
+        assert first["ok"] is True, first
+        # Bury the faithful, eventId-keyed node; leave an `id`-only impostor AT
+        # THE SAME VALUE, i.e. exactly the shape the fallback indexes.
+        buried = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) DETACH DELETE e RETURN count(*)",
+            params={"eid": _EVENT_ID}).result_set
+        assert buried and int(buried[0][0]) == 1, buried
+        proj.g.query(
+            "CREATE (e:Event {id:$eid, name:'rekey event', eventKind:'test', "
+            "startedAt:'2026-01-01T00:00:00Z'})", params={"eid": _EVENT_ID})
+        second = _verdict(log_path, proj, record_state=False)
+    finally:
+        proj.close()
+
+    assert second["ok"] is False, (
+        "an id-only :Event satisfied the presence of the buried faithful one — "
+        f"the comparison leg must key on the DECLARED prop only: {second}")
+    assert "absent-from-graph" in json.dumps(second), second
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -206,32 +405,140 @@ def test_the_widened_digest_is_stable_across_a_rebuild(tmp_path):
         "`rebuild_all` of ONE journal moved the baseline digest — the entity "
         "view is not a function of the journal (#7936)")
     assert after_rebuild["ok"] is True, after_rebuild
+#: A journal where the Event lands FIRST, so `_event_plain_merge` really does
+#: mint the `:Object` name stub (deterministic id, `_stub=true`) and the later
+#: `ObjectRegistered` really does ADOPT it via `_upsert_object`'s `ON MATCH
+#: o.id=coalesce($id, o.id)` / `o._stub=NULL`. In `_JOURNAL` the registration
+#: precedes the Event, so no stub is ever minted for that name and adoption is
+#: not what that fixture exercises.
+_STUB_THEN_ADOPT_JOURNAL = [
+    {"type": "EventRecorded", "id": _EVENT_ID, "name": "rekey event",
+     "eventKind": "test", "startedAt": "2026-01-01T00:00:00Z",
+     "subject": "rekey-subject", "object": "rekey-object"},
+    {"type": "ObjectRegistered", "id": _OBJECT_ID, "name": "rekey-object"},
+    {"type": "PointAdded",
+     "point": {"id": _POINT_ID, "content": "rekey point",
+               "pointKind": "statement", "status": "live"}},
+]
 
 
 def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path):
-    """The pre-wipe/adoption half: a node the journal DOES describe is faithful.
+    """The pre-wipe/adoption half: a stub the journal then ADOPTS is faithful.
 
-    The stub Object is adopted by the journal's ``ObjectRegistered`` (the
-    ``ON MATCH`` id write), so its presence is journal-derived even though no
-    record creates it by that id. FAILS IF: the digest keys stubs by something
-    the adoption legitimately changes (``_stub`` is deliberately not covered).
+    ``EventRecorded`` mints an ``:Object`` name stub first (a node NO record
+    creates by its canonical id), then the ``ObjectRegistered`` adopts it
+    (``ON MATCH o.id=coalesce($id, o.id)``, ``o._stub=NULL``). The node's
+    presence and identity are therefore journal-derived, so replaying the same
+    journal must reproduce the same digest. FAILS IF: the index keys a node by
+    something the adoption legitimately changes — ``_stub`` (cleared by the
+    adoption) is deliberately NOT covered, and
+    ``test_the_fingerprint_ignores_the_stub_discriminator`` pins that exclusion
+    directly.
+
+    The verdict is NOT asserted ``ok``: this journal order hits a SEPARATE,
+    PRE-EXISTING false ``content`` divergence on the adopted node's ``status``
+    (``_upsert_object`` writes ``status`` ON CREATE only — the #1350 clobber
+    guard — so adoption leaves it absent while the reference fold applies the
+    ``live`` creation default). Measured identically on ``459f22912`` with the
+    re-key absent; filed as #8872 rather than absorbed here.
+
+    That divergence is pinned EXACTLY (``{"content", {("Object",
+    "status")}}``), not as "anything but ``unrecorded-mutation``" (review): an
+    inequality against one class ABSORBS any NEW divergence the widening could
+    introduce on this node, so the old assertion stayed green through exactly
+    the regression this test exists for.
+
+    Because the #8872 divergence makes the first verdict ``ok=False``,
+    ``check_consistency`` cannot record a baseline for this fixture — so the
+    baseline is SEEDED BY HAND before the rebuild. Without that, ``stored``
+    stays ``None``, ``graph_moved`` is ``False`` by construction, and "the
+    BASELINE must not be what complains" is unfalsifiable (it passed on the
+    pre-fix tree too). The test then PROVES the baseline is live rather than
+    inert: one graph-only belief write on the same adopted node must read
+    ``unrecorded-mutation``.
     """
-    proj, log_path, events = _built(tmp_path)
+    events = _journal_dir(tmp_path, _STUB_THEN_ADOPT_JOURNAL)
+    proj = FalkorProjection(path=str(tmp_path / "adopt.db"),
+                            skip_health_check=True)
+    log_path = str(events / "events.jsonl")
     try:
-        # The stub exists (minted by EventRecorded.object) and was adopted.
+        proj.rebuild_all(str(events), confirm_destructive=True)
         rows = proj.g.query(
             "MATCH (o:Object {name:'rekey-object'}) RETURN o.id, o._stub"
         ).result_set
+        # The stub WAS minted and WAS adopted: the canonical id landed and the
+        # discriminator was cleared.
         assert rows and rows[0][0] == _OBJECT_ID, rows
+        assert rows[0][1] is None, rows
         first = _verdict(log_path, proj, record_state=True)
-        assert first["ok"] is True, first
+        assert first["ok"] is False, first
+        assert first["divergence"] == "content", first["divergence"]
+        assert first["state_recorded"] is False, (
+            "the #8872 divergence is expected to keep the baseline UNRECORDED — "
+            f"if it recorded, re-derive this test: {first}")
+        assert {(d["label"], d["field"])
+                for d in first["divergent_entities"]} == {("Object", "status")}, (
+                    "expected ONLY the pre-existing #8872 status divergence, "
+                    f"got {first['divergent_entities']}")
+        # Seed the baseline the #8872 divergence prevents `check_consistency`
+        # from writing, so the SECOND verdict really has one to compare against.
+        assert record_projection_state(
+            log_path, last_applied_seq=len(_STUB_THEN_ADOPT_JOURNAL),
+            content_hash=first["db_hash"]), "could not seed the baseline"
         proj.rebuild_all(str(events), confirm_destructive=True)
         second = _verdict(log_path, proj, record_state=False)
+        # Falsifiability proof for the baseline half: with THAT baseline in
+        # place, one genuinely unjournalled write on the very node the stub
+        # adoption built DOES read `unrecorded-mutation`. So the assertions
+        # above are not passing because the baseline is absent — they are
+        # passing because adoption did not move it.
+        proj.g.query(
+            "MATCH (o:Object {id:$oid}) SET o.confidence=0.42",
+            params={"oid": _OBJECT_ID})
+        third = _verdict(log_path, proj, record_state=False)
     finally:
         proj.close()
+    assert third["divergence"] == "unrecorded-mutation", (
+        "a graph-only belief write on the adopted node did not read "
+        "unrecorded-mutation, so the seeded baseline is inert and the "
+        f"assertions below are vacuous: {third}")
     assert first["db_hash"] == second["db_hash"], (
         "adoption of a name stub moved the baseline digest (#7936)")
-    assert second["ok"] is True, second
+    # Falsifiable now that a baseline EXISTS: a digest that moved under a still
+    # journal is `unrecorded-mutation`, which is the false RED this rules out.
+    assert second["divergence"] != "unrecorded-mutation", second
+    assert second["ok"] is False and second["divergence"] == "content", (
+        f"only the pre-existing #8872 divergence may remain, got {second}")
+    assert {(d["label"], d["field"])
+            for d in second["divergent_entities"]} == {("Object", "status")}, (
+                f"got {second['divergent_entities']}")
+
+
+def test_the_fingerprint_ignores_the_stub_discriminator(tmp_path):
+    """``_stub`` is cleared by adoption, so it must not be in the digest.
+
+    Pinned on the FINGERPRINT VIEW rather than through a rebuild: two builds of
+    one journal clear the flag identically, so a rebuild comparison cannot
+    discriminate whether ``_stub`` is covered — only the view can.
+    The key the assertion fires on is the SUBJECT stub: nothing in
+    ``_STUB_THEN_ADOPT_JOURNAL`` adopts it (the OBJECT stub is the adopted one,
+    and it is the one whose ``_stub`` this fixture clears).
+    FAILS IF: ``_entity_node_view`` starts copying an undeclared prop.
+    """
+    from tortoise.consistency import _graph_fingerprint, _graph_view
+
+    proj, _log_path, _events = _built(tmp_path, records=_STUB_THEN_ADOPT_JOURNAL)
+    try:
+        view = _graph_view(proj)
+        stub_keys = [k for k, p in view.items()
+                     if k[0] in ("Object", "Subject") and p.get("_stub")]
+        assert stub_keys, (
+            "the fixture minted no stub — the exclusion pin would be vacuous")
+        finger = _graph_fingerprint(view)
+    finally:
+        proj.close()
+    for label, nid in stub_keys:
+        assert "_stub" not in finger[label][nid], finger[label][nid]
 
 
 def test_a_live_graph_and_its_rebuild_share_a_digest(tmp_path):

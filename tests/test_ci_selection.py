@@ -3491,6 +3491,78 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(load_manifest()) == []
 
 
+# The refresher (`tools/ci_timing.py::render_refreshed_manifest`) rewrites a row's
+# VALUE and preserves its trailing comment verbatim, so a note that states WHERE
+# the number came from can outlive the basis it states — the file ships a rule about
+# it above the `durations:` block ("a row's comment is kept only while the value AND
+# its stated basis are unchanged"). Only the mechanically checkable half is pinned
+# here: a row whose value is NOT the flat default must not say it is the default.
+# The COUNTERFACTUAL forms are legitimate and must stay silent — "without the row
+# the file packs at the flat 2.0s default", "its absence packs it at the flat
+# 2.0s default", "a real weight, not the flat 2.0 default" — so the claim is
+# recognised by its VERB (`takes`/`carries`/`holds`/`is` … default), not by the
+# phrase alone. #8254 review P3 found 3 rows stale this way; the 2026-10-17 refresh
+# (#2876) found 5 more, 2 of them of this shape.
+_DURATIONS_ROW_RE = re.compile(
+    r"^  (?P<key>[^\s:#]+\.py):\s+(?P<value>[0-9.]+)(?P<tail>.*)$")
+_FLAT_DEFAULT_CLAIM_RE = re.compile(
+    # A claim about THIS row's weight: "it takes/carries/holds the … flat 2.0s
+    # default", or "the weight is the … flat 2.0s default". The bare copula form is
+    # anchored to a determiner so a note that merely SAYS `is` somewhere and then
+    # describes the counterfactual ("the file is in the fast pool, so its absence
+    # packs it at the flat 2.0s default") is not read as a claim.
+    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+2\.0s?\s+default"
+    r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+2\.0s?\s+default",
+    re.IGNORECASE)
+
+
+def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
+    """Rows that claim the flat default as their OWN basis for a non-default value."""
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None or m.group("key") not in durations:
+            continue
+        value = float(m.group("value"))
+        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        if _FLAT_DEFAULT_CLAIM_RE.search(m.group("tail")):
+            out.append((m.group("key"), value))
+    return out
+
+
+def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
+    """#2876/#8254 (P3): a re-derived value must not keep its old basis note."""
+    from tools.ci_selection import load_manifest
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_the_flat_default(
+        text, load_manifest()["durations"])
+    assert offenders == [], (
+        "a durations row states the #3400 flat 2.0s default as its basis while "
+        "carrying a different value — the refresh re-derived the row and the note "
+        f"went stale: {offenders}. Rewrite the note to the new basis (or drop the "
+        "claim), keeping any #4348 do-not-drop instruction.")
+
+
+def test_flat_default_claim_check_is_not_vacuous():
+    """The guard above must bite on the stale shape and stay quiet on its siblings."""
+    stale = (
+        "  test_a.py: 2.2  # a new file takes the #3400 flat 2.0s default."
+        "\n"
+        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required.")
+    legitimate = (
+        "  test_c.py: 7.2  # unmeasured — without this row the file packs at the"
+        " flat 2.0s default.\n"
+        "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
+        "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
+        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.")
+    durations = {f"test_{c}.py": 1.0 for c in "abcdef"}
+    assert _durations_rows_claiming_the_flat_default(stale, durations) == [
+        ("test_a.py", 2.2), ("test_b.py", 3.7)]
+    assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
+
+
 def test_duration_coverage_guard_backwards_compatible():
     """#3400: an absent/empty durations map is never a hard failure."""
     from tools.ci_selection import duration_coverage_issues
