@@ -377,6 +377,141 @@ def refused_events(entries) -> list[NonFoldedEvent]:
     return [e for e in entries if not e.exempt]
 
 
+# ── The identity-skip collector (#8702) ───────────────────────────────────
+#
+# A SKIP is not a refusal. R8's set above records a record the fold could not
+# resolve to a node and FAILS the run; a skip is the #7406 boundary's deliberate
+# degrade — the fold drops a record whose identity the store cannot take (a NUL
+# or lone-surrogate-bearing id) rather than aborting a replay that has already
+# wiped the graph. That posture is correct and is NOT changed here: a corrupt
+# journal must not make the recovery gate un-runnable on every retry.
+#
+# What it needs is ACCOUNTING. Before this, the only trace of a skip was a log
+# line, so `recover_from_log`'s `applied += 1` counted a dropped record as
+# REPLAYED and reported a complete, faithful recovery over a journal from which
+# it had dropped a record (#8702). The same context-var shape as the R8
+# collector, for the same reason: a fold reached deep inside a run records here
+# without a signature change at every call site.
+
+#: The identity was ABSENT (``None``/``""``) — nothing to merge on.
+IDENTITY_ABSENT = "absent"
+#: The identity is PRESENT but the store cannot take it as a parameter (a
+#: non-``str``, or a ``str`` carrying a NUL / lone surrogate). The cause #8702
+#: exists to name: it is not "missing".
+IDENTITY_UNWRITABLE = "present-but-unwritable"
+
+
+def identity_absent(value) -> bool:
+    """True when the identity is NOT THERE: absent (``None``) or empty (``""``).
+
+    ⛔ PRESENCE, not truthiness (#8840 review P3). ``if not value`` sends ``0``,
+    ``False``, ``[]`` and ``{}`` down the ABSENT branch, so a record whose id IS
+    present is reported as "carries NO point id at all" — the same #8018 class
+    this module exists to close (a report naming a cause that is false for the
+    record it describes). Those values are PRESENT and the store still refuses
+    them; they are classified as unwritable and their shape is named.
+    """
+    return value is None or (isinstance(value, str) and not value)
+
+
+def _unwritable_shape(value) -> str:
+    """Name WHY the store refuses this PRESENT value (the true cause).
+
+    ``_writable_id`` refuses three shapes: a non-``str``, a ``str`` carrying a
+    NUL, and a ``str`` carrying a lone surrogate. A message that asserted
+    "NUL/lone-surrogate bearing" for all of them was FALSE for the non-``str``
+    class — a live journal shape (``#331`` review r4 kept ``isinstance(..., str)``
+    precisely because non-str ids occur) — so the shape is named here, in ONE
+    home, and both the log line and ``reason`` read it (#8840 review P3).
+    """
+    if not isinstance(value, str):
+        return f"it is a {type(value).__name__}, not a str"
+    if "\x00" in value:
+        return "it carries a NUL"
+    return "it carries a lone surrogate"
+
+
+@dataclass(frozen=True)
+class IdentitySkip:
+    """One identity the fold could not write — and whether the RECORD died.
+
+    ``state`` distinguishes the two causes so a report states the TRUE one —
+    #8702's second half is that "missing point id" was reported for an id that
+    is present, which sends an operator to look in the wrong place.
+
+    ``drops_record`` is the GRANULARITY (#8840 review P1). This collector sees
+    every refused identity, and most of them are nested: a healthy ``PointAdded``
+    whose ``aboutEntities`` entry or ``extractedFrom`` URL is refused still
+    writes its node — only the edge/stub is lost. A replay accounting that read
+    *any* entry as "this record was dropped" therefore under-counted ``applied``
+    and could flip ``recovered`` to ``False`` and WIPE a replay that succeeded.
+    Only the creation anchors — the sites where the fold ``return``/``continue``s
+    and the record is genuinely not written — pass ``drops_record=True``.
+    """
+
+    what: str
+    value: object = None
+    label: str = "identity"
+    event_id: str | None = None
+    where: str = ""
+    drops_record: bool = False
+
+    @property
+    def state(self) -> str:
+        return IDENTITY_ABSENT if identity_absent(self.value) else (
+            IDENTITY_UNWRITABLE)
+
+    def describe(self) -> str:
+        """The cause, in the record's own terms (never "missing" for a present id)."""
+        if identity_absent(self.value):
+            return f"{self.what} carries NO {self.label} at all"
+        return (f"{self.what} carries a {self.label} {self.value!r} that "
+                f"is PRESENT but not writable ({_unwritable_shape(self.value)})")
+
+    def __str__(self) -> str:  # pragma: no cover - formatting only
+        where = f"{self.where}: " if self.where else ""
+        loc = f" (event_id={self.event_id!r})" if self.event_id else ""
+        return f"{where}{self.describe()}{loc}"
+
+
+_IDENTITY_SKIPS: ContextVar[list | None] = ContextVar(
+    "tortoise_identity_skip_set", default=None)
+
+
+@contextmanager
+def collect_identity_skips():
+    """Open an identity-skip run. Yields the (mutable) list to inspect.
+
+    Nested runs are independent, exactly like :func:`collect_non_folded`.
+    """
+    entries: list[IdentitySkip] = []
+    token = _IDENTITY_SKIPS.set(entries)
+    try:
+        yield entries
+    finally:
+        _IDENTITY_SKIPS.reset(token)
+
+
+def record_identity_skip(what: str, value, label: str = "identity", *,
+                         event_id: str | None = None,
+                         where: str = "",
+                         drops_record: bool = False) -> IdentitySkip:
+    """Record one identity skip into the active run (if any).
+
+    The LOG LINE is not the record (R8's rule, applied to skips): a caller that
+    must account for a dropped record reads the returned entry, never the log.
+    Outside a run this is a no-op and the call site's own warning remains the
+    only signal — a one-record ``apply()`` has no run boundary.
+    """
+    entry = IdentitySkip(what=str(what), value=value, label=label,
+                         event_id=event_id, where=where,
+                         drops_record=bool(drops_record))
+    entries = _IDENTITY_SKIPS.get()
+    if entries is not None:
+        entries.append(entry)
+    return entry
+
+
 def assert_no_non_folded(entries, *, engine: str = "rebuild") -> None:
     """Fail closed: raise :class:`NonFoldedEventsError` if the run refused any.
 

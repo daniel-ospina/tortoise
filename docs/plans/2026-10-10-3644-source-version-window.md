@@ -251,14 +251,22 @@ intra-record `previousValidTo == validFrom`, with monotone opens).
    ISSUE 2, P1). `_upsert_document` (the `DocumentCreated` fold) bumps
    `contentHash` + `version` on the same hash-diff gate but writes no `validFrom`;
    `_materialize_session_source` (the capture path) rewrites `contentHash` without
-   advancing `version` and is replayed by nothing. Both therefore leave a
+   advancing `version` and mints no window. *(Updated 2026-10-17, #5097: it is
+   no longer "replayed by nothing" — its metadata block DOES replay through a
+   trailing `SourceCreated` that `_upsert_source` folds as a stub completion and
+   that carries the node's `validFrom` verbatim, so a rebuild restores rather
+   than clears a window and never advances `version`. The WINDOW half of this
+   deferral is unchanged: the record mints no window and moves none — see
+   `docs/ONTOLOGY.md` §4.6 and the `validFrom` row of
+   `docs/durability-posture.md`.)* Both therefore leave a
    **present-but-stale** window start on any source the `create_source` path already
    stamped — the node asserts the new version has been valid since the *previous*
    version's start, which is the stale-window failure §4.6 exists to prevent, and
    is reachable only because this PR introduced `validFrom`. Extending the gate to
    them is not a boundary fix: each needs a minted instant that is **also
    replayable** (`_upsert_document` journals `DocumentCreated`;
-   `_materialize_session_source` has no replay arm at all), i.e. a clock/mint
+   `_materialize_session_source` journals its metadata since #5097 but carries no
+   window instant at all), i.e. a clock/mint
    decision this PR deliberately does not take. **Recorded, not silenced**: the
    current wrong behaviour is PINNED by
    `tests/test_source_version_window_3644.py::test_pinned_gap__upsert_document_moves_the_anchor_without_the_window`

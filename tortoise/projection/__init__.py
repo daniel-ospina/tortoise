@@ -64,6 +64,8 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     assert_no_non_folded,
     classify_terminalizer_miss,
     collect_non_folded,
+    identity_absent,
+    record_identity_skip,
     record_non_folded,
 )
 
@@ -4288,15 +4290,18 @@ def _writable_id(val) -> bool:
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
-def _log_identity_skip(what: str, value, label: str = "identity") -> None:
-    """WARN, ONCE, that an unwritable identity made a record be SKIPPED (#7369).
+def _log_identity_skip(what: str, value, label: str = "identity", *,
+                       event_id: str | None = None, where: str = "",
+                       absent_is_ordinary: bool = True,
+                       drops_record: bool = False) -> None:
+    """REPORT and RECORD that an unwritable identity made a record be SKIPPED.
 
-    The boundary change turned what used to be a LOUD abort into a SKIP. The
-    folds run on replay paths whose pass-1a/1b carry no per-event
+    The boundary change (#7369) turned what used to be a LOUD abort into a
+    SKIP. The folds run on replay paths whose pass-1a/1b carry no per-event
     ``try/except``, so before the gate an unwritable identity raised AFTER
     ``_wipe_all_nodes``; now the fold drops the record instead. A drop with no
     log is invisible: an operator cannot tell a deliberate degrade from data
-    loss, which is precisely the risk this change exists to manage.
+    loss, which is precisely the risk that change exists to manage.
 
     This is the ONE place the skip is reported, and it uses the SAME
     ``logger.warning`` mechanism the point-id skips already use
@@ -4305,21 +4310,63 @@ def _log_identity_skip(what: str, value, label: str = "identity") -> None:
     ``label`` the identity's role (MERGE key vs property) so the message says
     WHICH identity was refused.
 
-    An ABSENT identity (``None``/``""``) is NOT logged: the folds default
-    missing identity fields to ``""`` and skip them by design (an event with
-    no subject is ordinary, not a degrade), so logging those would spam the
-    operator with the healthy case and drown the corrupt one. Only a TRUTHY
-    value ``_writable_id`` refuses — the NUL/lone-surrogate-bearing class this
-    gate exists for — is an anomaly worth a warning.
+    ⛔ #8702 — the message must state the TRUE CAUSE. The #7406 guard swap
+    (``isinstance(..., str)`` → ``_writable_id``) left the surrounding
+    sentences saying "missing point id" for an id that is present but cannot
+    ride as a Cypher parameter. That is the same class as #8018 (a report
+    naming a cause that is false for the record it describes): an operator
+    sent to look for a missing field that is right there. The two causes are
+    therefore separated, and the message says which one fired and, when the
+    value is present, what it actually is.
+
+    The skip is also RECORDED (:func:`record_identity_skip`), so a run
+    boundary can COUNT it instead of reading the log — ``recover_from_log``
+    needs that to stop reporting a dropped record as replayed (#8702). The
+    entry, not this line, is the record.
+
+    An ABSENT identity (``None``/``""``) is NOT reported by default: the entity
+    folds default missing identity fields to ``""`` and skip them by design (an
+    event with no subject is ordinary, not a degrade), so logging those would
+    spam the operator with the healthy case and drown the corrupt one. A call
+    site for which an absent identity IS malformed (a Point creation anchor)
+    passes ``absent_is_ordinary=False`` to report — and record — it as its own
+    distinct cause.
+
+    ⛔ ``drops_record`` is the GRANULARITY (#8840 review P1). This function has
+    ~20 call sites and MOST of them are nested inside a record that FOLDS
+    SUCCESSFULLY: ``_upsert`` writes the Point node first and wires its edges
+    after, so a refused ``aboutEntities``/``extractedFrom``/``contains_session``
+    identity loses an edge, not the record. Only the creation anchors — the
+    sites where the fold ``return``/``continue``s and the record is not written
+    at all — pass ``drops_record=True``. ``recover_from_log`` counts a DROPPED
+    RECORD from those entries only; reading *any* entry as a drop made
+    ``applied`` under-count, which flipped ``recovered`` to ``False`` and WIPED
+    a replay that had succeeded — the #7406 harm this work exists to preserve.
     """
-    if not value:
+    if identity_absent(value):
+        if absent_is_ordinary:
+            return
+        entry = record_identity_skip(what, value, label, event_id=event_id,
+                                     where=where, drops_record=drops_record)
+        logger.warning(
+            "%s#8702: skipping %s — %s (event_id=%s), "
+            "so there is no identity to fold; the record is dropped",
+            f"{where}: " if where else "", what, entry.describe(), event_id,
+        )
         return
+    entry = record_identity_skip(what, value, label, event_id=event_id,
+                                 where=where, drops_record=drops_record)
+    # The cause comes from `IdentitySkip.describe()`, NOT a sentence written
+    # here: it names the refused SHAPE (a non-str / a NUL-bearing str / a
+    # lone-surrogate-bearing str), so the "true cause" claim holds for every
+    # value `_writable_id` refuses. Asserting "NUL/lone-surrogate bearing" for
+    # a non-str id was false for a live journal shape (#8840 review P3).
     logger.warning(
-        "#7369: skipping %s — %s %r is not a writable identity (empty, or "
-        "NUL/lone-surrogate bearing); the record is dropped rather than "
-        "reaching FalkorDB and aborting a replay that has already wiped the "
-        "graph",
-        what, label, value,
+        "%s#7369/#8702: skipping %s — %s; the record is dropped rather "
+        "than reaching FalkorDB and aborting a replay that has already wiped "
+        "the graph%s",
+        f"{where}: " if where else "", what, entry.describe(),
+        f" (event_id={event_id})" if event_id else "",
     )
 
 
@@ -7924,10 +7971,20 @@ class FalkorProjection(
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
             # #331 (review r4): str-only ids (non-str would break Cypher params).
+            # #7369/#8702: `_writable_id` refuses an EMPTY id as well as a
+            # NUL/lone-surrogate-bearing one, and the two causes are reported
+            # as themselves — "missing point id" was FALSE for a present id
+            # once the guard changed, and misdirected the operator (#8702).
+            # #8840 review P1: `drops_record=True` — this `return` IS the drop
+            # (the record is not written at all), which is what the replay
+            # accounting counts. Every other `_log_identity_skip` site reports a
+            # NESTED identity of a record that still folds.
             if not _writable_id(p.get("id")):
-                logger.warning(
-                    "FalkorProjection.apply: skipping %s with missing point "
-                    "id (event_id=%s)", t, ev.get("event_id"))
+                _log_identity_skip(t, p.get("id"), "point id",
+                                   event_id=ev.get("event_id"),
+                                   where="FalkorProjection.apply",
+                                   absent_is_ordinary=False,
+                                   drops_record=True)
                 return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -8025,7 +8082,16 @@ class FalkorProjection(
             elif isinstance(p, dict):
                 # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
                 # the skip must be observable (see `_log_identity_skip`).
-                _log_identity_skip("PointPromoted", p.get("id"), "id")
+                # #8840 review P3 (Issue 4): `absent_is_ordinary=False` +
+                # `drops_record=True` — this branch DROPS the record, so an
+                # absent id here is the record's death, not an ordinary empty
+                # entity name. Leaving it ordinary meant the replay counted it
+                # as `applied` with no trace at all.
+                _log_identity_skip("PointPromoted", p.get("id"), "id",
+                                   event_id=ev.get("event_id"),
+                                   where="FalkorProjection.apply",
+                                   absent_is_ordinary=False,
+                                   drops_record=True)
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point
@@ -9892,10 +9958,14 @@ class FalkorProjection(
                 # nothing to index by; skip rather than KeyError in
                 # _upsert_point_props.
                 # #331 (review r4): str-only ids.
+                # #8702: report the TRUE cause (present-but-unwritable is not
+                # "missing") — the guard swap left the old sentence standing.
                 if not _writable_id(p.get("id")):
-                    logger.warning(
-                        "rebuild: skipping %s with missing point id "
-                        "(event_id=%s)", t, ev.get("event_id"))
+                    _log_identity_skip(t, p.get("id"), "point id",
+                                       event_id=ev.get("event_id"),
+                                       where="rebuild",
+                                       absent_is_ordinary=False,
+                                       drops_record=True)
                     continue
                 # #2488/#3299: record the id's LAST hoisted-creation journal
                 # seq — the cross-family survivor anchor (a re-created id's
@@ -10302,8 +10372,15 @@ class FalkorProjection(
                 elif isinstance(p, dict):
                     # #7369: a truthy-but-unwritable id is skipped, not folded
                     # — the skip must be observable (see `_log_identity_skip`).
+                    # #8840 review P3 (Issue 4): the pass-1b sibling of the
+                    # `apply()` anchor — a dropped record, and an absent id here
+                    # is malformed rather than an ordinary empty identity.
                     _log_identity_skip(
-                        "PointPromoted (rebuild)", p.get("id"), "id")
+                        "PointPromoted (rebuild)", p.get("id"), "id",
+                        event_id=ev.get("event_id"),
+                        where="rebuild",
+                        absent_is_ordinary=False,
+                        drops_record=True)
             elif t == "OperatorPromoted":
                 # #785/R16: fold/apply parity with the main handler
                 # (#2256 review P1): UPSERT the snapshot synthesized into
@@ -11877,11 +11954,17 @@ class FalkorProjection(
                 # #331 (review r3): parity with apply()/pass 1a — edge
                 # wiring indexes by p["id"]; skip rather than KeyError.
                 # #331 (review r4): str-only ids.
+                # #8702: report the TRUE cause, and say WHICH pass dropped it —
+                # edge wiring, not the creation fold (pass 1a already skipped
+                # the record, so an operator reading "missing" here looked for
+                # a field that is present).
                 if not _writable_id(p.get("id")):
-                    logger.warning(
-                        "rebuild: skipping edge wiring for event with "
-                        "missing point id (event_id=%s)",
-                        ev.get("event_id"))
+                    _log_identity_skip(ev.get("type"), p.get("id"),
+                                       "point id",
+                                       event_id=ev.get("event_id"),
+                                       where="rebuild edge wiring",
+                                       absent_is_ordinary=False,
+                                       drops_record=True)
                     continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)

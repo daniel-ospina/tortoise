@@ -1106,6 +1106,16 @@ class _EntityHandlers:
         # rejects in `sdk._sanitize_props` / mcp `_SERVER_MANAGED_PROPS` are
         # where a tenant is told no.
         "contains_session",
+        # Lane L5 (#5097): the `SourceCreated` record's OWN discriminator, set by
+        # the one producer whose record COMPLETES an existing stub instead of
+        # creating a Source (`sdk._materialize_session_source`'s trailing
+        # record). `_upsert_source` reads it as a PARAMETER, never as a node
+        # property: it selects the ON CREATE arm's non-creator form and admits
+        # the capture writer's replay-only props. It sits here so
+        # `_persist_extra_props` can never put it on a `:Source` — the same
+        # reason `_stub` (the Event stub discriminator) is in `_SUBJECT_HANDLED`
+        # / `_OBJECT_HANDLED`, and it is not a declared node prop.
+        "_stub_completion",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
@@ -1321,6 +1331,37 @@ class _EntityHandlers:
         "domain", "summary", "topics", "status", "embedding", "about_entities",
         "document_kind", "documentKind", "session_id", "event_id",
         "source_path",
+    })
+    # Lane L5 (#5097): the CAPTURE COMPLETION record's own props — admitted to
+    # the `:Source` passthrough ONLY for a record that declares itself one
+    # (`_stub_completion`, set by `sdk._materialize_session_source`).
+    #
+    # They are minted by an IN-TREE PRODUCER (the session-capture writer), not by
+    # a caller, which is exactly the shape the comment above `_SOURCE_NODE_PROPS`
+    # says belongs on the READ surface and must still be REFUSED on the write
+    # side (`reliability*` is the sibling case). Declared on the read surface
+    # since #1352, so they survive the read filter either way.
+    #
+    # ⛔ NOT `_SOURCE_EXTRA_PROPS` (the #3998 D30 caller allowlist). That set is
+    # also the CALLER-writable one — `create_source(**props)` rides the same
+    # replay passthrough — so putting them there would make
+    # `create_source(url, k, sessionId=…)` persist provenance a caller could
+    # forge (it was DENIED with a warning before #5097 and is again), and would
+    # let ONE call carry both spellings (`session_id` IS caller-settable, a
+    # pre-existing asymmetry) instead of one.
+    #
+    # ⚠️ The journal is trusted: a hand-written record carrying
+    # `_stub_completion` can still set them. That is the same boundary every
+    # record-carried fact has (a forged `contentHash` replays too); the door this
+    # closes is the PUBLIC caller surface, not the journal. The DISCRIMINATOR is
+    # itself refused on every caller surface — `sdk.create_source`'s `**props`
+    # guard, `sdk._sanitize_props` (the direct-SDK backstop) and
+    # `mcp_server._SERVER_MANAGED_PROPS` (#5097 review P1: it rode in through
+    # `create_source(**props)` and made this whole set caller-writable again,
+    # while also suppressing the ON CREATE identity props) — so the capture
+    # writer is its only legitimate producer.
+    _SOURCE_CAPTURE_REPLAY_PROPS: frozenset = frozenset({
+        "sessionId", "capturedAt", "eventId",
     })
     _SOURCE_HANDLED: frozenset = frozenset({
         "id", "url", "sourceKind", "contentHash",
@@ -4996,12 +5037,32 @@ class _EntityHandlers:
             "OPTIONAL MATCH (_prev:Source {url: $url}) "
             "WITH _prev, properties(_prev) AS _prev_props "
             "MERGE (s:Source {url: $url}) "
-            "ON CREATE SET s.id = coalesce($id, $url), "
+            # Lane L5 (#5097): the three CREATOR-ONLY defaults below (`id`,
+            # `version`, `externalId`) are suppressed for a record that
+            # COMPLETES a stub instead of creating a Source (`$stub_completion`,
+            # set only by `sdk._materialize_session_source`). Its live node was
+            # created by the M2 `_link_source` stub, which writes NONE of the
+            # three — so an ON CREATE arm that wrote them would make a replay
+            # GAIN `id`/`version=1`/`externalId=''` the live node never had, and
+            # (worse) restart a version ordinal for a writer that does not
+            # advance one. `NULL` is the removal/no-op value, so the property
+            # simply stays absent, exactly as live has it. Every other record
+            # is byte-identical to before (`$stub_completion` is false).
+            "ON CREATE SET s.id = CASE WHEN $stub_completion THEN NULL "
+            "                        ELSE coalesce($id, $url) END, "
             "              s.canonicalUrl = $cu, "
             "              s.urlAliases = [$raw_url], "
             "              s.sourceKind = $sk, "
             "              s.contentHash = coalesce($hash, ''), "
-            "              s.title = $title, "
+            # `coalesce($title, $url)`, not `$title`: a record that carries no
+            # title (every producer but the capture's — `create_source` defaults
+            # it to the key, and the capture passes an explicit null) creates the
+            # node with the SAME title the `_link_source` stub writes (`title=url`)
+            # rather than none. Without it a `rebuild_all` — which folds this
+            # record BEFORE pass 2 mints the stub — left the session `:Source`
+            # with no title at all, i.e. a property live HAD and the recovery
+            # path lost (#5097 review P1).
+            "              s.title = coalesce($title, $url), "
             # #5024: the RECORDED ingest instant, not the replay's clock. The
             # payload has carried `ingestedAt` since #398, but the fold set it
             # from `_now_iso()` at REPLAY time, so `derived = replay(journal)`
@@ -5009,6 +5070,14 @@ class _EntityHandlers:
             # ...57.047168 on the same 12-instance run). `coalesce` keeps a
             # legacy/foreign record without the key working exactly as before.
             "              s.ingestedAt = coalesce($ingestedAt, $now), "
+            # Lane L5 (#5097): ON CREATE wrote NO `updatedAt` while the ON MATCH
+            # arm gates it on the hash — so a record that created the node (the
+            # `rebuild_all` order) rebuilt the session `:Source` with no update
+            # instant where live had one. `coalesce($updatedAt, s.updatedAt)` is
+            # a no-op for every record that carries none (so no producer gains a
+            # replay-clock stamp it never wrote) and reproduces the recorded one
+            # when it is there.
+            "              s.updatedAt = coalesce($updatedAt, s.updatedAt), "
             # ── #3644 (§4.6 window half) ────────────────────────────────
             # The CURRENT version's valid-time start. Written from the
             # RECORDED instant (`$vf`, minted once by `create_source` and
@@ -5022,8 +5091,10 @@ class _EntityHandlers:
             # version's window is OPEN while it is current, and Cypher cannot
             # write a NULL property anyway — absent IS the open end.
             "              s.validFrom = $vf, "
-            "              s.version = 1, "
-            "              s.externalId = $ext, "
+            "              s.version = CASE WHEN $stub_completion THEN NULL "
+            "                               ELSE 1 END, "
+            "              s.externalId = CASE WHEN $stub_completion THEN NULL "
+            "                                  ELSE $ext END, "
             "              s.format = coalesce($fmt, s.format), "
             "              s.sourcePath = coalesce($sp, s.sourcePath), "
             # #3998: the absent-raw state.  Written only when the caller
@@ -5048,7 +5119,20 @@ class _EntityHandlers:
             "           s.title = CASE WHEN $hash IS NULL THEN s.title "
             "                   WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                   THEN coalesce($title, s.title) ELSE s.title END, "
-            "           s.version = CASE WHEN $hash IS NULL THEN s.version "
+            # Lane L5 (#5097 review P1): the bump is GATED ON THE SAME
+            # DISCRIMINATOR as the ON CREATE suppression above. The capture
+            # writer's live raw MERGE never touches `s.version`, so a replayed
+            # capture record must not advance the ordinal either — on EITHER
+            # arm. Ungated, a session `:Source` that already carried a version
+            # (e.g. one a caller created with `create_source` before capturing)
+            # sat at `version = 1` live while `rebuild()`/`rebuild_all()` folded
+            # this record's differing `contentHash` through the hash-diff arm to
+            # `version = 2` — the same ordinal this PR's ON CREATE suppression
+            # exists to avoid restarting, just one arm over. With the ordinary
+            # M2 stub the bump is invisible (`null + 1` stays absent), which is
+            # why only a whole-bag comparison over a versioned node sees it.
+            "           s.version = CASE WHEN $stub_completion THEN s.version "
+            "                    WHEN $hash IS NULL THEN s.version "
             "                    WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                    THEN s.version + 1 ELSE s.version END, "
             # #5024: same rule as `ingestedAt` above — the recorded instant,
@@ -5058,9 +5142,24 @@ class _EntityHandlers:
             # branch is the LEGACY path for journals written before that record
             # existed; keeping `coalesce($updatedAt, $now)` makes both records
             # replay to the same node.
+            #
+            # Lane L5 (#5097 review, head f16638e6b): the SAME-HASH (last) arm
+            # must REPRODUCE the instant the record carries when the node has
+            # none — `_materialize_session_source`'s live clause is
+            # `ELSE coalesce(s.updatedAt, $now)`, i.e. it STAMPS a node that
+            # lacked one, while `ELSE s.updatedAt` kept the absence. The two
+            # part company on the one state where both conditions hold: the M2
+            # stub (`contentHash=''`, no `updatedAt`) receiving a capture whose
+            # derived transcript is empty (`content_hash` is `''` then) —
+            # measured live `updatedAt='2099-…'` / rebuilt `None`, a recovery
+            # path LOSING a value the write stored. `coalesce(s.updatedAt,
+            # $updatedAt)` is a no-op for a record that carries none (legacy /
+            # foreign journals) and for a node already stamped (the first stamp
+            # still wins), so no other producer moves.
             "           s.updatedAt = CASE WHEN $hash IS NULL THEN s.updatedAt "
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                     THEN coalesce($updatedAt, $now) ELSE s.updatedAt END, "
+            "                     THEN coalesce($updatedAt, $now) "
+            "                     ELSE coalesce(s.updatedAt, $updatedAt) END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
             # #3644: the window start moves ONLY on the same hash-diff gate as
             # `version`/`updatedAt` — a create/stub-completion (stored hash
@@ -5143,6 +5242,10 @@ class _EntityHandlers:
                 # alone rather than synthesizing one from `$now`).
                 "vf": ev.get("validFrom"),
                 "updatedAt": ev.get("updatedAt"),
+                # Lane L5 (#5097): the capture COMPLETION discriminator (see
+                # `_SOURCE_CAPTURE_REPLAY_PROPS`). Read as a parameter, never
+                # persisted — `_META_KEYS` keeps it off the node.
+                "stub_completion": bool(ev.get("_stub_completion")),
                 "ext": ev.get("externalId", ""),
                 "fmt": ev.get("format"),
                 "sp": ev.get("source_path"),
@@ -5162,14 +5265,22 @@ class _EntityHandlers:
         # The DENIAL is logged (#2795's drift warning, applied to this layer):
         # silently dropping a prop a caller sent is how a declaration rots into
         # a mystery, and the return value exists precisely to feed this.
+        # Lane L5 (#5097): a record that declares itself a CAPTURE COMPLETION
+        # also admits `_SOURCE_CAPTURE_REPLAY_PROPS` — the capture writer's own
+        # spellings, which are NOT caller-settable (see that set). Every other
+        # record keeps the plain #3998 allowlist, so `create_source(**props)`
+        # still DENIES them.
+        _allow = self._SOURCE_EXTRA_PROPS
+        if ev.get("_stub_completion"):
+            _allow = _allow | self._SOURCE_CAPTURE_REPLAY_PROPS
         _persisted = self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
-            ev, self._SOURCE_HANDLED, allow_keys=self._SOURCE_EXTRA_PROPS,
+            ev, self._SOURCE_HANDLED, allow_keys=_allow,
         )
         _denied = {
             k for k in ev
             if k not in _persisted and k not in self._META_KEYS
-            and k not in self._SOURCE_HANDLED and k not in self._SOURCE_EXTRA_PROPS
+            and k not in self._SOURCE_HANDLED and k not in _allow
             and ev.get(k) is not None
         }
         if _denied:
@@ -5265,6 +5376,14 @@ _SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
     # This is the "put this IN FRONT of the declaration, never instead of it"
     # rule the comment below states.
     "__runId",
+    # Lane L5 (#5097): the session-capture writer's provenance spellings. They are
+    # DECLARED (read surface, #1352) and REPLAYED (only for a record that declares
+    # itself a capture completion — `_SOURCE_CAPTURE_REPLAY_PROPS`), but they are
+    # minted by the writer, never asserted by a caller: without this entry the
+    # generic tenant route would persist a forged `eventId`/`sessionId` on the
+    # node AND into the `EntityMutated` record, where a rebuild restores it — the
+    # same `__runId` hole (#5196 round 3, P2) one line up.
+    "sessionId", "capturedAt", "eventId",
 })
 
 # The IDENTITY keys of a `:Source` — NOT refused to a caller-supplied map.

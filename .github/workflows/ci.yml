@@ -1700,7 +1700,13 @@ jobs:
           cat /tmp/wrangler.log || true
           echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
-      - name: Run welcome page E2E (mocked against the local preview) (#373/#1511)
+      # #8826: `/welcome` is not served by this Pages root, so no
+      # `wrangler pages dev` preview can exercise it. On every host this project
+      # serves, `website/_redirects` 301s `/welcome`, `/welcome/` and
+      # `/welcome.html` to the app origin (and on premiselabs.co the middleware's
+      # APP_ONLY branch does the same), and `website/welcome.html` does not exist
+      # here — the page lives in the dashboard Pages project.
+      - name: Run welcome page E2E (loopback WELCOME_URL; /welcome 301s to the app origin) (#373/#1511)
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
         env:
           WELCOME_URL: http://127.0.0.1:8788/welcome

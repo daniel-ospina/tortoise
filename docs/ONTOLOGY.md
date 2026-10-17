@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.28"
+title: "Tortoise — Canonical Ontology v3.29"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-15
+updated: 2026-10-17
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.28
+# Tortoise — Canonical Ontology v3.29
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -407,7 +407,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | Timestamps |
 | `lastDreamedAt` | ISO8601 UTC | — | — | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
 | `embedding` | vector | — | — | Semantic embedding (FTS + vector search) |
-| `speaker` | string | — | — | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
+| `speaker` | string | — | — | Role tag on episodic turn Points (user/assistant/…) — written by the ONE shared turn store (`tortoise/sdk.py::_TURN_WRITE_CYPHER`, #3086), so BOTH hosted capture (`POST /v1/sessions`) and the SDK (`TortoiseSDK.capture_session`) write it. The earlier claim that the SDK writes it alone was false (#3554) |
 | `is_episodic` | bool | — | — | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
 | `goalState` | string | — | — | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated at the SDK write boundary (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the draft/live lifecycle): `status` says whether a goal is promoted for use, `goalState` says whether it is met. `None` clears. Only meaningful on `goal`/`target`/`strategy`/`plan` points (§5) |
 
@@ -550,7 +550,7 @@ suppresses operator promotion exactly as a draft Point does.
 | `title` | string | — | `dc:title` | Human-readable label. Defaults to url |
 | `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | Last version transition. **Journalled since `#5024`:** a hash transition emits `SourceVersioned` carrying `previousContentHash` + the recorded instant, and the fold reads that instant — never the replay clock. Pre-`#5024` the write bumped it in place with no record of its own, so a rebuild re-stamped it (`#5024`) |
-| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). **`validFrom` is written since #3644**: `_upsert_source` sets it to the version's OBSERVATION instant (the same instant `create_source` mints for `updatedAt`, one clock read, carried on the record) through the same hash-diff gate as `version`/`updatedAt` — a create, a stub completion, or a real transition, never a no-op re-check. A version has no content-side date of its own (a version *is* "the content as read at an instant"), which is why the observation instant is definitional here and not the borrowed write clock §4.1/#3654 forbids for a Point; a caller-asserted start (a known publication date) is a separate additive input, deliberately not accepted yet. Coverage is the `create_source`/`_upsert_source` path only — a stub minted by `_link_source` writes none, and **absent means an open/unbounded start** (the replay never stamps one: `$vf` is recorded, never `coalesce($vf, $now)`). **Two further `:Source` writers move the version anchor without moving the window** — `_upsert_document` (the `DocumentCreated` fold) and `_materialize_session_source` (the capture path) — so a source this path stamped can be left with a **present-but-stale** start (tracked on **#3644**, pinned by `test_pinned_gap__*`). **`validTo` is written as a JOURNAL fact, not a node property**: the node holds the CURRENT version, whose window is open (absent IS the open end — Cypher cannot write NULL), so the prior version's close lives on the `SourceVersioned` record as `previousValidTo`, equal to that record's `validFrom` by construction (§4.6's "closes the old one in the same act"). A `:Source` REMOVAL sets the node's `validTo`; no such path exists yet (#3590 S2). A prior version's window is a journal record — see *Versioning* |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). **`validFrom` is written since #3644**: `_upsert_source` sets it to the version's OBSERVATION instant (the same instant `create_source` mints for `updatedAt`, one clock read, carried on the record) through the same hash-diff gate as `version`/`updatedAt` — a create, a stub completion, or a real transition, never a no-op re-check. A version has no content-side date of its own (a version *is* "the content as read at an instant"), which is why the observation instant is definitional here and not the borrowed write clock §4.1/#3654 forbids for a Point; a caller-asserted start (a known publication date) is a separate additive input, deliberately not accepted yet. Coverage is the `create_source`/`_upsert_source` path only — a stub minted by `_link_source` writes none, and **absent means an open/unbounded start** (the replay never stamps one: `$vf` is recorded, never `coalesce($vf, $now)`). **Two further `:Source` writers move the version anchor without moving the window** — `_upsert_document` (the `DocumentCreated` fold) and `_materialize_session_source` (the capture path) — so a source this path stamped can be left with a **present-but-stale** start (tracked on **#3644**, pinned by `test_pinned_gap__*`). Since **#5097** the capture writer's metadata DOES replay (a trailing `SourceCreated` that carries the node's `validFrom` verbatim, so a rebuild no longer CLEARS a window); it still never MOVES one. **`validTo` is written as a JOURNAL fact, not a node property**: the node holds the CURRENT version, whose window is open (absent IS the open end — Cypher cannot write NULL), so the prior version's close lives on the `SourceVersioned` record as `previousValidTo`, equal to that record's `validFrom` by construction (§4.6's "closes the old one in the same act"). A `:Source` REMOVAL sets the node's `validTo`; no such path exists yet (#3590 S2). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642). Still unwritten: no `:Source` removal path exists, and the removal field's meaning is exactly the decision **#3590** S2 owns (the same one that leaves Point's `expiredAt` unable to distinguish *replaced* from *withdrawn*). A version transition does NOT set it — `validTo`/`previousValidTo` is the window fact |
 | `documentKind` | string | — | `bibo:Document` subclasses | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
 | `format` | string | — | `dc:format` | Storage format (markdown, jsonl, yaml, cypher). In `_SOURCE_HANDLED` since D10 — **the model version is v3.15 (§4.4), the code half that moved it is PR #5127** (`#5142`) |
@@ -606,7 +606,7 @@ suppresses operator promotion exactly as a draft Point does.
 
 **Stale is a read, and `stale` is not `wrong`.** A **Point** is **stale** when its recorded `sourceVersion` differs from its source's current `contentHash` — a **derived predicate**, not a stored status, so nothing can drift. A stale entity **was true of the content that was read** and **remains standing**: supersession is **deferred until the replacement exists**, and when re-inference produces the successor the stale entity is superseded through `CORRECTS`. **Superseded, never deleted** — the previous belief stays queryable alongside the new one. This is the deliberate policy: **a stale belief is strictly better than no belief**, because immediate removal would leave the graph asserting nothing about a subject it previously had a position on.
 
-**A version's window is opened and the prior one closed in the same act (`#3644`).** The version's valid-time start is the instant it was **observed** — `create_source` mints it once, on the same clock as `updatedAt`, and `_upsert_source` writes it only through the hash-diff gate, so a no-op re-check moves neither the node nor the journal. The `SourceVersioned` record carries **both** window facts: `validFrom` (the new version's open, the node's window start) and `previousValidTo` (the prior version's close). The two are the **same instant by construction** — one minted clock under two names, which is what *"closes the previous version's window and records the new one"* means — so the window chain is exactly contiguous rather than "contiguous modulo a fallback". The window is **half-open, `[validFrom, validTo)`**: `previousValidTo == validFrom` therefore places the shared instant in exactly one version — the new one — rather than in both. A `:Source` reader must **not** reuse the Point lane's closed predicate (`_covers`: `validFrom <= t <= validTo`), which would double-cover that instant; no `:Source` reader exists yet, so this is the contract the first one must implement. `previousValidTo` is a **record-only** key: there is one node per `url`, the node holds the current version, and its window is **open** (absent `validTo` is the open end), so the prior version's close can only live in the journal. An absent `validFrom` is an **open start** and is never synthesized at replay time — a legacy record (or a `_link_source` stub, which writes no window) replays to a source with no window, exactly as it was written. **The invariant holds on the `create_source`/`_upsert_source` path only.** Two other `:Source` writers move the version anchor (`contentHash`/`version`) without moving the window, so a source this path stamped can be left with a **present-but-stale** start: `_upsert_document` (the `DocumentCreated` fold, which bumps `contentHash` + `version` on the same hash-diff gate but writes no `validFrom`) and `_materialize_session_source` (the session-capture path, which rewrites `contentHash` without advancing `version` and is replayed by nothing). Extending the gate to them needs a minted instant that is **also replayable** — a clock/mint decision this change does not take — and is tracked on **#3644**; the gap is pinned (never silenced) by `tests/test_source_version_window_3644.py::test_pinned_gap__*`.
+**A version's window is opened and the prior one closed in the same act (`#3644`).** The version's valid-time start is the instant it was **observed** — `create_source` mints it once, on the same clock as `updatedAt`, and `_upsert_source` writes it only through the hash-diff gate, so a no-op re-check moves neither the node nor the journal. The `SourceVersioned` record carries **both** window facts: `validFrom` (the new version's open, the node's window start) and `previousValidTo` (the prior version's close). The two are the **same instant by construction** — one minted clock under two names, which is what *"closes the previous version's window and records the new one"* means — so the window chain is exactly contiguous rather than "contiguous modulo a fallback". The window is **half-open, `[validFrom, validTo)`**: `previousValidTo == validFrom` therefore places the shared instant in exactly one version — the new one — rather than in both. A `:Source` reader must **not** reuse the Point lane's closed predicate (`_covers`: `validFrom <= t <= validTo`), which would double-cover that instant; no `:Source` reader exists yet, so this is the contract the first one must implement. `previousValidTo` is a **record-only** key: there is one node per `url`, the node holds the current version, and its window is **open** (absent `validTo` is the open end), so the prior version's close can only live in the journal. An absent `validFrom` is an **open start** and is never synthesized at replay time — a legacy record (or a `_link_source` stub, which writes no window) replays to a source with no window, exactly as it was written. **The invariant holds on the `create_source`/`_upsert_source` path only.** Two other `:Source` writers move the version anchor (`contentHash`/`version`) without moving the window, so a source this path stamped can be left with a **present-but-stale** start: `_upsert_document` (the `DocumentCreated` fold, which bumps `contentHash` + `version` on the same hash-diff gate but writes no `validFrom`) and `_materialize_session_source` (the session-capture path, which rewrites `contentHash` without advancing `version` — since **#5097** its METADATA block does replay, through a trailing `SourceCreated` that `_upsert_source` folds as a STUB COMPLETION and that carries the node's `validFrom` verbatim, so a rebuild restores rather than clears the window; what it still does not do is MINT a window or advance `version`, and because the record declares itself a STUB COMPLETION (`_stub_completion`) the fold's hash-diff arm does not advance `version` on replay either — the live write never touches it, so neither does the replay). Extending the gate to them needs a minted instant that is **also replayable** — a clock/mint decision this change does not take — and is tracked on **#3644**; the gap is pinned (never silenced) by `tests/test_source_version_window_3644.py::test_pinned_gap__*`.
 
 **Closing the interval is part of the write.** An unclosed `validTo` reads as *"still true"* indefinitely — the failure mode the whole model exists to prevent — so the journal record that opens a new version closes the old one **in the same act**; it is never a later repair.
 
@@ -715,7 +715,7 @@ declared, not built (implementation is tracked separately):
 | txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | — | `expiredAt` ❌ † |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — | — |
 
-> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** A content-changing re-fetch is no longer a silent in-place mutation: since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, and since `#3644` that record also carries the **version window** (`validFrom` + `previousValidTo`, the same minted instant) while the node's `validFrom` is written through the same hash-diff gate — so a replay reproduces the node's window and the prior window is recoverable from the journal alone. Both Source window rows are **⚠️, not ✅, for two different reasons**: the valid **start** is written on the `create_source`/`_upsert_source` path only (a `_link_source` stub mints none, and absent ⇒ open/unbounded start; `_upsert_document` and `_materialize_session_source` move the version anchor **without** the window, so a stamped source can carry a present-but-stale start — **#3644**, pinned by `test_pinned_gap__*`), and the valid **end** is a **record-only** fact — the node holds the CURRENT version, whose window is open (absent = open end), so the prior version's `validTo` lives on the record as `previousValidTo` and a node `validTo` would need a `:Source` **removal** path that does not exist yet (**#3590** S2, which also owns `expiredAt`).
+> † **A source's temporal slots are the Source column's.** No `:Object`-labelled write path reaches a Source, so the Object-labelled supersession fold (`_fold_object_superseded` / `apply_supersessions`, which `MATCH`es `(o:Object {id|name})`) **cannot stamp a Source** — **Source supersession is unreachable, not merely unimplemented (`—`).** A content-changing re-fetch is no longer a silent in-place mutation: since `#5024` it journals a `SourceVersioned` record naming the superseded `contentHash`, and since `#3644` that record also carries the **version window** (`validFrom` + `previousValidTo`, the same minted instant) while the node's `validFrom` is written through the same hash-diff gate — so a replay reproduces the node's window and the prior window is recoverable from the journal alone. Both Source window rows are **⚠️, not ✅, for two different reasons**: the valid **start** is written on the `create_source`/`_upsert_source` path only (a `_link_source` stub mints none, and absent ⇒ open/unbounded start; `_upsert_document` and `_materialize_session_source` move the version anchor **without** the window, so a stamped source can carry a present-but-stale start (the capture writer's metadata block has replayed since #5097, but the window half is unchanged) — **#3644**, pinned by `test_pinned_gap__*`), and the valid **end** is a **record-only** fact — the node holds the CURRENT version, whose window is open (absent = open end), so the prior version's `validTo` lives on the record as `previousValidTo` and a node `validTo` would need a `:Source` **removal** path that does not exist yet (**#3590** S2, which also owns `expiredAt`).
 >
 > **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
 > paths only; an undated session (mining W-4) stamps no `validFrom` at all
@@ -754,6 +754,113 @@ authoritative for the temporal slots. Event's transaction-time start is
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ❌ | — | — | ❌ | ❌ |
 | passes_frequency_gate | — | — | ❌ | — | — |
+
+---
+
+### §4.8 The `:Session` capture container (canonical)
+
+The **`:Session`** node is the capture container: the durable record of one
+captured session, holding the capture-attempt outcome and the entity-link
+counters, and connecting its turn `Point`s by `CONTAINS`. Unlike the entity
+types above, it is **written by many components, each owning a different
+property subset** — the two capture lanes, the derived-commit pipeline, the
+index-run re-link, the demo seeder, the longmem-eval ingestors, and the journal
+folds that re-create the node on replay.
+
+**The machine declaration is `tortoise/session_schema.py`** (`SESSION_PROPERTIES`
+/ `SESSION_WRITERS` / `SESSION_PROPERTY_OWNERS`). It is authoritative for the
+property set and the owner of each property; this section is its doc mirror,
+and `tools/session_retrofit_audit.py inventory` re-runs the writer predicate
+over the **tracked tree** (`git ls-files`) — minus the path prefixes and
+third-party/cache directories `PREDICATE` declares out of scope — and fails on
+drift in either direction (a new writer, or a declared one the predicate no longer finds). The
+scan scope is part of that declared predicate, not a private allow-list inside
+the tool. The per-property owners below **mirror that
+declaration** and are pinned against it by `tests/test_session_schema_3554.py`
+(an owner cell that disagrees with `SESSION_PROPERTY_OWNERS` fails the test); a
+property with no owning writer is an import-time assertion failure, never a
+silently-empty cell.
+
+| Property | Owning writers (`<module>::<function/constant>`) |
+|----------|--------------------------------------------------|
+| `id` | `rebuild_all` |
+| `created_at` | `_write_session_and_turns`, `_execute_commit_writes`, `_commit_region`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `rebuild_all` |
+| `turn_count` | `_write_session_and_turns`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `rebuild_all` |
+| `is_episodic` | `_write_session_and_turns`, `_link_session`, `_fold_session_recorded`, `_execute_commit_writes`, `_commit_region`, `BACKFILL_STATEMENTS`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+| `harness` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `capture_lane` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `actor_user_id` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `machine_id` | `_write_session_and_turns`, `rebuild_all` |
+| `model` | `_write_session_and_turns`, `rebuild_all` |
+| `client_captured_at` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `client_captured_at_source` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `source` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `capture_redactions` | `_TURN_WRITE_CYPHER`, `_fold_session_recorded`, `merge_capture_session`, `rebuild_all` |
+| `capture_ok` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `rebuild_all` |
+| `capture_extractor` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `rebuild_all` |
+| `entity_links_attempted` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `rebuild_all` |
+| `entity_links_created` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `rebuild_all` |
+| `value_nodes_created` | `_execute_commit_writes`, `rebuild_all` |
+| `value_nodes_held` | `_commit_region`, `rebuild_all` |
+| `draft_count` | `_execute_commit_writes`, `rebuild_all` |
+| `commit_count` | `_execute_commit_writes`, `rebuild_all` |
+| `updated_at` | `_execute_commit_writes`, `_commit_region`, `rebuild_all` |
+| `lme_question_id` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+| `lme_session_index` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+| `lme_source_session_id` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+
+**Who is an owner in this table.** A writer owns a property when it carries a
+`SET <alias>.<prop>` clause for it. A property used only as a `MERGE` key is **not** attributed
+— so the `id` row names `rebuild_all` (whose `SET s += $props` restores the whole
+schema) and not the ten writers whose `MERGE (s:Session {id: …})` mints the key.
+`id` is the Session's identity key, minted by every writer above; the cell records
+who *sets* it.
+
+**The one write primitive.** Every capture lane funnels through
+`tortoise/sdk.py::_write_session_and_turns` (#3551) plus the one turn store
+`_TURN_WRITE_CYPHER` (#3086); the hosted `POST /v1/sessions` handler and
+`TortoiseSDK.capture_session` hold no copy of the MERGE text and add only their
+own **outcome** counters. `rebuild_all` is the one writer whose property set IS
+the whole schema (`SET s += $props` over the pre-wipe snapshot), declared as
+such rather than enumerated.
+
+#### D9 retrofit — the recorded honest gaps
+
+The #3554 retrofit audit (`tortoise/session_schema.py::audit_session_retrofit`,
+reached via `tools/session_retrofit_audit.py retrofit`) quantifies three
+divergences on existing graphs. In all three the **decision is to record the
+gap, not to rewrite the stored record** — the reasons live in
+`RETROFIT_VERDICTS`, and are summarised here so the decision has a canonical
+doc home:
+
+- **`turn_count` shortfall under `capture_ok = true`** — `capture_ok` is the
+  **extraction-attempt** outcome, never a store-integrity flag. Rewriting it to
+  `false` would re-label a store loss as an extraction failure and arm the #2335
+  TRUE-retry gate, so the next same-session POST re-runs extraction and can mint
+  duplicate claims. The shortfall is derivable from graph truth (stored
+  `turn_count` vs the Session's live episodic turn members), which is what the
+  audit reads. **Recorded gap.**
+- **`capture_ok` pre/post-verification-read ordering** — the hosted lane
+  computes `capture_ok` AFTER the post-write verification read (and downgrades
+  on `skipped`); the SDK lane computes it BEFORE. No writer stamps which lane
+  computed it (`harness` is written by both, `capture_extractor` names the
+  extractor, and `machine_id`/`model` are hosted-claimed, not lane markers), so
+  per-record retro-attribution is **not possible**. The class is bounded rather
+  than invented: both lanes compute the same `ok` and the hosted lane can only
+  be equal or more pessimistic, so only `capture_ok = true` records could
+  differ from a re-computation. **Recorded gap.**
+- **`entity_links_created` under-count** — the counter is non-monotone by
+  construction: the capture-time pass writes this capture's numbers and the
+  index-completion re-link (`_relink_sessions_after_index`) overwrites them with
+  that run's, so a session can hold more `aboutObject` edges than the counter
+  records. The counter is per-run **evidence**; rewriting it to the live edge
+  count would destroy what the runs reported. The audit compares the recorded
+  counter against the live edge count and reports the per-session under-count.
+  **Recorded gap.**
+
+Each verdict's `where_recorded` field in `RETROFIT_VERDICTS` points at this
+section and at the `#3554 amendment` in
+`docs/plans/2026-08-25-1714-memory-capture-onboarding.md`.
 
 ---
 
