@@ -21,6 +21,34 @@ import { parseModule } from './wizardRenderedCopy.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
 
+/** className of a JSX opening element in ANY spelling (`"x"`, `'x'`, `{"x"}`, `` {`x`} ``). */
+function classNameOf(opening) {
+  for (const attr of opening.attributes) {
+    if (attr.type !== 'JSXAttribute' || attr.name?.name !== 'className') continue
+    const v = attr.value
+    if (!v) return null
+    if (v.type === 'StringLiteral') return v.value
+    if (v.type === 'JSXExpressionContainer') {
+      const e = v.expression
+      if (e.type === 'StringLiteral') return e.value
+      if (e.type === 'TemplateLiteral' && e.expressions.length === 0) return e.quasis[0].value.cooked
+    }
+    return null
+  }
+  return null
+}
+
+/** Every JSX element's (start offset, className) in the source. */
+function jsxClassNames(source) {
+  const out = []
+  walkNodes(parseModule(source), (node) => {
+    if (node.type !== 'JSXOpeningElement') return
+    const cls = classNameOf(node)
+    if (cls !== null) out.push({ start: node.start, end: node.start, cls })
+  })
+  return out
+}
+
 // #3726 cycle 2: the two #3913 pins below were still written as source regexes,
 // so each covered two of the three JS string delimiters (`"`, `'` — not `` ` ``)
 // and the negative one silenty false-GREENed on a template literal or a quoted
@@ -137,10 +165,18 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   assert.notEqual(headOpen, -1, 'the welcome-head card anchor must resolve (a negative pin over an empty window is a false green)')
   const headEnd = src.indexOf('LEGACY_WIZARD_ARCHIVED &&', headOpen)
   assert.notEqual(headEnd, -1, 'the archived-block boundary must resolve')
-  assert.ok(!/className=["']wizard-title["']/.test(src.slice(headOpen, headEnd)),
+  // #3726 cycle 3: the assertion itself was still a two-delimiter regex, so the
+  // third delimiter the comment above names — and the JSX container form — kept
+  // the pin GREEN while the label was genuinely back in the card. Read class
+  // names from the AST instead: one shape covers every spelling.
+  const inCardTitles = jsxClassNames(src).filter((n) => n.start > headOpen && n.start < headEnd)
+    .filter((n) => n.cls.split(/\s+/).includes('wizard-title'))
+  assert.deepEqual(inCardTitles, [],
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // the archived block's title still reads wizardSteps (kept for rollback)
-  assert.ok(/className=["'`]wizard-title["'`]\s*>\s*\{wizardSteps\[wizardStep\]\}/.test(src),
+  const archivedTitles = jsxClassNames(src)
+    .filter((n) => n.cls.split(/\s+/).includes('wizard-title'))
+  assert.ok(archivedTitles.some((n) => src.slice(n.start, n.start + 400).includes('wizardSteps[wizardStep]')),
     'archived legacy title retained (wizardSteps)')
 })
 
@@ -152,14 +188,37 @@ test('DE2E-2 copy sweep: org-create dialog + wizard copy say Organization', () =
   // name the Organization. #2487/#2547's lowercase fallback ('Your organization
   // is set up') lived in the <h1> this PR removed; the org name now renders in
   // the eyebrow, and the no-name case is covered by the stage label itself.
-  assert.ok(/You're set up in <strong>\{shownOrgName \|\| ['"]your organization['"]\}<\/strong>/.test(src),
+  // #3726 cycle 3: a pure-formatting edit (`{ shownOrgName || 'your organization' }`)
+  // or a template-literal fallback false-redded this. The rendered behaviour is
+  // a `||` whose right side is the string; read that, not the punctuation.
+  const orgFallbacks = []
+  walkNodes(parseModule(src), (node) => {
+    if (node.type !== 'LogicalExpression' || node.operator !== '||') return
+    const v = literalString(node.right)
+    if (v !== null) orgFallbacks.push(v)
+  })
+  assert.ok(orgFallbacks.includes('your organization'),
     'welcome ready copy names the user\'s Organization')
   assert.ok(src.includes('Creating your Organization and API key'), 'provisioning copy')
   assert.ok(src.includes('Your Organization and API key are live'), 're-entry + first-data cards')
 })
 
 test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan T7)', () => {
-  assert.ok(!/body:\s*JSON\.stringify\(\{\s*onboarding_complete:\s*true\s*\}\)/.test(src),
+  // #3726 cycle 3: same mechanism as the catalog-presented pin — a negative
+  // source match that hard-codes the key's spelling, so a re-quoted key
+  // (`{ "onboarding_complete": true }`) shipped the write it forbids and stayed
+  // GREEN. Read the AST: any object property or member assignment that sets it
+  // to true. The PATCH body shape is asserted separately below.
+  const trueWrites = []
+  walkNodes(parseModule(src), (node) => {
+    const isProp = node.type === 'ObjectProperty' && keyName(node.key) === 'onboarding_complete'
+    const isAssign = node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression'
+      && keyName(node.left.property) === 'onboarding_complete'
+    if (!isProp && !isAssign) return
+    const v = isProp ? node.value : node.right
+    if (v.type === 'BooleanLiteral') trueWrites.push(v.value)
+  })
+  assert.deepEqual(trueWrites, [],
     'wizardComplete dropped the PATCH onboarding_complete write')
 })
 

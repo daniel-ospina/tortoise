@@ -107,15 +107,28 @@ export function depsArrays(source) {
     if (!/CallExpression$/.test(node.type)) continue
     const callee = node.callee
     const name = callee?.type === 'Identifier' ? callee.name
-      : callee?.type === 'MemberExpression' && !callee.computed && callee.property?.type === 'Identifier' ? callee.property.name
+      // `React?.useMemo(…)` parses as CallExpression with an
+      // OptionalMemberExpression callee, so requiring MemberExpression
+      // dropped it — the same fail-open direction as the call side.
+      : /^(Optional)?MemberExpression$/.test(callee?.type) && !callee.computed && callee.property?.type === 'Identifier' ? callee.property.name
       : null
     if (!name || !HOOKS.has(name)) continue
     const last = node.arguments[node.arguments.length - 1]
     if (!last || last.type !== 'ArrayExpression') continue
+    // The NAMES come from the elements, not from splitting the inner text: a
+    // comment inside the array (`[a, // why\n lateB]`) swallowed the identifier
+    // that followed it — the same hand-lexing hazard the AST seam removes.
+    const names = []
+    for (const el of last.elements) {
+      let n = el
+      while (n && /^(Optional)?MemberExpression$/.test(n.type)) n = n.object
+      if (n?.type === 'Identifier') names.push(n.name)
+    }
     out.push({
       start: last.start,
       line: last.loc.start.line,
       inner: source.slice(last.start + 1, last.end - 1),
+      names,
     })
   }
   return out.sort((a, b) => a.start - b.start)
@@ -149,10 +162,7 @@ export function findTdzDeps(source) {
 
   for (const deps of depsArrays(source)) {
     const lineNo = deps.line
-    const names = deps.inner
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => /^[A-Za-z_$][\w$]*$/.test(s))
+    const names = deps.names
     if (names.length === 0) continue
 
     for (const name of names) {
@@ -373,6 +383,44 @@ test('#3726: an OPTIONAL hook call is still scanned', () => {
     'a hook called with `?.` still has a deps array')
 })
 
+test('#3726: `React?.useMemo(…)` (optional MEMBER) is scanned too', () => {
+  // The call side was hardened for `useMemo?.(…)` but the CALLEE side still
+  // required `MemberExpression`; `React?.useMemo(…)` parses as CallExpression
+  // with an OptionalMemberExpression callee, so it was dropped — fail-open, in
+  // the guard whose job is to catch a silent white-screen. `x?.y(…)` is the
+  // idiom main.jsx already uses (7 optional calls today, none a hook).
+  for (const call of ['React?.useMemo(() => 1, [lateOM])', 'obj?.useCallback(() => 1, [lateOM])']) {
+    const source = [
+      'function App() {',
+      `  ${call}`,
+      '  const lateOM = 1',
+      '  return null',
+      '}',
+    ].join('\n')
+    assert.deepEqual(findTdzDeps(source).map((v) => v.name), ['lateOM'],
+      `an optional member callee must not hide the deps array: ${call}`)
+  }
+})
+
+test('#3726: a comment inside a deps array does not swallow the next name', () => {
+  // The names came from splitting the array's INNER TEXT on commas, so a line
+  // comment ate the identifier after it — the same hand-lexing hazard the AST
+  // seam removes. Elements give the names directly.
+  const source = [
+    'function App() {',
+    '  const ready = 1',
+    '  React.useEffect(fn, [',
+    '    ready, // the ready flag',
+    '    lateAfterComment,',
+    '  ])',
+    '  const lateAfterComment = 2',
+    '  return null',
+    '}',
+  ].join('\n')
+  assert.deepEqual(findTdzDeps(source).map((v) => v.name), ['lateAfterComment'],
+    'the identifier after a comment in the deps array must still be checked')
+})
+
 // ── the real file ───────────────────────────────────────────────────────────
 test('#2709: main.jsx has no effect-deps referencing a later-declared const', () => {
   const violations = findTdzDeps(mainJsx)
@@ -411,7 +459,7 @@ test('#2710: the connect-step auto-open effect is GONE (no queued-modal leak)', 
   )
   assert.doesNotMatch(
     live,
-    /\[wizardStep, wizardHarness, harnessKey\]/,
+    /\[\s*wizardStep\s*,\s*wizardHarness\s*,\s*harnessKey\s*\]/,
     'the #2709 deps array must not return',
   )
   // Structural companion: the whole wizard tree must contain no queue call at
