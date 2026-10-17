@@ -20608,7 +20608,10 @@ class TortoiseSDK:
         # proportionally. Invariant to the number of fused ranked lists (no
         # hardcoded multiplier).
         if not results:
-            fts_results = self.tortoise_fts_query(q, limit=limit)
+            # #7983: a CANDIDATE pool — the fallback's rows are re-scored, some
+            # dropped by the max_rrf gate and the rest reranked below, so what
+            # the caller receives is recorded at the return instead.
+            fts_results = self.tortoise_fts_query(q, limit=limit, _record_reads=False)
             results = []
             max_rrf = max(
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
@@ -20633,6 +20636,7 @@ class TortoiseSDK:
         if graph_ranker is not None and results:
             results = graph_ranker.rerank(results, entity_type="point", query=q)
 
+        _ledger_record("Point", results)  # #7983: the rows this call SERVES
         return results
 
     # ── Session Context (#6989) ──────────────────────────────

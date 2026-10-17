@@ -664,7 +664,7 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = term
                 return [{"id": "p1", "content": "alpha", "pointKind": "statement"}]

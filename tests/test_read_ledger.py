@@ -1014,3 +1014,29 @@ def test_an_unpartitioned_reading_says_so(ledger, capsys):
     read_ledger.record_stock("Point", "a", nbytes=1, path=ledger)
     assert read_ledger._main(["--ledger", str(ledger)]) == 0
     assert "NOT PARTITIONED" in capsys.readouterr().out
+
+
+def test_a_mixed_null_and_named_tenant_file_is_flagged(ledger, capsys):
+    """`None` + ONE named tenant is a union, and it is the production shape.
+
+    A context-free write lands on `tenant=None` while a request-scoped one lands
+    on an org, so a file holding both is normal — and counting only the NAMED
+    tenants reported "1 tenant" and flagged nothing over a pooled reading.
+    """
+    read_ledger.record_stock("Point", "a", nbytes=1, path=ledger)
+    read_ledger.record_stock("Point", "b", nbytes=1, path=ledger, tenant_id="t1")
+    assert read_ledger._main(["--ledger", str(ledger)]) == 0
+    out = capsys.readouterr().out
+    assert "MIXED" in out, out
+
+
+def test_first_event_at_is_the_earliest_instant_not_the_earliest_string(ledger):
+    """`2026-10-11T01:00:00+09:00` is 2026-10-10T16:00Z, EARLIER than 20:00Z.
+
+    A string compare picks `2026-10-10T20:00:00+00:00` (its date sorts first), so
+    the report would name an event four hours after the file's true start.
+    """
+    read_ledger.record_stock("Point", "a", nbytes=1, path=ledger, at="2026-10-11T01:00:00+09:00")
+    read_ledger.record_stock("Point", "b", nbytes=1, path=ledger, at="2026-10-10T20:00:00+00:00")
+    folded = fold(ledger)
+    assert folded.first_event_at == "2026-10-11T01:00:00+09:00", folded.first_event_at

@@ -96,9 +96,9 @@ would overstate the row by its dominant column.
 | planted content width | **1,133 B** over the **49.0%** that carry content · **555 B over ALL** | calibrated to the dogfood's two means (1,121.4 / 549.1) and measured back. ⚠️ The dogfood **19,061 B tail is NOT planted** (no TOAST regime) ⇒ the footprint is a **LOWER BOUND** for a tenant that hits it |
 | record row width | **1,263–1,266 B median / 1,421–1,423 B mean** | n = 2,000 rows per run, two runs |
 | record footprint per tenant | **191,643,648 B = 0.1916 GB** ⇒ **2,136 B/node on disk** (**1.28×** the cache's 0.1499 GB) | heap + indexes + TOAST |
-| keyed miss fetch | **5.2 blocks MEAN** (4 median, 7 max) · **2,312 B mean on the wire** (1,306 median, 5,408 max) · **0.041–0.045 ms** server, 0.81–1.73 ms end-to-end | the record's own PK probe, 200 samples × two runs, DETOASTED (what a real reader pays) |
-| full-scope read (rebuild) | **115,605 blocks (947.0 MB logical) · 2,470–3,094 ms** | `read_record_view`'s query shape, DETOASTED, for ONE table (`public.point`, 89,701 rows, two runs) — a **per-table FLOOR**: a real rebuild walks `node_identity` plus five label tables and `relation` too |
-| ⛔ same reads WITHOUT the detoast | 4 blocks · 0.029–0.074 ms; 7,962 blocks · 65.2 MB · 27.1–117.1 ms | `SELECT *` under `EXPLAIN (ANALYZE)` alone — **14.5× too few blocks and 26–91× too little CPU** for a rebuild, recorded so no later reader "re-measures" a cheaper number |
+| keyed miss fetch | **5.2 blocks MEAN** (4 median, 7 max) · **2,312 B mean on the wire** (1,306 median, 5,408 max) · **0.048–0.053 ms** server, 0.81–1.07 ms end-to-end | the record's own PK probe, 200 samples × two runs, DETOASTED (what a real reader pays) |
+| full-scope read (rebuild) | **115,605 blocks (947.0 MB logical) · 2,629–2,694 ms** | `read_record_view`'s query shape, DETOASTED, for ONE table (`public.point`, 89,701 rows, two runs) — a **per-table FLOOR**: a real rebuild walks `node_identity` plus five label tables and `relation` too |
+| ⛔ same reads WITHOUT the detoast | 4 blocks · 0.029–0.108 ms; 7,962 blocks · 65.2 MB · 33.8–142.1 ms | `SELECT *` under `EXPLAIN (ANALYZE)` alone — **14.5× too few blocks and 18.5–80× too little CPU** for a rebuild, recorded so no later reader "re-measures" a cheaper number |
 
 **Blocks are exact; milliseconds are a range over the two runs in `rho-bench.log` (shared-CPU
 container, default settings) — an accounting bench, not a vendor benchmark.**

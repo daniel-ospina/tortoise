@@ -280,8 +280,6 @@ def _warn_once(key: str, msg: str, *args: object) -> None:
 #: exists because the tests pass many, and a module-level set may not grow with
 #: the number of distinct paths a process ever sees.
 _dirs_made: set[str] = set()
-#: Paths whose 0600 mode has been checked once this process (the check is a
-#: `stat`, and the answer cannot change unless someone chmods the file).
 
 
 def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> int:
@@ -742,7 +740,7 @@ def fold(
                 continue
             at_any = ev.get("at")
             if isinstance(at_any, str) and (
-                out.first_event_at is None or at_any < out.first_event_at
+                out.first_event_at is None or _stamp_cmp(at_any, out.first_event_at) < 0
             ):
                 out.first_event_at = at_any
             kind = ev.get("event")
@@ -1044,6 +1042,7 @@ def _main(argv: list[str] | None = None) -> int:
     # identifiers stay out of a report that may be pasted into an issue).
     union_tenants = 0
     pooled_single_namespace = False
+    mixed_namespace = False
     if a.tenant is None:
         all_tenants = _tenants_in_file(target)
         union_tenants = len({t for t in all_tenants if t is not None})
@@ -1052,6 +1051,12 @@ def _main(argv: list[str] | None = None) -> int:
         # tenant coordinate is known. `tenant()` now asks the auth context, so
         # this shape means "no context available", i.e. a reading that MAY be a
         # union and cannot prove it is not.
+        # A file with `tenant = None` events AND one named tenant is a union
+        # too — and it is the shape `tenant()` produces in production (context-
+        # free writes land on None, request-scoped ones on an org), so counting
+        # only the NAMED tenants reported `union_tenants == 1` and flagged
+        # nothing while the report still pooled two populations.
+        mixed_namespace = None in all_tenants and len(all_tenants) > 1
         pooled_single_namespace = bool(all_tenants) and all_tenants <= {None}
     f = hot_fraction(folded)
     if a.json:
@@ -1066,6 +1071,7 @@ def _main(argv: list[str] | None = None) -> int:
                     "reads_undated": folded.reads_undated,
                     "tenants_in_file": union_tenants,
                     "pooled_single_namespace": pooled_single_namespace,
+                    "mixed_namespace": mixed_namespace,
                 },
                 indent=2,
             )
@@ -1080,6 +1086,12 @@ def _main(argv: list[str] | None = None) -> int:
             "process serves more than one tenant, this f is a POOLED union "
             "(biased DOWN). Give the ledger a tenant (TORTOISE_READ_LEDGER_TENANT, "
             "or a request context) to keep them apart."
+        )
+    if mixed_namespace:
+        print(
+            f"⚠️ MIXED: {union_tenants} named tenant(s) AND unpartitioned "
+            f"(tenant=None) events — this file pools them, so f is a UNION "
+            f"(biased DOWN). Pass --tenant, and set a tenant on the writers too."
         )
     if union_tenants > 1:
         print(
@@ -1099,6 +1111,12 @@ def _main(argv: list[str] | None = None) -> int:
     )
     print(f"read at least once: {f.read_keys:,} keys · {f.read_bytes:,} B")
     print(f"NEVER read       : {f.zero_read_keys:,} keys · {f.zero_read_bytes:,} B")
+    if folded.reads_undated:
+        print(
+            f"⚠️ undated reads : {folded.reads_undated:,} read event(s) carry no "
+            f"parseable `at` and are OUTSIDE the window — the numerator is short "
+            f"by that much"
+        )
     fk = f.f_keys
     print(
         f"f (keys)         : {fk:.4f}" if fk is not None else "f (keys)         : n/a — empty stock"
