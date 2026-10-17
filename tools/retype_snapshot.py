@@ -24,6 +24,11 @@ Nothing here connects to a graph: the snapshot is the input and a re-runnable
 re-typed dump is the output. Loading it is ``restore_graph`` into the FRESH
 graph (Phase 4) — this tool never touches a live one.
 
+``--out`` is REQUIRED in apply mode: the re-typed dump is the whole point of the
+run, so a mode that would validate everything and discard it must not exit ``0``
+(a wrapper script cannot tell that apart from a successful conversion, and the
+next phase would restore the original snapshot).
+
 Exit codes: ``0`` ok · ``2`` refused (problems on stderr) · ``1`` usage/IO.
 """
 
@@ -122,6 +127,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("one of --propose or --decisions is required")
     if args.propose and args.decisions:
         parser.error("--propose and --decisions are different modes")
+    if args.decisions and not args.out:
+        # The re-typed dump IS the artifact. Without --out the run validates the
+        # plan, prints the report and exits 0 having written nothing — which a
+        # wrapper cannot tell apart from a successful conversion, and the next
+        # phase would load the ORIGINAL snapshot. Refuse instead of succeeding
+        # with nothing written.
+        parser.error("--decisions requires --out (the re-typed dump is the artifact)")
 
     dump = _load_json(args.dump, "dump")
     if not isinstance(dump, dict):

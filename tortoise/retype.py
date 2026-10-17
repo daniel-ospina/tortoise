@@ -73,9 +73,21 @@ job is the layer relocation the other one cannot do.
    so a name-less node is unaddressable or unsearchable in all three.
    ``eventId`` is derived mechanically (from ``id``); a ``name`` is NOT
    invented — it must be supplied, because naming a thing is the judgement the
-   mechanics do not have.
-7. **Counts reconcile.** Nodes and edges in == out; the moves and the keeps sum
-   to the node count. Checked, not assumed.
+   mechanics do not have. A name is also **unique among the nodes that end the
+   plan** in a name-MERGEed layer (``:Object``/``:Subject``, #7369): two nodes
+   sharing one name are ONE identity to the write path — which is why the
+   collision is refused even when neither node is moved by the plan.
+7. **Counts reconcile, against a BOUND snapshot.** Nodes and edges in == out;
+   the moves and the keeps sum to the node count; every edge endpoint is proved
+   to exist in the output (``edges_preserved`` is asserted, not restated). And
+   the plan carries a fingerprint of the dump it was validated against
+   (``RetypePlan.dump_sha256``: each node's ``dump_id`` + identity + labels +
+   kind), which ``apply_plan`` recomputes and refuses on mismatch, while
+   matching moves by *identity* and not only by position. ``dump_id`` is the
+   store's INTERNAL id — positional and reused after deletions — so a refreshed
+   snapshot of the same size maps the same ids onto different nodes; without the
+   binding the run would apply A's kinds and names onto B's nodes and still
+   report clean.
 
 ## Props this module drops, and why
 
@@ -142,6 +154,13 @@ NAME_REQUIRED_TARGETS: frozenset[str] = frozenset({"Object", "Subject", "Event"}
 
 #: Layers whose stored vector is encoded FROM ``name`` (#7845).
 NAME_EMBEDDED_TARGETS: frozenset[str] = frozenset({"Object", "Subject"})
+
+#: Layers whose write path MERGEs on ``name`` (#7369) — two nodes sharing one
+#: name are ONE identity in the target graph, so a name must be unique among
+#: them. ``:Event`` is deliberately absent: ``_upsert_event`` MERGEs on
+#: ``eventId``, so a duplicated Event name is search ambiguity (its FULLTEXT
+#: index is ``(subject, name)``), not an identity break.
+NAME_MERGE_TARGETS: frozenset[str] = frozenset({"Object", "Subject"})
 
 #: Why a name is required, per layer — the refusal says which mechanism bites.
 NAME_REQUIRED_REASON: dict[str, str] = {
@@ -263,6 +282,10 @@ class RetypePlan:
     moves: tuple[Move, ...]
     keeps: tuple[str, ...]
     decisions_sha256: str
+    #: The snapshot this plan was validated against (``_dump_fingerprint``).
+    #: ``apply_plan`` recomputes it and refuses a mismatch — an empty value is
+    #: an unbound plan and is refused too (fail closed).
+    dump_sha256: str = ""
 
 
 # ── dump access ─────────────────────────────────────────────────────────────
@@ -288,6 +311,37 @@ def node_key(node: Mapping[str, Any]) -> str:
     return f"dump_id:{node.get('dump_id')}"
 
 
+def _dump_fingerprint(dump: Mapping[str, Any]) -> str:
+    """sha256 over each node's ``(dump_id, identity, labels, kind)``.
+
+    ``dump_id`` is the store's INTERNAL id (``hosted_backup.dump_graph`` emits
+    ``int(internal_id)``), i.e. POSITIONAL and reused after deletions. Bound
+    only by the id set, a plan built for one snapshot applies to a refreshed
+    snapshot of the same size that names different nodes — it would write A's
+    kinds and NAMES onto B's nodes and every count would reconcile. Pairing the
+    id with the node's own identity makes that rotation a mismatch instead.
+    """
+    nodes = dump.get("nodes")
+    rows: list[list[str]] = []
+    if isinstance(nodes, list):
+        for node in nodes:
+            if not isinstance(node, dict):
+                rows.append(["<malformed>", repr(node)])
+                continue
+            props = _props(node)
+            rows.append(
+                [
+                    str(node.get("dump_id")),
+                    node_key(node),
+                    ",".join(sorted(_labels(node))),
+                    *(str(props.get(prop) or "") for prop in KIND_PROP.values()),
+                ]
+            )
+    rows.sort()
+    blob = json.dumps(rows, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def index_dump(dump: Mapping[str, Any]) -> dict[str, dict]:
     """``{node_key: node}`` for every node, refusing an ambiguous index."""
     nodes = dump.get("nodes")
@@ -304,6 +358,26 @@ def index_dump(dump: Mapping[str, Any]) -> dict[str, dict]:
         if dump_id in seen_dump_ids:
             problems.append(f"duplicate dump_id {dump_id!r} in node list")
         seen_dump_ids.add(dump_id)
+        # Container types are part of the fail-closed contract — the same two
+        # checks ``restore_graph`` makes (hosted_backup, #3895 review P1). A
+        # non-dict prop bag normalised to ``{}`` would emit a property-less node
+        # and report a clean run, HIDING from the loader the corruption it would
+        # have refused; a non-list label set is the same class.
+        raw_props = node.get("props") or {}
+        if not isinstance(raw_props, dict):
+            problems.append(
+                f"node dump_id {dump_id!r} carries a non-dict prop bag "
+                f"({type(raw_props).__name__}: {raw_props!r:.60}) — restore_graph "
+                "calls that CORRUPTION; it is not an empty bag to normalise"
+            )
+            continue
+        if not isinstance(node.get("labels") or [], list):
+            problems.append(
+                f"node dump_id {dump_id!r} carries a non-list label set "
+                f"({type(node.get('labels')).__name__}: {node.get('labels')!r:.60}) — "
+                "restore_graph calls that CORRUPTION"
+            )
+            continue
         key = node_key(node)
         if key in index:
             problems.append(
@@ -496,6 +570,41 @@ def _decisions_digest(decisions: Sequence[Decision]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def _name_collision_problems(index: Mapping[str, dict], moves: Sequence[Move]) -> list[str]:
+    """Every node that ENDS the plan in a name-MERGEed layer, grouped by name.
+
+    Invariant 6 requires a name on each moved node; requiring one is not enough,
+    because ``:Object``/``:Subject`` MERGE on it (#7369) — two nodes sharing a
+    name are ONE identity to the write path, not two rows. The collision can be
+    with a node the plan never touches (a curated graph routinely already holds
+    a same-named Object), so kept nodes are grouped in too.
+    """
+    by_move = {move.key: move for move in moves}
+    by_name: dict[tuple[str, str], list[str]] = {}
+    for key, node in index.items():
+        move = by_move.get(key)
+        if move is not None:
+            label, name = move.dst_label, move.name
+        else:
+            label, name = _current_label(node)[0], _props(node).get("name")
+        if label not in NAME_MERGE_TARGETS:
+            continue
+        if not (isinstance(name, str) and name.strip()):
+            continue
+        by_name.setdefault((str(label), name.strip()), []).append(key)
+    problems: list[str] = []
+    for (label, name), keys in sorted(by_name.items()):
+        if len(keys) < 2:
+            continue
+        problems.append(
+            f"{', '.join(repr(k) for k in sorted(keys))} would all end as "
+            f":{label} name={name!r} — a :{label} MERGEs on its name (#7369), so "
+            "the target graph would hold them as ONE identity (the write path "
+            "folds both into whichever it finds); give each its own name"
+        )
+    return problems
+
+
 def build_plan(
     dump: Mapping[str, Any],
     decisions: Any,
@@ -607,8 +716,7 @@ def build_plan(
                 "identity property); the node carries none"
             )
             continue
-        derives_event_id = (target == "Event"
-                            and not props.get(identity_prop))
+        derives_event_id = target == "Event" and not props.get(identity_prop)
         if kind_only and kind == props.get("pointKind"):
             keeps.append(key)  # a no-op decision is a keep, not a silent move
             continue
@@ -625,12 +733,17 @@ def build_plan(
             )
         )
 
+    if not problems:
+        # Invariant 6 — a name is required AND unique among the nodes that end
+        # in a name-MERGEed layer.
+        problems.extend(_name_collision_problems(index, moves))
     if problems:
         raise RetypeError(problems)
     return RetypePlan(
         moves=tuple(moves),
         keeps=tuple(sorted(keeps)),
         decisions_sha256=_decisions_digest(parsed),
+        dump_sha256=_dump_fingerprint(dump),
     )
 
 
@@ -666,6 +779,47 @@ def apply_plan(
     edges_in = dump.get("edges")
     if not isinstance(nodes_in, list) or not isinstance(edges_in, list):
         raise RetypeError(["dump carries no node/edge lists — nothing to re-type"])
+
+    # Shape/dump_id validation before a single node is rewritten (the loader's
+    # own container contract: a non-dict prop bag or a non-list label set is
+    # corruption, a duplicate dump_id is an ambiguity), plus the id → identity
+    # map the plan is bound to.
+    index = index_dump(dump)
+    identity_by_id = {int(node["dump_id"]): key for key, node in index.items()}
+
+    # Invariant 7 — the plan belongs to THIS snapshot. Matching on dump_id alone
+    # is POSITIONAL (see ``_dump_fingerprint``), so both halves are checked: the
+    # fingerprint over the whole node set, and per-move identity. Either alone
+    # leaves a silent mislabel: the fingerprint is what catches a rotation of the
+    # KEPT nodes, the per-move check names exactly which moves went astray.
+    problems: list[str] = []
+    fingerprint = _dump_fingerprint(dump)
+    if plan.dump_sha256 != fingerprint:
+        problems.append(
+            "plan was built for a different snapshot: dump fingerprint "
+            f"{plan.dump_sha256[:12] or '<none>'} != {fingerprint[:12]} — re-run "
+            "build_plan against this dump (its ids are positional, so a plan for "
+            "another snapshot of the same size would apply to the wrong nodes)"
+        )
+    misapplied = [move for move in plan.moves if identity_by_id.get(move.dump_id) != move.key]
+    if misapplied:
+        problems.append(
+            f"{len(misapplied)} plan move(s) land on a DIFFERENT node in this dump: "
+            + ", ".join(
+                f"{m.key!r} @ dump_id {m.dump_id} is {identity_by_id.get(m.dump_id)!r}"
+                for m in misapplied[:10]
+            )
+            + ("" if len(misapplied) <= 10 else f" (+{len(misapplied) - 10} more)")
+        )
+    unknown_keeps = sorted(set(plan.keeps) - set(identity_by_id.values()))
+    if unknown_keeps:
+        problems.append(
+            f"{len(unknown_keeps)} keep(s) name node(s) this dump does not carry: "
+            + ", ".join(repr(k) for k in unknown_keeps[:10])
+            + " — the partition must close against this snapshot's identities"
+        )
+    if problems:
+        raise RetypeError(problems)
 
     moves_by_id = {m.dump_id: m for m in plan.moves}
     census = _epistemic_edge_census(dump)
@@ -728,20 +882,51 @@ def apply_plan(
             epistemic_endpoints.append(move.key)
 
     # Invariant 7 — counts reconcile, checked against the output itself.
-    problems: list[str] = []
+    out_ids = [int(n["dump_id"]) for n in out_nodes]
     if len(moved_ids) != len(plan.moves):
-        # A plan built for a DIFFERENT snapshot of the same size would otherwise
-        # pass the count check below while applying nothing.
         problems.append(
             f"plan does not apply to this dump: {len(plan.moves)} move(s), "
             f"{len(moved_ids)} node id(s) matched"
         )
-    if len(out_nodes) != len(nodes_in):
-        problems.append(f"node count changed: {len(nodes_in)} in, {len(out_nodes)} out")
+    # A list built by appending one row per input row cannot change length, so a
+    # bare len(out) == len(in) compares the input with itself. The ID SET is the
+    # claim: every input id is present exactly once in the output.
+    if len(out_nodes) != len(nodes_in) or set(out_ids) != set(identity_by_id):
+        problems.append(
+            f"node set changed: {len(nodes_in)} id(s) in, {len(out_nodes)} node(s) "
+            f"out ({len(set(out_ids))} distinct id(s))"
+        )
     if len(plan.moves) + len(plan.keeps) != len(nodes_in):
         problems.append(
             f"partition does not close: {len(plan.moves)} move(s) + "
             f"{len(plan.keeps)} keep(s) != {len(nodes_in)} node(s)"
+        )
+    malformed_edges = sum(1 for edge in edges_in if not isinstance(edge, dict))
+    if malformed_edges:
+        problems.append(
+            f"{malformed_edges} edge row(s) are not objects — restore_graph calls that malformed"
+        )
+    id_set = set(out_ids)
+    missing_edge_ids = sorted(
+        {
+            endpoint
+            for edge in edges_in
+            if isinstance(edge, dict)
+            for endpoint in (edge.get("src"), edge.get("dst"))
+            if endpoint not in id_set
+        },
+        key=str,
+    )
+    if missing_edge_ids:
+        # ``edges_preserved`` is only true when every endpoint survived. dump_id
+        # is preserved by construction, but the DUMP may already be dangling and
+        # this tool must not certify that as preserved.
+        problems.append(
+            f"{len(missing_edge_ids)} edge endpoint dump_id(s) no output node "
+            "carries: "
+            + ", ".join(repr(k) for k in missing_edge_ids[:10])
+            + " — the dump is already dangling, so edges_preserved cannot be "
+            "asserted"
         )
     if problems:
         raise RetypeError(problems)

@@ -23,6 +23,7 @@ loader by calling the loader's OWN primitives (``DUMP_FORMAT``,
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 
 import pytest
@@ -570,7 +571,8 @@ def test_cli_propose_then_apply_roundtrip(tmp_path):
 def test_a_plan_built_for_another_snapshot_cannot_apply():
     """Two snapshots of the same size must not be interchangeable: dump_id is
     positional, so a plan from the wrong one would otherwise apply nothing and
-    look like a clean run."""
+    look like a clean run. The shifted-id case is the TOTAL mismatch; the two
+    tests above are the partial ones (same id range, different nodes)."""
     dump = _dump()
     other = copy.deepcopy(dump)
     for node in other["nodes"]:  # shift every internal id
@@ -578,4 +580,159 @@ def test_a_plan_built_for_another_snapshot_cannot_apply():
     plan = build_plan(dump, _all_keep(dump, overrides={"pt-goal-1": GOAL_MOVE}))
     with pytest.raises(RetypeError) as exc:
         apply_plan(other, plan)
-    assert any("does not apply to this dump" in p for p in exc.value.problems)
+    assert any("different snapshot" in p for p in exc.value.problems)
+
+
+# ── invariant 7 (binding): a plan belongs to ONE snapshot, not to an id set ──
+
+
+def test_a_plan_built_for_a_rotated_snapshot_of_the_same_size_cannot_apply():
+    """``dump_id`` is FalkorDB's INTERNAL, positional id, so a re-dump of the
+    same size reuses the same id range while naming different nodes — the exact
+    window the documented flow leaves open (``--propose`` → review → ``--apply``
+    against a refreshed snapshot). Bound only by the id set, the plan applies
+    A's kinds and NAMES onto B's nodes and every count reconciles: a silent
+    mislabel, which this module must refuse."""
+    dump = _dump()
+    plan = build_plan(dump, _all_keep(dump, overrides={"pt-goal-1": GOAL_MOVE}))
+    rotated = copy.deepcopy(dump)  # same size, same ids, different identities
+    first, second = rotated["nodes"][0]["props"], rotated["nodes"][1]["props"]
+    rotated["nodes"][0]["props"], rotated["nodes"][1]["props"] = second, first
+    with pytest.raises(RetypeError) as exc:
+        apply_plan(rotated, plan)
+    joined = " ".join(exc.value.problems)
+    assert "different snapshot" in joined
+    # the mis-applied move is named, not just counted
+    assert "pt-goal-1" in joined and "pt-dec-1" in joined
+
+
+def test_a_plan_is_bound_to_the_nodes_it_KEEPS_too():
+    """The move's own node is untouched here — only two KEPT nodes have swapped
+    identities. A check that only looks at the moved nodes sees nothing wrong;
+    the snapshot binding must still refuse."""
+    dump = _dump()
+    plan = build_plan(dump, _all_keep(dump, overrides={"pt-goal-1": GOAL_MOVE}))
+    rotated = copy.deepcopy(dump)
+    third, fourth = rotated["nodes"][2]["props"], rotated["nodes"][3]["props"]
+    rotated["nodes"][2]["props"], rotated["nodes"][3]["props"] = fourth, third
+    with pytest.raises(RetypeError) as exc:
+        apply_plan(rotated, plan)
+    assert any("different snapshot" in p for p in exc.value.problems)
+
+
+def test_a_keep_that_names_no_node_in_this_dump_is_refused():
+    """The partition must close against THIS dump's identities, not just the
+    count: a keep naming a node this dump does not carry is a plan for another
+    snapshot, and the count check cannot see it."""
+    dump = _dump()
+    plan = build_plan(dump, _all_keep(dump, overrides={"pt-goal-1": GOAL_MOVE}))
+    ghosted = dataclasses.replace(plan, keeps=("pt-ghost", *plan.keeps[1:]))
+    with pytest.raises(RetypeError) as exc:
+        apply_plan(dump, ghosted)
+    assert any("pt-ghost" in p for p in exc.value.problems)
+
+
+def test_edges_preserved_is_verified_not_assumed():
+    """The report says ``edges_preserved``; a dump whose edge already points at
+    a dump_id no node carries cannot support that claim, so it is refused rather
+    than restated."""
+    dump = _dump()
+    decisions = _all_keep(dump)
+    dump["edges"].append({"src": 3, "dst": 999, "type": "IMPL", "props": {}})
+    dump["edge_count"] = len(dump["edges"])
+    plan = build_plan(dump, decisions)
+    with pytest.raises(RetypeError) as exc:
+        apply_plan(dump, plan)
+    assert any("999" in p for p in exc.value.problems)
+
+
+# ── invariant 6 (uniqueness): one name is one identity ──────────────────────
+
+
+def test_two_moves_that_would_share_a_merge_name_are_refused():
+    """``:Object``/``:Subject`` MERGE on ``name`` (#7369): two nodes sharing one
+    name are ONE identity to the write path. Requiring a name per node is not
+    enough — the requirement has to be that no two nodes share it."""
+    dump = _dump()
+    overrides = {
+        "pt-goal-1": {"label": "Object", "kind": "goal", "name": "Alpha 2"},
+        "pt-stmt-1": {"label": "Object", "kind": "goal", "name": "Alpha 2"},
+    }
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, _all_keep(dump, overrides=overrides))
+    joined = " ".join(exc.value.problems)
+    assert "pt-goal-1" in joined and "pt-stmt-1" in joined
+    assert "MERGEs on its name" in joined
+
+
+def test_a_move_whose_name_collides_with_a_kept_object_is_refused():
+    """The collision can be with a node the plan never touches — the fixture
+    already carries ``:Object {name: 'Alpha'}``."""
+    dump = _dump()
+    with pytest.raises(RetypeError) as exc:
+        build_plan(
+            dump,
+            _all_keep(
+                dump, overrides={"pt-goal-1": {"label": "Object", "kind": "goal", "name": "Alpha"}}
+            ),
+        )
+    joined = " ".join(exc.value.problems)
+    assert "pt-goal-1" in joined and "obj-1" in joined
+
+
+def test_two_kept_objects_sharing_a_name_are_refused():
+    """A dump that ALREADY holds two same-named Objects cannot be handed to a
+    loader that MERGEs on name — the refusal names both."""
+    dump = _dump()
+    dump["nodes"].append(_node(14, ["Object"], id="obj-2", objectKind="goal", name="Alpha"))
+    dump["node_count"] = len(dump["nodes"])
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, _all_keep(dump))
+    assert any("obj-1" in p and "obj-2" in p for p in exc.value.problems)
+
+
+# ── the loader's own container contract, enforced at the door ───────────────
+
+
+def test_a_non_dict_prop_bag_is_refused_rather_than_normalised_to_empty():
+    """``restore_graph`` treats a non-dict prop bag as CORRUPTION (#3895 review
+    P1). Normalising it to ``{}`` would emit a property-less node, report a
+    clean run, and hide from the loader exactly the corruption it would refuse."""
+    dump = _dump()
+    decisions = _all_keep(dump)
+    dump["nodes"][2]["props"] = "corrupt"
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, decisions)
+    assert any("prop bag" in p and "3" in p for p in exc.value.problems)
+
+
+def test_a_non_list_label_set_is_refused():
+    dump = _dump()
+    decisions = _all_keep(dump)
+    dump["nodes"][0]["labels"] = "Point"
+    with pytest.raises(RetypeError) as exc:
+        build_plan(dump, decisions)
+    assert any("label" in p and "1" in p for p in exc.value.problems)
+
+
+# ── the CLI must never exit 0 having written nothing ────────────────────────
+
+
+def test_cli_apply_mode_never_exits_zero_without_the_retyped_dump(tmp_path):
+    """``--out`` was optional in apply mode, so the primary artifact was
+    discarded while the tool exited 0 — indistinguishable, to a wrapper script,
+    from a successful conversion. The documented contract is ``0`` ok."""
+    from tools.retype_snapshot import main
+
+    dump_path = tmp_path / "snapshot.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    decisions_path = tmp_path / "decisions.json"
+    decisions_path.write_text(json.dumps(_all_keep(_dump())), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(dump_path), "--decisions", str(decisions_path)])
+    assert exc.value.code == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "decisions.json",
+        "snapshot.json",
+    ]
