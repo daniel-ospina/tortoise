@@ -5,6 +5,7 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+from tortoise.entity_identity import display_holder_ids, record_non_folded
 from tortoise.live import epistemic_disjunction
 
 # #5048: the ONE home for the two mitigation predicates, shared with
@@ -187,8 +188,10 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
     if label == "Subject":
         _mint_subject_stub(g, key)
         rows = g.query(
-            "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 1",
+            "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2",
             params={"name": key}).result_set
+        if len(rows) > 1:
+            return _refuse_ambiguous_target("Subject", key, rows, rel)
         if not rows:
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
@@ -233,12 +236,43 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
         return {"internal": rows[0][0], "logical": rows[0][1]}
     # Non-stubbable labels — resolve-only (never mint). Event nodes match by
     # name (set by create_event).
+    #
+    # #5509: a NAME is a mutable natural key (D2: two live carriers are legal),
+    # so "the" target is not the backend's arbitrary first row. `LIMIT 1`
+    # silently picked one — a rebuilt edge could land on a different same-name
+    # carrier than the one live pointed at, i.e. replay was order-dependent —
+    # and the Object arm is exactly the identity read #5509 owns. Resolve
+    # EXACTLY ONE holder or refuse: two or more records the non-folded entry and
+    # skips the descriptor (the honest outcome for a name that does not name one
+    # identity). NO status filter here, deliberately: this is REPLAY resolution
+    # of an already-written edge, which must reach the node live addressed even
+    # when it has since gone terminal — routing it through the live resolver
+    # would make rebuild disagree with the graph it is rebuilding.
     q = (f"MATCH (x:{label} {{name:$key}}) "
-         f"RETURN ID(x), x.id LIMIT 1")
+         f"RETURN ID(x), x.id LIMIT 2")
     rows = g.query(q, params={"key": key}).result_set
+    if len(rows) > 1:
+        return _refuse_ambiguous_target(label, key, rows, rel)
     if not rows:
         return None
     return {"internal": rows[0][0], "logical": rows[0][1]}
+
+
+def _refuse_ambiguous_target(label: str, key: str, rows, rel: str):
+    """Record + report a name held by 2+ carriers; never pick one.
+
+    ``rows`` are the `(internal, logical)` pairs of every holder. Returns None
+    so the caller skips the structural edge: a name that does not name ONE
+    identity has no target, and picking an arbitrary holder is what #5509
+    removes. The entry (not the log line) is the record.
+    """
+    record_non_folded(label, key, display_holder_ids([r[1] for r in rows]))
+    logger.warning(
+        "structural edge %s: target %s %r has %d carriers %s — descriptor "
+        "skipped (never guess a name-keyed identity, #5509)",
+        rel, label, key, len(rows),
+        display_holder_ids([r[1] for r in rows]))
+    return None
 
 
 # Canonical structural-edge predicate vocabulary (ONTOLOGY §3.2/§3.3 + #391).
