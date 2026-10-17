@@ -87,9 +87,10 @@ THE TARGET IS NOT A PARAMETER
 -----------------------------
 Like ``tools/test_lane.py``, there is no ``--lane``/``--ref`` override: a peer's
 lane key is a computable ``sha1(path)[:8]``, so any override would be a way for
-one lane to delete or adopt another lane's pinned entries. ``prune`` and
-``recover`` are the only commands that touch the shared register, and they are
-explicit by design (`prune` also requires ``--apply``). ``recover`` additionally
+one lane to delete or adopt another lane's pinned entries. ``push`` appends one
+entry (as bare ``git stash push`` must); ``prune`` and ``recover`` are the only
+commands that remove or MOVE an existing entry, and both are explicit by design
+(`prune` also requires ``--apply``). ``recover`` additionally
 REFUSES an entry that another lane's ref or ``[<lane-key>]`` marker names: pinning
 it here would leave it claimed by both lanes, and ``check`` would then call a bare
 ``git stash pop`` safe on work that is not this lane's (#8773 review P1). It also
@@ -691,29 +692,33 @@ def _guard_release_all(sha: str) -> None:
         _guard_unpin(ref, sha)
 
 
-def _live_lane_keys() -> set[str] | None:
-    """Lane keys of every worktree git still knows about, or ``None`` if unreadable.
+def _live_lane_keys() -> tuple[set[str], list[str]] | None:
+    """Live lane keys plus any STALE registration, or ``None`` if undeterminable.
+
+    ``None`` means the question cannot be answered: `git worktree list` failed, OR
+    it reports a ``prunable`` registration. A worktree moved with plain `mv` (or
+    a directory removed without `git worktree prune`) leaves its OLD path
+    registered, so the key a LIVE worktree derives from ``--show-toplevel`` would
+    be absent from the live set and its guards would be classified dead — the
+    wrong direction. Callers retain everything on ``None``.
 
     A prune guard is created under the CREATING worktree's key and outlives that
-    worktree. Telling a live owner from a removed one is what makes it safe to
+    worktree; telling a live owner from a removed one is what makes it safe to
     reap a stale guard without touching a concurrent peer prune's protection.
     """
     cp = _git("worktree", "list", "--porcelain", check=False)
     if cp.returncode != 0:
         return None
-    lines = cp.stdout.splitlines()
-    if any(ln.startswith("prunable") for ln in lines):
-        # A stale registration (a worktree moved with plain `mv`, or a directory
-        # removed without `git worktree prune`) prints the OLD path, so the key a
-        # LIVE worktree derives from `--show-toplevel` would be absent and its
-        # guards would be classified dead. That is the wrong direction, so retain
-        # everything while any registration is stale (#8822 review P2).
-        return None
     keys: set[str] = set()
-    for ln in lines:
+    stale: list[str] = []
+    current: str | None = None
+    for ln in cp.stdout.splitlines():
         if ln.startswith("worktree "):
-            keys.add(lane_key(Path(ln[len("worktree "):])))
-    return keys
+            current = ln[len("worktree "):]
+            keys.add(lane_key(Path(current)))
+        elif ln.startswith("prunable") and current is not None:
+            stale.append(current)
+    return keys, stale
 
 
 def _reap_stale_guards() -> None:
@@ -728,21 +733,38 @@ def _reap_stale_guards() -> None:
     Both conditions are required: a LIVE owner key may be a prune in flight, whose
     guard is its only protection during a positional delete; a DEAD owner's guard
     for an object no other ref names is the LAST handle on that object.
+
+    Residual window (documented, not closable with git's ref API): the register is
+    read immediately before EACH release, but a peer `stash clear` between that
+    read and the `update-ref -d` still makes the released ref the last handle. The
+    window is one subprocess wide per guard; a re-pin-and-verify dance would only
+    narrow it further at the cost of double releases.
     """
     live = _live_lane_keys()
     if live is None:
+        print("kept   all prune guards — `git worktree list` could not be read, so a "
+              "live owner cannot be ruled out")
         return
-    try:
-        # Read the register HERE, never from a caller's snapshot. A peer `stash
-        # drop`/`clear` or a reflog expiry between that read and this release
-        # removes the entry, and deciding from the stale read would make the guard
-        # we drop the object's LAST handle (#8822 review P1).
-        present = {r["sha"] for r in _shared_register()}
-    except LaneStashError:
-        return  # an unreadable register is not evidence — retain conservatively
+    keys, stale = live
+    if stale:
+        # Reported, never silent: a stale registration disables the reap, and the
+        # state that CREATES a dead-key guard (a worktree directory removed without
+        # `git worktree prune`) is exactly the state that suspends its reaper.
+        print(f"kept   all prune guards — a worktree registration is STALE ({', '.join(stale)}); "
+              "a stale path can hide a LIVE lane key, so run `git worktree prune` to "
+              "enable reaping")
+        return
     for ref, sha, owner in _guard_refs():
-        if not owner or owner in live:
+        if not owner or owner in keys:
             continue
+        try:
+            # Read the register for EACH release, immediately before deciding. A
+            # peer `stash drop`/`clear` or a reflog expiry between the read and the
+            # unpin removes the entry, and deciding from an older read would make
+            # the guard we drop the object's LAST handle (#8822 review P1).
+            present = {r["sha"] for r in _shared_register()}
+        except LaneStashError:
+            return  # an unreadable register is not evidence — retain conservatively
         others = {
             r for r in _refs_pointing_at(sha)
             # Neither a guard (releasable at its owner's will) nor `refs/stash`
@@ -1120,9 +1142,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         verdict["safe"] = False
         if not rows:
             verdict["reasons"].append(
-                f"refs/stash resolves to {head[:12]} but the shared reflog does not "
-                "enumerate it — the register cannot be read, so a bare `git stash pop` "
-                "here cannot be shown to be safe (it would apply and drop that entry)"
+                f"refs/stash resolves to {head[:12]} but the shared reflog no longer "
+                "enumerates it (an emptied reflog; the read succeeded and returned "
+                "nothing) — a bare `git stash pop` here would apply and drop that entry"
             )
         else:
             verdict["reasons"].append(

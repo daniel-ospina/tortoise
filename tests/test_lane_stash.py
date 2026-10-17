@@ -2081,6 +2081,10 @@ def test_prune_retains_guards_while_a_worktree_registration_is_stale(
     monkeypatch.chdir(repo.a)
     capsys.readouterr()
     assert mod.main(["prune", "--apply"]) == 0
+    out = capsys.readouterr().out
+    # Suspension is reported, never silent: this state creates dead-key guards
+    # and is also the state that suspends their reaper.
+    assert "STALE" in out and "git worktree prune" in out, out
     refs = repo.git(
         "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
     ).stdout.split()
