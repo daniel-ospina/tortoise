@@ -329,9 +329,12 @@ and compares them with the bytes at upstream `main` HEAD. Both directions are
 mutation-measured (`tests/test_served_skills_parity.py`): a served copy edited
 in place reds the offline arm; an upstream edit to a pinned skill reds the
 currency arm; a hand-fabricated pin reds the honesty arm. The **scope** is
-checked too: upstream `skills/` must equal the pin's keys (plus any entries the
-pin records under `out_of_scope:`), because both byte arms iterate the pin's
-own keys and would therefore never see an upstream skill we had never pinned.
+checked too: upstream `skills/` must equal the set of upstream **directories**
+the pin binds through its `upstream_path`s (plus any entries the pin records
+under `out_of_scope:`), because both byte arms iterate the pin's own keys and
+would therefore never see an upstream skill we had never pinned. The binding is
+`upstream_path`, not the pin key: the served name may be shortened, so
+`skills.decide` may point at `skills/tortoise-decide/`.
 
 The currency arm compares **bytes, not the commit pointer**, so an upstream
 commit that changes no skill we serve does not red the gate and does not file a

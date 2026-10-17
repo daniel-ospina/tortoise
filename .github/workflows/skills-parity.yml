@@ -9,7 +9,8 @@
 #   * the upstream arm (`--check-upstream`) — the pin is HONEST (its commit
 #     really hashes to the pinned sha256), CURRENT (the bytes at upstream `main`
 #     HEAD are still those bytes) and has the right SCOPE (upstream `skills/`
-#     equals the pin's keys plus its declared `out_of_scope:` entries), so an
+#     equals the upstream directories the pin's `upstream_path`s bind, plus its
+#     declared `out_of_scope:` entries), so an
 #     upstream ADDITION or REMOVAL is reported instead of being invisible to a
 #     pin-keyed loop.
 #

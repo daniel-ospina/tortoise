@@ -16,7 +16,8 @@ Two halves, and the split is deliberate:
 * **non-vacuity** (the `check_upstream` tests below) — the pin is HONEST (the
   pinned commit really hashes to it) and CURRENT (the bytes at upstream `main`
   HEAD are still the pinned bytes) and has the right SCOPE (upstream `skills/`
-  is exactly the pin's keys, so an upstream ADDITION/REMOVAL is reported rather
+  is exactly the upstream directories the pin's `upstream_path`s bind, so an
+  upstream ADDITION/REMOVAL is reported rather
   than invisible). A pin-only gate is vacuous — pin any old commit and
   "byte-identical" becomes true of history — so these tests prove the currency
   arm is wired to the pin rather than the other way round. They monkeypatch the
@@ -131,6 +132,24 @@ def test_4643_the_pin_records_a_real_commit_and_content_hash():
         assert re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]), (
             f"{name}: sha256 must be 64 lowercase hex chars, got "
             f"{entry['sha256']!r}")
+
+
+def test_4643_section_71_states_the_scope_rule_the_code_implements():
+    """§7.1 is the section a contributor audits this gate against. It described
+    the scope arm as an equality on the pin's KEYS while the code binds the
+    upstream DIRECTORY from `upstream_path` (a served name may be shortened), so
+    the two authoritative descriptions of the same check disagreed — the exact
+    class this PR already fixed once (review finding, P2). Pin the sentence to
+    the code so it cannot rot back."""
+    rule = " ".join(_section_71().split())
+    assert "upstream_path" in rule, (
+        "§7.1 states the scope rule without naming `upstream_path`: the code "
+        "binds the upstream DIRECTORY from `upstream_path`, and the section is "
+        "what a contributor audits the gate against")
+    assert "the pin's keys" not in rule, (
+        "§7.1 still describes the scope arm as an equality on the pin's KEYS; "
+        "the code binds by `upstream_path`, and a pin whose served name differs "
+        "from the directory is legal")
 
 
 def test_4643_the_generator_keeps_the_out_of_scope_declaration(tmp_path):
@@ -397,7 +416,7 @@ def test_4643_an_upstream_commit_that_cannot_change_what_we_serve_is_not_drift(
     """CURRENCY IS ABOUT BYTES, NOT THE COMMIT POINTER (review finding, P2).
 
     The MIT repo also takes commits that change no skill we serve — a README
-    edit, CI config, an edit to a skill that is neither pinned nor listed under
+    edit, CI config, an edit to a skill already recorded under
     `out_of_scope:` (`6ebf0c9` is itself such a commit). Keying currency on
     `HEAD == pinned` reds the dashboard deploy for a reason unrelated to the
     artifact, auto-files a FALSE "the served mirror drifted" P2, and diagnoses

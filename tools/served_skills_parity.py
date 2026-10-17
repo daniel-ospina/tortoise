@@ -61,7 +61,7 @@ WHY CURRENCY COMPARES BYTES, NOT THE COMMIT POINTER
 The currency arm compares the PINNED sha256 against the bytes at upstream HEAD.
 It deliberately does NOT require `HEAD == pinned`: the MIT repo also takes
 commits that change no skill we serve (a README edit, CI config, an edit to a
-skill that is neither pinned nor listed under `out_of_scope:`). Keying on the
+skill already recorded under `out_of_scope:`). Keying on the
 pointer reds the dashboard deploy and auto-files a "the mirror drifted" P2 for a
 commit that changed none of the three files — a false alarm on the one signal
 humans are asked to trust, and a wrong diagnosis ("a skill changed there") for a
@@ -232,7 +232,8 @@ def load_manifest(path: Path) -> dict:
     out_of_scope = data.get("out_of_scope")
     if out_of_scope is not None:
         # Optional, and deliberately EXPLICIT: the upstream arm requires set
-        # equality between upstream `skills/` and the pin's keys, so the only
+        # equality between upstream `skills/` and the upstream directories the
+        # pin's `upstream_path`s bind, so the only
         # way to say "that upstream skill is not ours to serve" is to write it
         # down here. A malformed entry must fail closed — a silently ignored
         # name would make the declaration a no-op that reads as an exclusion.
@@ -577,7 +578,8 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
     """The pin is honest AND current AND the right scope, and the mirror matches it.
 
     Four assertions, in the order that makes each failure legible:
-      0. upstream `skills/` contains EXACTLY the pin's keys (plus the pin's
+      0. upstream `skills/` contains EXACTLY the upstream directories the pin's
+         `upstream_path`s bind (plus the pin's
          declared `out_of_scope:`) — at the pinned commit and at `branch` HEAD,
          so an upstream ADDITION or REMOVAL is reported rather than invisible
          (both byte assertions iterate the pin's own keys, see `_check_scope`);
