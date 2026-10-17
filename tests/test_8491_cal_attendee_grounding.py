@@ -64,13 +64,23 @@ def _state_file(tmp_path: Path, **overrides) -> Path:
     return path
 
 
-def _meeting_md(tmp_path: Path) -> Path:
+def _meeting_md(tmp_path: Path, *, quote_date: bool = True,
+                date_value: str = MEETING_DATE, title: str = MEETING_TITLE) -> Path:
+    """The contaminated artifact's markdown.
+
+    ``quote_date=False`` writes the ``date:`` UNQUOTED, which PyYAML parses into
+    a ``datetime`` — the shape ``_as_calendar_day`` was extended to accept and
+    the shape real ``~/meetings/*.md`` files produce when the writer does not
+    quote (a ``datetime`` is not subscriptable, so the opportunity label must go
+    through the helper rather than slice the value).
+    """
+    date_line = f'date: "{date_value}"\n' if quote_date else f"date: {date_value}\n"
     path = tmp_path / "2026-10-09-preston-younger-intro.md"
     path.write_text(
         "---\n"
         'id: "2026-10-09-preston-younger-intro"\n'
-        f'date: "{MEETING_DATE}"\n'
-        f'title: "{MEETING_TITLE}"\n'
+        f"{date_line}"
+        f'title: "{title}"\n'
         "type: meeting\n"
         "speakers:\n"
         '  - name: "SPEAKER_1"\n'
@@ -96,14 +106,106 @@ def test_stale_neighbouring_state_is_not_applied(tmp_path, monkeypatch):
     assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == []
 
 
-def test_state_from_the_same_day_is_applied(tmp_path, monkeypatch):
-    """Same local day grounds it even when the titles disagree."""
+def test_state_from_the_same_day_is_applied_when_the_title_cannot_speak(
+        tmp_path, monkeypatch):
+    """Same local day grounds it when the state carries NO title to contradict.
+
+    The day arm exists for exactly this case: the state cannot name the event
+    (``stop_recording()``/an older writer left no ``event_title``), so the day
+    is the only evidence either side has.
+    """
     monkeypatch.setattr(
         bridge, "CAL_STATE_FILE",
         str(_state_file(tmp_path, started_at="2026-10-09T10:55:00",
-                        event_title="A Different Calendar Title")),
+                        event_title=None)),
     )
     assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == ATTENDEES
+
+
+def test_same_day_state_naming_a_different_event_is_refused(
+        tmp_path, monkeypatch, capsys):
+    """#8491 residual: a same-day NEIGHBOUR must not be rescued by the day arm.
+
+    The state's own ``event_title`` is affirmatively a different event, which is
+    positive evidence that it describes another call — the day coincidence is
+    not enough. This is the arm that reachable in practice: ``watchdog.sh``
+    re-enters on failure, so a retried run meets whatever call recorded most
+    recently that day. A contradicting title is disqualifying, not "not
+    evidence" (pre-fix, this returned ``ATTENDEES``).
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-09T14:00:00",
+                        event_title="Afternoon Sync")),
+    )
+    assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == []
+    assert "does not describe this meeting" in capsys.readouterr().err
+
+
+def test_long_calendar_title_grounds_on_the_writers_truncation(
+        tmp_path, monkeypatch):
+    """The title arm must survive cal-trigger.py's ``event_title[:50]`` cap.
+
+    ``cal-trigger.py::start_recording`` stores ``event.get("title")[:50]`` while
+    the artifact carries the full calendar title, so exact equality is
+    unreachable above 50 characters — the arm the docstring designates for the
+    across-midnight case was dead for every auto-generated Zoom/Meet invite.
+    Day is deliberately mismatched here so ONLY the title arm can ground it.
+    """
+    long_title = ("Quarterly GTM Packaging Review with the Entire "
+                  "Infrastructure and Pricing Team")[:60]
+    assert len(long_title) == 60
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-08T23:52:00",
+                        event_title=long_title[:50])),
+    )
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, long_title) == ATTENDEES
+
+
+def test_a_tiny_stored_title_cannot_ground_but_does_not_disqualify(
+        tmp_path, monkeypatch):
+    """Below the floor a prefix is not evidence — it neither grounds nor refutes.
+
+    ``1:1`` is a prefix of ``1:1 with Alice`` only because it is 3 characters;
+    treating that as a match would ground any short stored title, so the title
+    cannot speak: the day arm decides, and on a differing day it refuses.
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-08T09:00:00",
+                        event_title="1:1")),
+    )
+    # Different day, title cannot ground -> refuse.
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, "1:1 with Alice") == []
+
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-09T09:00:00",
+                        event_title="1:1")),
+    )
+    # Same day, title cannot disqualify -> the day arm grounds it.
+    assert bridge.get_calendar_attendees(
+        MEETING_DATE, "1:1 with Alice") == ATTENDEES
+
+
+def test_cleared_state_is_silent_absence(tmp_path, monkeypatch, capsys):
+    """The cleared state ``stop_recording()`` writes is absence, not a mismatch.
+
+    It is written on every normal stop and read seconds later by ``watchdog.sh``,
+    so a warning here would fire on every ordinary meeting and cost the warning
+    its signal.
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, recording_pid=None,
+                        current_event_uid=None, started_at=None,
+                        event_title=None, attendees=[])),
+    )
+    assert bridge.get_calendar_attendees(MEETING_DATE, MEETING_TITLE) == []
+    assert capsys.readouterr().err == ""
 
 
 def test_state_from_the_same_event_title_is_applied(tmp_path, monkeypatch):
@@ -188,6 +290,49 @@ def test_process_meeting_does_not_seed_crm_from_a_stale_state(
     result = bridge.process_meeting(str(_meeting_md(tmp_path)))
     assert crm_calls["created_people"] == []
     assert crm_calls["created_opportunities"] == []
+    assert result["status"] in {"ok", "partial"}
+
+
+def test_process_meeting_does_not_seed_crm_from_a_same_day_neighbour(
+        tmp_path, monkeypatch, crm_calls):
+    """The residual #8491 harm end to end: a same-day NEIGHBOUR seeds nothing.
+
+    ``process_meeting`` auto-creates one Person + one "First call" Opportunity
+    per grounded attendee, so a state written by the 14:00 call must contribute
+    nothing to the 09:03 artifact — even though the calendar day matches.
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-09T14:00:00",
+                        event_title="Afternoon Sync")),
+    )
+    result = bridge.process_meeting(str(_meeting_md(tmp_path)))
+    assert crm_calls["created_people"] == []
+    assert crm_calls["created_opportunities"] == []
+    assert result["status"] in {"ok", "partial"}
+
+
+def test_process_meeting_accepts_an_unquoted_yaml_date(
+        tmp_path, monkeypatch, crm_calls):
+    """An UNQUOTED ``date:`` parses into a ``datetime`` — the flow must survive.
+
+    ``datetime`` is not subscriptable, so the opportunity label slicing
+    ``frontmatter['date'][:10]`` raised ``TypeError`` AFTER ``create_person`` had
+    already written the Person (no opportunity, no note, no idempotency marker,
+    and ``main()`` propagates). Grounded by the same day, so the run must reach
+    both creates.
+    """
+    monkeypatch.setattr(
+        bridge, "CAL_STATE_FILE",
+        str(_state_file(tmp_path, started_at="2026-10-09T10:55:00",
+                        event_title=MEETING_TITLE)),
+    )
+    result = bridge.process_meeting(str(_meeting_md(tmp_path, quote_date=False)))
+    assert crm_calls["created_people"] == [
+        (a["name"], a["email"]) for a in ATTENDEES]
+    assert crm_calls["created_opportunities"] == [
+        (f"person-{a['email']}", f"{a['name']} — First call 2026-10-09")
+        for a in ATTENDEES]
     assert result["status"] in {"ok", "partial"}
 
 

@@ -345,6 +345,38 @@ def _as_calendar_day(value) -> _date | None:
             return None
 
 
+# ``cal-trigger.py::start_recording`` stores ``event.get("title", "Meeting")[:50]``,
+# so the state's ``event_title`` is a hard-truncated PREFIX of the calendar title.
+# Titles are therefore compared on that truncation — but only when the shorter
+# side is long enough to be evidence: below this floor a prefix coincidence is
+# not a ground, so the titles "cannot speak" and the day arm decides instead.
+_TITLE_GROUNDING_MIN = 16
+
+
+def _title_relation(want_title: str, have_title: str) -> str | None:
+    """``"same"`` / ``"different"`` / ``None`` for two normalised titles.
+
+    ``None`` means the titles cannot speak to the question (a side is absent,
+    or the only agreement is a prefix too short to distinguish the writer's
+    truncation from a coincidence) — absence of evidence, not contradicting
+    evidence.
+    """
+    if not want_title or not have_title:
+        return None
+    if want_title == have_title:
+        return "same"
+    short, long_ = sorted((want_title, have_title), key=len)
+    if long_.startswith(short):
+        # Only the writer's ``[:50]`` truncation can shorten a calendar title, so
+        # agreement with a truncated store is PREFIX agreement, not equality —
+        # but a short prefix is a coincidence, not a ground: below the floor the
+        # title cannot speak, so the day arm decides instead.
+        return "same" if len(short) >= _TITLE_GROUNDING_MIN else None
+    # Not nested: two different titles. No floor applies — a disagreement is
+    # evidence whether the titles are long or short.
+    return "different"
+
+
 def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
                            meeting_title: str = None) -> list:  # noqa: RUF013
     """Calendar attendees for THE MEETING under process — never a neighbour's.
@@ -362,10 +394,19 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     names.
 
     Grounding therefore comes from the artifact's OWN evidence, since the state
-    has no id to match on: the same local calendar day (state ``started_at`` vs
-    the meeting ``date``), or the same ``event_title``. Neither matches — or no
-    evidence was supplied — and this returns ``[]``: refuse rather than guess,
-    so an ungrounded attendee is never written as a contact.
+    has no id to match on: the same ``event_title`` (compared on the writer's
+    50-character truncation, so a long calendar title can still match), or the
+    same local calendar day (state ``started_at`` vs the meeting ``date``).
+
+    A state whose title names a DIFFERENT event is DISQUALIFYING evidence — it
+    says the store describes another call — so the day arm cannot rescue it: a
+    same-day neighbour is exactly the residue a ``--watch`` pass or a retry
+    (``watchdog.sh`` re-enters on failure) meets, and it is the #8491 harm
+    narrowed, not removed. The day arm is kept for the case the title cannot
+    speak (no ``event_title``, a title too short to compare, or one the writer
+    never stored). Neither arm matches — or no evidence was supplied — and this
+    returns ``[]``: refuse rather than guess, so an ungrounded attendee is never
+    written as a contact.
     """
     if not os.path.exists(CAL_STATE_FILE):
         return []
@@ -377,13 +418,24 @@ def get_calendar_attendees(meeting_date: str = None,  # noqa: RUF013
     if not isinstance(state, dict):
         return []
 
-    want_day = _as_calendar_day(meeting_date)
-    have_day = _as_calendar_day(state.get("started_at"))
     want_title = str(meeting_title).strip().casefold() if meeting_title else ""
     have_title = str(state.get("event_title") or "").strip().casefold()
 
-    grounded = bool(want_day and have_day and want_day == have_day) or bool(
-        want_title and have_title and want_title == have_title)
+    # A CLEARED state is absence, not a mismatch: ``cal-trigger.py::stop_recording``
+    # writes ``{recording_pid: None, current_event_uid: None, started_at: None}``
+    # on every normal stop and ``watchdog.sh`` reads the file seconds later, so
+    # warning here would fire on every ordinary meeting and cost the warning
+    # below its signal. Still refuses — it just does so silently.
+    if not state.get("started_at") and not have_title:
+        return []
+
+    want_day = _as_calendar_day(meeting_date)
+    have_day = _as_calendar_day(state.get("started_at"))
+
+    relation = _title_relation(want_title, have_title)
+    grounded = relation == "same" or bool(
+        want_day and have_day and want_day == have_day
+        and relation != "different")
     if not grounded:
         print(
             "⚠️  cal-trigger state does not describe this meeting "
@@ -440,6 +492,14 @@ def process_meeting(md_path: str) -> dict:
     # the CRM from a different call (#8491).
     cal_attendees = get_calendar_attendees(
         frontmatter.get("date"), frontmatter.get("title"))
+    # PyYAML parses an UNQUOTED ISO `date:` into a ``datetime``/``date``, which is
+    # not subscriptable — ``_as_calendar_day`` is the one place that shape is
+    # handled, so the opportunity label reuses it instead of slicing. An
+    # unparseable label still falls back to the old string prefix.
+    _raw_date = frontmatter.get("date")
+    _meeting_day = _as_calendar_day(_raw_date)
+    day_label = (_meeting_day.isoformat() if _meeting_day
+                 else str(_raw_date or "")[:10])
     for att in cal_attendees:
         email = att.get("email", "")
         name = att.get("name", "")
@@ -450,7 +510,9 @@ def process_meeting(md_path: str) -> dict:
                 # Auto-create opportunity at "Contacted" stage for new contacts
                 new_person = find_person_by_email(email)
                 if new_person and "error" not in new_person:
-                    create_opportunity(new_person["id"], f"{name} — First call {frontmatter.get('date','')[:10]}")
+                    create_opportunity(
+                        new_person["id"],
+                        f"{name} — First call {day_label}")
                 log(f"Auto-created contact: {name} <{email}>") if 'log' in dir() else None  # noqa: F821
 
     # Match speakers to contacts
