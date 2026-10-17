@@ -6367,17 +6367,12 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     ``fold`` is deliberately UNCHANGED: it keeps the public ``{id: point}``
     contract every existing caller depends on (``ingest``, ``sdk``, ``api``,
     ``m0``, ``embeddings`` all index it by POINT id), and this companion
-    carries the rest of the fold instead of re-keying them. The remaining
-    durable step — one ``(label, id)`` index deriving ``log_points`` /
-    ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
-    stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
-    digest would move ``content_hash`` for every existing baseline, which
-    entails a ``format_version`` bump — and since #8268/#7936 that is no longer
-    a dead end. A predecessor format appended to
-    ``consistency._PROJECTION_STATE_FORMAT_HISTORY`` is MIGRATED: the next
-    healthy recording run re-baselines at the current format and reports
-    ``state_superseded_format``. Only an UNKNOWN or FUTURE ``format_version``
-    stays untrusted and is never re-recorded.
+    carries the rest of the fold instead of re-keying them. The `(label, id)`
+    re-key of the graph-side index landed separately in
+    ``consistency._graph_view`` (with the ``format_version`` bump the widened
+    digest needs); what remains open on #7936 is unifying THESE two folds and
+    ``_compare_views`` into the same ``(label, id)`` shape, which would change
+    the published meaning of ``log_points``/``db_points`` (point counts).
 
     ``entities`` is a BATCH/replay view: it is built from the journal's ordered
     existence boundary, which the one-record incremental path does not have.
@@ -6450,9 +6445,11 @@ class InMemoryProjection:
         # reference-fold label an unknown id is — ``_apply_one`` surfaces the
         # drop rather than guessing, and never manufactures a ``non-folded``
         # record the batch path would not. ``rebuild`` is the path that holds
-        # the non-Point belief; the durable ``(label, id)`` re-key that would
-        # let the incremental path fold the non-Point CREATION records too
-        # stays open on #7936.
+        # the non-Point belief; folding the non-Point CREATION records into the
+        # incremental path would need this class's own ``{id: point}`` index
+        # re-keyed to ``(label, id)`` (the CHANGE its consumers were re-keyed
+        # for in #7936 shipped in ``consistency._graph_view``; this fold's
+        # index is deliberately unchanged, so ``apply`` stays bounded).
         _apply_one(self.points, event, entities=self.entities)
 
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
@@ -13670,6 +13667,53 @@ class FalkorProjection(
         except Exception:
             return True
 
+    #: The fields the Event FULLTEXT index is SUPPOSED to carry (#244) — the
+    #: SAME list the sweep CREATES it with, so the migration's target cannot
+    #: drift from the schema it migrates to.
+    _EVENT_FTS_TARGET_FIELDS: tuple[str, ...] = tuple(
+        dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Event"])
+
+    def _event_fts_index_is_current(self) -> bool:
+        """Does the EXISTING Event FULLTEXT index already index BOTH fields?
+
+        #5440: the Event legacy branch exists to widen a SUBJECT-ONLY index to
+        ``(subject, name)``, and it was gated on the one-time marker ALONE.
+        The marker is absent on a graph whose index is ALREADY the target
+        shape — the state a freshly built graph is in (the sweep creates the
+        two-field index and mints only the Point marker), and the state a
+        restore/DR graph is in (the dump carries no indexes and skips the
+        markers). Whenever anything else made the schema not-current, the
+        branch then entered and issued ``db.idx.fulltext.drop('Event')``
+        against a healthy, in-use index that needed NO migration: a failure
+        between the drop and the recreate left Event FTS absent for an index
+        that was correct the whole time, and a concurrent boot could drop the
+        index a peer had just created.
+
+        So the destructive half is gated on the SCHEMA half — the same
+        reasoning as ``_point_fts_search_keys_field_missing`` (#5444).
+
+        Requires the field to be indexed AS FULLTEXT (a RANGE index on
+        ``name`` cannot answer ``queryNodes``), read from the kinds map
+        ``_schema_is_current`` reads. A probe that cannot answer returns
+        False — migrate, never assume done.
+        """
+        try:
+            for row in self.g.query("CALL db.indexes()").result_set:
+                if not row or str(row[0]) != "Event":
+                    continue
+                if len(row) < 3 or not isinstance(row[2], dict):
+                    return False
+                for field in self._EVENT_FTS_TARGET_FIELDS:
+                    kinds = row[2].get(field)
+                    if isinstance(kinds, str):
+                        kinds = [kinds]
+                    if "FULLTEXT" not in {str(k).upper() for k in (kinds or ())}:
+                        return False
+                return True
+            return False
+        except Exception:
+            return False
+
     def _array_valued_search_keys_exist(self) -> bool:
         """Does any Point still store ``search_keys`` as an ARRAY?
 
@@ -14251,25 +14295,47 @@ class FalkorProjection(
                                     "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
                                 ).result_set
                                 if not done:
-                                    # #H05: the drop procedure NAME varies by
-                                    # engine (db.idx.fulltext.drop on server
-                                    # builds, dropIndex on older ones) -- the
-                                    # single hardcoded name could never migrate
-                                    # on a build registering only the other.
-                                    for drop_proc in ("db.idx.fulltext.drop",
-                                                      "db.idx.fulltext.dropIndex"):
-                                        try:
-                                            self.g.query(
-                                                f"CALL {drop_proc}('Event')"
-                                            )
-                                            dropped = True
-                                            break
-                                        except Exception:
-                                            continue
-                                    self._create_fulltext_index(
-                                        "Event", ["subject", "name"]
-                                    )
-                                    created = True
+                                    # #5440: the marker is ALSO absent on a
+                                    # graph whose index is ALREADY
+                                    # (subject, name) — a freshly built one
+                                    # mints only the Point marker, and a
+                                    # restore/DR graph carries no indexes.
+                                    # Dropping there is a destructive no-op
+                                    # against a healthy, in-use index, so
+                                    # only a genuinely legacy (subject-only)
+                                    # index is dropped; an already-current one
+                                    # just records the migration. The
+                                    # recreate is what makes a drop
+                                    # necessary at all — you cannot widen a
+                                    # FULLTEXT index in place.
+                                    if self._event_fts_index_is_current():
+                                        # The intended index is in place, so
+                                        # a later failure is only the marker.
+                                        created = True
+                                    else:
+                                        # #H05: the drop procedure NAME
+                                        # varies by engine
+                                        # (db.idx.fulltext.drop on server
+                                        # builds, dropIndex on older ones) --
+                                        # the single hardcoded name could
+                                        # never migrate on a build
+                                        # registering only the other.
+                                        for drop_proc in (
+                                            "db.idx.fulltext.drop",
+                                            "db.idx.fulltext.dropIndex",
+                                        ):
+                                            try:
+                                                self.g.query(
+                                                    f"CALL {drop_proc}('Event')"
+                                                )
+                                                dropped = True
+                                                break
+                                            except Exception:
+                                                continue
+                                        self._create_fulltext_index(
+                                            "Event", list(self._EVENT_FTS_TARGET_FIELDS)
+                                        )
+                                        created = True
                                     self.g.query(
                                         "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
                                     )

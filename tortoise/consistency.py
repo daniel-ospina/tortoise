@@ -755,9 +755,57 @@ def _digest(views: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _graph_fingerprint(graph_by_id: dict,
+def _entity_node_view(props: dict) -> dict:
+    """The canonical view of ONE non-Point reference-fold node (#7936).
+
+    Exactly the fields the entity leg DECIDES (``_ENTITY_BELIEF_FIELDS`` plus
+    ``status``) — with ONE declared asymmetry, on ``status``: the digest
+    carries it for EVERY reference-fold label, while the COMPARISON bounds it
+    to Object/Subject (``entity_parity_bounds["status_compared"]``; ``Event``
+    carries ``eventStatus`` under a different name and its lifecycle has no such
+    fold). So a graph-only ``status`` write on an ``:Event`` is the BASELINE's
+    to catch, not the comparison's — stated rather than implied, because a
+    reader implementing the next leg against a claim of exact parity would get
+    the boundary wrong. ONE builder, read by both ``_graph_entities`` (the
+    comparison) and ``_graph_fingerprint`` (the baseline) — a second hand-copied
+    field list is how a widened writer drifts out of the baseline silently.
+
+    ``status`` is always present (``None`` when the node carries none) because
+    the entity leg compares it presence-conditionally: a stub minted by
+    ``_event_plain_merge`` has NO ``status`` at all (``MERGE … ON CREATE SET
+    s.id=…, s._stub=true``), and a stub that later gains ``live`` is a real
+    move — the digest must see it as one. ``_stub`` itself is deliberately NOT
+    covered: it is a discriminator the canonical registration CLEARS, so
+    including it would move the baseline on the adoption of a node the journal
+    did describe.
+    """
+    rec = {"status": props.get("status")}
+    for key in _ENTITY_BELIEF_FIELDS:
+        if key in props:
+            rec[key] = props[key]
+    return rec
+
+
+def _graph_fingerprint(graph_view: dict,
                       uncarried: dict | None = None) -> dict:
     """Pure GRAPH-only canonical view — the baseline a later run compares to.
+
+    ``graph_view`` is the ONE ``(label, id)`` graph index (:func:`_graph_view`),
+    covering every label the reference fold models — ``Point`` through
+    ``_canonical_point_fields`` and ``Object`` / ``Subject`` / ``Event`` through
+    :func:`_entity_node_view`. Keying it by label is what stops a non-Point node
+    from being invisible to the baseline (#7936): with a Point-only index a
+    graph-only ``Object``/``Subject``/``Event`` — or a belief/status rewrite on
+    one — left ``db_hash`` unmoved, so the check reported a clean graph for a
+    mutation ``replay(journal)`` cannot reproduce while the SAME mutation on a
+    ``:Point`` was ``unrecorded-mutation``. Pinned by
+    ``tests/test_7936_reference_fold_label_rekey.py``.
+
+    The returned view is NESTED by label (``{label: {id: view}}``) rather than
+    keyed by a tuple: :func:`_digest` hands this to ``json.dumps``, whose object
+    keys must be strings — a tuple key raises ``TypeError``. Nesting is also the
+    unambiguous form: a ``:Point`` and an ``:Event`` may legitimately share an
+    id (#7936 P2), so a flat ``{id: view}`` would collapse them.
 
     Covers the same declared content plus the embedding, so a vector-only
     rewrite of an otherwise-identical graph still moves the baseline (and so
@@ -792,16 +840,20 @@ def _graph_fingerprint(graph_by_id: dict,
     """
     uncarried = uncarried or {}
     out: dict = {}
-    for pid, props in graph_by_id.items():
+    for (label, nid), props in graph_view.items():
+        props = props if isinstance(props, dict) else {}
+        if label != "Point":
+            out.setdefault(label, {})[nid] = _entity_node_view(props)
+            continue
         skip = set(_ONE_SIDED_REASONS) | set(_GRAPH_DEFAULTED_PROPS)
-        skip |= set(uncarried.get(pid, {}))
+        skip |= set(uncarried.get(nid, {}))
         view = _canonical_point_fields(props, frozenset(skip))
-        if isinstance(props, dict) and props.get("is_operator"):
+        if props.get("is_operator"):
             for k in _OPERATOR_ABSENT_PROPS:
                 view.pop(k, None)
-        if isinstance(props, dict) and isinstance(props.get("embedding"), list):
+        if isinstance(props.get("embedding"), list):
             view["embedding"] = props["embedding"]
-        out[pid] = view
+        out.setdefault(label, {})[nid] = view
     return out
 
 
@@ -854,7 +906,17 @@ _PROJECTION_STATE_SUFFIX = ".projection-state.json"
 # the prerequisite #7936's `(label, id)` re-key names: that is a SECOND widening
 # of the same digest and needs `_PROJECTION_STATE_FORMAT` → 3 (append `3`; `2`
 # then migrates too, exactly like `1` does now).
-_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2)
+#
+# v2 → v3 (#7936): the `(label, id)` re-key. `_graph_fingerprint` now folds the
+# WHOLE graph index (`_graph_view`: Point + Object/Subject/Event), so
+# `projection_hash_sha256` moves again for every existing baseline that holds a
+# non-Point node — which is every real graph. Same consequence as v1 → v2,
+# same answer: append the format, let a v2 sidecar migrate on the next healthy
+# recording run. Without the bump the first post-upgrade run would read a
+# healthy graph as `journal_moved=False, graph_moved=True` — an
+# `unrecorded-mutation` whose `action` sends the operator hunting an
+# unjournalled writer that does not exist.
+_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2, 3)
 _PROJECTION_STATE_FORMAT: int = _PROJECTION_STATE_FORMAT_HISTORY[-1]
 _PROJECTION_STATE_SUPERSEDED_FORMATS: frozenset[int] = frozenset(
     _PROJECTION_STATE_FORMAT_HISTORY[:-1])
@@ -1421,10 +1483,20 @@ def _fold_journal(events: list[dict]) -> dict:
 #     (`entity_parity_ambiguous*`), never silently absorbed. A name-only
 #     supersede with NO carrier at all is NOT ambiguity: it records a refused
 #     `object-superseded-miss`, matching the graph fold.
-#   * The comparison runs in ONE direction, journal→graph (`entity_parity_bounds`
-#     states it): a node the GRAPH holds with no journal record is not a
-#     divergence here, because several in-tree paths write the projection
-#     without journaling (e.g. `sdk`'s direct `proj.apply`).
+#   * The COMPARISON runs in ONE direction, journal→graph (`entity_parity_bounds`
+#     states it): a node the GRAPH holds with no journal record is not a CONTENT
+#     divergence here. That is not a licence to hold such a node, it is a
+#     division of labour: a graph-only node is the baseline's question
+#     (`unrecorded-mutation`, #7936), not the field comparison's — the baseline
+#     is RECORDED on the first healthy run, so a pre-existing
+#     graph-only node from a legacy/unscoped writer is baselined once instead
+#     of red-ing every run, while a CHANGE to the entity set with a still
+#     journal is reported. Widening the COMPARISON instead would report every
+#     such node on every run, with no way to tell a legacy graph from a fresh
+#     burial. On a journal-backed projection (#7951 §17.1) an unscoped fold or
+#     raw mutation is REFUSED outright, so the sanctioned writers of a
+#     journal-backed graph journal first — a graph-only node there is the #4240
+#     bypass class the baseline exists to surface.
 #   * ACCEPT/REFUSE parity is JOURNAL-WIDE; CONTENT parity is not, for one
 #     DEFERRED fold. `rebuild_all` folds an `ObjectSuperseded` in a trailing
 #     sweep, so a supersede the sweep resolves differently from a chronological
@@ -1459,6 +1531,11 @@ def _fold_journal(events: list[dict]) -> dict:
 #     the kinds it can hit. Closing it means teaching this fold the fold
 #     vocabulary AND the ownership rule (a lifecycle-declaring kind suppresses
 #     the built-in connector fold), which is its own change (#8652).
+#: The non-Point labels the ENTITY leg models, with the graph MATCH key each is
+#: addressed by (``_ENTITY_ID_PROP`` — Event differs on purpose: it is the one
+#: label whose GRAPH key is not ``id``). Kept as a declaration even though
+#: :func:`_graph_view` indexes the WHOLE ``(label, id)`` set, so the entity half
+#: has a named home and a reader can see the two sets are different questions.
 _ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
     (label, _ENTITY_ID_PROP[label])
     for label in ("Object", "Subject", "Event")
@@ -1473,7 +1550,7 @@ _ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
     # D10 (#5127) retired the `:Document` NODE label: `_upsert_document` MERGEs a
     # document as a `:Source` keyed `url`, and `doc_status` was retired with it.
     # `DocumentCreated` is deliberately absent here for the same reason `Source`
-    # is absent from `_ENTITY_PARITY` above — a url-keyed node compared against
+    # is absent from the entity leg — a url-keyed node compared against
     # an id-keyed journal record is a false positive by construction (#4649).
     "EventRecorded": ("Event", None),
 }
@@ -1505,17 +1582,17 @@ _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: Point-only fingerprint could not move either. Measured: corrupting an
 #: ``:Event``'s ``confidence`` left ``ok=True, divergence=None``.
 #:
-#: STATED BOUND: the leg still runs journal→graph only, so a graph-only belief
-#: write on a non-Point node with NO ``ConfidenceChanged`` anywhere in the
-#: journal (an unjournalled producer — the #4240 class) remains invisible here.
-#: The ``db_hash`` baseline is deliberately NOT widened to cover it: the digest
-#: covers the Point view, and folding the entity view into it would move
-#: ``content_hash`` for every existing baseline, which the check reports as an
-#: ``unrecorded-mutation``. That is no longer a dead end (#8268/#7936): widening
-#: the digest needs a ``format_version`` bump — append the new format to
-#: ``_PROJECTION_STATE_FORMAT_HISTORY`` — and the old format then becomes a KNOWN
-#: PREDECESSOR that is MIGRATED (re-baselined) on the next healthy recording run
-#: instead of reporting for ever.
+#: STATED BOUND: the COMPARISON leg still runs journal→graph only, so a
+#: graph-only belief write on a non-Point node with NO ``ConfidenceChanged``
+#: anywhere in the journal (an unjournalled producer — the #4240 class) is not
+#: this leg's to decide. The ``db_hash`` BASELINE covers it instead (#7936):
+#: ``_graph_fingerprint`` now folds the whole ``(label, id)`` graph view, so
+#: such a write moves the digest and is reported as ``unrecorded-mutation``
+#: when the journal did not move. That widening is why
+#: ``_PROJECTION_STATE_FORMAT`` is 3 — every existing baseline's
+#: ``content_hash`` moves with it, and the previous format is a KNOWN
+#: PREDECESSOR that is MIGRATED (re-baselined) on the next healthy recording
+#: run instead of reporting for ever (#8268/#8644).
 _ENTITY_BELIEF_FIELDS: tuple[str, ...] = tuple(BELIEF_PROPS) + tuple(
     BELIEF_BOOL_PROPS)
 
@@ -1972,21 +2049,106 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     return entities, deleted, ambiguous
 
 
-def _graph_entities(projection) -> tuple[dict, dict]:
-    """The graph's non-Point entities, indexed two ways.
+#: The labels the REFERENCE FOLD's graph index covers (#7936): the Point
+#: lifecycle plus every label the entity fold models. DERIVED from
+#: `_REFERENCE_FOLD_ENTITY_LABELS`, not re-listed: `_ENTITY_CREATION` is the
+#: declared single home, so a fourth creation row there widens this set too.
+#: The literal it replaces was a second home for the same three labels, and the
+#: fail-open it created was invisible — `_ENTITY_CREATION` grows, the digest
+#: keeps indexing the old four labels, and a graph-only node of the new label
+#: leaves `db_hash` unmoved with every existing label-set pin still green.
+_GRAPH_VIEW_LABELS: tuple[str, ...] = (
+    "Point", *sorted(_REFERENCE_FOLD_ENTITY_LABELS))
 
-    Returns ``({(label, id): {"status": …}}, {(label, name): same-record})``.
-    The NAME index exists because `_upsert_object`/`_upsert_subject` MERGE on
-    name, so the id a journal record registered may not be the id the node
-    carries (#3585 review).
+
+def _graph_view_key(label: str, props: dict) -> tuple[str, bool] | None:
+    """``(id, via_fallback)`` — the identity a node of ``label`` is indexed
+    under, and whether that identity came from the declared fallback.
+
+    ``_ENTITY_ID_PROP[label]`` is the key the entity WRITERS and the entity
+    comparison address a node by (``id`` for Point/Object/Subject, ``eventId``
+    for Event), and it is tried first so the in-tree shape (an ``:Event`` whose
+    ``id == eventId``) gets exactly ONE key.
+
+    ONE declared fallback, for ``Event`` only: the BELIEF fold does not use
+    ``eventId`` — ``_fold_confidence_changed`` expands
+    ``epistemic_label_queries("MATCH (n:{label} {id:$id})")``, so it matches an
+    ``:Event`` by ``id`` like the other three labels. An ``:Event`` carrying
+    ``id`` but no ``eventId`` (reachable from a raw writer; the in-tree mirror
+    legacy shape is the reverse, ``eventId`` only) therefore has a WRITABLE
+    belief while ``eventId`` yields nothing — and dropping it from the index
+    would leave exactly the residual this file's fix removes, a graph-only
+    belief write on a non-Point node that leaves ``db_hash`` unmoved.
+
+    ``via_fallback`` is returned because the fallback WIDENS an existing
+    key-collision surface (see :func:`_graph_view`): caller-side, a node keyed
+    by its own match key must outrank one keyed only by the fallback, or the
+    digest depends on the order the store happened to return the rows.
     """
-    out: dict = {}
-    by_name: dict = {}
+    prop = _ENTITY_ID_PROP.get(label)
+    if not prop:
+        return None
+    nid = props.get(prop)
+    if isinstance(nid, str):
+        return nid, False
+    if label == "Event":
+        alt = props.get("id")
+        if isinstance(alt, str):
+            return alt, True
+    return None
+
+
+def _canonical_props(props: dict) -> str:
+    """A stable rendering of a node's properties, for deterministic ties."""
+    return json.dumps(props, sort_keys=True, default=str)
+
+
+def _graph_view(projection) -> dict:
+    """THE ``(label, id)`` graph index the reference fold reads (#7936).
+
+    ``{(label, id): properties(n)}`` over ``_GRAPH_VIEW_LABELS`` — the Point
+    lifecycle (``_apply_one``) plus every label the entity fold models. ONE
+    query and ONE index, because the two consumers that used to read the graph
+    separately (the Point view and the entity view) are answering the same
+    question about the same graph: what does the store actually hold? Two
+    queries is how the reference fold came to index ``:Point`` only while the
+    graph held the belief on an ``:Event``.
+
+    The key comes from :func:`_graph_view_key` — the label's own graph MATCH
+    key with the ``Event``/``id`` fallback the belief fold's match implies. A
+    node with no (or a non-string) identity is DROPPED, because one no writer
+    and no fold can address is not one replay can reproduce or compare. The id
+    is carried as the LABELED tuple, so a ``:Point`` and an ``:Event``
+    legitimately sharing an id stay two distinct entries (each is a different
+    node the graph really holds).
+
+    KEY COLLISIONS — resolution and the residual (the review's stated bound).
+    Two DISTINCT nodes of one label can resolve to the same key: a faithful
+    ``:Event {eventId: "X"}`` and a graph-only ``:Event {id: "X"}`` both key as
+    ``("Event", "X")``. ``db_hash`` is documented above as a pure function of
+    the GRAPH, so which node's properties win may NOT be the order the store
+    returned the rows (that would make the same graph hash two ways and read as
+    a false ``unrecorded-mutation``). Resolution is therefore deterministic:
+    the node keyed by the label's OWN match key outranks one keyed by the
+    ``Event``/``id`` fallback, and within a class the winner is the smaller
+    canonical rendering of its properties.
+
+    The RESIDUAL, stated rather than silent: a collision still keeps ONE entry,
+    so the loser is not in the digest — a graph-only ``id``-only ``:Event``
+    whose id also appears as a faithful ``:Event {eventId}`` is invisible to
+    ``db_hash`` (the false-GREEN direction of #7936, now narrowed to two nodes
+    that claim one id). Closing it needs a key that can hold both (a
+    ``(label, id, key-source)`` triple, or reporting the collision on the
+    verdict beside ``uncarried_journal_fields``); filed as #8879, not absorbed
+    here — no in-tree writer mints the shape (``_upsert_event`` always sets
+    ``id == eventId``).
+    """
+    view: dict = {}
+    primary: dict = {}
+    where = " OR ".join(f"n:{label}" for label in _GRAPH_VIEW_LABELS)
     rows = projection.query(
-        "MATCH (n) WHERE n:Object OR n:Subject OR n:Event "
-        "RETURN labels(n), properties(n)"
+        f"MATCH (n) WHERE {where} RETURN labels(n), properties(n)"
     ).result_set or []
-    id_prop = {label: prop for label, prop in _ENTITY_PARITY}
     for row in rows:
         if len(row) < 2:
             continue
@@ -1994,25 +2156,79 @@ def _graph_entities(projection) -> tuple[dict, dict]:
         if not isinstance(props, dict) or not isinstance(labels, (list, tuple)):
             continue
         for label in labels:
-            prop = id_prop.get(label)
-            if not prop:
+            resolved = _graph_view_key(label, props)
+            if resolved is None:
                 continue
-            eid = props.get(prop)
-            if isinstance(eid, str) and eid:
-                rec = {"status": props.get("status")}
-                # #7936: carry the belief properties too — the comparison's
-                # non-Point content leg is what makes a corrupted/stale belief
-                # on this node a divergence (`_ENTITY_BELIEF_FIELDS`). Only
-                # keys the node actually has are copied, so a node with no
-                # belief at all keeps `rec` at `{"status": …}` and the
-                # comparison stays presence-conditional.
-                for _bk in _ENTITY_BELIEF_FIELDS:
-                    if _bk in props:
-                        rec[_bk] = props[_bk]
-                out[(label, eid)] = rec
-                name = props.get("name")
-                if isinstance(name, str) and name:
-                    by_name[(label, name)] = rec
+            nid, via_fallback = resolved
+            key = (label, nid)
+            held = view.get(key)
+            if held is None:
+                view[key] = props
+                primary[key] = not via_fallback
+                continue
+            # Collision: prefer the node keyed by the label's own match key,
+            # then break the tie canonically so row order cannot decide.
+            if (not via_fallback) != primary.get(key, False):
+                keep_new = not via_fallback
+            else:
+                keep_new = _canonical_props(props) < _canonical_props(held)
+            if keep_new:
+                view[key] = props
+                primary[key] = not via_fallback
+    return view
+
+
+def _graph_entities(projection) -> tuple[dict, dict]:
+    """The graph's non-Point entities, indexed two ways.
+
+    Returns ``({(label, id): {"status": …}}, {(label, name): same-record})``.
+    The NAME index exists because `_upsert_object`/`_upsert_subject` MERGE on
+    name, so the id a journal record registered may not be the id the node
+    carries (#3585 review).
+
+    A projection over :func:`_graph_view` — the SAME ``(label, id)`` index the
+    baseline digest folds (:func:`_graph_fingerprint`), so the comparison and
+    the digest cannot disagree about which nodes exist.
+    """
+    return _entities_from_view(_graph_view(projection))
+
+
+def _entities_from_view(graph_view: dict) -> tuple[dict, dict]:
+    """The entity half of a :func:`_graph_view` index — see :func:`_graph_entities`.
+
+    Keys are ``(label, id)`` resolved against the SAME graph MATCH key the
+    writers use (``_ENTITY_PARITY``), so a key here is one the entity leg's
+    journal side also produces.
+    """
+    out: dict = {}
+    by_name: dict = {}
+    id_prop = dict(_ENTITY_PARITY)
+    for (label, eid), props in graph_view.items():
+        if label not in id_prop or not eid:
+            continue
+        # ⛔ THE COMPARISON ADDRESSES A NODE BY ITS DECLARED KEY ONLY (#8873
+        # review, P2). `_graph_view` also indexes an `:Event` that carries `id`
+        # but no `eventId`: the BELIEF fold matches that shape (`{id:$id}`), so
+        # the DIGEST must see it or a graph-only belief write there moves no
+        # hash — the residual #7936 exists to close.
+        #
+        # But admitting that fallback HERE would let an `id`-only node satisfy
+        # PRESENCE for a journal `:Event` keyed by `eventId`. Bury the faithful
+        # node, leave an impostor carrying only `id` at the same value, and the
+        # presence check finds the impostor, `_entity_node_view` (status +
+        # belief) compares equal, and the burial reads CLEAN — a false GREEN,
+        # which is the one failure mode this file must never produce.
+        #
+        # So: the digest keeps the fallback, the comparison leg does not. A
+        # fallback-keyed node is simply not an entity-carrier here, and its
+        # journal counterpart correctly reports `absent-from-graph`.
+        if props.get(id_prop[label]) != eid:
+            continue
+        rec = _entity_node_view(props)
+        out[(label, eid)] = rec
+        name = props.get("name")
+        if isinstance(name, str) and name:
+            by_name[(label, name)] = rec
     return out, by_name
 
 
@@ -2198,16 +2414,15 @@ def check_consistency(log_path: str, projection, *,
         if isinstance(_rec, dict):
             _rec.update(_belief)
 
-    # The COUNT is read from the graph directly, NOT from `len(graph_by_id)`.
-    # `graph_by_id` is keyed by `n.id`, so two nodes sharing an id (or a node
-    # whose id is not a string) would COLLAPSE and the size check would pass
-    # while the graph holds more nodes than the journal — a fail-open. The
-    # comparison still uses `graph_by_id`; the count does not.
+    # The COUNT is read from the graph directly, NOT from the index's Point
+    # slice. The slice is keyed by `id`, so two Point nodes sharing an id (or a
+    # node whose id is not a string) would COLLAPSE and the size check would
+    # pass while the graph holds more nodes than the journal — a fail-open. The
+    # comparison and the digest use the index; the count does not.
     #
     # ⛔ #7936 CLOSED (content leg): the non-Point BELIEF blind spot is removed.
-    # `journal_by_id`/`db_hash` below are still POINT-ONLY by construction, but
-    # the entity leg (`_fold_journal_entities` + `_compare_entities`) now folds
-    # and compares the belief properties (`_ENTITY_BELIEF_FIELDS`) on every
+    # The entity leg (`_fold_journal_entities` + `_compare_entities`) folds and
+    # compares the belief properties (`_ENTITY_BELIEF_FIELDS`) on every
     # `:Subject`/`:Object`/`:Event`, so a wrong, stale or lost belief there is a
     # `divergence="content"` instead of `ok=True`. Measured before/after on the
     # shape `rebuild_all` had just produced (`hash_match=True`): corrupting the
@@ -2217,14 +2432,30 @@ def check_consistency(log_path: str, projection, *,
     # test_content_comparison_sees_a_non_point_belief_divergence` (the inverted
     # form of the gap pin that used to assert the blind spot).
     #
-    # The `(label, id)` re-key of THIS Point view and of `db_hash` — one index
-    # deriving `log_points`/`db_points`/`_compare_views`/the fingerprint — stays
-    # open on #7936: widening the digest moves `content_hash` for every existing
-    # baseline, so it needs a `format_version` bump first — append the new format
-    # to `_PROJECTION_STATE_FORMAT_HISTORY`. That is no longer a dead end
-    # (#8268/#7936): a known predecessor is MIGRATED (re-baselined at the current
-    # format) on the next healthy recording run, so the re-key is landable
-    # without stranding the baseline.
+    # ⛔ #7936 CLOSED (baseline leg): the `(label, id)` re-key landed.
+    # `_graph_view` is now ONE index over every reference-fold label and
+    # `db_hash` folds ALL of it (`_graph_fingerprint`), so a graph-only
+    # `:Object`/`:Subject`/`:Event` node — or a belief/status write on one with
+    # no journal record — moves the baseline and is reported as
+    # `unrecorded-mutation`, exactly as the same mutation on a `:Point` always
+    # was. Before it, `db_hash` was Point-only and `_compare_views` never saw a
+    # non-Point id, so the mutation was INVISIBLE (`ok=True, divergence=None`).
+    # The digest widening moves `content_hash` for every existing baseline,
+    # which is why `_PROJECTION_STATE_FORMAT` is 3: a v2 predecessor is a KNOWN
+    # predecessor (#8268/#8644) that the next healthy recording run MIGRATES,
+    # so no deployment is stranded and none is told to hunt an unjournalled
+    # writer that does not exist.
+    #
+    # STILL OPEN on #7936 (stated, not implied): `log_points` / `db_points` /
+    # `_compare_views` remain the POINT leg — they are the Point SLICE of this
+    # same index, and the non-Point content question is decided by the entity
+    # leg (`_compare_entities`), not by a re-keyed `_compare_views`. Unifying
+    # the two folds into one `(label, id)` fold and one field-aware comparison
+    # is the remaining step: it is not needed for either leg's correctness
+    # today (presence + beliefs on the entity labels are covered by the entity
+    # leg, and graph-only moves by the digest), and re-keying
+    # `log_points`/`db_points` would change a published verdict field's
+    # MEANING (the count of POINTS), which is a separate decision.
     count_rows = projection.query("MATCH (n:Point) RETURN count(n)").result_set
     db_count = 0
     if count_rows and len(count_rows[0]) > 0:
@@ -2232,15 +2463,13 @@ def check_consistency(log_path: str, projection, *,
         if isinstance(raw, int):
             db_count = raw
 
-    rows = projection.query(
-        "MATCH (n:Point) RETURN n.id, properties(n)"
-    ).result_set
-    graph_by_id: dict = {}
-    for row in rows or []:
-        pid = row[0] if len(row) > 0 else None
-        props = row[1] if len(row) > 1 else None
-        if isinstance(pid, str):
-            graph_by_id[pid] = props if isinstance(props, dict) else {}
+    # THE one graph index (#7936): every label the reference fold models, keyed
+    # `(label, id)`. Both consumers below are SLICES of it — the Point one for
+    # the field-aware comparison, the whole thing for the baseline — so the two
+    # cannot read different graphs.
+    graph_view = _graph_view(projection)
+    graph_by_id = {nid: props for (label, nid), props in graph_view.items()
+                   if label == "Point"}
 
     log_count = len(journal_by_id)
     uncarried = _uncarried(journal_by_id)
@@ -2252,7 +2481,7 @@ def check_consistency(log_path: str, projection, *,
     # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
     # Point-only, so an Object/Subject burial would be invisible; this compares
     # the journal's entity reference against the graph's entity nodes.
-    graph_entities, graph_entity_names = _graph_entities(projection)
+    graph_entities, graph_entity_names = _entities_from_view(graph_view)
     entity_mismatches, entity_divergent_count, entity_ambiguous_excluded = (
         _compare_entities(journal_entities, graph_entities,
                           graph_entity_names, entity_deleted,
@@ -2263,7 +2492,7 @@ def check_consistency(log_path: str, projection, *,
     # graph still moves the baseline (and so cannot hide under `hash_match`).
     # Being graph-only, it is storable and comparable across runs; the verdict
     # itself is the field-aware comparison above, never a digest equality.
-    db_hash = _digest(_graph_fingerprint(graph_by_id, uncarried))
+    db_hash = _digest(_graph_fingerprint(graph_view, uncarried))
 
     stored, state_error, state_superseded_format = (
         read_projection_state_detail(log_path))
@@ -2386,14 +2615,35 @@ def check_consistency(log_path: str, projection, *,
             "direction": "journal->graph",
             "status_compared": ["Object", "Subject"],
             # #7936: the non-Point belief leg. `fields` are the properties
-            # compared on every reference-fold label; the digest bound names
-            # what the BASELINE still cannot see (it covers the Point view
-            # only), so the check states its own blind spot instead of implying
-            # a coverage it does not have.
+            # compared on every reference-fold label. `baseline_digest_covers`
+            # names what the BASELINE sees; the bound below names what NEITHER
+            # half decides, so the check states its own blind spots instead of
+            # implying a coverage it does not have.
             "belief_compared": list(_ENTITY_BELIEF_FIELDS),
+            # #7936: the `(label, id)` re-key. The digest is no longer
+            # Point-only, so a graph-only non-Point node (or a belief/status
+            # write on one) MOVES it and is reported as `unrecorded-mutation`.
             "baseline_digest_covers": (
-                "Point-only (the entity beliefs are compared journal->graph, "
-                "not fingerprinted)"),
+                "(label, id) over Point/Object/Subject/Event: the Point "
+                "content fields plus, per entity, `status` and "
+                "`belief_compared` (graph-only, so a moved entity node moves "
+                "the baseline). `status` is covered on EVERY label here, "
+                "including Event, where the COMPARISON bounds it out "
+                "(`status_compared`) — so a graph-only Event `status` write "
+                "is the baseline's to catch, not the comparison's"),
+            "baseline_digest_does_not_cover": (
+                "non-Point fields outside `belief_compared`+`status` (e.g. a "
+                "graph-only `name`/`eventKind` edit with no id change), "
+                "the Source/url-keyed labels the reference fold does not "
+                "model, and — the one `(label, id)` key that can hold TWO "
+                "distinct nodes — a graph-only `id`-only Event whose id is "
+                "also an Event's `eventId`: one node wins the key "
+                "deterministically (the `eventId`-keyed one) and the other is "
+                "not in the digest (#8879)"),
+            "point_counts_cover": (
+                "the POINT leg only: `log_points`/`db_points` remain point "
+                "counts (a graph-only non-Point node is caught by the "
+                "baseline digest, not by this count)"),
             "name_keyed": ["Object", "Subject"],
             "identity": {"Object": "name", "Subject": "name",
                          "Event": "eventId"},

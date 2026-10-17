@@ -107,6 +107,15 @@ Rules that hold regardless of granularity or policy:
   `to`. **planned:** multi-item `to` on a plain IMPL/NAND connection becomes a
   Phase-1 violation; multi-input semantics stay reachable via the operator
   anchor (`mitigation` or `reify: true`).
+- A connection's `mitigation: {reason, strength}` is **applied**, not a bare
+  routing anchor (#5244): the operator is created / deduped / absorbed first,
+  then the mitigation is written through the single-writer gate that owns the
+  predicate — a mitigation Point plus `(op:Point)-[:mitigated_by]->(m:Point)` —
+  and stamped with the bundle's `batch_id` ([§16](#16-batch_id--audit)).
+  Re-submission updates it **in place** (never a duplicate) and reports
+  `mitigation_strength_change` ([§3.2](#32-warnings--the-twelve-keys) key 6).
+  On a `relation` connection `mitigation` is a **Phase-1 violation** — a
+  structural edge has no operator bridge to damp ([§13](#13-acceptance-surface-breaks--migration-lines) row 4).
 - Created points default to `status: "draft"` under the gated policy (see
   [§11 Promotion & EP](#11-promotion--ep)). Pass `status: "live"` only with
   `promotion_policy: "auto"` — under gated, an explicit `status:"live"` is a
@@ -263,6 +272,12 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > emitted. The set was extended from ELEVEN to TWELVE keys by #8499 (the
 > `point_mediated_route` row above); that amendment is deliberate, and is
 > recorded here and pinned in `tests/test_ingest_conformance.py`.
+>
+> **Which keys are emitted today.** Row 6 (`mitigation_strength_change`) is
+> emitted by `ingest()`'s mitigation path since #5244. Rows 3 and 4
+> (`mitigation_orphan_residue`, `mitigation_drift_duplicate`) describe
+> crash-orphan re-link and post-re-key drift; **no write door emits them yet** —
+> they are reserved vocabulary for those recovery flows, not observable today.
 
 ---
 
@@ -586,10 +601,11 @@ not schema — no version bump.
 | 1 | **Gated default flip** | ingest auto-promotes (#131) | default `promotion_policy="gated"` — points stay draft; connections never promote | Pass `promotion_policy="auto"` for the #131 promote-on-first-edge behaviour (null-status sources only — an explicit or prior `draft` is never retro-promoted, #1088; the graph is no longer byte-identical across policies) |
 | 2 | **Multi-item `to` on plain IMPL/NAND rejected** | a multi-input operator was created via fan-out | Phase-1 violation (fail-closed) | Add `reify:true`/`mitigation` (operator route unchanged), or split into singular connections |
 | 3 | **Label conflict on same-pair plain connections** | label-differing same-pair plain connections created two operators | Phase-1 violation | `reify:true` ×2 (operator route keeps both labels), or unify the label |
-| 4 | **Route-scoped attribute rejection** | `confidence`/`weight` on operator-routed connections and `direction`/`confidence`/`weight` on relations were silently dropped | Phase-1 violation | Drop the attributes (confidence/weight belong on the plain direct-edge path only) |
+| 4 | **Route-scoped attribute rejection** | `confidence`/`weight` on operator-routed connections and `direction`/`confidence`/`weight` on relations were silently dropped | Phase-1 violation — and since #5244 also `mitigation` on a relation (a structural edge has no operator bridge to damp) | Drop the attributes (confidence/weight belong on the plain direct-edge path only); for a mitigation, express the connection as `operator` + `mitigation` or call `sdk.mitigate_operator` |
 | 5 | **Mitigation-reason conflict** | same-pair same-label IMPL+mitigation with differing reasons committed with an order-dependent survivor | Phase-1 violation | Unify the reason, or use label-differing pairs (legal) |
 | 6 | **Label-absent strict matching** | a no-label request was a wildcard matching labeled operators (order-dependent commit) | absent ≠ present; Phase-1 conflict for same-pair {labeled + absent}; a label-dropped resubmit creates a second operator + `label_dropped_resubmit` warning | Re-add the label, or use `reify` ×2 under auto |
 | 7 | **Direction-absent strict matching (per-op-type)** | a direction-absent lookup was a wildcard | absent ≡ op-type default for dedup (IMPL→`bidirectional`, NAND→`unidirectional`); {IMPL absent, `unidirectional`} and {NAND absent, `bidirectional`} are conflicts; a direction-dropped resubmit creates a second operator + `direction_dropped_resubmit` warning | Declare the direction, or accept the extraction default — **NAND=unidirectional, IMPL=bidirectional** |
+| 8 | **A connection's `mitigation` is applied** (#5244) | the field was validated and then DISCARDED: the operator was written, no mitigation Point, no `mitigated_by` edge, no warning | the operator is created/deduped/absorbed, then the mitigation Point + `(op)-[:mitigated_by]->(m)` edge are written and `batch_id`-stamped; a re-submission updates in place and reports `mitigation_strength_change` (row 6) | None — this is what [§3.2](#32-warnings--the-twelve-keys) already promised. Expect one extra Point in the graph and in `list_batch` counts for a mitigation-bearing bundle |
 
 ---
 
@@ -612,7 +628,7 @@ Combined cross-epic upgrade notes (epic #902 ingest + epic #900 index).
   retry, `batch_id` audit, and the full error contract of this document. The
   corpus tools remain for the transition window only.
 
-**Behavior changes (this release):** the seven breaks in
+**Behavior changes (this release):** the eight breaks in
 [§13](#13-acceptance-surface-breaks--migration-lines), the default-policy
 flip to `gated`, the response additions (`batch_id`, `warnings`), and
 **endpoint-kind-aware connection routing** — a plain IMPL/NAND between
