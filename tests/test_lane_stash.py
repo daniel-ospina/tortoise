@@ -2036,9 +2036,10 @@ def test_prune_keeps_a_LIVE_lanes_guard_for_an_unpinned_entry(
 def test_prune_reaps_a_guard_whose_worktree_is_gone(repo, monkeypatch, capsys):
     """A guard under a REMOVED key is released once the object has another handle.
 
-    No other command can release it: `prune` only unpins the guards IT created, and
-    `recover` refuses a register-listed sha without `-m`. Left alone, that ref
-    blocks gc forever (#8822 review P2).
+    No ROUTINE command releases it: `prune` only unpins the guards IT created, and
+    `recover` releases a guard only when it ADOPTS that sha (so an explicit
+    `recover <sha> -m "…"` also frees it — an escape hatch, not an automatic
+    route). Left alone, that ref blocks gc forever (#8822 review P2).
     """
     mod = _load_tool()
     repo.dirty(repo.b, "f.txt", "base\nkept\n")
