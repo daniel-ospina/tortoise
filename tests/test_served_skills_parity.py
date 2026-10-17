@@ -31,7 +31,13 @@ job of `deploy-pages.yml` and the daily `skills-parity.yml` — and the assertio
 below derive that fact by EXECUTING each step's real `run:` block (recording
 interpreter stubs on `PATH`, #4494's lesson) rather than by reading its text, so
 `echo …`, `… || true`, `… | tee …` and `continue-on-error:` are not mistaken
-for a gate. Both runners are asserted, so landing only one of the two reds.
+for a gate. Because `_job_syncs` executes EVERY step of the owning job, the
+execution is hermetic and measured to be so: PATH carries only a throwaway stub
+dir, every other command is answered by `command_not_found_handle` (recorded,
+exit 0) instead of the real binary, and a timeout is returned as status 124
+rather than raised — otherwise a per-PR run of this suite reached the network,
+slept for real, and errored out on Linux (#8862 review, P0 + P1). Both runners
+are asserted, so landing only one of the two reds.
 `docs/license-notes.md` §7.1 must name
 whichever runners exist, and must name no runner that does not.
 
@@ -50,6 +56,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -1128,6 +1135,43 @@ exit 0
 #: Shadowed so the step's real command shape is what runs, never the real tool.
 _STUBBED = ("uv", "uvx", "python", "python3")
 
+#: The real shells a body may spawn (`bash -c …`, `sh -c …`), linked INTO the
+#: hermetic bin dir. A nested shell then behaves like the runner's while no
+#: system directory is on PATH — resolving them from the parent's PATH instead
+#: is what put `/usr/bin:/bin` on the child's PATH (review finding, P1).
+_SHELLS = ("bash", "sh")
+
+#: Answer EVERY other command a body invokes, instead of leaving it to a real
+#: binary. Three measured reasons (review findings P0 + P1):
+#:
+#:   * with `/usr/bin:/bin` on PATH a step reached the network
+#:     (`api.cloudflare.com`, prod `app.premiselabs.co`) and slept for real
+#:     (`sleep 5`, then 19 × `sleep 30` in the served-onboarding poll), so the
+#:     suite's green depended on a live third party;
+#:   * that poll never converged in the throwaway cwd (`sha256sum` of a missing
+#:     file is empty, the served hash is not), so `subprocess.run` hit its bound
+#:     and `TimeoutExpired` escaped as a test ERROR — the P0;
+#:   * an unresolvable command makes `bash -e` abort the STEP, which is
+#:     fail-OPEN for the `--sync` hazard this harness exists to catch: a `--sync`
+#:     further down the same body was never reached, and an env-spelled
+#:     `"$TOOL"` is invisible to the text fallback.
+#:
+#: Recording and returning 0 fixes all three at once: nothing outside the stub
+#: dir is executable, nothing sleeps, and the body always runs to its end. The
+#: record is what makes the hermeticity assertable rather than claimed.
+_NOT_FOUND_HANDLE = """command_not_found_handle() {
+  printf '%s\\0' "$@" >> "$PARITY_STUB_EXTERNAL"
+  printf '\\036' >> "$PARITY_STUB_EXTERNAL"
+  return 0
+}
+export -f command_not_found_handle
+"""
+
+#: A step that outlives this is rejected, never raised. Everything above makes a
+#: legitimate step finish in milliseconds (bash startup, stubs, no I/O), so the
+#: bound only ever fires on a body the hermetic env cannot satisfy.
+_STEP_TIMEOUT_SECONDS = 20
+
 
 def _shell_flags(step: object) -> tuple[str, ...]:
     """The flags GitHub actually runs this step with.
@@ -1146,35 +1190,81 @@ def _shell_flags(step: object) -> tuple[str, ...]:
     return ("-e",)
 
 
+def _read_record(path: Path) -> list[list[str]]:
+    """Decode one stub record: argv NUL-separated, records RS-separated."""
+    if not path.exists():
+        return []
+    return [[p.decode() for p in chunk.split(b"\0") if p]
+            for chunk in path.read_bytes().split(b"\x1e") if chunk]
+
+
 def _execute_step(body: str, *, fail_arm: bool = False,
                   flags: tuple[str, ...] = ("-e",),
                   extra_env: dict | None = None) -> tuple[int, list[list[str]]]:
-    """RUN a step's real `run:` body; return (exit status, recorded argvs).
+    """RUN a step's real `run:` body; return (exit status, recorded argvs)."""
+    rc, calls, _external = _execute_step_detail(
+        body, fail_arm=fail_arm, flags=flags, extra_env=extra_env)
+    return rc, calls
+
+
+def _execute_step_detail(
+        body: str, *, fail_arm: bool = False, flags: tuple[str, ...] = ("-e",),
+        extra_env: dict | None = None) -> tuple[int, list[list[str]],
+                                                list[list[str]]]:
+    """Like `_execute_step`, plus the commands the body TRIED to run.
 
     `flags` must be the shell THIS step gets on the runner (`_shell_flags`), not
     the strictest shell available — see that function for why the difference is a
     real disarmament and not a detail.
 
-    Hermetic by construction: the stubs are the only interpreters on PATH, the
-    cwd is a throwaway directory, and the environment is an allowlist — so a
-    body cannot execute a real gate, sync a real project, or reach the network.
+    Hermetic by construction, and measured rather than asserted: PATH contains
+    the throwaway bin dir and NOTHING else (no `/usr/bin`, no `/bin`), so the
+    interpreter stubs are the only interpreters, every other command is answered
+    by `command_not_found_handle` (recorded, exit 0) instead of a real binary,
+    the cwd is a throwaway directory, and the environment is an allowlist. A body
+    therefore cannot execute a real gate, sync a real project, reach the network,
+    or sleep — and cannot abort early on an unresolvable command either, which is
+    what kept a late `--sync` invisible (review findings, P0 + P1).
+
+    The status is always an int: a body that outlives the bound is reported as
+    `124` (the `timeout(1)` convention) with whatever argvs it recorded first,
+    never raised, because both predicates this feeds are total functions over
+    workflow content.
     """
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         bin_dir = root / "bin"
         bin_dir.mkdir()
+        shell = shutil.which("bash") or "/bin/bash"
         for name in _STUBBED:
             stub = bin_dir / name
             stub.write_text(_STUB, encoding="utf-8")
             stub.chmod(0o755)
+        for name in _SHELLS:
+            target = shutil.which(name) or shell
+            link = bin_dir / name
+            if link.exists():
+                continue
+            try:
+                link.symlink_to(target)
+            except OSError:  # pragma: no cover - filesystem refuses symlinks
+                continue
         record = root / "argv.bin"
+        external_record = root / "external.bin"
         script = root / "step.sh"
-        script.write_text(_interpolate(body, extra_env), encoding="utf-8")
+        script.write_text(_NOT_FOUND_HANDLE + _interpolate(body, extra_env),
+                          encoding="utf-8")
         env = {
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            # ⛔ NOTHING but the stub dir: `:/usr/bin:/bin` here put every real
+            # binary (curl, sleep, sha256sum, npm, git) in reach of a step that
+            # runs on every PR (review finding, P1 — measured reaching
+            # api.cloudflare.com and prod app.premiselabs.co).
+            "PATH": str(bin_dir),
             "HOME": str(root),
             "TMPDIR": str(root),
+            "RUNNER_TEMP": str(root),
             "PARITY_STUB_RECORD": str(record),
+            "PARITY_STUB_EXTERNAL": str(external_record),
             "PARITY_STUB_FAIL_ARM": "1" if fail_arm else "0",
             "GITHUB_WORKSPACE": str(REPO),
         }
@@ -1184,16 +1274,21 @@ def _execute_step(body: str, *, fail_arm: bool = False,
         for key, value in (extra_env or {}).items():
             if isinstance(key, str) and isinstance(value, (str, int, float)):
                 env[key] = str(value)
-        proc = subprocess.run(
-            ["bash", *flags, str(script)],
-            cwd=root, env=env, capture_output=True, text=True, timeout=60,
-        )
-        calls: list[list[str]] = []
-        if record.exists():
-            for chunk in record.read_bytes().split(b"\x1e"):
-                if chunk:
-                    calls.append([p.decode() for p in chunk.split(b"\0") if p])
-        return proc.returncode, calls
+        status = 124
+        try:
+            # `shell` is ABSOLUTE on purpose: it must not be looked up on the
+            # child's PATH, which no longer carries a system directory.
+            proc = subprocess.run(
+                [shell, *flags, str(script)],
+                cwd=root, env=env, capture_output=True, text=True,
+                timeout=_STEP_TIMEOUT_SECONDS,
+            )
+            status = proc.returncode
+        except subprocess.TimeoutExpired:
+            # `subprocess.run` has already killed the child, so the partial
+            # record on disk is readable and the callers stay total.
+            status = 124
+        return status, _read_record(record), _read_record(external_record)
 
 
 #: Flags that make the tool run the upstream arm. `--check` runs BOTH arms and a
@@ -1482,6 +1577,113 @@ def _upstream_runners(workflows: Path | None = None) -> dict[str, dict]:
                for _, job, _ in _arm_steps(doc)):
             runners[path.name] = doc
     return runners
+
+
+# ── the harness itself must DO nothing — it runs on every PR ─────────────────
+#
+# Review findings (P0 + P1), measured on Linux (the ubuntu-latest shape):
+# `_job_syncs` executes every step of the arm's job to catch a `--sync` hidden
+# behind `env:`/`$PWD`, and PATH carried `/usr/bin:/bin`. So a per-PR test run
+# executed the REAL post-deploy steps of `deploy-dashboard`: it curled
+# `api.cloudflare.com` and prod `app.premiselabs.co`, slept 5 s, then 19 × 30 s
+# in the served-onboarding poll — a poll whose `EXPECTED` hash is empty in the
+# throwaway cwd, so it can never converge. `subprocess.run`'s 60 s bound then
+# fired and `TimeoutExpired` escaped as an ERROR through `_upstream_runners` into
+# ~25 test cases (~27 min of shard time, each paying ~65 s before erroring), and
+# the run's green depended on a live third party. On macOS the same poll exits 0
+# in under a second (`sha256sum` is absent, so `"" == ""`), which is why the
+# local "41 passed" could be true while CI was red.
+#
+# The fix is the three assertions below: nothing outside the stub dir is on PATH,
+# nothing a body invokes is executed for real, and a timed-out step is REPORTED
+# rather than raised. Each is measured against the same helper, so none of them
+# can be satisfied by prose.
+
+def test_4643_the_step_runner_puts_nothing_but_the_stubs_on_path():
+    """A body sees the stub dir and nothing else — `/usr/bin:/bin` is what made
+    real `curl`/`sleep`/`sha256sum` reachable from a per-PR test run (P1)."""
+    rc, calls = _execute_step('python3 "$PATH"')
+    assert rc == 0 and calls, "the interpreter stub did not record its own PATH"
+    entries = calls[0][1].split(":")
+    assert len(entries) == 1, (
+        f"PATH must carry ONLY the throwaway stub dir, got {entries} — every "
+        "other entry puts a real binary (curl, sleep, npm, git) in reach of a "
+        "step body that runs on every PR, and the network/sleep follow from it")
+    stub_dir = Path(entries[0])
+    assert stub_dir.name == "bin" and not any(
+        str(stub_dir).startswith(system) for system in ("/usr", "/bin", "/opt")), (
+        f"the only PATH entry must be the temp stub dir, got {stub_dir}")
+
+
+def test_4643_an_executed_step_cannot_curl_or_sleep():
+    """The real binaries a body would reach are answered by the not-found
+    handler: recorded, never executed. `curl` here would have been a live
+    request to a production host, and `sleep 30` real shard time."""
+    body = ("curl -fsSL --max-time 20 https://app.premiselabs.co/x -o f\n"
+            "sleep 30\n"
+            "sha256sum f\n")
+    start = time.monotonic()
+    rc, _calls, external = _execute_step_detail(body)
+    elapsed = time.monotonic() - start
+    assert rc == 0, (
+        "a body whose `curl`/`sleep`/`sha256sum` are hermetically answered must "
+        f"still run to completion (exit {rc}) — an abort here is fail-OPEN for a "
+        "`--sync` further down the same step")
+    assert [argv[0] for argv in external] == ["curl", "sleep", "sha256sum"], (
+        f"expected the not-found handler to answer all three, recorded {external}"
+        " — a name missing from this list was resolved to a REAL binary")
+    assert elapsed < 5, (
+        f"the body took {elapsed:.1f}s — `sleep 30` ran for real; the stub env "
+        "must make it free")
+
+
+def test_4643_executing_the_real_deploy_job_stays_off_the_network():
+    """The regression itself: the SHIPPED `deploy-dashboard` job, executed by
+    the sync probe, must return quickly. Pre-fix on Linux this raised
+    `TimeoutExpired` after ~65 s (the onboarding poll never converges), so the
+    assertion is on both the verdict and the wall clock."""
+    doc = yaml.safe_load(
+        (WORKFLOWS / "deploy-pages.yml").read_text(encoding="utf-8")) or {}
+    job = doc["jobs"]["deploy-dashboard"]
+    start = time.monotonic()
+    assert _job_syncs(job) is False, (
+        "the shipped deploy job runs `--check-upstream`, not `--sync`; a True "
+        "here means the probe misread a step")
+    elapsed = time.monotonic() - start
+    assert elapsed < _STEP_TIMEOUT_SECONDS, (
+        f"executing `deploy-dashboard` took {elapsed:.1f}s — its post-deploy "
+        "steps (curl to prod, `sleep 30` polls) are running for real")
+
+
+def test_4643_a_body_that_cannot_resolve_a_command_still_reaches_its_sync():
+    """Fail-OPEN closed: `bash -e` aborts on `command not found`, so before the
+    handler a `--sync` further down the same body was never reached — and this
+    spelling is invisible to the text fallback, because the tool is named by
+    `$TOOL` (the very spelling the `env:` probe exists for)."""
+    body = ('no-such-binary-4643 --nowhere\n'
+            'python3 "$TOOL" --sync\n')
+    job = {"steps": [{"env": {"TOOL": "tools/served_skills_parity.py"},
+                      "run": body}]}
+    assert _job_syncs(job) is True, (
+        "a step whose first command is unresolvable must still be executed to "
+        "the end — otherwise a `--sync` hidden behind it is certified as clean, "
+        "and the build stages bytes an unreviewed step just wrote")
+
+
+def test_4643_a_timed_out_step_is_reported_not_raised(monkeypatch):
+    """The P0's escape hatch: `subprocess.run`'s bound must surface as a status,
+    never as an exception out of a predicate that both `_upstream_runners` and
+    `_is_arm_step` call."""
+    def _boom(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["bash"], timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    rc, calls = _execute_step("echo hello")
+    assert rc == 124, (
+        f"a timed-out step must report 124 (the `timeout(1)` convention), got {rc}")
+    assert calls == [], (
+        "nothing was recorded before the timeout, so the predicate must see no "
+        "argv rather than stale ones")
 
 
 def test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it():
