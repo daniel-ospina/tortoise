@@ -37,6 +37,7 @@ import time
 
 __all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
+    "BillingEnumerationError",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
     "subscription_period_bounds",
@@ -60,6 +61,23 @@ class BillingConfigError(BillingError):
 
 class StripeAPIError(BillingError):
     """A Stripe API call failed (network, auth, 4xx/5xx)."""
+
+
+class BillingEnumerationError(BillingError, RuntimeError):
+    """The fleet could not be enumerated as a CERTIFIED-COMPLETE set.
+
+    The fail-CLOSED refusal behind ``reconcile_subscriptions``: a partial page
+    must never be published as a clean pass (#8878/#5388). It is given a name
+    of its own so the INTERNAL endpoint can answer a 5xx that SAYS what
+    happened (``503 enumeration_incomplete``) instead of an opaque 500 — the
+    daily driver's log is the page, and `billing reconcile returned HTTP 500`
+    names nothing an operator can act on.
+
+    It subclasses ``RuntimeError`` as well, deliberately: this IS a
+    control-plane seam failure (``SupabaseControlPlane`` raises ``RuntimeError``
+    for every transport/HTTP fault), so a caller that already fails closed on
+    that shape keeps working unchanged.
+    """
 
 
 # ── Secret scrubbing (log hygiene, review fix 9) ────────────────────────────
@@ -925,7 +943,7 @@ def _enumerate_billed_orgs(limit: int | None = None) -> list[dict]:
             "organizations", select=list(_IDENTITY_FIELDS), filters=None,
             cursor="id")
         if not complete:
-            raise RuntimeError(
+            raise BillingEnumerationError(
                 "billing reconcile: the org enumeration could not be CERTIFIED "
                 f"complete ({len(rows)} row(s) returned) — refusing to publish "
                 "a partial pass as a clean one (the NO_ORGS class #596, #8878)"
@@ -934,7 +952,7 @@ def _enumerate_billed_orgs(limit: int | None = None) -> list[dict]:
     else:
         total_aware = getattr(cp, "query_with_total", None)
         if not callable(total_aware):
-            raise RuntimeError(
+            raise BillingEnumerationError(
                 "billing reconcile: the control-plane seam exposes neither "
                 "query_all nor query_with_total, so the fleet cannot be "
                 "certified complete — refusing to reconcile a partial page"
@@ -943,7 +961,7 @@ def _enumerate_billed_orgs(limit: int | None = None) -> list[dict]:
             "organizations", select=list(_IDENTITY_FIELDS), order="id",
             count_exact=True)
         if total is None or total != len(rows):
-            raise RuntimeError(
+            raise BillingEnumerationError(
                 "billing reconcile: the enumeration is a LOWER BOUND (server "
                 f"stated {total!r}, page returned {len(rows)}) — refusing to "
                 "publish a partial pass as a clean one (#8878)"

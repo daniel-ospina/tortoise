@@ -2283,6 +2283,33 @@ class TestReconcileSweep:
         tier, max_points, _status = self._row(sdk, org_id)
         assert (tier, max_points) == ("pro", 100000)
 
+    def test_the_endpoint_names_an_uncertified_enumeration(
+            self, monkeypatch, billing_client):
+        """A fleet that cannot be CERTIFIED complete answers 503 with a NAME.
+
+        Uncaught, that refusal renders as an opaque ``500 {"detail": "Internal
+        Server Error"}`` — and the daily driver's ``::error::`` line is the
+        page, so "HTTP 500" names nothing an operator can act on. ``503
+        enumeration_incomplete`` says which leg failed and that a retry is the
+        response (the fleet was not READ, not mis-repaired).
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+
+        def _cannot_certify(*_a, **_kw):
+            raise bl.BillingEnumerationError(
+                "billing reconcile: the org enumeration could not be CERTIFIED "
+                "complete (1000 row(s) returned)")
+
+        monkeypatch.setattr(bl, "reconcile_subscriptions", _cannot_certify)
+        r = billing_client["client"].post(
+            "/v1/internal/billing/reconcile",
+            headers={"Authorization": "Bearer internal-test-key"})
+        assert r.status_code == 503, r.text
+        assert r.json()["status"] == "enumeration_incomplete"
+
 
 class TestLifespanStartup:
     def test_lifespan_startup_returns_without_blocking(self, monkeypatch, tmp_path):

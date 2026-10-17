@@ -36869,11 +36869,13 @@ async def billing_reconcile(request: Request):
     ``{"status": "already_running"}`` and does NO work (the next scheduled run
     retries; nothing queues) — a caller must not read 202 as a completed pass.
 
-    Fails CLOSED on an uncertifiable enumeration (500), so the daily driver's
-    red run is the alarm rather than a partial pass reported as clean.
+    Fails CLOSED on an uncertifiable enumeration — **503**
+    ``{"status": "enumeration_incomplete"}`` — so the daily driver's red run is
+    the alarm rather than a partial pass reported as clean, and its log names
+    the leg instead of showing an opaque 500.
     """
     _check_internal(request)
-    from tortoise.billing import reconcile_subscriptions
+    from tortoise.billing import BillingEnumerationError, reconcile_subscriptions
 
     if _BILLING_RECONCILE_INFLIGHT.locked():
         return JSONResponse(status_code=202,
@@ -36885,19 +36887,37 @@ async def billing_reconcile(request: Request):
         # registry-namespaced SDK (a write vector post-#669 that RESURRECTS the
         # deleted registry graph, #878) — ``reconcile_org``/``org_billing_identity``
         # read the authoritative ``organizations`` row with ``sdk=None``.
-        if is_supabase_enabled():
-            sdk = None
-            result = await asyncio.to_thread(reconcile_subscriptions, None)
-        else:
-            sdk = await asyncio.to_thread(_registry_sdk)
-            try:
-                # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
-                # rides a worker hand-off so it cannot hold the single uvicorn
-                # event loop (the #2988/#3498 class).
-                result = await asyncio.to_thread(reconcile_subscriptions, sdk)
-            finally:
-                with suppress(Exception):
-                    sdk.close()
+        try:
+            if is_supabase_enabled():
+                sdk = None
+                result = await asyncio.to_thread(reconcile_subscriptions, None)
+            else:
+                sdk = await asyncio.to_thread(_registry_sdk)
+                try:
+                    # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
+                    # rides a worker hand-off so it cannot hold the single uvicorn
+                    # event loop (the #2988/#3498 class).
+                    result = await asyncio.to_thread(reconcile_subscriptions, sdk)
+                finally:
+                    with suppress(Exception):
+                        sdk.close()
+        except BillingEnumerationError as exc:
+            # The pass refuses to reconcile a fleet it cannot certify COMPLETE.
+            # That is not a request error — it is "the source is unavailable or
+            # unprovable, retry" — so it answers 503 with a NAME, instead of the
+            # opaque 500 an uncaught RuntimeError produces: the driver's
+            # ``::error::`` line is the page, and "HTTP 500" names nothing an
+            # operator can act on. Every PER-ORG failure is caught inside the
+            # pass, so this exception is always the enumeration's.
+            from tortoise.security import redact_error
+            _logger.warning("billing reconcile: enumeration unavailable: %s",
+                            redact_error(exc))
+            return JSONResponse(
+                status_code=503,
+                content={"status": "enumeration_incomplete",
+                         "detail": "the fleet enumeration could not be "
+                                   "confirmed complete — refusing to report a "
+                                   "partial pass as clean"})
     return result
 
 

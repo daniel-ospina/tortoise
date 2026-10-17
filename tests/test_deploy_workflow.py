@@ -1269,7 +1269,14 @@ def _billing_case(**overrides):
     return payload
 
 
-#: (case, http status, body, expected exit code, why)
+#: (case, http status, body, expected exit code, why, trigger)
+#:
+#: The TRIGGER is part of a 202's verdict, not decoration: the endpoint answers
+#: 202 `already_running` for a concurrent pass, which its docstring calls benign
+#: (nothing queues; the next scheduled run retries). A SCHEDULED run that lands
+#: inside an operator's manual pass is therefore a no-op, not an incident — while
+#: a `workflow_dispatch` that did no work must not look like a completed pass.
+#: Default trigger is `schedule` (the cadence this job exists for).
 _BILLING_VERDICTS = [
     ("clean", 200, _billing_case(), 0,
      "a clean pass is green"),
@@ -1300,8 +1307,16 @@ _BILLING_VERDICTS = [
      "a body that is not a summary cannot verify anything"),
     ("http-500", 500, {"detail": "boom"}, 1,
      "a non-200 is a failed pass"),
-    ("already-running", 202, {"status": "already_running"}, 1,
-     "202 means the pass did NO work — it must never read as a completed pass"),
+    ("already-running-scheduled", 202, {"status": "already_running"}, 0,
+     "a scheduled run overlapping a manual pass is benign — nothing queues and "
+     "the next scheduled run retries; paging it would be a false billing incident"),
+    ("already-running-dispatched", 202, {"status": "already_running"}, 1,
+     "a DISPATCHED run that did NO work must not read as a completed pass",
+     "workflow_dispatch"),
+    ("enumeration-incomplete", 503,
+     {"status": "enumeration_incomplete", "detail": "not certified"}, 1,
+     "a pass that could not certify the whole fleet compared an unknown "
+     "fraction of it — never a clean pass"),
 ]
 
 #: Every field the verdict keys on. Shared by the workflow's check and the
@@ -1340,12 +1355,13 @@ class TestBillingReconcileDriverVerdicts:
         )
 
     @pytest.mark.parametrize(
-        "case,status,body,expected,why",
-        _BILLING_VERDICTS,
+        "case,status,body,expected,why,trigger",
+        [(*case, "schedule") if len(case) == 5 else case
+         for case in _BILLING_VERDICTS],
         ids=[c[0] for c in _BILLING_VERDICTS],
     )
     def test_exit_code_matches_the_documented_verdict(
-            self, case, status, body, expected, why):
+            self, case, status, body, expected, why, trigger):
         import subprocess
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1378,6 +1394,9 @@ class TestBillingReconcileDriverVerdicts:
                     "INTERNAL_API_URL": f"http://127.0.0.1:{port}",
                     "FASTAPI_INTERNAL_KEY": "test-internal-key",
                     "HOME": "/tmp",
+                    # The workflow binds this from `${{ github.event_name }}`;
+                    # the 202 verdict depends on it (see _BILLING_VERDICTS).
+                    "EVENT_NAME": trigger,
                 },
                 capture_output=True, text=True, timeout=120,
             )

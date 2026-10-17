@@ -479,9 +479,23 @@ A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
 
 **Cadence.** `.github/workflows/billing-reconcile-cron.yml` runs the pass daily
 (04:43 UTC) with `INTERNAL_API_URL` + `FASTAPI_INTERNAL_KEY`, and the run FAILS
-**and pages Telegram** when the request fails, when the response cannot be read
-as a summary, when any org `failed` to reconcile, when any org is `unrepaired`,
-or when any `drift` row went `up`.
+**and pages Telegram** when the request fails (including the driver's own 600 s
+`-m` ceiling — `/v1/internal/` is prefix-exempt from the transport bound and has
+no server-side one, so the caller publishes its patience), when the endpoint
+answers `503 enumeration_incomplete` (the pass could not certify the WHOLE
+fleet, so it compared an unknown fraction and refuses to report that as clean),
+when the response cannot be read as a summary, when any org `failed` to
+reconcile, when any org is `unrepaired`, or when any `drift` row went `up`.
+
+**`202 already_running` is a no-op, and whether it is a failure depends on the
+trigger.** The endpoint answers it for a CONCURRENT pass (`nothing queues`, the
+next scheduled run retries). A **scheduled** run that lands inside an operator's
+manual pass therefore exits 0 with a notice — the manual pass is covering the
+fleet — while a **`workflow_dispatch`** that did no work FAILS, because a
+dispatched run that silently did nothing must not look like a completed pass.
+So if you dispatch right after the 04:43 UTC schedule and it reds with
+`already_running`, that is the driver telling you to re-dispatch; it is not an
+incident.
 The driver is external deliberately (same reasoning as the backup sweep, #596):
 an in-process timer dies with the process and is invisible when the app is
 crash-looping — exactly when a missed delivery is most likely.
