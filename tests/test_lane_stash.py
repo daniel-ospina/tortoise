@@ -22,6 +22,7 @@ Run:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -2053,6 +2054,40 @@ def test_prune_keeps_a_dead_lanes_guard_that_is_the_only_handle(repo, monkeypatc
         "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
     ).stdout.split()
     assert dead in refs, f"the only handle on an object must survive: {refs}"
+
+
+def test_prune_retains_guards_while_a_worktree_registration_is_stale(
+    repo, monkeypatch, capsys,
+):
+    """A stale registration can hide a LIVE key, so nothing is reaped until it is pruned.
+
+    `mv` on a worktree leaves the OLD path registered, so the key the live
+    worktree derives from `--show-toplevel` is absent from the live set. Reaping
+    then would strip a live lane's protection — the wrong direction (#8822 P2).
+    """
+    mod = _load_tool()
+    stale = repo.root.parent / "wtStale"
+    repo.git("worktree", "add", "-q", "-b", "feat/stale", str(stale))
+    shutil.rmtree(stale)
+    assert "prunable" in repo.git("worktree", "list", "--porcelain").stdout
+
+    repo.dirty(repo.b, "f.txt", "base\nkept\n")
+    repo.git("stash", "push", "-q", "-m", "kept", cwd=repo.b)
+    sha = repo.stash_sha()
+    assert sha
+    dead = f"refs/pi-lane-prune-guard/deadlane-44444444/{sha}"
+    repo.git("update-ref", dead, sha)
+
+    monkeypatch.chdir(repo.a)
+    capsys.readouterr()
+    assert mod.main(["prune", "--apply"]) == 0
+    refs = repo.git(
+        "for-each-ref", "--format=%(refname)", "refs/pi-lane-prune-guard"
+    ).stdout.split()
+    assert dead in refs, (
+        "a stale worktree registration could hide a live key — nothing may be "
+        f"reaped: {refs}"
+    )
 
 
 def test_check_does_not_name_prune_as_reclaimable_on_a_diverged_register(repo):

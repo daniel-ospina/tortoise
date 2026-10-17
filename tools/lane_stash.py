@@ -701,14 +701,22 @@ def _live_lane_keys() -> set[str] | None:
     cp = _git("worktree", "list", "--porcelain", check=False)
     if cp.returncode != 0:
         return None
+    lines = cp.stdout.splitlines()
+    if any(ln.startswith("prunable") for ln in lines):
+        # A stale registration (a worktree moved with plain `mv`, or a directory
+        # removed without `git worktree prune`) prints the OLD path, so the key a
+        # LIVE worktree derives from `--show-toplevel` would be absent and its
+        # guards would be classified dead. That is the wrong direction, so retain
+        # everything while any registration is stale (#8822 review P2).
+        return None
     keys: set[str] = set()
-    for ln in cp.stdout.splitlines():
+    for ln in lines:
         if ln.startswith("worktree "):
             keys.add(lane_key(Path(ln[len("worktree "):])))
     return keys
 
 
-def _reap_stale_guards(present: set[str]) -> None:
+def _reap_stale_guards() -> None:
     """Release guards whose OWNER WORKTREE is gone and whose object has another handle.
 
     A guard left by a removed worktree is never released by any other command:
@@ -723,13 +731,23 @@ def _reap_stale_guards(present: set[str]) -> None:
     """
     live = _live_lane_keys()
     if live is None:
-        return  # cannot tell live from dead — retain conservatively
+        return
+    try:
+        # Read the register HERE, never from a caller's snapshot. A peer `stash
+        # drop`/`clear` or a reflog expiry between that read and this release
+        # removes the entry, and deciding from the stale read would make the guard
+        # we drop the object's LAST handle (#8822 review P1).
+        present = {r["sha"] for r in _shared_register()}
+    except LaneStashError:
+        return  # an unreadable register is not evidence — retain conservatively
     for ref, sha, owner in _guard_refs():
         if not owner or owner in live:
             continue
         others = {
             r for r in _refs_pointing_at(sha)
-            if r != ref and not r.startswith(GUARD_NS + "/")
+            # Neither a guard (releasable at its owner's will) nor `refs/stash`
+            # (moved by any later `stash store`) is durable backing.
+            if r != ref and r != "refs/stash" and not r.startswith(GUARD_NS + "/")
         }
         if sha in present or others:
             _guard_unpin(ref, sha)
@@ -1091,13 +1109,27 @@ def cmd_check(args: argparse.Namespace) -> int:
     # NOT "nothing to take": a bare `git stash pop` would apply and drop that
     # entry. Fail closed rather than answer from the absence of data (#8051 P1).
     diverged = head is not None and (not rows or rows[0]["sha"] != head)
+    # `prune`'s refusal predicate is NARROWER than "the ref is not the register's
+    # top entry": it refuses only when the head appears in NO register position.
+    # An advisory may name `prune --apply` only where prune would actually run
+    # (#8822 review P2).
+    prune_refuses = (
+        bool(rows) and head is not None and head not in {r["sha"] for r in rows}
+    )
     if diverged:
         verdict["safe"] = False
-        verdict["reasons"].append(
-            f"refs/stash resolves to {head[:12]} but the shared reflog does not "
-            "enumerate it — the register cannot be read, so a bare `git stash pop` "
-            "here cannot be shown to be safe (it would apply and drop that entry)"
-        )
+        if not rows:
+            verdict["reasons"].append(
+                f"refs/stash resolves to {head[:12]} but the shared reflog does not "
+                "enumerate it — the register cannot be read, so a bare `git stash pop` "
+                "here cannot be shown to be safe (it would apply and drop that entry)"
+            )
+        else:
+            verdict["reasons"].append(
+                f"refs/stash resolves to {head[:12]}, which is not the register's top "
+                f"entry ({rows[0]['sha'][:12]}) — the ref and the reflog disagree, so a "
+                "bare `git stash pop` here cannot be shown to be safe"
+            )
 
     if rows:
         top = rows[0]
@@ -1165,7 +1197,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             # (#8773 review P2).
             parts = []
             if reclaimable_unpinned:
-                if diverged:
+                if prune_refuses:
                     # Naming `prune --apply` here would be the same contradiction
                     # this advisory exists to remove: a diverged register makes
                     # prune exit 2 (#8822 review P2).
@@ -1377,9 +1409,8 @@ def cmd_prune(args: argparse.Namespace) -> int:
     if args.apply:
         # Guards left by REMOVED worktrees are otherwise un-releasable: `prune` only
         # unpins the guards it created, and `recover` refuses a register-listed sha
-        # without `-m`. Read the register ONCE (`register_shas`) rather than
-        # re-deriving presence per guard (#8822 review P2).
-        _reap_stale_guards(register_shas)
+        # without `-m` (#8822 review P2).
+        _reap_stale_guards()
     if not doomed:
         if not orphan:
             # Nothing to reclaim — but an APPLIED record whose register entry left
