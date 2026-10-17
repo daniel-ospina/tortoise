@@ -158,7 +158,17 @@ if __name__ == "__main__":
 # migration; node-level type/event_id/ts are canonical for v1).
 # NOTE: ClaimStateChanged is deliberately NOT registered — no code path emits
 # it (plan-review P1); challenged is derived from NAND-edge presence, and
-# every claim transition maps to one of the eleven concrete event types below.
+# every claim transition maps to one of the twelve concrete event types below.
+#
+# ⚠️ THIS TUPLE IS THE READ-SIDE CATALOG, NOT THE EMIT SET. `sdk._GRAPH_EVENT_TYPES`
+# is the emit set (the store's claim-TRANSITION contract); THIS registry is what the
+# two read-side validators consult — `TortoiseSDK.poll_events`' `types=` filter and
+# `webhook_delivery._validated_types`. Membership is therefore required of every type
+# the `:GraphEvent` store can hold: a store-writable type that is absent here is
+# UNNAMEABLE (a hard `ValueError: unknown event type`, not an empty page) — #2353's
+# review P2, where `PointRevised` reached the store under `TORTOISE_CHANGE_FEED`
+# while `types=["PointRevised"]` raised. `PointRevised` is the one member whose emit
+# path is conditional (the switch below); the other eleven are emitted unconditionally.
 CLAIM_EVENT_TYPES = (
     "PointAdded",
     "OperatorAdded",
@@ -171,6 +181,8 @@ CLAIM_EVENT_TYPES = (
     "DedupeRejected",     # #784: content-dedup candidate rejected
     "ObjectSuperseded",   # #1350: Object status fold source (supersession)
     "PointInvalidated",   # #2488: invalidate_point — outdated flag + CORRECTS (no status)
+    "PointRevised",       # #2353: update_point content/validity/status revision — reaches the
+                          # :GraphEvent store only while TORTOISE_CHANGE_FEED is truthy
 )
 
 

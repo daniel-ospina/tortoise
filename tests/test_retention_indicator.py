@@ -26,7 +26,16 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import retention_indicator as ri
 from tortoise.hosted_api import app
 
-TODAY = datetime.now(UTC).date()
+# A PINNED reference day, deliberately FAR from the wall clock. Reading the
+# clock here (``datetime.now(UTC).date()``, as this module once did) makes every
+# fixture date relative to the instant the module happened to be imported: a
+# "future" payload built from that import-time day is no longer future once the
+# assertion runs on the next UTC day, so the strict ``>`` in the endpoint's
+# guard goes false and the refusal is never exercised — a UTC-midnight time bomb
+# that reddened an unrelated PR's gate at 00:02Z (#8805). Decades of separation
+# also keep the pin load-bearing, the `test_3036_oauth_retention` precedent: a
+# clock-reading mutant cannot pass by coinciding with the real day.
+TODAY = date(2020, 1, 1)
 AS_OF = TODAY
 
 
@@ -906,7 +915,15 @@ class TestEndpointAuth:
         ).status_code == 401
 
     def test_a_future_reading_is_refused(self, client, internal_key, monkeypatch):
+        import tortoise.hosted_api as ha
+
         _wire(monkeypatch, FakeCP([], []))
+        # Freeze the endpoint's clock to the day the payload is built from, so
+        # the boundary is asserted exactly — one UTC day ahead — instead of
+        # racing the wall clock across midnight (#8805). Without this the
+        # payload below is decades in the past and the guard correctly answers
+        # 200, so the freeze is load-bearing, not decoration.
+        monkeypatch.setattr(ha, "_utc_today", lambda: AS_OF)
         future = (AS_OF + timedelta(days=1)).isoformat()
         resp = client.get(PATH, params={"as_of": future}, headers=internal_key)
         assert resp.status_code == 422

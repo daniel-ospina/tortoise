@@ -23,6 +23,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.billing as billing
+from tests._verdict import verdict_client
 from tortoise.billing import (
     BillingConfigError,
     BillingError,
@@ -442,7 +443,6 @@ def billing_client(monkeypatch, tmp_path):
     registry SDK (same DB) for direct mirror assertions.
     """
     import os  # noqa: I001
-    from fastapi.testclient import TestClient
     from tortoise.hosted_api import app
     from tortoise.sdk import TortoiseSDK
 
@@ -455,7 +455,7 @@ def billing_client(monkeypatch, tmp_path):
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
 
     sdk = TortoiseSDK(db, namespace="registry")
-    with TestClient(app) as tc:
+    with verdict_client(app) as tc:
         r = tc.post("/v1/register", json={
             "email": "billing-owner@example.com",
             "password": "supersecret1",
@@ -925,8 +925,6 @@ class TestBillingSupabaseStore:
 
     @pytest.fixture
     def sb(self, monkeypatch):
-        from fastapi.testclient import TestClient
-
         import tortoise.hosted_api as ha
         import tortoise.supabase_control as sc
         from tests.fake_control_plane import FakeControlPlane
@@ -962,7 +960,7 @@ class TestBillingSupabaseStore:
                "email": "owner@example.com"}
         ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
         try:
-            yield TestClient(ha.app), fake
+            yield verdict_client(ha.app), fake
         finally:
             ha.app.dependency_overrides.pop(ha.get_current_org_session, None)
 
@@ -1447,9 +1445,8 @@ class TestBillingSupabaseKeyAuthCreatorEmail:
             }],
         })
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
-        from fastapi.testclient import TestClient
         with patched_tortoise_sdk(str(tmp_path / "kc4727.db")):
-            yield TestClient(ha.app), fake
+            yield verdict_client(ha.app), fake
 
     def _stub_stripe(self, monkeypatch, cid: str = "cus_kc_e2e"):
         created: list[str] = []
@@ -2297,3 +2294,33 @@ class TestBillingErrorToHttpMapping:
             headers=billing_client["headers"],
         )
         assert r.status_code == 502, r.text
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``/v1/billing/checkout`` is the
+    route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/billing/checkout")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(ha.app) as raw:
+        assert raw.post("/v1/billing/checkout", json={}).status_code == 504
+    with verdict_client(ha.app) as tc, \
+            pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/billing/checkout", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/billing/checkout answered" in message

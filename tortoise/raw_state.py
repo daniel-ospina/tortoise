@@ -161,7 +161,8 @@ RAW_STATE_AT_PROP = "rawStateAt"
 #: How long a ``deleted`` marker is **guaranteed** for, after which it is
 #: eligible to be dropped by a (future, journalled) collection pass.
 #:
-#: 10 days is Cassandra's documented ``gc_grace_seconds`` default — the same
+#: ``RAW_DELETION_MARKER_TTL`` is 10 days — Cassandra's documented
+#: ``gc_grace_seconds`` default — the same
 #: shape and the same number as the storage-layer canon the ruling rests on.
 #: The window must outlast the slowest path that could still hold a
 #: pre-deletion copy (here: a `rebuild_all` replaying an older journal), or
@@ -418,7 +419,15 @@ def deletion_marker_expires_at(props: object) -> str | None:
         # a malformed marker, not a licence to drop it: expiry is UNKNOWN, which
         # this reports as `None` — never as "already expired".
         return None
-    return (stamp + RAW_DELETION_MARKER_TTL).isoformat()
+    try:
+        return (stamp + RAW_DELETION_MARKER_TTL).isoformat()
+    except OverflowError:
+        # A stamp at the representable maximum (e.g. `datetime.max`) overflows
+        # the window arithmetic. That marker is UNFIT to reason on, so expiry is
+        # UNKNOWN — the same `None` as an unparseable stamp, and never a raise
+        # on a foreign/legacy row. `is_deletion_marker_expired` then reports
+        # `False`, the safe direction: an unboundable marker is never dropped.
+        return None
 
 
 def is_deletion_marker_expired(

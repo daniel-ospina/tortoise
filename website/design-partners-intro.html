@@ -223,11 +223,17 @@
     /* ── Profile — label above value, two columns, no boxes ───────────── */
     .profile { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem 3rem; }
     .profile h3, .more h3 {
-      font-weight: 500;
-      font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--text-dim); margin-bottom: 0.7rem;
+      font-weight: 600;
+      font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
+      color: #fff; margin-bottom: 0.7rem;
     }
     .profile p { font-size: 0.9rem; }
+    /* The sibling one-pager carries this on the same block, and this page needs
+       it: without it the first profile sentence ends on the lone word
+       "workflows." at 1280px (and the third cell on "knowledge"), and at 320px
+       on "workflows." and "systems.". Measured at 320, 390, 768, 1280 and
+       1600px: no paragraph's line count or cell height changes. */
+    .profile p { text-wrap: pretty; }
     .profile p strong { color: #fff; font-weight: 600; }
 
     /* ── More info ────────────────────────────────────────────────────── */
@@ -347,10 +353,10 @@
       </div>
     </div>
 
-    <!-- ══ The problem ═════════════════════════════════════════════════ -->
+    <!-- ══ The Problem ═════════════════════════════════════════════════ -->
     <section id="problem">
       <div class="wrap">
-        <h2>The problem</h2>
+        <h2>The Problem</h2>
         <p>Agents are increasingly capable, but fundamentally <span class="hl">struggle with complex work that unfolds over time</span>. They forget previous decisions, lose important variables as context grows, sub-optimise, and can be disproportionately influenced by the latest information.</p>
         <p>Regular memory systems are filing cabinets, providing retrieval of facts but unable to provide an understanding of how the pieces of a company, product, or technical system work together.</p>
       </div>
@@ -365,8 +371,8 @@
         <div class="outcomes">
           <ul class="up">
             <li><span class="a">↑</span><span>Agent Autonomy</span></li>
-            <li><span class="a">↑</span><span>Token Efficiency</span></li>
-            <li><span class="a">↑</span><span>Decision Quality</span></li>
+            <li><span class="a">↑</span><span>Token efficiency</span></li>
+            <li><span class="a">↑</span><span>Decision quality</span></li>
           </ul>
           <ul class="down">
             <li><span class="a">↓</span><span>Sub-optimisation</span></li>

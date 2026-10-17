@@ -4266,6 +4266,42 @@ def repo_roots(git_bin: str, path: str, timeout: float) -> list[str]:
 
 
 def _git_repo_dirs(roots: list[str]) -> list[str]:
+    """Directories under `roots` that look like local clones.
+
+    BOTH levels are guarded: an unreadable ROOT is skipped, and so is an
+    unreadable ENTRY. `Path.is_dir()`/`Path.exists()` swallow
+    ENOENT/ENOTDIR/EBADF/ELOOP but NOT `EACCES`, so a sibling that is stat-able
+    but not traversable — a root-owned `drwx------` dir under a shared `/tmp`,
+    which exists on a cmux cloud cell (`/tmp/cmux-blesh-runtime-0`) and not on a
+    dev box — raised straight out of the `.git` probe and aborted the whole
+    scan (#8650). On the `--repo owner/name` path that killed
+    `find_local_clone` and exited 1, the COLLISION code, with EMPTY stdout and
+    no `VERDICT:` line — so a collision was reported with no surface named,
+    where the designed outcome is a verdict. The same walk backs
+    `who_is_on --repo <slug>`.
+
+    Scope note: the controller's `refresh-candidates.sh` invokes the pre-flight
+    as `--repo .`, which is the PATH branch of `_resolve_target`; it never
+    reaches `find_local_clone`, so it was NOT exposed to this crash (measured —
+    the pre-fix tool exits 0 with a `VERDICT:` on that form).
+
+    Skipping is lossless for clone DISCOVERY in the `EACCES` case, which is the
+    one observed on the cell. `EACCES` here means the process lacks SEARCH
+    permission on `entry`, and every consumer of a returned path then runs
+    `git -C <entry>` (`_remote_slug`), which needs the same search permission to
+    `chdir`. An entry this probe cannot read therefore cannot yield a slug,
+    cannot appear in `candidate_slugs`, and cannot be returned by
+    `find_local_clone` — it is never a clone "the surface would have found".
+
+    A non-`EACCES` `OSError` (a transient EIO/ENOMEM on a network mount, say) is
+    DELIBERATELY treated the same way, by the recorded decision on #8650 that
+    only `OSError` is swallowed; for those the probe may fail where a later
+    `git -C <entry>` would have succeeded. Treating them as "not a clone" is
+    fail-closed downstream (`find_local_clone` returns None, which drives the
+    `no-local-clone` INCOMPLETE reason, exit 2), never a silent CLEAN.
+
+    Only `OSError` is swallowed; a non-OSError failure still propagates.
+    """
     dirs: list[str] = []
     for root in roots:
         try:
@@ -4273,8 +4309,11 @@ def _git_repo_dirs(roots: list[str]) -> list[str]:
         except OSError:
             continue
         for entry in entries:
-            if entry.is_dir() and (entry / ".git").exists():
-                dirs.append(str(entry))
+            try:
+                if entry.is_dir() and (entry / ".git").exists():
+                    dirs.append(str(entry))
+            except OSError:
+                continue
     return dirs
 
 

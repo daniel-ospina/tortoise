@@ -875,7 +875,8 @@ def _install_missing_dbdir_guard() -> None:
 # entry's own `rlock` is already held at the mutation, so the guard is only
 # needed to look the entry up.
 # `_CONSTRUCT_LOCKS` is keyed on the canonical path (or on `_MEMORY_DB_KEY`
-# for the `:memory:` sentinel, #7943) and is never pruned: an
+# for the `:memory:` sentinel, #7943, or on the lock FILE when a `sidecar` is
+# supplied, #7935's journal lock) and is never pruned: an
 # entry is one `RLock` + one int per DISTINCT `<dbdir>/<dbfilename>` for the
 # process lifetime — the same shape and the same accepted bound as
 # `_owner_refcounts` / `_own_start_cache` in this module (bounded in practice by
@@ -1019,8 +1020,34 @@ def _memory_construct_lock_path() -> str:
                         f"tortoise-memory-construct-{digest}.lock")
 
 
-def _open_construct_lock(key: str) -> int:
+def _construct_lock_path(key: str) -> str:
+    """The flock file `_open_construct_lock` takes for `key` when no `sidecar`
+    is given.
+
+    One derivation, so a caller that needs to know WHICH file a construction
+    locks (rather than to take it) cannot disagree with the opener: #7935's
+    `_destination_lock` compares this path against the journal lock's file to
+    decide whether taking both would self-deadlock on one file, and a second
+    spelling of the suffix here would make that comparison lie.
+
+    `:memory:` is the one key that is not a filesystem path, so it resolves to
+    the relocated sidecar (see `_memory_construct_lock_path`) rather than
+    littering `<cwd>/:memory:.tortoise-construct.lock`.
+    """
+    if key == _MEMORY_DB_KEY:
+        return _memory_construct_lock_path()
+    return key + ".tortoise-construct.lock"
+
+
+def _open_construct_lock(key: str, *, sidecar: str | None = None) -> int:
     """Open + LOCK_EX the lock file for `key`, or -1 when no lock can be taken.
+
+    `sidecar` overrides the derived `<key>.tortoise-construct.lock` path, so a
+    caller can reuse this whole discipline (O_NOFOLLOW, the regular-file check,
+    the announced wait, the -1-not-raise failures) for a DIFFERENT file that
+    still needs one exclusive cross-process flock — #7935's restore-journal
+    lock, which cannot share the store's key but must not grow a second,
+    divergent lock implementation.
 
     Two failures deliberately yield -1 ("no lock", the caller keeps the
     in-process RLock) rather than raising, mirroring `_acquire_owner_lock`'s
@@ -1048,14 +1075,12 @@ def _open_construct_lock(key: str) -> int:
     A failure to FLOCK closes the just-opened fd before propagating — the fd
     would otherwise leak on every construction of that key.
     """
-    if key == _MEMORY_DB_KEY:
-        path = _memory_construct_lock_path()
-    else:
-        path = key + ".tortoise-construct.lock"
+    path = sidecar if sidecar is not None else _construct_lock_path(key)
     try:
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     except FileNotFoundError:
-        if not os.path.isdir(os.path.dirname(key)):
+        if not os.path.isdir(os.path.dirname(
+                sidecar if sidecar is not None else key)):
             return -1
         raise
     except OSError as exc:
@@ -1112,12 +1137,20 @@ def _release_construct_lock(entry: _ConstructLock) -> None:
 
 
 @contextlib.contextmanager
-def _construction_lock(key: str):
-    """#4921: hold `key`'s construction lock for the block, reentrantly."""
+def _construction_lock(key: str, *, sidecar: str | None = None):
+    """#4921: hold `key`'s construction lock for the block, reentrantly.
+
+    `sidecar` is passed through to `_open_construct_lock` to lock a DIFFERENT
+    file than `<key>.tortoise-construct.lock` (#7935's journal lock). The
+    registry is keyed on the lock FILE — `sidecar` when given, else `key` — so
+    one entry still means one flock, and reentrancy is per lock file rather
+    than per derivation.
+    """
+    lock_id = sidecar if sidecar is not None else key
     with _CONSTRUCT_LOCKS_GUARD:
-        entry = _CONSTRUCT_LOCKS.get(key)
+        entry = _CONSTRUCT_LOCKS.get(lock_id)
         if entry is None:
-            entry = _CONSTRUCT_LOCKS[key] = _ConstructLock(key)
+            entry = _CONSTRUCT_LOCKS[lock_id] = _ConstructLock(lock_id)
     entry.rlock.acquire()
     try:
         # NOT under `_CONSTRUCT_LOCKS_GUARD`: `_open_construct_lock` blocks for
@@ -1127,7 +1160,7 @@ def _construction_lock(key: str):
         # naive "hold the mutex" version causes.
         entry.depth += 1
         if entry.depth == 1:
-            entry.fd = _open_construct_lock(key)
+            entry.fd = _open_construct_lock(key, sidecar=sidecar)
         yield
     finally:
         try:

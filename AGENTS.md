@@ -204,6 +204,8 @@ Does **not** apply to: routine project file reads, git operations, local shell c
 
 - **Never use sed for multi-line code changes.**
 - **Never use `git add -A`** — always stage specific files.
+- **Never use a bare `git stash pop`/`apply` in a worktree lane** — `refs/stash` is shared by every
+  worktree; see *Repo-Specific Conventions → Git Workflow* and `tools/lane_stash.py` (#8051).
 - **Prefer the `edit` tool over `write`** for targeted changes to existing files.
 - **Commit messages: always `git commit -F <file>` — never `-m`, never a heredoc.** The message
   message file goes in a **repo- and worktree-unique temp directory**, never a shared
@@ -500,6 +502,28 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 ### Git Workflow
 
 - **Before any commit:** invoke `commit-workflow` skill
+- **⛔ Never run a bare `git stash pop` / `git stash apply` / `git stash drop` in a worktree lane.**
+  `refs/stash` and its reflog live in the **common** git dir, so the stack is repo-GLOBAL: a peer
+  lane's `git stash push` renumbers YOUR entry, and your unqualified `git stash pop` then applies
+  and **drops the PEER's entry** into your worktree (#2654, #3539, and a 7860/8482 lane that
+  already knew the hazard — three recorded incidents, #8051). It presents as a *successful* pop:
+  no conflict, no warning, no different exit status. Use `python tools/lane_stash.py push|pop|list`
+  instead — it pins every entry to `refs/lane/<lane-key>/stash/<n>` and restores **by sha**, so a
+  peer's entry is unreachable in either direction; `python tools/lane_stash.py check` is the
+  executable detector (exit 1 = a bare `git stash pop` here would take work that is not provably
+  this lane's — a peer lane's marker or lane ref, any entry only a branch name could attribute, or a
+  `refs/stash` that resolves over an emptied reflog; a register that cannot be read at all is exit 2,
+  a state error, so treat ANY non-zero as "do not run a bare `git stash pop`").
+  `python tools/lane_stash.py recover <sha>` is the repair recipe for THIS lane's own dropped entry
+  (it pins what it restores under the current lane), and it **refuses** an entry another lane's ref
+  or `[<lane-key>]` marker names, or one already enumerated by the register that is not provably
+  this lane's (nothing was dropped, so `recover` would only mint ownership; pass `-m` to assert it
+  deliberately) — pinning a peer's entry here would leave it claimed by both lanes, and `check`
+  would then clear a bare pop on work that is not this lane's. To restore a *peer's* dropped entry,
+  use `git stash store -m "<original subject>" <sha>` (the commit survives in the object DB), or let
+  that lane recover it from its own worktree.
+  `tests/test_lane_stash.py` carries the 2-worktree reproduction. The lane rule
+  also exists one repo up in agent-infra (skills + guard extension) as agent-infra #1264.
 - Branch naming: `feat/`, `fix/`, `chore/` prefixes
 - PRs auto-merge by default (no staging hold unless `deploy:staging` label)
 - Pre-commit hook enforces agent-infra version sync via `.husky/pre-commit`

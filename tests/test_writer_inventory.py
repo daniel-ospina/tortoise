@@ -25,7 +25,6 @@ import os
 import tempfile
 
 import pytest
-from fastapi.testclient import TestClient
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -35,7 +34,7 @@ from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.hosted_api import app, get_current_org, get_current_user
 
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_client
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row  # noqa: F401
 from datetime import UTC
@@ -146,7 +145,11 @@ def client(monkeypatch, supabase_env, spy):
         # clear at enter; pop-pin → restore __init__ → deterministic anchor
         # close → clear overrides at exit (replaces this file's local
         # _patch_tortoise_sdk_init — the #1497 original).
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        # #8582: the client-construction seam. This fixture (and `team_client` /
+        # `user_client` on top of it) backs ~83 status reads on non-exempt
+        # hosted routes, so a transport wait-bound refusal (#3834) is a
+        # NON-ANSWER for all of them: INCONCLUSIVE, never `assert 504 == 200`.
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             yield tc, supabase_env, spy
 
 
@@ -1066,7 +1069,11 @@ class TestGraphSurface:
     """C2 (#2111) contract: POST /v1/graphs is the session alias of the ONE
     provisioning service — free tier 402s (E2E-3 pin), the graphs row is
     written in Supabase mode (C1 deferred the INSERT; C2 owns it), and the
-    list shape carries status/key_count (point_count dropped, §6.2)."""
+    list shape carries status/key_count (point_count dropped, §6.2).
+
+    Also carries the #8000 pin for the team-switcher read's verdict contract
+    (`test_my_teams_route_is_refused_and_the_read_is_converted`), since that
+    read is one of this class's own sites."""
 
     def _seed_default_graph(self, fake):
         """Real teams rows always carry graph_name (provision_team requires
@@ -1170,13 +1177,57 @@ class TestGraphSurface:
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
         fake.seed("org_memberships", [_owner_membership()])
-        r = tc.get("/v1/organizations")
+        # #8000: this nodeid 504'd on the required `test (b)` leg (PR #8416,
+        # run 38371075736) on a head that touches no runtime path. The route is
+        # NOT wait-bound-EXEMPT, so the refusal is a non-answer (#5049 rule 1) —
+        # `require_answered` makes it an INCONCLUSIVE skip instead of the
+        # `assert 504 == 200` FAIL, while an ANSWERED non-200 still reaches the
+        # assertion below, so a genuine regression stays a FAIL.
+        r = require_answered(tc.get("/v1/organizations"),
+                             what="GET /v1/organizations answered")
         assert r.status_code == 200, r.text
         rows = r.json()
         assert len(rows) == 1
         assert rows[0]["org_id"] == "team-free-001"
         assert rows[0]["graph_count"] == 1
         assert rows[0]["default_graph_id"] == "default"
+
+    def test_my_teams_route_is_refused_and_the_read_is_converted(
+            self, user_client, monkeypatch):
+        """#8000 / #8582: the route really can be refused, and the *client
+        seam* turns that refusal into a non-answer — not the
+        ``assert 504 == 200`` the #8416 `test (b)` leg recorded.
+
+        Deterministic (no load, no wall-clock wait): the SAME middleware the
+        request meets in production (``hosted_api.WaitBoundMiddleware``, whose
+        bound's only home is ``mcp_auth``) is forced to breach on this route.
+        The plain-client control is the non-vacuity leg — it would pass
+        unchanged if the route were ever EXEMPTED, turning this pin red instead
+        of letting the conversion become dead code.
+
+        #8582 converted this file's `client` fixture, so the seam converts the
+        refusal at construction rather than at the read; the bare
+        ``status_code`` read at ``test_list_my_teams_uses_derived_graphs`` is
+        now covered by the same seam.
+        """
+        from starlette.testclient import TestClient
+
+        from tortoise import mcp_auth
+        from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+        assert ("GET", "/v1/organizations") not in _TRANSPORT_WAIT_BOUND_EXEMPT
+        monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+        # Control: a PLAIN client observes the product's own refusal.
+        with TestClient(app) as raw:
+            assert raw.get("/v1/organizations").status_code == 504
+        # ...and the seam every read in this file is bound through turns it
+        # into a non-answer.
+        tc, _fake, _ = user_client
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            tc.get("/v1/organizations")
+        message = str(excinfo.value)
+        assert "INCONCLUSIVE [#5049]" in message
+        assert "GET /v1/organizations answered" in message
 
     def test_graph_quota_409_at_cap_solo(self, user_client):
         """C2 quota gate: solo (max 2 — default + 1 custom) 201s the 1st

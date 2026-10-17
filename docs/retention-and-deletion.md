@@ -106,6 +106,7 @@ this document:
 | `tortoise/retention.py` `RESTORE_WINDOW_DAYS` / `RESTORE_WINDOW_HOURS` | **Sole authority for the restore window** |
 | `tortoise/backup_config.py` `retention_hourly` / `retention_daily` / `retention_weekly` | **Sole authority for the backup-hold counts** (a different concept from the restore window) |
 | `tortoise/backup_config.py` `LOCK_DAYS_MAX` | the bucket-lock bound; must stay strictly below the restore window (`RESTORE_WINDOW_DAYS - 1`) |
+| `tortoise/raw_state.py` `RAW_DELETION_MARKER_TTL` | **Sole authority for the deletion-marker guarantee window** (**10 days** — Cassandra's `gc_grace_seconds` default, the storage-layer canon the #3998 ruling rests on). Metadata about the LINK back to the raw, never a copy of it and never a retention period on user content (R1); after it a (future, journalled) collection pass MAY drop the marker. Registered so a restatement of the number is traceable to one authority; the availability axis itself is recorded at `docs/ONTOLOGY.md` §4.6. |
 | `website/apps/dashboard/functions/_shared/auth/session.ts` `SESSION_SWEEP_GRACE_S` | **Sole authority for the D1 auth-session-store grace** — how long a `sessions` row is kept past its own `expires_at` before `sweepExpiredSessions` deletes it (#8032). Not a deletion-promise window; see the table above. |
 
 Everything else is a **derived alias**, never independently set:
@@ -381,8 +382,11 @@ not a whitelist — a file outside the set above may still link here.
 
 **Named implementation constants** (exempt by design): `tortoise/retention.py` and
 `tortoise/backup_config.py` are exempt whole-file (every line is the authority);
-`tortoise/{backup_sweep,hosted_api,sdk,supabase_control}.py` are exempt only on
-lines that name a canonical constant. `website/apps/dashboard/src/graphs.test.js`
+`tortoise/{backup_sweep,hosted_api,sdk,supabase_control,raw_state}.py` are exempt
+only on lines that name a canonical constant. `docs/ONTOLOGY.md` is exempt only on
+lines that name a canonical constant too (its §4.6 row does carry a bare window
+number, but it names `RAW_DELETION_MARKER_TTL` on that same line — the constant,
+not the absence of a number, is what makes the line traceable). `website/apps/dashboard/src/graphs.test.js`
 is derived: it imports `TRASH_GRACE_DAYS` from `graphs.js` rather than restating
 the number.
 

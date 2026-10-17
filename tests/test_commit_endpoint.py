@@ -46,7 +46,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered
+from tests._verdict import require_answered, verdict_client
 from tortoise.commit_schema import (
     compute_client_commit_id,
     point_content_id,
@@ -94,7 +94,7 @@ def client():
         # clear at enter; pop-pin → restore __init__ → deterministic anchor
         # close → clear overrides at exit (replaces the local
         # _patch/_restore_tortoise_sdk_init copies).
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             yield tc
 
 
@@ -103,7 +103,7 @@ def client_no_auth():
     """TestClient WITHOUT auth override — exercises the real 401 path."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             yield tc
 
 
@@ -3141,3 +3141,37 @@ def test_commit_seam_is_inconclusive_on_a_transport_bound_refusal():
             _raw_payload(0, session_id="sRefusal", points=[], entities=[],
                          provenance_refs=[]))
     assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8802: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/sessions/commit`` is
+    the route every read in this file funnels to and it is not exempt from the
+    bound. The plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it would pass
+    unchanged if the route were ever exempted.
+
+    TWO clients in this module stay plain, both declared in
+    `test_verdict_contract.py::_CONVERTED_CLIENT_SEAMS`: the R-13 rate-limit
+    test's ``TestClient(mini)``, whose ``mini`` app carries only
+    ``RateLimitMiddleware`` (no ``WaitBoundMiddleware``, so no read bound from it
+    can be a transport refusal), and this pin's own control.
+    """
+    from fastapi.testclient import TestClient
+
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/sessions/commit")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post("/v1/sessions/commit", json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/sessions/commit", json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/sessions/commit answered" in message

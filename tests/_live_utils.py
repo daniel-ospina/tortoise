@@ -7,6 +7,7 @@ test_event_store.py and test_embedded_concurrency.py.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 
 # #3339: the ONE live-URI skip reason. tools/skip-guard.py keys the
@@ -179,3 +180,53 @@ def _skip_unless_live_uri():
 
     if not os.environ.get("TORTOISE_DB_URI"):
         pytest.skip(LIVE_URI_SKIP_REASON)
+
+
+@contextlib.contextmanager
+def mask_embedder():
+    """Install the no-embedder double over BOTH embedder seams; restore on exit.
+
+    The ONE owner of the mask (#8057). Every docker-lane module in the assembly
+    family pins the dense/vector legs OUT — the evidence path there is
+    deterministic text, no model, no network — and used to hand-roll the same
+    two ``monkeypatch.setattr`` calls in an autouse ``_no_embedder`` fixture.
+    A FIXTURE CANNOT REACH A MODULE-LEVEL PROBE: the availability gate runs at
+    module IMPORT, before any fixture, so the probe kept driving
+    ``create_point`` with the REAL seam. That path derives an embedding
+    (``encode_for_store`` -> ``EmbeddingModel.get``), and a cold
+    sentence-transformers/torch load is measured at 50-205s (#6960) — paid at
+    import, on a lane that only ever needed the FULLTEXT round-trip. Owning the
+    mask in one place is the point: the probe and the fixtures cannot drift
+    into disagreeing about which seams are pinned.
+
+    Both seams, because either one alone still loads: ``encode_for_store`` calls
+    ``compute_embedding`` (module global, the seam the write paths use) and
+    ``_encode`` calls ``EmbeddingModel.get`` (the singleton loader). Both
+    doubles absorb any signature (``*args, **kwargs``): the write paths call
+    ``compute_embedding`` with exactly one positional argument and
+    ``EmbeddingModel.get`` with none, but the warm-up leg passes
+    ``load_timeout=`` — a narrow double that raised on the wider call would be
+    swallowed by the write path's own ``except Exception`` and degrade to the
+    silent no-vector path #4280 is about, i.e. the mask would introduce the
+    failure it exists to avoid.
+
+    Restores BOTH attributes in a ``finally``, so an exception in the masked
+    block cannot leave the process pinned to the double. The saved values are
+    read out of ``__dict__``, not via ``getattr``: ``EmbeddingModel.get`` is a
+    ``classmethod``, so ``getattr`` hands back a NEW bound-method object on every
+    access and restoring that would replace the descriptor with a plain method —
+    a functional-looking but structurally degraded seam (subclass override and
+    ``get.__func__`` both stop working) for every test after the mask.
+    """
+    from tortoise import embeddings as _emb
+
+    _cls = _emb.EmbeddingModel
+    _saved_compute = _emb.__dict__["compute_embedding"]
+    _saved_get = _cls.__dict__["get"]
+    _emb.compute_embedding = staticmethod(lambda *a, **k: None)
+    _cls.get = staticmethod(lambda *a, **k: None)
+    try:
+        yield
+    finally:
+        _emb.compute_embedding = _saved_compute
+        _cls.get = _saved_get

@@ -327,6 +327,96 @@ def require_answered(response: Any, *, what: str) -> Any:
     return response
 
 
+# ── rule 1, product side: the client seam that covers every caller ────────
+# #8579 routed `require_answered` through the *named* seams it could reach (a
+# `_commit`, a `_poll_until`, a `_post_signed`). The residual is the callers
+# that sit behind no shared request helper, where a bare
+# `assert r.status_code == 200` reads the refusal as a product FAIL (#8582).
+#
+# Every one of those callers still builds a client, and every response it reads
+# comes back through that client — so the client construction is the seam that
+# covers them all, and one conversion per construction replaces a per-read
+# sweep (the plan doc's "convert the seam, not the leaf",
+# `docs/plans/2026-09-26-5049-verdicts-from-conditions.md`). The check sits at
+# the request boundary — after the response is fetched, before it is returned —
+# which is httpx's own documented home for a shared per-response decision
+# (https://www.python-httpx.org/advanced/event-hooks/).
+#
+# ⛔ The seam converts only the REFUSAL ENVELOPE (`require_answered`'s rule), so
+# a genuine answered 4xx/5xx still reaches the caller's own assertion, and a
+# test that deliberately pins the refusal must build a plain client (a converted
+# seam SKIPs before its assertion is reached).
+
+
+def _answered(request: Any, response: Any) -> Any:
+    """Route one client response through `require_answered`, naming the request.
+
+    ``what`` names the method and route that was refused, so the INCONCLUSIVE
+    reason points at the request rather than at the seam that observed it.
+    """
+    return require_answered(
+        response, what=f"{request.method} {request.url.path} answered")
+
+
+def _already_read(response: Any) -> bool:
+    """True when the body is available without consuming the caller's stream.
+
+    httpx leaves ``is_stream_consumed`` False until ``read()``/``aread()`` is
+    called, so a response returned with ``stream=True`` is still unread when it
+    reaches the seam; reaching for ``.text`` there would raise
+    `httpx.ResponseNotRead` and break the caller. Such a response is left
+    untouched — the seam cannot inspect a body it must not consume.
+
+    ⛔ This is a known limit, not coverage: a streamed refusal is not converted.
+    No converted seam streams (there is no ``.stream(`` call site in any of
+    them), and `test_the_verdict_client_seam_does_not_consume_a_streamed_response`
+    pins the pass-through so the limit stays visible rather than silently
+    widening.
+    """
+    return getattr(response, "is_stream_consumed", True) is not False
+
+
+def verdict_client(app: Any, **kwargs: Any) -> Any:
+    """A `TestClient` whose every response passes the #5049 contract (#8582).
+
+    The seam, not the leaf: a route behind `WaitBoundMiddleware` that refuses a
+    too-long request is a NON-ANSWER, so it becomes the contract's INCONCLUSIVE
+    skip instead of a load-dependent `assert 504 == 200` FAIL.
+
+    Imported inside the call so this module stays stdlib+pytest at import time
+    (it is imported at `tests/conftest.py` module level).
+    """
+    from starlette.testclient import TestClient
+
+    class _VerdictTestClient(TestClient):
+        def send(self, request: Any, **send_kwargs: Any) -> Any:
+            response = super().send(request, **send_kwargs)
+            if not _already_read(response):
+                return response
+            return _answered(request, response)
+
+    return _VerdictTestClient(app, **kwargs)
+
+
+def verdict_async_client(app: Any, **kwargs: Any) -> Any:
+    """The async twin of `verdict_client` — an `httpx.AsyncClient` ASGI seam.
+
+    For the call sites that build their own client around
+    `httpx.ASGITransport(app=...)` rather than going through `TestClient`.
+    """
+    import httpx
+
+    class _VerdictAsyncClient(httpx.AsyncClient):
+        async def send(self, request: Any, **send_kwargs: Any) -> Any:
+            response = await super().send(request, **send_kwargs)
+            if not _already_read(response):
+                return response
+            return _answered(request, response)
+
+    kwargs.setdefault("transport", httpx.ASGITransport(app=app))
+    return _VerdictAsyncClient(**kwargs)
+
+
 @dataclasses.dataclass(frozen=True)
 class Deadline:
     """A named budget with its *recorded* endpoint time (rule 2).

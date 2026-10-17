@@ -14,6 +14,7 @@ These pin the contract's discriminating power:
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
 import re
@@ -42,6 +43,8 @@ from tests._verdict import (
     require_within,
     reset_process_globals,
     transport_wait_bound_s,
+    verdict_async_client,
+    verdict_client,
     wait_for,
 )
 
@@ -121,6 +124,84 @@ def _sse_result(*, status: int = 200, home: str = "structuredContent"):
         status=status,
         text=f"event: message\ndata: {json.dumps(response)}\n\n",
     )
+
+# ── rule 1, product side: the client seam that covers every caller (#8582) ──
+# `#8579` routed `require_answered` through the named seams it could reach. The
+# residual is the callers behind no request helper, whose bare
+# `assert r.status_code == 200` still reads the refusal as a FAIL. Those callers
+# all build a client, so the client CONSTRUCTION is the seam that covers them
+# (#8582). These tests pin the seam's discriminating power before any caller
+# depends on it.
+
+
+def _seam_app():
+    """A tiny ASGI app carrying the three shapes the client seam distinguishes."""
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    from tortoise import mcp_auth
+
+    async def refused(_request):
+        return JSONResponse(
+            {"detail": mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE}, status_code=504)
+
+    async def boom(_request):
+        return JSONResponse({"detail": "the handler failed"}, status_code=500)
+
+    async def ok(_request):
+        return JSONResponse({"ok": True})
+
+    return Starlette(routes=[
+        Route("/refused", refused), Route("/boom", boom), Route("/ok", ok)])
+
+
+def test_the_verdict_client_seam_converts_the_refusal_and_names_the_request():
+    with verdict_client(_seam_app()) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get("/refused")
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /refused answered" in message, "the refused request must be named"
+
+
+def test_the_verdict_client_seam_is_the_discriminator_not_the_app():
+    """Non-vacuity: a PLAIN client reads the very same response as a 504."""
+    from starlette.testclient import TestClient
+
+    with TestClient(_seam_app()) as tc:
+        assert tc.get("/refused").status_code == 504
+
+
+def test_the_verdict_client_seam_leaves_an_answered_response_alone():
+    with verdict_client(_seam_app()) as tc:
+        assert tc.get("/ok").json() == {"ok": True}
+
+
+def test_the_verdict_client_seam_leaves_an_answered_error_alone():
+    """A genuine 5xx is not the refusal — it must still reach the caller."""
+    with verdict_client(_seam_app()) as tc:
+        assert tc.get("/boom").status_code == 500
+
+
+def test_the_verdict_client_seam_does_not_consume_a_streamed_response():
+    """A `stream=True` body is unread; the seam must not reach into it."""
+    from tortoise import mcp_auth
+
+    with verdict_client(_seam_app()) as tc, tc.stream("GET", "/refused") as r:
+        assert r.status_code == 504
+        assert mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE in r.read().decode()
+
+
+def test_the_verdict_async_client_seam_converts_the_refusal():
+    async def _run():
+        async with verdict_async_client(
+                _seam_app(), base_url="http://test") as ac:
+            await ac.get("/refused")
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        asyncio.run(_run())
+    assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
+
 
 _ATEXIT = "tortoise.embedded_lifecycle._atexit_deadline"
 
@@ -734,7 +815,11 @@ _CONVERTED_SITES: dict[str, frozenset[str]] = {
         {"test_registry_revoke_pbkdf2_only_node"}),
     "tests/test_writer_inventory.py": frozenset(
         {"test_signup_provisions_identity_path",
-         "test_create_graph_writes_row_supabase_mode"}),
+         "test_create_graph_writes_row_supabase_mode",
+         # #8000: the second nodeid the #8416 `test (b)` red recorded — the
+         # SAME route class as the graph-write site above, left unconverted by
+         # #8579 because the issue-measured inventory named only two sites.
+         "test_list_my_teams_uses_derived_graphs"}),
 }
 
 
@@ -759,12 +844,144 @@ def _functions_calling(source: str, name: str) -> set[str]:
     return found
 
 
+#: The class NAMES a converted file must not construct directly. Matching on the
+#: final name — bare or attribute-qualified — is deliberate: an aliased or
+#: module-qualified construction (`from httpx import AsyncClient; AsyncClient(...)`
+#: or `client_mod.TestClient(...)`) is the SAME un-converted site, and matching
+#: only the two spellings this repo happens to use today is how the reversion
+#: this registry exists to catch would slip through.
+_PLAIN_CLIENT_NAMES = frozenset({"TestClient", "AsyncClient"})
+
+
+def _plain_client_constructions(source: str) -> int:
+    """Count direct `TestClient(...)` / `AsyncClient(...)` CALLS.
+
+    AST, not substring: prose that merely names the class (a docstring, a
+    comment such as test_capture_loop_responsiveness.py's note about the shape
+    of the `client` fixture) is not a client construction and must not be
+    counted as one. The seam's own factories are `verdict_client` /
+    `verdict_async_client`, so they never match.
+    """
+    count = 0
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = (
+            func.id if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute)
+            else None
+        )
+        if name in _PLAIN_CLIENT_NAMES:
+            count += 1
+    return count
+
+
+def test_the_plain_client_counter_ignores_prose_and_sees_aliases():
+    """Non-vacuity control: a comment is not a construction, an alias is one."""
+    assert _plain_client_constructions("x = TestClient(app)\n") == 1
+    assert _plain_client_constructions(
+        "x = httpx.AsyncClient(transport=t)\n") == 1
+    assert _plain_client_constructions(
+        "x = AsyncClient(transport=t)\n") == 1
+    assert _plain_client_constructions("x = client_mod.TestClient(app)\n") == 1
+    assert _plain_client_constructions(
+        "# wraps the app in `TestClient(app)`\n") == 0
+    assert _plain_client_constructions("x = _verdict_client(app)\n") == 0
+    assert _plain_client_constructions("x = verdict_async_client(app)\n") == 0
+
+
 def test_the_wiring_checker_discriminates():
     """Non-vacuity control: the checker sees the call, and its absence."""
     with_call = "def a():\n    return require_answered(x, what='w')\n"
     without_call = "def a():\n    return x\n"
     assert _functions_calling(with_call, "require_answered") == {"a"}
     assert _functions_calling(without_call, "require_answered") == set()
+    with_seam = "def a():\n    return verdict_client(app)\n"
+    assert _functions_calling(with_seam, "verdict_client") == {"a"}
+    assert _functions_calling(without_call, "verdict_client") == set()
+    with_async_seam = "def a():\n    return verdict_async_client(app)\n"
+    assert _functions_calling(with_async_seam, "verdict_async_client") == {"a"}
+    assert _functions_calling(without_call, "verdict_async_client") == set()
+
+
+#: The #8582 CLIENT seam. `_CONVERTED_SITES` cannot be the home for it: that
+#: registry identifies a converted site by a `require_answered(` call IN the
+#: file, and a client-seam conversion need not leave one (and where a file also
+#: carries #8579-era call sites, one may remain and is then covered by the seam
+#: as well). Each entry is ``(plain constructions allowed, seam functions that
+#: must call a verdict-client factory)``. The allowed count is a DECLARED
+#: exception, never slack: any other plain construction in the file has
+#: re-opened the class for that file, because the reads it binds go back to
+#: reading a refusal as a FAIL. This is the checkable restatement of #8582's
+#: Indicator (1), which a plain `grep` cannot discharge for a seam conversion.
+_CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
+    # ── #8802: the remainder of the #8582 sweep ────────────────────────────
+    # Same seam, same declaration: every client these files build routes its
+    # responses through `require_answered`, so a transport wait-bound refusal is
+    # the contract's INCONCLUSIVE skip rather than an `assert 504 == 200` FAIL.
+    # +1 each: the refusal pin's own control client, which must stay PLAIN to
+    # observe the 504 it proves is real.
+    "tests/test_agent_signup_idempotency.py": (1, frozenset({"client"})),
+    # +2: the mount-only MCP parent (`_mounted_test_client` — a local
+    # `Mount("/mcp", ...)` Starlette carrying NO `WaitBoundMiddleware`) and the
+    # pin's control.
+    "tests/test_auth_flip.py": (2, frozenset({"rest_client"})),
+    "tests/test_billing.py": (1, frozenset({"billing_client", "env", "sb"})),
+    "tests/test_claim_endpoints.py": (1, frozenset({"client"})),
+    # +2: the R-13 rate-limit test's `TestClient(mini)` (a `mini` Starlette with
+    # only `RateLimitMiddleware` — no bound, so none of its reads can be a
+    # refusal) and the pin's control.
+    "tests/test_commit_endpoint.py": (2, frozenset({"client", "client_no_auth"})),
+    "tests/test_dashboard_login.py": (1, frozenset({"client"})),
+    "tests/test_data_source_capture.py": (1, frozenset({"client"})),
+    "tests/test_delivery_tenancy.py": (1, frozenset({"_sb_env", "_spine_env"})),
+    "tests/test_invite_fusion_http.py": (1, frozenset({"client"})),
+    # +2: `_mounted_test_client`'s mount-only parent (as in test_auth_flip) and
+    # the pin's control.
+    "tests/test_oauth_mcp.py": (2, frozenset({"api_client"})),
+    "tests/test_onboarding_endpoints.py": (1, frozenset({"client",
+                                                         "unauth_client"})),
+    # +1: the pin's own control client, which must stay PLAIN to observe the 504.
+    "tests/test_capture_loop_responsiveness.py": (1, frozenset({
+        "_verdict_async_client"})),
+    "tests/test_dr_endpoints.py": (1, frozenset({"client"})),
+    "tests/test_invites_http.py": (1, frozenset({"client",
+                                                  "_verdict_async_client"})),
+    # (the async seam calls `verdict_async_client`, hence the union below)
+    # +1: the pin's control client (above).
+    "tests/test_writer_inventory.py": (1, frozenset({"client"})),
+    # +1: the #3246 capture-retry helper's client, deliberately left plain — it
+    # must OBSERVE the 504 to re-issue the request. Built by
+    # `TestSessionActorStamp2600._setup` and fed to
+    # `_post_capture_allowing_transport_retry`; named by symbol, not by line, in
+    # a 12k-line file.
+    # +1: this file's own pin control, which must stay plain to observe the 504.
+    "tests/test_hosted_api.py": (2, frozenset({"_verdict_client"})),
+}
+
+
+@pytest.mark.parametrize("path,expected", sorted(_CONVERTED_CLIENT_SEAMS.items()))
+def test_every_converted_client_seam_builds_a_verdict_client(path, expected):
+    """#8582: a dropped client-seam conversion goes RED here."""
+    plain_allowed, seams = expected
+    source = (_REPO_ROOT / path).read_text()
+    converters = ({"verdict_client", "verdict_async_client"})
+    builds = set().union(
+        *(_functions_calling(source, name) for name in converters))
+    missing = seams - builds
+    assert not missing, (
+        f"{path}: {sorted(missing)} no longer build a verdict client — the "
+        "#8582 seam was dropped, so a wall-clock refusal at that seam is read "
+        "as a product FAIL again"
+    )
+    plain = _plain_client_constructions(source)
+    assert plain == plain_allowed, (
+        f"{path}: {plain} plain client construction(s), {plain_allowed} "
+        "declared. A converted file's reads are covered by its seam, so an "
+        "undeclared plain construction re-opens #8582 for this file — convert "
+        "it, or declare the exception here with its reason."
+    )
 
 
 @pytest.mark.parametrize("path,expected", sorted(_CONVERTED_SITES.items()))

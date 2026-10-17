@@ -6162,5 +6162,99 @@ class BranchTerminalLookupTests(unittest.TestCase):
         self.assertIn("headSha", " ".join(self.seen[0]))
 
 
+class GitRepoDirsUnreadableEntryTests(unittest.TestCase):
+    """#8650: an unreadable SIBLING must be skipped, not abort the scan.
+
+    `_git_repo_dirs` already `except OSError: continue`d around `iterdir()`, so an
+    unreadable ROOT was skipped — but the per-ENTRY `.git` probe was unguarded, and
+    `Path.exists()` propagates `EACCES` (it swallows ENOENT/ENOTDIR/EBADF/ELOOP
+    only). A stat-able-but-untraversable sibling — the root-owned `drwx------`
+    `/tmp/cmux-blesh-runtime-0` on a cmux cloud cell, where `repo_roots()` is
+    `/tmp` — therefore raised out of the scan and aborted the pre-flight on the
+    `--repo owner/name` slug form: `find_local_clone` exited 1 (the COLLISION
+    code) with EMPTY stdout and no `VERDICT:` line. (The controller's
+    `refresh-candidates.sh` uses `--repo .`, the PATH branch, which never reaches
+    `find_local_clone` — measured, not exposed to this crash.)
+
+    Both of the first two tests FAIL against the pre-fix code (the probe raises).
+    The last two pin the boundary from both sides: a non-`OSError` still propagates,
+    and a non-`EACCES` `OSError` is still swallowed (the guard is `except OSError`,
+    not `except PermissionError`).
+    """
+
+    def test_an_unreadable_entry_is_skipped_and_readable_clones_survive(self):
+        with tempfile.TemporaryDirectory(prefix="cp-roots-") as tmp:
+            root = Path(tmp)
+            good = root / "good-repo"
+            (good / ".git").mkdir(parents=True)
+            locked = root / "locked-repo"
+            (locked / ".git").mkdir(parents=True)
+            if os.geteuid() == 0:
+                self.skipTest("root ignores mode bits; the mock test covers it")
+            locked.chmod(0o000)
+            try:
+                dirs = _tool_module()._git_repo_dirs([str(root)])
+            finally:
+                locked.chmod(0o755)          # let TemporaryDirectory clean up
+            self.assertEqual(dirs, [str(good)])
+
+    def test_a_permission_error_on_the_entry_probe_is_skipped_not_raised(self):
+        """Root-proof twin of the test above: the guard must catch `OSError`
+        regardless of whether the filesystem enforces mode bits for this uid."""
+        with tempfile.TemporaryDirectory(prefix="cp-roots-") as tmp:
+            root = Path(tmp)
+            (root / "good-repo" / ".git").mkdir(parents=True)
+            (root / "locked-repo" / ".git").mkdir(parents=True)
+            real_exists = Path.exists
+
+            def raising_exists(self, *args, **kwargs):
+                if self.name == ".git" and self.parent.name == "locked-repo":
+                    raise PermissionError(13, "Permission denied", str(self))
+                return real_exists(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "exists", raising_exists):
+                dirs = _tool_module()._git_repo_dirs([str(root)])
+            self.assertEqual(dirs, [str(root / "good-repo")])
+
+    def test_a_non_oserror_failure_is_not_swallowed(self):
+        """The guard is `except OSError` — a genuine defect in the probe (here a
+        `RuntimeError`) must still surface, so the skip cannot hide a bug."""
+        with tempfile.TemporaryDirectory(prefix="cp-roots-") as tmp:
+            root = Path(tmp)
+            (root / "good-repo" / ".git").mkdir(parents=True)
+            real_exists = Path.exists
+
+            def exploding_exists(self, *args, **kwargs):
+                if self.name == ".git" and self.parent.name == "good-repo":
+                    raise RuntimeError("bug in the probe")
+                return real_exists(self, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "exists", exploding_exists),
+                self.assertRaises(RuntimeError),
+            ):
+                _tool_module()._git_repo_dirs([str(root)])
+
+    def test_a_non_permission_oserror_on_the_entry_probe_is_also_skipped(self):
+        """The other side of the same boundary: the guard is `except OSError`, not
+        `except PermissionError`. #8650's recorded decision is to treat EVERY
+        `OSError` on the entry probe as "not a clone" (fail-closed downstream),
+        so narrowing the guard to `PermissionError` must fail this test."""
+        with tempfile.TemporaryDirectory(prefix="cp-roots-") as tmp:
+            root = Path(tmp)
+            (root / "good-repo" / ".git").mkdir(parents=True)
+            (root / "locked-repo" / ".git").mkdir(parents=True)
+            real_exists = Path.exists
+
+            def io_error_exists(self, *args, **kwargs):
+                if self.name == ".git" and self.parent.name == "locked-repo":
+                    raise OSError(5, "Input/output error", str(self))
+                return real_exists(self, *args, **kwargs)
+
+            with mock.patch.object(Path, "exists", io_error_exists):
+                dirs = _tool_module()._git_repo_dirs([str(root)])
+            self.assertEqual(dirs, [str(root / "good-repo")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

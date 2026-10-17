@@ -334,6 +334,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # vacuous. The delenv IS the point; the autouse fixture-param monkeypatch
     # auto-restores at teardown (no lane leak).
     "test_7767_restore_rollback.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #7935: the destination-lock suite forces the EMBEDDED lane for the same
+    # reason #7767's rollback suite does — the subject is a flock on the
+    # destination STORE's `<db>.tortoise-construct.lock` sidecar plus a
+    # `<events>.restore.lock` sidecar, and the aside protocol is
+    # filesystem-scoped, so under a URI the file assertions would be vacuous.
+    # The delenv IS the point; the autouse fixture-param monkeypatch
+    # auto-restores at teardown (no lane leak).
+    "test_7935_restore_destination_lock.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #7951: the hosted-session fixtures force the EMBEDDED lane for the same
     # reason #7767's rollback suite does — the behaviour under test is the
     # JOURNAL (`derived = replay(journal)` around a session delete) against a
