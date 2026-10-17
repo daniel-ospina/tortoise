@@ -470,8 +470,17 @@ def test_no_workflow_declares_the_version_as_an_env_key() -> None:
         walk(_load(path), path.name)
 
 
-#: A segment that ASSIGNS the variable — the shape that gives the pin a home.
-_ASSIGNMENT = re.compile(r"^(?:export\s+|declare\s+)?WRANGLER_VERSION\s*=")
+#: The only legal VALUE of the variable, spelled out: what `DECLARATION` assigns.
+_DECLARED_VALUE = '"$(cat config/wrangler-version)"'
+
+#: An assignment of the variable, found by OCCURRENCE — not only at a segment's
+#: start. bash lets an assignment follow a keyword (`then`, `do`, `else`) or a
+#: prefix (`readonly`, `env`), and a segment-initial rule is blind to both: the
+#: line's legal mention then carries the whole line through the token fallthrough.
+_ASSIGNMENT = re.compile(
+    r"(?:^|[\s;&|({])(?:export\s+|declare\s+|readonly\s+|local\s+|env\s+)?"
+    r"WRANGLER_VERSION\s*="
+)
 _SEGMENT = re.compile(r"\|\||&&|[;|]")
 
 
@@ -480,8 +489,10 @@ def _mention_offences(text: str) -> list[str]:
 
     Judged per SEGMENT, not per line or per token: a line may assign a literal and
     still name the variable elsewhere (`V="4.1"  # see $V`), and it may also hold
-    the declaration AND a second assignment. The value is read to the end of its
-    segment, because the legal value contains spaces.
+    the declaration AND a second assignment. An assignment is found ANYWHERE in a
+    segment (however it is prefixed or introduced), and its value must be EXACTLY
+    the declared one to the end of that segment — a prefix test would accept
+    `"$(cat config/wrangler-version)"-beta`, which is a different version.
     """
     offenders = []
     for lineno, line in enumerate(text.splitlines(), 1):
@@ -491,11 +502,11 @@ def _mention_offences(text: str) -> list[str]:
         assignment_bad = False
         for segment in _SEGMENT.split(code):
             segment = segment.strip()
-            match = _ASSIGNMENT.match(segment)
-            if match and not segment[match.end():].strip().startswith(
-                '"$(cat config/wrangler-version)"'
-            ):
-                assignment_bad = True
+            for match in _ASSIGNMENT.finditer(segment):
+                if segment[match.end():].strip() != _DECLARED_VALUE:
+                    assignment_bad = True
+                    break
+            if assignment_bad:
                 break
         if assignment_bad:
             offenders.append(f"{lineno}: {code.strip()}")
@@ -624,6 +635,31 @@ def test_a_spec_may_be_named_in_a_comment_but_not_in_a_message() -> None:
         "a plain read must pass"
     assert _mention_offences('echo "WRANGLER_VERSION=$WRANGLER_VERSION"') == [], \
         "printing the NAME with the value assigns nothing"
+
+    # The P3 this round exists to close: an assignment is judged by OCCURRENCE, so
+    # one introduced by a keyword or a prefix is seen. Measured pre-fix: each of
+    # these five lines was GREEN across all 25 arms, because `^`-anchored matching
+    # skipped the assignment and the line's legal `$WRANGLER_VERSION` token then
+    # carried the whole line through the fallthrough.
+    for spelling in (
+        'if [ -z "$WRANGLER_VERSION" ]; then WRANGLER_VERSION="4.151.1"; fi',
+        'env WRANGLER_VERSION="4.151.1" true; echo "$WRANGLER_VERSION"',
+        'if [ -n "$WRANGLER_VERSION" ]; then :; else WRANGLER_VERSION="4.151.1"; fi',
+        'for x in 1; do WRANGLER_VERSION="4.151.1"; done; echo "$WRANGLER_VERSION"',
+        'readonly WRANGLER_VERSION="4.151.1"; echo "$WRANGLER_VERSION"',
+    ):
+        assert _mention_offences(spelling), (
+            "an assignment behind a keyword or prefix still gives the pin a second "
+            f"home and must red: {spelling}"
+        )
+    # The value is compared WHOLE, not by prefix: a suffix is a different version.
+    assert _mention_offences(declared + "-beta"), \
+        "a suffix after the declared value is a different version — compare the value whole"
+    # ... and the same keyword shapes with the LEGAL value must still pass, or the
+    # rule would forbid the declaration's own spelling wherever it is introduced.
+    assert _mention_offences(
+        'if [ -n "$WRANGLER_VERSION" ]; then :; else ' + declared + '; fi'
+    ) == [], "the legal declaration introduced after `else` must pass"
 
 
 def test_each_workflow_reads_the_version_at_least_once() -> None:
