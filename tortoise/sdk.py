@@ -3100,6 +3100,21 @@ class _WriteNotLanded(Exception):
 
     A zero-row FIRST attempt is untouched: it never reaches this class, so
     ``update_point``'s historical ``{}``-for-a-missing-id contract is safe.
+
+    **Scope: the graph-abort family only.** ``retryable_aborted_write`` also
+    admits the write-slot arm (ordinary multi-writer contention) and MISCONF,
+    and NEITHER says anything about whether the target existed — so arming this
+    sentinel on those would turn a benign ``update_point(<missing id>)`` into a
+    stale ``ResponseError`` after four attempts. The gate in
+    ``_graph_write_with_retry`` therefore consults the witness only when the
+    abort that authorised the retry was a graph-deleted-or-replaced one, which
+    is the only family the rebuild-still-replaying ambiguity belongs to.
+
+    Residual, stated honestly: during a rebuild, a target that genuinely never
+    existed also yields zero rows, and this class raises the abort instead of
+    the historical ``{}``. It cannot be told apart from "not replayed yet"
+    without a read the verb would otherwise not pay for — and raising the abort
+    is the truthful answer for a call whose graph was replaced mid-flight.
     """
 
     def __init__(self, original: BaseException):
@@ -5538,14 +5553,15 @@ class TortoiseSDK:
 
         ``witness`` (#8854 review P1): an optional ``result -> bool`` callback
         answering "did this statement apply to at least one node?". It is
-        consulted ONLY on a RE-ISSUED attempt (``attempts > 1``) — because
-        only then was the retry authorised by an abort that proves nothing
-        landed, so a zero-match re-issue cannot be a legitimate no-op; it is
-        the rebuild-still-replaying case, where reporting success would lose
-        the write silently. On exhaustion the abandoned abort is re-raised. A
-        first attempt is never consulted, so verbs that return a benign empty
-        result (``update_point`` on a missing id) keep that contract.
-        Statements a witness guards must therefore RETURN something observable
+        consulted ONLY after a GRAPH-REPLACED abort authorised the retry
+        (``graph_abort_family(last_abort)``) — that is the only family in which
+        a zero-match re-issue can mean "not replayed yet" rather than "the
+        caller's target never existed". The write-slot / MISCONF arms are
+        retried without consulting it, so their benign zero-row outcomes are
+        unchanged. On exhaustion the abandoned abort is re-raised. A first
+        attempt is never consulted, so verbs that return a benign empty result
+        (``update_point`` on a missing id) keep that contract. Statements a
+        witness guards must therefore RETURN something observable
         (``RETURN count(n)`` / ``RETURN r``); a bare ``SET`` has no row to
         testify with.
 
@@ -5606,14 +5622,21 @@ class TortoiseSDK:
                 self._graph_write_retry_count = getattr(
                     self, "_graph_write_retry_count", 0) + 1
             result = fn()
-            if (attempts > 1 and witness is not None
-                    and last_abort is not None and not witness(result)):
-                # An authorised re-issue that matched nothing. This is NOT a
-                # success: the graph key exists (that is why the retry was
-                # authorised) but the rows this statement targets have not
-                # been replayed. Raising keeps the loudness the pre-retry code
-                # had, and the sentinel carries the original abort so the
+            if (witness is not None and last_abort is not None
+                    and graph_abort_family(last_abort)
+                    and not witness(result)):
+                # An authorised re-issue that matched nothing, after a
+                # GRAPH-REPLACED abort — the rebuild-recreated-the-key window.
+                # This is NOT a success: the rows this statement targets have
+                # not been replayed. Raising keeps the loudness the pre-retry
+                # code had, and the sentinel carries the original abort so the
                 # exhausted path can surface that exact error.
+                #
+                # The graph-abort gate is load-bearing: the write-slot and
+                # MISCONF arms are retried too, and they say nothing about
+                # node existence — arming the witness there made
+                # `update_point(<missing id>)` raise a stale ResponseError
+                # instead of returning `{}` (#8854 review P1).
                 raise _WriteNotLanded(last_abort)
             return result
 
@@ -5842,9 +5865,10 @@ class TortoiseSDK:
         entry point so the existing call sites (and their
         `_graph_write_with_retry` wrapping) are unchanged.
 
-        `sweep_orphans` is forwarded verbatim: `update_point` sets it because a
-        retried reconciler can skip the orphan-`:Tag` GC otherwise (#8854
-        review P3 — see the projection method's docstring).
+        `sweep_orphans` is forwarded verbatim: `update_point` sets it FROM THE
+        SECOND ATTEMPT ON because a retried reconciler can skip the orphan-
+        `:Tag` GC otherwise (#8854 review P3 — see the projection method's
+        docstring).
         """
         proj._sync_tags(pid, tags, sweep_orphans=sweep_orphans)
 
@@ -10417,22 +10441,27 @@ class TortoiseSDK:
                 # `SET` of a value fixed before the first attempt, so the keys
                 # that DID land in the aborted attempt are rewritten to the
                 # same value rather than re-applied.
-                def _write_props() -> int:
-                    matched = 0
+                def _write_props() -> bool:
+                    if not _props_param:
+                        return True
+                    applied = True
                     for key, val in _props_param.items():
-                        matched += proj.g.query(
+                        matched = proj.g.query(
                             "MATCH (n:Point {id:$id}) SET n += $props "
                             "RETURN count(n)",
                             params={"id": id, "props": {key: val}},
                         ).result_set[0][0]
-                    return matched
+                        if not matched:
+                            applied = False
+                    return applied
 
                 self._graph_write_with_retry(
                     _write_props, what="update_point SET (per-key)",
-                    # Every key must match; a re-issue into a rebuilt-but-not-
-                    # yet-replayed graph matches none and is NOT a success
-                    # (#8854 review P1).
-                    witness=lambda matched: matched >= len(_props_param))
+                    # EVERY key must match. A sum would let one key matched
+                    # by duplicate ids mask a sibling key that matched none
+                    # (#8854 review P2: ids are not unique — the duplicate
+                    # fan-out is a tested shape).
+                    witness=bool)
                 if _derived_embedding:
                     # The clear and the set are ONE atomic query, so a crash
                     # between them cannot leave the node vectorless. This arm

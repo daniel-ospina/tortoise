@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import types
 import uuid
 
 import pytest
@@ -108,12 +109,17 @@ class _AbortOnceGraph:
     """
 
     def __init__(self, real, needle: str, *, aborts: int = 1,
-                 present: bool = True, skip: int = 0) -> None:
+                 present: bool = True, skip: int = 0,
+                 message: str = _DELETED_OR_REPLACED) -> None:
         self._real = real
         self._needle = needle
         self._aborts = aborts
         self._present = present
         self._skip = skip
+        # Default is the rebuild literal; a caller can inject the OTHER
+        # retryable family (the write-slot arm) to prove the witness is not
+        # armed by abort classes that say nothing about node existence.
+        self._message = message
         self.matching = 0
         self.applied = 0
 
@@ -126,7 +132,7 @@ class _AbortOnceGraph:
             # a single budget re-issues the keys that already landed, a
             # per-key budget does not.
             if self._skip < self.matching <= self._skip + self._aborts:
-                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+                raise redis_exc.ResponseError(self._message)
             self.applied += 1
         return self._real.query(cypher, params=params, timeout=timeout)
 
@@ -693,7 +699,8 @@ def test_a_reissue_that_matches_nothing_is_NOT_reported_as_success(
     exception: the revision survived only in the caller's transcript, and in
     journal-less mode the replay could not recover it either.
     """
-    monkeypatch.setattr("tortoise.retry.time.sleep", lambda _s: None)
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "emptied")
     try:
         pid = _pid(sdk)
@@ -715,7 +722,8 @@ def test_a_reissue_that_matches_nothing_is_NOT_reported_as_success(
 def test_an_invalidate_that_matches_nothing_does_not_report_invalidated(
         tmp_path, monkeypatch):
     """The ``invalidate_point`` witness: no CORRECTS edge, no success claim."""
-    monkeypatch.setattr("tortoise.retry.time.sleep", lambda _s: None)
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "invempty")
     try:
         old = _pid(sdk)
@@ -739,7 +747,8 @@ def test_retract_does_not_claim_already_terminal_after_a_retry(
     the empty ``result_set`` took the terminal branch — reporting a LIVE point
     as already terminal, while the journal had already recorded the retraction.
     """
-    monkeypatch.setattr("tortoise.retry.time.sleep", lambda _s: None)
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "retractempty")
     try:
         pid = _pid(sdk)
@@ -759,13 +768,46 @@ def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
     """The witness must NOT change a legitimate zero-row FIRST attempt.
 
     ``update_point`` on a missing id historically returns ``{}`` without
-    raising; consulting the witness on attempt 1 would break that contract, so
-    the witness path is gated on ``attempts > 1``.
+    raising. A first attempt never consults the witness, so this stays true.
+    (The GATE itself — "only a graph-replaced abort arms it" — is pinned by
+    ``test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract``;
+    this test alone cannot observe it, since ``origin/main`` passes it too.)
     """
     sdk = _sdk(tmp_path, "missing")
     try:
         missing = str(uuid.uuid4())
         assert sdk.update_point(missing, confidence=0.5) == {}
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+_WRITE_SLOT = "another write is in progress, retry the query"
+
+
+def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
+        tmp_path, monkeypatch):
+    """A non-rebuild abort must NOT arm the witness (#8854 review P1).
+
+    ``retryable_aborted_write`` also admits the write-slot arm — ordinary
+    multi-writer contention — which says nothing about whether the TARGET
+    exists. Arming the witness on it turned ``update_point(<missing id>)`` into
+    a stale ``ResponseError`` after four attempts, where the documented answer
+    is ``{}``. Only the graph-deleted-or-replaced family can mean "not
+    replayed yet", so only that family arms the witness.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "lockslot")
+    try:
+        missing = str(uuid.uuid4())
+        proj = sdk._get_proj()
+        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE,
+                               message=_WRITE_SLOT)
+        proj.g = proxy
+
+        assert sdk.update_point(missing, confidence=0.5) == {}
+        assert proxy.matching >= 2, "the aborted statement was never re-issued"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
