@@ -93,6 +93,28 @@ def line_bytes(record: dict) -> int:
     return len(json.dumps(record, ensure_ascii=False).encode("utf-8")) + 1
 
 
+def richest_by_type(records: list[dict]) -> dict[str, dict]:
+    """The FULLEST record of each type — the shape production actually writes.
+
+    The corpus holds 39 records for 29 types, so 10 types appear more than once
+    and a plain dict comprehension keeps the LAST one. For `PointAdded` that is
+    the MINIMAL `{id, content, pointKind, status, createdAt}` shape — ~300 B
+    smaller than the production-shaped `PointAdded`, which also carries the
+    `kind` / `contains_session` / `point.subtype` / `ep_alpha` fields. Taking
+    the last one therefore published a create cost ~3.4% LOW, i.e. in the
+    understating direction this measurement exists to avoid, and the reported
+    "no vector" baseline was a record shape no writer emits.
+    """
+    out: dict[str, dict] = {}
+    for rec in records:
+        rtype = rec.get("type")
+        if not isinstance(rtype, str) or not rtype:
+            continue
+        if rtype not in out or line_bytes(rec) > line_bytes(out[rtype]):
+            out[rtype] = rec
+    return out
+
+
 def write_journal(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes("".join(
@@ -105,8 +127,8 @@ def main() -> int:
     types = sorted({r.get("type") for r in records if r.get("type")})
     vec = unit_vector()
     stamped = [stamp(r, vec) for r in records]
-    by_type = {r["type"]: r for r in records}
-    stamped_by_type = {r["type"]: r for r in stamped}
+    by_type = richest_by_type(records)
+    stamped_by_type = {t: stamp(r, vec) for t, r in by_type.items()}
 
     print(f"corpus: {CORPUS.name} — {len(records)} records, "
           f"{len(types)} event types")
@@ -139,9 +161,10 @@ def main() -> int:
         base = measure(base_dir, project_records=100_000)["total"]
         hosted = measure(vec_dir, project_records=100_000)["total"]
 
-    print("== the 29-type corpus, measured WHOLE (one record of each type — a "
-          "record-type mix, NOT an operation mix)")
-    for label, total in (("without vectors", base), ("with vectors", hosted)):
+    print("== the 29-type corpus, measured WHOLE (all 39 committed records — "
+          "a record-type mix, NOT an operation mix)")
+    for label, total in (("as committed", base),
+                         ("with 384-d vector", hosted)):
         print(f"  {label:<18} {total['records']:>3} records  "
               f"{total['bytes']:>8,} B  mean {total['record_bytes']['mean']:>7.1f} B"
               f"  p95 {total['record_bytes']['p95']:>6,} B"

@@ -7707,15 +7707,17 @@ def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
     # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as
     # missing (`bytes + other_bytes == file size` exactly, malformed lines
     # counted not raised, the embedding share found nested in the snapshot).
-    # BOTH guarded paths are flat NON_PYTHON_PREFIXES entries (`tools/`,
-    # `docs/`) matching no SOURCE_PATTERNS row, so without the CORE_ALSO entries
-    # a tool-only or probe-only diff was filtered out BEFORE the
-    # "not matched -> core" fallback and the pins never ran on the files they
-    # exist to hold (the #1349/#3332/#3616 silent-drop class, the same shape as
-    # the `tools/lane_stash.py` arm above).
+    # ALL guarded paths are flat NON_PYTHON_PREFIXES entries (`tools/`,
+    # `docs/`, `supabase/`) matching no SOURCE_PATTERNS row, so without the
+    # CORE_ALSO entries a tool-only, probe-only or FIXTURE-only diff was
+    # filtered out BEFORE the "not matched -> core" fallback and the pins never
+    # ran on the files they exist to hold (the #1349/#3332/#3616 silent-drop
+    # class, the same shape as the `tools/lane_stash.py` arm above).
     for changed in ("tools/journal_growth.py",
                     "docs/evidence/5612-journal-growth/probes/"
-                    "corpus_growth_probe.py"):
+                    "corpus_growth_probe.py",
+                    # the corpus the pins hard-code (`records == 39`, 29 types)
+                    "supabase/tests/fixtures/record_projection_journal.jsonl"):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)

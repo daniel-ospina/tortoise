@@ -13,40 +13,52 @@ compact, checkpoint-then-truncate) depends on that number. A measurement a
 decision turns on has to be checkable, so each class of byte is pinned here:
 
 * ``test_per_record_sizes_sum_to_the_file_size`` — ``bytes + other_bytes`` is
-  the file size EXACTLY, on a clean journal and on one with junk in it. A
+  the file size EXACTLY, asserted against the bytes the test itself wrote. A
   measurement that silently drops bytes understates growth, which is the
-  direction that gets a volume filled.
+  direction that gets a volume filled. (``other_bytes`` is ACCUMULATED from the
+  lines actually classified, not a residual: as a residual the equality would
+  be an arithmetic identity and could not fail.)
 * ``test_malformed_line_is_measured_not_raised`` — a mid-file malformed line
   makes `EventLog.read_all` REFUSE (#3316), and that refusal is correct. The
   measurer must not share it: a journal that can no longer be replayed is
   exactly the journal whose size an operator needs to see.
 * ``test_embedding_bytes_are_attributed_inside_the_record`` — the vector rides
   nested inside the writer's snapshot (``point.embedding``, #5004), so a
-  top-level scan reports 0% on the records that dominate the journal.
+  top-level scan reports 0% on the records that dominate the journal — and
+  ``test_null_embedding_is_not_a_carried_vector`` pins the mirror case, the
+  forced-present ``"embedding": null`` that means *no* vector.
+* ``test_live_base_dir_layout_is_measured`` — the live journal is
+  ``<base>/<graph>/events.jsonl``, not a flat dir; measuring the base dir
+  reported "no journal to measure" on the only journal an operator sizes.
 
 Run:
     uv run pytest tests/test_journal_growth.py -q
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
 import pytest
 
+from tools import journal_growth
 from tools.journal_growth import (
-    SEAL_SENTINEL,
     journal_files,
     main,
     measure,
 )
+from tortoise.log import SEAL_SENTINEL
 
 FIXTURE = Path(__file__).resolve().parent.parent / (
     "supabase/tests/fixtures/record_projection_journal.jsonl")
+PROBE = Path(__file__).resolve().parent.parent / (
+    "docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py")
 
 
 def _write(path: Path, records: list[dict], *, raw: str = "") -> bytes:
     """Write a journal the way `EventLog.append` does: one JSON line each."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
     body += raw
     path.write_bytes(body.encode("utf-8"))
@@ -108,7 +120,11 @@ def test_malformed_line_is_measured_not_raised(tmp_path: Path) -> None:
     assert total["seal_annotations"] == 1        # the #5917 seal line
     assert total["empty_lines"] == 1
     assert total["bytes"] + total["other_bytes"] == len(data)
-    assert total["other_bytes"] > 0
+    # EXACT, not `> 0`: pins the terminator accounting on the one fixture where
+    # dropping a byte is plausible (a record sitting next to a torn fragment).
+    assert total["other_bytes"] == ((len(torn.encode()) + 1)
+                                    + (len(SEAL_SENTINEL.encode()) + 1) + 1)
+    assert total["bytes"] == len(data) - total["other_bytes"]
     assert set(total["by_type"]) == {"PointAdded", "PointRetracted"}
 
 
@@ -159,6 +175,8 @@ def test_real_fixture_corpus_measures() -> None:
     total = report["total"]
     assert total["records"] == 39
     assert total["malformed"] == 0
+    assert total["file_bytes"] == size
+    assert total["other_bytes"] == 0        # a clean corpus: nothing unaccounted
     assert total["bytes"] + total["other_bytes"] == size
     assert len(total["by_type"]) == 29
     assert total["record_bytes"]["min"] <= total["record_bytes"]["p50"]
@@ -202,13 +220,219 @@ def test_text_form_renders(tmp_path: Path, capsys) -> None:
 
 def test_missing_path_is_a_usage_error(tmp_path: Path, capsys) -> None:
     assert main([str(tmp_path / "absent.jsonl")]) == 2
-    assert "no journal to measure" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no journal to measure" in err
+    # Both layouts the tool accepts are named, so "no journal" cannot be a
+    # mis-invocation reported as an empty journal.
+    assert "*.jsonl" in err
+    assert "<graph>/events.jsonl" in err
 
 
-def test_seal_sentinel_is_the_journals_own() -> None:
-    """The tool reads the marker from `tortoise.log` — never a second spelling."""
-    from tortoise.log import SEAL_SENTINEL as JOURNAL_SENTINEL
-    assert SEAL_SENTINEL == JOURNAL_SENTINEL
+def test_live_base_dir_layout_is_measured(tmp_path: Path) -> None:
+    """A live BASE dir measures ``<graph>/events.jsonl``, one journal per graph.
+
+    `config._resolve_event_log_path` returns
+    ``os.path.join(base, key, "events.jsonl")``, so every direct child of
+    `TORTOISE_EVENT_LOG_BASE_DIR` is a graph DIRECTORY. Enumerating only
+    ``*.jsonl`` children found nothing, raised ``FileNotFoundError`` and exited
+    2 — "no journal to measure" on the very journal #5612 exists to size.
+
+    Negative control: ``archive/old.jsonl`` is not a ``events.jsonl`` and
+    `rebuild_all` never reads it, so it stays unmeasured.
+    """
+    base = tmp_path / "events"
+    _write(base / "graph_a" / "events.jsonl",
+           [{"type": "PointAdded", "id": "a"}])
+    _write(base / "graph_b" / "events.jsonl",
+           [{"type": "PointAdded", "id": "b1"},
+            {"type": "PointRevised", "id": "b1"}])
+    _write(base / "archive" / "old.jsonl",
+           [{"type": "PointAdded", "id": "old"}] * 3)
+    (base / "notes.txt").write_text("not a journal\n", encoding="utf-8")
+
+    files = journal_files(base)
+    assert [p.parent.name for p in files] == ["graph_a", "graph_b"]
+    report = measure(base)
+    assert report["total"]["records"] == 3
+    assert sorted(f["graph"] for f in report["files"]) == ["graph_a", "graph_b"]
+    assert (report["total"]["bytes"] + report["total"]["other_bytes"]
+            == report["total"]["file_bytes"])
+    # A per-graph dir keeps working as a single-graph target.
+    assert measure(base / "graph_b")["total"]["records"] == 2
+
+
+def test_null_embedding_is_not_a_carried_vector(tmp_path: Path) -> None:
+    """``"embedding": null`` is the ABSENT shape, not a vector-bearing record.
+
+    PRESENCE IS OWNERSHIP (#5004): `sdk._emit_event` forces the key present
+    (`clean.setdefault("embedding", None)`) and `_drop_journalled_embedding`
+    sets it to `None` when there is no usable vector — which is what every
+    snapshot record looks like on the keyword-only deployment. Counting the key
+    as a vector reported every snapshot as carrying one.
+    """
+    vec = [0.5, 0.25]
+    path = tmp_path / "graph.jsonl"
+    data = _write(path, [
+        {"type": "PointAdded", "point": {"id": "p1", "embedding": None}},
+        {"type": "PointAdded", "point": {"id": "p2", "embedding": []}},
+        {"type": "OperatorAdded", "point": {"id": "o1", "embedding": None}},
+        {"type": "PointAdded", "point": {"id": "p3", "embedding": vec}},
+    ])
+    total = measure(tmp_path)["total"]
+    assert total["records"] == 4
+    assert total["embedding_records"] == 1          # only the real vector
+    assert total["embedding_bytes"] == len(json.dumps(vec).encode())
+    assert total["bytes"] + total["other_bytes"] == len(data)
+
+
+def test_torn_tail_is_accounted(tmp_path: Path) -> None:
+    """The UNTERMINATED final line is the terminator branch production hits.
+
+    A crash leaves the last record without its newline (#5917's seal machinery
+    exists for that tail). Every other fixture here is newline-terminated, so
+    without this case the terminator rule is never exercised — and an off-by-one
+    there understates growth by one byte per journal, silently.
+    """
+    first = json.dumps({"type": "PointAdded", "id": "p1"})
+    # (a) a valid record whose terminator did not survive the crash
+    path = tmp_path / "torn_valid.jsonl"
+    data = (first + "\n" + json.dumps({"type": "PointRevised", "id": "p1"})).encode()
+    path.write_bytes(data)
+    total = measure(path)["total"]
+    assert total["records"] == 2
+    assert total["bytes"] == len(data)      # no phantom terminator added
+    assert total["other_bytes"] == 0
+    # (b) a record torn MID-JSON, also unterminated
+    fragment = '{"type": "PointAdded", "id": "p2"'
+    path_b = tmp_path / "torn_fragment.jsonl"
+    data_b = (first + "\n" + fragment).encode()
+    path_b.write_bytes(data_b)
+    total_b = measure(path_b)["total"]
+    assert total_b["records"] == 1
+    assert total_b["malformed"] == 1
+    assert total_b["other_bytes"] == len(fragment.encode())
+    assert total_b["bytes"] + total_b["other_bytes"] == len(data_b)
+
+
+@pytest.mark.parametrize("separator", [b"\r\n", b"\r"])
+def test_foreign_newlines_measure_their_records(
+        tmp_path: Path, separator: bytes) -> None:
+    """CRLF and bare CR separate records, exactly as `log.py::read_all` reads them.
+
+    `read_all` normalises `\\r\\n` and `\\r` to `\\n` ("a foreign journal that
+    separates records with a bare CR keeps reading"). Splitting on `\\n` alone
+    measured a bare-CR journal as ONE malformed line: `records 0`, `projection
+    .bytes 0` — a replayable journal reported as zero growth.
+    """
+    path = tmp_path / "graph.jsonl"
+    records = [{"type": "PointAdded", "id": "p1"},
+               {"type": "PointRevised", "id": "p1"}]
+    data = separator.join(json.dumps(r).encode() for r in records) + separator
+    path.write_bytes(data)
+    total = measure(tmp_path)["total"]
+    assert total["records"] == 2
+    assert total["malformed"] == 0
+    assert total["other_bytes"] == 0
+    assert total["bytes"] == len(data)      # the separator bytes are counted
+
+
+@pytest.mark.parametrize("marker", [SEAL_SENTINEL, SEAL_SENTINEL[:7]])
+def test_seal_marker_is_an_annotation_even_when_torn(
+        tmp_path: Path, marker: str) -> None:
+    """A TORN seal is an annotation, never a malformed record.
+
+    A crash can leave a prefix of the marker where the complete annotation was
+    intended; `log.py::_is_seal_prefix` tolerates it because counting it would
+    inflate the malformed figure the operator reads.
+    """
+    path = tmp_path / "graph.jsonl"
+    fragment = '{"type": "PointAdded"'
+    data = (json.dumps({"type": "PointAdded", "id": "p1"}) + "\n"
+            + fragment + "\n" + marker + "\n").encode()
+    path.write_bytes(data)
+    total = measure(tmp_path)["total"]
+    assert total["records"] == 1
+    assert total["malformed"] == 1
+    assert total["seal_annotations"] == 1
+    assert total["other_bytes"] == ((len(fragment.encode()) + 1)
+                                    + (len(marker.encode()) + 1))
+
+
+def test_empty_journal_has_no_phantom_line(tmp_path: Path) -> None:
+    """A 0-byte journal has no lines at all — not one empty line."""
+    path = tmp_path / "graph.jsonl"
+    path.write_bytes(b"")
+    total = measure(tmp_path)["total"]
+    assert total["records"] == 0
+    assert total["empty_lines"] == 0
+    assert total["file_bytes"] == 0
+    assert total["bytes"] + total["other_bytes"] == 0
+
+
+def test_the_tools_seal_grammar_is_the_journals_own() -> None:
+    """The marker AND its classifier are imported from `tortoise.log`.
+
+    A re-spelled literal of the same value would satisfy an equality pin while
+    the grammar drifted, so the source itself is checked: no second copy of the
+    marker, and the classification delegated to the journal's own predicate.
+    """
+    from tortoise.log import is_seal_annotation
+
+    source = Path(journal_growth.__file__).read_text(encoding="utf-8")
+    assert SEAL_SENTINEL not in source
+    assert "_is_seal_prefix" in source
+    assert is_seal_annotation(SEAL_SENTINEL)
+    assert not is_seal_annotation(SEAL_SENTINEL[:7])
+
+
+def test_text_form_total_is_the_sum_of_its_rows(
+        tmp_path: Path, capsys) -> None:
+    """The TOTAL row's `bytes` column is the sum of the rows above it.
+
+    The rows print FILE bytes; `total['bytes']` counts only well-formed records,
+    so on any journal with a torn tail / seal / blank line the total printed was
+    SMALLER than the rows it totals — under a column headed `bytes`.
+    """
+    _write(tmp_path / "graph_a.jsonl", [{"type": "PointAdded", "id": "a"}])
+    torn = '{"type": "PointAdded", "id": "c"'
+    (tmp_path / "graph_b.jsonl").write_bytes(
+        (json.dumps({"type": "PointAdded", "id": "b"}) + "\n"
+         + torn + "\n").encode())
+    assert main([str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    report = measure(tmp_path)
+    file_total = sum(f["file_bytes"] for f in report["files"])
+    assert report["total"]["bytes"] < file_total        # junk is present
+    total_line = next(ln for ln in out.splitlines() if ln.startswith("TOTAL"))
+    assert int(total_line.split()[2].replace(",", "")) == file_total
+
+
+def test_probe_pins_its_published_outputs() -> None:
+    """The evidence probe is a pinned artifact, not a dead file.
+
+    `config/ci-surfaces.yml` selects `core` on a probe-only change, and the
+    numbers `docs/evidence/5612-journal-growth/README.md` publishes are the
+    probe's output. Without this pin the probe could drift while CI stayed green
+    — the silent-drop class the CORE_ALSO entries exist to close.
+    """
+    assert PROBE.is_file()
+    spec = importlib.util.spec_from_file_location("corpus_growth_probe", PROBE)
+    assert spec is not None and spec.loader is not None
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+
+    assert probe.VECTOR_WIDTH == 384             # the pinned embedder's width
+    assert probe.CORPUS.is_file()                # the committed corpus
+    rec = {"type": "PointAdded", "point": {"id": "p1", "content": "c"}}
+    assert probe.line_bytes(rec) == len(
+        json.dumps(rec, ensure_ascii=False).encode("utf-8")) + 1
+    stamped = probe.stamp(rec, probe.unit_vector())
+    assert len(stamped["point"]["embedding"]) == probe.VECTOR_WIDTH
+    assert probe.line_bytes(stamped) > probe.line_bytes(rec)
+    # Only the creating/promoted types are stamped (`PointRevised` is a delta).
+    revised = probe.stamp({"type": "PointRevised", "point": {"id": "p1"}},
+                          probe.unit_vector())
+    assert "embedding" not in revised["point"]
 
 
 @pytest.mark.parametrize("bad", ["not json at all", "[1, 2, 3]", "42", '"s"'])

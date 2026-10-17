@@ -31,14 +31,27 @@ state loss on the next ``rebuild_all``. That is a durability-posture decision
 
 Usage
 =====
-    # one journal file, or a directory of them (the base dir layout)
-    python tools/journal_growth.py /data/event-log
-    python tools/journal_growth.py /data/event-log/team_tortoise.jsonl --json
+    # a live BASE dir — TORTOISE_EVENT_LOG_BASE_DIR, one journal per graph
+    python tools/journal_growth.py /data/events
+    # one graph's journal directory, or one journal file
+    python tools/journal_growth.py /data/events/team_tortoise
+    python tools/journal_growth.py /data/events/team_tortoise/events.jsonl --json
 
-A directory is read the way ``rebuild_all`` reads one: its direct ``*.jsonl``
-children, NOT recursive (``projection/__init__.py`` lists with
-``os.listdir`` + ``endswith('.jsonl')``, so a nested file is not part of that
-graph's journal and is not counted here either).
+A directory is read in BOTH layouts the deployment writes:
+
+* a BASE dir — ``<base>/<graph>/events.jsonl``, one journal per graph
+  (``config._resolve_event_log_path``: ``os.path.join(base, key,
+  "events.jsonl")``; ``entrypoint.sh`` / ``docker-compose.yml`` point
+  ``TORTOISE_EVENT_LOG_BASE_DIR`` at ``/data/events``), and
+* a per-graph dir (or any dir of journals) — its direct ``*.jsonl`` children,
+  the enumeration ``rebuild_all`` uses (``projection/__init__.py`` lists with
+  ``os.listdir`` + ``endswith('.jsonl')``), NOT recursive: a nested
+  ``archive/old.jsonl`` is not part of any graph's journal and is not counted.
+
+Both are needed because the base dir's direct children are graph
+DIRECTORIES; listing only ``*.jsonl`` there found nothing and reported "no
+journal to measure" on exactly the journal an operator is trying to size.
+Each per-graph file is labelled with its graph key in the report.
 
 ``--json`` emits a stable schema (``files``, ``total``, ``projection``); the text
 form is for a human reading a volume.
@@ -71,32 +84,59 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-#: The seal annotation ``EventLog.append`` writes after a torn tail (#5917). It
-#: is not a record: counting it would inflate the record count by one per tear.
-#: Imported, never re-spelled — a second copy of the marker would drift and the
-#: tool would start reporting seals as untagged records. ``tortoise.log``
-#: imports only the stdlib, so this costs nothing.
-from tortoise.log import SEAL_SENTINEL  # noqa: E402
+#: The seal annotation ``EventLog.append`` writes after a torn tail (#5917).
+#: It is not a record: counting it would inflate the record count by one per
+#: tear. The CLASSIFIER is imported, never re-spelled — a second copy of the
+#: grammar would drift and the tool would start reporting seals (and torn seal
+#: prefixes, which a crash leaves behind) as malformed records.
+#: ``tortoise.log`` imports only the stdlib, so this costs nothing.
+from tortoise.log import _is_seal_prefix  # noqa: E402
 
 #: What a record with no legible ``type`` is grouped under. The journal's own
 #: envelope always carries one, so a record here is an operator edit or a
 #: foreign writer — visible rather than silently excluded.
 UNTAGGED = "<untagged>"
 
+#: The per-graph journal's file name (`config._resolve_event_log_path`).
+JOURNAL_NAME = "events.jsonl"
+
+
+def _is_seal(text: str) -> bool:
+    """True for the seal annotation — complete OR TORN, ``tortoise.log``'s grammar.
+
+    A crash can leave a PREFIX of the marker (``__Torn``) where the complete
+    annotation was intended; ``read_all`` tolerates that and so must the
+    measurer, or every tear is reported to the operator as a malformed record.
+    The sentinel is deliberately not JSON, so no torn RECORD fragment can be a
+    prefix of it.
+    """
+    return bool(text) and _is_seal_prefix(text)
+
 
 def journal_files(target: Path) -> list[Path]:
-    """The journal files *target* names.
+    """The journal files *target* names, in both layouts the deployment writes.
 
     A file measures itself. A directory measures its direct ``*.jsonl``
-    children — the same enumeration ``rebuild_all`` uses, so this never
-    counts a file the replay would not read.
+    children (one graph's journal, the enumeration ``rebuild_all`` uses) AND
+    one level of ``<subdir>/events.jsonl`` (the base-dir layout — see
+    :data:`JOURNAL_NAME`), so a live ``TORTOISE_EVENT_LOG_BASE_DIR`` measures
+    every graph instead of reporting "no journal".
     """
     if target.is_file():
         return [target]
-    if target.is_dir():
-        return sorted(p for p in target.iterdir()
-                      if p.is_file() and p.name.endswith(".jsonl"))
-    return []
+    if not target.is_dir():
+        return []
+    children = list(target.iterdir())
+    direct = sorted(p for p in children
+                    if p.is_file() and p.name.endswith(".jsonl"))
+    per_graph = sorted(p / JOURNAL_NAME for p in children
+                       if p.is_dir() and (p / JOURNAL_NAME).is_file())
+    return direct + per_graph
+
+
+def _graph_key(path: Path) -> str:
+    """The graph a journal belongs to, or "" when the path is not a base-dir one."""
+    return path.parent.name if path.name == JOURNAL_NAME else ""
 
 
 def _percentile(sorted_sizes: list[int], pct: float) -> int:
@@ -129,11 +169,20 @@ def _embedding_bytes(value, depth: int = 0) -> int:
     ["embedding"]`` — see ``sdk._emit_event`` and ``stamp_journal_embedding``),
     so a top-level-only scan would report the embedding share as zero on
     exactly the records that carry it.
+
+    ⚠️ PRESENCE IS OWNERSHIP (#5004): ``sdk._emit_event`` forces the key present
+    (``clean.setdefault("embedding", None)``) and ``_drop_journalled_embedding``
+    sets it to ``None`` when there is NO usable vector — the keyword-only
+    deployment always looks like that. A ``null`` value is 4 B of nothing, not a
+    carried vector, so it must not be counted as one record bearing a vector.
     """
     if isinstance(value, dict):
         total = 0
         for k, v in value.items():
             if k == "embedding":
+                if v is None or (isinstance(v, (list, tuple, dict, str))
+                                 and not v):
+                    continue    # the forced-absent shape, not a vector
                 total += _json_bytes(v)
             else:
                 total += _embedding_bytes(v, depth + 1)
@@ -147,6 +196,7 @@ def _blank() -> dict:
     return {
         "records": 0,
         "bytes": 0,
+        "other_bytes": 0,
         "malformed": 0,
         "seal_annotations": 0,
         "empty_lines": 0,
@@ -158,57 +208,100 @@ def _blank() -> dict:
     }
 
 
+def _pieces(chunk: bytes) -> list[tuple[bytes, int]]:
+    """Split ONE line-read chunk into ``(payload, terminator_bytes)`` pairs.
+
+    Universal newlines, the same grammar ``EventLog.read_all`` normalises to
+    (``\\r\\n`` and a bare ``\\r`` both separate records), but with each
+    separator counted as the bytes it really occupies — so per-record sizes
+    still sum to the file size on a CRLF or foreign-CR journal. Splitting on
+    ``b"\\n"`` alone measured a bare-CR journal as ONE malformed line: a
+    replayable journal reported as zero growth, which is the understating
+    direction this tool must never take.
+    """
+    out: list[tuple[bytes, int]] = []
+    start = 0
+    i = 0
+    end = len(chunk)
+    while i < end:
+        byte = chunk[i]
+        if byte == 0x0D:                        # \r — CRLF is ONE separator
+            width = 2 if (i + 1 < end and chunk[i + 1] == 0x0A) else 1
+            out.append((chunk[start:i], width))
+            i += width
+            start = i
+        elif byte == 0x0A:                      # \n
+            out.append((chunk[start:i], 1))
+            i += 1
+            start = i
+        else:
+            i += 1
+    if start < end:                             # only the final chunk can be torn
+        out.append((chunk[start:], 0))
+    return out
+
+
 def measure_file(path: Path) -> dict:
-    """Measure one journal file. Never raises on a journal it cannot parse."""
-    data = path.read_bytes()
+    """Measure one journal file. Never raises on a journal it cannot parse.
+
+    STREAMED, one line at a time: the journal this exists to size is unbounded
+    by design (#5612 — ~8.6 GB per 1,000,000 creates), so a ``read_bytes()`` +
+    ``split()`` pair would need ~2× that in RAM and would OOM on exactly the
+    volume the measurement was landed for.
+    """
     agg = _blank()
-    terminated = data.endswith(b"\n")
-    pieces = data.split(b"\n")
-    if terminated:
-        pieces = pieces[:-1]
-    last = len(pieces) - 1
-    for idx, raw in enumerate(pieces):
-        # The terminator belongs to the record it ends, so the per-record sizes
-        # sum to the file size exactly (that equality is asserted in the tests).
-        size = len(raw) + (0 if (idx == last and not terminated) else 1)
-        stripped = raw.strip()
-        if not stripped:
-            agg["empty_lines"] += 1
-            continue
-        try:
-            text = raw.decode("utf-8").strip()
-        except UnicodeDecodeError:
-            text = ""
-        if text and text == SEAL_SENTINEL:
-            agg["seal_annotations"] += 1
-            continue
-        try:
-            record = json.loads(text)
-        except ValueError:
-            agg["malformed"] += 1
-            continue
-        if not isinstance(record, dict):
-            agg["malformed"] += 1
-            continue
-        rtype = record.get("type")
-        rtype = rtype if isinstance(rtype, str) and rtype else UNTAGGED
-        agg["records"] += 1
-        agg["bytes"] += size
-        agg["sizes"].append(size)
-        slot = agg["by_type"].setdefault(
-            rtype, {"count": 0, "bytes": 0, "sizes": []})
-        slot["count"] += 1
-        slot["bytes"] += size
-        slot["sizes"].append(size)
-        for key, value in record.items():
-            agg["field_bytes"][key] = (
-                agg["field_bytes"].get(key, 0) + _json_bytes(value))
-        emb = _embedding_bytes(record)
-        if emb:
-            agg["embedding_bytes"] += emb
-            agg["embedding_records"] += 1
+    file_bytes = 0
+    with path.open("rb") as fh:
+        for chunk in fh:        # the newline is INCLUDED, so len() is the size
+            file_bytes += len(chunk)
+            for raw, terminator in _pieces(chunk):
+                # The terminator belongs to the record it ends, so the per-record
+                # + junk sizes sum to the file size exactly. `other_bytes` is
+                # ACCUMULATED here, never computed as a residual — a residual
+                # makes that equality an identity that cannot fail.
+                size = len(raw) + terminator
+                stripped = raw.strip()
+                if not stripped:
+                    agg["empty_lines"] += 1
+                    agg["other_bytes"] += size
+                    continue
+                try:
+                    text = raw.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    text = ""
+                if _is_seal(text):
+                    agg["seal_annotations"] += 1
+                    agg["other_bytes"] += size
+                    continue
+                try:
+                    record = json.loads(text)
+                except ValueError:
+                    agg["malformed"] += 1
+                    agg["other_bytes"] += size
+                    continue
+                if not isinstance(record, dict):
+                    agg["malformed"] += 1
+                    agg["other_bytes"] += size
+                    continue
+                rtype = record.get("type")
+                rtype = rtype if isinstance(rtype, str) and rtype else UNTAGGED
+                agg["records"] += 1
+                agg["bytes"] += size
+                agg["sizes"].append(size)
+                slot = agg["by_type"].setdefault(
+                    rtype, {"count": 0, "bytes": 0, "sizes": []})
+                slot["count"] += 1
+                slot["bytes"] += size
+                slot["sizes"].append(size)
+                for key, value in record.items():
+                    agg["field_bytes"][key] = (
+                        agg["field_bytes"].get(key, 0) + _json_bytes(value))
+                emb = _embedding_bytes(record)
+                if emb:
+                    agg["embedding_bytes"] += emb
+                    agg["embedding_records"] += 1
     return {"path": str(path), "_raw": agg,
-            "file_bytes": len(data)}
+            "file_bytes": file_bytes}
 
 
 def _finalize(raw: dict, file_bytes: int) -> dict:
@@ -228,10 +321,13 @@ def _finalize(raw: dict, file_bytes: int) -> dict:
         "records": n,
         "bytes": raw["bytes"],
         # Everything on disk that is NOT a well-formed record's bytes: torn
-        # fragments, seal annotations, empty lines. `bytes + other_bytes` is
-        # the file size exactly (asserted in the tests), so a journal's growth
-        # can never include bytes this report did not account for.
-        "other_bytes": file_bytes - raw["bytes"],
+        # fragments, seal annotations, empty lines. ACCUMULATED from the lines
+        # actually classified (`measure_file`), NOT computed as
+        # `file_bytes - bytes`: as a residual, `bytes + other_bytes ==
+        # file_bytes` would be true for ANY per-record arithmetic, including one
+        # that drops a record — so the equality below would assert nothing. The
+        # tests assert it against the bytes the test itself wrote.
+        "other_bytes": raw["other_bytes"],
         "malformed": raw["malformed"],
         "seal_annotations": raw["seal_annotations"],
         "empty_lines": raw["empty_lines"],
@@ -257,8 +353,8 @@ def measure(target: str | Path, *, project_records: int = 100_000) -> dict:
     files = journal_files(p)
     if not files:
         raise FileNotFoundError(
-            f"no journal to measure at {p} "
-            f"(a file, or a directory holding *.jsonl)")
+            f"no journal to measure at {p} (a *.jsonl file, a directory "
+            f"holding *.jsonl, or a base dir holding <graph>/{JOURNAL_NAME})")
     per_file = []
     merged = _blank()
     for f in files:
@@ -266,11 +362,13 @@ def measure(target: str | Path, *, project_records: int = 100_000) -> dict:
         raw = got["_raw"]
         per_file.append({
             "path": got["path"],
+            "graph": _graph_key(Path(got["path"])),
             "file_bytes": got["file_bytes"],
             **_finalize(raw, got["file_bytes"]),
         })
         merged["records"] += raw["records"]
         merged["bytes"] += raw["bytes"]
+        merged["other_bytes"] += raw["other_bytes"]
         merged["malformed"] += raw["malformed"]
         merged["seal_annotations"] += raw["seal_annotations"]
         merged["empty_lines"] += raw["empty_lines"]
@@ -285,7 +383,11 @@ def measure(target: str | Path, *, project_records: int = 100_000) -> dict:
             dst["count"] += slot["count"]
             dst["bytes"] += slot["bytes"]
             dst["sizes"].extend(slot["sizes"])
-    total = _finalize(merged, sum(f["file_bytes"] for f in per_file))
+    file_bytes = sum(f["file_bytes"] for f in per_file)
+    total = _finalize(merged, file_bytes)
+    # Reported so the accounting is checkable from `--json` alone:
+    # `bytes + other_bytes == file_bytes` is a real arithmetic check.
+    total["file_bytes"] = file_bytes
     mean = total["record_bytes"]["mean"]
     return {
         "files": per_file,
@@ -314,8 +416,13 @@ def render(report: dict, *, top: int = 10) -> str:
             f"{f['file_bytes']:>12,} {f['record_bytes']['mean']:>7.0f} "
             f"{f['record_bytes']['p95']:>8} {f['malformed']:>5}")
     rb = total["record_bytes"]
+    # The `bytes` column is the FILE bytes of each row, so the total must be the
+    # sum of the column above it — not `total['bytes']`, which counts only
+    # well-formed records and is therefore SMALLER than the rows it totals on
+    # any journal carrying a torn tail, a seal or a blank line.
+    file_total = sum(f["file_bytes"] for f in report["files"])
     lines.append(
-        f"{'TOTAL':<44} {total['records']:>9} {total['bytes']:>12,} "
+        f"{'TOTAL':<44} {total['records']:>9} {file_total:>12,} "
         f"{rb['mean']:>7.0f} {rb['p95']:>8} {total['malformed']:>5}")
     lines.append("")
     lines.append(f"record size bytes: p50 {rb['p50']} · p95 {rb['p95']} · "
