@@ -296,7 +296,8 @@ class RestoreObservation:
         liveness = (
             "The port still ACCEPTS a TCP connection, so the server process is alive and listening"
             if self.instance_listening
-            else "Liveness could NOT be measured (no transport probe was supplied)"
+            else "Liveness could NOT be measured (no probe supplied, or the probe "
+            "did not complete — a connect timeout is NOT a refusal)"
         )
         return (
             f"{header} {liveness}: this is not a crash and not load — a loaded server "
@@ -451,7 +452,7 @@ def restore_graph_key(
     restore: Callable[[Any], Any],
     ping: Callable[[], Any],
     bound_s: float,
-    listening: Callable[[], bool] | None = None,
+    listening: Callable[[], bool | None] | None = None,
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
     witness_join_s: float = 5.0,
     recovery_probe_s: float = 1.0,
@@ -533,10 +534,16 @@ def restore_graph_key(
         deadline_s=witness_join_s,
         recovery_s=recovery_probe_s if completed else 0.0,
     )
-    silent_ms, silence_started_s, silence_ended_s = _longest_silence(samples)
     # Attribution uses only samples inside the operation window; the recovery probe
     # may still add samples afterwards, and those may not be blamed on the restore.
     attributed = [s for s in samples if s[0] <= window_end_s]
+    # The BLOCK MAGNITUDE must come from the window too: `blocked_ms` is
+    # `max(silent_ms, witness_max_latency_ms)`, so a silence that began after the
+    # restore returned was still published as "BLOCKED the instance for 1006 ms of
+    # its 0.15s" (#8827 review cycle 2). `silence_ended_s` stays on the full list
+    # because the recovery edge is legitimately post-window.
+    silent_ms, silence_started_s, _ = _longest_silence(attributed)
+    _unused_silent, _unused_start, silence_ended_s = _longest_silence(samples)
     failures = sum(1 for _offset, answered, _latency in attributed if not answered)
     # Only ANSWERED samples carry a latency: an unanswered one's latency is the
     # witness client's own socket timeout, not a measurement of the block.
@@ -593,7 +600,14 @@ def restore_graph_key(
     # The restore did not return inside the bound: the caller must fail loudly, with
     # the measurement, not hang. Liveness is probed AFTER the bound so it describes
     # the instance at the moment the caller gives up.
-    instance_listening = None if listening is None else bool(listening())
+    # `bool(probe)` would turn the tri-state probe's `None` ("could not measure")
+    # back into `False` ("refused"), and `False` selects INSTANCE_GONE — telling the
+    # operator to restart a healthy box. `None` must survive to the status decision.
+    if listening is None:
+        instance_listening: bool | None = None
+    else:
+        probe = listening()
+        instance_listening = probe if probe is None else bool(probe)
     if not failures and samples:
         # Every sample ANSWERED, so the instance was serving and the overrun is the
         # CALLER's. Both conditions are required: with zero samples `not failures`
@@ -621,7 +635,13 @@ def restore_graph_key(
         witness_max_latency_ms=max_latency_ms,
         blocked_latency_ms=blocked_latency_ms,
         instance_listening=instance_listening,
-        error="restore did not return within the bound",
+        error=(
+            "restore did not return within the bound; the WITNESS could not "
+            f"measure it ({', '.join(witness_errors)}), so this is NOT evidence "
+            "of the #7846 blocked-engine signature"
+            if witness_fault
+            else "restore did not return within the bound"
+        ),
     )
     logger.error("graph-key restore overran its bound: %s", observation.sentence())
     if observation.status == CALLER_STALL:
