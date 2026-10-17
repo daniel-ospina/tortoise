@@ -2968,6 +2968,21 @@ _RESERVED_ENVELOPE_PROPS = (
 #:   parameter added to `_emit_event` fails the suite instead of silently
 #:   re-opening this hole.
 #:
+#: * ``aboutLinks`` (#8398 review P1-1) is the case that derivation CANNOT see:
+#:   it is not an `_emit_event` parameter, so it is unreachable via
+#:   ``inspect.signature`` — it collides because ``_create_entity``'s
+#:   ``EventRecorded`` emit splats TWO ``**`` bags into ONE call (the journaled
+#:   payload and the write-time ``_journal_extra`` edge facts), and a caller
+#:   prop of that name lands in the first while the SDK supplies the second.
+#:   Measured on a38d6e775: ``create_event(..., aboutObject=oid,
+#:   aboutLinks=["caller"])`` raised ``TypeError: got multiple values for
+#:   keyword argument 'aboutLinks'`` AFTER the live write and BEFORE the
+#:   record, so the Event was live-only and ``rebuild_all`` deleted it. The
+#:   splat is merged into one dict now (so the collision cannot recur), and the
+#:   name is reserved here so the caller prop never reaches the live fold
+#:   either — where `apply`'s inline re-wire read it as journal data and
+#:   reported a phantom link failure (measured).
+#:
 #: Strip it at prop INTAKE like the envelope set above, and ALSO before any
 #: RELAY that forwards a caller bag into another method — the collision is at
 #: the call, so `update_entity` (relays to `_update_entity`) and
@@ -2975,7 +2990,7 @@ _RESERVED_ENVELOPE_PROPS = (
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self")
+_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:
@@ -25532,7 +25547,8 @@ class TortoiseSDK:
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,
-                       _return_apply_result: bool = False) -> dict | tuple[dict, object]:
+                       _return_apply_result: bool = False,
+                       _journal_extra: dict | None = None) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -25792,7 +25808,19 @@ class TortoiseSDK:
             self._emit_event(
                 "EventRecorded",
                 id=event["id"],
-                **_journal_record_payload(event),
+                # #8398 P1-1: ONE dict, never two `**`-splats. Two splats that
+                # share a key raise `TypeError: _emit_event() got multiple
+                # values for keyword argument 'aboutLinks'` — AFTER the live
+                # write has committed and BEFORE the record is appended, so the
+                # Event stayed live-only and the next rebuild deleted it
+                # (measured: `create_event(..., aboutObject=oid,
+                # aboutLinks=["caller"])` on a38d6e775; on `origin/main` the
+                # same call works, so it was a regression). Merging here makes
+                # the collision impossible, and `_journal_extra` — the
+                # write-time EDGE facts — stays authoritative over a caller
+                # prop of the same name.
+                **{**_journal_record_payload(event),
+                   **(_journal_extra or {})},
             )
         if label == "Object" and _journal_object_registration:
             # (#2194) Mirror the EventRecorded block above: payload = the
@@ -26761,6 +26789,46 @@ class TortoiseSDK:
                  "status": "live", **props},
                 "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
+            # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
+            # stripped HERE, at the Event door, because ``event`` is the
+            # NESTED-record key the fold unwraps (``entities.py::_upsert_event``
+            # — ``inner = event.get("event", event)``) and the replay reader
+            # now address-checks (``edges.py::replay_about_links``). A caller
+            # bag carrying ``event`` therefore SHADOWED the record in the fold
+            # and dropped every ``aboutLinks`` link on the record. MEASURED at
+            # 742ff7246: ``create_event("withprop", "event",
+            # event={"payload": "x"}, aboutObject=oid)`` wrote the record
+            # ``{"type": "EventRecorded", "id": "1a14…", "event":
+            # {"payload": "x"}, "aboutLinks": [{"rel": "aboutObject",
+            # "how": "id", "targets": ["obj-…"]}]}``, and the rebuild
+            # replayed NOTHING — no link, no failure, no warning.
+            #
+            # Strip-and-ignore, matching ``_RESERVED_EMIT_CALL_PROPS``
+            # (``aboutLinks``, #8398 review P1-1) and the reserved actor keys:
+            # ``event`` is NOT Event content. ``_EVENT_HANDLED`` already
+            # declares it an ENVELOPE field the fold must never persist
+            # (``entities.py``), so the caller prop was never stored on the node
+            # — it only ever reached the RECORD, where it does the damage. The
+            # delta is therefore a FIX, not a loss: the prop is dropped instead
+            # of costing the whole Event node (``_upsert_event`` skipped the
+            # MERGE outright, so ``create_event`` returned ``{}`` and
+            # ``MATCH (e:Event)`` was empty) AND its journaled links.
+            #
+            # ⛔ Deliberately NOT added to ``_RESERVED_EMIT_CALL_PROPS``: that
+            # set is stripped by the shared ``_sanitize_props`` intake, which
+            # ALSO serves ``create_point``/``update_point``/``update_entity``,
+            # where ``event`` is an ordinary free-form tenant prop this fix has
+            # no business dropping. The collision exists only where an
+            # ``EventRecorded`` payload is built — here. ``create_event`` (the
+            # documented alias) relays through this branch, and its own
+            # ``_drop_reserved_emit_props`` relay strip is the matching guard
+            # for the names that DO collide at a call.
+            _shadowing_event_prop = props.pop("event", None)
+            if _shadowing_event_prop is not None:
+                _logger.warning(
+                    "ignoring client-supplied 'event' on create_entity("
+                    "type='event') — it shadows the nested EventRecorded "
+                    "payload and would drop the record's about* links (#8398)")
             eventKind = props.pop("eventKind", None)
             if not eventKind:
                 raise ValueError(
@@ -26787,19 +26855,92 @@ class TortoiseSDK:
             about_object = props.pop("aboutObject", None)
             about_point = props.pop("aboutPoint", None)
             about_document = props.pop("aboutDocument", None)
+            proj = self._get_proj()
+            # #8398: these four are wired LIVE (below) as graph edges, so they
+            # are popped before the fold and never reach the journaled
+            # EventRecorded payload — which made `derived == replay(journal)`
+            # FALSE for exactly this class: a rebuild dropped the Event→entity
+            # links while create_operator's IMPL edges survived.
+            # Classify each link HERE, against the LIVE graph, and journal the
+            # PRECISE form so replay repeats a known-good construction instead
+            # of re-deciding id-vs-name against a graph that may answer
+            # differently (the drift `_wire_about_value` exists to prevent).
+            # #8398 review P1-2: the NAME path is resolved here too.
+            # `_create_about_edges` is the rel-IGNORING Subject→Object→Event→
+            # Source→Point cascade, so `aboutObject="Acme"` with no `Acme` node
+            # wired **aboutSubject** to a fresh Subject stub — and journaling
+            # that as `how:"name"` made replay re-run the cascade against the
+            # END-OF-JOURNAL graph, landing on the by-then-registered Object: a
+            # different rel AND a different node, counted as success. So the
+            # cascade is resolved ONCE here (read-only, `resolve_about_link`)
+            # and the RESOLVED rel/label/key are journaled; the write below
+            # reuses that same resolution.
+            from .projection.edges import STRUCTURAL_REL_LABELS as _REL_LABELS
+            about_links: list[dict] = []
+            #: (rel-or-pinned-link, value-or-internal-id) for the post-fold write.
+            _about_writes: list[tuple[object, object]] = []
+            for _rel, _val in (
+                ("aboutSubject", about_subject),
+                ("aboutObject", about_object),
+                ("aboutPoint", about_point),
+                ("aboutDocument", about_document),
+            ):
+                if not _val:
+                    continue
+                _tlabel = _REL_LABELS.get(_rel)
+                if isinstance(_val, str) and _tlabel is not None:
+                    _hits = [
+                        _h for _h in proj._resolve_entity(
+                            _val, by_id=True, by_eventId=True)
+                        if _h["label"] == _tlabel
+                    ]
+                else:
+                    _hits = []
+                if _hits:
+                    # Journal the RESOLVED values, not a flag: an id that resolved
+                    # to the rel's target label NOW. Replay repeats an exact
+                    # endpoint instead of re-running the id-or-name cascade
+                    # against a graph whose answers may differ.
+                    about_links.append({
+                        "rel": _rel,
+                        "how": "id",
+                        "targets": [_h["value"] for _h in _hits],
+                    })
+                    _about_writes.append((_rel, _val))
+                elif isinstance(_val, str) and not _is_entity_id(_val):
+                    # resolves to nothing and is not handle-shaped → the name
+                    # path (resolve-or-mint) is what will actually wire it.
+                    # `resolve_about_link` is READ-ONLY: it returns the pinned
+                    # link AND the internal id(s) the write must address, so the
+                    # record and the edge come from ONE resolution instead of
+                    # two reads that could disagree. A LIST of ids because a
+                    # name may legally have several carriers — all of them are
+                    # journaled in `targets` and all of them are written, so an
+                    # arbitrary backend row order can never be pinned (review
+                    # P2-3 at 2b9626072).
+                    _link, _internal = proj.resolve_about_link(_val)
+                    if _link is not None:
+                        about_links.append(_link)
+                        _about_writes.append((_link, _internal))
+                else:
+                    # an unresolvable HANDLE wires NO edge (#3586) — nothing to
+                    # journal, but the door still has to report it.
+                    _about_writes.append((_rel, _val))
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
                 "eventStatus": "scheduled", **props}, "EventRecorded",
-                is_episodic=is_episodic)
-            proj = self._get_proj()
-            if about_subject:
-                _wire_about_value(proj, eid, about_subject, "aboutSubject")
-            if about_object:
-                _wire_about_value(proj, eid, about_object, "aboutObject")
-            if about_point:
-                _wire_about_value(proj, eid, about_point, "aboutPoint")
-            if about_document:
-                _wire_about_value(proj, eid, about_document, "aboutDocument")
+                is_episodic=is_episodic,
+                _journal_extra={"aboutLinks": about_links} if about_links else None)
+            # The writes use the SAME resolution the record was built from: an
+            # id-resolved link re-enters `_wire_about_value` (unchanged), and a
+            # name-path link is written from its pinned link + the internal id
+            # the resolution produced — never by re-running the cascade, so the
+            # edge and the journal cannot disagree.
+            for _rel_or_link, _val in _about_writes:
+                if isinstance(_rel_or_link, dict):
+                    proj.wire_about_link(eid, _rel_or_link, _val)
+                else:
+                    _wire_about_value(proj, eid, _val, _rel_or_link)
         elif t == "document":
             documentKind = props.pop("documentKind", None)
             if not documentKind:

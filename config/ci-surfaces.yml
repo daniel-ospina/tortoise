@@ -1635,6 +1635,7 @@ surfaces:
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_7902_write_path_label_widening.py  # #7902: the epistemic-label declaration lives in tortoise/live.py (core fallback) — keep the write-path widening guard awake on a live.py-only change
   - test_about_edges.py
+  - test_8398_aboutobject_replay.py  # #8398: the Event→entity about* links journaled with the record and re-wired by both replay engines (touches tortoise/sdk.py + tortoise/projection/{edges,__init__}.py)
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
   - test_activation_scorecard.py   # #B7: activation scorecard (with the `api` half — see there)
