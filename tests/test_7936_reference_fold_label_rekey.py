@@ -64,6 +64,36 @@ _JOURNAL = [
      "subject": "rekey-subject", "object": "rekey-object"},
 ]
 
+#: A journal whose EVENT precedes the Object's registration, so the Object is
+#: really minted as a name STUB (no creation record registers it: the
+#: ``EventRecorded`` reference mints it) and then ADOPTED by
+#: ``_upsert_object``'s ``ON MATCH`` (the registered id lands, ``_stub`` is
+#: cleared). ``_JOURNAL`` above is deliberately NOT this shape — it registers
+#: the Object first, so no stub is ever minted there.
+_STUB_EVENT_ID = "evt-7936-stubfirst"
+_STUB_OBJECT_ID = "obj-7936-adopted"
+_STUB_OBJECT_NAME = "stub-first-object"
+_STUB_FIRST_JOURNAL = [
+    {"type": "EventRecorded", "id": _STUB_EVENT_ID,
+     "name": "stub-first event", "eventKind": "test",
+     "startedAt": "2026-01-01T00:00:00Z",
+     "subject": "stub-first-subject", "object": _STUB_OBJECT_NAME},
+    {"type": "ObjectRegistered", "id": _STUB_OBJECT_ID,
+     "name": _STUB_OBJECT_NAME},
+    # The `restatus` is what keeps the journal HEALTHY, and it is here on the
+    # merits: `_upsert_object`'s ON MATCH (the adoption) never seeds `status`
+    # (it is ON CREATE only, the #1350 clobber guard), so an adopted stub
+    # carries NO status while the reference fold's creation default is `live` —
+    # a one-field `content` divergence for a never-restatused adopted stub.
+    # That divergence PRE-EXISTS this change (it is the reference fold's
+    # creation default meeting a graph fold that never writes it on adoption)
+    # and is NOT this file's to decide, so the fixture records the status the
+    # way a producer would.
+    {"type": "EntityMutated", "op": "restatus", "label": "Object",
+     "id": _STUB_OBJECT_ID, "state": {"status": "live"},
+     "event_id": "e-7936-stubfirst-restatus"},
+]
+
 
 def _journal_dir(tmp_path: Path, records=None) -> Path:
     events = tmp_path / "events"
@@ -154,11 +184,16 @@ def test_a_graph_only_non_point_belief_write_is_an_unrecorded_mutation(tmp_path)
 
 
 def test_a_graph_only_non_point_status_write_is_an_unrecorded_mutation(tmp_path):
-    """The same blind spot on ``status`` — the field the entity leg DOES compare.
+    """The same blind spot on ``status`` — a field the entity leg bounds away.
 
-    The comparison only decides the keys the JOURNAL states, so a status the
-    journal never wrote on that node is skipped there too; only the baseline can
-    see it. FAILS IF: the digest ignores a non-Point node's ``status``.
+    The COMPARISON bounds ``status`` to ``Object``/``Subject``
+    (``entity_parity_bounds["status_compared"]``): ``Event`` carries
+    ``eventStatus`` and folds no lifecycle here, so a ``status`` on an
+    ``:Event`` is a field the entity leg deliberately does NOT compare. That is
+    exactly why the BASELINE has to cover it — a field no leg decides is a
+    field a graph-only write moves unnoticed. FAILS IF: the digest ignores a
+    non-Point node's ``status`` (the ``:Event`` write below then leaves
+    ``db_hash`` unmoved).
     """
     proj, log_path, _events = _built(tmp_path)
     try:
@@ -211,18 +246,48 @@ def test_the_widened_digest_is_stable_across_a_rebuild(tmp_path):
 def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path):
     """The pre-wipe/adoption half: a node the journal DOES describe is faithful.
 
-    The stub Object is adopted by the journal's ``ObjectRegistered`` (the
-    ``ON MATCH`` id write), so its presence is journal-derived even though no
-    record creates it by that id. FAILS IF: the digest keys stubs by something
-    the adoption legitimately changes (``_stub`` is deliberately not covered).
+    The fixture puts the ``EventRecorded`` BEFORE the ``ObjectRegistered``, so
+    the Object really is minted as an ``_stub=true`` name stub — its first
+    creator is the Event's ``object`` reference, under the deterministic name
+    id — and then ADOPTED by the registration: ``_upsert_object``'s ``ON MATCH``
+    writes the registered id and clears ``_stub``. The stub's own pre-adoption
+    state is asserted on a graph built from the event-only prefix, so this pin
+    cannot silently degrade into "the Object was created directly by the
+    registration" (which is what the pre-#8859 fixture actually exercised).
+
+    FAILS IF: the digest keys nodes by something the adoption legitimately
+    changes (``_stub`` is deliberately not covered —
+    ``test_the_baseline_deliberately_ignores_the_stub_discriminator`` pins that
+    exclusion directly), or the rebuild stops reproducing the adoption.
     """
-    proj, log_path, events = _built(tmp_path)
+    stub_proj, _stub_log, _ = _built(tmp_path, "stub", _STUB_FIRST_JOURNAL[:1])
     try:
-        # The stub exists (minted by EventRecorded.object) and was adopted.
+        stub_rows = stub_proj.g.query(
+            "MATCH (o:Object {name:$name}) RETURN o.id, o._stub",
+            params={"name": _STUB_OBJECT_NAME}).result_set
+    finally:
+        stub_proj.close()
+    # Pre-adoption: the Event minted a marked stub, under an id that is NOT the
+    # one the later registration writes.
+    assert stub_rows, "the EventRecorded reference minted no Object stub"
+    assert stub_rows[0][1] is True, (
+        f"the minted stub is not marked `_stub=true` — adoption is not "
+        f"observable, so the digest equality below cannot discriminate "
+        f"(#7936): {stub_rows}")
+    assert stub_rows[0][0] != _STUB_OBJECT_ID, stub_rows
+
+    proj, log_path, events = _built(tmp_path, "adopted", _STUB_FIRST_JOURNAL)
+    try:
         rows = proj.g.query(
-            "MATCH (o:Object {name:'rekey-object'}) RETURN o.id, o._stub"
-        ).result_set
-        assert rows and rows[0][0] == _OBJECT_ID, rows
+            "MATCH (o:Object {name:$name}) RETURN o.id, o._stub",
+            params={"name": _STUB_OBJECT_NAME}).result_set
+        # Adopted: ONE node, the registered id landed, the marker was cleared.
+        assert len(rows) == 1, (
+            f"the registration created a SECOND `:Object` instead of adopting "
+            f"the stub (#7936): {rows}")
+        assert rows[0][0] == _STUB_OBJECT_ID, rows
+        assert rows[0][1] is None, (
+            f"`_stub` survived the registration's adoption: {rows}")
         first = _verdict(log_path, proj, record_state=True)
         assert first["ok"] is True, first
         proj.rebuild_all(str(events), confirm_destructive=True)
@@ -232,6 +297,24 @@ def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path)
     assert first["db_hash"] == second["db_hash"], (
         "adoption of a name stub moved the baseline digest (#7936)")
     assert second["ok"] is True, second
+
+
+def test_the_baseline_deliberately_ignores_the_stub_discriminator():
+    """``_stub`` is NOT a covered field, so adoption cannot move the digest.
+
+    ``_stub`` marks a node no record registered yet; adoption CLEARS it on a
+    node the journal DID describe, so covering it would report a
+    ``unrecorded-mutation`` for a faithful adoption. Pinned as a property of
+    the ONE builder both consumers read. FAILS IF: ``_stub`` is added to
+    ``_entity_node_view`` — in which case the adoption test above needs a
+    different exclusion argument, not a silent baseline move.
+    """
+    from tortoise.consistency import _entity_node_view
+
+    assert (_entity_node_view({"status": "live", "_stub": True})
+            == _entity_node_view({"status": "live"})), (
+        "`_stub` is inside the baseline view — a name stub's ADOPTION would "
+        "move `db_hash` on a node the journal described (#7936)")
 
 
 def test_a_live_graph_and_its_rebuild_share_a_digest(tmp_path):
@@ -317,7 +400,58 @@ def test_the_reported_bounds_name_the_digest_coverage(tmp_path):
     for label in ("Point", "Object", "Subject", "Event"):
         assert label in bounds["baseline_digest_covers"], bounds
     assert "name" in bounds["baseline_digest_does_not_cover"], bounds
+    # The two residual shapes the index deliberately does not reach, named so a
+    # reader does not infer a coverage the code does not have.
+    assert "no identity property" in bounds["baseline_digest_does_not_cover"], bounds
+    assert "eventId" in bounds["baseline_digest_does_not_cover"], bounds
     assert "POINT leg" in bounds["point_counts_cover"], bounds
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# The index's label set has ONE home — a literal here re-opens the fail-open
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_the_graph_index_is_derived_from_the_one_label_declaration(
+        tmp_path, monkeypatch):
+    """``_graph_view`` indexes the DECLARED label set, not a re-listed one.
+
+    ``_REFERENCE_FOLD_ENTITY_LABELS`` is the one home for the entity label set
+    (``_ENTITY_CREATION`` grows it), so a hard-coded
+    ``WHERE n:Point OR n:Object OR n:Subject OR n:Event`` is a second home: a
+    fifth creation row then reaches the fold, the sibling label-set pins and
+    the writers while staying INVISIBLE to the baseline index — the #7936
+    fail-open returning for the new label with every existing pin green.
+
+    Non-vacuous by mechanism: the extra label is driven through the SAME seam
+    the declaration would grow (``_GRAPH_VIEW_LABELS``), so a literal query
+    cannot see it. FAILS IF: the query stops tracking the declaration.
+    """
+    from tortoise import consistency as _c
+
+    assert set(_c._GRAPH_VIEW_LABELS) == ({"Point"}
+                                          | set(_c._REFERENCE_FOLD_ENTITY_LABELS))
+    # The index KEY comes from a THIRD declaration: `_graph_view` DROPS a node
+    # whose label has no `_ENTITY_ID_PROP` entry, so a label declared and not
+    # keyed would reach the query and vanish from the index anyway.
+    assert set(_c._GRAPH_VIEW_LABELS) <= set(_c._ENTITY_ID_PROP), (
+        "a label the index queries has no identity property — every one of its "
+        "nodes is silently dropped from the baseline digest (#7936)")
+
+    proj, _log, _events = _built(tmp_path)
+    try:
+        proj.g.query("CREATE (w:Widget {id:'widget-7936'})")
+        assert ("Widget", "widget-7936") not in _c._graph_view(proj), (
+            "an undeclared label was indexed — the label set is not the one "
+            "home it claims to be")
+        monkeypatch.setattr(_c, "_GRAPH_VIEW_LABELS",
+                            _c._GRAPH_VIEW_LABELS + ("Widget",))
+        monkeypatch.setitem(_c._ENTITY_ID_PROP, "Widget", "id")
+        assert ("Widget", "widget-7936") in _c._graph_view(proj), (
+            "`_graph_view` did not pick up a label added to the declared set — "
+            "its query is a re-listed literal, so a new `_ENTITY_CREATION` row "
+            "would be invisible to the baseline digest (#7936)")
+    finally:
+        proj.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════

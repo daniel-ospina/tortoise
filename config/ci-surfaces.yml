@@ -1274,11 +1274,15 @@ surfaces:
   # the SAME mutation on a `:Point` was `unrecorded-mutation`. `core` alone: it
   # drives `tortoise/consistency.py` (no named SOURCE_PATTERN, so a
   # consistency-only change selects `core`) through `check_consistency`, and the
-  # `format_version` bump it pins lives in that same module. Its journal fixtures
-  # carry no Points, so `tortoise/projection/entities.py` and `tortoise/ids.py`
-  # are reached only for the name-stub half — the `sdk` registration of
-  # `test_7936_stable_stub_ids.py` (above) is the arm that covers an
-  # `ids.py`-only change.
+  # `format_version` bump it pins lives in that same module. It is NOT
+  # `core`-only because the fixtures are narrow: they carry a `Point` (the
+  # `log_points`/`db_points` pin counts it) and one test drives the whole
+  # `tortoise/sdk.py` + `ep.py` write path, so `projection/entities.py`,
+  # `tortoise/ids.py` and `live.py` are all exercised. That costs nothing:
+  # `sdk.py` and `projection/__init__.py` are SHARED_MODULEs (full matrix), and
+  # an `ids.py`-only change is covered by the `sdk` registration of
+  # `test_7936_stable_stub_ids.py` (above). `core` is therefore the correct
+  # FLOOR for a `live.py`/`consistency.py`-only diff, not a claim about reach.
   - test_7936_reference_fold_label_rekey.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
