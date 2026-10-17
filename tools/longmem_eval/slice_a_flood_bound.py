@@ -20,8 +20,8 @@ the one thing the old T was really protecting:
   * a coverage-loop FLOOD — many restatements of ONE fact occupying the
     reader window (§1 of the wave doc: *"the coverage loop merged 79 points
     into one question's 40-item window"*), and
-  * the pre-#2978 composition — *"61% of admitted slots were content-less
-    operator points"* (#2978).
+  * the pre-#2978 composition — #2978's title, *"content-less operator
+    points consume 61% of the reader's context slots"*.
 
 Three arms on the SAME C2-shaped pool (item-bound 40, the wave's window):
 
@@ -197,8 +197,9 @@ _CHUNK_FILLERS = (
 #: `pre_2978.contentless_slot_share`), not the issue's 61.3%.
 _CONTENTLESS_HITS = 24
 
-#: §5 Slice A: *"a distilled point + its own source raw chunks + its turns"* —
-#: the pass-2 leg. The chunks carry the anchored quote plus DISTINCT filler, so
+#: §5, quoted: *"a distilled point + its source raw chunks + its turns all
+#: restating the same fact"* — the pass-2 leg. The chunks carry the anchored
+#: quote plus DISTINCT filler, so
 #: they are not same-session duplicates of each other: without provenance each
 #: stands alone, with provenance all are the anchor's own source (<= 1 kept).
 _OWN_SOURCE_CHUNKS = 8
@@ -309,8 +310,10 @@ def build_c2_pool() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     index = 0
 
     # 1. The #2978 class: content-less operators, interleaved with the flood at
-    #    the top of the pool. 24 of the first 40 positions -> the measured
-    #    "61.3% of admitted slots" composition under the pre-fix predicate.
+    #    the top of the pool. 24 of the first 40 positions = 60.0%, this
+    #    fixture's own share (see `_CONTENTLESS_HITS`) — it reproduces the
+    #    CLASS #2978 measured at 61.3% (103 of 168 admitted slots EMPTY), not
+    #    that percentage.
     for i in range(_CONTENTLESS_HITS):
         pool.append(_operator(f"op{i:02d}", "IMPL" if i % 2 else "NAND", index=index))
         index += 1

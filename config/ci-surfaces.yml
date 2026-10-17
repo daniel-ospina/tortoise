@@ -3884,12 +3884,14 @@ surfaces:
   # the pre-#2978 baseline shape, the post-#2978 reallocation, the assembly's
   # 1 + max_verbatim bound, and the duplicate-free control. Registered HERE
   # because the instrument is `tools/longmem_eval/slice_a_flood_bound.py` (a
-  # SOURCE_PATTERNS entry of this surface), and DUAL with `sdk` below because
-  # the functions it pins live in `tortoise/retrieval.py` (also this surface's
-  # own — `evidence_assembly` is on the eval arm path, `assemble_context` is
-  # the shared product window). Without this arm a slice-tool-only change
-  # would select no surface and the receipt's reproducibility gate would not
-  # run on the change that can move it.
+  # SOURCE_PATTERNS entry of this surface), and DUAL with the `sdk` surface
+  # ABOVE because the functions it pins live in `tortoise/retrieval.py`
+  # (registered there: `evidence_assembly` is on the eval arm path,
+  # `assemble_context` is the shared product window). A slice-tool-only change
+  # DOES select a surface — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of
+  # this one — so what this row buys is the guard's presence in that selection:
+  # without it the receipt's reproducibility gate does not run on the change
+  # that can move the receipt.
   - longmem_eval/test_slice_a_flood_bound.py
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
