@@ -95,6 +95,14 @@ def test_list_covers_all_three_sources_with_their_defaults(ctx):
     # The raw projection rides along — the tool must not hide state behind its
     # own interpretation of it.
     assert "onboarding" in out
+    # The two GitHub sources must expose the SAME key set: after this migration
+    # `list` is the only MCP reader of index state (`tortoise_onboarding_state`
+    # and `tortoise_onboarding_github_status` are REMOVED targets), so a caller
+    # iterating `sources` must not have to know which one carries it.
+    issues = set(out["sources"]["github_issues"])
+    documents = set(out["sources"]["github_documents"])
+    assert issues == documents, (issues ^ documents)
+    assert {"indexed", "indexed_at"} <= issues, issues
 
 
 def test_list_projects_each_github_source_from_its_own_intent_flag(ctx):
@@ -588,6 +596,7 @@ def test_refusals_are_logged_too(ctx):
         ("agent_sessions", True, "disable", "disabled"),
         ("agent_sessions", False, "disable", "already_off"),
         ("agent_sessions", False, "enable", "enabled"),
+        ("agent_sessions", True, "enable", "already_on"),
     ],
 )
 def test_every_state_change_payload_carries_the_same_fields(

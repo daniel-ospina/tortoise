@@ -4447,23 +4447,37 @@ def _sources_view() -> dict:
     if "error" in state:
         return state
     connected = _known_bool(state, "github_connected")
-    indexed = _known_bool(state, "github_docs_indexed")
-    indexed_raw = _state_get(state, "github_docs_indexed_at")
-    indexed_at = None if indexed_raw is _UNAVAILABLE else indexed_raw
+
+    def _index_state(prefix: str) -> dict:
+        """`indexed` / `indexed_at` for ONE GitHub source.
+
+        The two GitHub sources share a key set on purpose: a caller iterating
+        `sources` must not need to know which of them happens to carry the
+        index state, and after this migration `list` is the ONLY MCP reader of
+        it (`tortoise_onboarding_state` / `tortoise_onboarding_github_status`
+        are REMOVED targets). The issues walk stamps `github_indexed`, the docs
+        walk `github_docs_indexed`.
+        """
+        raw = _state_get(state, f"{prefix}_at")
+        return {
+            "indexed": _known_bool(state, prefix),
+            "indexed_at": None if raw is _UNAVAILABLE else raw,
+        }
+
     return {
         "sources": {
             "github_issues": {
                 **_SOURCE_ROSTER["github_issues"],
                 "enabled": _flag_on(state, "issues_enabled"),
                 "connection_connected": connected,
+                **_index_state("github_indexed"),
                 "scope": "source",
             },
             "github_documents": {
                 **_SOURCE_ROSTER["github_documents"],
                 "enabled": _flag_on(state, "docs_enabled"),
                 "connection_connected": connected,
-                "indexed": indexed,
-                "indexed_at": indexed_at,
+                **_index_state("github_docs_indexed"),
                 "scope": "source",
             },
             "agent_sessions": {
