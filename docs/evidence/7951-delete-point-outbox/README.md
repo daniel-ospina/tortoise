@@ -56,7 +56,7 @@ advisories and the `#2943` snapshot-dir note, which the headline block omits). E
 |---|---|---|
 | `order: ['journal-EntityMutated-delete', 'cache-DETACH-DELETE']` | §17.1's ordering | on `origin/main` the order is reversed (`cache` first) — the door deleted the node and then appended the record |
 | `REFUSAL VERDICT` (append fails ⇒ node survives, no record) | §17.1's resurrection window | pre-fix, a failed append left the node **destroyed and unrecorded**, so `rebuild_all` re-folded the `PointAdded` line and the Point came back live |
-| `COMMIT VERDICT` | §17.1's crash window | with the `DETACH DELETE` forced to fail after the append, the record stands and a later `rebuild_all` removes the node — the cache merely lagged |
+| `COMMIT VERDICT` | §17.1's crash window | with the `DETACH DELETE` forced to fail after the append, the record stands and a later `rebuild_all` removes the node — the cache is `extra_in_cache` (a node the record no longer has, `tortoise/reconciliation.py`'s second-writer class), NOT a lag (`missing_in_cache` is the lag direction) |
 | `Point live after rebuild_all: 0` (happy path) | `derived = replay(journal)` | a delete whose record is missing is undone by the replay; the line shows the deletion is durable |
 
 ## Tests (the gates those lines are drawn from)

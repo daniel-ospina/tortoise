@@ -70,7 +70,9 @@ append refuses the delete instead of performing an unrecorded destruction.**
 ## 3. Ordering contract (unchanged, applied)
 
 **Journal first, then project** — module top of `tortoise/sdk.py`, argued from the two crash windows:
-die between append and cache ⇒ the cache only **lags**, and replay heals it; die between cache and
+die between append and cache ⇒ the cache is **`extra_in_cache`** (it holds a node the record no
+longer has — the §17.1 second-writer signature, *not* a lag, which is `missing_in_cache`) and
+replay resolves it destructively; die between cache and
 append ⇒ the cache is **ahead of truth with no repair path**. On a delete the second window's harm is
 resurrection, which is strictly worse than loss and is why the delete door is worth a unit of its own.
 

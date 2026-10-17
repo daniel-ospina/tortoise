@@ -10493,8 +10493,9 @@ class TortoiseSDK:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(
                 id, getattr(proj, "graph_name", None),
-                "the journal append failed, so the DETACH DELETE was NOT "
-                "issued and nothing was destroyed",
+                "the journal append did not confirm, so the DETACH DELETE "
+                "was NOT issued; if the record did land, a replay will "
+                "remove the Point",
                 operation="delete_point")
         # #7405: the hard delete rides the bounded write retry. A DETACH DELETE
         # by an explicit id is idempotent — a re-issue after a non-landing ABORT
@@ -10502,11 +10503,34 @@ class TortoiseSDK:
         # MUST be proved not-landed, which is exactly what
         # `retryable_aborted_write` admits (a bare DELETE never rides
         # `retryable_transient`).
-        self._graph_write_with_retry(
-            lambda: proj.g.query(
-                "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id}),
-            what="delete_point DETACH DELETE",
-        )
+        #
+        # #7951 review P1 — THE COMMITTED ARM IS CALLER-FACING, not just the
+        # crash window the comment above describes. The record is already on
+        # disk when this statement runs, so a write that fails here (retry
+        # exhausted, or any engine error) leaves the TRUTH saying destroyed
+        # while the cache still serves the Point and the caller is told the
+        # delete did not happen. That is `WriteNotLandedError`'s
+        # ``record_committed=True`` arm, and it exists precisely so a caller
+        # does not re-issue blindly (a blind retry appends a SECOND delete
+        # record for one intent). Re-raise the engine error only when no record
+        # was committed.
+        try:
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id}),
+                what="delete_point DETACH DELETE",
+            )
+        except Exception as exc:
+            if _delete_committed:
+                from .exceptions import WriteNotLandedError
+                raise WriteNotLandedError(
+                    id, getattr(proj, "graph_name", None),
+                    f"the cache delete failed AFTER the destruction record was "
+                    f"committed ({type(exc).__name__}: {exc})",
+                    operation="delete_point", record_committed=True,
+                    record="EntityMutated op=delete",
+                ) from exc
+            raise
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
         # `PointRetracted` (id=) call emitted BOTH stores, and its fold has

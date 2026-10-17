@@ -476,10 +476,12 @@ class WriteNotLandedError(RuntimeError):
 
     def __init__(self, point_id: str, graph: str | None = None,
                  detail: str = "", *, record_committed: bool = False,
-                 operation: str = "create_point") -> None:
+                 operation: str = "create_point",
+                 record: str = "PointAdded") -> None:
         self.point_id = point_id
         self.graph = graph
         self.operation = operation
+        self.record = record
         self.detail = detail
         self.record_committed = record_committed
         _where = f" on graph {graph!r}" if graph else ""
@@ -490,11 +492,11 @@ class WriteNotLandedError(RuntimeError):
                 "the read-back)"
             )
             _contract = (
-                "The PointAdded record WAS appended before the cache write "
-                "(the #7951 §17.1 outbox ordering), so the TRUTH holds this "
-                "write and a replay will materialise it — do NOT re-issue "
-                "blindly (that would append a second record); treat the "
-                "write as COMMITTED and let the projection catch up."
+                f"The {self.record} record WAS appended before the cache "
+                "write (the #7951 §17.1 outbox ordering), so the TRUTH holds "
+                "this write and a replay will materialise it — do NOT "
+                "re-issue blindly (that would append a second record); treat "
+                "the write as COMMITTED and let the projection catch up."
             )
         else:
             _cause = (

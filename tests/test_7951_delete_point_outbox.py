@@ -163,6 +163,9 @@ def test_a_failed_append_does_not_delete_the_point(env, monkeypatch):
 
     monkeypatch.setattr(log, "append", _boom)
 
+    journal = Path(events) / "events.jsonl"
+    size_before = journal.stat().st_size if journal.exists() else 0
+
     with pytest.raises(WriteNotLandedError) as ei:
         sdk.delete_point(pid)
 
@@ -175,8 +178,12 @@ def test_a_failed_append_does_not_delete_the_point(env, monkeypatch):
     assert _live(proj, pid) is True, (
         "the Point was destroyed although the destruction was never recorded "
         "— the next replay would RESURRECT it (§17.1 apply-first window)")
-    assert _mutations(events, pid) == [], (
-        "the record is supposed to have FAILED to append")
+    # POSITIVE evidence, not the tautology `_mutations(...) == []` (which the
+    # spy's own raise guarantees, so it could never fail — review P2). The
+    # bytes on disk are what a caller's replay actually folds.
+    assert (journal.stat().st_size if journal.exists() else 0) == size_before, (
+        "the journal grew although the append raised — a partial record "
+        "would be folded by the next rebuild")
 
 
 # ── T3: a committed record whose cache delete did not land ────────────────
@@ -185,8 +192,10 @@ def test_a_committed_delete_record_is_healed_by_replay(env, monkeypatch):
     """The residual window is the replay-healable one, not a resurrect.
 
     Force the `DETACH DELETE` to fail after the record committed: TRUTH says
-    the Point is deleted and the cache merely LAGS. `rebuild_all` must then
-    remove the node — healing the lag. Pre-fix the same crash left NO record,
+    the Point is deleted and the cache is `extra_in_cache` (it holds a node the
+    record no longer has — `tortoise/reconciliation.py`'s chokepoint class, NOT
+    a lag; a lag is `missing_in_cache`). `rebuild_all` must then
+    remove the node. Pre-fix the same crash left NO record,
     so the replay re-folded the `PointAdded` line and the Point stayed live
     forever; that is the assertion this test makes fail on the old ordering.
 
@@ -206,8 +215,21 @@ def test_a_committed_delete_record_is_healed_by_replay(env, monkeypatch):
 
     monkeypatch.setattr(type(proj.g), "query", failing_delete)
 
-    with pytest.raises(RuntimeError):
+    from tortoise.exceptions import WriteNotLandedError
+
+    with pytest.raises(WriteNotLandedError) as ei:
         sdk.delete_point(pid)
+
+    # #7951 review P1 — the COMMITTED arm is caller-facing. The record is on
+    # disk before the cache write, so this failure means "destroyed in the
+    # TRUTH, still served by the cache", never "the delete did not happen".
+    # A bare engine error here would invite the caller to re-issue, which
+    # would append a SECOND delete record for one intent.
+    assert ei.value.record_committed is True, (
+        "the caller must be told the destruction is committed — the record "
+        "was appended BEFORE the cache delete")
+    assert ei.value.operation == "delete_point"
+    assert ei.value.record == "EntityMutated op=delete"
 
     monkeypatch.setattr(type(proj.g), "query", real_query)
 
@@ -287,3 +309,30 @@ def test_the_graph_event_row_is_still_written_after_the_delete(env):
         "the :GraphEvent subscriber row vanished — the ordering fix must not "
         f"change what subscribers see: {[e['type'] for e in polled]!r}")
     assert _live(proj, pid) is False, "premise: the delete landed"
+
+
+# ── T7: the journal-LESS arm (the default embedded/dev shape) ─────────────
+
+def test_a_journal_less_sdk_still_deletes(tmp_path):
+    """`None` must not be read as a refusal.
+
+    `_journal_entity_mutation` returns ``None`` when there is nothing to log or
+    no journal is configured. The door's gate is ``is False`` — an identity
+    test, not truthiness — because a journal-less SDK is the DEFAULT embedded
+    shape: a truthiness bug would refuse every delete on every such SDK, which
+    no other test in this file covers (verify P2).
+
+    MUTATION: change `is False` to `if not _delete_committed:` and this fails
+    with a refusal instead of the True return.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "no-journal.db"))
+    try:
+        pid = sdk.create_point("observation", "deleted with no journal")["id"]
+        assert sdk.delete_point(pid) is True, (
+            "a journal-less SDK must delete, not refuse — there is no record "
+            "to fail to commit")
+        assert _live(sdk._get_proj(), pid) is False
+    finally:
+        sdk.close()
