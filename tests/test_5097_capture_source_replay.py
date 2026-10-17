@@ -50,6 +50,18 @@ silently. Also outside this slice: the ``references`` (Source→Event) and
 all (the "no carrier for edges" class the unjournaled-mutation suite cites and
 does not close).
 
+The carrier is also a NO-OP for the two properties this writer must neither
+move nor destroy: it carries the node's own ``validFrom``/``is_episodic`` (so
+the fold's hash-diff ``s.validFrom = $vf`` cannot REMOVE a window) and its
+record declares itself a STUB COMPLETION (``_stub_completion``), which
+suppresses the ON CREATE creator-only defaults (``id``/``version``/
+``externalId``) and gates the ON MATCH ``version + 1`` — the live write never
+touches ``version`` on either arm, so neither may a replay. That discriminator
+is server-managed: it is refused by ``create_source``'s ``**props`` guard, by
+``_sanitize_props`` and by the MCP ``_SERVER_MANAGED_PROPS`` boundary, so the
+capture writer is its only producer (a caller-settable one forged capture
+provenance AND stripped a tenant node's identity props).
+
 Offline: ``TORTOISE_SESSION_LLM_MOCK=1`` installs the deterministic MockModel
 extractor — zero network, zero provider spend.
 """
@@ -279,19 +291,24 @@ def test_a_second_materialization_with_a_changed_transcript_moves_updatedAt(
 
 
 def test_the_carrier_does_not_clear_a_version_window_the_node_had(tmp_path):
-    """Review P2: the carrier omitted `validFrom`, and the fold CLEARS on null.
+    """Review P2 + review P1: the carrier must not CLEAR or ADVANCE a version.
 
-    `_upsert_source`'s hash-diff arm writes `s.validFrom = $vf` — deliberately
-    NOT `coalesce($vf, s.validFrom)`, so a record carrying no window REMOVES the
-    property. A capture after a `create_source` on the same url therefore
-    cleared a RECORDED window that a replay restored before this carrier
-    existed: the carrier made the recovery path worse for a `docs/
-    durability-posture.md` RECORDED field. The fix carries the node's own value.
+    Two defects, one state (a session `:Source` that already carried a version
+    window, i.e. one a caller created with `create_source` before capturing):
 
-    ⚠️ Read this as a GUARD on the carrier, not a demonstration of it: it PASSES
-    on the pre-fix tree (no carrier ⇒ nothing to clear) and FAILS on a carrier
-    that omits `validFrom` — which is the state a revert of that one key
-    reproduces.
+    * `_upsert_source`'s hash-diff arm writes `s.validFrom = $vf` — deliberately
+      NOT `coalesce($vf, s.validFrom)`, so a record carrying no window REMOVES
+      the property. The carrier therefore CLEARED a RECORDED window
+      (`docs/durability-posture.md`) that a replay restored before it existed.
+    * the same hash-diff arm also ran `s.version = s.version + 1`, while the
+      capture writer's live raw MERGE never touches `s.version` — so a replay
+      ADVANCED the ordinal (live 1, rebuilt 2), the exact class the ON CREATE
+      suppression exists to stop, one arm over.
+
+    The fix carries the node's own `validFrom` and gates the ON MATCH bump on
+    `$stub_completion`, so the fold is a no-op on both fields. This compares the
+    WHOLE property bag (`_bag_diff`), because the earlier form asserted two
+    chosen keys and stepped over the `version` divergence green.
     """
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
@@ -302,11 +319,15 @@ def test_the_carrier_does_not_clear_a_version_window_the_node_had(tmp_path):
         proj = sdk._get_proj()
         before = _source_props(proj, url)
         assert before["validFrom"], "precondition: create_source minted a window"
+        assert before.get("version") == 1, (
+            "precondition: create_source mints the first version ordinal")
 
         sdk._materialize_session_source(SESSION_ID, None, SECOND_NOW, CONV)
         live = _source_props(proj, url)
         assert live["validFrom"] == before["validFrom"], (
             "the capture writer must not move the version window")
+        assert live.get("version") == before.get("version"), (
+            "the capture writer must not advance the version ordinal")
 
         proj.rebuild(EventLog(log_path), confirm_destructive=True)
         after = _source_props(proj, url)
@@ -316,6 +337,13 @@ def test_the_carrier_does_not_clear_a_version_window_the_node_had(tmp_path):
             f"{after.get('validFrom')!r})")
         assert after.get("title") == before["title"], (
             "the carrier's explicit null title must PRESERVE the node's title")
+        # WHOLE bag, minus the ONE declared residual (`ingestedAt`, see the
+        # module docstring): a replay that advances `version` is a live != replay
+        # divergence on a declared property, not a detail.
+        diverged = _bag_diff(live, after)
+        assert not diverged, (
+            "a replay diverged the versioned session :Source from the live node: "
+            f"{diverged}")
     finally:
         sdk.close()
 
@@ -331,7 +359,11 @@ def test_the_capture_props_stay_unsettable_through_create_source(tmp_path):
     They now live in `_SOURCE_CAPTURE_REPLAY_PROPS`, admitted only for a record
     that declares itself a capture completion.
 
-    Fails on the pre-fix head: all three land on the node.
+    Non-vacuity on `main`: the camelCase half passes there too (those keys were
+    never in `_SOURCE_EXTRA_PROPS` on main — the intermediate revision of THIS
+    PR widened them); what main accepts and this suite catches in that half is
+    `update_entity(sessionId=…)`, which `_SOURCE_SERVER_MANAGED_PROPS` now
+    refuses.
     """
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"),
                       event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
@@ -352,5 +384,57 @@ def test_the_capture_props_stay_unsettable_through_create_source(tmp_path):
         for key in ("sessionId", "capturedAt", "eventId"):
             with pytest.raises(ValueError, match="server-managed"):
                 sdk.update_entity(url, **{key: "forged"})
+    finally:
+        sdk.close()
+
+
+def test_the_stub_completion_discriminator_is_not_caller_settable(tmp_path):
+    """Review P1: the widening's DISCRIMINATOR rode in through `**props`.
+
+    `_upsert_source` reads `_stub_completion` as a parameter, and it selects
+    write behaviour twice: it suppresses the ON CREATE creator-only defaults
+    (`id`/`version`/`externalId`) and it admits `_SOURCE_CAPTURE_REPLAY_PROPS`.
+    `create_source` builds `ev = {..., **props}` and bypasses
+    `_sanitize_props` (`_skip_sanitize=True`), so an unlisted key reached it and
+    one call could forge capture provenance AND strip a tenant node's identity
+    props — then ride the journal, so a rebuild restored both.
+
+    Fails on the review head in three places: `create_source` ACCEPTED the key
+    (and persisted all three props), the generic props surfaces accepted it, and
+    the MCP boundary forwarded it. The final assertion pins the consequence:
+    a caller-created `:Source` still carries the creator-only defaults, so the
+    suppression is unreachable from the tenant surface.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"),
+                      event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
+    try:
+        url = "session:forged-5097"
+        forged = dict(sessionId="forged", capturedAt=SECOND_NOW,
+                      eventId="forged-event")
+        with pytest.raises(ValueError, match="_stub_completion"):
+            sdk.create_source(url, "agentSession", contentHash="h-1",
+                              _stub_completion=True, **forged)
+        # The fail-closed backstop every OTHER props surface passes through.
+        with pytest.raises(ValueError, match="_stub_completion"):
+            sdk.create_point("statement", "a statement",
+                             _stub_completion=True)
+        # Nothing was written by the refused calls, and a legitimate
+        # `create_source` still gets the creator-only defaults — i.e. the
+        # ON CREATE suppression is not reachable from the caller surface.
+        assert not sdk._get_proj().g.query(
+            "MATCH (s:Source {url: $url}) RETURN properties(s)",
+            params={"url": url}).result_set, (
+            "the refused call still wrote a :Source")
+        clean = "session:caller-5097-clean"
+        sdk.create_source(clean, "agentSession", contentHash="h-1")
+        props = _source_props(sdk._get_proj(), clean)
+        assert props.get("sessionId") is None, (
+            "a caller-created :Source gained the capture writer's provenance")
+        assert props.get("id") == clean, (
+            "a caller-created :Source must keep its `id` (the ON CREATE arm's "
+            "creator-only default) — a caller-settable `_stub_completion` "
+            "suppressed it")
+        assert props.get("version") == 1
+        assert "externalId" in props
     finally:
         sdk.close()

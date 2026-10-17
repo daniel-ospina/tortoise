@@ -3365,6 +3365,22 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "'_stub' is a server-managed event-stub discriminator and cannot "
             "be set via props."
         )
+    # Lane L5 (#5097 review P1): the SIBLING discriminator, and the same class
+    # of hole. `_stub_completion` is what `_upsert_source` reads to suppress the
+    # ON CREATE creator-only defaults (`id`/`version`/`externalId`) and to admit
+    # `_SOURCE_CAPTURE_REPLAY_PROPS` to the `:Source` passthrough. A caller that
+    # can set it can therefore forge the capture writer's provenance
+    # (`sessionId`/`capturedAt`/`eventId`) AND strip a node's identity props —
+    # and the key rides the journal, so a rebuild restores the forgery.
+    # `create_source` refuses it in its own `**props` guard (it bypasses this
+    # intake); this is the fail-closed backstop for every other props surface
+    # (`create_point`/`create_entity`/`update_*`). Hard-reject, never strip,
+    # matching `_stub` above: there is no legitimate caller intent.
+    if "_stub_completion" in props:
+        raise ValueError(
+            "'_stub_completion' is a server-managed capture-completion "
+            "discriminator and cannot be set via props."
+        )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
     # `mitigate_operator`, which validate it and run the authored-assertion
@@ -29405,6 +29421,31 @@ class TortoiseSDK:
                     f"props — the merge-run token is minted by the server "
                     f"(#5196)."
                 )
+        # Lane L5 (#5097 review P1): `_stub_completion` is the CAPTURE-
+        # COMPLETION DISCRIMINATOR. `_upsert_source` reads it as a PARAMETER
+        # (`$stub_completion`) and it SELECTS WRITE BEHAVIOUR twice: it
+        # suppresses the ON CREATE arm's creator-only defaults
+        # (`id`/`version`/`externalId`) and it widens the passthrough to
+        # `_SOURCE_CAPTURE_REPLAY_PROPS`. Because this method builds `ev` as
+        # `{..., **props}` and `_skip_sanitize=True`s the projection, an
+        # unlisted key rode straight through — measured on the review head:
+        # `create_source("session:x", "agentSession",
+        # _stub_completion=True, sessionId="forged", capturedAt="…",
+        # eventId="forged")` (a) PERSISTED all three provenance props the
+        # record's own comment says are denied here (#3998), (b) created the
+        # tenant's node with NO `id`/`version`/`externalId` — defeating this
+        # method's own `id` reject — and (c) JOURNALLED the forged key + props,
+        # so every rebuild restored the forgery. Same class as `_stub`
+        # (#7936), `__runId` (#5196) and `contains_session` (#3947): a payload
+        # key that decides replay behaviour is server-managed, not a prop. The
+        # ONE producer is `_materialize_session_source`'s own `_emit_event`
+        # call, which never re-enters this method.
+        if "_stub_completion" in props:
+            raise ValueError(
+                "'_stub_completion' is a server-managed capture-completion "
+                "discriminator and cannot be set via props — it is set only "
+                "by the session-capture writer (#5097)."
+            )
         # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
         # is the CLOSED :Source property surface in `projection/entities.py`
         # (`_SOURCE_EXTRA_PROPS`), which is the only form that can hold — a

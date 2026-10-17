@@ -1353,7 +1353,13 @@ class _EntityHandlers:
     # ⚠️ The journal is trusted: a hand-written record carrying
     # `_stub_completion` can still set them. That is the same boundary every
     # record-carried fact has (a forged `contentHash` replays too); the door this
-    # closes is the PUBLIC caller surface, not the journal.
+    # closes is the PUBLIC caller surface, not the journal. The DISCRIMINATOR is
+    # itself refused on every caller surface — `sdk.create_source`'s `**props`
+    # guard, `sdk._sanitize_props` (the direct-SDK backstop) and
+    # `mcp_server._SERVER_MANAGED_PROPS` (#5097 review P1: it rode in through
+    # `create_source(**props)` and made this whole set caller-writable again,
+    # while also suppressing the ON CREATE identity props) — so the capture
+    # writer is its only legitimate producer.
     _SOURCE_CAPTURE_REPLAY_PROPS: frozenset = frozenset({
         "sessionId", "capturedAt", "eventId",
     })
@@ -5113,7 +5119,20 @@ class _EntityHandlers:
             "           s.title = CASE WHEN $hash IS NULL THEN s.title "
             "                   WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                   THEN coalesce($title, s.title) ELSE s.title END, "
-            "           s.version = CASE WHEN $hash IS NULL THEN s.version "
+            # Lane L5 (#5097 review P1): the bump is GATED ON THE SAME
+            # DISCRIMINATOR as the ON CREATE suppression above. The capture
+            # writer's live raw MERGE never touches `s.version`, so a replayed
+            # capture record must not advance the ordinal either — on EITHER
+            # arm. Ungated, a session `:Source` that already carried a version
+            # (e.g. one a caller created with `create_source` before capturing)
+            # sat at `version = 1` live while `rebuild()`/`rebuild_all()` folded
+            # this record's differing `contentHash` through the hash-diff arm to
+            # `version = 2` — the same ordinal this PR's ON CREATE suppression
+            # exists to avoid restarting, just one arm over. With the ordinary
+            # M2 stub the bump is invisible (`null + 1` stays absent), which is
+            # why only a whole-bag comparison over a versioned node sees it.
+            "           s.version = CASE WHEN $stub_completion THEN s.version "
+            "                    WHEN $hash IS NULL THEN s.version "
             "                    WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                    THEN s.version + 1 ELSE s.version END, "
             # #5024: same rule as `ingestedAt` above — the recorded instant,

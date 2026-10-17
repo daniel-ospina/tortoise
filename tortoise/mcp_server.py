@@ -1824,7 +1824,20 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # vanished on rebuild and live != replay. Refused here BEFORE the write is
     # attempted, with `sdk._sanitize_props` as the fail-closed backstop for the
     # direct SDK route (the same two-layer shape as `__runId`/`baseline_*`).
-    "_stub"})
+    "_stub",
+    # Lane L5 (#5097 review P1): the CAPTURE-COMPLETION discriminator is the
+    # same shape one lane over. `sdk._upsert_source` reads it as a PARAMETER:
+    # it suppresses the ON CREATE arm's creator-only defaults
+    # (`id`/`version`/`externalId`) and widens the `:Source` passthrough to
+    # `_SOURCE_CAPTURE_REPLAY_PROPS` (the capture writer's
+    # `sessionId`/`capturedAt`/`eventId`). A tenant able to write it can forge
+    # capture provenance AND strip a node's identity props, and the key rides
+    # the journal so a rebuild restores the forgery (measured on the review
+    # head through `tortoise_create_source(props={...})`). Refused here BEFORE
+    # the write is attempted; `sdk.create_source` refuses it in its own
+    # `**props` guard and `sdk._sanitize_props` is the direct-SDK backstop.
+    "_stub_completion",
+})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
