@@ -1,11 +1,13 @@
 // harnesses.test.js — run with node --test (Node 20+, zero deps: pure module,
 // no jsdom/React needed) (#1998 W2 — universal command, surface 5).
 import { test } from 'node:test'
+import * as HARNESS_MODULE from './harnesses.js'
+import { wizardPromptText } from './wizardPrompts.js'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   HARNESS_ORDER, HARNESS_NAMES, HARNESS_SELF_INSTALL, HARNESS_TEACH_HUMAN,
-  UNIVERSAL_COMMAND, UNIVERSAL_COMMAND_HARNESSES,
+  CODEX_DESKTOP_COMMAND,
   HARNESS_INTRO, HARNESS_INSTALL, HARNESS_STEPS, HARNESS_SKILLS, HARNESS_PERSIST,
   HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS,
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
@@ -64,12 +66,19 @@ test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, in
     'OAuth harnesses are teach-human')
 })
 
-test('UNIVERSAL_COMMAND covers all 7 harnesses (one command per harness)', () => {
-  assert.deepEqual(UNIVERSAL_COMMAND_HARNESSES, HARNESS_ORDER)
-  for (const h of HARNESS_ORDER) {
-    assert.equal(typeof UNIVERSAL_COMMAND[h], 'function', `${h} universal command`)
-    const cmd = UNIVERSAL_COMMAND[h](KEY)
-    assert.ok(cmd && cmd.length > 0, `${h} command non-empty`)
+test('#3430: the ONE rendered config block survives; the unrendered per-harness blocks are gone', () => {
+  // #3430: `UNIVERSAL_COMMAND` carried one block per harness, but only the Codex
+  // Desktop leaf was ever rendered — `main.jsx` (#2827/#3232) calls it "the ONE
+  // config-writing leaf that stays single-block". The other seven were copy no
+  // user saw, while `DE2E-5` asserted against them: the suite could keep passing
+  // while the product said something else. The constant is now that one block.
+  assert.equal(typeof CODEX_DESKTOP_COMMAND, 'function')
+  const cmd = CODEX_DESKTOP_COMMAND(KEY)
+  assert.ok(cmd && cmd.length > 0, 'codexDesktop command non-empty')
+  // Re-adding a per-harness block is a DECISION (render it in main.jsx first),
+  // not a tidy-up — so pin the deletion rather than a leaf count.
+  for (const gone of ['UNIVERSAL_COMMAND', 'UNIVERSAL_COMMAND_HARNESSES']) {
+    assert.equal(HARNESS_MODULE[gone], undefined, `${gone} must stay deleted (#3430)`)
   }
 })
 
@@ -172,14 +181,11 @@ test('#2936: analyticsHarnessOf maps the UI-only leaf, and refuses the unattribu
 })
 
 test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/skills, no .codex/skills', () => {
-  const cli = UNIVERSAL_COMMAND.codex(KEY)
-  assert.match(cli, /codex mcp add tortoise --url/, 'codex CLI: codex mcp add')
-  assert.match(cli, /--bearer-token-env-var TORTOISE_API_KEY/, 'codex CLI: env-var bearer')
-  // the CLI copy surfaces the approval reality (#2330) and points Desktop
-  // users at the no-terminal variant
-  assert.match(cli, /approval/, 'codex CLI states first-call approval reality')
-  assert.match(cli, /Codex Desktop/, 'codex CLI points Desktop users at the variant')
-  const desktop = UNIVERSAL_COMMAND.codexDesktop(KEY)
+  // #3430: the Codex CLI block that used to sit beside this one was rendered
+  // nowhere (an agent-driven harness gets a prompt, not a paste-able block —
+  // #3232), so only the Desktop block remains. The CLI mechanics are the AGENT's
+  // job now, which is why nothing here names `codex mcp add`.
+  const desktop = CODEX_DESKTOP_COMMAND(KEY)
   assert.ok(desktop && desktop.length > 0, 'codexDesktop command non-empty')
   assert.match(desktop, /\[mcp_servers\.tortoise\]/, 'desktop: config.toml mcp_servers block')
   assert.match(desktop, /bearer_token_env_var = "TORTOISE_API_KEY"/, 'desktop: env-var-name bearer')
@@ -190,84 +196,52 @@ test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/
   assert.match(desktop, /--harness codex/, 'desktop: skill installer deferral command')
   // .codex/skills may appear ONLY as the disambiguation "(not .codex/skills)"
   // — never as a target path or install instruction.
-  for (const t of [desktop, cli]) {
-    if (t.includes('.codex/skills')) {
-      assert.ok(t.includes('not .codex/skills'), '.codex/skills only as negated disambiguation')
-    }
+  if (desktop.includes('.codex/skills')) {
+    assert.ok(desktop.includes('not .codex/skills'), '.codex/skills only as negated disambiguation')
   }
   assert.equal(HARNESS_COPY_LABEL.codexDesktop, 'Copy instructions')
   assert.ok(HARNESS_INTRO.codexDesktop && HARNESS_INTRO.codexDesktop.includes('~/.codex/config.toml'), 'desktop intro names the config file')
 })
 
-test('DE2E-5: 4 self-install harnesses carry a config-write command + skill install + tortoise_health verify', () => {
-  const claude = UNIVERSAL_COMMAND.claude(KEY)
-  assert.match(claude, /claude mcp add --transport http tortoise/, 'claude: claude mcp add --transport http')
-  assert.match(claude, /https:\/\/api\.premiselabs\.co\/mcp\//, 'claude: MCP url')
-  const codex = UNIVERSAL_COMMAND.codex(KEY)
-  assert.match(codex, /codex mcp add tortoise --url/, 'codex: codex mcp add')
-  assert.match(codex, /--bearer-token-env-var TORTOISE_API_KEY/, 'codex: env-var bearer')
-  const cursor = UNIVERSAL_COMMAND.cursor()
-  assert.match(cursor, /\.cursor\/mcp\.json/, 'cursor: config file path')
-  assert.match(cursor, /\$\{env:TORTOISE_API_KEY\}/, 'cursor: env: indirection')
-  const pi = UNIVERSAL_COMMAND.pi(KEY)
-  assert.match(pi, /\.mcp\.json/, 'pi: config file path')
-  assert.match(pi, /\$\{TORTOISE_API_KEY\}/, 'pi: plain ${VAR} indirection')
+test('DE2E-5: the RENDERED self-install prompts carry the MCP URL, the skill install and the verify', () => {
+  // #3430: retargeted off the unrendered `UNIVERSAL_COMMAND.*` mechanics copy
+  // onto the surfaces `main.jsx` actually renders. The mechanics (which `mcp add`
+  // subcommand, which config file) became the AGENT's job at #3232, so pinning
+  // them pinned a promise the product no longer makes. The three facts a human IS
+  // promised are still asserted — on the rendered text.
   for (const h of HARNESS_SELF_INSTALL) {
-    const cmd = UNIVERSAL_COMMAND[h](KEY)
-    assert.match(cmd, /install-tortoise-skills\.sh/, `${h}: skill install line`)
-    assert.match(cmd, /tortoise_health/, `${h}: tortoise_health verify`)
+    const text = [wizardPromptText(h, 1, KEY, 'included'), wizardPromptText(h, 2, KEY, 'included')]
+      .filter(Boolean).join('\n')
+    assert.ok(text.length > 0, `${h}: renders a connect prompt`)
+    assert.match(text, /https:\/\/api\.premiselabs\.co\/mcp\/?/, `${h}: rendered prompt names the MCP URL`)
+    assert.match(text, /install-tortoise-skills\.sh/, `${h}: rendered prompt names the skill installer`)
+    assert.match(text, /tortoise_health/, `${h}: rendered prompt names the verify tool`)
   }
-  // Post-#593 (auto-complete on first agent write): the 3 key-config
-  // harnesses still hand off with the harness-connected checkpoint phrase;
-  // Pi's copy dropped the checkpoint ceremony (onboarding auto-completes on
-  // the first graph write) — it must end on the eager-connect verify instead.
-  for (const h of ['claude', 'codex', 'cursor']) {
-    const cmd = UNIVERSAL_COMMAND[h](KEY)
-    assert.match(cmd, /harness-connected/, `${h}: harness-connected checkpoint`)
-  }
-  assert.match(pi, /connected/, 'pi: connect verify sentence (no checkpoint ceremony)')
-  assert.ok(!pi.includes('harness-connected'), 'pi: checkpoint handoff copy removed (#593)')
 })
 
-test('DE2E-5: teach-human harnesses carry exact manual steps + verify handoff (Claude Desktop/Web)', () => {
-  // #2865: both Claude connector surfaces are key-less OAuth — no `Authorization`
-  // request header, no API key, and the canonical NO-slash connector URL that
-  // matches the server's RFC 8707 resource indicator (#2864).
-  const desktop = UNIVERSAL_COMMAND['claude-desktop'](KEY)
-  assert.match(desktop, /Connectors/, 'desktop: Connectors UI named')
-  assert.match(desktop, /Server URL/, 'desktop: server URL field')
-  assert.match(desktop, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'desktop: canonical connector URL (no slash)')
-  assert.match(desktop, /Authorize/, 'desktop: OAuth Authorize step')
-  assert.match(desktop, /tortoise_health/, 'desktop: agent verifies')
-  assert.ok(!desktop.includes('Authorization'), 'desktop: no Bearer recipe (that is the blocker)')
-  assert.match(desktop, /Leave Request headers empty/, 'desktop: the field is named only to say it stays empty')
-  assert.ok(!/beta/i.test(desktop), 'desktop: no beta caveat')
-  assert.ok(!desktop.includes(KEY), 'desktop: never embeds the key')
-  // #3428/#2937 (lane B3, review cycle 1 P2-3): the dashboard Continue click no
-  // longer writes the checkpoint (the human writer is deleted), so the copy must
-  // name the real writer instead of promising the click does it.
-  assert.match(desktop, /first successful write/, 'desktop: the real checkpoint writer is named')
-  assert.ok(!desktop.includes('harness-connected checkpoint'),
-    'desktop: the deleted human writer (#3428) must not be promised')
-  const web = UNIVERSAL_COMMAND['claude-web'](KEY)
-  assert.match(web, /Connectors/, 'web: connector steps')
-  assert.match(web, /Server URL/, 'web: server URL step')
-  assert.match(web, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'web: canonical connector URL (no slash)')
-  assert.match(web, /Authorize/, 'web: OAuth Authorize step')
-  assert.match(web, /tortoise_health/, 'web: agent verifies')
-  // #3428/#2937 (lane B3, review cycle 1 P2-3): retargeted off the deleted
-  // human writer — the copy now names the agent's first successful write.
-  assert.match(web, /first successful write/, 'web: the real checkpoint writer is named')
-  assert.ok(!web.includes('harness-connected checkpoint'),
-    'web: the deleted human writer (#3428) must not be promised')
-  assert.ok(!web.includes('Authorization'), 'web: no Bearer recipe')
-  assert.ok(!web.includes(KEY), 'web: never embeds the key')
-  // #2865: the Continue label tells the truth on a manual connector surface.
-  assert.equal(HARNESS_CONTINUE_LABEL['claude-desktop'], "I've connected it — Continue →")
-  assert.equal(HARNESS_CONTINUE_LABEL['claude-web'], "I've connected it — Continue →")
+test('DE2E-5: teach-human harnesses are key-less OAuth on BOTH connector surfaces', () => {
+  // #3430: the `UNIVERSAL_COMMAND['claude-desktop'|'claude-web']` blocks were
+  // rendered nowhere. The LIVE recipe is JSX in `main.jsx` and IS pinned — by
+  // `wizardConnectTripwire.test.js`: the canonical `<code>{CANONICAL_MCP_URL}</code>`
+  // (:1576), `Authorize` (:1579), "Leave Request headers empty" (:1581), and the
+  // beta caveat's absence (:1591/:1598). What is asserted HERE is the data half:
+  // every connector surface is key-less OAuth and never carries a Bearer recipe.
+  for (const h of ['claude-desktop', 'claude-web']) {
+    const intro = HARNESS_INTRO[h]
+    assert.ok(intro && intro.length > 0, `${h}: rendered intro present`)
+    assert.ok(!/beta/i.test(intro), `${h}: intro carries no beta caveat`)
+    assert.ok(!intro.includes(KEY), `${h}: intro never embeds the key`)
+    assert.equal(HARNESS_CONTINUE_LABEL[h], "I've connected it — Continue →")
+  }
+  // The full recipe (Connectors UI, Authorize, org chooser) renders in JSX for
+  // BOTH surfaces; only the Desktop intro restates it in data.
+  const desktop = HARNESS_INTRO['claude-desktop']
+  assert.match(desktop, /Connectors/, 'desktop: intro names the Connectors UI')
+  assert.match(desktop, /Authorize/, 'desktop: intro names the OAuth Authorize step')
+  assert.match(desktop, /No API key is needed/, 'desktop: intro says no key is needed')
 })
 
-test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector steps + skills-as-prompt copy', () => {
+test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — steps + skills-as-prompt copy', () => {
   // connector steps (rendered above the snippet) name the Developer-mode
   // surface and the OAuth choice; the URL is the NO-slash form
   const steps = HARNESS_STEPS('chatgpt', KEY)
@@ -282,32 +256,12 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
   const prompt = HARNESS_INSTALL.chatgpt()
   assert.equal(prompt, HARNESS_INSTALL['claude-web'](), 'claude-web and chatgpt share the identical workflows body')
   assert.match(prompt, /Follow these workflows/, 'prompt: workflows marker')
-  // the self-contained UNIVERSAL_COMMAND block embeds the connector steps +
-  // prompt + a user-facing in-chat verify; the `chatgpt` copy must not name
-  // `tortoise_health`.
-  const cmd = UNIVERSAL_COMMAND.chatgpt()
-  assert.match(cmd, /Developer mode/, 'command: Developer mode')
-  assert.match(cmd, /chatgpt\.com\/plugins/, 'command: plugins surface')
-  assert.match(cmd, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'command: exact MCP URL (no trailing slash)')
-  assert.match(cmd, /OAuth/, 'command: OAuth')
-  assert.match(cmd, /Follow these workflows/, 'command: workflows prompt embedded')
-  assert.match(cmd, /are we connected\?/, 'command: in-chat verify question')
-  // #3428/#2937 (lane B3, review cycle 1 P2-3): retargeted off the deleted
-  // human writer — the copy now names the agent's first successful write.
-  assert.match(cmd, /first successful write/, 'chatgpt: the real checkpoint writer is named')
-  assert.ok(!cmd.includes('harness-connected checkpoint'),
-    'chatgpt: the deleted human writer (#3428) must not be promised')
-  assert.ok(!cmd.includes('tt_'), 'chatgpt copy must never carry a key prefix')
-  assert.ok(!cmd.includes(KEY), 'chatgpt copy must never embed the test key')
-  assert.ok(!cmd.includes('tortoise_health'), 'chatgpt copy verifies IN CHAT — never tortoise_health')
-  assert.ok(!cmd.includes('api.premiselabs.co/mcp/'), 'chatgpt copy must not use the slash URL form')
-  // #2865: ONE canonical connector constant — chatgpt, claude-desktop and
-  // claude-web all carry the no-slash form (the keyed MCP_URL stays slashed).
+  // #3430: the self-contained `UNIVERSAL_COMMAND.chatgpt` block was rendered
+  // nowhere — chatgpt has no chooser surface at all (#2698 deleted its tab,
+  // #2912's families exclude it) and its live carrier is the setup docs page
+  // (website/docs.html#chatgpt). Only the LIVE half is asserted here.
   assert.equal(CANONICAL_MCP_URL, 'https://api.premiselabs.co/mcp')
-  for (const h of ['chatgpt', 'claude-desktop', 'claude-web']) {
-    assert.ok(UNIVERSAL_COMMAND[h](KEY).includes(CANONICAL_MCP_URL),
-      `${h}: connector copy carries the canonical no-slash URL`)
-  }
+  assert.ok(urlStep, 'the rendered steps carry the canonical no-slash URL')
   assert.equal(HARNESS_COPY_LABEL.chatgpt, 'Copy prompt')
   assert.equal(HARNESS_CONTINUE_LABEL.chatgpt, "I've connected it — Continue →")
   assert.ok(HARNESS_INTRO.chatgpt && HARNESS_INTRO.chatgpt.includes('paste the prompt'), 'chatgpt intro points at the chat paste')
@@ -317,29 +271,41 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
     'chatgpt capture row renders a reason (never undefined)')
 })
 
-test('no literal tt_ key in project-scoped/committable configs (env-var indirection)', () => {
-  // cursor + pi configs are project files (.cursor/mcp.json, .mcp.json) —
-  // the JSON blocks rendered inside the commands reference the env var,
-  // never the key. The full pi copy legitimately carries the key once (the
-  // profile export line — same as claude/codex CLI commands); the
-  // committable JSON stays key-free.
-  const cursorCmd = UNIVERSAL_COMMAND.cursor()
-  assert.ok(!cursorCmd.includes('tt_'), 'cursor command must not embed the key')
-  assert.ok(!cursorCmd.includes(KEY), 'cursor command must not embed the key')
-  assert.match(cursorCmd, /\$\{env:TORTOISE_API_KEY\}/, 'cursor JSON references env:')
-  const piCmd = UNIVERSAL_COMMAND.pi(KEY)
-  // the key appears EXACTLY once — the profile export line; the committable
-  // .mcp.json JSON block references the env var, never the key
-  const keyLines = piCmd.split('\n').filter((l) => l.includes(KEY))
-  assert.equal(keyLines.length, 1, 'pi copy must carry the key exactly once (export line)')
-  assert.match(keyLines[0], /Add TORTOISE_API_KEY=/, 'the single key use is the profile export')
-  assert.ok(piCmd.includes('"Bearer ${TORTOISE_API_KEY}"'), 'pi JSON references the env var')
+test('no literal key in a committable config: the RENDERED copy sends it to the shell profile', () => {
+  // #3430: retargeted onto rendered surfaces. The dead `UNIVERSAL_COMMAND.cursor`
+  // / `.pi` blocks were the old home of this check; the config files they
+  // described are now written by the AGENT from the rendered prompt, so what is
+  // asserted is what the human/agent actually reads.
+  //
+  // ⛔ KEY is itself `tt_w2_test_key`, so "does the prompt contain tt_" is TRUE
+  // by construction and proves nothing — the property is WHERE the key lands:
+  // the shell profile (env indirection), never an Authorization header or a
+  // project config file that gets committed.
+  const piPrompt = wizardPromptText('pi', 1, KEY, 'included')
+  assert.match(piPrompt, /shell profile/, 'pi prompt sends the key to the shell profile')
+  assert.ok(!/Authorization["\s:]*Bearer/i.test(piPrompt), 'pi prompt never inlines a Bearer header')
+  assert.ok(!piPrompt.includes('.mcp.json'), 'pi prompt leaves the config file to the agent')
+  for (const h of HARNESS_SELF_INSTALL) {
+    for (const step of [1, 2]) {
+      const text = wizardPromptText(h, step, KEY, 'included') || ''
+      assert.ok(!/Authorization["\s:]*Bearer/i.test(text),
+        `${h}/${step}: rendered copy never inlines a Bearer header`)
+    }
+  }
 })
 
-test('DE2E-2 copy sweep: universal command copy never says "team"/"workspace"', () => {
-  const all = HARNESS_ORDER.map((h) => UNIVERSAL_COMMAND[h](KEY)).join(' ')
-  assert.ok(!/\bteam\b/i.test(all), 'no "team" in universal command copy')
-  assert.ok(!/workspace/i.test(all), 'no "workspace" in universal command copy')
+test('DE2E-2 copy sweep: rendered connect copy never says "team"/"workspace"', () => {
+  // #3430: this swept the deleted universal commands; sweep what renders now —
+  // the one surviving config block, every rendered prompt (both live modes are
+  // covered by wizardPrompts.test.js), and every rendered intro.
+  const parts = [CODEX_DESKTOP_COMMAND(KEY)]
+  for (const h of HARNESS_ORDER) {
+    for (const step of [1, 2]) parts.push(wizardPromptText(h, step, KEY, 'included') || '')
+    parts.push(HARNESS_INTRO[h] || '')
+  }
+  const all = parts.join(' ')
+  assert.ok(!/\bteam\b/i.test(all), 'no "team" in rendered connect copy')
+  assert.ok(!/workspace/i.test(all), 'no "workspace" in rendered connect copy')
 })
 
 test('A0 rollback: legacy HARNESS_* exports preserved (archived #1643 wizard + capture rows depend on them)', () => {
