@@ -187,7 +187,8 @@ nothing regresses on withdrawal") — and the arms **are** OFF everywhere
 ### 4.4 Where T-2 is re-homed
 
 **Owner of record: the end-to-end run in #8486** (*"Run the LongMemEval-S
-end-to-end QA benchmark — PENDING, never executed"*, P1-severe). The relay is
+end-to-end QA benchmark (PENDING — never executed; no comparable number
+exists)"*, P1-severe). The relay is
 posted on **#8486** itself (the artifact the lane that runs the benchmark
 reads), stating the exact obligation:
 

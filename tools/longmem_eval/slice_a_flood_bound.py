@@ -23,7 +23,12 @@ the one thing the old T was really protecting:
   * the pre-#2978 composition — #2978's title names it *"…content-less
     operator points consume 61% of the reader's context slots…"*.
 
-Three arms on the SAME C2-shaped pool (item-bound 40, the wave's window):
+Three primary arms on the SAME C2-shaped pool (item-bound 40, the wave's
+window), plus two variant arms measured on it too —
+``post_2978_assembly_value_marked`` (value-critical claims marked, so value
+retention is measurable) and
+``provenance_free_assembly`` (provenance stripped, the product ask-lane shape —
+§SCOPE NOTE). Five arm records in the receipt, not three:
 
   ``pre_2978``          the shipped ``assemble_context`` with the pre-#2978
                         admission predicate restored (``_has_claim_text``
@@ -58,9 +63,13 @@ The measured bounds hold for a hit that CARRIES its provenance (``quote`` /
 point_props_for_hits``) and the shape ``package_evidence_pool`` keys on. On the
 PRODUCT ask lane those fields are absent from ``SearchResult``, so Slice A's
 own-source leg is inert there today — measured, open, owned by **#8658**. This
-instrument does not assume that bug away: the ``provenance_free`` arm pins the
-opposite (a pool without provenance yields an untouched package), so the
-instrument stays honest about where the bound applies.
+instrument does not assume that bug away: the ``provenance_free_assembly`` arm
+measures the product shape instead of describing it — pass 1 (the content
+legs) is provenance-INDEPENDENT, so it still collapses 91 of the 139 items
+(139 -> 48 packages); what breaks is pass 2, so the one flooded fact costs
+**12** window slots instead of 2 (receipt
+``arms.provenance_free_assembly``). The bound is therefore stated for the
+eval lane and measured, not assumed, for the ask lane.
 
 RUN
 ---
@@ -485,7 +494,8 @@ def _slot_census(admitted: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def measure() -> dict[str, Any]:
-    """Run the three arms + the two controls over the C2-shaped pool."""
+    """Run the three primary arms + two variant arms + the two controls over the
+    C2-shaped pool."""
     pool, pool_census = build_c2_pool()
 
     with _pre_2978_predicate():

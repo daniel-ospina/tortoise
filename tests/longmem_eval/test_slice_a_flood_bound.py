@@ -34,6 +34,7 @@ Two independent jobs:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -159,8 +160,16 @@ def test_provenance_free_pool_does_not_get_the_bound(receipt: dict) -> None:
     instead of 2 on the product ask-lane shape."""
     bare = receipt["arms"]["provenance_free_assembly"]
     assert bare["package_stats"]["verbatim_refs_kept"] == 0
+    # pass 1 is provenance-independent, so it still collapses the STATEMENT
+    # flood — 91 of 139 here. Pinning it stops the docstring drifting back to
+    # "an untouched package", which the receipt falsifies.
+    stats = bare["package_stats"]
+    assert stats["package_items"] < stats["pool_items"]
+    assert stats["collapsed_duplicates"] == stats["pool_items"] - stats["package_items"]
     assert bare["flood_slots"] > receipt["arms"]["post_2978_assembly"]["flood_slots"]
-    assert receipt["verdicts"]["provenance_leg_is_lane_scoped"]
+    verdict = receipt["verdicts"]["provenance_leg_is_lane_scoped"]
+    assert verdict["measured"], "the scope limit must be MEASURED, not asserted"
+    assert "INERT" in verdict["why"], verdict["why"]
 
 
 def test_duplicate_free_control_is_byte_identical(receipt: dict) -> None:
@@ -182,3 +191,64 @@ def test_pool_is_the_documented_c2_shape(receipt: dict) -> None:
     assert census["contentless_hits"] == 24
     assert census["by_fact"]["value"] == 4
     assert census["by_fact"]["other"] == 8
+
+
+#: Tokens that LOOK like an arm key. Anchored on the three arm families rather
+#: than a generic ``[a-z_]+`` sweep: a generic sweep flags ordinary identifiers
+#: (``build_c2_pool``) and the guard would be silenced instead of obeyed.
+_ARMISH = re.compile(
+    r"\b(?:pre_2978(?:_[a-z_]+)?|post_2978(?:_[a-z_]+)?|provenance_free(?:_[a-z_]+)?)\b"
+)
+
+
+def test_every_arm_name_the_prose_cites_is_a_receipt_key(receipt: dict) -> None:
+    """Two review cycles of #8043 failed on THIS defect, so it is pinned.
+
+    A docstring called the provenance-free arm ``provenance_free`` and another
+    called the value-marked arm ``post_2978_assembly_marked``; neither is a
+    name the receipt records (``provenance_free_assembly`` and
+    ``post_2978_assembly_value_marked`` are), so a reader following the prose
+    to the receipt found nothing. Nothing parsed those names, so both passed
+    CI silently. This is the doc-side companion of the receipt-reproducibility
+    pin above: that one stops a NUMBER drifting from the code, this one stops a
+    NAME drifting from the receipt.
+
+    SCOPE: the instrument and the gate record — the two artifacts a reader is
+    sent to for a number. The bare ``pre_2978`` / ``post_2978`` forms are
+    exempt: they are prose adjectives ("the pre-#2978 predicate") as often as
+    keys, so only a token carrying a SUFFIX claims to be a name. A cited token
+    must be a key ANYWHERE in the receipt, not only under ``arms`` —
+    ``pre_2978_arm`` is a real key under ``instrument``.
+    """
+    arms = set(receipt["arms"])
+    assert arms, "precondition: the receipt records arms"
+
+    def all_keys(node: object) -> set[str]:
+        if isinstance(node, dict):
+            out: set[str] = set()
+            for key, value in node.items():
+                out.add(key)
+                out |= all_keys(value)
+            return out
+        if isinstance(node, list):
+            out = set()
+            for item in node:
+                out |= all_keys(item)
+            return out
+        return set()
+
+    known = all_keys(receipt)
+    missing: dict[str, list[str]] = {}
+    for path in (
+        ROOT / "tools" / "longmem_eval" / "slice_a_flood_bound.py",
+        ROOT / "docs" / "runbook" / "8043-slice-a-t-gate.md",
+    ):
+        cited = {tok for tok in _ARMISH.findall(path.read_text()) if tok not in known}
+        cited -= {"pre_2978", "post_2978"}
+        if cited:
+            missing[str(path.relative_to(ROOT))] = sorted(cited)
+
+    assert not missing, (
+        "prose cites name(s) the receipt records nowhere: "
+        f"{missing} — the receipt's arms are {sorted(arms)}"
+    )
