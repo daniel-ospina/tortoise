@@ -300,12 +300,13 @@ def _pin_upstream(monkeypatch, manifest, head: str, payloads: dict[str, bytes],
     test that only moves the pointer is not exercising a drift.
 
     ``pin_listing``/``head_listing`` are the upstream `skills/` DIRECTORY names
-    at those commits; the default is the honest answer (exactly the pin's keys),
-    so every byte-arm case below exercises bytes and not scope.
+    at those commits; the default is the honest answer (exactly the pin's
+    directories, see `_upstream_dirs`), so every byte-arm case below exercises
+    bytes and not scope.
     """
     at_head = payloads if head_payloads is None else head_payloads
     pinned = manifest["upstream"]["commit"]
-    default_listing = sorted(manifest["skills"])
+    default_listing = _upstream_dirs(manifest)
     monkeypatch.setattr(sp, "remote_head", lambda *a, **k: head)
     monkeypatch.setattr(
         sp, "fetch_raw",
@@ -607,6 +608,17 @@ def _payloads(manifest: dict) -> dict[str, bytes]:
             for e in manifest["skills"].values()}
 
 
+def _upstream_dirs(manifest: dict) -> list[str]:
+    """The upstream DIRECTORY names the pin binds.
+
+    Derived from `upstream_path`, never from the pin's KEYS: the key is the
+    SERVED name and the schema deliberately lets the two differ (review finding,
+    P3 — comparing keys reds an honest pin whose served name is shortened).
+    """
+    return sorted({Path(e["upstream_path"]).parent.name
+                   for e in manifest["skills"].values()})
+
+
 def test_4643_an_upstream_addition_is_reported_not_invisible(monkeypatch, tmp_path):
     """Review finding (P2), measured: add an upstream `skills/newcapability/`
     and NOTHING reds — not the mirror arm (it iterates the pin), not the
@@ -668,6 +680,27 @@ def test_4643_a_pin_that_names_a_skill_its_own_commit_lacks_reds(
     assert named in problems[0]
 
 
+def test_4643_the_scope_arm_binds_by_upstream_path_not_the_pin_key(
+        monkeypatch, tmp_path):
+    """Review finding (P3): the scope arm compared the pin's KEYS to upstream
+    DIRECTORY names. `skills.<key>` is the SERVED name and `upstream_path` is the
+    binding, so an honest pin whose served name is shortened was a PERMANENT
+    false red whose printed remedy (`--sync`) re-cuts the same keys and cannot
+    clear it.
+    """
+    manifest = sp.load_manifest(MANIFEST)
+    entry = manifest["skills"].pop("tortoise-file-finding")
+    manifest["skills"]["file-finding"] = entry  # served name ≠ upstream dir
+    root = _mirror_root(tmp_path, manifest)
+    payloads = _payloads(manifest)
+    _pin_upstream(monkeypatch, manifest, manifest["upstream"]["commit"], payloads)
+
+    assert sp.check_upstream(manifest, root) == [], (
+        "the pin binds upstream directories through `upstream_path`; keying the "
+        "scope arm on the pin's keys invents a missing skill and prints a "
+        "remedy that cannot fix it")
+
+
 def test_4643_out_of_scope_records_a_deliberate_exclusion(monkeypatch, tmp_path):
     """The escape hatch the message names must WORK, or the only options for a
     converged-but-unserved upstream skill are a false pin or a permanently red
@@ -683,6 +716,33 @@ def test_4643_out_of_scope_records_a_deliberate_exclusion(monkeypatch, tmp_path)
     assert sp.check_upstream(manifest, root) == [], (
         "a declared out_of_scope upstream skill is not a drift — the declaration "
         "is the recorded decision the gate is asking for")
+
+
+def test_4643_out_of_scope_covers_a_skill_added_after_the_pin(monkeypatch, tmp_path):
+    """THE case the escape hatch exists for, and the one it used to reject.
+
+    Review finding (P2): `declared_out` was validated against the PINNED commit,
+    but a skill that needs excluding is one added upstream AFTER the pin — so it
+    is by definition absent from the pinned commit. The gate printed "pin it or
+    record it as out of scope", and recording it printed "drop the stale
+    declaration": the two messages prescribed each other, so no sequence of the
+    documented actions reached green, and the action that would have (a pin
+    re-cut) was named by neither.
+
+    This test is the state the first message produces (`head_listing` has the
+    addition, `pin_listing` does not), which is exactly what the old code reds.
+    """
+    manifest = sp.load_manifest(MANIFEST)
+    manifest["out_of_scope"] = ["research-domain"]
+    root = _mirror_root(tmp_path, manifest)
+    payloads = _payloads(manifest)
+    _pin_upstream(monkeypatch, manifest, "f" * 40, payloads, dict(payloads),
+                  head_listing=[*_upstream_dirs(manifest), "research-domain"])
+
+    assert sp.check_upstream(manifest, root) == [], (
+        "a declared out_of_scope skill that appeared upstream AFTER the pin is a "
+        "recorded decision, not a stale declaration — rejecting it closed the "
+        "hatch for the only case that needs it")
 
 
 def test_4643_a_stale_out_of_scope_declaration_reds(monkeypatch, tmp_path):
@@ -749,6 +809,70 @@ def test_4643_the_cli_exits_nonzero_when_it_cannot_verify(monkeypatch, capsys):
         "…and it is NOT drift: reporting it as drift auto-files a false alarm "
         "about bytes nobody compared")
     assert payload["cannot_verify"] and "unreachable" in payload["cannot_verify"][0]
+
+
+def test_4643_a_drift_survives_an_unreadable_side(monkeypatch, tmp_path, capsys):
+    """Review finding (P2): an observed drift was DISCARDED by a later failure.
+
+    `check_upstream` kept its findings in a local list, so when a later fetch
+    exhausted its retries it raised out of the function and the caller never got
+    the drift it had already found — the run still exited 1, but it reported
+    "could not verify — this is NOT a drift" and the report a human reads for the
+    red said `### Drift (0)`. Both answers must survive in ONE run.
+    """
+    manifest = sp.load_manifest(MANIFEST)
+    root = _mirror_root(tmp_path, manifest)
+    payloads = _payloads(manifest)
+    names = sorted(manifest["skills"])
+    unreadable = manifest["skills"][names[0]]["upstream_path"]
+    drifted = manifest["skills"][names[-1]]["upstream_path"]
+    moved = dict(payloads)
+    moved[drifted] = moved[drifted] + b"\n# upstream edited this one\n"
+    pinned = manifest["upstream"]["commit"]
+
+    def _fetch(repo, commit, path, *a, **k):
+        if commit != pinned and path == unreadable:
+            raise sp.ParityError(f"{path}: timed out after 3 attempts")
+        return (payloads if commit == pinned else moved)[path]
+
+    monkeypatch.setattr(sp, "remote_head", lambda *a, **k: "f" * 40)
+    monkeypatch.setattr(sp, "fetch_raw", _fetch)
+    monkeypatch.setattr(sp, "list_upstream_skills",
+                        lambda *a, **k: _upstream_dirs(manifest))
+
+    report = tmp_path / "report.md"
+    rc = sp.main(["--check-upstream", "--root", str(root),
+                  "--manifest", str(MANIFEST), "--json",
+                  "--report", str(report)])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["problems"] and "MIRROR IS STALE" in payload["problems"][0], payload
+    assert payload["cannot_verify"] and "timed out" in payload["cannot_verify"][0], (
+        f"the unreadable skill must be reported as could-not-verify: {payload}")
+    text = report.read_text(encoding="utf-8")
+    assert "### Drift (1)" in text, (
+        "the uploaded report is the diagnostic for the red run — it must carry "
+        f"the drift that WAS found: {text!r}")
+    assert "### Could not verify (1)" in text, text
+
+
+def test_4643_a_defective_pin_is_a_defect_not_a_could_not_verify(tmp_path, capsys):
+    """Review finding (P2): `main()` wrapped `load_manifest` in the same
+    `except ParityError` as the network reads, so a missing or malformed pin —
+    deterministic, and the thing the operator must fix FIRST — was reported as
+    "could not verify … re-run once the network/credential is sane", advice that
+    can never clear it."""
+    bad = tmp_path / "pin.yml"
+    bad.write_text("upstream:\n  repo: x\nskills: {}\n", encoding="utf-8")
+
+    rc = sp.main(["--check-upstream", "--root", str(REPO),
+                  "--manifest", str(bad), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1, "a pin this tool cannot read must FAIL (fail-closed)"
+    assert payload["cannot_verify"] == [], (
+        "a malformed pin is not a transient read failure — filing it under "
+        "'re-run once the network is sane' hides an actionable defect")
+    assert payload["problems"] and "UNUSABLE" in payload["problems"][0], payload
 
 
 # ── the ownership record (target 3) + the wiring (target 4) ───────────────
@@ -902,9 +1026,17 @@ _STUB = """#!/usr/bin/env bash
 printf '%s\\0' "${0##*/}" "$@" >> "$PARITY_STUB_RECORD"
 printf '\\036' >> "$PARITY_STUB_RECORD"
 if [ "${PARITY_STUB_FAIL_ARM:-0}" = "1" ]; then
+  # The real tool's own semantics: `--check-upstream` and `--check` both run the
+  # upstream arm, and a bare invocation runs BOTH arms; only `--check-local`
+  # leaves it out. A stub that failed only on one spelling would force the
+  # predicate to accept one spelling (review finding, P3).
   for a in "$@"; do
-    if [ "$a" = "--check-upstream" ]; then exit 1; fi
+    case "$a" in
+      --check-upstream|--check) exit 1 ;;
+      --check-local) exit 0 ;;
+    esac
   done
+  exit 1
 fi
 exit 0
 """
@@ -950,10 +1082,40 @@ def _execute_step(body: str, *, fail_arm: bool = False) -> tuple[int, list[list[
         return proc.returncode, calls
 
 
-def _is_the_arm(args: list[str]) -> bool:
-    """The argv the ARM would receive — script operand AND flag, in that order."""
-    if "--check-upstream" not in args:
+#: Flags that make the tool run the upstream arm. `--check` runs BOTH arms and a
+#: bare invocation runs both too (`main()`: `do_upstream = args.check or …`), so
+#: the predicate decides on the ARM SEMANTICS, not on one spelling: §7.1's Gate
+#: cell names `--check`, and a maintainer who aligns the step with the doc must
+#: not be told "no step executes the arm" (review finding, P3).
+_ARM_FLAGS = ("--check", "--check-upstream")
+
+#: The tool this tree ships. The script operand must RESOLVE here — not merely
+#: end in the right filename. `tests/test_ci_guard_invocation.py` (#4494), the
+#: model this harness cites, makes exactly this check for `tools/skip-guard.py`;
+#: omitting it left a `scripts/served_skills_parity.py` that prints OK accepted as
+#: a runner (review finding, P3).
+THE_TOOL = (REPO / "tools" / "served_skills_parity.py").resolve()
+
+
+def _resolves_to_the_tool(operand: str) -> bool:
+    """The script operand is THIS tree's tool, not a lookalike."""
+    candidate = Path(operand)
+    if not candidate.is_absolute():
+        candidate = REPO / candidate
+    try:
+        return candidate.resolve() == THE_TOOL
+    except OSError:  # pragma: no cover - unresolvable path
         return False
+
+
+def _is_the_arm(args: list[str]) -> bool:
+    """True iff THIS recorded command runs the tool's upstream arm.
+
+    One record is one interpreter invocation, so the flag cannot belong to a
+    different command in the same `run:` body: it has to be in the argv the TOOL
+    receives, after the script operand — and the script operand has to be the
+    file this tree ships.
+    """
     operand = next((i for i, a in enumerate(args)
                     if a.endswith("served_skills_parity.py")), None)
     if operand is None:
@@ -962,7 +1124,13 @@ def _is_the_arm(args: list[str]) -> bool:
     # gate: the script is an argument to nothing. Same for `-m`.
     if "-c" in args[:operand] or "-m" in args[:operand]:
         return False
-    return args.index("--check-upstream") > operand
+    if not _resolves_to_the_tool(args[operand]):
+        return False
+    tail = args[operand + 1:]
+    if any(flag in tail for flag in _ARM_FLAGS):
+        return True
+    # A bare invocation runs BOTH arms; only `--check-local` suppresses this one.
+    return "--check-local" not in tail
 
 
 def _can_fail(unit: dict) -> bool:
@@ -1242,6 +1410,23 @@ _DISARMAMENTS = [
         run="python3 -c pass " + s["run"].split("python ", 1)[-1])),
     ("continue_on_error_step", lambda s: s.update(**{"continue-on-error": True})),
     ("skipped_by_if", lambda s: s.update(**{"if": "false"})),
+    # Review finding (P3): the operand is judged by NAME only, so a lookalike
+    # script that always exits 0 was accepted. The stub still fails here, so
+    # `_is_arm_step`'s status half passes and ONLY the tree-resolution check can
+    # reject it — this case is the non-vacuity proof of that check.
+    ("shim_operand_not_the_shipped_tool", lambda s: s.update(
+        run=s["run"].replace("tools/served_skills_parity.py",
+                             "scripts/served_skills_parity.py"))),
+    # The flag is on a DIFFERENT command: the tool runs `--check-local` only.
+    ("flag_on_a_different_command", lambda s: s.update(
+        run="uv run python tools/served_skills_parity.py --check-local"
+            " && /bin/echo --check-upstream")),
+    # Executed, but under `if`: bash -e does not abort on a failing CONDITION, so
+    # a red gate leaves the step green.
+    ("arm_in_an_if_condition", lambda s: s.update(
+        run="if " + s["run"] + "; then true; fi")),
+    # Executed in the background: the step returns before the arm can fail it.
+    ("arm_backgrounded", lambda s: s.update(run=s["run"] + " &")),
 ]
 
 
@@ -1294,6 +1479,48 @@ def test_4643_a_job_that_cannot_fail_is_not_a_runner(tmp_path, name, mutate):
     assert "skills-parity.yml" in _upstream_runners(workflows), (
         f"{name}: only the mutated workflow lost its runner — the job-level "
         "rule leaked into a workflow whose own job is fine")
+
+
+#: Spellings that DO run the upstream arm, so they must still be recognised as
+#: runners. Both were rejected before the predicate decided on semantics: it
+#: required the literal `--check-upstream`, while §7.1 documents `--check` and a
+#: bare invocation runs both arms (review finding, P3 — a guard whose remedy is
+#: "narrow the gate back" pushes in the wrong direction).
+_ARM_SPELLINGS = [
+    ("documented_check_flag",
+     lambda s: s.update(run=s["run"].replace("--check-upstream", "--check"))),
+    ("bare_invocation_runs_both_arms",
+     lambda s: s.update(run=s["run"].replace(" --check-upstream", ""))),
+]
+
+
+@pytest.mark.parametrize("name,mutate", _ARM_SPELLINGS,
+                         ids=[n for n, _ in _ARM_SPELLINGS])
+def test_4643_any_spelling_that_runs_the_arm_is_a_runner(tmp_path, name, mutate):
+    """The doc names `--check`; the tool runs the upstream arm for `--check`, for
+    `--check-upstream`, and for a bare invocation. A predicate that knows only one
+    spelling reds a step that DOES gate, and the only way to clear it is to narrow
+    the step back to the spelling the test happens to know."""
+    workflows = _workflows_with_mutation(tmp_path, mutate)
+    assert "deploy-pages.yml" in _upstream_runners(workflows), (
+        f"{name}: this spelling runs the upstream arm, so the step is a runner")
+
+
+def test_4643_the_arm_operand_must_be_the_shipped_tool():
+    """The cited model (`tests/test_ci_guard_invocation.py`) resolves the operand
+    into the tree; this predicate did not, so any path whose last component was
+    the right filename was accepted — including a shim that always exits 0."""
+    assert _is_the_arm(["uv", "run", "python",
+                        "tools/served_skills_parity.py", "--check-upstream"])
+    assert _is_the_arm(["uv", "run", "python",
+                        "tools/served_skills_parity.py", "--check"])
+    assert not _is_the_arm(["uv", "run", "python",
+                            "tools/served_skills_parity.py", "--check-local"])
+    assert not _is_the_arm(["uv", "run", "python",
+                            "scripts/served_skills_parity.py", "--check-upstream"]), (
+        "a lookalike script is not this tree's gate")
+    assert not _is_the_arm(["python3", "-c", "pass",
+                            "tools/served_skills_parity.py", "--check-upstream"])
 
 
 def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_path):
