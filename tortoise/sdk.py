@@ -26789,6 +26789,46 @@ class TortoiseSDK:
                  "status": "live", **props},
                 "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
+            # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
+            # stripped HERE, at the Event door, because ``event`` is the
+            # NESTED-record key the fold unwraps (``entities.py::_upsert_event``
+            # — ``inner = event.get("event", event)``) and the replay reader
+            # now address-checks (``edges.py::replay_about_links``). A caller
+            # bag carrying ``event`` therefore SHADOWED the record in the fold
+            # and dropped every ``aboutLinks`` link on the record. MEASURED at
+            # 742ff7246: ``create_event("withprop", "event",
+            # event={"payload": "x"}, aboutObject=oid)`` wrote the record
+            # ``{"type": "EventRecorded", "id": "1a14…", "event":
+            # {"payload": "x"}, "aboutLinks": [{"rel": "aboutObject",
+            # "how": "id", "targets": ["obj-…"]}]}``, and the rebuild
+            # replayed NOTHING — no link, no failure, no warning.
+            #
+            # Strip-and-ignore, matching ``_RESERVED_EMIT_CALL_PROPS``
+            # (``aboutLinks``, #8398 review P1-1) and the reserved actor keys:
+            # ``event`` is NOT Event content. ``_EVENT_HANDLED`` already
+            # declares it an ENVELOPE field the fold must never persist
+            # (``entities.py``), so the caller prop was never stored on the node
+            # — it only ever reached the RECORD, where it does the damage. The
+            # delta is therefore a FIX, not a loss: the prop is dropped instead
+            # of costing the whole Event node (``_upsert_event`` skipped the
+            # MERGE outright, so ``create_event`` returned ``{}`` and
+            # ``MATCH (e:Event)`` was empty) AND its journaled links.
+            #
+            # ⛔ Deliberately NOT added to ``_RESERVED_EMIT_CALL_PROPS``: that
+            # set is stripped by the shared ``_sanitize_props`` intake, which
+            # ALSO serves ``create_point``/``update_point``/``update_entity``,
+            # where ``event`` is an ordinary free-form tenant prop this fix has
+            # no business dropping. The collision exists only where an
+            # ``EventRecorded`` payload is built — here. ``create_event`` (the
+            # documented alias) relays through this branch, and its own
+            # ``_drop_reserved_emit_props`` relay strip is the matching guard
+            # for the names that DO collide at a call.
+            _shadowing_event_prop = props.pop("event", None)
+            if _shadowing_event_prop is not None:
+                _logger.warning(
+                    "ignoring client-supplied 'event' on create_entity("
+                    "type='event') — it shadows the nested EventRecorded "
+                    "payload and would drop the record's about* links (#8398)")
             eventKind = props.pop("eventKind", None)
             if not eventKind:
                 raise ValueError(

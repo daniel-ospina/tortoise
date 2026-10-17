@@ -1206,3 +1206,165 @@ def test_an_ALL_STALE_pinned_link_is_not_repaired_from_its_key(wired) -> None:
     assert (wired_n, failed_n) == (1, 0), (
         f"the key repair stopped working for a live endpoint: wired={wired_n} "
         f"failed={failed_n}")
+
+
+# ── Round 5 (fifth independent review at 742ff7246) ──────────────────────────
+
+
+def test_a_caller_event_prop_cannot_shadow_the_records_aboutLinks(wired) -> None:
+    """P2-1 (reader half): the nested unwrap must be ADDRESS-CHECKED.
+
+    ``event`` is a legal caller PROP NAME and also the key the NESTED record
+    format puts its payload under (``EventAPI.add_event`` / the miner journal
+    ``{event: {id, …}}``). The unconditioned
+    ``inner = payload.get("event", payload)`` resolved that ambiguity in the one
+    direction that destroys journal data silently. MEASURED at 742ff7246 on the
+    record
+
+        {"type": "EventRecorded", "id": "1a14…", "event": {"payload": "x"},
+         "aboutLinks": [{"rel": "aboutObject", "how": "id",
+                         "targets": ["obj-…"]}]}
+
+    — ``inner`` became the PROP, ``source`` was ``None`` and
+    ``replay_about_links`` returned ``(0, 0)``: no count, no warning, while the
+    record demonstrably carried ``aboutLinks``. A journaled link claim was
+    discarded in exactly the silence this PR exists to end, and a later repair
+    of the (pre-existing) Event node-fold collision would turn that over-claimed
+    record into replay-created state live never had.
+
+    **This test discriminates the READER alone** — it hand-builds the record, so
+    the SDK's intake strip (the sibling test below) cannot help it. With the
+    unwrap reverted to ``payload.get("event", payload)`` both assertions fail
+    (``(0, 0)``), which is the mutation.
+    """
+    sdk, proj, _events, _journal = wired
+    oid = _nid(sdk.create_object("Shadow"))
+    ev = _nid(sdk.create_event("shadowed", "event"))
+    payload = {
+        "type": "EventRecorded", "id": ev, "eventId": ev,
+        "name": "shadowed", "eventKind": "event", "eventStatus": "scheduled",
+        # A caller PROP of that name — not the nested payload.
+        "event": {"payload": "x"},
+        "aboutLinks": [{"rel": "aboutObject", "how": "id", "targets": [oid]}],
+    }
+    wired_n, failed_n = proj.replay_about_links(payload)
+    assert (wired_n, failed_n) == (1, 0), (
+        "the record's aboutLinks were silently discarded because a caller "
+        f"`event` prop shadowed the record: wired={wired_n} failed={failed_n} "
+        "(the pre-fix measurement is (0, 0))")
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id})-[r:aboutObject]->(o:Object {id:$oid}) "
+        "RETURN count(r)", params={"id": ev, "oid": oid}).result_set[0][0] == 1, (
+        "the shadowed record's link did not replay onto the Object")
+
+    # The same record with its Event gone must be a COUNTED loss, never (0, 0):
+    # "not wired" and "no links claimed" are different facts, and only the
+    # second may be silent.
+    proj.g.query("MATCH (e:Event {id:$id}) DETACH DELETE e", params={"id": ev})
+    wired_n, failed_n = proj.replay_about_links(payload)
+    assert (wired_n, failed_n) == (0, 1), (
+        "a shadowed record whose source Event is gone reported nothing at all "
+        f"instead of one loss: wired={wired_n} failed={failed_n}")
+
+
+def test_a_caller_event_prop_is_STRIPPED_at_the_Event_door(wired, caplog) -> None:
+    """P2-1 (intake half): the ambiguity is removed at the SOURCE as well.
+
+    Reading the record correctly stops the SILENT discard; stripping the prop
+    makes the journal claim true in the first place. MEASURED at 742ff7246,
+    ``create_event("withprop", "event", event={"payload": "x"},
+    aboutObject=oid)`` journaled its ``aboutLinks`` while
+    ``_upsert_event`` — which unwraps ``event`` the same way — skipped the node
+    entirely, so ``create_event`` returned ``{}``, ``MATCH (e:Event)`` was empty
+    and the link had no source to replay onto.
+
+    ``event`` is not Event content: ``_EVENT_HANDLED`` already declares it an
+    envelope field the fold must never persist. The strip therefore costs no
+    node property — it trades a dropped prop for the Event node AND its links.
+    """
+    import logging
+
+    sdk, proj, events, journal = wired
+    oid = _nid(sdk.create_object("Shadow"))
+    with caplog.at_level(logging.WARNING):
+        node = sdk.create_event("withprop", "event", event={"payload": "x"},
+                                aboutObject=oid)
+    ev = _nid(node)
+    assert ev, (
+        "create_event returned no node — the caller `event` prop still shadows "
+        f"the fold: {node!r}")
+    assert "ignoring client-supplied 'event'" in caplog.text, (
+        "the dropped caller prop was not reported: the strip must be visible, "
+        f"not silent: {caplog.text[-2000:]}")
+
+    record = _event_records(journal, "withprop")[0]
+    assert "event" not in record, (
+        f"the caller prop rode into the record and re-creates the ambiguity: "
+        f"{record!r}")
+    assert record["aboutLinks"] == [
+        {"rel": "aboutObject", "how": "id", "targets": [oid]}], (
+        f"the record lost the link the SDK resolved: {record!r}")
+
+    def _edges() -> int:
+        return proj.g.query(
+            "MATCH (e:Event {id:$id})-[r:aboutObject]->() RETURN count(r)",
+            params={"id": ev}).result_set[0][0]
+
+    assert _edges() == 1, "live did not wire the link"
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id}) RETURN count(e)",
+        params={"id": ev}).result_set[0][0] == 1, (
+        "the Event was live-only: rebuild_all destroyed it")
+    assert _edges() == 1, (
+        "the link did not survive rebuild_all — the record and the live write "
+        "disagree")
+
+
+def test_a_name_equal_to_the_Events_OWN_name_resolves_to_the_SUBJECT_arm(
+        wired) -> None:
+    """P2-2: the name cascade is resolved PRE-fold, and that is DELIBERATE.
+
+    ``resolve_about_link`` runs before the Event is written, so the ``Event`` arm
+    of ``_ABOUT_NAME_CASCADE`` can never match the record being created.
+    MEASURED ``create_event("SelfName", "event", aboutSubject="SelfName")``:
+
+    * ``origin/main`` — live ``(Event)-[:aboutEvent]->(itself)``, which a rebuild
+      then LOSES (the #8398 defect: the self-edge was never journaled).
+    * this branch — live ``(Event)-[:aboutSubject]->(:Subject{id:"SelfName"})``,
+      which SURVIVES rebuild.
+
+    That is an undisclosed change of live wiring in the direction of
+    replay-safety, so it is pinned here (and stated in the resolver's
+    docstring): the retired self-``Event`` arm could never survive a rebuild, and
+    a link that cannot be replayed is not worth preserving. Moving the
+    resolution POST-fold would restore it only by giving up the property that
+    makes the record and the edge agree — ONE resolution for both — so the
+    behaviour is stated instead of changed.
+    """
+    sdk, proj, events, journal = wired
+    ev = _nid(sdk.create_event("SelfName", "event", aboutSubject="SelfName"))
+
+    rows = proj.g.query(
+        "MATCH (e:Event {id:$id})-[r]->(t) "
+        "RETURN type(r), labels(t), t.id, t.name",
+        params={"id": ev}).result_set
+    assert rows == [["aboutSubject", ["Subject"], "SelfName", "SelfName"]], (
+        "a name equal to the Event's own name must resolve to the :Subject arm "
+        f"(measured), got {rows}")
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id})-[:aboutEvent]->(x:Event) RETURN count(x)",
+        params={"id": ev}).result_set[0][0] == 0, (
+        "the retired self-aboutEvent edge is back — it can never survive a "
+        "rebuild")
+
+    link = _event_records(journal, "SelfName")[0]["aboutLinks"][0]
+    assert (link["rel"], link.get("target_label")) == ("aboutSubject", "Subject"), (
+        f"the record must pin the arm live actually wired: {link!r}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id})-[r]->(t) "
+        "RETURN type(r), labels(t), t.id, t.name",
+        params={"id": ev}).result_set == rows, (
+        "the resolved link did not survive rebuild_all")

@@ -985,6 +985,21 @@ class _EdgeHandlers:
 
         Returns ``(None, None)`` when the cascade wires nothing (an unwritable
         name — refused and logged, #7369).
+
+        ⚠️ **Resolving PRE-fold means the ``Event`` arm can no longer match the
+        record being written — DELIBERATELY (#8398, 5th review P2-2).** This call
+        happens before the ``Event`` exists, so a name equal to the Event's OWN
+        name (``create_event("SelfName", "event", aboutSubject="SelfName")``)
+        now resolves to the ``:Subject`` arm — ``(Event)-[:aboutSubject]->
+        (:Subject {id:"SelfName"})``, which SURVIVES a rebuild — where
+        ``origin/main`` wired a self-``aboutEvent`` edge ``(Event)->(Event)``
+        that was never journaled and which ``rebuild_all`` therefore LOSES. The
+        change in live wiring is accepted: the retired self-edge could never
+        survive a rebuild, and it is traded for a link whose record and edge
+        come from ONE resolution (the property this method exists to keep —
+        moving the resolution post-fold to restore the self-edge would let the
+        record and the write disagree again). Pinned by
+        ``test_a_name_equal_to_the_Events_OWN_name_resolves_to_the_SUBJECT_arm``.
         """
         for label, rel in self._ABOUT_NAME_CASCADE:
             link, internals = self._resolve_about_edge_target(
@@ -1367,9 +1382,41 @@ class _EdgeHandlers:
             return _hard_delete_suppresses(
                 hard_delete_seqs, endpoint_id, endpoint_label, seq)
 
-        inner = payload.get("event", payload)
+        # ⛔ Unwrap the NESTED record format ONLY when the inner dict actually
+        # ADDRESSES this record (#8398, 5th review P2-1). ``event`` is not a
+        # reserved name on every writer (``EventAPI.add_event`` and the miner
+        # journal ``{event: {id, …}}``; a caller PROP may legally be called
+        # ``event``), so the two shapes are ambiguous at this key — and an
+        # unconditional ``payload.get("event", payload)`` resolved the
+        # ambiguity in the ONE direction that silently destroys journal data:
+        # MEASURED at 742ff7246,
+        # ``create_event("withprop", "event", event={"payload": "x"},
+        # aboutObject=oid)`` writes the record
+        # ``{"type": "EventRecorded", "id": "1a14…", "event": {"payload":
+        # "x"}, "aboutLinks": [{"rel": "aboutObject", "how": "id",
+        # "targets": ["obj-…"]}]}`` — the caller prop became ``inner``, so
+        # ``source`` was ``None`` and this reader returned ``(0, 0)``: NO
+        # count, NO warning, while the record demonstrably claimed a link. A
+        # journaled link claim was discarded in the exact silence this method
+        # exists to end.
+        #
+        # So: the nested form is authoritative only when its payload carries
+        # the record's address (``id``/``eventId``, the two keys
+        # ``_upsert_event`` reads). Otherwise the record IS the payload — its
+        # own ``aboutLinks`` are read and the caller prop is inert data. The
+        # residual ambiguity is removed at the WRITE end too (the SDK drops a
+        # caller ``event`` prop at the Event door), but a journal written by
+        # any other build must still be READ correctly: this reader cannot
+        # assume the intake strip ran.
+        inner = payload.get("event")
+        if not (isinstance(inner, dict)
+                and ("id" in inner or "eventId" in inner)):
+            inner = payload
         source = inner.get("id") or inner.get("eventId")
-        links = inner.get("aboutLinks") or []
+        # The record's OWN link field wins when the nested payload has none: a
+        # ``_journal_extra`` field is written at the RECORD's top level even
+        # for a nested-shaped record, so reading only ``inner`` would hide it.
+        links = inner.get("aboutLinks") or payload.get("aboutLinks") or []
         if not isinstance(source, str):
             # an unaddressable record still CLAIMED links; a (0, 0) here would
             # drop them without a signal — the class this fix exists to end
