@@ -155,14 +155,18 @@ _DQUOTE_ESCAPES = '$`"\\\n'
 #: TRANSLATED rather than skipped because an escape can spell the token's `@`:
 #: `wrangler$'\100'4` runs `wrangler@4`, so reading the escape as its letter (`1`)
 #: made a real float invisible to the guard while every check stayed green
-#: (measured end to end on a parsed job body). The same table keeps a CORRECT pin
-#: correct: `wrangler@$'\064'.127.0` is `wrangler@4.127.0`.
+#: (measured end to end on a parsed job body). Every arity bash accepts is
+#: covered: `\nnn` is 1–3 OCTAL digits, `\xHH` 1–2 hex, and `\uHHHH`/`\UHHHHHHHH`
+#: 1–4 / 1–8 hex. A fixed arity matched only the LONG spellings, so `$'\u40'` fell
+#: through to the sentinel with the digits left behind — the token then vanished
+#: instead of being refused, a false PASS (measured on bash 5). The same table keeps
+#: a CORRECT pin correct: `wrangler@$'\064'.127.0` is `wrangler@4.127.0`.
 _ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
            "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\",
            "'": "'", '"': '"', "?": "?"}
 _ANSI_OCTAL = re.compile(r"[0-7]{1,3}")
 _ANSI_HEX = re.compile(r"[0-9A-Fa-f]{1,2}")
-_ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{4}"), 8: re.compile(r"[0-9A-Fa-f]{8}")}
+_ANSI_UNICODE = {4: re.compile(r"[0-9A-Fa-f]{1,4}"), 8: re.compile(r"[0-9A-Fa-f]{1,8}")}
 #: An escape this scan does not model becomes this sentinel. It cannot appear in
 #: an exact pin, so a SPEC carrying it is floating by the whole-word test — the
 #: scan will not guess what the escape spells. (The octal escape for NUL produces
@@ -249,7 +253,13 @@ def _shell_words(text: str) -> list[str]:
                 elif nxt in ("u", "U"):
                     m = _ANSI_UNICODE[4 if nxt == "u" else 8].match(text, i + 2)
                     if m:
-                        out.append(chr(int(m.group(0), 16)))
+                        code = int(m.group(0), 16)
+                        # `chr` raises above the Unicode range and on surrogates;
+                        # bash yields the empty string there, so the word must be
+                        # unreadable rather than crash the guard.
+                        out.append(chr(code)
+                                   if code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF
+                                   else _UNREADABLE)
                         i = m.end()
                         continue
                 out.append(_ANSI_C.get(nxt, _UNREADABLE))
@@ -530,8 +540,9 @@ def _cut_comment(line: str) -> str:
     """`line` with a COMMENT TAIL cut off — quoting honoured, so `\"a#b\"` is data.
 
     A `#` starts a comment only at the start of a word and outside quotes, which
-    is shell's own rule. It is the same rule `_shell_words` applies, kept here as
-    a character scan because this test needs the CODE TEXT, not its words.
+    is shell's own rule — and a word starts after a blank OR a metacharacter, so a
+    `;#` tail is a comment too. It is the same rule `_shell_words` applies, kept
+    here as a character scan because this test needs the CODE TEXT, not its words.
     """
     quote = ""
     at_word_start = True
@@ -554,7 +565,10 @@ def _cut_comment(line: str) -> str:
             i += 1
         elif ch == "#" and at_word_start:
             return line[:i]
-        elif ch in " \t":
+        elif ch in " \t;&|()<>":
+            # A METACHARACTER also starts a word, so `;#` and `(#` are comments.
+            # Counting blanks alone left `npx … --version ;# for attempt in 1 2 3`
+            # reading as code and satisfied the retry check on a single fetch.
             at_word_start = True
         else:
             at_word_start = False
@@ -600,6 +614,11 @@ def test_the_retry_check_ignores_a_commented_out_loop() -> None:
         "# old body used `for attempt in 1 2 3`; now a single fetch\n"
         "npx --yes wrangler@4.127.0 --version")
     assert not _has_retry_loop_in_code("npx --yes wrangler@4.127.0 --version")
+    # …and a `#` after a METACHARACTER starts a comment like any other, or the loop
+    # text survives in `;# for attempt in 1 2 3` and satisfies the check on one fetch.
+    for run in ("npx --yes wrangler@4.127.0 --version ;# for attempt in 1 2 3",
+                "(# for attempt in 1 2 3\nnpx --yes wrangler@4.127.0 --version)"):
+        assert not _has_retry_loop_in_code(run), run
     # A TRAILING comment is a comment too, and it was the surviving spelling while
     # only whole lines were dropped: a single unprotected fetch with the loop text
     # kept as a note passed every invariant.
@@ -835,6 +854,17 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
         assert _floating_wranglers(run) == {"4"}, run
     # …and the same escapes can spell a CORRECT pin, which must stay exact.
     assert _exact_wranglers("npx --yes wrangler@$'\\064'.127.0 --version") == {"4.127.0"}
+    # bash takes 1–4 (`\u`) and 1–8 (`\U`) hex digits, so the SHORT spellings must
+    # be translated too: with a fixed arity the escape left its digits behind, the
+    # word held no `wrangler@`, and the float was invisible (measured on bash 5).
+    for run in ("npx --yes wrangler$'\\u40'4 --version",
+                "npx --yes wrangler$'\\u040'4 --version",
+                "npx --yes wrangler$'\\U0040'4 --version"):
+        assert _floating_wranglers(run) == {"4"}, run
+    assert _exact_wranglers("npx --yes wrangler@4.1$'\\u32'7.0 --version") == {"4.127.0"}
+    # A code point `chr` cannot hold is UNREADABLE, not a crash: bash yields the
+    # empty string there, so the word can never be the pin.
+    assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\UFFFFFFFF' --version") == {""}
     # An escape this scan does NOT model makes the word unreadable, and unreadable
     # is FLOATING (fail-closed) rather than silently clean.
     assert _floating_wranglers("npx --yes wrangler@4.127.0$'\\cA' --version") == {""}
