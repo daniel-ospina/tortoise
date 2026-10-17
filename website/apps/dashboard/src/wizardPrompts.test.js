@@ -121,7 +121,7 @@ test('#4880: the rendered wizard copy matches the committed snapshot', () => {
   const renderedCommands = {}
   for (const harness of COMMAND_HARNESSES) renderedCommands[harness] = CODEX_DESKTOP_COMMAND(KEY)
   assert.deepEqual(snapshot.commands, renderedCommands,
-    'the rendered universal commands drifted from the snapshot')
+    'the rendered config block drifted from the snapshot')
   assert.equal(snapshot.onboardingInstructions, ONBOARDING_INSTRUCTIONS,
     'the shared onboarding sentence drifted from the snapshot')
   assert.deepEqual(snapshot.captions, WIZARD_CAPTIONS,

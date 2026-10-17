@@ -415,8 +415,12 @@ def test_4365_served_connect_copy_names_three_skills_plus_the_instructions():
     surfaces = dict(snap["prompts"])
     surfaces["workflows"] = snap["workflows"]
     surfaces["onboardingInstructions"] = sentence
-    # #3430: the per-harness `UNIVERSAL_COMMAND` blocks were deleted — only the
-    # Codex Desktop block is rendered at all, so it is the only one left to check.
+    # #3430: the per-harness `UNIVERSAL_COMMAND` blocks were deleted (only the Codex
+    # Desktop block was ever rendered). The surviving entry contributes NOTHING to
+    # the loop below — that block names the installer only as a commented curl
+    # invocation and enumerates no skill set — so the coverage that matters is the
+    # four rendered wizard prompts — the `checked >= 4` floor at the end of this
+    # test is what fails if one of them loses its enumeration.
     surfaces.update({f"CODEX_DESKTOP_COMMAND.{k}": v for k, v in snap["commands"].items()})
     # #4880: the live JSX captions — extracted into wizardPrompts.js as DATA so
     # they are rendered values like everything else.

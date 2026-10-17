@@ -2,7 +2,7 @@
 // no jsdom/React needed) (#1998 W2 — universal command, surface 5).
 import { test } from 'node:test'
 import * as HARNESS_MODULE from './harnesses.js'
-import { wizardPromptText } from './wizardPrompts.js'
+import { wizardPromptText, wizardWorkflowsText } from './wizardPrompts.js'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
@@ -68,10 +68,11 @@ test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, in
 
 test('#3430: the ONE rendered config block survives; the unrendered per-harness blocks are gone', () => {
   // #3430: `UNIVERSAL_COMMAND` carried one block per harness, but only the Codex
-  // Desktop leaf was ever rendered — `main.jsx` (#2827/#3232) calls it "the ONE
-  // config-writing leaf that stays single-block". The other seven were copy no
-  // user saw, while `DE2E-5` asserted against them: the suite could keep passing
-  // while the product said something else. The constant is now that one block.
+  // Desktop leaf was ever rendered — `main.jsx` imports and renders exactly that
+  // one call (`rg -n 'UNIVERSAL_COMMAND' src/main.jsx` at the parent commit shows
+  // the import plus a single render site). The other seven were copy no user saw,
+  // while `DE2E-5` asserted against them: the suite could keep passing while the
+  // product said something else. The constant is now that one block.
   assert.equal(typeof CODEX_DESKTOP_COMMAND, 'function')
   const cmd = CODEX_DESKTOP_COMMAND(KEY)
   assert.ok(cmd && cmd.length > 0, 'codexDesktop command non-empty')
@@ -203,20 +204,39 @@ test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/
   assert.ok(HARNESS_INTRO.codexDesktop && HARNESS_INTRO.codexDesktop.includes('~/.codex/config.toml'), 'desktop intro names the config file')
 })
 
-test('DE2E-5: the RENDERED self-install prompts carry the MCP URL, the skill install and the verify', () => {
+test('DE2E-5: the RENDERED self-install prompts carry the MCP URL and the skill install', () => {
   // #3430: retargeted off the unrendered `UNIVERSAL_COMMAND.*` mechanics copy
   // onto the surfaces `main.jsx` actually renders. The mechanics (which `mcp add`
   // subcommand, which config file) became the AGENT's job at #3232, so pinning
-  // them pinned a promise the product no longer makes. The three facts a human IS
-  // promised are still asserted — on the rendered text.
+  // them pinned a promise the product no longer makes.
   for (const h of HARNESS_SELF_INSTALL) {
     const text = [wizardPromptText(h, 1, KEY, 'included'), wizardPromptText(h, 2, KEY, 'included')]
       .filter(Boolean).join('\n')
     assert.ok(text.length > 0, `${h}: renders a connect prompt`)
     assert.match(text, /https:\/\/api\.premiselabs\.co\/mcp\/?/, `${h}: rendered prompt names the MCP URL`)
     assert.match(text, /install-tortoise-skills\.sh/, `${h}: rendered prompt names the skill installer`)
-    assert.match(text, /tortoise_health/, `${h}: rendered prompt names the verify tool`)
   }
+})
+
+test('DE2E-5: EVERY harness verifies through tortoise_health — the clause is 6 harnesses, not 4', () => {
+  // #3430 review, cycle 1: the deleted universal commands each ended in a
+  // `tortoise_health` verify, so dropping them silently narrowed a CONTRACT that
+  // is stated for every harness. `HARNESS_SELF_INSTALL` is only 4 of the 6 that
+  // render a prompt, and the two connector leaves (claude-desktop, claude-web)
+  // were left covered by nothing but a snapshot `deepEqual` — which passes for
+  // any text change regenerated in the same commit, so it cannot protect a
+  // semantic claim. Asserted here on the RENDERED text instead.
+  const rendered = HARNESS_ORDER.filter((h) => h !== 'chatgpt')
+  assert.deepEqual(rendered.slice().sort(),
+    ['claude', 'claude-desktop', 'claude-web', 'codex', 'cursor', 'pi'],
+    'the verify contract covers every harness with a rendered surface')
+  for (const h of rendered) {
+    const step2 = wizardPromptText(h, 2, KEY, 'included') || ''
+    assert.match(step2, /tortoise_health/, `${h}: rendered step 2 names the verify tool`)
+  }
+  // …and the connector leaves' other delivery surface: the workflows prompt.
+  assert.match(wizardWorkflowsText(KEY, 'included'), /tortoise_health/,
+    'the workflows prompt (the connector leaves\' delivery surface) names the verify tool')
 })
 
 test('DE2E-5: teach-human harnesses are key-less OAuth on BOTH connector surfaces', () => {
@@ -271,7 +291,7 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — steps + skills-as-
     'chatgpt capture row renders a reason (never undefined)')
 })
 
-test('no literal key in a committable config: the RENDERED copy sends it to the shell profile', () => {
+test('the RENDERED connect copy never inlines a Bearer header or a project config', () => {
   // #3430: retargeted onto rendered surfaces. The dead `UNIVERSAL_COMMAND.cursor`
   // / `.pi` blocks were the old home of this check; the config files they
   // described are now written by the AGENT from the rendered prompt, so what is
@@ -284,7 +304,7 @@ test('no literal key in a committable config: the RENDERED copy sends it to the 
   const piPrompt = wizardPromptText('pi', 1, KEY, 'included')
   assert.match(piPrompt, /shell profile/, 'pi prompt sends the key to the shell profile')
   assert.ok(!/Authorization["\s:]*Bearer/i.test(piPrompt), 'pi prompt never inlines a Bearer header')
-  assert.ok(!piPrompt.includes('.mcp.json'), 'pi prompt leaves the config file to the agent')
+  assert.ok(!piPrompt.includes('.mcp.json'), 'pi prompt names no project config file — the agent writes it')
   for (const h of HARNESS_SELF_INSTALL) {
     for (const step of [1, 2]) {
       const text = wizardPromptText(h, step, KEY, 'included') || ''

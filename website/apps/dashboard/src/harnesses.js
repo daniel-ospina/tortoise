@@ -538,7 +538,7 @@ export const SKILLS_INSTALL_URL =
   'https://app.premiselabs.co/install-tortoise-skills.sh'
 
 // #4365: the shipped skill set, stated ONCE. Every surface in THIS module that
-// enumerates it interpolates these — SKILL_INSTALL, the HARNESS_SKILLS block,
+// enumerates it interpolates these — the HARNESS_SKILLS block,
 // and the HARNESS_STEPS.cursor label — so the copy cannot drift from the
 // installer's own `SKILLS=(...)` array (pinned by test on both sides). The
 // four LIVE dashboard wizard prompts interpolate SKILLS_LIST too — from
@@ -720,10 +720,11 @@ export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex',
 //   level 2 — the SURFACE you connect (only when there is a real choice):
 //             Claude → Code, Desktop, Web;  Codex → CLI, Desktop
 //
-// `surface.id` is the existing HARNESS_ORDER/`wizardHarness` LEAF id, so every
-// per-harness payload (CODEX_DESKTOP_COMMAND, wizardPromptText, HARNESS_NAMES,
-// capture support) stays keyed exactly as before — this is a UI grouping, not
-// a vocabulary change (DE2E-5's 7-harness contract is untouched).
+// `surface.id` is the existing HARNESS_ORDER/`wizardHarness` LEAF id, so the
+// per-harness payloads (wizardPromptText, HARNESS_NAMES, capture support) stay
+// keyed exactly as before — this is a UI grouping, not a vocabulary change
+// (DE2E-5's 7-harness contract is untouched). CODEX_DESKTOP_COMMAND is a bare
+// function, not a per-harness map: it serves the one manual leaf (#3430).
 // ChatGPT stays out: it has no Claude/Codex-style surface split and its
 // Developer-mode path is not reachable from the dashboard chooser (#2698).
 // #2865: Claude's Desktop/Web surfaces ARE key-less OAuth (HARNESS_OAUTH) and
@@ -823,32 +824,35 @@ export function analyticsHarnessOf(leaf) {
     : leaf
 }
 
-// ── #1998 (W2): universal setup command (epic #1976 I-3, surface 5) ────────
-// The connect step's ONE command per harness — all 7 covered, 4 self-install
-// (config-write) + 3 teach-human (desktop/web/chatgpt — web/chatgpt have no
-// local shell, so the human completes the steps). HARNESS_NAMES/HARNESS_ORDER
-// stay the single 7-harness vocabulary; the harness table in the SERVED
-// onboarding instructions (#4365: an instruction document, not an installed
-// skill) is the agent-side self-adjudication source (the chooser's
-// successor). chatgpt is key-less/OAuth (HARNESS_OAUTH) and the live chooser
-// cannot select it: #2698 deleted its dashboard tab and #2912's 4-family
-// HARNESS_FAMILIES excludes it. (The archived #1643 render at the bottom of this
-// block maps the full HARNESS_ORDER, chatgpt included, but it is gated on
-// `LEGACY_WIZARD_ARCHIVED && welcomeOriented` — both false.) Its LIVE carrier is
-// the public setup docs page (#4836): website/docs.html#chatgpt names the
-// Developer-mode path, the canonical connector URL and the onboarding
-// instructions URL. The block below embeds the workflows prompt; the page hands
-// over the onboarding document. This block's `chatgpt` copy must omit
-// `tortoise_health` — it verifies in the chat instead (pinned in
-// harnesses.test.js).
+// ── #1998 (W2) / #3430: the ONE rendered connect block (epic #1976 I-3) ────
+// #3430 DELETED the per-harness "universal setup command" that used to live
+// here: one paste-able block per harness, of which only Codex Desktop was ever
+// rendered. The rest reached no user while DE2E-5 asserted their exact strings,
+// so the suite could keep passing on copy the product had stopped serving.
+// Do NOT re-add a block without rendering it in main.jsx first.
 //
-// Contract (DE2E-5): every harness reaches a connected state verifiable via
-// tortoise_health; the served onboarding instructions take over from the
-// command (verify → harness-connected checkpoint). The command NEVER embeds the API
-// key in a project-scoped/committable config (env-var indirection); CLI
-// one-liners carry the key in the shell call only. These exports are
-// ADDITIVE — the legacy HARNESS_* exports stay (the ARCHIVED #1643 wizard
-// render + Memory-sources capture rows depend on them; A0 rollback path).
+// The live connect copy is `wizardPromptText` (agent-driven harnesses: the human
+// hands the agent the prompt and the AGENT does the mechanics — which `mcp add`
+// subcommand, which config file, #3232) plus the Claude connector JSX in
+// main.jsx (#2865). HARNESS_NAMES/HARNESS_ORDER remain the single 7-harness
+// vocabulary; the harness table in the SERVED onboarding instructions (#4365:
+// an instruction document, not an installed skill) is the agent-side
+// self-adjudication source.
+//
+// chatgpt is key-less/OAuth (HARNESS_OAUTH) and has NO dashboard surface:
+// #2698 deleted its tab and #2912's families exclude it. Its live carrier is
+// the public setup docs page (#4836): website/docs.html#chatgpt.
+//
+// Contract (DE2E-5), and where each clause is now pinned:
+//   • every harness reaching a connected state verifiable via tortoise_health —
+//     pinned on the RENDERED step-2 prompt for all six non-chatgpt harnesses
+//     plus the workflows prompt (harnesses.test.js);
+//   • the key never lands in a project-scoped/committable config (env-var
+//     indirection) — pinned on the rendered prompt, never on a literal (the
+//     test key is itself `tt_`-prefixed, so "contains tt_" proves nothing).
+// These exports are ADDITIVE — the legacy HARNESS_* exports stay (the ARCHIVED
+// #1643 wizard render + Memory-sources capture rows depend on them; A0 rollback
+// path).
 export const HARNESS_SELF_INSTALL = ['claude', 'codex', 'cursor', 'pi']
 
 export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web', 'chatgpt']
@@ -860,13 +864,6 @@ export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web', 'chatgpt']
 // This is a VOCABULARY export, not a render gate — the live connect step
 // branches on it directly (main.jsx), so a change here must be mirrored there.
 export const HARNESS_OAUTH = ['claude-desktop', 'claude-web', 'chatgpt']
-
-// The skill installer line every config-writing harness command appends.
-// #4365: it names the THREE capabilities the installer actually ships (v3) —
-// onboarding is not among them. Onboarding is the instructions the agent
-// reads at ONBOARDING_INSTRUCTIONS_URL, plus the MCP config in the block above.
-const SKILL_INSTALL = (harness) =>
-  `# ${SKILLS_CLAIM}:\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}\n\n# Onboarding is NOT a skill — it is the instructions below plus the config above.\n# Read and follow them here: ${ONBOARDING_INSTRUCTIONS_URL}`
 
 // The ONE config-writing leaf still rendered as a single paste-able block.
 // Codex Desktop has no terminal (#2827) and no agent-facing verify to order
