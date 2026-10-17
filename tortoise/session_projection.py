@@ -54,6 +54,18 @@ SESSION_READ_FIELDS: tuple[str, ...] = (
     # from POSITIONAL columns, so a column inserted anywhere earlier silently
     # re-binds `r[0..3]` to the wrong values.
     "extraction",
+    # #3516: the capture-provenance triplet. The capture path has STORED these
+    # since #3516 §B / #3515 piece 12 (`sdk._write_session_and_turns`), but the
+    # read projection never served them — so `client_capture_floor_verdict`,
+    # the store-proven floor's own verdict function, could not be called with a
+    # real record by ANY consumer. That is why it had zero production callers:
+    # not a missing wiring, a missing READ. Serving them is the precondition
+    # for the install-verify path to evaluate the floor at all.
+    #
+    # They are client-claimed and NULL on a legacy / hook-less session, exactly
+    # as `machine_id`/`model` are — same class, same position rule (APPENDED, so
+    # a positional consumer of the earlier columns never shifts).
+    "client_captured_at", "client_captured_at_source", "capture_lane",
 )
 
 #: What `GET /v1/sessions` serves per session: the shared projection plus
@@ -62,6 +74,9 @@ SESSION_LIST_FIELDS: tuple[str, ...] = (
     "id", "created_at", "turns", "extracted",
     "actor_user_id", "harness", "actor_display", "machine_id", "model",
     "extraction",
+    # #3516: the capture-provenance triplet, mirrored from SESSION_READ_FIELDS
+    # (the bind below fails loudly if these two ever diverge).
+    "client_captured_at", "client_captured_at_source", "capture_lane",
 )
 
 #: #3520: the session-scoped EXTRACTION-status vocabulary — the members any

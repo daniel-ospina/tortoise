@@ -2449,10 +2449,10 @@ class _EntityHandlers:
         The capture path MERGEs the Session with a raw graph write; this
         record is its journal carrier, so the node (and any ``EntityLinked``
         edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``,
-        ``actor_user_id`` and ``capture_lane`` are coalesce-preserved (first
-        writer wins, mirroring the live merge), ``turn_count`` tracks the latest
-        journaled capture. Returns 1 when the node exists after the fold, 0 on a
-        malformed record.
+        ``source``, ``actor_user_id`` and ``capture_lane`` are coalesce-preserved
+        (first writer wins, mirroring the live merge), ``turn_count`` tracks the
+        latest journaled capture. Returns 1 when the node exists after the fold,
+        0 on a malformed record.
 
         BOTH the id and every journal-derived property value are gated for
         WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
@@ -2541,6 +2541,18 @@ class _EntityHandlers:
             sets.append(
                 "s.client_captured_at=coalesce(s.client_captured_at, $v_client_captured_at)")
             params["v_client_captured_at"] = _cap_at
+        # #3516 §D: the transcript stem the capture came from. Set-if-absent
+        # (coalesce), the SAME semantics as the live raw SET
+        # (`sdk._write_session_and_turns`): the store-sync backstop ships the
+        # SAME session after the hook, and an absent/different stem from the
+        # later writer must never relabel what the hook observed. The
+        # truthiness guard matches the sink too — `""`/`0`/`False` stay absent
+        # on replay exactly as they are live. Without this arm a journal-only
+        # rebuild loses `source` and live/replay diverge (review P2).
+        _src = ev.get("source")
+        if _src and _annotator_value_ok(_src):
+            sets.append("s.source=coalesce(s.source, $v_source)")
+            params["v_source"] = _src
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):

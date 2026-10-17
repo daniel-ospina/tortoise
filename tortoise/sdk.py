@@ -2330,6 +2330,7 @@ def _write_session_and_turns(
     capture_lane: str | None = None,
     client_captured_at: float | None = None,
     client_captured_at_source: str | None = None,
+    source: str | None = None,
     actor_user_id: str | None = None,
     machine_id: str | None = None,
     model: str | None = None,
@@ -2463,6 +2464,16 @@ def _write_session_and_turns(
         # have (piece 12 — 'unknown' must be excludable from a pass).
         if client_captured_at_source:
             session_record["client_captured_at_source"] = client_captured_at_source
+    # #3516 §D: the transcript stem the capture came from. Set-only-when-present
+    # AND set-if-absent (``coalesce``), the machine_id/model rule below rather
+    # than the harness rule: the store-sync backstop ships the SAME session
+    # after the hook, and a backstop entry that carries a different (or no)
+    # transcript stem must never overwrite the stem the hook observed — a
+    # plain SET would let the weaker, later producer relabel the record.
+    if source:
+        merge_sets.append("s.source=coalesce(s.source, $src)")
+        merge_params["src"] = source
+        session_record["source"] = source
     if actor_user_id:
         merge_sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
         merge_params["uid"] = actor_user_id
@@ -26833,7 +26844,17 @@ class TortoiseSDK:
             # sess[0..6] mapping is unchanged, and the SDK read must serve the
             # SAME extraction status the hosted surfaces do (#5498 binds the
             # three key sets to one declaration).
-            "s.capture_ok, s.capture_extractor",
+            "s.capture_ok, s.capture_extractor, "
+            # #3516: the capture-provenance triplet, APPENDED AFTER #3520's
+            # columns (sess[9..11]). #3520 landed on main first and took
+            # sess[7]/sess[8], so these must FOLLOW it — a union that placed
+            # them at sess[7] would have silently re-bound `extraction` to the
+            # provenance columns, which is the positional corruption this
+            # projection's own header warns about.
+            # The SDK read is BOUND to `SESSION_READ_FIELDS` by the parity
+            # test, so this lane cannot serve a different vocabulary from the
+            # hosted endpoint it mirrors.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -26897,6 +26918,11 @@ class TortoiseSDK:
             # part of the SDK read by construction rather than a second
             # opinion).
             "extraction": session_extraction_status(sess[7], sess[8]),
+            # #3516 §B / #3515 piece 12: the floor's inputs + the producer lane.
+            # sess[9..11] — they follow #3520's columns, which hold 7 and 8.
+            "client_captured_at": sess[9],
+            "client_captured_at_source": sess[10],
+            "capture_lane": sess[11],
             "extracted": extracted_count,
             "turn_points": turn_points,
             "extracted_points": extracted_points,

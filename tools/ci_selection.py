@@ -1429,6 +1429,29 @@ TOOL_CARVEOUTS = (
     # matrix) is the safe default for a tool whose answer drives dispatch.
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
+    # #8375 item 1: the required-check repair. The workflow and the launchd
+    # fallback both run `tools/ci_check_repair.py` with `--apply` on a schedule,
+    # unattended, with the ability to CLOSE and REOPEN pull requests and to re-run
+    # workflow runs. Its suite (tests/test_ci_check_repair.py) is registered in the
+    # `ci-surfaces.yml` `core` surface — and that registration covers the TEST
+    # FILE's own edits, NOT the tool's: no SOURCE_PATTERNS entry matches
+    # `tools/ci_check_repair.py`, so a tool-only diff is swallowed by the flat
+    # "tools/" prefix, `changed` comes back empty, select() takes the docs-only
+    # early return (which bypasses the `if not matched: matched.add("core")`
+    # fallback entirely), and NOT ONE of the 74 guards runs on the very change
+    # that can break them. Measured: `--changed-files tools/ci_check_repair.py`
+    # returned surfaces=[] full=False before this carve-out. `--integrity` cannot
+    # catch it — it only asks whether the test file is CLASSIFIED. The same
+    # applies to the launchd entry point (the `bash -s`/TCC handoff), the local
+    # fallback, and the installer whose plist decides whether the job is armed.
+    # None of the four matches a SOURCE_PATTERNS row, so they land in the
+    # unknown-path branch -> FULL matrix (fail closed), which is the safe default
+    # for a tool that mutates other PRs.
+    # Pinned by test_ci_selection.test_ci_check_repair_tool_change_fails_closed_to_full.
+    "tools/ci_check_repair.py",
+    "tools/ci_check_repair_launchd.py",
+    "tools/ci-check-repair-local.sh",
+    "tools/install-ci-check-repair-schedule.sh",
 )
 
 
