@@ -533,6 +533,26 @@ def test_a_failed_flag_write_says_the_walk_started(ctx, monkeypatch):
     assert out["state"] == "started", "the walk DID start; do not imply it did not"
 
 
+def test_a_failed_disable_write_is_an_error_payload_not_an_exception(ctx,
+                                                                  monkeypatch):
+    """Every declared status carries the same fields — and no traceback.
+
+    The enable and agent-sessions writes were guarded first; this one escaped
+    as a raw exception, so a caller branching on `enforcement` got a
+    traceback instead of the documented payload.
+    """
+
+    def _boom(*a, **k):
+        raise RuntimeError("control plane down")
+
+    monkeypatch.setattr(ha, "_update_onboarding_state", _boom)
+
+    out = m.tortoise_manage_sources("disable", "github_issues")
+
+    assert "could not be written" in out["error"]
+    assert "error_flag_write" in [entry[3] for entry in ctx["logs"]]
+
+
 def test_every_enable_flag_is_a_registered_state_key():
     """A mistyped flag is silently dropped by the router (fail-closed) while
     the tool still answers `disabled` — so pin the key to the registry."""

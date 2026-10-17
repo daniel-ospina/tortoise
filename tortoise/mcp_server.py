@@ -4642,7 +4642,19 @@ def _set_source_state(source: str, enable: bool) -> dict:
             # before the write, so a crash inside the write still leaves it on
             # the record (the outcome line follows).
             _log_source_change(org_id, source, "disable", "attempt")
-            _update_onboarding_state(org_id, _echo=False, **{flag: False})
+            try:
+                _update_onboarding_state(org_id, _echo=False, **{flag: False})
+            except Exception:
+                # Same shape as the enable/agent-sessions writes: a plane
+                # failure must come back as the documented error payload, not
+                # as an exception escaping the tool.
+                _log.warning("source-management flag write failed",
+                             exc_info=True)
+                _log_source_change(org_id, source, "disable",
+                                   "error_flag_write")
+                return {"error": (
+                    "The source's enable flag could not be written (control "
+                    "plane unavailable); nothing changed. Retry.")}
             _log_source_change(org_id, source, "disable", "ok")
             return {
                 "source": source,

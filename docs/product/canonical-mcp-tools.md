@@ -30,7 +30,7 @@ generated view of the current baseline) and the gate in `tools/surface-guard.py`
 document left **OPEN** are settled — `manage_deployment` is **off the MCP**,
 `run_onboarding` is **dropped for `check_connection`**, and `packs_list`/`pack_install` are
 **SDK/REST, post-beta** (#4663). The **23** is this list's own proposal count; the **MCP
-target is 26**. `approved: 2026-09-18` above stays the original ruling date; this paragraph
+target is 26 at that ruling** (27 since #3540, 2026-10-17). `approved: 2026-09-18` above stays the original ruling date; this paragraph
 records the amendment.
 
 **Amended 2026-10-12** (owner ruling, recorded on **#7852**): `create_operator`
@@ -172,7 +172,8 @@ currently absorbs `get_confidence`, which is read-labelled but writes. See **Ope
 **Rows 22 and 23 are settled OFF the MCP (2026-09-22).** `manage_deployment` is account tenancy
 (`org_create`) plus two tenant-served pack operations; `run_onboarding` mixed a write with two
 tenant-served reads. Neither container ships on the MCP target. The rehomed members and the
-dropped capability are recorded in **Open items**; the **MCP target count is unchanged at 26** —
+dropped capability are recorded in **Open items**; the **MCP target count is unchanged at 26 in
+that ruling** (27 since #3540, 2026-10-17 — see the amendment above) —
 the beta list already carries `check_connection` in `run_onboarding`'s place and the tenancy
 surface outside the MCP. Nothing below is a silent deletion: every member is either rehomed or
 listed as retired.
@@ -256,7 +257,7 @@ and **17 of the 23 names appear nowhere else in the repo** — the six that do a
 `run_onboarding`, and in every case the match is a different identifier or the existing
 tool of the same name. The one unplaced tool is `graph_set_recording`, whose disposition is
 **RESOLVED by owner ruling 2026-09-21: kept** — see the row above. The unplaced tool is now the
-**24th** approved tool (the beta target becomes 26), so "zero orphans" holds.
+**24th** approved tool (the beta target became 26 at that ruling; 27 since #3540, 2026-10-17), so "zero orphans" holds.
 Six breakages were found and
 folded into the list above; two were filed as issues: **#4113** (surface guards assert tool
 names by string, so they go vacuous on any rename) and **#4114** (`hosted_only` is declared
