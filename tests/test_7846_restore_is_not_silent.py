@@ -336,6 +336,15 @@ def test_tcp_is_listening_measures_the_port_not_the_server() -> None:
         "a closed port read as listening — a dead instance would be misreported as blocked"
     )
 
+    # #8827 review: a connect TIMEOUT is "could not measure", never a refusal.
+    # `socket.timeout` is an `OSError`, so the two-valued probe reported a blocked
+    # instance with a full accept backlog (which DROPS SYNs) as "the port REFUSED …
+    # the process is gone … restart the instance" — the exact case it exists for.
+    assert tcp_is_listening("10.255.255.1", 6379, timeout_s=0.2) is None, (
+        "an unmeasurable connect read as a refusal — a healthy but blocked instance "
+        "would be reported as gone, and the operator told to restart it"
+    )
+
 
 def test_a_non_positive_bound_is_refused() -> None:
     """A zero/negative bound would make every restore look like an overrun."""

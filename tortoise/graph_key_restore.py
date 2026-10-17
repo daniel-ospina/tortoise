@@ -134,7 +134,7 @@ DEFAULT_POLL_INTERVAL_S = 0.1
 DEFAULT_BLOCKED_LATENCY_MS = 250.0
 
 
-def tcp_is_listening(host: str, port: int, *, timeout_s: float = 1.0) -> bool:
+def tcp_is_listening(host: str, port: int, *, timeout_s: float = 1.0) -> bool | None:
     """Whether ``host:port`` ACCEPTS a TCP connection — process alive, no more.
 
     Deliberately transport-level. A FalkorDB instance blocked on its serving thread
@@ -146,8 +146,19 @@ def tcp_is_listening(host: str, port: int, *, timeout_s: float = 1.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout_s):
             return True
-    except OSError:
+    except ConnectionRefusedError:
+        # The kernel ACTIVELY refused: nothing is listening. This is the only
+        # signal that may be read as "the process is gone".
         return False
+    except OSError:
+        # Timeout / EHOSTUNREACH / ENETUNREACH — we could not MEASURE.
+        #
+        # `socket.timeout` is a subclass of `OSError`, and a BLOCKED instance whose
+        # accept backlog is full drops SYNs, so a connect TIMEOUT is expected
+        # precisely in the case this probe exists for. Reporting it as a refusal
+        # told the operator "the port REFUSED … the process is gone … restart the
+        # instance" about a healthy but blocked box (#8827 review).
+        return None
 
 
 @dataclass(frozen=True)
@@ -519,11 +530,17 @@ def restore_graph_key(
     # the measurement, not hang. Liveness is probed AFTER the bound so it describes
     # the instance at the moment the caller gives up.
     instance_listening = None if listening is None else bool(listening())
-    if not failures:
+    if not failures and samples:
+        # Every sample ANSWERED, so the instance was serving and the overrun is the
+        # CALLER's. Both conditions are required: with zero samples `not failures`
+        # is vacuously true, and "every one of the 0 witness PINGs ANSWERED" is the
+        # pre-fix false reading delivered in a confident voice (#8827 review).
         status = CALLER_STALL
     elif instance_listening is False:
         status = INSTANCE_GONE
     else:
+        # Includes the zero-sample case: nothing was measured, so the instrument
+        # reports silence it cannot attribute rather than claiming the CALLER.
         status = ALIVE_BUT_SILENT
     observation = RestoreObservation(
         graph=graph,
