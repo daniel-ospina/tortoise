@@ -1062,8 +1062,8 @@ def test_4643_the_ownership_table_states_the_rule_per_artifact():
 # nothing"), one level up — and `tests/test_ci_guard_invocation.py` is the
 # repo's settled answer to it (#4494, after thirteen review cycles on this exact
 # class): *a text scanner cannot be completed by more text rules*. So the step
-# is RUN, under `bash -e -o pipefail`, with recording interpreter stubs on
-# PATH, and a runner must satisfy BOTH:
+# is RUN, under the flags `_shell_flags` derives for THAT step, with recording
+# interpreter stubs on PATH, and a runner must satisfy BOTH:
 #
 #   * the recorded argv is the arm itself — `served_skills_parity.py` at the
 #     interpreter's SCRIPT operand, with `--check-upstream` after it (so an
@@ -1098,14 +1098,17 @@ _STUB = """#!/usr/bin/env bash
 printf '%s\\0' "${0##*/}" "$@" >> "$PARITY_STUB_RECORD"
 printf '\\036' >> "$PARITY_STUB_RECORD"
 if [ "${PARITY_STUB_FAIL_ARM:-0}" = "1" ]; then
-  # The real tool's own semantics: `--check-upstream` and `--check` both run the
-  # upstream arm, and a bare invocation runs BOTH arms; only `--check-local`
-  # leaves it out. A stub that failed only on one spelling would force the
-  # predicate to accept one spelling (review finding, P3).
+  # The real tool's own semantics (`main()`): `--check-upstream` and `--check`
+  # both run the upstream arm; a bare invocation (or one that only adds
+  # `--json`/`--report`) runs BOTH arms. `--check-local` leaves it out, `--sync`
+  # re-derives the mirror and returns 0 BEFORE either arm, and `--help` is
+  # argparse's exit 0. A stub that failed on `--sync` made a `--sync` step look
+  # like a fail-closed gate (review finding, P1), so the stub must agree with
+  # the predicate about what "the arm" is.
   for a in "$@"; do
     case "$a" in
       --check-upstream|--check) exit 1 ;;
-      --check-local) exit 0 ;;
+      --check-local|--sync|--help|-h) exit 0 ;;
     esac
   done
   exit 1
@@ -1223,8 +1226,18 @@ def _is_the_arm(args: list[str]) -> bool:
     tail = args[operand + 1:]
     if any(flag in tail for flag in _ARM_FLAGS):
         return True
-    # A bare invocation runs BOTH arms; only `--check-local` suppresses this one.
-    return "--check-local" not in tail
+    # A bare invocation runs BOTH arms (`main()`: `do_upstream = args.check or
+    # args.check_upstream or not (explicit or args.sync)`), and so does one that
+    # only adds `--json`/`--report`. Two spellings run NO arm and must not be
+    # certified as a runner:
+    #   * `--sync` re-derives the mirror and returns 0 before either arm runs —
+    #     a deploy step written that way rewrites the pin at deploy time and
+    #     gates nothing (review finding, P1);
+    #   * `--help` is argparse's exit 0.
+    # "Everything except `--check-local`" got both of these wrong.
+    if "--check-local" in tail or "--sync" in tail:
+        return False
+    return not any(a in ("--help", "-h") for a in tail)
 
 
 def _can_fail(unit: dict) -> bool:
@@ -1459,6 +1472,61 @@ def test_4643_an_unscheduled_backstop_is_not_a_backstop(name, mutate):
 
 # ── the wiring guard cannot be disarmed (mutation-proved) ─────────────────
 
+def _gate_step_in(workflows: Path) -> dict:
+    """The gate step of the (possibly mutated) deploy workflow, regardless of
+    whether it still qualifies as a runner — the disarmament cases need to read
+    the step's own `shell:` to know what the mutation MEANS."""
+    doc = yaml.safe_load((workflows / "deploy-pages.yml").read_text(encoding="utf-8"))
+    for job in (doc.get("jobs") or {}).values():
+        for step in (job.get("steps") or []):
+            if isinstance(step, dict) and "served_skills_parity" in str(
+                    step.get("run") or ""):
+                return step
+    raise AssertionError("no gate step in the mutated deploy workflow")
+
+
+def test_4643_the_executor_models_the_shell_github_actually_uses():
+    """`| tee` is a disarmament ONLY without pipefail, and `shell: bash` is the
+    standard hardening a maintainer reaches for. The model is load-bearing in
+    both directions, so assert it directly: reverting `_shell_flags` to always
+    `-e` (re-introducing the escaped P2) must red here rather than pass
+    (review finding, P2)."""
+    assert _shell_flags({}) == ("-e",), (
+        "GitHub's implied default is `bash -e <file>` — no pipefail")
+    assert _shell_flags({"shell": "bash"}) == ("-e", "-o", "pipefail")
+    assert _shell_flags({"shell": "bash -eo pipefail {0}"}) == (
+        "-e", "-o", "pipefail")
+    assert _shell_flags({"shell": "sh"}) == ("-e",)
+
+
+def test_4643_a_piped_gate_under_the_pipefail_shell_is_still_a_runner(tmp_path):
+    """The other half of the model: piped through `tee`, but with `shell: bash`
+    (pipefail), the step still exits non-zero on a failing arm — so it IS a
+    fail-closed runner, and calling it disarmed would be a false red that tells
+    a maintainer to remove the hardening."""
+    def mutate(step):
+        step.update({"shell": "bash", "run": step["run"] + " | tee arm.log"})
+
+    workflows = _workflows_with_mutation(tmp_path, mutate)
+    assert "deploy-pages.yml" in _upstream_runners(workflows), (
+        "a piped gate under `shell: bash` fails the step, so it is a runner")
+
+
+def test_4643_a_sync_step_is_not_a_gate(tmp_path):
+    """`--sync` re-derives the mirror and returns 0 BEFORE either arm runs, so a
+    deploy step written that way rewrites the pin at deploy time and gates
+    nothing. The pre-fix predicate read it as the arm ("every tail except
+    `--check-local`") and the stub's unrecognised-argv `exit 1` made it look
+    fail-closed (review finding, P1)."""
+    def mutate(step):
+        step["run"] = step["run"].replace("--check-upstream", "--sync")
+
+    workflows = _workflows_with_mutation(tmp_path, mutate)
+    assert "deploy-pages.yml" not in _upstream_runners(workflows), (
+        "a `--sync` step is certified as a fail-closed gate — it rewrites the "
+        "pin instead of checking it, and could ship a mirror it just changed")
+
+
 def _workflows_with_mutation(tmp_path: Path, mutate, mutate_job=None) -> Path:
     """The REAL workflows, with `mutate(step)` applied to deploy-pages.yml's arm
     step — so every assertion below is about an edit someone could actually make
@@ -1528,6 +1596,13 @@ _DISARMAMENTS = [
     # pipefail` regardless, so it certified a gate CI had already disarmed
     # (review finding, P2).
     ("piped_to_tee", lambda s: s.update(run=s["run"] + " | tee arm.log")),
+    # `--sync` RE-DERIVES the mirror and returns 0 before either arm runs, so a
+    # deploy step written that way rewrites the pin at deploy time and gates
+    # nothing — while the pre-fix predicate ("every tail except `--check-local`")
+    # certified it, because the stub failed on the argv it did not recognise.
+    # This is the P1 class one argv away (review finding, P1).
+    ("sync_instead_of_check", lambda s: s.update(
+        run=s["run"].replace("--check-upstream", "--sync"))),
 ]
 
 
@@ -1545,6 +1620,17 @@ def test_4643_a_runner_that_cannot_fail_is_not_a_runner(tmp_path, name, mutate):
     line already aborts the step, so appending `; exit 0` disarms nothing and a
     case for it could never red."""
     workflows = _workflows_with_mutation(tmp_path, mutate)
+    if name == "piped_to_tee" and "pipefail" in _shell_flags(
+            _gate_step_in(workflows)):
+        # `| tee` disarms ONLY under the implied default shell. With
+        # `shell: bash` — GitHub's pipefail shell, and the standard remedy for a
+        # piped command — the step still fails closed, so this case must not
+        # claim otherwise: the message it prints would tell a maintainer to
+        # un-harden CI (review finding, P2).
+        assert "deploy-pages.yml" in _upstream_runners(workflows), (
+            "a piped gate under `shell: bash` still fails the step; the "
+            "disarmament case must not call it a gate that gates nothing")
+        return
     assert "deploy-pages.yml" not in _upstream_runners(workflows), (
         f"{name}: the step still reads as the gate but cannot fail — the "
         "wiring guard must stop calling it a runner (it is the P1 class: a "
