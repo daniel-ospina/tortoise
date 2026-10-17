@@ -21,6 +21,8 @@ without a per-source tool appearing.
 from __future__ import annotations
 
 import inspect
+import json
+import time
 
 import pytest
 
@@ -357,15 +359,41 @@ def test_unreadable_state_is_not_reported_as_on(ctx, monkeypatch):
 
     listed = m.tortoise_manage_sources("list")
     assert listed["sources"]["agent_sessions"]["enabled"] is None
+    # The sentinel must not leak into the boolean fields either: a plain
+    # `object()` is truthy, so `bool(_state_get(...))` reported a graph-down
+    # team as connected AND indexed.
+    assert listed["sources"]["github_issues"]["connection_connected"] is None
+    assert listed["sources"]["github_documents"]["indexed"] is None
+    assert listed["sources"]["github_documents"]["indexed_at"] is None
+    # The sentinel is a raw `object()`: handing it to the caller makes the
+    # tool result unserialisable, so `list` fails instead of answering.
+    json.dumps(listed)
 
     out = m.tortoise_manage_sources("enable", "agent_sessions")
     assert "could not be read" in out["error"]
     assert ctx["writes"] == [], "an unknown state must not be written over"
 
 
+def _stub_heal(monkeypatch, healed):
+    """Stub the #1845 heal both REST twins run BEFORE they walk (#3540).
+
+    `_heal_github_org` is `async` and hits `GET /user`; the tool must await it
+    from a sync handler, so the seam is the coroutine itself.
+    """
+    seen: list[tuple] = []
+
+    async def _heal(org_id, encrypted, stored_org):
+        seen.append((org_id, encrypted, stored_org))
+        return healed(stored_org) if callable(healed) else healed
+
+    monkeypatch.setattr(ha, "_heal_github_org", _heal)
+    return seen
+
+
 def test_enable_refuses_when_the_stored_credential_has_no_org(ctx, monkeypatch):
-    """The REST twin refuses this with 400; `None` reaches the walk as
+    """With the heal unable to derive a login, `None` would reach the walk as
     `f"{org}/{repo}"`, so a success answer would be a lie."""
+    _stub_heal(monkeypatch, lambda stored: stored)
     monkeypatch.setattr(ha, "_github_credentials", lambda org_id: ("enc", None))
 
     out = m.tortoise_manage_sources("enable", "github_issues")
@@ -373,6 +401,136 @@ def test_enable_refuses_when_the_stored_credential_has_no_org(ctx, monkeypatch):
     assert "GitHub org unknown" in out["error"]
     assert ctx["writes"] == []
     assert ctx["jobs"] == []
+
+
+def test_enable_heals_a_missing_stored_org_instead_of_demanding_a_reconnect(
+        ctx, monkeypatch):
+    """#1845: both REST twins heal the stored org, and the heal's own docstring
+    says a reconnect is NOT required — so the consolidated call must not refuse
+    a state the call it replaces (and REST) handles.
+
+    Mutation: delete the heal (the pre-fix body read `_github_credentials`
+    straight into the refusal) and this reds with "GitHub org unknown"."""
+    ran: list[str | None] = []
+
+    async def _issues(job_id, org_id, org, repos):
+        ran.append(org)
+
+    seen = _stub_heal(monkeypatch, "acme")
+    monkeypatch.setattr(ha, "_github_credentials", lambda org_id: ("enc", None))
+    monkeypatch.setattr(ha, "_start_index_job",
+                        lambda org_id, kind: (f"job-{kind}", True))
+    monkeypatch.setattr(ha, "_run_indexing", _issues)
+
+    out = m.tortoise_manage_sources("enable", "github_issues")
+
+    assert "error" not in out, out
+    assert seen == [("org_test", "enc", None)], (
+        "the heal was skipped — the stored org was used raw")
+    for _ in range(100):
+        if ran:
+            break
+        time.sleep(0.05)
+    assert ran == ["acme"], (
+        f"the walk was not given the HEALED login: {ran!r}")
+
+
+def test_enable_heals_the_pre_1845_uuid_org_before_walking(ctx, monkeypatch):
+    """The pre-#1845 connect stored the internal org_id UUID as `github_org`.
+
+    A truthiness guard passes that value straight into the walk, where every
+    `f"{org}/{repo}"` 404s while the tool answers `enabled`; the heal derives
+    the real login. Mutation: drop the heal and the walk receives the UUID."""
+    ran: list[str | None] = []
+
+    async def _issues(job_id, org_id, org, repos):
+        ran.append(org)
+
+    _stub_heal(monkeypatch, "acme")
+    monkeypatch.setattr(ha, "_github_credentials",
+                        lambda org_id: ("enc", org_id))
+    monkeypatch.setattr(ha, "_start_index_job",
+                        lambda org_id, kind: (f"job-{kind}", True))
+    monkeypatch.setattr(ha, "_run_indexing", _issues)
+
+    out = m.tortoise_manage_sources("enable", "github_issues")
+
+    assert "error" not in out, out
+    for _ in range(100):
+        if ran:
+            break
+        time.sleep(0.05)
+    assert ran == ["acme"], (
+        "the walk was handed the stored org instead of the healed login: "
+        f"{ran!r}")
+
+
+def test_enable_refuses_when_the_stored_org_is_the_internal_id(ctx, monkeypatch):
+    """If the heal cannot repair the UUID, fail CLOSED rather than walk it.
+
+    `_heal_github_org` returns the stored value when its `GET /user` fails, so
+    a healed-but-still-a-UUID result must not be treated as a login.
+    """
+    _stub_heal(monkeypatch, lambda stored: stored)
+    monkeypatch.setattr(ha, "_github_credentials",
+                        lambda org_id: ("enc", org_id))
+
+    out = m.tortoise_manage_sources("enable", "github_issues")
+
+    assert "GitHub org unknown" in out["error"]
+    assert ctx["jobs"] == []
+
+
+def test_enable_refuses_when_the_heal_raises(ctx, monkeypatch):
+    """A raising heal is best-effort by contract — refuse, do not walk."""
+
+    async def _boom(org_id, encrypted, stored_org):
+        raise RuntimeError("GET /user failed")
+
+    monkeypatch.setattr(ha, "_heal_github_org", _boom)
+    monkeypatch.setattr(ha, "_github_credentials", lambda org_id: ("enc", None))
+
+    out = m.tortoise_manage_sources("enable", "github_issues")
+
+    assert "GitHub org unknown" in out["error"]
+    assert ctx["jobs"] == []
+
+
+def test_a_failed_spawn_does_not_leave_the_claim_behind(ctx, monkeypatch):
+    """A minted claim blocks the org's next start for 30 minutes."""
+    monkeypatch.setattr(ha, "_github_credentials", lambda org_id: ("enc", "acme"))
+    monkeypatch.setattr(ha, "_start_index_job",
+                        lambda org_id, kind: ("job-x", True))
+    monkeypatch.setattr(m, "_spawn_index_runner", lambda *a, **k: False)
+    ha._INDEX_JOBS["job-x"] = {"status": "started", "org_id": "org_test"}
+    ha._INDEX_JOB_OWNERS["job-x"] = "owner"
+    try:
+        out = m.tortoise_manage_sources("enable", "github_issues")
+        assert "could not be started" in out["error"]
+        assert "job-x" not in ha._INDEX_JOBS
+        assert "job-x" not in ha._INDEX_JOB_OWNERS
+    finally:
+        ha._INDEX_JOBS.pop("job-x", None)
+        ha._INDEX_JOB_OWNERS.pop("job-x", None)
+
+
+def test_a_failed_flag_write_says_the_walk_started(ctx, monkeypatch):
+    """The walk is running but the source still reads OFF — say both."""
+    monkeypatch.setattr(ha, "_github_credentials", lambda org_id: ("enc", "acme"))
+    monkeypatch.setattr(ha, "_start_index_job",
+                        lambda org_id, kind: ("job-f", True))
+    monkeypatch.setattr(m, "_spawn_index_runner", lambda *a, **k: True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("control plane down")
+
+    monkeypatch.setattr(ha, "_update_onboarding_state", _boom)
+    ctx["state"]["issues_enabled"] = False
+
+    out = m.tortoise_manage_sources("enable", "github_issues")
+
+    assert "could not be written" in out["error"]
+    assert out["state"] == "started", "the walk DID start; do not imply it did not"
 
 
 def test_every_enable_flag_is_a_registered_state_key():

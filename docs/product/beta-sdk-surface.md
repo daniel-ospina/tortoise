@@ -18,12 +18,14 @@ approvedBy: daniel-ospina
 they do — not pruned from the existing 150.
 
 > **Scope of this approval.** The owner settled the **target surface** on 2026-09-21, including the
-> ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26**. The
+> ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26** (26 at
+> that ruling; amended to **27** by #3540 on 2026-10-17 — see `canonical-mcp-tools.md`). The
 > **four** placement questions that were left open in `canonical-mcp-tools.md` (`packs_list`,
 > `pack_install`, `run_onboarding`, `manage_deployment`) were **settled on 2026-09-22** (recorded on
 > **#4282**) — see
 > §"The four open placements — settled". None of the four changes the count: they are all **off the
-> MCP target**, which is why the MCP stays at **26**. See `vision-mcp-sdk-surface.md`
+> MCP target**, which is why the MCP **stayed at 26** for that ruling (it is **27** since #3540,
+> 2026-10-17 — see the current-target note below). See `vision-mcp-sdk-surface.md`
 > §"Cross-artifact tensions".
 
 **Canonical terms:** an **organisation account** (the customer's account — the billing and
@@ -105,8 +107,13 @@ person managing their own account).
 which is inside the tenancy block but is the one tenancy method with an MCP twin, because the
 owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26.
 
+> **Current target: 27.** The arithmetic above is the 2026-09-21 derivation and stays as written.
+> #3540 (2026-10-17) added `tortoise_manage_sources`, which was never on this list — the two
+> switches it retires were not target tools — so the **target** is 26 + 1 = **27**, while the
+> **served** surface moved **82 → 81**. The two move in opposite directions in the same change.
+
 > **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the
-> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the 26 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **4** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`) have a prefixed equivalent. So it is **26 of 26 by name**, or **22 of 26** if you normalise the prefix.
+> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `tortoise_manage_sources`) have a prefixed equivalent. So it is **27 of 27 by name**, or **22 of 27** if you normalise the prefix.
 > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it.
 Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every
 *current* tool to its destination but does not name the target's replacing name.
@@ -287,8 +294,8 @@ Cognee's config-supplied ontology. Pack curation is a **user/builder** concern, 
   per-graph pack operation. Nothing about the frozen target precludes adding one post-beta; the
   surface is frozen for beta, not permanently closed.
 - **The SDK/REST surface is the natural home.** The pack catalog is *content*, not agent memory, so
-  a per-graph pack operation belongs with the tenancy/pack operations (SDK + REST), not the 26 MCP
-  tools.
+  a per-graph pack operation belongs with the tenancy/pack operations (SDK + REST), not the MCP
+  tool list (27 targets as of #3540).
 
 **Where a post-beta per-graph pack operation would slot in:** an SDK/REST operation addressed to
 **one memory graph** — list / install / remove on that graph, plus authoring a user-supplied pack

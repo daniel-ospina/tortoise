@@ -778,7 +778,10 @@ the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
 
 - **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
   `tortoise_manage_sources(action="enable", source="github_issues")`; read `tortoise_onboarding_github_status`
-  (or `tortoise_onboarding_state`). ⏺ **`disable` here is INTENT, not custody:**
+  (or `tortoise_onboarding_state`). ⏺ **No per-repo scope:** the call takes no
+  `repo` argument, so it indexes EVERY connected repo. Never tell a user it
+  indexed one named repository — for a scoped walk use the REST twin
+  `POST /v1/index/github` with `repo`. ⏺ **`disable` here is INTENT, not custody:**
   it writes `issues_enabled=false`, which no server-side reader honours yet, so
   an in-flight index run is not cancelled and the connection (with the docs
   source) stays. The tool's own payload reports `enforcement: "intent-only"` —

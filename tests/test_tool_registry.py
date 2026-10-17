@@ -816,6 +816,27 @@ class TestCapabilityModel:
 
         assert declared_set_violations(served_registry()) == []
 
+    def test_every_non_sdk_writer_is_still_served(self):
+        """`NON_SDK_WRITER_TOOLS` says "Kept exact" — so assert liveness.
+
+        #3540 review P3: the two retired onboarding switches stay in the set
+        (they still resolve and still WRITE), but nothing checked that a
+        member's name still exists — a rename would leave the entry pointing at
+        nothing while `declared_set_violations` (which iterates live ENTRIES)
+        stayed silent.  This is the missing arm.
+        """
+        from tool_surface_capabilities import NON_SDK_WRITER_TOOLS, served_registry
+
+        served = {e.name for e in served_registry()}
+        stale = sorted(NON_SDK_WRITER_TOOLS - served)
+        assert stale == [], (
+            f"NON_SDK_WRITER_TOOLS names no served tool: {stale} — delete or "
+            f"rename the entry")
+        writers = {e.name for e in served_registry() if e.writes}
+        assert writers >= NON_SDK_WRITER_TOOLS, (
+            "a NON_SDK_WRITER_TOOLS member is not writer-annotated: "
+            f"{sorted(NON_SDK_WRITER_TOOLS - writers)}")
+
     def test_guards_cover_the_served_set_not_only_the_live_one(self):
         """#3883: a retired name is still resolvable and callable by name, so the
         capability guards must see it. A live-only default left a retired entry's

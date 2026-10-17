@@ -1,6 +1,7 @@
 """Tests for mcp_server — MCP tool registration, _safe wrapper, and tool behavior."""
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -456,12 +457,6 @@ class TestToolFunctions:
 
         calls: list = []
         token = _current_org_id.set("team-github-index")
-        import asyncio as _asyncio
-        # Hermetic (CI workers may have no current event loop — the tool's
-        # get_event_loop().create_task raises RuntimeError there): create an
-        # explicit loop so the scheduled task actually runs.
-        loop = _asyncio.new_event_loop()
-        _asyncio.set_event_loop(loop)
         try:
             monkeypatch.setattr(ha, "_github_token_enc", lambda tid: "enc")
             monkeypatch.setattr(ha, "_start_index_job",
@@ -481,16 +476,20 @@ class TestToolFunctions:
             monkeypatch.setattr(ms, "_validate_repo_scope",
                                 ha._validate_repo_scope, raising=False)
             result = tortoise_onboarding_github_index("acme", "repo1")
-            assert result == {"job_id": "job1", "status": "started"}
-            # the tool schedules _run_indexing via create_task on the loop
-            # we set — pump it so the capture runs
-            loop.run_until_complete(_asyncio.sleep(0.05))
+            assert result["job_id"] == "job1"
+            assert result["status"] == "started"
+            assert result["state"] == "started"
+            # The walk is spawned on its own thread (this tool used to schedule
+            # create_task on the caller's loop, which is a loop a sync MCP tool
+            # running on a worker thread does not have) — wait for it.
+            for _ in range(100):
+                if calls:
+                    break
+                time.sleep(0.05)
             assert calls == [("acme", ["repo1"])], \
                 "the repo must be wrapped into a one-item list, not a bare str"
         finally:
             _current_org_id.reset(token)
-            loop.close()
-            _asyncio.set_event_loop(None)
 
 
 class TestGraphBoundTeamSurfaceReject:

@@ -226,15 +226,18 @@ class TestPromptDashboardParity:
             "a declined install must not produce a capture receipt")
 
     def test_q3_decline_then_reenable_consents(self, org_lane):
-        """A user who declined can re-enable through the tool.
+        """A user who declined can re-enable through the ADVERTISED tool.
 
-        `tortoise_manage_sources(action="enable", source="agent_sessions")` re-sets the
-        setting REGARDLESS of `capture_revised` (epic #1714 §C — a
-        stdio/self-hosted user has no other path, because the prompt ask
+        The re-enable goes through `tortoise_manage_sources(action="enable",
+        source="agent_sessions")` — the name the retired switch points at —
+        and it re-sets the setting REGARDLESS of `capture_revised` (epic #1714
+        §C — a stdio/self-hosted user has no other path, because the prompt ask
         never re-fires once revised). Mutation: short-circuit the write when
         `capture_revised` is already set — the second assertion reds and the
         user is stranded OFF.
         """
+        from tortoise.mcp_server import tortoise_manage_sources
+
         _tc, use = org_lane
         org_id = f"{_TEAM['org_id']}-reenable"
         use(org_id)
@@ -243,7 +246,9 @@ class TestPromptDashboardParity:
         assert _state(org_id)["capture_revised"] is True, (
             "precondition: the decline set capture_revised")
 
-        _prompt_answer(org_id, True)
+        with _mcp_org(org_id):
+            result = tortoise_manage_sources("enable", "agent_sessions")
+        assert not result.get("error"), result
         assert _state(org_id)["session_recording"] is True, (
             "the re-enable was skipped because capture_revised was already "
             "set — that strands the user in the OFF state")

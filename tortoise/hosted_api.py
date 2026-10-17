@@ -27116,7 +27116,8 @@ def _session_recording_allowed(org: dict,
 
     Resolution order: the graph's override (D-C6-1 storage) → when None the
     org default (onboarding_state.session_recording — the #1927 flag the
-    dashboard toggle + MCP tortoise_onboarding_session_recording write).
+    dashboard toggle and the MCP `tortoise_manage_sources(action="enable"
+    |"disable", source="agent_sessions")` write).
     Returns (allowed, surface) where surface names the deciding layer for
     the 409 message (``graph`` vs ``org``).
 
@@ -29317,8 +29318,9 @@ async def set_session_recording(body: dict, org: dict = Depends(get_current_org_
     #1859 P3-3: converted from get_current_org (key-only) to the same
     non-gated dual-auth as GET/PATCH /v1/onboarding/state — the dashboard
     was rewired by #1728 to PATCH /v1/onboarding/state (session JWT), while
-    the MCP tool registry (tortoise_onboarding_session_recording) still
-    drives this endpoint with a tt_ key; both must work."""
+    the MCP surface (`tortoise_manage_sources(action="enable"
+    |"disable", source="agent_sessions")`, #3540) still drives this endpoint
+    with a tt_ key; both must work."""
     # C5 #2114 (review P2): the toggle writes onboarding state (registry/org
     # node) — org-level surface; graph-bound keys rejected (cross-graph
     # write prevention).

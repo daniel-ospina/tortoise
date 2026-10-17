@@ -4341,9 +4341,10 @@ _SOURCE_ROSTER: dict[str, dict] = {
         # The PRODUCT default is ON: `DEFAULT_ONBOARDING_STATE` and
         # `_ONBOARDING_DEFAULT_STATE` both carry `issues_enabled: True` (#1924,
         # "Both default ON so a connected org keeps today's behavior"). This
-        # roster said "off", so `list` reported `enabled: true` next to
+        # roster once said "off", so `list` reported `enabled: true` next to
         # `default: "off"` in one payload — a default the product does not
-        # implement. Derived below from the default state, not restated.
+        # implement. Pinned against that dict by
+        # `tests/test_manage_sources_3540.py::test_defaults_match_the_products_own_default_state`.
         "default": "on",
         "connection": "github",
         # #1924: the per-source OFF is an ENABLE-INTENT flag, NOT a disconnect.
@@ -4445,7 +4446,10 @@ def _sources_view() -> dict:
     state = _onboarding_state()
     if "error" in state:
         return state
-    connected = bool(_state_get(state, "github_connected"))
+    connected = _known_bool(state, "github_connected")
+    indexed = _known_bool(state, "github_docs_indexed")
+    indexed_raw = _state_get(state, "github_docs_indexed_at")
+    indexed_at = None if indexed_raw is _UNAVAILABLE else indexed_raw
     return {
         "sources": {
             "github_issues": {
@@ -4458,8 +4462,8 @@ def _sources_view() -> dict:
                 **_SOURCE_ROSTER["github_documents"],
                 "enabled": _flag_on(state, "docs_enabled"),
                 "connection_connected": connected,
-                "indexed": bool(_state_get(state, "github_docs_indexed")),
-                "indexed_at": _state_get(state, "github_docs_indexed_at"),
+                "indexed": indexed,
+                "indexed_at": indexed_at,
                 "scope": "source",
             },
             "agent_sessions": {
@@ -4472,6 +4476,19 @@ def _sources_view() -> dict:
         # hidden behind this tool's interpretation of it.
         "onboarding": state,
     }
+
+
+def _known_bool(state: dict, key: str, default: bool = False):
+    """bool for a known value, False when unset, None when UNREADABLE.
+
+    `bool(_state_get(...))` made the `_UNAVAILABLE` sentinel truthy, so a
+    graph-down self-host read reported `connection_connected: true` and
+    `indexed: true` — and leaked `<object object at 0x…>` into `indexed_at`.
+    """
+    value = _state_get(state, key)
+    if value is _UNAVAILABLE:
+        return None
+    return default if value is None else bool(value)
 
 
 def _source_payload(spec: dict, status: str, **extra) -> dict:
@@ -4488,26 +4505,52 @@ def _source_payload(spec: dict, status: str, **extra) -> dict:
             **extra}
 
 
-def _spawn_index_runner(runner, job_id: str, org_id: str,
-                        gh_org: str | None) -> bool:
-    """Start the async index walk WITHOUT assuming this thread has a loop.
+def _spawn_index_runner(runner, *args) -> bool:
+    """Start an async index walk WITHOUT assuming this thread has a loop.
 
     FastMCP runs a SYNC tool on a worker thread, where
     `asyncio.get_event_loop()` returns a loop that is not running and
-    `create_task` schedules nothing. The retired handler had the same shape;
-    now that this is the ONLY path, the walk must not depend on the caller's
-    thread. A dedicated thread with its own loop is safe because `_run_indexing`
-    holds no loop-bound state — the REST twin creates the same coroutine on
-    uvicorn's loop.
+    `create_task` schedules nothing. A dedicated thread with its own loop is
+    safe because the runners hold no loop-bound state — the REST twin creates
+    the same coroutine on uvicorn's loop.
+
+    The runner's own one-hour eviction is scheduled with
+    `get_running_loop().call_later(...)` in its `finally`. That loop is OURS and
+    closes when the walk returns, so the callback would never fire and the
+    terminal `_INDEX_JOBS` entry would live forever (`GET /v1/index/{job_id}`
+    answering 200 for a finished job indefinitely). The eviction is therefore
+    re-armed on a wall clock before the loop closes.
     """
     import threading
 
+    job_id = str(args[0]) if args else "?"
+
     def _target() -> None:
         import asyncio as _a
+
+        from tortoise.hosted_api import (
+            _INDEX_JOB_EVICT_S,
+            _INDEX_JOB_OWNERS,
+            _INDEX_JOBS,
+        )
+
+        loop = _a.new_event_loop()
+        _a.set_event_loop(loop)
         try:
-            _a.run(runner(job_id, org_id, gh_org, None))
+            loop.run_until_complete(runner(*args))
         except Exception:
             _log.warning("index run failed (job=%s)", job_id, exc_info=True)
+        finally:
+            def _evict() -> None:
+                _INDEX_JOBS.pop(job_id, None)
+                _INDEX_JOB_OWNERS.pop(job_id, None)
+
+            try:
+                threading.Timer(_INDEX_JOB_EVICT_S, _evict).start()
+            except Exception:
+                _log.warning("index eviction could not be armed (job=%s)",
+                             job_id, exc_info=True)
+            loop.close()
 
     try:
         threading.Thread(target=_target, name=f"index-{job_id}",
@@ -4517,6 +4560,34 @@ def _spawn_index_runner(runner, job_id: str, org_id: str,
                      exc_info=True)
         return False
     return True
+
+
+def _heal_github_org_sync(org_id: str, encrypted: str,
+                          stored_org: str | None) -> str | None:
+    """The REST twins' own #1845 heal, awaited from a SYNC tool.
+
+    `_heal_github_org` is `async` and this handler is sync (FastMCP runs it on
+    a worker thread), so it is driven to completion on a loop of its own — the
+    same reason `_spawn_index_runner` does not borrow the caller's loop.
+
+    Both REST twins that own this shape heal BEFORE they walk
+    (`/v1/index/github/re-poll` and `/v1/index/docs` refuse only when the heal
+    returns falsy — plain `POST /v1/index/github` takes `org` from the caller),
+    and the heal is what makes the pre-#1845 shape — the internal org_id UUID
+    stored as `github_org` — work again WITHOUT a reconnect. A None/UUID org
+    read straight into the walk instead 404s every repo while the tool has
+    already answered `enabled`.
+    """
+    import asyncio as _a
+
+    from tortoise.hosted_api import _heal_github_org
+
+    loop = _a.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            _heal_github_org(org_id, encrypted, stored_org))
+    finally:
+        loop.close()
 
 
 def _set_source_state(source: str, enable: bool) -> dict:
@@ -4617,22 +4688,44 @@ def _set_source_state(source: str, enable: bool) -> dict:
                     "accepts credentials."
                 )
             }
-        if not gh_org:
-            # The REST twin refuses this exact case with 400 "GitHub org
-            # unknown. Re-connect." A `None` here reaches the walk as
-            # f"{org}/{repo}" — a success response over a walk with no org.
+        # #1845: HEAL before walking, exactly as both REST twins do. The two
+        # shapes this repairs — `github_org` missing, and the pre-#1845 connect
+        # flow having stored the internal org_id UUID in it — index fine after
+        # the heal, and the heal's own docstring is explicit that "a reconnect
+        # is NOT required". Reading the stored value straight into the walk
+        # instead 404s every repo while the tool answers `enabled`.
+        stored_org = gh_org
+        try:
+            healed = _heal_github_org_sync(org_id, encrypted, stored_org)
+        except Exception:
+            # The heal is best-effort by contract; an escaping exception must
+            # not skip the refusal below and hand the walk a value we never
+            # checked.
+            _log.warning("github org heal failed", exc_info=True)
+            healed = stored_org
+        if healed and healed != stored_org:
+            _log_source_change(org_id, source, "enable", "healed_github_org")
+            gh_org = healed
+        if not gh_org or gh_org == org_id:
+            # Fail CLOSED on the leftover: an unhealed `None` (or an unhealed
+            # pre-#1845 UUID — `_heal_github_org` returns the stored value when
+            # its `GET /user` fails) would reach the walk as `f"{org}/{repo}"`
+            # over a value that is not a login.
             _log_source_change(org_id, source, "enable",
                                "refused_no_github_org")
             return {
                 "error": (
-                    "GitHub org unknown for this team's stored credential. "
-                    "Re-connect with tortoise_onboarding_github_connect."
+                    "GitHub org unknown for this team's stored credential and "
+                    "it could not be derived from the stored token. Nothing "
+                    "was started. Re-connect with "
+                    "tortoise_onboarding_github_connect."
                 )
             }
         kind = "docs" if source == "github_documents" else "github"
         runner = _run_docs_indexing if kind == "docs" else _run_indexing
         job_id, is_new = _start_index_job(org_id, kind=kind)
-        if is_new and not _spawn_index_runner(runner, job_id, org_id, gh_org):
+        if is_new and not _spawn_index_runner(runner, job_id, org_id, gh_org,
+                                             None):
             # Evict the claim we just minted: leaving it makes the ORG's next
             # start (this tool, or POST /v1/index/*) a silent 30-minute no-op.
             _INDEX_JOBS.pop(job_id, None)
@@ -4641,7 +4734,24 @@ def _set_source_state(source: str, enable: bool) -> dict:
             return {"error": ("The index job could not be started; nothing "
                               "was left claimed. Retry.")}
         if not current_on:
-            _update_onboarding_state(org_id, _echo=False, **{flag: True})
+            try:
+                _update_onboarding_state(org_id, _echo=False, **{flag: True})
+            except Exception:
+                # The walk IS running; saying nothing here would leave a source
+                # reported off while it indexes, with no outcome line at all.
+                _log.warning("source-management flag write failed",
+                             exc_info=True)
+                _log_source_change(org_id, source, "enable",
+                                   "error_flag_write")
+                return {
+                    "error": (
+                        "The index job started but the source's enable flag "
+                        "could not be written (control plane unavailable), so "
+                        "it will still read as off. Retry the enable."
+                    ),
+                    "job_id": job_id,
+                    "state": "started" if is_new else "reused",
+                }
         _log_source_change(org_id, source, "enable", "ok")
         return {
             "source": source,
@@ -4683,8 +4793,17 @@ def _set_source_state(source: str, enable: bool) -> dict:
                 **_source_payload(spec, "already_off")}
     _log_source_change(org_id, source,
                        "enable" if enable else "disable", "attempt")
-    _update_onboarding_state(org_id, _echo=False, session_recording=enable,
-                             capture_revised=True)
+    try:
+        _update_onboarding_state(org_id, _echo=False, session_recording=enable,
+                                 capture_revised=True)
+    except Exception:
+        _log.warning("source-management flag write failed", exc_info=True)
+        _log_source_change(org_id, source,
+                           "enable" if enable else "disable",
+                           "error_flag_write")
+        return {"error": (
+            "The source's recording flag could not be written (control plane "
+            "unavailable); nothing changed. Retry.")}
     _log_source_change(org_id, source,
                        "enable" if enable else "disable", "ok")
     return {"source": source, "scope": "source",
@@ -5233,7 +5352,6 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     org_id = _current_org_id.get()
     if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    import asyncio as _asyncio
 
     from tortoise.hosted_api import (
         _github_token_enc,
@@ -5255,19 +5373,22 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     # the org is reused AND the run is spawned ONLY when the job was
     # freshly minted (never two concurrent walks on one job).
     job_id, is_new = _start_index_job(org_id)
-    if is_new:
-        try:
-            # #1845: _run_indexing now takes a repo LIST (None = all). The
-            # MCP tool's single optional repo is wrapped into a one-item
-            # list through the same allowlist validator as the REST
-            # re-poll — a bare str would be iterated character-by-character
-            # by the new list contract (regression caught in review).
-            _asyncio.get_event_loop().create_task(
-                _run_indexing(job_id, org_id, org,
-                              _validate_repo_scope([repo] if repo else None)))
-        except RuntimeError:
-            return {"error": "No running event loop"}
-    return {"job_id": job_id, "status": "started"}
+    if is_new and not _spawn_index_runner(
+            # #1845: `_run_indexing` takes a repo LIST (None = all); the single
+            # optional repo is wrapped into a one-item list through the same
+            # allowlist validator as the REST re-poll — a bare str would be
+            # iterated character-by-character by the list contract.
+            _run_indexing, job_id, org_id, org,
+            _validate_repo_scope([repo] if repo else None)):
+        # Never leave the minted claim behind: it would make the org's next
+        # start a silent 30-minute no-op.
+        from tortoise.hosted_api import _INDEX_JOB_OWNERS, _INDEX_JOBS
+        _INDEX_JOBS.pop(job_id, None)
+        _INDEX_JOB_OWNERS.pop(job_id, None)
+        return {"error": ("The index job could not be started; nothing was "
+                          "left claimed. Retry.")}
+    return {"job_id": job_id, "status": "started",
+            "state": "started" if is_new else "reused"}
 
 
 # ── HTTP Streamable transport (#236) ─────────────────────────────

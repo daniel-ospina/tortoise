@@ -20996,7 +20996,8 @@ class TortoiseSDK:
                 "data_points": [],
                 "insight": "The graph has no prior knowledge yet — nothing to pull. "
                             "Run tortoise_manage_sources(action=\"enable\", "
-                            "source=\"github_issues\") to seed it.",
+                            "source=\"github_issues\") to seed it — that call "
+                            "indexes EVERY connected repo, not one.",
                 "more_in_graph": None,
                 "repo_stats": None,
             }
@@ -21031,7 +21032,9 @@ class TortoiseSDK:
                 "data_points": data_points,
                 "insight": f"Graph is populated but '{repo}' has no indexed issues yet — "
                             "run tortoise_manage_sources(action=\"enable\", "
-                            "source=\"github_issues\") to index it.",
+                            "source=\"github_issues\") to index it. That call has "
+                            "no per-repo scope: it indexes EVERY connected repo, "
+                            f"so '{repo}' is covered only if it is one of them.",
                 "more_in_graph": None,
                 "repo_stats": None,
             }

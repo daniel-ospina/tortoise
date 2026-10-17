@@ -1128,6 +1128,12 @@ class TestOnboardingToolGating:
             # Steady-state surface unaffected
             assert "tortoise_query" in names2
             assert "tortoise_create_point" in names2
+            # #3540: the consolidated source-management tool is STEADY-STATE —
+            # it must stay listed after onboarding completes, which is exactly
+            # why it is NOT in `_ONBOARDING_TOOL_NAMES`. Pinning the choice: a
+            # future lane adding it to that set would hide the only source
+            # management tool from every onboarded team.
+            assert "tortoise_manage_sources" in names2
 
     def test_onboarding_gating_is_per_team(self, tmp_path, monkeypatch):
         """Security-adjacent negative case: team A's completed onboarding must
