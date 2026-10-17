@@ -29,11 +29,13 @@ Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
 import time
 import uuid
+from urllib.parse import urlsplit
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
@@ -309,8 +311,23 @@ _PER_PR = os.environ.get("WELCOME_E2E_PER_PR") == "1"
 
 
 def _targets_production(url: str) -> bool:
-    """True when `url` is not the local preview — i.e. a deployed artifact."""
-    return "://127.0.0.1" not in url and "://localhost" not in url
+    """True when `url` is a DEPLOYED host — i.e. not a loopback target.
+
+    Hostname-based on purpose. A substring test (`"://127.0.0.1" not in url`)
+    misclassified in BOTH directions: it read `http://127.0.0.1.example.com/` as
+    local (skipping the guard for a genuine remote host), and it read
+    `http://[::1]:8788/` and an uppercase `HTTP://` as production (fetching a
+    deployed host from the per-PR leg). `urlsplit().hostname` also strips the
+    brackets off an IPv6 literal, so `[::1]` arrives as `::1`.
+    """
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True
+
 
 # #4686: the MCP probe below targets LIVE PRODUCTION, and a transport failure
 # is not a 401-contract violation — but until this block it surfaced as one.

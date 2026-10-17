@@ -1015,6 +1015,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_4932_per_pr_artifact_scope.py
   - test_2350_validity_precision.py
   # #5142: the ONTOLOGY record of the D10 code half — the `format` markers vs
   # `_SOURCE_HANDLED`, the deferred document/corpus-source node collapse, and
@@ -5455,6 +5456,7 @@ durations:
 #   a shared runner is exactly what this lane exists to keep OFF the merge
 #   gate — and before #3992 the lane the plan named did not exist at all, so
 #   the SLO was unverifiable. It runs from .github/workflows/perf-lane.yml.
+  test_4932_per_pr_artifact_scope.py: 5.0
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py
