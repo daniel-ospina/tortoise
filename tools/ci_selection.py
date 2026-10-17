@@ -1027,6 +1027,39 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tools/drift-guard.py above. Pinned by
              # tests/test_ci_selection.py::test_orchestrator_harness_change_selects_core_not_tier1.
              "operations/orchestrator-harness/",
+             # #3554 review (P2, Finding 2): the :Session declaration's own doc
+             # subjects — `docs/ONTOLOGY.md` §4.8 (the owner table the machine
+             # declaration mirrors) and
+             # `docs/plans/2026-08-25-1714-memory-capture-onboarding.md` (the
+             # `#3554 amendment` the D9 verdicts cite) — own
+             # tests/test_session_schema_3554.py, registered `core`. `docs/` is a
+             # flat NON_PYTHON_PREFIXES entry and neither path is a concrete
+             # SOURCE_PATTERNS row, so a docs-only edit of either filtered to
+             # `changed == []`, took the docs-only early return and fell back to
+             # tier-1 smoke — whose set does NOT contain that file. The §4.8
+             # owner rows could then drop an owner (or the plan amendment lose a
+             # decision) and merge green against the declaration it claims to be
+             # pinned to. Same #1349/#3332/#3616 silent-drop class as
+             # `docs/auth-architecture.md` and the #3524 consent-bridge records;
+             # pinned by
+             # tests/test_ci_selection.py::test_the_session_declaration_guard_runs_on_its_docs_subjects_too.
+             "docs/ONTOLOGY.md",
+             "docs/plans/2026-08-25-1714-memory-capture-onboarding.md",
+             # #3554 review (P2): the guard's THIRD docs subject —
+             # `docs/ONTOLOGY-CHANGELOG.md`, which
+             # `test_section_4_8_changelog_entry_sits_under_its_own_version_block`
+             # reads — was left out of this tuple while the other two were
+             # admitted, so the same silent drop stayed open for it: a docs-only
+             # edit moving the `§4.8 (added by #3554` bullet back under the wrong
+             # `Changelog vX.Y` header selected NO surface and fell back to
+             # tier-1 smoke, whose 45-file set does not contain the guard. The
+             # sibling changelog readers (test_5142/7818/8474_ontology_record.py)
+             # are covered only because they happen to sit in tier1 — the new
+             # module is not, and a `core` registration alone never helps (a
+             # surface name only runs when that surface is already selected).
+             # Same #1349/#3332/#3616 class; pinned alongside the other two in
+             # tests/test_ci_selection.py::test_the_session_declaration_guard_runs_on_its_docs_subjects_too.
+             "docs/ONTOLOGY-CHANGELOG.md",
              # PR #8594 review P2: the fail-closed dispatcher's review copy
              # (tools/agent-infra-queue-dispatch.py) owns
              # tests/test_queue_dispatch_fail_closed.py, and tools/fleet_state.py
@@ -1078,6 +1111,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # rarely (9 commits ever as of 2026-10-14). Pinned by
              # tests/test_ci_selection.py::test_supabase_config_change_selects_core_not_tier1.
              "supabase/config.toml",
+
              # PR #8744 review P2: the SQL↔Python contract guard
              # (`tests/test_postgres_storage.py`, registered `core`) reads the
              # migration TEXT to pin the two RPC names and the `p_since` /
@@ -1457,6 +1491,22 @@ TOOL_CARVEOUTS = (
     # matrix) is the safe default for a tool whose answer drives dispatch.
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
+    # #3554: the `:Session` writer inventory + D9 retrofit instrument
+    # (tools/session_retrofit_audit.py) owns
+    # tests/test_session_schema_3554.py. Same silent-drop class as the
+    # carve-outs above: the flat "tools/" prefix in NON_PYTHON_PREFIXES
+    # swallows the path, so a tool-only change comes back as `changed=[]`,
+    # select() takes the docs-only early return — which bypasses the
+    # `if not matched: matched.add("core")` fallback entirely — and the
+    # inventory/D9 guard never runs on the very change that can widen or
+    # narrow the predicate. Registering tests/test_session_schema_3554.py
+    # under `core` in ci-surfaces.yml does NOT cover this: it applies to
+    # edits of the TEST file, not of the tool. No SOURCE_PATTERNS entry
+    # matches the path, so it lands in the unknown-path branch -> FULL
+    # matrix (fail closed).
+    # Pinned by test_ci_selection.
+    # test_session_retrofit_audit_tool_change_fails_closed_to_full.
+    "tools/session_retrofit_audit.py",
     # #8375 item 1: the required-check repair. The workflow and the launchd
     # fallback both run `tools/ci_check_repair.py` with `--apply` on a schedule,
     # unattended, with the ability to CLOSE and REOPEN pull requests and to re-run

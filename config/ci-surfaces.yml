@@ -549,6 +549,16 @@ surfaces:
   # `tortoise/sdk.py::TortoiseSDK.capture_session`, and `tortoise/sdk.py` is a
   # SHARED_MODULE (so an sdk.py change selects the full matrix regardless).
   - test_write_session_and_turns_3551.py
+  # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
+  # and its writer inventory + D9 retrofit instrument
+  # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
+  # #2938 convention as test_write_session_and_turns_3551.py above:
+  # `session_schema.py` matches no SOURCE_PATTERNS entry (it falls to the
+  # `core` fallback), while the inventory predicate scans
+  # tortoise/hosted_api.py — so an api-only PR that adds or removes a
+  # `:Session` writer must still run the drift guard. No graph lane: the
+  # retrofit half drives a fake graph handle.
+  - test_session_schema_3554.py
   # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
   # admission gate, the ledger write, the reader and the RPC wrappers all live
   # in tortoise/hosted_api.py, metering.py and supabase_control.py, which
@@ -1782,6 +1792,9 @@ surfaces:
   - test_capture_validfrom_3945.py
   - test_v4_declared_mechanisms.py
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
+  # #3554: the `:Session` write-schema declaration + its writer inventory/D9
+  # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
+  - test_session_schema_3554.py
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
   # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
@@ -3663,6 +3676,14 @@ surfaces:
   # other file this pins — is a SHARED_MODULE, so a sdk.py change runs it under
   # the full matrix regardless. See the `core` arm's entry for the same file.
   - test_references_boundary_5213.py
+  # #3554: the `:Session` writer inventory's declared universe SPANS this
+  # surface — `SESSION_WRITERS` declares `tools/ask_spotcheck.py::
+  # merge_capture_session` (a SOURCE_PATTERNS["sdk"] path), so a change that
+  # adds or removes a writer there selects `sdk` and would otherwise skip the
+  # drift guard. DUAL-REGISTERED with `api`/`core`/`eval`: a named-surface
+  # match REPLACES the `core` fallback, so each surface the declaration reaches
+  # needs its own arm (#2938).
+  - test_session_schema_3554.py
   # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets) — the
   # source's typed edge IS the EP factor's source slot, and the canonical
   # evidence read never surfaces a point as its own supporter. `sdk` owns it
@@ -3822,6 +3843,15 @@ surfaces:
   - test_provenance_extractedfrom_3263.py  # #3263: pins tools/longmem_eval/ingest_v2._write_payload provenance (dual-registered with ep; #2938 precedent)
   - test_load_test.py
   - test_pair_label_runner.py
+  # #3554: the `:Session` writer inventory's declared universe SPANS this
+  # surface — `SESSION_WRITERS` declares `tools/longmem_eval/ingest.py::
+  # ingest_haystack` and `tools/longmem_eval/ingest_v2.py::_write_v2_phase_a`
+  # (both SOURCE_PATTERNS["eval"] paths), so a change that adds or removes a
+  # writer there selects `eval` and would otherwise skip the drift guard.
+  # DUAL-REGISTERED with `api`/`core`/`sdk`: a named-surface match REPLACES the
+  # `core` fallback, so each surface the declaration reaches needs its own arm
+  # (#2938).
+  - test_session_schema_3554.py
 tier1:
 - test_cli_serve.py
 - test_config.py
@@ -4505,6 +4535,7 @@ durations:
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
   test_write_session_and_turns_3551.py: 70.8  # #3551: locally measured (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
+  test_session_schema_3554.py: 6.6  # #3554: locally measured (42 hermetic tests, no graph lane) — refresh from CI junit
   test_battery_setup.py: 66.0
   test_graph_write_loop_responsiveness.py: 4.4
   test_read_routes_loop_responsiveness.py: 3.7

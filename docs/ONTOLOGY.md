@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.28"
+title: "Tortoise — Canonical Ontology v3.29"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-15
+updated: 2026-10-17
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.28
+# Tortoise — Canonical Ontology v3.29
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -407,7 +407,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | Timestamps |
 | `lastDreamedAt` | ISO8601 UTC | — | — | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
 | `embedding` | vector | — | — | Semantic embedding (FTS + vector search) |
-| `speaker` | string | — | — | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
+| `speaker` | string | — | — | Role tag on episodic turn Points (user/assistant/…) — written by the ONE shared turn store (`tortoise/sdk.py::_TURN_WRITE_CYPHER`, #3086), so BOTH hosted capture (`POST /v1/sessions`) and the SDK (`TortoiseSDK.capture_session`) write it. The earlier claim that the SDK writes it alone was false (#3554) |
 | `is_episodic` | bool | — | — | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
 | `goalState` | string | — | — | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated at the SDK write boundary (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the draft/live lifecycle): `status` says whether a goal is promoted for use, `goalState` says whether it is met. `None` clears. Only meaningful on `goal`/`target`/`strategy`/`plan` points (§5) |
 
@@ -754,6 +754,113 @@ authoritative for the temporal slots. Event's transaction-time start is
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ❌ | — | — | ❌ | ❌ |
 | passes_frequency_gate | — | — | ❌ | — | — |
+
+---
+
+### §4.8 The `:Session` capture container (canonical)
+
+The **`:Session`** node is the capture container: the durable record of one
+captured session, holding the capture-attempt outcome and the entity-link
+counters, and connecting its turn `Point`s by `CONTAINS`. Unlike the entity
+types above, it is **written by many components, each owning a different
+property subset** — the two capture lanes, the derived-commit pipeline, the
+index-run re-link, the demo seeder, the longmem-eval ingestors, and the journal
+folds that re-create the node on replay.
+
+**The machine declaration is `tortoise/session_schema.py`** (`SESSION_PROPERTIES`
+/ `SESSION_WRITERS` / `SESSION_PROPERTY_OWNERS`). It is authoritative for the
+property set and the owner of each property; this section is its doc mirror,
+and `tools/session_retrofit_audit.py inventory` re-runs the writer predicate
+over the **tracked tree** (`git ls-files`) — minus the path prefixes and
+third-party/cache directories `PREDICATE` declares out of scope — and fails on
+drift in either direction (a new writer, or a declared one the predicate no longer finds). The
+scan scope is part of that declared predicate, not a private allow-list inside
+the tool. The per-property owners below **mirror that
+declaration** and are pinned against it by `tests/test_session_schema_3554.py`
+(an owner cell that disagrees with `SESSION_PROPERTY_OWNERS` fails the test); a
+property with no owning writer is an import-time assertion failure, never a
+silently-empty cell.
+
+| Property | Owning writers (`<module>::<function/constant>`) |
+|----------|--------------------------------------------------|
+| `id` | `rebuild_all` |
+| `created_at` | `_write_session_and_turns`, `_execute_commit_writes`, `_commit_region`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `rebuild_all` |
+| `turn_count` | `_write_session_and_turns`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `rebuild_all` |
+| `is_episodic` | `_write_session_and_turns`, `_link_session`, `_fold_session_recorded`, `_execute_commit_writes`, `_commit_region`, `BACKFILL_STATEMENTS`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+| `harness` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `capture_lane` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `actor_user_id` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `machine_id` | `_write_session_and_turns`, `rebuild_all` |
+| `model` | `_write_session_and_turns`, `rebuild_all` |
+| `client_captured_at` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `client_captured_at_source` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `source` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
+| `capture_redactions` | `_TURN_WRITE_CYPHER`, `_fold_session_recorded`, `merge_capture_session`, `rebuild_all` |
+| `capture_ok` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `rebuild_all` |
+| `capture_extractor` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `rebuild_all` |
+| `entity_links_attempted` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `rebuild_all` |
+| `entity_links_created` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `rebuild_all` |
+| `value_nodes_created` | `_execute_commit_writes`, `rebuild_all` |
+| `value_nodes_held` | `_commit_region`, `rebuild_all` |
+| `draft_count` | `_execute_commit_writes`, `rebuild_all` |
+| `commit_count` | `_execute_commit_writes`, `rebuild_all` |
+| `updated_at` | `_execute_commit_writes`, `_commit_region`, `rebuild_all` |
+| `lme_question_id` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+| `lme_session_index` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+| `lme_source_session_id` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+
+**Who is an owner in this table.** A writer owns a property when it carries a
+`SET <alias>.<prop>` clause for it. A property used only as a `MERGE` key is **not** attributed
+— so the `id` row names `rebuild_all` (whose `SET s += $props` restores the whole
+schema) and not the ten writers whose `MERGE (s:Session {id: …})` mints the key.
+`id` is the Session's identity key, minted by every writer above; the cell records
+who *sets* it.
+
+**The one write primitive.** Every capture lane funnels through
+`tortoise/sdk.py::_write_session_and_turns` (#3551) plus the one turn store
+`_TURN_WRITE_CYPHER` (#3086); the hosted `POST /v1/sessions` handler and
+`TortoiseSDK.capture_session` hold no copy of the MERGE text and add only their
+own **outcome** counters. `rebuild_all` is the one writer whose property set IS
+the whole schema (`SET s += $props` over the pre-wipe snapshot), declared as
+such rather than enumerated.
+
+#### D9 retrofit — the recorded honest gaps
+
+The #3554 retrofit audit (`tortoise/session_schema.py::audit_session_retrofit`,
+reached via `tools/session_retrofit_audit.py retrofit`) quantifies three
+divergences on existing graphs. In all three the **decision is to record the
+gap, not to rewrite the stored record** — the reasons live in
+`RETROFIT_VERDICTS`, and are summarised here so the decision has a canonical
+doc home:
+
+- **`turn_count` shortfall under `capture_ok = true`** — `capture_ok` is the
+  **extraction-attempt** outcome, never a store-integrity flag. Rewriting it to
+  `false` would re-label a store loss as an extraction failure and arm the #2335
+  TRUE-retry gate, so the next same-session POST re-runs extraction and can mint
+  duplicate claims. The shortfall is derivable from graph truth (stored
+  `turn_count` vs the Session's live episodic turn members), which is what the
+  audit reads. **Recorded gap.**
+- **`capture_ok` pre/post-verification-read ordering** — the hosted lane
+  computes `capture_ok` AFTER the post-write verification read (and downgrades
+  on `skipped`); the SDK lane computes it BEFORE. No writer stamps which lane
+  computed it (`harness` is written by both, `capture_extractor` names the
+  extractor, and `machine_id`/`model` are hosted-claimed, not lane markers), so
+  per-record retro-attribution is **not possible**. The class is bounded rather
+  than invented: both lanes compute the same `ok` and the hosted lane can only
+  be equal or more pessimistic, so only `capture_ok = true` records could
+  differ from a re-computation. **Recorded gap.**
+- **`entity_links_created` under-count** — the counter is non-monotone by
+  construction: the capture-time pass writes this capture's numbers and the
+  index-completion re-link (`_relink_sessions_after_index`) overwrites them with
+  that run's, so a session can hold more `aboutObject` edges than the counter
+  records. The counter is per-run **evidence**; rewriting it to the live edge
+  count would destroy what the runs reported. The audit compares the recorded
+  counter against the live edge count and reports the per-session under-count.
+  **Recorded gap.**
+
+Each verdict's `where_recorded` field in `RETROFIT_VERDICTS` points at this
+section and at the `#3554 amendment` in
+`docs/plans/2026-08-25-1714-memory-capture-onboarding.md`.
 
 ---
 

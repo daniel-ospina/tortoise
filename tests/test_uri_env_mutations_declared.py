@@ -256,6 +256,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
     # without mocking `_get_proj` — the setenv IS the test input.
     "test_read_status.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #3554: the retrofit verb's `--uri` reporting test sets a docker:// URI so
+    # `_get_proj` → `_derive_graph_name` has a graph name to resolve, while the
+    # SDK itself is REPLACED by a fake module (`fake_sdk_module`) — nothing
+    # connects, and the monkeypatch fixture auto-restores at teardown, so no
+    # lane leaks. The setenv IS the test input, the same "pinned without
+    # touching a server" shape as test_hosted_api.py's #2251 spy entry.
+    "test_session_schema_3554.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #3039: the ACL admin-client decode pin forces a docker:// URI so
     # `_admin_client` takes the redis path; redis.Redis is stubbed, never
     # connects. The setenv IS the test input (deliberate docker lane).
