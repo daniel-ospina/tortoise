@@ -24,12 +24,15 @@ These tests pin the GUARD, not the deployment: they assert the deploy step still
 compares BYTES, still prints both digests, and still fails closed. Deleting or
 weakening the step reds here.
 
-# Known residual (stated, not implied): the step compares copy 3 against copy 1.
-# The other three served skills (how-to-use-tortoise, tortoise-decide,
-# tortoise-file-finding) are served from the same tree and are equally
-# unobserved; their canonical lives in the MIT repo (#4643), so widening needs a
-# different comparison source. That is #4914's stated scope boundary, not a gap
-# this guard silently pretends to cover.
+# Known residual (stated, not implied): the step compares copy 3 against copy 1
+# for tortoise-onboarding ONLY. `website/apps/dashboard/public/skills/` serves
+# SIX ``SKILL.md`` files — tortoise-onboarding plus how-to-use-tortoise,
+# tortoise-decide, tortoise-file-finding, analyse-for-contradictions and
+# research-domain (the #1652 pair, cf. tests/test_served_skills.py). The other
+# FIVE are served from the same tree and are equally unobserved; their canonical
+# lives in the MIT repo (#4643), so widening needs a different comparison
+# source. That is #4914's stated scope boundary, not a gap this guard silently
+# pretends to cover.
 """
 
 from __future__ import annotations
@@ -64,8 +67,27 @@ def _step_block(text: str) -> str:
         f"the deploy no longer carries a step named {STEP_NAME!r} — #4914's "
         "third-copy guard has been removed"
     )
-    nxt = text.find("\n      - ", start)
-    return text[start:] if nxt == -1 else text[start:nxt]
+    # Boundary is the next STEP (`- name:`/`- uses:`), not merely the next `- `
+    # item: slicing on `- ` pulls in the following step's comment preamble, which
+    # both lets a neighbour's prose satisfy these assertions and lets a
+    # neighbour's comment mentioning cache-busting false-RED the negative one.
+    nxt = re.search(r"\n      - (?:name|uses):", text[start:])
+    return text[start:] if nxt is None else text[start : start + nxt.start()]
+
+
+def _job_block(text: str, job: str) -> str:
+    """The YAML slice for one job, so ordering can be pinned WITHIN a job.
+
+    Comparing `find()` offsets across the whole file pins FILE order, not job
+    membership: a step moved into an unrelated job (e.g. one with
+    `if: always()` and no dependency on this job) can run concurrently with —
+    and finish before — the upload while still appearing "later" in the file.
+    """
+    m = re.search(rf"^  {re.escape(job)}:", text, re.MULTILINE)
+    assert m, f"job {job!r} not found in the workflow"
+    nxt = re.search(r"^  [a-zA-Z0-9_-]+:", text[m.end() :], re.MULTILINE)
+    end = m.end() + (nxt.start() if nxt else len(text))
+    return text[m.start() : end]
 
 
 def test_the_deploy_has_a_served_skill_byte_parity_step() -> None:
@@ -85,13 +107,15 @@ def test_the_step_compares_bytes_not_markers() -> None:
     preserves them is exactly the class this guard exists to catch.
     """
     block = _step_block(_workflow_text())
-    assert "sha256sum" in block, (
-        "the step must hash the served bytes — marker assertions cannot see a "
-        "drift that preserves the markers (#4914)"
+    assert re.search(r'sha256sum\s+"\$CANONICAL"', block), (
+        "the canonical side must be hashed from the repo file"
     )
-    # It must hash BOTH sides, not just the payload.
-    assert block.count("sha256sum") >= 2, (
-        "both the canonical and the served document must be hashed"
+    # Counting occurrences is not enough: hashing the CANONICAL twice would make
+    # the comparison compare a value to itself — a guard that can never red. The
+    # SERVED side must be hashed from the FETCHED bytes.
+    assert re.search(r'sha256sum\s+"\$SERVED_FILE"', block), (
+        "the served side must be hashed from the FETCHED bytes; hashing the "
+        "canonical twice makes this comparison vacuous"
     )
 
 
@@ -153,10 +177,15 @@ def test_the_step_runs_after_the_bundle_poll_in_the_same_job() -> None:
     not the published artifact — the precise gap #4914 describes.
     """
     text = _workflow_text()
-    poll = text.find("dashboard bundle not live after")
-    served = text.find(STEP_NAME)
+    job = _job_block(text, "deploy-dashboard")
+    poll = job.find("dashboard bundle not live after")
+    served = job.find(STEP_NAME)
     assert poll != -1, "the sibling bundle poll is gone — ordering cannot be checked"
-    assert served != -1
+    assert served != -1, (
+        "the served-skill step is not inside the deploy-dashboard job — moved to "
+        "another job it can run concurrently with the upload and never observe "
+        "the published artifact"
+    )
     assert served > poll, (
         "the served-skill check must run AFTER the post-deploy bundle poll; "
         "placed earlier it cannot observe the published artifact"
@@ -169,6 +198,8 @@ def test_the_step_runs_after_the_bundle_poll_in_the_same_job() -> None:
         "how-to-use-tortoise",
         "tortoise-decide",
         "tortoise-file-finding",
+        "analyse-for-contradictions",
+        "research-domain",
     ],
 )
 def test_the_uncovered_served_skills_are_named_not_silently_ignored(skill: str) -> None:

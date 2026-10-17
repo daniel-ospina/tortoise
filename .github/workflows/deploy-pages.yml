@@ -873,7 +873,17 @@ jobs:
           MAX_ATTEMPTS=20
           SERVED=""
           for i in $(seq 1 $MAX_ATTEMPTS); do
-            if ! curl -fsS --max-time 20 "$URL" -o "$SERVED_FILE"; then
+            # -L: today the URL answers 200 directly, so this is belt-and-braces.
+            # If a legitimate 301/308 is ever added for /skills/*, curl without -L
+            # would hash the REDIRECT BODY and red a healthy deploy with a digest
+            # nobody can interpret, while an agent following the URL still gets
+            # the right document. The bytes are still compared either way, so a
+            # redirect to the WRONG content still reds.
+            if ! curl -fsSL --max-time 20 "$URL" -o "$SERVED_FILE"; then
+              # Reset so a STALE digest from an earlier attempt cannot be
+              # reported as "the served value" — the diagnostic must distinguish
+              # "the document differs" from "the last attempts did not connect".
+              SERVED=""
               echo "attempt $i/$MAX_ATTEMPTS: fetch failed, retrying in 30s..."
               [ "$i" -lt "$MAX_ATTEMPTS" ] && sleep 30
               continue
