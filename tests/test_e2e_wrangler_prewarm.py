@@ -111,10 +111,37 @@ def _is_constant_false(gate: object) -> bool:
         return not gate
     return bool(_CONSTANT_FALSE.match(str(gate).strip()))
 
+
+def _fenced_blocks(text: str) -> str:
+    """The contents of every ``` fence, joined — the parts a reader would PASTE."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out)
+
 def _workflow_paths() -> list:
+    """Every file that can carry a `run:` — workflows AND composite actions.
+
+    A composite action is invoked from a workflow with `uses:`, so a spec inside
+    one reaches the lane exactly like a step's own: scanning only
+    `.github/workflows/` leaves the four actions under `.github/actions/`
+    unguarded.
+    """
     paths = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+    actions = REPO_ROOT / ".github" / "actions"
+    if actions.is_dir():
+        paths += sorted(actions.glob("*/action.yml")) + sorted(actions.glob("*/action.yaml"))
     assert paths, "no workflows found — the repo root probe is wrong"
     return paths
+
+
+#: Documents that show a copy-pasteable wrangler command. They are guidance, and
+#: guidance that floats teaches the drift this file exists to stop.
+COMMAND_DOCS = ("website/README.md",)
 
 
 def _load(path) -> dict:
@@ -759,3 +786,41 @@ def test_the_manual_deploy_resolves_the_version_from_either_invocation(
     assert args[:2] == ["--yes", f"wrangler@{declared}"], (
         f"the manual deploy ran {args!r} — it must carry the version it read"
     )
+
+
+# ------------------------------------------- 6. the documentation that teaches it
+
+
+def test_no_document_shows_a_floating_wrangler_spec() -> None:
+    """A README example is a command someone will paste.
+
+    `website/README.md` showed `npx --yes wrangler@4 pages deploy` next to two
+    shipped steps that assert 4.127.0 — the exact drift this change removes,
+    stated as guidance. Every spec in these files must be the asserted form, and
+    the version must come from the one artefact.
+    """
+
+    for rel in COMMAND_DOCS:
+        path = REPO_ROOT / rel
+        assert path.is_file(), f"{rel} is missing"
+        text = path.read_text(encoding="utf-8")
+        # Only FENCED code, not prose: a doc may legitimately name the bad
+        # spelling while explaining why it is bad.
+        code = "\n".join(
+            line for line in _fenced_blocks(text).splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        offenders = [
+            token
+            for token in re.findall(r"wrangler@[^\s`\"')]+", code)
+            if not LEGAL_SPEC.match(token)
+        ]
+        assert not offenders, (
+            f"{rel} still shows a copy-pasteable wrangler spec that is not the "
+            f"asserted form ({offenders}) — it would ship whatever npm serves"
+        )
+        if "wrangler@" in code:
+            assert "config/wrangler-version" in text, (
+                f"{rel} shows a wrangler command without pointing at "
+                "config/wrangler-version — the version has one home"
+            )
