@@ -715,10 +715,12 @@ change it any time from `Settings → Memory sources`.
 > tile (#8686). Self-hosted, the two GitHub tiles are writable through
 > `tortoise_manage_sources` as well (the flag write lands on the deployment's
 > own `:OnboardingState` node via the self-host branch of
-> `_update_onboarding_state`), but they still need a CONNECTED GitHub
-> credential, and `tortoise_onboarding_github_connect` has no self-hosted team
-> context — so do not promise a GitHub change on a deployment that has never
-> connected one.
+> `_update_onboarding_state`) — both directions, but only the OFF one is
+> unconditionally writable: `disable` writes the flag with no credential read,
+> while `enable` needs a CONNECTED GitHub credential that a deployment may not
+> have, and `tortoise_onboarding_github_connect` has no self-hosted team context
+> — so never promise a GitHub ENABLE on a deployment that has never connected
+> one.
 
 The pinned order and the per-source state keys are the dashboard's tile
 inventory (`website/apps/dashboard/src/integrationsGrid.js`, one declaration

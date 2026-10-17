@@ -185,16 +185,17 @@ def test_disabling_agent_sessions_writes_the_off_switch(ctx):
                               "capture_revised": True}]
 
 
-def test_enabling_agent_sessions_records_consent_even_when_the_default_is_on(ctx):
-    """The default being ON is not the same fact as the disclosure being accepted.
+def test_enabling_agent_sessions_writes_even_when_the_default_is_on(ctx):
+    """The default being ON is not the same fact as a write having landed.
 
     `session_recording` defaults ON, so a fresh install reads `enabled: true`
-    without anything having been written; `capture_revised` is the record that
-    the user accepted the capture disclosure. Short-circuiting on `enabled`
+    without anything having been written; `capture_revised` is the marker that a
+    recording-state write has happened (both directions write it — it is NOT a
+    consent record, and none should be invented). Short-circuiting on `enabled`
     alone made the SKILL's yes-branch ("both write session_recording +
     capture_revised") a silent no-op on exactly the install it is written for.
     """
-    ctx["state"].pop("capture_revised", None)      # never accepted
+    ctx["state"].pop("capture_revised", None)      # no write on record yet
     assert ctx["state"]["session_recording"] is True
 
     out = m.tortoise_manage_sources("enable", "agent_sessions")
@@ -210,7 +211,7 @@ def test_enabling_agent_sessions_reports_already_on_without_writing(ctx):
     The ruling does not reverse a recorded default, so `enable` here reports the
     truth and changes nothing — it does not flip the product's behaviour. This is
     the case where the CAPTURE DISCLOSURE is already accepted; without
-    `capture_revised` the consent write still has to land (next test).
+    `capture_revised` the write still has to land (next test).
     """
     ctx["state"]["capture_revised"] = True
     out = m.tortoise_manage_sources("enable", "agent_sessions")
@@ -638,7 +639,7 @@ def test_refusals_are_logged_too(ctx):
         ("agent_sessions", True, "disable", "disabled"),
         ("agent_sessions", False, "disable", "already_off"),
         ("agent_sessions", False, "enable", "enabled"),
-        ("agent_sessions", True, "enable", "already_on"),  # consent recorded
+        ("agent_sessions", True, "enable", "already_on"),  # write on record
     ],
 )
 def test_every_state_change_payload_carries_the_same_fields(
@@ -655,7 +656,7 @@ def test_every_state_change_payload_carries_the_same_fields(
     else:
         ctx["state"]["session_recording"] = initial
     if source == "agent_sessions" and action == "enable" and initial:
-        # `already_on` needs BOTH the flag and the recorded consent.
+        # `already_on` needs BOTH the flag and a write on record.
         ctx["state"]["capture_revised"] = True
     if source == "github_issues" and action == "enable":
         # Without a stored credential the tool REFUSES (an `{"error": ...}`
