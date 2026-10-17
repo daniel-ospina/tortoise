@@ -1019,17 +1019,20 @@ class _EdgeHandlers:
         Returns ``(wired, failed)`` — the caller reports ``failed`` so a rebuild
         that could not re-wire a journaled link is never silent. Every skip that
         costs a journaled link counts as ``failed``: a mystery ``how``, a ``rel``
-        outside the set, a ``targets`` that is not a list, an empty ``targets``.
+        outside the set, a ``targets`` that is not a list, an empty ``targets``,
+        and a record whose id cannot address an Event at all (its links are
+        counted, not dropped).
         "Wired" on the ``name`` path is MEASURED, never assumed — but by the
         LINK's presence, not by ``rel``: a name link's own rel resolved to nothing
         at write time, so live wired whatever the rel-ignoring cascade found.
-        A resolve-or-mint that joined nothing is a failure.
         """
         inner = payload.get("event", payload)
         source = inner.get("id") or inner.get("eventId")
         links = inner.get("aboutLinks") or []
         if not isinstance(source, str):
-            return (0, 0)
+            # an unaddressable record still CLAIMED links; a (0, 0) here would
+            # drop them without a signal — the class this fix exists to end
+            return (0, len(links)) if isinstance(links, list) and links else (0, 0)
         if not isinstance(links, list):
             return (0, 1)
         wired = failed = 0
@@ -1040,7 +1043,11 @@ class _EdgeHandlers:
             rel = link.get("rel")
             if rel not in _ABOUT_REPLAY_RELS:
                 # a journaled link this replay does not understand is a loss,
-                # not a non-event — it must be counted, not skipped
+                # not a non-event — it must be counted, not skipped.
+                # ⚠️ TRIPWIRE: if the writer ever gains a rel this set lacks,
+                # this reports one failure per record on EVERY rebuild until the
+                # set is extended. Fail-loud is the intended direction; the
+                # remedy is to add the rel to ``_ABOUT_REPLAY_RELS``.
                 failed += 1
                 continue
             if link.get("how") == "id":
@@ -1084,10 +1091,12 @@ class _EdgeHandlers:
         Idempotent by construction — an already-wired link counts, so a re-run
         does not report a failure that did not happen.
 
-        The key set mirrors ``_try_about_edge``: ``Source`` matches by ``url`` OR
-        ``title``, so a ``title``-keyed document is linked live and must count
-        here too — omitting ``title`` reported a failure for a link the cascade
-        had just made (same class as measuring ``rel``).
+        The key set is what live resolution could have used: identity keys
+        ``name|url|id|eventId`` on any label, plus ``title`` **only on ``Source``**
+        — the cascade matches a document by ``e.url = $name OR e.title = $name``,
+        and ``title`` is a display prop on ``Object``/``Event`` too, so matching it
+        un-scoped would report success for a same-titled Object while no document
+        was joined (masking a real loss).
 
         ⚠️ Presence is the test, which means a link that genuinely failed could be
         masked by a same-valued node already joined to this Event — by design: the
@@ -1097,8 +1106,8 @@ class _EdgeHandlers:
         rows = self.g.query(
             "MATCH (s:Event) WHERE s.id=$sv OR s.eventId=$sv "
             "MATCH (s)-[r:aboutSubject|aboutObject|aboutEvent|aboutPoint|aboutDocument]->(t) "
-            "WHERE t.name=$tv OR t.url=$tv OR t.title=$tv "
-            "   OR t.id=$tv OR t.eventId=$tv "
+            "WHERE t.name=$tv OR t.url=$tv OR t.id=$tv OR t.eventId=$tv "
+            "   OR (t:Source AND t.title=$tv) "
             "RETURN count(r)",
             params={"sv": source, "tv": value}).result_set
         return int(rows[0][0]) if rows and rows[0] else 0

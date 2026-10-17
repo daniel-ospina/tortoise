@@ -314,3 +314,22 @@ def test_every_unusable_link_is_COUNTED_not_skipped(wired) -> None:
     for payload in cases:
         assert proj.replay_about_links(payload) == (0, 1), (
             f"{payload['aboutLinks']} was not counted as a loss")
+
+    # A record whose id cannot address an Event still CLAIMED links: count them.
+    assert proj.replay_about_links({"aboutLinks": cases[0]["aboutLinks"]}) == (0, 1)
+
+
+def test_title_matching_is_Source_scoped(wired) -> None:
+    """``title`` is a display prop on Object/Event too — the guard is Source-only.
+
+    The cascade matches a document by ``e.url = $name OR e.title = $name`` on
+    ``:Source``. Matching ``title`` label-agnostically reported SUCCESS for an
+    Event joined to a same-titled Object while no document was joined — a false
+    success that masks a real loss.
+    """
+    sdk, proj, _events, _journal = wired
+    ev = _nid(sdk.create_event("titled", "event"))
+    sdk.create_object("o", title="MyDoc")
+    assert proj._count_about_to_value(ev, "MyDoc") == 0, (
+        "an Object's title satisfied a document link")
+    assert proj._count_about_to_value(ev, "MyDoc-not-a-thing") == 0
