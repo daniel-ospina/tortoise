@@ -10492,11 +10492,14 @@ class TortoiseSDK:
 
         Raises ``WriteNotLandedError`` (``operation="delete_point"``) instead of
         returning when the §17.1 outbox refuses the destruction: either the
-        `EntityMutated` op=delete record could not be appended (the `DETACH
-        DELETE` was then NOT issued), or the record WAS committed and the cache
-        delete failed (``record_committed=True`` — treat the delete as COMMITTED
-        and do not re-issue it blindly, a replay heals the cache). A no-op id
-        still returns ``False``; ``True`` still means the node was destroyed.
+        `EntityMutated` op=delete record could not be CONFIRMED (the `DETACH
+        DELETE` was then NOT issued — the record may still have landed, since a
+        buffered append can write and then raise, so the refusal reports the
+        record as unconfirmed, never as absent), or the record WAS committed and
+        the cache delete failed (``record_committed=True`` — treat the delete as
+        COMMITTED and do not re-issue it blindly, a replay heals the cache). A
+        no-op id still returns ``False``; ``True`` still means the node was
+        destroyed.
         """
         proj = self._get_proj()
         exists = proj.g.query(
@@ -10564,7 +10567,8 @@ class TortoiseSDK:
                 "the journal append did not confirm, so the DETACH DELETE "
                 "was NOT issued; if the record did land, a replay will "
                 "remove the Point",
-                operation="delete_point")
+                operation="delete_point",
+                record="EntityMutated op=delete")
         # #7405: the hard delete rides the bounded write retry. A DETACH DELETE
         # by an explicit id is idempotent — a re-issue after a non-landing ABORT
         # re-deletes a node that is (at worst) already gone, a no-op. The abort

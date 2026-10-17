@@ -58,6 +58,12 @@ append refuses the delete instead of performing an unrecorded destruction.**
    probe — all reads), the `EntityMutated` op=delete record is appended. `False` (a configured
    journal's append RAISED) ⇒ `WriteNotLandedError(..., operation="delete_point")` and **no**
    `DETACH DELETE`.
+   **The refusal's TEXT is the door's own** (review round 3): on a delete, `False` means the append
+   did not CONFIRM, not that the record is absent — a buffered `EventLog.append` can land the record
+   and then raise — so the delete door gets its own `_headline`/`_cause`/`_contract` in
+   `WriteNotLandedError` instead of sharing `create_point`'s, which said "was not committed" and "no
+   rebuild record was committed for it" about a record that may be durably on disk. That string is
+   the MCP wire contract (`mcp_server.tortoise_delete_point` → `_safe` → `{"error": …}`).
 3. `PointRetracted` (`:GraphEvent` store) stays **after** the delete — it states what the call DID, and
    it is truth-vs-truth, not truth-vs-derived (§3).
 4. The module-top KNOWN DEVIATIONS paragraph was **corrected**: it claimed `delete_point` conformed
@@ -100,6 +106,7 @@ delete is unconditional once the probe passes, so the record can and must preced
 |---|---|---|---|
 | T1 | the `DETACH DELETE` happens before the record is appended | `test_delete_point_appends_the_record_before_the_cache_delete` (positional spy on `_journal_entity_mutation` vs the delete statement) | **YES** — `['cache', 'journal']` |
 | T2 | a failed append still destroys the node | `test_a_failed_append_does_not_delete_the_point` (append raises ⇒ `WriteNotLandedError(operation="delete_point")`, node still live, no record) | **YES** — `DID NOT RAISE`, node destroyed |
+| T2 (text) | the refusal states the opposite of its own state (`False` reported as "not committed" / "no rebuild record was committed") | same test: the NEGATIVE assertions `"not committed" not in msg`, `"no rebuild record was committed" not in msg`, `"was not applied" not in msg` — a positive substring check cannot catch an overclaim, which is why the old `"did not confirm"` assertion passed while the test's premise was contradicted | **YES** — red on the shared create-shaped text (review round 3) |
 | T3 | a committed record does not survive a failed cache delete (so the window is a resurrect) | `test_a_committed_delete_record_is_healed_by_replay` (force the delete to fail ⇒ record stands ⇒ `rebuild_all` removes the node) | **YES** — `[]` instead of one delete record |
 | T4 | journal-first journals a destruction that never happened | `test_a_missing_point_journals_nothing` (unknown id ⇒ `False`, zero records) | no (guard) |
 | T5 | the record's declared shape drifts in with an ordering fix | `test_the_delete_record_keeps_its_declared_shape` (one record, `op=delete`, `label=Point`, no `state`, no JSONL `PointRetracted`) | no (guard) |
@@ -121,6 +128,7 @@ fixed one.
 |---|---|---|---|
 | `delete_point` append-before-delete | code | `tests/test_7951_delete_point_outbox.py` (T1, T3) | done |
 | failed append ⇒ no delete ⇒ `WriteNotLandedError` | code | same (T2) | done |
+| the unconfirmed arm's caller-facing text is the DELETE door's own (never "not committed") | code | same (T2, negative assertions); `tortoise/exceptions.py` `WriteNotLandedError` | done |
 | `_journal_entity_mutation` returns the per-call outcome | code | same (T2); `tests/test_unjournaled_mutation_class.py` (45 tests, unchanged shape) | done |
 | the no-op delete still journals nothing | code | same (T4) | done |
 | the journal-less (`None`) outcome is not a refusal | code | same (T7) | done |

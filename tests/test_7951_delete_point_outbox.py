@@ -218,9 +218,26 @@ def test_a_failed_append_does_not_delete_the_point(env, monkeypatch):
     # append can land the record and still raise, so the message says "did not
     # confirm" rather than "nothing was written" — pinned here, and the landed
     # case has its own test (T8).
-    assert "did not confirm" in str(ei.value), (
+    _msg = str(ei.value)
+    assert "did not confirm" in _msg, (
         "the refusal must not assert that nothing was written — `False` only "
         "means the append raised, and an append can land and then raise")
+    # #7951 review round 3 — the NEGATIVE half, which a positive substring check
+    # cannot make: this arm shared `create_point`'s created-shaped text, whose
+    # headline said "was not committed" and whose cause said "no rebuild record
+    # was committed for it". Both are FALSE on a delete door, where `False` only
+    # means the append did not confirm and the record may be durably on disk
+    # (T8 pins exactly that state). The old positive assertion passed while the
+    # message stated the opposite of the test's premise.
+    assert "not committed" not in _msg, (
+        "`False` does not mean the record failed to commit — a buffered append "
+        f"can land it and then raise (T8): {_msg!r}")
+    assert "no rebuild record was committed" not in _msg, (
+        "the destruction record may be on disk; a delete-door refusal must not "
+        f"assert it never landed: {_msg!r}")
+    assert "was not applied" not in _msg, (
+        "a blind re-issue appends a SECOND delete record for one intent, so "
+        f"the message must not invite one as if nothing was recorded: {_msg!r}")
 
 
 # ── T3: a committed record whose cache delete did not land ────────────────
