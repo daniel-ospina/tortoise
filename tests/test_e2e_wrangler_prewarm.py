@@ -40,7 +40,9 @@ What is left for THIS file is the shape that keeps those properties true:
   6. every deploy step asserts before it uploads;
   7. every job that installs wrangler pins node 22 — `npm install` only WARNS
      (`EBADENGINE`) on an engines mismatch, so a node-20 job would install
-     "successfully" and fail later, inside the readiness loop.
+     "successfully" and fail later, inside the readiness loop. An install inside a
+     local COMPOSITE ACTION is that install of every job that `uses:` it, since
+     the action's steps run inside the consuming job, under its `setup-node`.
 
 A spec-LESS invocation is a second class, and it has no `wrangler@` token for the
 spec arm to read: `npx --yes wrangler pages deploy` resolves to the registry's
@@ -231,6 +233,92 @@ def _steps_named(name: str) -> list[tuple[str, dict]]:
             if (step.get("name") or "") == name:
                 out.append((job_name, step))
     return out
+
+
+def _composite_action_docs() -> dict[str, dict]:
+    """`<dir relative to the repo root>` → document, for every LOCAL composite action.
+
+    Keyed by DIRECTORY, because that is what a `uses: ./.github/actions/<dir>`
+    names. A workflow document is not in here: it has `jobs:`, so the jobs loop
+    already reaches it.
+    """
+    out: dict[str, dict] = {}
+    for path in _workflow_paths():
+        if path.parent == WORKFLOWS:
+            continue
+        doc = _load(path) or {}
+        runs = doc.get("runs") or {}
+        if isinstance(runs, dict) and runs.get("using") == "composite":
+            out[path.parent.relative_to(REPO_ROOT).as_posix()] = doc
+    return out
+
+
+def _steps_with_local_actions(
+    steps: list[dict], actions: dict[str, dict], seen: tuple[str, ...] = ()
+) -> list[dict]:
+    """`steps` PLUS the steps of every LOCAL composite action they `uses:`.
+
+    A composite action's steps run INSIDE the consuming job, so a job that
+    `uses: ./.github/actions/x` runs x's commands: an `npm install -g` in there
+    installs wrangler for that job, under that job's `setup-node`. Transitive
+    (`uses` may itself `uses` a local action) and cycle-safe via `seen`.
+
+    This is the resolution the node arm lacked: it iterated `jobs:` only, and a
+    composite document has none, so a wrangler install inside one was in NO
+    population the arm examined (#8874 review, ISSUE 1).
+    """
+    out = list(steps)
+    for step in steps:
+        uses = str(step.get("uses") or "").strip()
+        if not uses.startswith("./"):
+            continue
+        key = uses[2:].rstrip("/")
+        if key in seen or key not in actions:
+            continue
+        nested = list((actions[key].get("runs") or {}).get("steps") or [])
+        out += _steps_with_local_actions(nested, actions, (*seen, key))
+    return out
+
+
+def _installs_wrangler(steps: list[dict]) -> bool:
+    """Does any step's CODE name the wrangler command — with a spec or without one?"""
+    return any(
+        "wrangler@" in _run(step)
+        or "npm install -g wrangler" in _run(step)
+        or _bare_invocations(_run(step))
+        for step in steps
+    )
+
+
+def _node22_offenders(
+    docs: list[tuple[str, dict]], actions: dict[str, dict]
+) -> tuple[int, list[str]]:
+    """`(wrangler-installing jobs examined, offenders)` for the given documents.
+
+    `docs` is `[(label, workflow document)]`: the arm passes every document in
+    `_workflow_paths()`, the self-test passes synthetic ones, so the arm's
+    verdict can be PROVED to red on the shape it names rather than asserted.
+    """
+    offenders: list[str] = []
+    checked = 0
+    for label, doc in docs:
+        for job_name, job in ((doc or {}).get("jobs") or {}).items():
+            # Includes the steps of any local composite action this job uses.
+            steps = _steps_with_local_actions(job.get("steps") or [], actions)
+            if not _installs_wrangler(steps):
+                continue
+            checked += 1
+            node = None
+            for step in steps:
+                uses = step.get("uses") or ""
+                if uses.startswith("actions/setup-node"):
+                    node = str((step.get("with") or {}).get("node-version", ""))
+            # No `setup-node` at all is an offender, not a crash: the job would
+            # run whatever node the image ships, and `npm install` only WARNS on
+            # an engines mismatch.
+            if "22" not in (node or ""):
+                offenders.append(f"{label}:{job_name} node-version={node!r}")
+    return checked, offenders
 
 
 def _deploy_steps() -> list[tuple[str, dict]]:
@@ -670,19 +758,76 @@ def test_the_ci_yml_wrangler_wiring_is_exercised_by_an_ungated_job() -> None:
     )
 
 
+#: The comparison as the CONDITION of a test — `if [` / `elif [` on the same
+#: comment-cut line. A bare mention is not an assertion: it cannot fail a job.
+_EQUALITY_TEST = re.compile(r'\b(?:if|elif)\s+\[\s*"\$got"\s*=\s*"\$WRANGLER_VERSION"\s*\]')
+
+#: `exit 1` standing alone as a COMMAND — see `_equality_offences`.
+_EXIT_1 = re.compile(r"^\s*exit\s+1\s*$")
+
+
+def _equality_offences(run: str) -> list[str]:
+    """Why `run` does not ASSERT the resolved version — judged on comment-cut CODE.
+
+    Two conditions, both of which a MESSAGE fails:
+
+    * the comparison must be the condition of a test (`if`/`elif`), not a string
+      that mentions it — `echo '[ "$got" = "$WRANGLER_VERSION" ]'` names the
+      comparison in full;
+    * the failure must be an `exit 1` command, not the words `exit 1` inside one.
+
+    Cutting comments (the fix this PR ships) is not enough on its own: the arm
+    then accepted a step that merely PRINTS the comparison, which is the same
+    defect one level down — the class the sibling spec arm now refuses by rule.
+    """
+    code = [_cut_comment(line) for line in str(run or "").splitlines()]
+    if not any(_EQUALITY_TEST.search(line) for line in code):
+        return ['no `if [ "$got" = "$WRANGLER_VERSION" ]` TEST — the resolved version is not asserted']
+    if not any(
+        _EXIT_1.match(segment)
+        for line in code
+        for segment in _SEGMENT.split(_strip_quoted(line))
+    ):
+        return ["a mismatch would not fail the step: `exit 1` is in no command"]
+    return []
+
+
 def test_the_version_check_is_an_equality_against_the_declared_value() -> None:
     """The assertion must compare, not merely print — a print cannot fail a job."""
 
     for job, step in _steps_named(VERIFY_STEP):
-        # CODE only: a comment naming the comparison satisfied the raw-text
-        # version of this arm (measured) — the same defect the retry arm already
-        # carries a `_cut_comment` fix and a self-test for.
-        run = "\n".join(_cut_comment(line) for line in _run(step).splitlines())
-        assert re.search(r'\[ "\$got" = "\$WRANGLER_VERSION" \]', run), (
-            f"{job}: no `[ \"$got\" = \"$WRANGLER_VERSION\" ]` comparison — the resolved "
-            "version is not asserted"
-        )
-        assert "exit 1" in run, f"{job}: a mismatch would not fail the step"
+        offences = _equality_offences(_run(step))
+        assert not offences, f"{job}: " + "; ".join(offences)
+
+
+def test_the_equality_arm_refuses_a_message_that_merely_prints_the_comparison() -> None:
+    """Non-vacuity for the arm above: a print of the comparison must NOT satisfy it.
+
+    Measured on the pre-fix body: `echo '[ "$got" = "$WRANGLER_VERSION" ]'`
+    matched the bare `re.search`, and any other line carrying `exit 1` — even one
+    inside another message — satisfied the second assertion.
+    """
+    real = (
+        'if [ "$got" = "$WRANGLER_VERSION" ]; then\n'
+        '  echo "wrangler ${got} installed and verified"\n'
+        "  exit 0\n"
+        "fi\n"
+        'echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"\n'
+        "exit 1\n"
+    )
+    assert _equality_offences(real) == [], "the shipped shape must pass"
+    assert _equality_offences(
+        'echo \'[ "$got" = "$WRANGLER_VERSION" ]\'\n'
+        'echo "::error::resolved wrangler ${got} != declared ${WRANGLER_VERSION}"\n'
+        "exit 0\n"
+    ), "a step that only PRINTS the comparison cannot fail a job"
+    assert _equality_offences(
+        'if [ "$got" = "$WRANGLER_VERSION" ]; then\n  exit 0\nfi\n'
+        'echo "a mismatch would exit 1 here"\n'
+    ), "`exit 1` inside a message fails nothing"
+    assert _equality_offences(
+        '# if [ "$got" = "$WRANGLER_VERSION" ]; then\nexit 1\n'
+    ), "a COMMENTED-OUT comparison asserts nothing"
 
 
 # ------------------------------------------------------ 3. boot and deploy shape
@@ -817,41 +962,96 @@ def test_no_step_invokes_wrangler_without_a_spec_outside_the_declared_boots() ->
 
 
 def test_every_job_that_installs_wrangler_pins_node_22() -> None:
-    """Derived, not a list: a new wrangler job joins the arm automatically."""
+    """Derived, not a list: a new wrangler job joins the arm automatically.
 
-    offenders = []
-    checked = 0
-    for path in _workflow_paths():
-        for job_name, job in (_load(path).get("jobs") or {}).items():
-            steps = job.get("steps") or []
-            # A job "installs wrangler" if any step's CODE names the command —
-            # with a spec or without one. Keying on `wrangler@` alone let a new
-            # job that calls a bare `npx wrangler` escape this arm entirely (the
-            # reviewer measured exactly that mutation surviving every arm).
-            installs = any(
-                "wrangler@" in _run(step)
-                or "npm install -g wrangler" in _run(step)
-                or _bare_invocations(_run(step))
-                for step in steps
-            )
-            if not installs:
-                continue
-            checked += 1
-            node = None
-            for step in steps:
-                uses = step.get("uses") or ""
-                if uses.startswith("actions/setup-node"):
-                    node = str((step.get("with") or {}).get("node-version", ""))
-            # No `setup-node` at all is an offender, not a crash: the job would
-            # run whatever node the image ships, and `npm install` only WARNS on
-            # an engines mismatch.
-            if "22" not in (node or ""):
-                offenders.append(f"{path.name}:{job_name} node-version={node!r}")
+    A wrangler install that lives in a COMPOSITE ACTION joins it too: its steps
+    run inside the consuming job, so `_steps_with_local_actions` resolves them
+    into that job and that job's `setup-node` is what covers them. This arm used
+    to iterate `jobs:` alone — a composite document has none, so such an install
+    was in no population it examined, while the sentence above promised
+    derivation from the tree (#8874 review, ISSUE 1).
+    """
+
+    checked, offenders = _node22_offenders(
+        [(path.name, _load(path)) for path in _workflow_paths()],
+        _composite_action_docs(),
+    )
     assert checked >= 4, f"only {checked} wrangler-installing jobs found — the probe is wrong"
     assert not offenders, (
         "a job installs wrangler without node 22; `npm install` only WARNS on an engines "
         "mismatch, so it would 'succeed' and break later in the readiness loop:\n"
         + "\n".join(offenders)
+    )
+
+
+def test_a_composite_action_that_installs_wrangler_reaches_the_node_arm() -> None:
+    """Non-vacuity for the arm above: a composite install must reach its job.
+
+    Synthetic documents, never the tree. On the pre-fix body — which read
+    `jobs[job]['steps']` and never resolved a `uses:` — this composite action was
+    in no population at all: `checked` was 0 and no offender was produced, so a
+    job pinning node 20 while installing a floating wrangler through an action
+    passed the arm.
+    """
+    action = {
+        "runs": {
+            "using": "composite",
+            "steps": [{"run": 'npm install -g "wrangler@${WRANGLER_VERSION:?}"'}],
+        }
+    }
+    job_pinning_20 = {
+        "jobs": {
+            "e2e": {
+                "steps": [
+                    {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}},
+                    {"uses": "./.github/actions/wrangler-toolchain"},
+                ]
+            }
+        }
+    }
+    actions = {".github/actions/wrangler-toolchain": action}
+    checked, offenders = _node22_offenders([("ci.yml", job_pinning_20)], actions)
+    assert checked == 1, (
+        "a composite action's install did not reach the consuming job — the arm would "
+        "report nothing about a job that installs wrangler through an action"
+    )
+    assert offenders == ["ci.yml:e2e node-version='20'"], offenders
+
+    # The same job pinning node 22 is clean, and an action NOTHING uses is not an
+    # offender (nothing runs its install, so no node version can be required of it).
+    job_pinning_22 = {
+        "jobs": {
+            "e2e": {
+                "steps": [
+                    {"uses": "actions/setup-node@v4", "with": {"node-version": "22"}},
+                    {"uses": "./.github/actions/wrangler-toolchain"},
+                ]
+            }
+        }
+    }
+    assert _node22_offenders([("ci.yml", job_pinning_22)], actions) == (1, [])
+    assert _node22_offenders([("ci.yml", {"jobs": {"x": {"steps": []}}})], actions) == (0, [])
+
+    # Transitive: an action that `uses` another local action inherits its steps.
+    wrapping = {
+        "runs": {
+            "using": "composite",
+            "steps": [{"uses": "./.github/actions/wrangler-toolchain"}],
+        }
+    }
+    nested = dict(actions, **{".github/actions/wrap": wrapping})
+    job_using_wrapper = {
+        "jobs": {
+            "e2e": {
+                "steps": [
+                    {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}},
+                    {"uses": "./.github/actions/wrap"},
+                ]
+            }
+        }
+    }
+    assert _node22_offenders([("ci.yml", job_using_wrapper)], nested)[1], (
+        "a wrangler install one `uses:` level deeper is still that job's install"
     )
 
 
@@ -1062,17 +1262,25 @@ def test_no_document_uploads_from_the_repository_root() -> None:
     `wrangler` resolves `functions/` against the process cwd — never against the
     directory it uploads — so a fence that reads the version from the repo root
     and then uploads from there ships a site with NO Functions: dead auth on a
-    green deploy (#3620). `website/README.md` carried exactly that shape while
-    the paragraph above it documented the failure it causes — `cd "$(git rev-parse
-    --show-toplevel)"` and the upload two lines later — because reading the
-    version from the root is right and uploading from it is not, and the fence
-    did only the first.
+    green deploy (#3620). Reading the version from the root is right; uploading
+    from it is not.
+
+    What earned this arm: the troubleshooting fence THIS BRANCH added in
+    `dc46eb705` had exactly that shape (`cd "$(git rev-parse --show-toplevel)"`
+    and the upload two lines later), and `20a717661` corrected it to serve
+    `website/` from inside `website/`. `origin/main` never carried the fence at
+    all — it had only the prose `npx wrangler pages deploy <dir> still works` —
+    so the RED this arm demonstrates on that shape is measured on a MUTATED COPY
+    of the corrected fence, not on a historical commit.
 
     Judged PER FENCE and in reading order, splitting on `&&`/`;` so
     `cd "$STAGE" && … pages deploy` counts as the `cd` it is. A comment naming
-    the command does not count (`_cut_comment`, as elsewhere in this file).
+    the command does not count (`_cut_comment`, as elsewhere in this file), and
+    `uploads_seen` keeps the arm from passing green having examined no upload at
+    all.
     """
 
+    uploads_seen = 0
     for rel in COMMAND_DOCS:
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         offenders = []
@@ -1083,10 +1291,19 @@ def test_no_document_uploads_from_the_repository_root() -> None:
                     segment = segment.strip()
                     if segment.startswith("cd "):
                         cwd_is_upload_root = not _ROOT_CD.match(segment)
-                    elif _UPLOAD.search(segment) and not cwd_is_upload_root:
+                        continue
+                    if not _UPLOAD.search(segment):
+                        continue
+                    uploads_seen += 1
+                    if not cwd_is_upload_root:
                         offenders.append(
                             f"{rel}:{lineno}: uploads with the repository root as "
                             f"the cwd ({segment}) — `functions/` is resolved from "
                             "the cwd, so this ships a site with no Functions"
                         )
         assert not offenders, "\n".join(offenders)
+    assert uploads_seen, (
+        f"no wrangler upload found in any fence under {COMMAND_DOCS} — the arm would "
+        "pass green having examined nothing, so a fence that changed shape (or a "
+        "wrong `COMMAND_DOCS`) would read as compliance"
+    )
