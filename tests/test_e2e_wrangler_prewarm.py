@@ -51,15 +51,16 @@ CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 PREWARM_STEP = "Pre-warm wrangler toolchain"
 
-#: A token is classified by its SHAPE, never by a lookahead that backtracks
-#: mid-token (a lookahead happily matched `4.12` inside `4.127.0`): an EXACT pin
-#: is three numeric components and nothing else — `4.127.0`. Anything else is
-#: floating: `4`, `4.127`, `latest`, `next`, the X-RANGES `4.127.x` / `4.x.x`
-#: (npm reads those as a moving window, `>=4.127.0 <4.128.0-0`), and a
-#: prerelease, which this rule refuses as an over-report rather than resolve.
-#: A dist-tag is an OFFENDER, not a non-match: the numeric-only form of this
-#: check could not see `wrangler@latest` at all, so such a step contributed
-#: nothing to the float/parity checks and was invisible to them.
+# A token is classified by its SHAPE, never by a lookahead that backtracks
+# mid-token (a lookahead happily matched `4.12` inside `4.127.0`): an EXACT pin
+# is three numeric components and nothing else — `4.127.0`. Anything else is
+# floating: `4`, `4.127`, `latest`, `next`, the X-RANGES `4.127.x` / `4.x.x`
+# (npm reads those as a moving window, `>=4.127.0 <4.128.0-0`), and a
+# prerelease, which this rule refuses as an over-report rather than resolve.
+# A dist-tag is an OFFENDER, not a non-match: the numeric-only form of this
+# check could not see `wrangler@latest` at all, so such a step contributed
+# nothing to the float/parity checks and was invisible to them. (The rule itself
+# is `_EXACT_SPEC` below; this block is the POLICY note, not attribute docs.)
 
 
 #: A shell line CONTINUATION removes the backslash AND the newline, so the two
@@ -87,11 +88,14 @@ _CONTINUATION = re.compile(r"\\\n")
 #: interpreted at all.
 #:
 #: This replaced a hand-written shell lexer that STRIPPED comments before reading
-#: the token. Every shell form that lexer had not modelled — `<<'EOF'`, `<<\EOF`,
-#: two here-docs on one line, an escaped quote, `;#`, an apostrophe in a
-#: here-doc body — could suppress a real floating invocation from a required
-#: check, i.e. report a green step while shell ran a float. The arms below pin
-#: them.
+#: the token. Its ONLY deletion point was the comment tail, so it could hide an
+#: invocation only where it misread a `#` as starting a comment — `echo a;# x &&
+#: npx --yes wrangler@4 --version` is exactly that (measured on `main`: the tail
+#: was cut, so a real float came back as nothing). Its other gaps — `<<'EOF'`,
+#: `<<\EOF`, two here-docs on one line, `<<'1'`, an escaped quote, an apostrophe in
+#: a here-doc body — could only OVER-report, which is the safe direction. The arms
+#: below pin each input so the reading that keeps it reported cannot be dropped
+#: silently; they pin the CONTRACT, and only `;#` is also a pre-fix miss.
 #:
 #: WHY THIS IS THE FLOOR. Each earlier draft added a rule to tell a pin from a
 #: mention, and every rule could be defeated by text shell interprets but the
@@ -484,20 +488,56 @@ def _is_constant_false_gate(expr: object) -> bool:
     return bool(_CONSTANT_FALSE.match(str(expr if expr is not None else "")))
 
 
-def _has_retry_loop_in_code(run: str) -> bool:
-    """Does the loop TEXT appear on a non-comment line?
+def _cut_comment(line: str) -> str:
+    """`line` with a COMMENT TAIL cut off — quoting honoured, so `\"a#b\"` is data.
 
-    That is exactly what this proves — not that the loop WRAPS the fetch. A
-    whole-line comment no longer satisfies it (measured: a step keeping "# old body
-    used `for attempt in 1 2 3`" while making a single fetch passed every
-    invariant), which is the case this guard was caught by. DECLARED RESIDUAL: a
-    here-doc body, an `echo`, or an empty loop (`for attempt in 1 2 3; do :; done`)
-    still satisfies the substring test; the arms below pin those misses so the
-    limit is stated rather than implied. The honest fix is at the lane: assert that
-    the fetch actually retried.
+    A `#` starts a comment only at the start of a word and outside quotes, which
+    is shell's own rule. It is the same rule `_shell_words` applies, kept here as
+    a character scan because this test needs the CODE TEXT, not its words.
     """
-    lines = [line for line in str(run or "").splitlines()
-             if not line.strip().startswith("#")]
+    quote = ""
+    at_word_start = True
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+        elif quote == '"':
+            if ch == '"':
+                quote = ""
+            elif ch == "\\" and i + 1 < len(line):
+                i += 1
+        elif ch in "'\"":
+            quote = ch
+            at_word_start = False
+        elif ch == "\\" and i + 1 < len(line):
+            at_word_start = False
+            i += 1
+        elif ch == "#" and at_word_start:
+            return line[:i]
+        elif ch in " \t":
+            at_word_start = True
+        else:
+            at_word_start = False
+        i += 1
+    return line
+
+
+def _has_retry_loop_in_code(run: str) -> bool:
+    """Does the loop TEXT appear in CODE (not in a comment)?
+
+    That is what this proves — not that the loop WRAPS the fetch. Comments are
+    cut, whole-line AND trailing: a step keeping `# old body used `for attempt in
+    1 2 3`` as a note while making a single fetch passed every invariant, and so
+    did the trailing spelling `npx … --version  # for attempt in 1 2 3` while the
+    filter dropped whole lines only. DECLARED RESIDUAL: a here-doc body, an
+    `echo`, or an empty loop (`for attempt in 1 2 3; do :; done`) still satisfies
+    the substring test; the arms below pin those misses so the limit is stated
+    rather than implied. The honest fix is at the lane: assert that the fetch
+    actually retried.
+    """
+    lines = [_cut_comment(line) for line in str(run or "").splitlines()]
     return any("for attempt in 1 2 3" in line for line in lines)
 
 
@@ -522,6 +562,15 @@ def test_the_retry_check_ignores_a_commented_out_loop() -> None:
         "# old body used `for attempt in 1 2 3`; now a single fetch\n"
         "npx --yes wrangler@4.127.0 --version")
     assert not _has_retry_loop_in_code("npx --yes wrangler@4.127.0 --version")
+    # A TRAILING comment is a comment too, and it was the surviving spelling while
+    # only whole lines were dropped: a single unprotected fetch with the loop text
+    # kept as a note passed every invariant.
+    assert not _has_retry_loop_in_code(
+        "npx --yes wrangler@4.127.0 --version  # for attempt in 1 2 3")
+    # …while quoting is honoured, so a `#` INSIDE a string is data. A cut at the
+    # first `#` on the line (the naive form) would drop the loop and fail here.
+    assert _has_retry_loop_in_code(
+        'x="a#b" && for attempt in 1 2 3; do :; done')
     # DECLARED RESIDUAL, pinned: these still satisfy the substring test. Stated so
     # the limit is not mistaken for coverage.
     for run in ("cat <<'EOF'\nfor attempt in 1 2 3\nEOF\nnpx --yes wrangler@4.127.0 --version",
@@ -632,11 +681,12 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     assert _floating_wranglers("npx --yes \\\n  wrangler@4 --version") == {"4"}
     assert _floating_wranglers("npx --yes wrangler\\\n@4 --version") == {"4"}
 
-    # REGRESSION ARMS — inputs where a previous draft of this matcher, or the
-    # shell lexer it replaced, reported nothing while bash executed a floating
-    # `wrangler@4`. (The per-revision history of which draft hid which is NOT
-    # asserted here: it was measured inconsistently across review rounds, so the
-    # arms pin the input, not the provenance.)
+    # ARMS — spellings this matcher must report, each of which really runs a
+    # floating `wrangler@4`. They pin the reading (drop a modelled form and the
+    # arm fails), NOT a history: most are already caught by the replaced lexer, and
+    # the per-revision story was measured inconsistently across review rounds, so
+    # the arm pins the input. Only `;#` is also a pre-fix miss (see the comment
+    # above `_CONTINUATION`).
     for run in (
         "cat <<'EOF'\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A1
         "cat <<\\EOF\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A2
@@ -670,7 +720,7 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     # required a command word or an ENUMERATED command position and therefore
     # missed every one of these: each really runs a float, and the lexer this
     # replaced reported each. Enumerating where shell may start a command is what
-    # produced them, so the rule no longer enumerates (see `_INVOCATION`).
+    # produced them, so the rule no longer enumerates (see `_wrangler_invocations`).
     for run in (
         "bun x wrangler@4 pages dev",
         "pnpm dlx wrangler@4 pages dev",
