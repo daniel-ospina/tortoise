@@ -14,7 +14,7 @@ aboutObjects: "#7983, #7954, #7950, STORAGE-ARCHITECTURE.md §17.4, Postgres rec
 **Measured at:** `measure/7983-hot-fraction-and-rho@459f22912edf4893fb70144d42e97df389479ed5`
 on **2026-10-17**. Everything below is measured on that tree; the code this lane adds
 (`tortoise/read_ledger.py` plus the `_ledger_record` hook at `query`, `paginated_query`,
-`query_points_by_tag`, and the FTS funnel inline — deliberately NOT `get_point`, which the write paths
+`query_points_by_tag`, and the FTS funnel inline — and `query()` skips the SDK's own population scans (`_record_reads=False`: `recall_gaps`, `issue_insight`, the FTS fallback), because one `recall_gaps()` call reads the whole stock. Deliberately NOT `get_point`, which the write paths
 read through; graph expansion and three direct-Cypher readers are NOT hooked either) is the only
 change.
 
@@ -94,8 +94,8 @@ would overstate the row by its dominant column.
 | record row width | **1,263–1,266 B median / 1,421–1,423 B mean** | n = 2,000 rows per run, two runs |
 | record footprint per tenant | **191,643,648 B = 0.1916 GB** ⇒ **2,136 B/node on disk** (**1.28×** the cache's 0.1499 GB) | heap + indexes + TOAST |
 | keyed miss fetch | **5.2 blocks MEAN** (4 median, 7 max) · **2,312 B mean on the wire** (1,306 median, 5,408 max) · **0.041–0.045 ms** server, 0.81–1.73 ms end-to-end | the record's own PK probe, 200 samples × two runs, DETOASTED (what a real reader pays) |
-| full-scope read (rebuild) | **115,605 blocks (947.0 MB logical) · 2,470–3,094 ms** | `read_record_view`'s query shape, 89,701 rows, two runs, DETOASTED |
-| ⛔ same reads WITHOUT the detoast | 4 blocks · 54–56 ms; 7,962 blocks · 53.2 MB · 53.9–55.5 ms | `SELECT *` under `EXPLAIN (ANALYZE)` alone — **14.5× too few blocks and ~50× too little CPU** for a rebuild, recorded so no later reader "re-measures" a cheaper number |
+| full-scope read (rebuild) | **115,605 blocks (947.0 MB logical) · 2,470–3,094 ms** | `read_record_view`'s query shape, DETOASTED, for ONE table (`public.point`, 89,701 rows, two runs) — a **per-table FLOOR**: a real rebuild walks `node_identity` plus five label tables and `relation` too |
+| ⛔ same reads WITHOUT the detoast | 4 blocks · 0.029–0.074 ms; 7,962 blocks · 65.2 MB · 27.1–117.1 ms | `SELECT *` under `EXPLAIN (ANALYZE)` alone — **14.5× too few blocks and 26–91× too little CPU** for a rebuild, recorded so no later reader "re-measures" a cheaper number |
 
 **Blocks are exact; milliseconds are a range over the two runs in `rho-bench.log` (shared-CPU
 container, default settings) — an accounting bench, not a vendor benchmark.**
@@ -164,13 +164,16 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
 - **stock registration by the product**: the ledger learns a key exists only when a caller says so
   (today, the census probe). Enabling `TORTOISE_READ_LEDGER` without a stock census makes every read
   `unregistered` and leaves `f` without a denominator.
-- **three read paths the ledger cannot count**, all biasing `f` LOW (so they flatter the split):
-  **graph expansion** (`recall_subgraph` returns expander nodes, not keyed lookups); **the state and
-  traversal paths** (`traverse`, `recall_state`'s related-point/object readers,
-  `get_historical_knowledge`) plus the FTS funnel's candidate POOL (only the returned rows are
-  counted); and **the `Subject`/`Object`/`Source` legs of the FTS funnel**, whose rows are
-  `SearchResult.to_dict()` and carry `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in
-  `unresolved` rather than in a joinable coordinate. All three are **#8877**.
+- **five read paths the ledger cannot count** (the same five §17.4.6 enumerates — this list is the
+  primary one, and the count there must match it): **`recall_subgraph`** (graph expansion: expander
+  nodes, not keyed lookups); **`list_sources`** (a caller-facing `:Source` reader returning `url` —
+  the one unhooked path whose rows WOULD resolve to a joinable coordinate); **the state and traversal
+  paths** (`traverse`, `recall_state`'s related-point/object readers, `get_historical_knowledge`); **the
+  FTS funnel's candidate POOL** (only the returned rows are counted); and **the `Subject`/`Object`/
+  `Source` legs of the FTS funnel**, whose rows are `SearchResult.to_dict()` and carry
+  `id`/`eventId`/`sourcePath` — never `name`/`url` — so they land in `unresolved` rather than in a
+  joinable coordinate. The first four bias `f` **LOW** (flattering the split); the byte-unit hole
+  above is **TWO-SIDED**. All are **#8877**.
 
 ---
 

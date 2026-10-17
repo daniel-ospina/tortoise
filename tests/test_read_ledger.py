@@ -670,3 +670,40 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
     assert fold(ledger).capped is True
     assert fold(ledger, tenant="t1").capped is True, "the truncation is file-level"
     assert fold(ledger, tenant="someone-else").capped is True
+
+
+def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
+    """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
+
+    They call `query()` to do it, so recording them would mark every Point read
+    after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
+    `get_point` prevented, and it would silently invalidate the one-directional
+    "the gaps bias `f` LOW" caveat the docs rest on.
+    """
+    inst, graph = hooked_sdk
+    record_stock("Point", "p1", nbytes=100)
+    record_stock("Point", "p2", nbytes=100)
+
+    graph.rows = [{"id": "p1"}, {"id": "p2"}]
+    assert [r["id"] for r in inst.query(_record_reads=False)] == ["p1", "p2"]
+    assert {row.read_count for row in fold().rows.values()} == {0}, (
+        "an internal scan must record NOTHING"
+    )
+
+    graph.rows = [{"id": "p1"}]
+    inst.query()
+    counts = {k[2]: row.read_count for k, row in fold().rows.items()}
+    assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
+
+
+def test_the_mode_tightening_skips_a_directory(tmp_path, monkeypatch):
+    """Pointing the env var at a DIRECTORY must not rewrite that directory's mode.
+
+    `chmod 0600` on a directory removes group/other traverse — an unrelated,
+    destructive side effect of a best-effort measurement.
+    """
+    victim = tmp_path / "not-a-ledger"
+    victim.mkdir()
+    victim.chmod(0o755)
+    assert read_ledger.record_stock("Point", "p1", nbytes=10, path=victim) is False
+    assert victim.stat().st_mode & 0o777 == 0o755, "someone else's directory, untouched"

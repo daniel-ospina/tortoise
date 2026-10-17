@@ -76,6 +76,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -323,7 +324,12 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # world-readable on exactly the files it was added for.
         if key not in _mode_checked:
             try:
-                if target.exists() and (target.stat().st_mode & 0o077):
+                st = target.stat()
+                # ⛔ REGULAR FILES ONLY: pointing the env var at a DIRECTORY (or a
+                # device) must not have its mode rewritten as a side effect of a
+                # measurement — the tightest permission is not automatically the
+                # right one for something that is not our file.
+                if stat.S_ISREG(st.st_mode) and (st.st_mode & 0o077):
                     os.chmod(target, 0o600)
             except OSError:  # pragma: no cover — not ours to fail the read path
                 pass
@@ -331,9 +337,30 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
                 _mode_checked.add(key)
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            os.write(fd, blob)
+            # `os.write` may write FEWER bytes than asked (a full disk, a pipe).
+            # Looping is the only way the return value can be trusted, and it is
+            # what `lines_written` counts below — the caller must never hear "N
+            # events recorded" for a batch whose tail never reached the file.
+            written = 0
+            while written < len(blob):
+                n = os.write(fd, blob[written:])
+                if n <= 0:  # pragma: no cover — a closed/full descriptor
+                    break
+                written += n
         finally:
             os.close(fd)
+        if written < len(blob):
+            # A SHORT write leaves a torn tail: count only the events whose line
+            # is provably whole, and say the window is incomplete.
+            _warn_once(
+                "short",
+                "read ledger %s: wrote %d of %d B — the tail is torn, so some "
+                "events are LOST and this window is INCOMPLETE",
+                target,
+                written,
+                len(blob),
+            )
+            return blob[:written].count(b"\n")
         return len(lines)
     except OSError as e:  # pragma: no cover — a broken filesystem
         _warn_once(

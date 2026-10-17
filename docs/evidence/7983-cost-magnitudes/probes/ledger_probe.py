@@ -10,8 +10,8 @@ as is **what the instrument records**. It is not a tenant estimate:
     *a* query mix, not for a tenant's. §17.4.6 records it as a proxy, with the
     sample and the date, and does NOT put it in the `f` row of the cost model.
 
-Read-only by construction, and it PROVES that: the node count and
-`GRAPH.MEMORY USAGE` are captured before and after and asserted equal.
+Read-only by construction, and it PROVES that: the node count is captured before and after and
+asserted equal, with `GRAPH.MEMORY USAGE` captured and reported beside it as a second witness.
 
     uv run python docs/evidence/7983-cost-magnitudes/probes/ledger_probe.py \
         --uri 'docker://:@localhost:16379/tortoise' --graph tortoise --queries 200
@@ -157,6 +157,14 @@ def main() -> int:
         after = census()
         assert before["nodes"] == after["nodes"], (
             f"the probe WROTE to the graph: {before['nodes']} -> {after['nodes']}"
+        )
+        # `GRAPH.MEMORY USAGE` is an independent second witness: a write that
+        # rewrote a property without changing the node COUNT would pass the count
+        # check alone. Reported rather than asserted equal, because the server's
+        # own bookkeeping can move a few bytes on a read.
+        print(
+            f"memory usage before/after: {before['memory_usage']} / {after['memory_usage']}",
+            file=sys.stderr,
         )
 
         folded = fold(ledger)

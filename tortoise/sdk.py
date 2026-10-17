@@ -12971,6 +12971,7 @@ class TortoiseSDK:
 
     def query(self, kind: str | None = None,
               *, include_retracted: bool = False,
+              _record_reads: bool = True,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
 
@@ -13021,7 +13022,13 @@ class TortoiseSDK:
             params=params,
         ).result_set
         points = [r[0] for r in rows]
-        _ledger_record("Point", points)  # #7983: a product READ of these keys
+        # #7983: `_record_reads=False` is for the SDK's OWN population scans —
+        # `recall_gaps`, `issue_insight` and the FTS TF-IDF fallback. They are not
+        # a caller reading these keys: recording them would mark the ENTIRE stock
+        # read after one `recall_gaps()` call (f -> ~1) and bias `f` HIGH, the
+        # direction that removes the saving the ledger exists to measure.
+        if _record_reads:
+            _ledger_record("Point", points)
         return points
 
     def paginated_query(self, kind: str | None = None,
@@ -20738,7 +20745,8 @@ class TortoiseSDK:
         repo_points: list[dict] = []
         if repo:
             repo_points = self.query(
-                kind="observation", source="github", github_repo=repo
+                kind="observation", source="github", github_repo=repo,
+                _record_reads=False,  # #7983: an internal population scan
             )
 
         if total_points == 0:
@@ -21681,7 +21689,12 @@ class TortoiseSDK:
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
-                                    include_retracted=include_terminal)
+                                    include_retracted=include_terminal,
+                                    # #7983: these hits are recorded ONCE, by
+                                    # `_with_read_status` below — a second record
+                                    # here inflates read_count for every fallback
+                                    # hit (and the scan itself is not a caller read).
+                                    _record_reads=False)
                 if exclude_status and points:
                     # Same status exclusion as step 5d (#898 review round-2):
                     # the degraded fallback must not leak superseded/deprecated
@@ -23640,7 +23653,8 @@ class TortoiseSDK:
             # superseded/deprecated for the opt-in — retracted is then
             # re-filtered below by excluded_set).
             nodes = self.query(kind=kind,
-                               include_retracted=include_superseded)
+                               include_retracted=include_superseded,
+                               _record_reads=False)  # #7983: a population scan
             pool_results = []
             for n in nodes:
                 if (n.get("status") or "") in excluded_set:
