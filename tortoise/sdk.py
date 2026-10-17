@@ -10445,8 +10445,8 @@ class TortoiseSDK:
               (``ValueError('No point …')`` here would abandon the window).
             - ``None`` / ``draft`` → False: re-issuing matches.
             - ``live`` → the #1088 idempotent success for a STATUS-ONLY promote;
-              with other props nothing was applied, so keep it loud instead of
-              journaling a revision the graph never made.
+              with other props nothing was applied, so the caller gets the SAME
+              documented refusal the first-attempt route raises.
             - terminal → the documented ``ValueError``.
             """
             if result.result_set:
@@ -10462,9 +10462,19 @@ class TortoiseSDK:
             if status == 'live':
                 # #1088: already-live is an idempotent success for a
                 # STATUS-ONLY promote (the arm's post-check completes the
-                # no-op). With other props nothing was applied, so keep it
-                # loud instead of journaling a revision the graph never made.
-                return len(_props_param) == 1
+                # no-op).
+                if len(_props_param) == 1:
+                    return True
+                # With other props nothing was applied, so the caller must get
+                # the SAME refusal the first-attempt route gives. Returning
+                # False here would raise `_WriteNotLanded` instead, and its
+                # exhausted path re-raises the GRAPH abort — an error telling
+                # the caller to retry a promote that can never match while the
+                # node is live, arriving after 7-14 s and withholding the
+                # remedy ("re-issue without `status`"). This is the read the
+                # `_WriteNotLanded` docstring promises a refused promote takes.
+                _raise_update_point_status_error(
+                    proj, id, status_only=False, present=True)
             if _raise_update_point_status_error(
                     proj, id, status_only=len(_props_param) == 1,
                     present=True):

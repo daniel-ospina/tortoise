@@ -1508,11 +1508,14 @@ def test_a_retried_tag_sync_that_lands_nothing_does_not_report_success(
         tmp_path, monkeypatch):
     """A re-issued tag sync against an unreplayed Point is NOT a success.
 
-    Measured pre-fix: ``update_point(pid, tags=[a, b])`` returned a point dict
-    while the graph held ZERO ``TAGGED`` edges and no ``Point`` at all — the
-    success report the whole retry exists to avoid (#6666 class). The tag arm
-    rode ``_graph_write_with_retry`` WITHOUT a witness, so nothing asked the
-    graph whether the re-issue had landed.
+    Measured pre-fix: ``update_point(pid, tags=[a, b])`` returned normally
+    with ``{}`` while the graph held ZERO ``TAGGED`` edges and no ``Point`` at
+    all — the success report the whole retry exists to avoid (#6666 class).
+    ``{}`` is the historical missing-id answer, not a point dict: this fixture
+    DELETES the Point at the abort, so the re-issue's read-back is empty (the
+    same contract `test_a_first_attempt_that_matches_nothing_keeps_the_empty_
+    contract` pins). The tag arm rode ``_graph_write_with_retry`` WITHOUT a
+    witness, so nothing asked the graph whether the re-issue had landed.
 
     The abort therefore surfaces unchanged, exactly as it does on the property
     arm — one behaviour for the whole mutation, not one per statement.
@@ -1879,6 +1882,78 @@ def test_a_live_status_only_promote_writes_through_no_other_slot(
         assert out["status"] == "live", (
             "the no-op still answers with the node, like the probe path: "
             f"saw {out.get('status')!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class _AbortThenLive(_AbortOnceGraph):
+    """Abort the first promote, then make the node LIVE.
+
+    The rebuild window with a status flip: the abort authorises a retry, and by
+    the time the promote is re-issued the replay has landed the node live, so
+    the guarded ``SET`` matches NOTHING and raises nothing.
+    """
+
+    def __init__(self, real, needle: str, *, victim: str) -> None:
+        super().__init__(real, needle, present=True)
+        self._victim = victim
+        self.aborted = False
+
+    def query(self, cypher, params=None, timeout=None):
+        try:
+            return super().query(cypher, params=params, timeout=timeout)
+        except redis_exc.ResponseError:
+            if not self.aborted:
+                self.aborted = True
+                self._real.query(
+                    "MATCH (n:Point {id:$id}) SET n.status = 'live'",
+                    params={"id": self._victim})
+            raise
+
+
+def test_a_retried_live_promote_with_other_props_raises_the_documented_refusal(
+        tmp_path, monkeypatch):
+    """A retry must not REPLACE the refusal with an inactionable abort.
+
+    The first-attempt route raises ``ValueError`` "already live — ... re-issue
+    without `status`". The re-issued route reaches the same end state and must
+    answer the SAME way: answering `_WriteNotLanded` instead exhausts the
+    budget and surfaces the GRAPH abort — 7-14 s of retries, then "graph was
+    deleted or replaced", which sends the caller to retry a promote that can
+    never match while the node is live and never names the remedy.
+
+    The sleep count is the discriminator: one backoff means the witness raised
+    on the first re-issue, three means the budget was run out.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=sleeps.append))
+    sdk = _sdk(tmp_path, "promoteretrylive")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortThenLive(proj.g, _POINT_PROMOTE_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="already live"):
+            sdk.update_point(pid, status="live", confidence=0.42)
+
+        assert proxy.aborted, (
+            "fixture precondition: the promote must have aborted once, or the "
+            "witness was never armed and this test proves nothing")
+        assert len(sleeps) == 1, (
+            "the refusal must surface on the FIRST re-issue — one backoff, "
+            f"not a run-out budget: saw {len(sleeps)} sleeps")
+        proj.g = proxy._real
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status, n.confidence",
+            params={"id": pid}).result_set[0]
+        assert row[0] == "live"
+        assert row[1] is None, (
+            "the refusal must not paper over a partly-applied write: the "
+            f"confidence was never set, saw {row[1]!r}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
