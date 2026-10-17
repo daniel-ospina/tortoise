@@ -4,7 +4,13 @@
 This is the instrument's end-to-end exercise, and the ONLY thing it may be read
 as is **what the instrument records**. It is not a tenant estimate:
 
-  * the STOCK is real — every `(label, key)` the live graph holds;
+  * the STOCK is real — every `(label, key)` the live graph holds **for the labels the
+record's identity contract keys** (`Point`, `Event`, `Subject`, `Object`, `Source`,
+`Session`). ⚠️ SCOPE: `GraphEvent` and `Tag` are NOT stock — they carry no
+contract key and the record view does not read them per key — so this denominator
+is the KEYED record, not every node in the store. The omission is conservative for
+`f` (a never-read `GraphEvent` would only LOWER it), and `stock_truncated: false`
+speaks about the paging walk of these six labels, not about the whole store.;
   * the READ MIX is a **proxy**: queries are drawn from the graph's own content
     (one query per sampled Point, built from its own words), so it stands in for
     *a* query mix, not for a tenant's. §17.4.6 records it as a proxy, with the

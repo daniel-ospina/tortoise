@@ -798,16 +798,27 @@ def fold(
                 if ev.get("bytes") is not None:
                     try:
                         row.nbytes = int(ev["bytes"])
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         # A hand-edited or half-rewritten `bytes` must not take
                         # the report down, and the EVENT is not lost: the key
                         # exists, its width is simply unknown — which is exactly
                         # what `nbytes is None` means everywhere else (the byte
-                        # fraction excludes it and reports its coverage).
+                        # fraction excludes it and reports its coverage). OverflowError
+                        # too: `record_stock(nbytes=float("inf"))` is writable
+                        # through this module's OWN public API and emits
+                        # `{"bytes": Infinity}`, and `int(inf)` raises — one such
+                        # line would make every later fold() die, permanently.
                         row.nbytes = None
                 at = ev.get("at")
-                if at and (
-                    row.first_written_at is None or _stamp_cmp(at, row.first_written_at) < 0
+                # `isinstance` guard: a non-string `at` (an epoch integer, a list)
+                # would reach `_stamp_cmp`'s mixed-type fallback and raise a
+                # TypeError out of a READ-ONLY report — the pending-READ path
+                # already guards this, and the same "damaged line is counted, not
+                # fatal" rule applies here.
+                if (
+                    isinstance(at, str)
+                    and at
+                    and (row.first_written_at is None or _stamp_cmp(at, row.first_written_at) < 0)
                 ):
                     row.first_written_at = at
             elif kind == EVENT_READ:

@@ -1099,3 +1099,23 @@ def test_tenants_in_file_counts_the_file_even_with_tenant_given(ledger):
         assert read_ledger._main(["--ledger", str(ledger), "--tenant", "t1", "--json"]) == 0
     payload = _json.loads(buf.getvalue())
     assert payload["tenants_in_file"] == 3, payload["tenants_in_file"]
+
+
+def test_an_infinite_bytes_value_does_not_brick_the_report(ledger):
+    """`record_stock(nbytes=float("inf"))` is writable through the public API."""
+    read_ledger.record_stock("Point", "p1", nbytes=float("inf"), path=ledger)
+    read_ledger.record_read("Point", "p1", path=ledger, at="2026-10-17T00:00:00+00:00")
+    folded = fold(ledger)  # must not raise OverflowError
+    row = next(iter(folded.rows.values()))
+    assert row.nbytes is None, "unknown width, not a pretend number"
+    assert row.read_count == 1
+
+
+def test_a_non_string_at_does_not_raise_out_of_the_fold(ledger):
+    """A merged/torn file may carry an epoch integer under `at`."""
+    ledger.write_text(
+        '{"at":1697000000,"event":"stock","key":"p1","label":"Point","tenant":null}\n'
+        '{"at":["x"],"event":"stock","key":"p2","label":"Point","tenant":null}\n'
+    )
+    folded = fold(ledger)
+    assert folded.stock_keys == 2
