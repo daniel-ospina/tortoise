@@ -64,32 +64,47 @@ PREWARM_STEP = "Pre-warm wrangler toolchain"
 #: invocation and must be matched as one.
 _CONTINUATION = re.compile(r"\\\n")
 
-#: A whole-line comment is not a command.
+#: A whole-line comment is not a command. Only WHOLE lines are skipped — a
+#: trailing `# …` is left in the text (see the declared over-report below).
 _COMMENT_LINE = re.compile(r"^[ \t]*#")
 
 #: ── The pin is matched as an INVOCATION, never as a bare mention ─────────────
-#: A command word (`npx`/`npm`/`pnpm`/`yarn`/`bunx`), then `wrangler@<spec>` on
-#: the same line — or `wrangler@<spec>` itself at a command position. This
-#: replaced a hand-written shell lexer and removes the entire class of defects
-#: that lexer produced: a comment, a here-doc body (`<<'EOF'`, `<<\EOF`, two on
-#: one line), an ANSI-C string or an escaped quote that merely MENTIONS a version
-#: is not an invocation and cannot be mistaken for a pin. Crucially, NOTHING is
-#: stripped from the text any more: every earlier version stripped comments, so
-#: each shell form it had not modelled (an escaped quote, `$'…'`, `;#`, a
-#: here-doc body, `<<\EOF`, a second here-doc delimiter) could suppress a real
-#: floating invocation from a required check. Matching the invocation shape
-#: cannot suppress anything.
+#: A command word (`npx`/`npm`/`pnpm`/`yarn`/`bunx`/`bun x`), then
+#: `wrangler@<spec>` on the same line — or `wrangler@<spec>` itself at a command
+#: position (line start, or after `;` `&&` `|` `(` a backtick or `$(`), possibly
+#: behind `VAR=value` assignments.
+#:
+#: This replaced a hand-written shell lexer that STRIPPED comments. Every shell
+#: form that lexer had not modelled — `<<'EOF'`, `<<\EOF`, two here-docs on one
+#: line, an escaped quote, `$'…'`, `;#`, a name with an apostrophe in the body —
+#: could suppress a real floating invocation from a required check, i.e. report a
+#: green step while shell ran a float. The arms below pin all of them.
+#:
+#: Matching the invocation is not "no suppression is possible"; it is narrower
+#: and measurable: what the matcher sees is not rewritten to drop comments, so a
+#: construct can only make it report MORE than the command line it sits on, never
+#: less. Over-reports are declared with the arms; all are fail-closed, which
+#: is the direction an approximation is allowed to fail in here.
+_CMD_WORD = r"(?:npx|npm|pnpm|yarn|bunx|bun[ \t]+x)"
+_CMD_POSITION = r"(?:^|[;&|(`]|\$\()"
+#: An INDIRECT spec (`wrangler@$V`, `wrangler@"${V}"`) is reported as the EMPTY
+#: spec on purpose: whatever the variable holds, the token is not an exact pin,
+#: so it counts as floating — the same fail-closed read the lexer this replaced
+#: produced, and what keeps a variable-versioned pre-warm or boot step red.
+_SPEC = r"([A-Za-z0-9][A-Za-z0-9._-]*|(?=[\"'$({]))"
 _INVOCATION = re.compile(
-    r"(?:\b(?:npx|npm|pnpm|yarn|bunx)\b[^\n]*?"
-    r"|^[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t\n;&|]*[ \t]+)*"
-    r")wrangler@([A-Za-z0-9][A-Za-z0-9._-]*)",
+    r"(?:\b" + _CMD_WORD + r"\b[^\n]*?"
+    r"|" + _CMD_POSITION + r"[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t\n;&|]*[ \t]+)*"
+    r")wrangler@" + _SPEC,
     re.M,
 )
 
-#: DECLARED RESIDUAL, unchanged from the lexer this replaced: a version supplied
-#: indirectly — `wrangler@$WRANGLER_VERSION`, `wrangler@"${V}"` — carries no
-#: literal token for a text check to read. Guarding that needs a different
-#: instrument (an install in the lane, asserting the resolved tarball).
+#: DECLARED RESIDUAL — a version supplied indirectly (`wrangler@$V`,
+#: `wrangler@"${V}"`) cannot be RESOLVED by a text check, so it is reported as an
+#: empty spec, i.e. as floating (see `_SPEC`). What is genuinely out of reach is
+#: only the opposite direction: an indirect spec cannot be proved EQUAL to an
+#: exact pin, so a step that pins indirectly and a pre-warm that also does still
+#: cannot be checked for parity — a text check would have to resolve the variable.
 
 
 def _wrangler_invocations(run: str) -> set[str]:
@@ -301,26 +316,57 @@ def test_floating_detector_catches_a_dist_tag_not_only_a_numeric_range() -> None
     # A shell CONTINUATION makes the two lines one command line.
     assert _floating_wranglers("npx --yes \\\n  wrangler@4 --version") == {"4"}
 
-    # REGRESSION ARMS — every one of these HID a real float from the shell lexer
-    # this matcher replaced (a quote in a here-doc body or an ANSI-C string left
-    # its quote state open, so the later `npx` line read as a comment while bash
-    # ran it, and the guard passed). They pass now by construction: nothing is
-    # stripped, so no construct can suppress an invocation.
+    # REGRESSION ARMS — each of A1–A6 HID a real float on at least one revision
+    # of the shell lexer this matcher replaced (a quote in a here-doc body or an
+    # ANSI-C string left its quote state open, so the later `npx` line read as a
+    # comment while bash ran it, and the guard passed). A2 and A3 were still
+    # hidden at the head that merged (#8743, 9378ba130) — the two the merge
+    # shipped. A4 and A7 never hid on any revision and stand as coverage only.
     for run in (
-        "cat <<'EOF'\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",
-        "cat <<\\EOF\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",
-        "cat <<'A' <<'B'\nA\nDon't\nB\necho 'see #1' && npx --yes wrangler@4 --version",
-        "cat <<'1'\nDon't\n1\nnpx --yes wrangler@4 --version",
-        "echo \"escaped \\\" # note\" && npx --yes wrangler@4 --version",
-        "echo a\\;# x && npx --yes wrangler@4 --version",
-        "cat <<< word\n# was wrangler@4\nnpx --yes wrangler@4 --version",
-        "echo x $(cat <<\\EOF\nDon't\nEOF\n) && npx --yes wrangler@4 --version",
+        "cat <<'EOF'\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A1
+        "cat <<\\EOF\nDon't\nEOF\necho 'see #8745' && npx --yes wrangler@4 --version",  # A2
+        "cat <<'A' <<'B'\nA\nDon't\nB\necho 'see #1' && npx --yes wrangler@4 --version",  # A3
+        "cat <<'1'\nDon't\n1\nnpx --yes wrangler@4 --version",  # A4 (coverage)
+        "echo \"escaped \\\" # note\" && npx --yes wrangler@4 --version",  # A5
+        "echo a\\;# x && npx --yes wrangler@4 --version",  # A6
+        "cat <<< word\n# was wrangler@4\nnpx --yes wrangler@4 --version",  # A7 (coverage)
+        "echo x $(cat <<\\EOF\nDont\nEOF\n) && npx --yes wrangler@4 --version",  # A8
     ):
         assert _floating_wranglers(run) == {"4"}, run
 
-    # DECLARED RESIDUAL: a version behind a variable has no literal token to read.
-    assert _floating_wranglers("WRANGLER=latest\nnpx --yes wrangler@$WRANGLER --version") == set()
-    assert _floating_wranglers('npx --yes wrangler@"${WRANGLER}" --version') == set()
+    # NO REGRESSION against the lexer this replaced: a spaced `bun x`, a
+    # command-position `wrangler@` after a metacharacter, the other package
+    # runners and the `VAR=value` prefix were ALL reported by that lexer and must
+    # still be. (A review of the first version of this matcher found the first
+    # two MISSING — a false PASS in the making: `bun x wrangler@4 pages dev` and
+    # `echo hi; wrangler@4 pages dev` both really run.)
+    assert _floating_wranglers("bun x wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("pnpm dlx wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("yarn dlx wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("bunx wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("npm exec -- wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("echo hi; wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("true && wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("cat log | wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("(wrangler@4 pages dev)") == {"4"}
+    assert _floating_wranglers("WRANGLER_VERSION=4 wrangler@4 pages dev") == {"4"}
+    assert _floating_wranglers("echo hi && \\\n  npx --yes wrangler@4 --version") == {"4"}
+
+    # DECLARED OVER-REPORT (fail-closed, the safe direction): text that merely
+    # NAMES an invocation in a way the matcher cannot tell from a command — a
+    # TRAILING comment, a quoted mention, a here-doc body — is reported, because
+    # the text is not rewritten. Refusing a correct step is recoverable by
+    # rewording it; hiding a real invocation from a required check is not — and
+    # the old lexer's attempt to tell those two apart is what produced A1–A6.
+    assert _floating_wranglers(
+        "npx --yes wrangler@4.127.0 --version  # was: npx --yes wrangler@4 --version") == {"4"}
+    assert _floating_wranglers('echo "npx --yes wrangler@4 --version"') == {"4"}
+    assert _floating_wranglers("cat <<'EOF'\nnpx --yes wrangler@4 --version\nEOF") == {"4"}
+
+    # An INDIRECT spec is floating, not invisible: the empty spec is never exact.
+    assert _floating_wranglers("WRANGLER=latest\nnpx --yes wrangler@$WRANGLER --version") == {""}
+    assert _floating_wranglers('npx --yes wrangler@"${WRANGLER}" --version') == {""}
+    assert _exact_wranglers("npx --yes wrangler@$WRANGLER --version") == set()
 
 
 def test_no_e2e_boot_step_floats_the_wrangler_version() -> None:
