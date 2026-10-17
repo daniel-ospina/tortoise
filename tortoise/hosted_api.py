@@ -12115,6 +12115,20 @@ async def toggle_api_key_enabled(
         if "name" in body.model_fields_set or "scopes" in body.model_fields_set:
             raise HTTPException(status_code=403,
                                 detail="Requires owner or admin role in team")
+        if body.enabled is False:
+            # #2446 review P2-4: this lane has NO per-key `enabled` column, so
+            # the `{"key_id", "enabled": True}` echo further down is a no-op
+            # (#1148). Echoing success to the member's "turn off my key" would
+            # report a security action that did not happen while the credential
+            # keeps authenticating, so the #2446 member slice refuses instead of
+            # lying. Owner/admin keep the historical echo: that shape predates
+            # #2446 and changing it lane-wide is a separate decision.
+            raise HTTPException(
+                status_code=409,
+                detail=("Turning off a key is not available on this "
+                        "deployment — this lane has no per-key disable. "
+                        "Replace or revoke the session key instead."),
+            )
     elif created_via == "bootstrap":
         raise HTTPException(status_code=409, detail="Cannot modify a session key")
     result = {"key_id": key_id, "enabled": True}
@@ -19813,6 +19827,12 @@ async def _membership_role(user_id: str, org_id: str) -> str | None:
     raw 500 from the global handler. Non-outage exceptions propagate
     untouched (a schema/dialect bug must stay loud, not masquerade as an
     outage).
+
+    The registry fallback reaches its read through `_graph_offload`, so a
+    graph-pool refusal or bound miss answers 503 `graph_unavailable` (that
+    helper's own body) rather than `control_plane_unavailable`. Both are 503,
+    so the #2380 polarity holds; only the error_code differs by which lane the
+    read took.
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -19897,7 +19917,10 @@ async def _require_owner_admin_or_own_key(user_id: str, org_id: str,
         class is the self-service session credential (the only class a member
         can mint: ``POST /v1/session/key`` purpose=bootstrap is member-open,
         ``recovery`` is POLICY A-gated by #2380), so a holder can only ever
-        retire or replace the credential the server itself handed them.
+        retire or replace the credential the server itself handed them —
+        and only WHILE they remain an active member (a REMOVED holder, or one
+        whose membership row is gone, gets POLICY A via the `role is not None`
+        clause in the body).
       * 403 ``"Requires owner or admin role in team"`` — BYTE-IDENTICAL to
         POLICY A for every other case, so a member acting on anyone else's key
         (the owner's, another member's, or an ORG-OWNED/shared key they merely
@@ -19914,7 +19937,18 @@ async def _require_owner_admin_or_own_key(user_id: str, org_id: str,
     role = await _membership_role(user_id, org_id)
     if role in ("owner", "admin"):
         admitted = role
-    elif _session_key_holder(row) == user_id:
+    elif role is not None and _session_key_holder(row) == user_id:
+        # #2446 review P2-1: `role is not None` is load-bearing, not a
+        # tautology. `_membership_role` returns a role ONLY for an ACTIVE
+        # membership (registry `status:'active'`; supabase `status eq
+        # 'active'`), so a REMOVED member — or a row whose membership is gone
+        # entirely — yields None here. Holding the row is NOT enough on its
+        # own: `remove_member` does not revoke the member's api_keys and key
+        # auth performs no membership check, so without this clause a removed
+        # member could still re-enable (or replace) the session credential
+        # they were left with, and authenticate with it. Admission therefore
+        # requires an active membership AND the holder predicate; every other
+        # case falls to the byte-identical POLICY A 403 below.
         admitted = "own"
     else:
         raise HTTPException(status_code=403,
@@ -25832,7 +25866,17 @@ async def _resolve_replace_target(org_id: str, key_id: str,
     refusals happen BEFORE any mint, so no key is ever created by a refused
     replace.
     """
-    row = await asyncio.to_thread(_rotatable_key_row, org_id, key_id)
+    try:
+        row = await asyncio.to_thread(_rotatable_key_row, org_id, key_id)
+    except Exception as _exc:
+        # #2380 (#1719 class): this read is a CONTROL-PLANE call in supabase
+        # mode (PostgREST via `api_key_by_id`), so an outage must degrade to
+        # the repo-standard 503 control_plane_unavailable, never a raw 500 out
+        # of the handler. The PATCH lane's equivalent read gets this for free
+        # through `_cp_offload`; `asyncio.to_thread` does not map exceptions,
+        # so the wrap is explicit here (review P2-2).
+        _raise_503_if_cp_outage(_exc)
+        raise
     if row is None:
         raise HTTPException(status_code=404, detail="API key not found")
     if row.get("org_id") != org_id or _session_key_holder(row) != user_id:
@@ -25866,9 +25910,28 @@ async def _claim_replace_leg(org_id: str, old_id: str, new_id: str,
     try:
         claimed = await asyncio.to_thread(
             _claim_key_revocation, org_id, old_id, now)
-    except Exception:
+    except Exception as _exc:
         _logger.exception("replace-own: claim-revoke of %s failed", old_id)
-        claimed = False
+        # #2446 review P2-3: a RAISED claim did not lose a race — it never ran,
+        # so the displaced row is still LIVE. Falling through to the 409 below
+        # would report "it was revoked while this replace ran", which is false,
+        # and in a compromised-key workflow that is the one fact the caller must
+        # not be misinformed about. Compensate the replacement away first (never
+        # leave an orphan live credential), then surface the outage.
+        compensated = True
+        try:
+            await asyncio.to_thread(_force_revoke_key_row, org_id, new_id, now)
+        except Exception:
+            compensated = False
+            _logger.exception("replace-own: compensation of %s failed", new_id)
+        if not compensated:
+            return False, (
+                "The replacement was created, but the previous session key "
+                "could not be revoked and the rollback failed — both are "
+                "currently active. Turn off the key you no longer need."
+            )
+        _raise_503_if_cp_outage(_exc)
+        raise
     if claimed:
         return True, None
     compensated = True

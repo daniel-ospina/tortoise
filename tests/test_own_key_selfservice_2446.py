@@ -678,11 +678,13 @@ def _seed_team(reg, org_id: str, tier: str = "free"):
     )
 
 
-def _seed_membership(reg, org_id: str, user_id: str, role: str):
+def _seed_membership(reg, org_id: str, user_id: str, role: str,
+                     status: str = "active"):
     reg.query(
         "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
-        "status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
-        params={"uid": user_id, "tid": org_id, "role": role},
+        "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
+        params={"uid": user_id, "tid": org_id, "role": role,
+                "status": status},
     )
 
 
@@ -744,19 +746,29 @@ class TestOwnKeyRegistryParity:
         assert next(x for x in _reg_rows(reg, "team-2446r", _UOWN)
                     if x["id"] == "owner-boot")["revoked_at"] is None
 
-    def test_member_turns_off_own_key(self, reg_client, reg, as_user):
+    def test_member_turns_off_own_key_is_refused_not_echoed(self, reg_client, reg,
+                                                           as_user):
         tc = reg_client
         _seed_team(reg, "team-2446r")
         _seed_membership(reg, "team-2446r", _U1, "member")
         _seed_key(reg, "team-2446r", "own-boot", created_by=_U1,
                   created_via="bootstrap", expires_at=_FAR_FUTURE)
         as_user(_U1)
-        # the registry lane has no `enabled` column: the echo is the contract
-        # (#1148), and the point of the pin is that the MEMBER gate admits it
-        # instead of 403ing.
+        # #2446 review P2-4: this lane has no `enabled` column, so the historical
+        # {"key_id", "enabled": True} echo (#1148) is a NO-OP. Answering 200 to a
+        # member's "turn my key OFF" would report a security action that never
+        # ran while the credential kept authenticating — so the member slice
+        # refuses instead of lying, and the row is provably untouched.
         r = tc.patch("/v1/team/keys/own-boot", json={"enabled": False})
-        assert r.status_code == 200, r.text
-        assert r.json() == {"key_id": "own-boot", "enabled": True}
+        assert r.status_code == 409, r.text
+        assert "not available on this deployment" in r.json()["detail"]
+        rows = _reg_rows(reg, "team-2446r", _U1)
+        assert next(x for x in rows if x["id"] == "own-boot")["revoked_at"] is None
+        # The ENABLE direction keeps the historical echo: the key is on, so a
+        # 200 here states a fact rather than a hope.
+        r2 = tc.patch("/v1/team/keys/own-boot", json={"enabled": True})
+        assert r2.status_code == 200, r2.text
+        assert r2.json() == {"key_id": "own-boot", "enabled": True}
 
     def test_member_toggle_of_a_peer_key_403(self, reg_client, reg, as_user):
         tc = reg_client
@@ -768,6 +780,34 @@ class TestOwnKeyRegistryParity:
         as_user(_U1)
         _assert_role_403(tc.patch("/v1/team/keys/peer-boot",
                                   json={"enabled": False}))
+
+    def test_removed_member_holding_their_own_row_403(self, reg_client, reg,
+                                                      as_user):
+        """#2446 review P2-1: `remove_member` sets the membership to 'removed'
+        and does NOT revoke the member's api_keys, and key auth performs no
+        membership check — so a removed member still holds an authenticating
+        session row. Holding it is not admission: `_membership_role` only returns
+        a role for an ACTIVE membership, so this stays the byte-identical
+        POLICY A 403 instead of a way back in."""
+        tc = reg_client
+        _seed_team(reg, "team-2446r")
+        _seed_membership(reg, "team-2446r", _U1, "member", status="removed")
+        _seed_key(reg, "team-2446r", "own-boot", created_by=_U1,
+                  created_via="bootstrap", expires_at=_FAR_FUTURE)
+        as_user(_U1)
+        _assert_role_403(tc.patch("/v1/team/keys/own-boot",
+                                  json={"enabled": True}))
+
+    def test_holder_with_no_membership_row_403(self, reg_client, reg, as_user):
+        """Same gate, the other entry: the holder predicate alone must never
+        admit a caller whose membership row is gone entirely."""
+        tc = reg_client
+        _seed_team(reg, "team-2446r")
+        _seed_key(reg, "team-2446r", "own-boot", created_by=_U1,
+                  created_via="bootstrap", expires_at=_FAR_FUTURE)
+        as_user(_U1)
+        _assert_role_403(tc.patch("/v1/team/keys/own-boot",
+                                  json={"enabled": True}))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -800,6 +840,68 @@ def test_lost_claim_rolls_the_replacement_back_and_409s(monkeypatch):
     assert exc.value.status_code == 409
     assert "rolled back" in exc.value.detail
     assert calls == ["claim:old-key", "force:new-key"]
+
+
+def test_claim_exception_never_claims_the_key_was_revoked(monkeypatch):
+    """#2446 review P2-3: a claim that RAISES did not lose a race — it never
+    ran, so the displaced row is still LIVE. The lost-claim 409 ("it was revoked
+    while this replace ran") would then be a false statement about a credential
+    the caller may be trying to kill, so the replacement is compensated away
+    first and the outage surfaces as the #2380 503 instead."""
+    import asyncio
+
+    calls: list[str] = []
+
+    def _boom(org_id, key_id, now):
+        calls.append(f"claim:{key_id}")
+        raise RuntimeError("control plane down")
+
+    def _force(org_id, key_id, now):
+        calls.append(f"force:{key_id}")
+
+    monkeypatch.setattr(ha, "_claim_key_revocation", _boom)
+    monkeypatch.setattr(ha, "_force_revoke_key_row", _force)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ha._claim_replace_leg(
+            "team-x", "old-key", "new-key", "2026-01-01T00:00:00+00:00"))
+    assert exc.value.status_code == 503, exc.value
+    assert "revoked" not in str(exc.value.detail).lower()
+    # compensated BEFORE the refusal: no orphan live credential either way
+    assert calls == ["claim:old-key", "force:new-key"]
+
+
+def test_claim_exception_with_failed_compensation_discloses_both_live(monkeypatch):
+    """The same raise with a failing rollback is the one case where the caller
+    is told BOTH keys are live (never that the old one is gone)."""
+    import asyncio
+
+    def _boom(org_id, key_id, now):
+        raise RuntimeError("control plane down")
+
+    def _force_boom(org_id, key_id, now):
+        raise RuntimeError("still down")
+
+    monkeypatch.setattr(ha, "_claim_key_revocation", _boom)
+    monkeypatch.setattr(ha, "_force_revoke_key_row", _force_boom)
+    replaced_revoked, warning = asyncio.run(ha._claim_replace_leg(
+        "team-x", "old-key", "new-key", "2026-01-01T00:00:00+00:00"))
+    assert replaced_revoked is False
+    assert warning and "both are currently active" in warning
+
+
+def test_replace_target_read_outage_is_503_not_500(monkeypatch):
+    """#2446 review P2-2: the displace-target read is a control-plane call, so
+    an outage must degrade to the repo-standard #2380 503 rather than escaping
+    the handler as a raw 500."""
+    import asyncio
+
+    def _boom(org_id, key_id):
+        raise RuntimeError("control plane down")
+
+    monkeypatch.setattr(ha, "_rotatable_key_row", _boom)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ha._resolve_replace_target("team-x", "old-key", "user-1"))
+    assert exc.value.status_code == 503, exc.value
 
 
 def test_double_failure_discloses_both_live_keys(monkeypatch):
