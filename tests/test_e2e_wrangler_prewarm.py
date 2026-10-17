@@ -1,16 +1,21 @@
 """The wrangler pin is one artefact, ASSERTED against what actually resolved (#8816).
 
 The pin used to be a string repeated in twelve `run:` blocks, and the guard that
-"checked" it read that text. Reading text cannot see a spec written as
+"checked" it read that text. The old guard's text scan could not see a spec written as
 `wran\\gler@4`, `"wrangler"@4` or `wrangler$X@4`, cannot see a bare `wrangler`,
 and never looked at `deploy-pages.yml` at all — where `wrangler@4` floated in
 production. Two measurements decided the replacement (bash 5, node 22):
 
   * `wrangler --version` prints the bare resolved version on stdout;
-  * a float declaration fails that comparison on a COLD resolution (`wrangler@4`
-    resolved to 4.151.1). It can PASS on a warm npm cache, which may serve the
-    pinned tarball for `@4` — so the assertion is not the float guard: the TEXT
-    arms below are, and the two are complementary rather than redundant.
+  * a float declaration fails that comparison wherever npm resolves the spec
+    against the REGISTRY. The three e2e jobs install with `npm install -g
+    "wrangler@${VERSION}"`, so a declared `4` becomes 4.151.1 there and the
+    comparison reds whatever the cache holds; an `npx` lane (`deploy-pages.yml`,
+    `deploy.sh`) can instead be served the pinned tarball from a warm cache and
+    print the pin itself, so in THOSE lanes the assertion is not the float guard
+    — the TEXT arms below are. Which lane gets which is stated, not assumed:
+    claiming the warm-cache caveat for the global-install lane understates a
+    guard that does catch a float there.
 
 So the version now lives in ONE file, `config/wrangler-version`, and the lane
 ASSERTS the version it got against it — a comparison between an observation and a
@@ -457,8 +462,10 @@ def test_a_spec_may_be_named_in_a_comment_but_not_in_a_message() -> None:
     assert not _floating_specs(
         '  run: npx --yes "wrangler@${WRANGLER_VERSION:?}" pages deploy dist'
     ), "the asserted form must pass, quoted or not"
-    # Both capabilities the docstring names, pinned: removing either one (a
-    # one-token edit) must red THIS arm, not sit green behind a claim.
+    # Every capability the docstring advertises, pinned: removing any one of them
+    # (a one-token edit) must red THIS arm, not sit green behind a claim.
+    assert _floating_specs('  run: npx --yes "wrangler"@4 pages deploy dist'), \
+        "a quote-split spec is the word bash builds — quote removal is advertised"
     assert _floating_specs(r"  run: npx --yes wran\gler@4 pages deploy"), \
         "a backslash-split spec is the word bash runs — resolving it is advertised"
     assert not _floating_specs(
@@ -914,9 +921,9 @@ def test_the_manual_deploy_resolves_the_version_from_either_invocation(
 def test_no_document_shows_a_floating_wrangler_spec() -> None:
     """A README example is a command someone will paste.
 
-    `website/README.md` showed `npx --yes wrangler@4 pages deploy` next to two
-    shipped steps that assert 4.127.0 — the exact drift this change removes,
-    stated as guidance. Every spec in these files must be the asserted form, and
+    `website/README.md` recommended `npx --yes wrangler@4 pages deploy` while the
+    workflows pinned 4.127.0 — the exact drift this change removes, stated as
+    guidance, one line outside any fence. Every spec in these files must be the asserted form, and
     the version must come from the one artefact.
     """
 
@@ -968,3 +975,50 @@ def test_no_document_shows_a_floating_wrangler_spec() -> None:
                 f"{rel}: a fence shows a wrangler spec without reading "
                 "config/wrangler-version — the version has one home"
             )
+
+
+#: `cd` into the REPOSITORY ROOT — correct for reading (`cat
+#: config/wrangler-version`), wrong for uploading, because wrangler takes
+#: `functions/` from the cwd.
+_ROOT_CD = re.compile(
+    r"^cd\s+[\"']?\$\(\s*git\s+rev-parse\s+--show-toplevel\s*\)[\"']?\s*$"
+)
+
+#: An UPLOAD — the two wrangler subcommands that read `functions/` off the cwd.
+_UPLOAD = re.compile(r"\bpages\s+(?:deploy|dev)\b")
+
+
+def test_no_document_uploads_from_the_repository_root() -> None:
+    """A fence that uploads must `cd` into the upload root first.
+
+    `wrangler` resolves `functions/` against the process cwd — never against the
+    directory it uploads — so a fence that reads the version from the repo root
+    and then uploads from there ships a site with NO Functions: dead auth on a
+    green deploy (#3620). `website/README.md` carried exactly that shape while
+    the paragraph above it documented the failure it causes — `cd "$(git rev-parse
+    --show-toplevel)"` and the upload two lines later — because reading the
+    version from the root is right and uploading from it is not, and the fence
+    did only the first.
+
+    Judged PER FENCE and in reading order, splitting on `&&`/`;` so
+    `cd "$STAGE" && … pages deploy` counts as the `cd` it is. A comment naming
+    the command does not count (`_cut_comment`, as elsewhere in this file).
+    """
+
+    for rel in COMMAND_DOCS:
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        offenders = []
+        for block in _fenced_blocks(text):
+            cwd_is_upload_root = False
+            for lineno, line in block:
+                for segment in re.split(r"&&|;", _cut_comment(line)):
+                    segment = segment.strip()
+                    if segment.startswith("cd "):
+                        cwd_is_upload_root = not _ROOT_CD.match(segment)
+                    elif _UPLOAD.search(segment) and not cwd_is_upload_root:
+                        offenders.append(
+                            f"{rel}:{lineno}: uploads with the repository root as "
+                            f"the cwd ({segment}) — `functions/` is resolved from "
+                            "the cwd, so this ships a site with no Functions"
+                        )
+        assert not offenders, "\n".join(offenders)
