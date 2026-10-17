@@ -204,6 +204,18 @@ class TestQueryConsolidation:
         assert result == query_sdk.tag_points
         assert query_sdk.calls[-1][0] == "query_points_by_tag"
 
+    def test_tag_pagination_opts_out_of_recording_the_population(self, query_sdk):
+        """#7983: ONE page is served, so the tag POPULATION is not a read.
+
+        Recording the population would mark every tagged point read and bias the
+        hot fraction HIGH — the direction the instrument says must never happen.
+        """
+        from tortoise.mcp_server import tortoise_query
+        out = tortoise_query(tag="pricing", limit=1, offset=0)
+        assert out["total"] == len(query_sdk.tag_points)
+        assert len(out["results"]) == 1
+        assert query_sdk.calls[-1][2] is False, "a page must not record the population"
+
     def test_tag_with_pagination_returns_dict(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(tag="pricing", offset=1, limit=1)

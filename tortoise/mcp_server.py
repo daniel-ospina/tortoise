@@ -1973,16 +1973,24 @@ def tortoise_create_point(kind: str, content: str,
     return result
 
 
+#: The SDK keyword-only switches a remote caller must never set. Named
+#: explicitly, NOT "any key starting with `_`": `security.validate_filter_key`
+#: ACCEPTS a leading underscore, so a tenant property literally named `_foo` is a
+#: legitimate filter — and dropping it would silently turn a filter into "no
+#: filter", i.e. return the whole collection.
+PRIVATE_FILTER_KEYS = frozenset({"_record_reads"})
+
+
 def _public_filters(filters: Any) -> dict:
-    """A caller's filter dict MINUS the SDK's private `_`-prefixed switches.
+    """A caller's filter dict MINUS the SDK's private switches (#7983).
 
-    #7983: a remote caller must not be able to switch the read ledger off with a
-    query parameter — a caller-controlled switch on a measurement presented as
-    authoritative. Dropping the keys here means the same dict means the same
-    thing on the paginated and the plain path.
+    A remote caller may not switch the read ledger off with a query parameter —
+    that is a caller-controlled switch on a measurement presented as
+    authoritative — and the drop applies to the paginated and the plain path
+    alike, so the same dict means the same thing on both.
 
-    A non-mapping `filters` raises `TypeError`, which is the type the plain path
-    raised before this existed (**unpack of a str); the dict comprehension that
+    A non-mapping `filters` raises `TypeError`, the type the plain path raised
+    before this existed (`**` unpack of a str); the dict comprehension that
     replaced it raised `AttributeError` from `.items()` instead, which no caller
     or test expected.
     """
@@ -1990,7 +1998,7 @@ def _public_filters(filters: Any) -> dict:
         return {}
     if not isinstance(filters, dict):
         raise TypeError("filters must be a mapping")
-    return {k: v for k, v in filters.items() if not str(k).startswith("_")}
+    return {k: v for k, v in filters.items() if k not in PRIVATE_FILTER_KEYS}
 
 
 def tortoise_query(kind: str | None = None,
@@ -2085,10 +2093,10 @@ def tortoise_query(kind: str | None = None,
                      # property filter there.
                      **_public_filters(filters))
     # #7983: a caller-supplied filter may not set the SDK's PRIVATE switches
-    # (they start with `_`), or a remote agent could turn the read ledger off
+    # (PRIVATE_FILTER_KEYS), or a remote agent could turn the read ledger off
     # with a query parameter — a caller-controlled switch on a measurement that
-    # is presented as authoritative. Underscore keys are dropped here, so the
-    # same dict means the same thing on both the paginated and the plain path.
+    # is presented as authoritative. A tenant property named `_foo` is still a
+    # filter (validate_filter_key accepts it), so ONLY the known switches go.
     result = _safe(_get_org_sdk().query, kind,
                    include_retracted=include_retracted,
                    **_public_filters(filters))

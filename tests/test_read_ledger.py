@@ -902,3 +902,22 @@ def test_a_rotated_ledger_is_tightened_again(ledger):
     ledger.chmod(0o644)
     read_ledger.record_stock("Point", "p2", nbytes=10, path=ledger)
     assert _stat.S_IMODE(ledger.stat().st_mode) == 0o600
+
+
+def test_a_torn_tail_is_repaired_before_the_next_batch(ledger):
+    """A crash leaves a fragment with no newline; the NEXT batch must survive it.
+
+    Without the repair the batch's first line is concatenated onto the fragment,
+    so that record is destroyed while the return value counts it (the newline it
+    wrote is the batch's own) — the module's "a torn write damages at most one
+    record" guarantee failing in the recovery case it exists for, and the lost
+    read biasing `f` LOW.
+    """
+    ledger.write_bytes(b'{"at":"t","event":"read","label":"Point","key":"torn"')
+    got = read_ledger.record_rows("Point", [{"id": "p2"}, {"id": "p3"}], path=ledger)
+    assert got == 2
+    folded = fold(ledger)
+    # Both served keys are readable (no stock registered, so they fold as
+    # unregistered reads — the point is that they are READ, not lost).
+    assert folded.unregistered_reads == 2, folded
+    assert folded.lines_skipped == 1, "the fragment is one damaged line, not three"

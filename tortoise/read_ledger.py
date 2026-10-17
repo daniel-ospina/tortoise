@@ -262,7 +262,6 @@ def _warn_once(key: str, msg: str, *args: object) -> None:
 _dirs_made: set[str] = set()
 #: Paths whose 0600 mode has been checked once this process (the check is a
 #: `stat`, and the answer cannot change unless someone chmods the file).
-_mode_checked: set[str] = set()
 
 
 def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> int:
@@ -388,27 +387,36 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
         # under a looser umask) is chmod'ed the first time this process writes to
         # it. Trusting the create mode alone would leave tenant identifiers
         # world-readable on exactly the files it was added for.
+        #
+        # ⛔ THERE IS NO LATCH, on purpose. A per-path latch survives a ROTATION,
+        # and a per-(dev, inode) latch fails on inode RECYCLING — `rm` +
+        # recreate can land the same inode with a looser mode and the check never
+        # runs. The mode comes from the `stat` this function already takes, so
+        # the check costs one comparison and a chmod only when the file is
+        # actually too open.
         st = None
         with contextlib.suppress(OSError):
             st = target.stat()
-        # ⛔ THE LATCH IS THE INODE, NOT THE PATH. A per-path latch survives a
-        # ROTATION — this process "already checked" the file and the NEW inode
-        # (which an operator's rotation may have created 0644, with bytes
-        # already in it) is never tightened, leaving the tenant identifiers 0600
-        # exists for world-readable in exactly the rotation case.
-        _ino = (st.st_dev, st.st_ino) if st is not None else None
-        if _ino is None or _ino not in _mode_checked:
-            try:
-                if st is not None and stat.S_ISREG(st.st_mode) and (st.st_mode & 0o077):
-                    os.chmod(target, 0o600)
-                # ⛔ REGULAR FILES ONLY: pointing the env var at a DIRECTORY (or a
-                # device) must not have its mode rewritten as a side effect of a
-                # measurement — the tightest permission is not automatically the
-                # right one for something that is not our file.
-            except OSError:  # pragma: no cover — not ours to fail the read path
-                pass
-            if _ino is not None and len(_mode_checked) < 64:
-                _mode_checked.add(_ino)
+        if st is not None and stat.S_ISREG(st.st_mode) and (st.st_mode & 0o077):
+            # ⛔ REGULAR FILES ONLY: pointing the env var at a DIRECTORY (or a
+            # device) must not have its mode rewritten as a side effect of a
+            # measurement — the tightest permission is not automatically the
+            # right one for something that is not our file.
+            with contextlib.suppress(OSError):  # not ours to fail the read path
+                os.chmod(target, 0o600)
+        # ⛔ A crash (or the short-write path below) can leave a TORN final line
+        # with no newline. Appending a batch onto it CONCATENATES the batch's
+        # first line with the fragment, so that record is unparseable AND lost —
+        # while the return value still counted it, because the newline it wrote
+        # is the batch's own. The `capped` marker path already reasons about
+        # this; the normal path must do the same, or "a torn write damages at
+        # most one record" is false in exactly the recovery case it exists for
+        # and the lost read biases `f` LOW.
+        n_events = len(lines)
+        prefix = b""
+        if size and not _tail_ends_with_newline(target):
+            prefix = b"\n"
+            blob = prefix + blob
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             # `os.write` may write FEWER bytes than asked (a full disk, a pipe).
@@ -434,8 +442,10 @@ def _append_many(records: list[dict[str, Any]], *, path: Path | None = None) -> 
                 written,
                 len(blob),
             )
-            return blob[:written].count(b"\n")
-        return len(lines)
+            # The repaired prefix is not an event: count only lines that start
+            # after it.
+            return blob[len(prefix) : written].count(b"\n")
+        return n_events
     except Exception as e:  # pragma: no cover — a broken filesystem or a bad path
         # ANY failure is swallowed, not just `OSError`: the module's contract is
         # that a measurement may never break the thing it measures, and

@@ -27163,16 +27163,20 @@ class TortoiseSDK:
             params=params,
         ).result_set
         # Fetch a bit extra for scoring headroom, but honor the caller's limit.
-        return [dict(r[0]) for r in rows[:limit]]
+        out = [dict(r[0]) for r in rows[:limit]]
+        _ledger_record("Event", out)  # #7983: a served page, not a pool
+        return out
 
     def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent Events, optionally filtered by eventKind."""
         proj = self._get_proj()
         if eventKind:
-            return [r[0] for r in proj.g.query(
+            out = [r[0] for r in proj.g.query(
                 "MATCH (e:Event {eventKind: $ek}) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
                 params={"ek": eventKind, "lim": limit}
             ).result_set]
+            _ledger_record("Event", out)  # #7983: a served page (the other branch too)
+            return out
         out = [r[0] for r in proj.g.query(
             "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
             params={"lim": limit}
