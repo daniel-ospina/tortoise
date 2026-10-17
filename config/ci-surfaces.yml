@@ -620,6 +620,14 @@ surfaces:
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
+  # #2446 (phase 2 of #2427): the member OWN-KEY slice — atomic session-key
+  # replace (POST /v1/session/key replace_key_id) + enable/disable-own, and the
+  # non-own-key POLICY A 403 pins. Owned by `api` because every file it guards
+  # (`tortoise/hosted_api.py`, `tortoise/supabase_control.py`) is an EXACT `api`
+  # SOURCE_PATTERN match — a hosted_api.py-only diff REPLACES the `core`
+  # fallback in select(), so without this arm the whole authorization contract
+  # would run on no change that can break it.
+  - test_own_key_selfservice_2446.py
   - test_mcp_client.py
   - test_mcp_http.py
   - test_mcp_rename_table.py  # #4282: Phase 0.3 rename table — old name → new name, per tool
@@ -4816,6 +4824,7 @@ durations:
   test_hosted_auth.py: 1.8
   test_ingest_event_endpoint.py: 1.7
   test_session_key_recovery_gate.py: 3.3
+  test_own_key_selfservice_2446.py: 7.8
   test_topic_summarization.py: 1.6
   test_aggregative_facet_coverage.py: 1.4
   test_de2e5_instantiates_ranking.py: 1.1

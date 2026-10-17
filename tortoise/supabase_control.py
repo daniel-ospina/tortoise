@@ -3369,12 +3369,17 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
     #4355: ``expires_at`` rides the select so the replacement-aware rotate can
     inherit the displaced row's expiry verbatim when the rotate body omits one
     (a body-omitted expiry must never WIDEN the replacement to a Never key).
+    #2446: ``created_by`` rides it too — the member own-key gate reads it as
+    the HOLDER of a self-service session row (`_session_key_holder`). The
+    select is a projection, so adding a column is additive for every caller
+    (rotate / revoke / PATCH / replace-own); omitting it would make every row
+    look org-owned and silently 403 the whole member lane.
     """
     rows = cp.query(
         "api_keys",
         select=["org_id", "revoked_at", "created_via", "enabled", "name",
                 "scopes", "graph_id", "delegation_depth", "created_by_key_id",
-                "expires_at"],
+                "expires_at", "created_by"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None

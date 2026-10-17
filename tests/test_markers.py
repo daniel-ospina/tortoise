@@ -218,6 +218,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     },
     "test_session_key_http.py": {"registry": "prod-coupled"},
     "test_session_key_recovery_gate.py": {"registry": "prod-coupled"},  # #2380 — recovery-gate registry-lane parity via TortoiseSDK(namespace="registry")
+    "test_own_key_selfservice_2446.py": {"registry": "prod-coupled"},  # #2446 — the own-key slice's registry/selfhost lane parity seeds Team/Membership/APIKey through TortoiseSDK(namespace="registry"), the canonical namespace prod resolves (same class as the #2380 sibling above); renaming it would break the seed→resolution coupling
     "test_signup_token_revoke.py": {"registry": "prod-coupled"},
     "test_suspension_parity.py": {
         "registry": "prod-coupled", "reg-team-1": "team-identity",
