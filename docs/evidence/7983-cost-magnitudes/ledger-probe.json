@@ -2,6 +2,7 @@
   "graph": "tortoise",
   "uri": "docker://:@localhost:16379/tortoise",
   "queries_run": 200,
+  "sample": "random",
   "limit_per_query": 10,
   "stock_keys_by_label": {
     "Point": 10396,
@@ -36,6 +37,6 @@
   "unresolved_reads": 0,
   "window_started": null,
   "window_ended": null,
-  "first_event_at": "2026-10-17T15:51:09+00:00",
+  "first_event_at": "2026-10-17T16:12:29+00:00",
   "capped": false
 }

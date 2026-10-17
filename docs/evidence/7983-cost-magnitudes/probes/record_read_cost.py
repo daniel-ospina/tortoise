@@ -45,6 +45,7 @@ import argparse
 import json
 import statistics
 import sys
+import time
 from pathlib import Path
 
 import psycopg2
@@ -231,6 +232,43 @@ def measure(conn, tenants: int) -> dict:
     out["miss_ms_median"] = round(statistics.median(m for _, m in probe_plans), 4)
     out["miss_bytes_median"] = statistics.median(egress)
 
+    # ── 2b. the SAME miss, DETOASTED — what a real reader pays ───────────────
+    # ⚠️ `EXPLAIN (ANALYZE)` on `SELECT *` sends its tuples to a dummy receiver,
+    # which never runs an OUTPUT function — so a TOASTed jsonb column stays an
+    # 18-byte POINTER and its TOAST heap is never read. `read_record_view` does
+    # `SELECT *` and psycopg CONVERTS every column, so the real read detoasts.
+    # `octet_length(t::text)` forces the same detoast server-side, and the wire
+    # bytes are what egress is charged on.
+    detoast_sql = (
+        "SELECT octet_length(t::text) FROM public.point t "
+        "WHERE org_id = %s AND graph_id = %s AND node_key = %s"
+    )
+    detoast_plans, wire = [], []
+    for i in range(1, 201):
+        key = f"p-{(i * 397) % STOCK_NODES_PER_TENANT + 1}"
+        dp = plan_of(cur, detoast_sql, (org, graph, key))
+        detoast_plans.append((blocks(dp), float(dp["Execution Time"])))
+        cur.execute(detoast_sql, (org, graph, key))
+        wire.append(cur.fetchone()[0])
+    out["miss_blocks_detoast_median"] = statistics.median(b for b, _ in detoast_plans)
+    # A MISS MIX is what egress and IOPS sum over, so the MEAN is the figure those
+    # lines consume: 60% of a tenant's Points carry no vector, so the median
+    # describes the common case and the mean describes the bill.
+    out["miss_blocks_detoast_mean"] = round(statistics.fmean(b for b, _ in detoast_plans), 1)
+    out["miss_blocks_detoast_max"] = max(b for b, _ in detoast_plans)
+    out["miss_ms_detoast_median"] = round(statistics.median(m for _, m in detoast_plans), 4)
+    out["miss_wire_bytes_median"] = statistics.median(wire)
+    out["miss_wire_bytes_mean"] = round(statistics.fmean(wire), 1)
+    out["miss_wire_bytes_max"] = max(wire)
+
+    # The client-side cost of the REAL shape: fetch the row and convert it.
+    t0 = time.perf_counter()
+    for i in range(1, 51):
+        key = f"p-{(i * 397) % STOCK_NODES_PER_TENANT + 1}"
+        cur.execute(fetch_sql, (org, graph, key))
+        cur.fetchall()
+    out["miss_client_ms_median"] = round((time.perf_counter() - t0) / 50 * 1000, 4)
+
     # ── 3. a full-scope read: what a rebuild/replay pays ─────────────────────
     full = plan_of(
         cur, "SELECT * FROM public.point WHERE org_id = %s AND graph_id = %s", (org, graph)
@@ -238,6 +276,14 @@ def measure(conn, tenants: int) -> dict:
     out["full_scope_blocks"] = blocks(full)
     out["full_scope_ms"] = round(float(full["Execution Time"]), 2)
     out["full_scope_rows"] = int(full["Plan"]["Actual Rows"])
+
+    full_d = plan_of(
+        cur,
+        "SELECT *, octet_length(t::text) FROM public.point t WHERE org_id = %s AND graph_id = %s",
+        (org, graph),
+    )
+    out["full_scope_blocks_detoast"] = blocks(full_d)
+    out["full_scope_ms_detoast"] = round(float(full_d["Execution Time"]), 2)
     return out
 
 
@@ -278,14 +324,26 @@ def arithmetic(m: dict) -> None:
         f"node in the CACHE"
     )
     print(
-        f"keyed miss fetch                : {m['miss_blocks_median']:.0f} blocks "
-        f"({m['miss_blocks_median'] * BLOCK_BYTES / 1024:.0f} KiB logical) · "
-        f"{m['miss_ms_median']} ms · {m['miss_bytes_median']:.0f} B returned"
+        f"keyed miss fetch                : {m['miss_blocks_detoast_median']:.0f} blocks "
+        f"({m['miss_blocks_detoast_median'] * BLOCK_BYTES / 1024:.0f} KiB logical) · "
+        f"{m['miss_ms_detoast_median']} ms server · {m['miss_client_ms_median']} ms end-to-end "
+        f"· {m['miss_wire_bytes_median']:,.0f} B on the wire"
     )
     print(
-        f"full-scope read (rebuild)       : {m['full_scope_blocks']:,} blocks "
-        f"({m['full_scope_blocks'] * BLOCK_BYTES / 1e6:.1f} MB logical) · "
-        f"{m['full_scope_ms']} ms · {m['full_scope_rows']:,} rows"
+        f"  (heap-only, NO detoast)       : {m['miss_blocks_median']:.0f} blocks · "
+        f"{m['miss_ms_median']} ms — what `EXPLAIN (ANALYZE)` on `SELECT *` reports, "
+        f"and it UNDERCOUNTS: the dummy receiver never runs an output function, so "
+        f"the TOASTed vector stays an 18-B pointer"
+    )
+    print(
+        f"full-scope read (rebuild)       : {m['full_scope_blocks_detoast']:,} blocks "
+        f"({m['full_scope_blocks_detoast'] * BLOCK_BYTES / 1e6:.1f} MB logical) · "
+        f"{m['full_scope_ms_detoast']} ms · {m['full_scope_rows']:,} rows"
+    )
+    print(
+        f"  (heap-only, NO detoast)       : {m['full_scope_blocks']:,} blocks · "
+        f"{m['full_scope_ms']} ms — the same undercount, "
+        f"{m['full_scope_blocks_detoast'] / max(m['full_scope_blocks'], 1):.1f}x too small"
     )
 
     print("\n── the disk line (rho's denominator) ───────────────────────")
@@ -300,9 +358,12 @@ def arithmetic(m: dict) -> None:
     )
 
     # ── IOPS: provisioned, so the binding quantity is the PEAK, not the total ─
-    b = m["miss_blocks_median"]
+    b = m["miss_blocks_detoast_mean"]
     print("\n── the IOPS line (provisioned: peak, not total) ────────────")
-    print(f"1 cache miss                    : {b:.0f} IOPS if the page must be read")
+    print(
+        f"1 cache miss                    : {b:.1f} IOPS MEAN over the miss mix "
+        f"({m['miss_blocks_detoast_median']:.0f} median, {m['miss_blocks_detoast_max']} max)"
+    )
     # BOTH densities: the allowance is PROJECT-wide, so a per-tenant threshold has
     # to name the density it divides by. Quoting one density's IOPS next to the
     # other's egress is how a 40x error entered this report's first draft.
@@ -319,10 +380,11 @@ def arithmetic(m: dict) -> None:
     )
 
     print("\n── the egress line ─────────────────────────────────────────")
-    included_misses = INCLUDED_EGRESS_GB * 1e9 / m["miss_bytes_median"]
+    included_misses = INCLUDED_EGRESS_GB * 1e9 / m["miss_wire_bytes_mean"]
     print(
-        f"1 cache miss returns            : {m['miss_bytes_median']:.0f} B "
-        f"= ${m['miss_bytes_median'] / 1e9 * RATE_EGRESS_GB:.8f} of egress"
+        f"1 cache miss returns            : {m['miss_wire_bytes_mean']:,.0f} B mean "
+        f"({m['miss_wire_bytes_median']:,} median, {m['miss_wire_bytes_max']:,} max) "
+        f"= ${m['miss_wire_bytes_mean'] / 1e9 * RATE_EGRESS_GB:.8f} of egress"
     )
     print(
         f"250 GB included =               : {included_misses:,.0f} cold misses/month "
@@ -333,19 +395,22 @@ def arithmetic(m: dict) -> None:
         print(
             f"  ⇒ per tenant at {t:,} tenants  : {per_t:,.0f} misses/month "
             f"= {per_t / 30 / 86400:.3f}/s — the FIRST line to leave $0; each miss "
-            f"above it adds ${m['miss_bytes_median'] / 1e9 * RATE_EGRESS_GB:.1e}"
+            f"above it adds ${m['miss_wire_bytes_mean'] / 1e9 * RATE_EGRESS_GB:.1e}"
         )
 
     print("\n── the compute line ────────────────────────────────────────")
-    print(f"1 keyed miss                    : {m['miss_ms_median']} ms")
     print(
-        f"1 full-scope rebuild            : {m['full_scope_ms']} ms of one core "
-        f"({m['full_scope_ms'] / 1000:.2f} CPU-seconds)"
+        f"1 keyed miss                    : {m['miss_client_ms_median']} ms end-to-end "
+        f"({m['miss_ms_detoast_median']} ms server)"
+    )
+    print(
+        f"1 full-scope rebuild            : {m['full_scope_ms_detoast']} ms of one core "
+        f"({m['full_scope_ms_detoast'] / 1000:.2f} CPU-seconds)"
     )
     # A rebuild a day is the cheapest plausible cadence: 30 x that, in CPU-hours.
     print(
         f"=> a DAILY rebuild/tenant       : "
-        f"{m['full_scope_ms'] * 30 / 1000 / 3600:.4f} CPU-hours/month"
+        f"{m['full_scope_ms_detoast'] * 30 / 1000 / 3600:.4f} CPU-hours/month"
     )
 
 

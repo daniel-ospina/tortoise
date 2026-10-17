@@ -606,6 +606,15 @@ def test_each_store_target_gets_its_own_default_ledger(tmp_path, monkeypatch):
     second = read_ledger.ledger_path()
     assert first != second, "two targets, two files"
     assert first.parent == second.parent == tmp_path
+    # A shared SERVER holds many graphs and `graph_name=` never reaches
+    # `resolve_db_path()`, so the env names the graph when a deployment states it.
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@localhost:6379/one")
+    monkeypatch.setenv("TORTOISE_GRAPH_NAME", "graph-a")
+    graph_a = read_ledger.ledger_path()
+    monkeypatch.setenv("TORTOISE_GRAPH_NAME", "graph-b")
+    assert read_ledger.ledger_path() != graph_a, "two graphs on one server, two files"
+    monkeypatch.delenv("TORTOISE_GRAPH_NAME", raising=False)
+
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     embedded = read_ledger.ledger_path()
     assert embedded != first, "the embedded store is its own target"

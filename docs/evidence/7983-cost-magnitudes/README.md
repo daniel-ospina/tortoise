@@ -33,7 +33,7 @@ magnitudes, and this issue is those two magnitudes.
 | quantity | measurable at `459f22912`? | what this lane did | measured value |
 |---|---|---|---|
 | **`f` — the hot fraction** | ⛔ **no instrument existed** | shipped the **read ledger** (`tortoise/read_ledger.py`, hooked into the four caller-facing row-returning read paths (`get_point` deliberately excluded — the write paths read through it)) | **no tenant value, and none is claimed.** The instrument's own exercise on the live self-hosted graph: **`f` = 8.64%** over 200 proxy queries — **a proxy mix, not a tenant** |
-| **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 3.54** at the doc's 1,000-tenant density (**88.5** at its 40-tenant cache density) — ⚠️ **the disk line is measured, the compute+plan lines are the doc's DENSITY ASSUMPTIONS**, so `rho` is an assumption over a measurement, and only the disk line is a value |
+| **`rho` — the record's non-storage lines** | ⚠️ **partly** — the record store is not deployed, but its SCHEMA is committed and its read path is code | measured the unit costs on the committed record schema | **`rho` = 3.55** at 1,000 tenants/project (**88.7** at 40, **710** at 5) — ⚠️ **the disk line is measured, the compute+plan lines are the doc's DENSITY ASSUMPTIONS**, so `rho` is an assumption over a measurement, and only the disk line is a value |
 
 ---
 
@@ -93,8 +93,9 @@ would overstate the row by its dominant column.
 | planted content width | **1,133 B** over the **49.0%** that carry content · **555 B over ALL** | calibrated to the dogfood's two means (1,121.4 / 549.1) and measured back. ⚠️ The dogfood **19,061 B tail is NOT planted** (no TOAST regime) ⇒ the footprint is a **LOWER BOUND** for a tenant that hits it |
 | record row width | **1,263–1,266 B median / 1,421–1,423 B mean** | n = 2,000 rows per run, two runs |
 | record footprint per tenant | **191,643,648 B = 0.1916 GB** ⇒ **2,136 B/node on disk** (**1.28×** the cache's 0.1499 GB) | heap + indexes + TOAST |
-| keyed miss fetch | **4 logical blocks (32 KiB) · 1,286 B out · 0.030–0.092 ms** | the record's own PK probe, 200 samples × two runs |
-| full-scope read (rebuild) | **7,962 blocks (65.2 MB logical) · 34.7–105.8 ms** | `read_record_view`'s query shape, 89,701 rows, two runs |
+| keyed miss fetch | **5.2 blocks MEAN** (4 median, 7 max) · **2,312 B mean on the wire** (1,306 median, 5,408 max) · **0.041–0.045 ms** server, 0.81–1.73 ms end-to-end | the record's own PK probe, 200 samples × two runs, DETOASTED (what a real reader pays) |
+| full-scope read (rebuild) | **115,605 blocks (947.0 MB logical) · 2,470–3,094 ms** | `read_record_view`'s query shape, 89,701 rows, two runs, DETOASTED |
+| ⛔ same reads WITHOUT the detoast | 4 blocks · 54–56 ms; 7,962 blocks · 53.2 MB · 53.9–55.5 ms | `SELECT *` under `EXPLAIN (ANALYZE)` alone — **14.5× too few blocks and ~50× too little CPU** for a rebuild, recorded so no later reader "re-measures" a cheaper number |
 
 **Blocks are exact; milliseconds are a range over the two runs in `rho-bench.log` (shared-CPU
 container, default settings) — an accounting bench, not a vendor benchmark.**
@@ -103,17 +104,19 @@ container, default settings) — an accounting bench, not a vendor benchmark.**
 disk      = $0.125 × 0.1916 GB               = $0.0240 /tenant/month   (MEASURED GB × the plan's AVERAGE rate; the plan includes 8 GB/project ≈ 41.8 tenants of this stock, so the MARGINAL byte is $0 until then — rho is an average-cost ratio. The doc used $0.0187 from the CACHE's 0.1499 GB)
 compute   = $60 ÷ 1,000                      = $0.060                  (density assumption)
 plan      = $25 ÷ 1,000                      = $0.025                  (density assumption)
-IOPS      = $0   (4 blocks/miss ⇒ the step is 18.75 cold misses/s/tenant at 40 tenants, 0.75 at 1,000)
-egress    = $0   ONLY below the project's 250 GB allowance: 1,286 B/miss ⇒ 194,476,857 misses/month SHARED by the tenants (the log divides by the UNROUNDED 1,285.5 B median, which the row above rounds to 1,286 B: 250 GB ÷ 194,476,857 = 1,285.5 B)
-                  ⇒ 1.9 misses/s/tenant at 40 tenants, 0.075 at 1,000 — the FIRST line to leave $0; each miss above it adds $1.2e-7
+IOPS      = $0   (5.2 blocks/mmiss MEAN ⇒ the step is 14.4 cold misses/s/tenant at 40 tenants, 0.58 at 1,000)
+egress    = $0   ONLY below the project's 250 GB allowance: 2,312 B/miss MEAN ⇒ 108,154,878 misses/month SHARED by the tenants
+                  ⇒ 1.04 misses/s/tenant at 40 tenants (3,755/hour), 0.042 at 1,000 (150/hour) — the FIRST line to leave $0; each miss above it adds $2.1e-7
                   of egress and RAISES rho
-rho       = (0.060 + 0.025) ÷ 0.0240         = 3.54
+rho       = (0.060 + 0.025) ÷ 0.0240         = 3.55
 
 ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
             (the division uses the UNROUNDED lines, so it re-derives from the log)
-            1 GB STARTUP cache, 1,000 tenants : $14.5948 ÷ $0.023955 = 609 ⇒ the split pays BELOW f = 99.25%; f=1 → 0.993×
-            8 GB PRO cache,   40 tenants      : $ 8.7469 ÷ $0.023955 = 365 ⇒ the split pays BELOW f = 75.5%;  f=1 → 0.803×
-            (a LOWER break-even is the HARDER bar: at 40 tenants a quarter of the cache must be cold, at 1,000 tenants 0.75%)
+            5 tenants, 1 GB STARTUP           : $14.5948 ÷ $0.023955 = 609 ⇒ NO break-even (rho = 710); f=1 → 0.462×
+            40 tenants, 8 GB PRO              : $8.7469  ÷ $0.023955 = 365 ⇒ pays BELOW f = 75.4%;  f=1 → 0.803×
+            1,000 tenants, 8 GB PRO (40/project): $8.7469 ÷ $0.023955 = 365 ⇒ pays BELOW f = 98.75%; f=1 → 0.988×
+            (a LOWER break-even is the HARDER bar: at 40 tenants a quarter of the cache must be cold,
+             at 1,000 tenants 1.25%, and at 5 tenants there is no break-even at all)
 ```
 
 **Two findings the model needs:**
@@ -131,18 +134,20 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
    encoding at 21.9 chars/float, so **0.1916 GB is a LOWER BOUND at that column type**.
 2. **`rho` is dominated by TENANT DENSITY, not by any per-read cost.** At §17.4.3's 40-tenant
    density BOTH density-scaled lines move — compute `$60 ÷ 40 = $1.50` and plan `$25 ÷ 40 = $0.625`
-   ⇒ **`rho` = (1.50 + 0.625) ÷ 0.0240 = 88.5**; at 1,000 tenants the same two lines give **3.54**.
+   ⇒ **`rho` = (1.50 + 0.625) ÷ 0.0240 = 88.7**; at 1,000 tenants the same two lines give **3.55**, and at 5
+   tenants/project **710** — where the split cannot pay at any `f`.
    ⚠️ **Three bases, not two** — a density, its own cache tier, and the measured disk line. Pairing
-   each density with ITS cache rate gives `ratio` **609** (1 GB STARTUP, 1,000 tenants) and **365**
-   (8 GB PRO, 40 tenants); `multiplier = 1/(f + (1+rho)/ratio)` then gives:
-   **`f` below 99.25% ⇒ the split pays at 1,000 tenants** (only 0.75% of the cache must be cold) and
-   **`f` below 75.5% at 40 tenants** (a quarter of it must be) — the 40-tenant case is the HARDER one.
-   `f = 1` is 0.993× / 0.803× in both, so at today's keep-everything policy nothing is saved.
+   each density with ITS OWN packing tier gives `ratio` **609** (5 tenants, 1 GB STARTUP) and **365**
+   (40 or 1,000 tenants, 8 GB PRO — 1,000 tenants is forty projects of 40); `multiplier = 1/(f + (1+rho)/ratio)` then gives:
+   **`f` below 98.75% ⇒ the split pays at 1,000 tenants** (only 1.25% of the cache must be cold), below
+   **75.4% at 40 tenants** (a quarter must be cold — the HARDER case), and **never at 5 tenants** on
+   1 GB STARTUP, where `(1+rho)/ratio` exceeds 1 and no hot fraction makes it pay.
+   `f = 1` is 0.988× / 0.803× / 0.462×, so at today's keep-everything policy nothing is saved.
    (Dividing the measured DISK LINE — the only part of `rho` that is a value, since compute and plan are density assumptions — by §17.4.4's pre-measurement `778.7` mixes a price with a quantity:
    778.7 is a RATE ratio, valid only while the record occupies the cache's own 0.1499 GB.) The
-   coherent pair is 25× apart and no per-read measurement can resolve it: 4 blocks and 30–92 µs
+   coherent pair is 25× apart and no per-read measurement can resolve it: 5.2 blocks and 41–45 µs
    per miss do not make a compute tier. ⚠️ **The egress allowance is shared by the project**, so it
-   holds only up to 1.9 misses/s/tenant at 40 tenants (0.075 at 1,000) — a real mix can exceed that
+   holds only up to 1.04 misses/s/tenant at 40 tenants (0.042 at 1,000) — a real mix can exceed that
    and raise `rho`. **Neither a floor nor a ceiling:** the encoding bound and the miss-rate bound
    point opposite ways, and the density moves it 25×; the figures are quotable only with their bases.
 
@@ -175,7 +180,8 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
 |---|---|
 | `census-7983.log` | the before-census (instrument absence, dated, at the base commit) |
 | `probes/census_7983.py` | reproduces it (`--base <sha>` measures the committed tree) |
-| `probes/ledger_probe.py` · `ledger-probe.json` | the ledger exercised on the live self-hosted graph |
+| `probes/ledger_probe.py` · `ledger-probe.json` | the ledger exercised on the live self-hosted graph (random draw — the quoted reading) |
+| `probes/ledger_probe.py` · `ledger-probe-storage-order.json` | the same probe with `--sample storage-order`: **2.07%** against 8.64%, so the sampling effect is reproducible rather than asserted |
 | `ledger-probe-warnings.summary.txt` | the probe's product-level warnings, summarised and attributed |
 | `probes/record_read_cost.py` · `rho-bench.log` | `rho`'s unit costs on the committed record schema (two runs) |
 | `probes/graph_content_census.py` · `graph-content-census.json` | the dogfood graph's shape: what the bench planted and why those widths |

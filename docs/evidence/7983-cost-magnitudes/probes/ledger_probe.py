@@ -65,6 +65,14 @@ def main() -> int:
     ap.add_argument("--ledger", default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument(
+        "--sample",
+        choices=("random", "storage-order"),
+        default="random",
+        help="random = shuffle inside the pool (the reading quoted in the docs); "
+        "storage-order = the pre-fix draw (`LIMIT` only), kept ONLY so the sampling "
+        "effect is reproducible instead of asserted",
+    )
+    ap.add_argument(
         "--keep-ledger",
         action="store_true",
         help="keep the raw ledger file (it is ~90 lines per query: "
@@ -130,8 +138,11 @@ def main() -> int:
         pool_total = g.query(
             "MATCH (n:Point) WHERE n.id IS NOT NULL AND n.content IS NOT NULL RETURN count(n)"
         ).result_set[0][0]
-        random.seed(7983)
-        sampled = random.sample(pool, min(a.queries, len(pool)))
+        if a.sample == "storage-order":
+            sampled = pool[: a.queries]
+        else:
+            random.seed(7983)
+            sampled = random.sample(pool, min(a.queries, len(pool)))
         ran = 0
         for (content,) in sampled:
             words = [w for w in str(content).split() if len(w) > 3][:4]
@@ -154,6 +165,7 @@ def main() -> int:
             "graph": a.graph,
             "uri": a.uri,
             "queries_run": ran,
+            "sample": a.sample,
             "limit_per_query": a.limit,
             "stock_keys_by_label": stock,
             "stock_keys": total_stock,

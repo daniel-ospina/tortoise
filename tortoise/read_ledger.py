@@ -183,14 +183,27 @@ def ledger_path() -> Path:
     directory alone would put EVERY graph on the host in one file, with
     `tenant = None`. `fold` would then union several stocks and read sets into one
     ratio, biasing `f` DOWN (the flattering direction) with nothing flagged. The
-    store's own identity is therefore part of the filename.
+    store's own identity is therefore part of the filename, and `TORTOISE_GRAPH_NAME`
+    joins it when set — a graph chosen only by the SDK's `graph_name=` argument is
+    invisible here and needs an explicit path.
     """
     explicit = os.environ.get(LEDGER_PATH_ENV)
     if explicit:
         return Path(explicit).expanduser()
     from .config import resolve_db_path
 
-    store = os.environ.get("TORTOISE_DB_URI") or str(resolve_db_path())
+    # A server URI alone still holds MANY graphs (the SDK's `graph_name` chooses
+    # one and `resolve_db_path()` never sees it), so the graph name is part of the
+    # identity whenever the environment states it. A caller that selects a graph
+    # by constructor argument on a SHARED server must set an explicit
+    # `TORTOISE_READ_LEDGER_PATH`: no default can see that choice.
+    store = "|".join(
+        (
+            os.environ.get("TORTOISE_DB_URI") or "",
+            os.environ.get("TORTOISE_GRAPH_NAME") or "",
+            str(resolve_db_path()),
+        )
+    )
     tag = hashlib.sha256(store.encode()).hexdigest()[:12]
     return Path(resolve_db_path()).expanduser().parent / f"read_ledger-{tag}.jsonl"
 
