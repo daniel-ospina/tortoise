@@ -839,6 +839,68 @@ jobs:
           echo "::error::dashboard bundle not live after $MAX_ATTEMPTS attempts (~10 min) — expected: $EXPECTED"
           exit 1
 
+      # #4914: the THIRD copy in the onboarding family — the one an agent actually
+      # fetches — was never byte-checked. Copies 1 (canonical) and 2 (tracked served
+      # mirror) are asserted identical by the "staged for the dashboard deploy" step
+      # above, and copy 3 is *produced* by `dist` copying `public/`, so it is correct
+      # BY CONSTRUCTION. Construction is not observation: a deploy that fails or
+      # partially publishes, a CDN/cache anomaly, or a custom domain pointing at the
+      # wrong Pages project (which HAS happened — deploy-pages.yml:56 records the
+      # `tortoise.premiselabs.co` CNAME previously serving `tortoise-landing-v2`)
+      # leaves the OLD document live while every repo-side check stays green.
+      #
+      # The existing coverage does not close this: `welcome-e2e-monitor` fetches the
+      # URL but asserts CONTENT MARKERS (`text/markdown`, `---`, `name:`, a few
+      # tokens), so a drift that preserves those markers is invisible — and that
+      # monitor cannot fail a release. This step reds the deploy itself.
+      #
+      # ⛔ Deliberately NO cache-buster "edge stale vs not published" branch: the
+      # 2026-09-23 ruling (#4914 comment) rejects it as unimplementable (no
+      # per-deployment origin is captured; the `pages.dev` origin returns the SAME
+      # ETag) and unnecessary (the served path measures `cf-cache-status: DYNAMIC`).
+      # It matches the sibling bundle poll's single policy instead: MAX_ATTEMPTS x 30s,
+      # then exit 1.
+      #
+      # Both sha256 values are printed so a GREEN run PROVES the live bytes rather
+      # than asserting it in prose.
+      - name: The served onboarding document is byte-identical to the canonical
+        run: |
+          CANONICAL="tortoise/onboarding/SKILL.md"
+          URL="https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
+          SERVED_FILE="$(mktemp)"
+          EXPECTED=$(sha256sum "$CANONICAL" | cut -d' ' -f1)
+          echo "canonical: $CANONICAL sha256=$EXPECTED"
+          MAX_ATTEMPTS=20
+          SERVED=""
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            # -L: today the URL answers 200 directly, so this is belt-and-braces.
+            # If a legitimate 301/308 is ever added for /skills/*, curl without -L
+            # would hash the REDIRECT BODY and red a healthy deploy with a digest
+            # nobody can interpret, while an agent following the URL still gets
+            # the right document. The bytes are still compared either way, so a
+            # redirect to the WRONG content still reds.
+            if ! curl -fsSL --max-time 20 "$URL" -o "$SERVED_FILE"; then
+              # Reset so a STALE digest from an earlier attempt cannot be
+              # reported as "the served value" — the diagnostic must distinguish
+              # "the document differs" from "the last attempts did not connect".
+              SERVED=""
+              echo "attempt $i/$MAX_ATTEMPTS: fetch failed, retrying in 30s..."
+              [ "$i" -lt "$MAX_ATTEMPTS" ] && sleep 30
+              continue
+            fi
+            SERVED=$(sha256sum "$SERVED_FILE" | cut -d' ' -f1)
+            if [ "$SERVED" = "$EXPECTED" ]; then
+              echo "served onboarding document verified — $URL sha256=$SERVED (attempt $i)"
+              rm -f "$SERVED_FILE"
+              exit 0
+            fi
+            echo "attempt $i/$MAX_ATTEMPTS: served sha256=$SERVED != canonical sha256=$EXPECTED, retrying in 30s..."
+            [ "$i" -lt "$MAX_ATTEMPTS" ] && sleep 30
+          done
+          echo "::error::the served onboarding document is not byte-identical after $MAX_ATTEMPTS attempts (~10 min) — canonical sha256=$EXPECTED, served sha256=${SERVED:-<never fetched>} (#4914)"
+          rm -f "$SERVED_FILE"
+          exit 1
+
       # #3048: the dashboard's ASSET fallback must be an honest 404.
       #
       # Measured defect (2026-09-11, pre-#4006): a request for a NONEXISTENT
