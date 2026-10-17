@@ -180,8 +180,8 @@ ratio     = cache line ÷ record disk line, in DOLLARS (the closed form's input)
   shape of the set); **the state and traversal paths** (`traverse`, `recall_state`'s related-point/
   object readers, `get_historical_knowledge`); **a POOL read of the FTS funnel** — its internal pool
   callers opt out (`_record_reads=False`) and record the slice they SERVE — `recall_state` its
-  Point rows (`recall_gaps`, `issue_insight`, `search_sessions`, `suggest_entry_points`, `get_events` and the printed session summary
-  likewise record what they return) — but a caller that hands the funnel a `limit` far above what it
+  Point rows, as every hooked path does (§17.4.6 names them; this file keeps no second list,
+  because a copy is what re-stales) — but a caller that hands the funnel a `limit` far above what it
   surfaces is still a pool read, and `recall_state`'s OBJECT leg is uncounted: its rows carry `id`,
   while an Object's key is `name`, so recording them could only emit `unresolved` (reported as a row with no
   value for the label's contract field, which for a successful Object read would be a mis-statement); and **the
