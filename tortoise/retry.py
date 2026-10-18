@@ -407,9 +407,11 @@ def explain_graph_abort(
       instead of asserting a deletion the evidence does not establish.
     - ``graph_present is None`` — the presence probe could not answer, so the
       message says the state is UNKNOWN rather than guessing either way. It
-      stays CAUSE-NEUTRAL: ``None`` covers an unresponsive instance, a missing
-      projection and an unresolved graph name alike (``_graph_presence``),
-      and naming one of them sends the reader to check a healthy server.
+      names ALL THREE reasons the answer can be missing — an unresponsive
+      instance, an unresolved graph name and a missing projection
+      (``_graph_presence``) — instead of picking one, because naming only the
+      instance sends the reader to check a healthy server for a wiring gap it
+      cannot see.
 
     It does NOT say which of restart / rebuild / eviction happened: the engine
     exposes no identity token for the graph, the same limitation ``#7685``
@@ -459,8 +461,11 @@ def explain_graph_abort(
         explains = (
             "the graph key could not be probed, so whether the graph "
             f"survived is UNKNOWN — {calls} attempt(s) were made in this "
-            "call. Check that the instance is answering and that the graph "
-            "name resolved, before retrying."
+            "call. A probe answers nothing for three different reasons (the "
+            "connection did not answer, the graph name did not resolve, or no "
+            "projection was available), and the answer does not say which — "
+            "check the connection, the graph name and the projection before "
+            "concluding anything about the data."
         )
     return text + _LEGIBLE_OPENER + explains
 

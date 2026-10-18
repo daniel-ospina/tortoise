@@ -1304,11 +1304,25 @@ def test_the_swap_diagnosis_never_promises_a_safe_retry_on_a_gone_or_unknown_gra
     unknown = _explain(redis_exc.ResponseError(_DELETED_OR_REPLACED), None)
     assert unknown is not None
     assert "UNKNOWN" in unknown, "an unanswerable probe must not become a guess"
-    # `None` covers no-projection / no-graph-name / a raising probe alike, so
-    # naming "the instance is not answering" sends the reader to a healthy
-    # server — the cause must stay neutral.
-    assert "not answering" not in unknown, (
-        "_graph_presence answers None for a wiring gap too")
+    # `None` covers an unresponsive instance, an unresolved graph name and a
+    # missing projection alike, and no amount of server-checking fixes the last
+    # one — so the note must name ALL THREE as the reasons the state is unknown.
+    # Naming only the instance, or negating that one phrasing, is not enough:
+    # the previous wording said "Check that the instance is answering and that
+    # the graph name resolved", which drops the missing-projection cause and
+    # sends the reader to check a healthy server (#8954).
+    for cause in ("connection", "graph name", "projection"):
+        assert cause in unknown, (
+            f"the UNKNOWN note must name {cause!r} as one of the causes it "
+            "cannot distinguish; naming a single one points the reader at "
+            "the wrong thing")
+    for single_cause_directive in (
+            "Check that the instance is answering",
+            "the instance is not answering",
+            "the instance is unresponsive"):
+        assert single_cause_directive not in unknown, (
+            "the instance must not be named as THE cause: `_graph_presence` "
+            "answers None for a wiring gap too")
     assert "could not be probed" in unknown
     assert "retrying is safe" not in unknown
     assert "restore" not in unknown.lower()
