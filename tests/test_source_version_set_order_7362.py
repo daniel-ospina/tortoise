@@ -37,7 +37,11 @@ connector writer; the ``contentHash`` write LAST in ``_upsert_source``'s
 DIVISION OF LABOUR with ``tests/test_8870_version_anchor_write_order.py`` (the
 sibling pin for this defect, deliberately kept separate): that file asserts the
 BEHAVIOUR on a live server engine and skips, loudly, where there is none — the
-strongest evidence, available only in the docker lane. This file asserts the
+strongest evidence, available only on an engine that applies the SET items LEFT
+TO RIGHT — and NOT, as an earlier version of this docstring claimed, "only in
+the docker lane": the docker lane runs `falkordb-server v4.20.6`, which reads
+pre-write values, so that file MEASURES the engine's semantics and SKIPS there
+(naming the property) instead of greening vacuously. This file asserts the
 ORDER, which needs no engine, so the defect stays guarded in the embedded
 carve-out lane and in any future lane whose backend reads pre-write values. The
 behavioural pins that cover the writers' own outcomes: ``test_document_version_counter_advances_with_the_hash``

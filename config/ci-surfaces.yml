@@ -2214,13 +2214,22 @@ surfaces:
   # the guard runs with the code it guards. Lane: embedded (like the sibling
   # `test_connector_sources.py` below) — deliberately NOT carve_out-registered.
   - test_connector_source_version_5214.py
-  # #8870: the version-anchor WRITE ORDER, pinned on the LIVE engine. It belongs
-  # on `core` for the same reason its sibling above does — `tortoise/projection/
+  # #8870: the version-anchor WRITE ORDER, pinned BEHAVIOURALLY. It belongs on
+  # `core` for the same reason its sibling above does — `tortoise/projection/
   # entities.py` (the choke point) selects `core`, so the guard runs with the
-  # code it guards. It SKIPS (naming the engine) where no live FalkorDB exists,
-  # because the defect it pins is invisible on the embedded engine — whose `SET`
-  # items do not observe each other — and a green from that lane is exactly the
-  # false evidence #8870 survived on.
+  # code it guards. Its gate is a PROPERTY, not a port: it runs against the
+  # configured `TORTOISE_DB_URI` (REQUIRED — no legacy-port fallback, which was
+  # both the fail-open skip and a path to the canonical store) and MEASURES the
+  # engine's SET-order semantics with a one-clause probe, SKIPPING (naming
+  # the property) on an engine that reads pre-write values. That matters here:
+  # the defect is invisible on such an engine, and the CI docker lane
+  # (`falkordb-server v4.20.6`) is one — an earlier version of the gate tested
+  # only that a port answered, so the file was green there on the PRE-fix
+  # statements, which is the false evidence #8870 survived on. A green now means
+  # the assertions ran on an engine that can produce a red; the skip is the
+  # honest signal elsewhere, and `test_source_version_set_order_7362.py` below
+  # guards the defect in every lane regardless. The engine-free gate tests in
+  # this file (the probe/skip-reason/URI tests) run in EVERY lane.
   - test_8870_version_anchor_write_order.py
   - test_connector_sources.py
   # #5011: divergence detection is by CONTENT, not size — the per-projection
