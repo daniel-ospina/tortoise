@@ -702,3 +702,101 @@ def test_bench_measure_question_records_the_binding_bound():
     assert row["cap_stopped_by"] != "byte_cap"
     # the raised window admits more than the frozen 40-item baseline
     assert row["n_ctx_cap"] > row["n_ctx40"]
+
+
+# ── #8487: the selection instant is the QUESTION's date, never the wall clock ─
+#
+# Review round 7 (P2): the read path's valid-time selection runs inside
+# ``tortoise_fts_query`` and resolves its instant from ``query_date``, falling
+# back to ``datetime.now(UTC).date()``. Every lane below OWNS a resolved
+# ``question_date`` (it renders it in the reader header / the assembled
+# context), so an un-pinned retrieval call selects evidence as of TODAY while
+# labelling it with the asked date — an ended-but-then-current claim gets
+# demoted, a not-yet-effective one does not, and a measurement lane stops being
+# reproducible across a ``validTo`` boundary. The assertion is on the WIRED
+# kwarg (what the lane actually calls), which is what no existing test saw.
+
+class _KwargRecordingSDK(_BenchFakeSDK):
+    """``_BenchFakeSDK`` + the kwargs each retrieval call was made with."""
+
+    def __init__(self, n_hits: int = 8):
+        super().__init__(n_hits=n_hits)
+        self.calls: list[dict] = []
+
+    def tortoise_fts_query(self, query, **kwargs):
+        self.calls.append(kwargs)
+        return super().tortoise_fts_query(query, **kwargs)
+
+
+def test_ask_lane_pins_the_selection_instant_to_the_question_date(monkeypatch):
+    """FAIL VALUE: ``run_ask_lane(..., question_date=<date>)`` selecting as of
+    the day the read happens (#8487 review round 7, P2).
+
+    Reachable: ``_run`` drives the real ``run_ask_lane`` with a fake SDK that
+    records the retrieval kwargs. Pre-fix the kwarg is absent entirely, so the
+    selection resolves to the wall-clock date while the response's
+    ``question_date`` says otherwise."""
+    sdk = _FakeSDK(n_hits=5)
+    res, _reader = _run(sdk, monkeypatch)
+    assert sdk.query_kwargs.get("query_date") == "2024-01-01", (
+        "the ask lane must take its valid-time selection as of the question "
+        f"date it renders; got query_date={sdk.query_kwargs.get('query_date')!r}")
+    assert res["question_date"] == "2024-01-01"
+
+
+def test_bench_and_transcript_lanes_pin_the_selection_instant(monkeypatch):
+    """FAIL VALUE: the lanes that MIRROR the ask lane (and so deliberately
+    keep the selection ON) leaving the instant unset — which reorders the same
+    question across a ``validTo`` boundary and breaks their own
+    re-baseline-then-compare contract (#8487 review round 7, P2).
+
+    Reachable: all four call sites are driven for real against a kwargs-
+    recording SDK. Pre-fix none of them passes ``query_date``.
+
+    (d) is the round-8 (P2) addition: ``_scan_for_failures`` DEFINES the
+    long-haystack subset with the same ``pool@120`` read ``_measure_question``
+    then measures, so an un-pinned scan can admit a question on one pool order
+    and measure it on another."""
+    from tools import ask_recall_bench as bench
+    from tools import gen_ask_transcripts as transcripts
+
+    # (a) the bench's assembled arm
+    sdk = _KwargRecordingSDK()
+    bench._retrieve_pipeline(
+        sdk, "zephyr", limit=40, item_cap=40, keep_numeric=False,
+        search_keys_prf=False, fusion_weights=None, fusion_k=60,
+        evidence_boost=False, byte_cap=bench.BYTE_CAP, stats={},
+        question_date="2024-01-01")
+    assert sdk.calls and sdk.calls[0].get("query_date") == "2024-01-01", (
+        f"ask_recall_bench pipeline: query_date={sdk.calls[0].get('query_date')!r}")
+
+    # (b) the bench's pool@120 measurement
+    sdk = _KwargRecordingSDK()
+    bench._measure_question(
+        sdk, {"question_id": "q1", "question": "zephyr",
+              "question_date": "2023-05-20", "haystack_sessions": []},
+        keep_numeric=False, search_keys_prf=False, fusion_weights=None,
+        fusion_k=60, cap_limit=120, cap_item=120, evidence_boost=False)
+    assert sdk.calls[0].get("query_date") == "2023-05-20", (
+        f"ask_recall_bench pool read: query_date={sdk.calls[0].get('query_date')!r}")
+
+    # (c) the committed-transcript generator
+    sdk = _KwargRecordingSDK()
+    transcripts._render_user_message(sdk, "what database do we use now?",
+                                     "2026-08-29", seeds=[])
+    assert sdk.calls[0].get("query_date") == "2026-08-29", (
+        f"gen_ask_transcripts: query_date={sdk.calls[0].get('query_date')!r}")
+
+    # (d) the long-haystack SUBSET SCAN — the same pool@120 read as (b), so it
+    # must select as of the same instant or the subset definition drifts.
+    import tortoise.sdk as sdk_mod
+
+    sdk = _KwargRecordingSDK(n_hits=2)
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", lambda _db: sdk)
+    monkeypatch.setattr(bench, "_seed_question", lambda *_a, **_k: None)
+    bench._scan_for_failures(
+        [{"question_id": "q-scan", "question": "zephyr",
+          "question_date": "2023-05-20", "haystack_sessions": []}],
+        scan_limit=1, keep_numeric=False, search_keys_prf=False)
+    assert sdk.calls[0].get("query_date") == "2023-05-20", (
+        f"ask_recall_bench subset scan: query_date={sdk.calls[0].get('query_date')!r}")

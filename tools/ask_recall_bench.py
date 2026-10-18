@@ -33,6 +33,29 @@ WHAT IT MEASURES (retrieval only — no reader, no provider keys):
                             frozen literal — it is the pre-#4105 baseline of
                             record.
 
+MEASURED AGAINST THE SHIPPED READER, #8487 INCLUDED (recorded decision):
+every retrieval call here passes NO ``_valid_time_rerank`` opt-out, on
+purpose. This bench mirrors the ask lane's own pipeline (``annotate_ask_hits``
+→ ``dedup_pool`` → ``apply_evidence_boost`` → ``assemble_context``), so it must
+measure the reader that ships — including the #8487 pre-truncation valid-time
+selection, which the ask lane applies by default. Two consequences the next
+reader must not have to rediscover:
+
+  * A number recorded BEFORE #8487 is not comparable to a number measured
+after it on any PREFER-LATEST question (the selection can move which ids
+survive the ``limit`` cut, and this bench grades recall against exactly those
+id sets). Re-baseline before comparing across the boundary.
+  * Do NOT "fix" that by passing ``_valid_time_rerank=False`` here: opting out
+would measure a pipeline the product no longer runs. The lanes that DO opt out
+are the ones that re-own the order downstream (``tools/longmem_eval/
+retrieve.py``, ``tools/fusion_formula_ab.py``,
+``tools/ask_pool_admission_probe.py``).
+  * EVERY read that GRADES or DEFINES an id set must pin ``query_date`` to the
+question's own date, including ``_scan_for_failures`` — its ``pool@120`` read
+DEFINES the long-haystack subset that ``_measure_question`` then measures, so
+an un-pinned scan admits (or drops) a question on one pool order and measures
+it on another (#8487 review round 8, P2).
+
 SEEDING PARITY (verifier-fix): ingestion mirrors ``tools/longmem_eval/
 ingest.py`` (search_keys + has_answer + embeddings + session props + the
 deterministic turn→point-id map ``lme:{qid}:s{si}:t{ti}``) — NOT
@@ -232,8 +255,17 @@ def _retrieve_pipeline(sdk, question: str, *, limit: int, item_cap: int,
         dedup_pool,
         resolve_ask_boost_multipliers,
     )
+    # #8487: NO valid-time opt-out here — this mirrors the ask lane and must
+    # measure the shipped reader (see the module docstring's recorded decision).
+    # ``query_date`` is threaded for the same reason the opt-out is withheld:
+    # the selection is part of the shipped order, so the bench must take it as
+    # of the QUESTION's date (``assemble_context`` below already renders that
+    # date). Leaving it unset selects as of the wall clock, which reorders the
+    # same question across a ``validTo`` boundary and breaks the
+    # re-baseline-then-compare rule in the module docstring.
     hits = sdk.tortoise_fts_query(
         question, limit=limit, pool_size=None, include_terminal=True,
+        query_date=question_date or None,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf,
         fusion_weights=fusion_weights, fusion_k=fusion_k)
     annotated = sdk.annotate_ask_hits(hits)
@@ -269,8 +301,11 @@ def _measure_question(sdk, question: dict, *, keep_numeric: bool,
     q = question["question"]
     gold = set(_gold_turn_ids(question))
     # pool@120 — the full fused pool (pool floor = 120; limit=120 returns it)
+    # #8487: no valid-time opt-out — measures the shipped reader, at the
+    # question's own instant (the same date the pipeline arm renders below).
     pool_hits = sdk.tortoise_fts_query(
         q, limit=120, pool_size=None, include_terminal=True,
+        query_date=question.get("question_date") or None,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf,
         fusion_weights=fusion_weights, fusion_k=fusion_k)
     pool_ids = [h["id"] for h in pool_hits]
@@ -335,7 +370,15 @@ def _scan_for_failures(data: list[dict], *, scan_limit: int,
             _seed_question(sdk2, question)
             hits = sdk2.tortoise_fts_query(
                 question["question"], limit=120, pool_size=None,
-                include_terminal=True, keep_numeric=keep_numeric,
+                include_terminal=True,
+                # #8487 review round 8 (P2): the SUBSET DEFINITION must be
+                # scored as of the SAME instant `_measure_question` measures
+                # it with, or a question can be admitted by the scan and then
+                # measured on a different pool order (the selection is
+                # intent-gated and takes the wall clock when the date is
+                # unset).
+                query_date=question.get("question_date") or None,
+                keep_numeric=keep_numeric,
                 search_keys_prf=search_keys_prf)
             ranks = [j + 1 for j, h in enumerate(hits)
                      if h["id"] in set(_gold_turn_ids(question))]

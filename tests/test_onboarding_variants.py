@@ -912,11 +912,22 @@ def test_3232_agents_standing_block_orders_the_restart_before_the_verify():
     block = src[src.index("# Tortoise — agent memory"):
                 src.index('${me}" > "$block"')]
     flat = " ".join(block.split())
-    assert ("restart the client so the new session reads it, then verify with "
-            "tortoise_health before reporting done") in flat, (
+    # #3429: pinned as an ORDER (positions), not as one sentence. The sentence
+    # was reworded to name WHO restarts and that the server is loaded at session
+    # start; an equality pin on the old wording made that rewording a red, which
+    # trains the next author to delete the pin instead of keeping the order.
+    write_at = flat.index("Write the MCP config")
+    restart_at = flat.index("restart the client so the new session reads it")
+    verify_at = flat.index("run the verify with tortoise_health")
+    assert write_at < restart_at < verify_at, (
         "the AGENTS.md block must write the config, RESTART the client, and "
         "only then verify — the standing block is re-read every session, so a "
         "verify-before-restart order re-creates #3232 for the whole repo")
+    assert "THIS session cannot see it" in flat and "that NEW session" in flat, (
+        "the block must say the MCP server is loaded at session start and that "
+        "the verify belongs to the NEW session — 'restart the client' alone "
+        "does not tell an agent it cannot verify in the session that wrote the "
+        "config (#3232's defect, restated for a surface re-read every session")
 
 
 def test_3232_generic_restart_lines_are_exact():
