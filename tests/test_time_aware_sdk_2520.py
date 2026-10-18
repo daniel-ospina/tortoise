@@ -722,7 +722,8 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
     with the #8487 selection (or a mirror lane silently opting out and so
     measuring a reader the product does not run).
 
-    Reachable: an AST pass over the four lanes, which asserts the DECLARED
+    Reachable: an AST pass over the six declared lanes below, which asserts the
+    DECLARED
     choice per lane rather than a general rule — each file's reason is recorded
     at its own call site or in its own docstring. Only `sdk.tortoise_fts_query`
     call sites are inspected, so unrelated calls cannot satisfy it.
