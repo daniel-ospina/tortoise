@@ -776,8 +776,8 @@ def event_head_seq(graph) -> int:
     is the opposite of this gate's stated bias.
 
     "Corrupt" is the same domain ``event_store.next_seq`` refuses on the write
-    side: anything that is not a real number (a numeric STRING included — the
-    store is explicit that a property of another type is "refused, never
+    side: anything that is not a real number (a numeric STRING included —
+    ``next_seq`` is explicit that a property of another type is "refused, never
     coerced", because ``'5' + 1`` cannot be compared), a NEGATIVE value, or a
     ``bool`` — which is an ``int`` subclass, so ``int(True) == 1`` would
     otherwise pass as a trustworthy head of 1 while the events run to 5. A
@@ -789,26 +789,28 @@ def event_head_seq(graph) -> int:
     paragraph exists to avoid on the steady path, so an UNTRUSTWORTHY graph pays it
     on every pass, and the counter does not become trustworthy on its own.
 
-    ⛔ AND REPAIR IS NOT THIS FUNCTION'S TO DESCRIBE. The store's own repair path
-    contradicts the obvious reading of ``next_seq``'s guard, so this paragraph
-    now states only what is checkable from here. A reader who needs the repair
-    story must measure the counter node:
+    ⛔ WHAT HAPPENS TO A BROKEN COUNTER IS NOT ONE STORY, so this paragraph states
+    only what is checkable here, in the two functions that do it. A reader who
+    needs the repair story must measure the counter node:
 
-    * ``next_seq`` REFUSES a non-number, a ``bool`` and a negative counter and
-      leaves it unchanged (the negative fails its ``prev >= 0`` grant test), so a
-      graph holding one stops emitting until someone repairs the node. Only a
-      non-integral float is BUMPED (``2.9`` → ``3.9``, re-issuing a seq an
-      existing ``:GraphEvent`` already holds — the #4653 class).
+    * ``next_seq`` REFUSES a non-number, a ``bool``, a negative counter and one
+      at/above ``MAX_SEQ`` (which ``_as_seq`` below accepts deliberately) and
+      leaves it unchanged — a negative or exhausted counter fails its
+      ``prev >= 0 AND prev < $max`` grant test — so a graph holding one stops
+      emitting until someone repairs the node. Only a non-integral float is
+      BUMPED (``2.9`` → ``3.9``, re-issuing a seq an existing ``:GraphEvent``
+      already holds — the #4653 class; the ``int()`` coercion below is recorded
+      on #9059).
     * a rebuild's behaviour is a THIRD thing, neither repair nor refusal. Its
       pre-wipe ``capture_watermark`` reads through ``int()``, so a numeric string
       or a ``bool`` is COERCED (``'5'`` → ``5``, ``True`` → ``1``) and the
       rebuild proceeds — and a ``True`` counter comes back as a TRUSTED ``1`` on
       a graph that had already issued seqs 1..3, so the next emit RE-ISSUES an
-      already-issued seq (the #4653 class; recorded on #9059). Note the compared
-      quantity: ``:GraphEvent`` rows are not replayed after a rebuild (#4664), so
-      that ``1`` is below the seqs the graph HAD issued, not below any surviving
-      row. A non-numeric string or an out-of-domain counter makes that read RAISE,
-      so the rebuild aborts and the counter is left untouched.
+      already-issued seq (the #4653 class). Note the compared quantity:
+      ``:GraphEvent`` rows are not replayed after a rebuild (#4664), so that ``1``
+      is below the seqs the graph HAD issued, not below any surviving row. A
+      non-numeric string or an out-of-domain counter makes that read RAISE, so the
+      rebuild aborts and the counter is left untouched.
 
     ⛔ THE ONE CASE THIS FIX'S OVER-ADMISSION IS NOT A CHEAP NO-OP. Every
     unbounded admission ``_BEHIND_PREDICATE`` enumerates costs one SDK open and
