@@ -9,9 +9,9 @@ carried none and the engine had nothing to rebuild on its serving thread.
 A duration assertion cannot prove that either, at any size CI will run: measured on the
 issue's engine (``falkordb/falkordb:latest``, graph module 42201, 2026-10-17, see
 ``docs/evidence/7846-indexed-graph-restore/drop-first-42201-5000.log``), the indexed RESTORE
-is 0.56 s at 5 000 nodes and the index-free one 0.02 s — 33x, but both far inside any bound
-generous enough not to false-red a slow runner. So the ORDER is pinned here, as behaviour,
-on a fake engine that records every call.
+is 0.599 s at 5 000 nodes and the index-free one 0.036 s — 16.6x, but both far inside any
+bound generous enough not to false-red a slow runner. So the ORDER is pinned here, as
+behaviour, on a fake engine that records every call.
 
 WHAT THESE TESTS PIN, and the mutation each one reds:
 
@@ -41,6 +41,7 @@ from tortoise.graph_key_restore import (
     UNMEASURED,
     IndexDefinitionUnreadable,
     IndexDropIncompleteError,
+    IndexDropUnverifiedError,
     IndexedGraphRestoreRefused,
     IndexRestoreMismatchError,
     IndexRestoreUnverifiedError,
@@ -116,6 +117,38 @@ def _catalogue_row(definition, *, options=None) -> list:
         definition.entity_type,
         "OPERATIONAL",
         "{}",
+    ]
+
+
+def _parsed_row(row) -> list:
+    """A STRINGIFIED catalogue row as a PARSED client hands it over.
+
+    ``falkordb``'s ``result_set`` is NATIVE: ``row[1]`` a ``list[str]``, ``row[2]`` a
+    ``{field: [types]}`` dict and ``row[3]`` a ``{field: {option: value}}`` dict, with the
+    option integers as ``int`` — the shape ``tortoise/index_catalogue.py`` records as
+    MEASURED (``OrderedDict({'content': ['FULLTEXT'], ...})``). This helper lets a test hand
+    the SAME catalogue over in both shapes; the pre-fix parser handled only the string one
+    and refused every graph through the parsed seam (#8965 review).
+    """
+    field = str(row[1]).strip().strip("[]").strip()
+    tokens = [
+        token.strip()
+        for token in str(row[2]).strip().split("[", 1)[1].rstrip("]}").split(",")
+        if token.strip()
+    ]
+    options: dict[str, int | str] = {}
+    options_cell = str(row[3]).strip()
+    if options_cell not in ("", "{}"):
+        inner = options_cell.split("{", 2)[2].rstrip("}").strip()
+        for piece in inner.split(","):
+            key, _, value = piece.partition(":")
+            value = value.strip()
+            options[key.strip()] = (
+                int(value) if value.lstrip("-").isdigit() else value.strip("'\"")
+            )
+    return [
+        row[0], [field], {field: tokens}, {field: options},
+        str(row[4]), [], row[6], row[7], {},
     ]
 
 
@@ -309,9 +342,14 @@ def test_the_guard_reads_whatever_catalogue_shape_the_caller_has_to_hand() -> No
     """
     rows = [list(row) for row in _INDEXED_ROWS]
     full_reply = [["label", "properties", "types", "options"], rows, ["stats"]]
+    # A PARSED client's `result_set` is NOT the string rows with an attribute on top: its
+    # cells are native (dict/list), which is what the pre-fix parser could not read. Building
+    # this case out of the string rows (the pre-fix form of this test) exercised only the
+    # attribute unwrap and passed on the broken parser (#8965 review).
+    parsed = [_parsed_row(row) for row in _INDEXED_ROWS]
 
     class _QueryResult:
-        result_set = rows
+        result_set = parsed
 
     for seam in (rows, full_reply, _QueryResult()):
         engine = _FakeGraph(_UNINDEXED_ROWS)
@@ -320,6 +358,58 @@ def test_the_guard_reads_whatever_catalogue_shape_the_caller_has_to_hand() -> No
         assert engine.destructive_calls() == [], (
             f"a {type(seam).__name__} catalogue did not stop the restore: {engine.calls}"
         )
+
+
+def test_the_PARSED_client_shape_parses_to_the_SAME_definition() -> None:
+    """The documented ``result_set`` seam must read, not refuse (#8965 review P2).
+
+    The parsed cells reach this module through the client a caller actually holds, and a
+    string-only parser refused EVERY graph through it — including the RANGE-only graphs the
+    non-vector skip exists to protect — with "carries an index type this module does not
+    recognise ('VECTOR')". Pre-fix this test raises ``IndexDefinitionUnreadable``.
+    """
+    string_definition = vector_index_definitions(_INDEXED_ROWS, graph="g7846")[0]
+    parsed_definition = vector_index_definitions(
+        [_parsed_row(_INDEXED_ROWS[0])], graph="g7846"
+    )[0]
+
+    assert parsed_definition.signature() == string_definition.signature()
+    assert parsed_definition.create_cypher() == string_definition.create_cypher(), (
+        "the parsed shape re-creates a different statement"
+    )
+    assert parsed_definition.option("M") == 8
+    assert isinstance(parsed_definition.option("M"), int), (
+        "the option lost its integer type through the parsed seam"
+    )
+
+    # ... and the SAFE path runs end-to-end through it, not merely the parser.
+    engine = _FakeGraph(_INDEXED_ROWS)
+    result = engine.safe(list_indexes=lambda: [_parsed_row(r) for r in engine.catalogue])
+
+    assert engine.catalogue_at_dump == []
+    assert result.indexes.recreated is True and result.indexes.verified is True
+
+
+def test_a_range_index_in_the_PARSED_shape_is_not_a_reason_to_refuse() -> None:
+    """Every production graph carries a RANGE index, so this arm decides adoptability.
+
+    ``test_a_range_or_fulltext_index_is_not_a_reason_to_refuse`` pins the rule for the
+    string shape; the parsed shape is what a caller's own client gives it, and the pre-fix
+    parser refused it — i.e. the safe path was unusable on every production graph through
+    the seam the module documents.
+    """
+    rangeful = [
+        "Point", ["is_operator"], {"is_operator": ["RANGE"]}, {},
+        "english", [], "NODE", "OPERATIONAL", {},
+    ]
+    engine = _FakeGraph(_UNINDEXED_ROWS)
+
+    observation = engine.raw(index_guard=lambda: [rangeful])
+
+    assert engine.destructive_calls() == ["dump", "delete", "restore"], (
+        f"a RANGE-only graph was refused through the parsed seam: {engine.calls}"
+    )
+    assert observation.status in (SERVED, UNMEASURED)
 
 
 def test_a_guard_that_cannot_read_the_catalogue_refuses_rather_than_passing() -> None:
@@ -668,6 +758,37 @@ def test_a_re_create_that_RAISES_halfway_names_what_it_could_not_restore() -> No
     )
 
 
+def test_a_failing_re_create_does_not_abandon_the_REMAINING_indexes() -> None:
+    """#8965 review: the MAIN re-create loop abandoned the rest on the first raise.
+
+    ``_try_recreate``'s own stated rule is "a failure on the first must not abandon the
+    rest, or one bad definition costs every other index on the graph" — and the main path
+    raised inside the loop, so with two indexes and the FIRST ``CREATE`` refused, the second
+    index was never re-created although it was a perfectly good index. The note then listed
+    it as "NOT re-created", i.e. as though the engine had refused it.
+    """
+    engine = _FakeGraph(
+        [list(_INDEXED_ROWS[0]), list(_SECOND_INDEX_ROW)], create_fails_on={"embedding"}
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        engine.safe()
+
+    assert "refused to create embedding" in str(raised.value)
+    creates = [call for call in engine.calls if call.startswith("create:")]
+    assert creates == ["create:embedding", "create:vec"], (
+        f"the loop stopped at the first failing CREATE, so the other index was never "
+        f"re-created: {engine.calls}"
+    )
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    not_recreated = [line for line in notes.splitlines() if "NOT re-created" in line]
+    assert not_recreated, f"the note does not name what is missing: {notes!r}"
+    assert "embedding" in not_recreated[0]
+    assert "Entity" not in not_recreated[0], (
+        f"the note reports the index that WAS re-created as lost: {notes!r}"
+    )
+
+
 def test_an_unrecognised_index_type_refuses_instead_of_reading_as_index_free() -> None:
     """#8965 review F4: the guard FAILED OPEN on any token it did not know.
 
@@ -782,6 +903,92 @@ def test_a_verification_read_that_fails_does_not_claim_nothing_was_touched() -> 
     )
     # It must not raise a mismatch either: nothing measured a difference.
     assert not isinstance(raised.value, IndexRestoreMismatchError)
+
+
+def test_the_post_drop_re_read_failing_is_not_a_silent_loss() -> None:
+    """#8965 review (P1): the read that PROVES the drop took was the one unguarded arm.
+
+    Call order in ``restore_graph_key_safe``: 1 = the pre-drop read, **2 = the post-drop
+    re-read**, 3 = the inner guard, 4 = verify. Read 2 runs after EVERY ``drop_index()``, so
+    a transport blip there — or the ``IndexDefinitionUnreadable`` whose text says "NOTHING
+    HAS BEEN TOUCHED" — escaped with the index DROPPED, no re-create attempt, no note and no
+    statement the caller could act on. A retry then read an index-free catalogue, dropped
+    nothing, and returned successfully without the index: a silent, permanent loss.
+
+    Pre-fix: bare ``ConnectionError``, ``create:`` never issued, ``__notes__`` absent.
+    """
+    engine = _FakeGraph(_INDEXED_ROWS, fail_list_on={2})
+
+    with pytest.raises(IndexDropUnverifiedError) as raised:
+        engine.safe()
+
+    assert "dump" not in engine.calls, (
+        f"the DUMP ran although whether the drop took was never read: {engine.calls}"
+    )
+    creates = [call for call in engine.calls if call.startswith("create:")]
+    assert creates == ["create:embedding"], (
+        f"the index that WAS dropped was not put back although the graph key was never "
+        f"touched: {engine.calls}"
+    )
+    message = str(raised.value)
+    assert "NOTHING HAS BEEN TOUCHED" not in message, (
+        f"the error claims nothing was touched about a graph whose index was dropped: {message}"
+    )
+    assert "index_guard=None" not in message, (
+        f"the error advises the index-bearing restore this path exists to prevent: {message}"
+    )
+    assert "embedding" in message and "CREATE VECTOR INDEX" in message, (
+        f"the error names neither the dropped index nor a statement to restore it: {message}"
+    )
+    assert "NOT KNOWN" in message, (
+        f"the error presents an unmeasured outcome as a measured one: {message}"
+    )
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "NEVER deleted" in notes, (
+        f"the note does not say the graph key survived: {notes!r}"
+    )
+
+
+def test_a_failed_INNER_guard_re_read_is_not_reported_as_nothing_touched() -> None:
+    """The guard's own re-read is the same read one step later (#8965 review).
+
+    With the drop taken, call 3 is ``restore_graph_key``'s ``index_guard`` read. A failure
+    there used to escape as ``IndexDefinitionUnreadable`` — "NOTHING HAS BEEN TOUCHED …
+    restore with ``index_guard=None``" — over a graph whose index had just been dropped.
+    The recovery arm did put the index back, so the state was right and only the account of
+    it was wrong; the caller was still told to issue the index-bearing restore.
+    """
+    engine = _FakeGraph(_INDEXED_ROWS, fail_list_on={3})
+
+    with pytest.raises(IndexDropUnverifiedError) as raised:
+        engine.safe()
+
+    assert "dump" not in engine.calls, f"the DUMP ran on an unproven guard read: {engine.calls}"
+    assert "create:embedding" in engine.calls, (
+        f"the dropped index was not put back on the guard arm: {engine.calls}"
+    )
+    message = str(raised.value)
+    assert "NOTHING HAS BEEN TOUCHED" not in message
+    assert "index_guard=None" not in message
+    assert "CREATE VECTOR INDEX" in message
+
+
+def test_an_unindexed_graph_s_guard_read_failure_says_nothing_was_dropped() -> None:
+    """No index means NO drop, so "NOTHING HAS BEEN TOUCHED" is the true statement.
+
+    The translation to ``IndexDropUnverifiedError`` exists because the ``DROP`` loop has
+    already run; claiming indexes "were DROPPED" over an index-free graph would be a new
+    false statement — the class the translation exists to remove.
+    """
+    engine = _FakeGraph(_UNINDEXED_ROWS, fail_list_on={2})
+
+    with pytest.raises(ConnectionError):
+        engine.safe()
+
+    assert "dump" not in engine.calls, f"the DUMP ran on an unread catalogue: {engine.calls}"
+    assert not [call for call in engine.calls if call.startswith("create:")], (
+        f"an index was 'put back' on a graph that carries none: {engine.calls}"
+    )
 
 
 def test_a_catalogue_that_cannot_be_re_read_says_UNKNOWN_not_LOST() -> None:

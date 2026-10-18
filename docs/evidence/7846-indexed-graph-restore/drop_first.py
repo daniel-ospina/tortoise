@@ -18,8 +18,13 @@ Usage::
 
     python docs/evidence/7846-indexed-graph-restore/drop_first.py <port> <nodes>
 
-Exit code 2 means INVALID HARNESS (the index was not POPULATED before the restore, so the
-reading says nothing about an index-bearing restore — see README §1).
+Exit code 2 means INVALID HARNESS — the reading would say nothing about an index-bearing
+restore: the vector index never reached ``OPERATIONAL``, it is not POPULATED (fewer than K
+neighbours, i.e. the issue's own index-free control case — see README §1), or the server
+reports no graph module (no reading is taken at all). ``SystemExit(2)``, not ``assert``: an
+``assert`` is STRIPPED under ``python -O`` (leaving no vacuity gate at all) and exits 1,
+so a consumer keying on the documented code got the case it was guarding against under the
+wrong one.
 """
 
 from __future__ import annotations
@@ -191,19 +196,26 @@ def _seams(client, graph):
     }
 
 
+def _invalid_harness(message: str):
+    """Exit 2: this reading would not be about an index-bearing restore (README §1)."""
+    print(f"INVALID HARNESS: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def _prepare(client, nodes, tag):
     """A unique graph with ``nodes`` indexed nodes, gated on a POPULATED index."""
     graph = f"t_7846_df_{tag}_{uuid.uuid4().hex[:10]}"
     bystander_graph = f"{graph}_bystander"
     build(client, graph, nodes)
     status = await_operational(client, graph)
-    assert status == "OPERATIONAL", f"index never reached OPERATIONAL: {status}"
+    if status != "OPERATIONAL":
+        _invalid_harness(f"the vector index never reached OPERATIONAL: {status}")
     populated = _knn(client, graph, DIM)
-    assert populated == K, (
-        f"INVALID HARNESS: the index is not POPULATED ({K} requested, "
-        f"{populated} returned) — the restore below would be the issue's own "
-        f"index-free control case"
-    )
+    if populated != K:
+        _invalid_harness(
+            f"the index is not POPULATED ({K} requested, {populated} returned) — the "
+            f"restore below would be the issue's own index-free control case"
+        )
     client.execute_command("GRAPH.QUERY", bystander_graph, "CREATE (n:Bystander {id: 1})")
     return graph, bystander_graph
 

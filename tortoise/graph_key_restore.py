@@ -195,9 +195,15 @@ import re
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+#: The repo's SINGLE catalogue-row reader (#3154/#3441), IMPORTED rather than copied: this
+#: module carried a verbatim copy of ``index_catalogue._cell``, i.e. one more reader of the
+#: same row that can drift from the others (#8965 review). ``index_catalogue`` imports
+#: nothing, so this stays hermetic.
+from tortoise.index_catalogue import catalogue_cell as _cell
 
 logger = logging.getLogger(__name__)
 
@@ -459,12 +465,55 @@ def _cell_text(cell: Any) -> str:
     return "" if cell is None else str(cell)
 
 
-def _cell(row: Any, index: int) -> Any:
-    """``row[index]``, or ``None`` when the row is shorter than the catalogue promises."""
-    try:
-        return row[index]
-    except (TypeError, IndexError, KeyError):
-        return None
+def _unquote_text(text: str) -> str:
+    """One catalogue token without the quotes a STRINGIFIED cell gives it.
+
+    The raw RESP form is unquoted (``{embedding: [VECTOR]}``); a client that stringifies
+    an already-parsed cell yields Python's repr (``{'embedding': ['VECTOR']}``), whose
+    keys and items keep their single quotes. Both must name the same token, or ``'VECTOR'``
+    is compared against ``VECTOR``, found unknown, and the definition is refused.
+    """
+    stripped = (text or "").strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "'\"":
+        return stripped[1:-1].strip()
+    return stripped
+
+
+def _mapping_entries(cell: Any) -> list[tuple[str, Any]]:
+    """The TOP-LEVEL ``(key, value)`` pairs of a catalogue MAP cell, in EITHER shape.
+
+    ``CALL db.indexes()`` reaches this module through two clients with different CELL
+    TYPES: a raw ``GRAPH.QUERY`` RESP reply, whose cells are stringified, and a
+    ``falkordb`` client's parsed ``result_set``, whose cells are NATIVE
+    (``{'embedding': ['VECTOR']}`` — the shape ``tortoise/index_catalogue.py`` records as
+    measured). Only the string form was handled, so the documented ``result_set`` seam
+    refused EVERY graph — including RANGE-only graphs, the case the non-vector skip exists
+    to protect — with "carries an index type this module does not recognise ('VECTOR')"
+    (#8965 review).
+
+    Values are returned in their OWN shape: the caller decides whether it wants index TYPE
+    tokens or an options map, and normalising them here would lose the integers.
+    """
+    if isinstance(cell, Mapping):
+        entries: list[tuple[str, Any]] = []
+        for key, value in cell.items():
+            if not isinstance(key, str):
+                raise ValueError(f"non-string key {key!r} in a map cell")
+            entries.append((key.strip(), value))
+        return entries
+    return list(_map_entries(_cell_text(cell)))
+
+
+def _type_tokens(cell: Any) -> tuple[str, ...]:
+    """The index TYPE tokens of one catalogue cell, native or textual, verbatim.
+
+    Verbatim on purpose: the caller's allowlist is an EXACT-token allowlist, and
+    normalising case here would quietly widen it. A re-cased token still reads as unknown
+    and still refuses (fail-closed), which is the polarity the module documents.
+    """
+    if isinstance(cell, (list, tuple, set, frozenset)):
+        return tuple(_unquote_text(_cell_text(item)) for item in cell)
+    return _list_items(_cell_text(cell))
 
 
 def _map_entries(text: str) -> list[tuple[str, str]]:
@@ -513,7 +562,7 @@ def _map_entries(text: str) -> list[tuple[str, str]]:
         key, separator, value = piece.partition(":")
         if not separator:
             raise ValueError(f"no ':' in map entry {piece!r} of {text!r}")
-        entries.append((key.strip(), value.strip()))
+        entries.append((_unquote_text(key), value.strip()))
     return entries
 
 
@@ -523,17 +572,28 @@ def _list_items(text: str) -> tuple[str, ...]:
     if not (stripped.startswith("[") and stripped.endswith("]")):
         raise ValueError(f"not a list cell: {text!r}")
     return tuple(
-        item.strip() for item in stripped[1:-1].split(",") if item.strip()
+        _unquote_text(item) for item in stripped[1:-1].split(",") if item.strip()
     )
 
 
-def _scalar(text: str) -> str | int:
-    """A catalogue option VALUE from its text form, keeping integers as integers."""
-    if _INTEGER.match(text or ""):
-        return int(text)
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
-        return text[1:-1]
-    return text
+def _scalar(value: Any) -> str | int:
+    """A catalogue option VALUE, native or from its text form (ints stay ints).
+
+    The native form is what a parsed client hands over (``dimension: 384`` is a Python
+    ``int``); the text form is the raw RESP reply's. Anything else has no ``CREATE`` form
+    this module can state, so it REFUSES rather than being rendered as its repr.
+    """
+    if isinstance(value, bool):
+        # `bool` is an `int` subclass and `M: True` is not an HNSW parameter; rendering it
+        # as `1` would silently change the option.
+        raise ValueError(f"option value {value!r} has no CREATE form")
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"option value {value!r} has no CREATE form")
+    if _INTEGER.match(value or ""):
+        return int(value)
+    return _unquote_text(value)
 
 
 def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[VectorIndexDefinition, ...]:
@@ -552,20 +612,20 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
     definitions: list[VectorIndexDefinition] = []
     for row in rows or ():
         try:
-            property_types = _map_entries(_cell_text(_cell(row, 2)))
+            property_types = _mapping_entries(_cell(row, 2))
         except ValueError as exc:
             raise IndexDefinitionUnreadable(
                 graph=graph, detail=f"the per-property TYPE cell is not a map ({exc})",
                 cell=_cell(row, 2),
             ) from None
         vector_properties = []
-        for name, types_text in property_types:
+        for name, types_cell in property_types:
             try:
-                types = _list_items(types_text)
+                types = _type_tokens(types_cell)
             except ValueError as exc:
                 raise IndexDefinitionUnreadable(
                     graph=graph, detail=f"the TYPE list of {name!r} is not a list ({exc})",
-                    cell=types_text,
+                    cell=types_cell,
                 ) from None
             if VECTOR_INDEX_TYPE in types:
                 vector_properties.append(name)
@@ -583,7 +643,7 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
                         f"{sorted(_NON_VECTOR_TYPES | {VECTOR_INDEX_TYPE})}. Treating it "
                         f"as non-vector could issue an index-bearing RESTORE"
                     ),
-                    cell=types_text,
+                    cell=types_cell,
                 )
         if not vector_properties:
             continue
@@ -602,7 +662,7 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
                 graph=graph, detail="the catalogue reports no label", cell=_cell(row, 0)
             )
         try:
-            option_maps = dict(_map_entries(_cell_text(_cell(row, 3))))
+            option_maps = dict(_mapping_entries(_cell(row, 3)))
         except ValueError as exc:
             raise IndexDefinitionUnreadable(
                 graph=graph, detail=f"the OPTIONS cell is not a map ({exc})",
@@ -620,12 +680,12 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
                 )
             try:
                 options = tuple(
-                    (key, _scalar(value)) for key, value in _map_entries(inner)
+                    (key, _scalar(value)) for key, value in _mapping_entries(inner)
                 )
             except ValueError as exc:
                 raise IndexDefinitionUnreadable(
                     graph=graph,
-                    detail=f"the options of {name!r} are not a map ({exc})",
+                    detail=f"the options of {name!r} are not a readable map ({exc})",
                     cell=inner,
                 ) from None
             if not options:
@@ -1319,6 +1379,41 @@ class IndexDropIncompleteError(RuntimeError):
         )
 
 
+class IndexDropUnverifiedError(RuntimeError):
+    """The indexes were DROPPED and the catalogue could not be re-read to confirm it.
+
+    Its own type because the state is its own, and the pre-drop type is actively wrong
+    about it: :class:`IndexDefinitionUnreadable` says "NOTHING HAS BEEN TOUCHED" and
+    advises ``restore_graph_key(index_guard=None)`` — which by this point is false and is
+    advice to issue exactly the index-bearing RESTORE this path exists to prevent (#8965
+    review).
+
+    Raised BEFORE ``dump()``/``delete()``: the graph key is untouched, the graph is intact,
+    and no restore was issued. What is NOT known is whether the graph is index-free — so
+    the definitions are handed over as ``CREATE`` statements and a best-effort re-create of
+    the dropped set is reported on the exception's note.
+    """
+
+    def __init__(self, *, graph: str, dropped: Any, reason: str):
+        self.graph = graph
+        self.dropped = tuple(dropped)
+        self.reason = reason
+        super().__init__(
+            f"the VECTOR index(es) on {graph!r} were DROPPED, but the catalogue could not "
+            f"be re-read to confirm which of them are gone ({reason}). Whether the graph "
+            f"is index-free is NOT KNOWN. The graph key was NOT deleted and NO restore was "
+            f"issued, so the graph itself is intact. Dropped: "
+            + "; ".join(str(definition) for definition in self.dropped)
+            + ". Re-read `CALL db.indexes()` once the engine answers and issue a CREATE "
+            "ONLY for an index that is MISSING: "
+            + "; ".join(
+                f"{definition} -> {definition.create_cypher()}"
+                for definition in self.dropped
+            )
+            + ". Do NOT re-issue a plain restore: it would carry the index."
+        )
+
+
 class IndexRestoreMismatchError(RuntimeError):
     """The re-created index does not match the definition read before the drop.
 
@@ -1560,6 +1655,11 @@ def restore_graph_key(
             the process died.
         GraphRestoreStalledError: the restore overran ``bound_s`` while EVERY witness
             PING answered — the instance was serving, so the stall is the caller's.
+        IndexedGraphRestoreRefused: ``index_guard`` reported a VECTOR index, so the plain
+            restore sequence (``dump()`` -> ``delete()`` -> ``restore()``) was REFUSED
+            before anything was deleted: an index-bearing RESTORE rebuilds the index on
+            the engine's serving thread, and this driver holds no ``create_index`` step to
+            undo that. Use ``restore_graph_key_safe``.
         BaseException: whatever ``restore`` itself raised, re-raised unchanged with
             the observation attached as a ``__notes__`` entry (its own error is
             already loud; this driver does not replace it). That observation's status
@@ -2171,6 +2271,10 @@ def restore_graph_key_safe(
             state exactly. Nothing dropped — every raise of this type from this function
             happens before any destructive step.
         IndexDropIncompleteError: the index survived the drop. Nothing deleted.
+        IndexDropUnverifiedError: the definitions were DROPPED and the catalogue could not be
+            re-read to confirm it, so which of them are gone is NOT KNOWN. Nothing deleted
+            and no restore issued; the graph key is intact and a best-effort re-create is
+            reported on the error's note.
         IndexedGraphRestoreRefused: an index reappeared after the drop and before the
             restore. Nothing deleted.
         IndexRestoreMismatchError: the graph WAS restored and the re-created index does not
@@ -2215,7 +2319,32 @@ def restore_graph_key_safe(
                     )
                 )
             raise
-        remaining = _coerce_definitions(list_indexes(), graph=graph)
+        # ⛔ THE READ THAT PROVES THE DROP TOOK MUST NOT RAISE RAW (#8965 review). It runs
+        # AFTER every `drop_index()`, so a transport blip here — or an
+        # `IndexDefinitionUnreadable`, whose text says "NOTHING HAS BEEN TOUCHED" and
+        # advises `index_guard=None` — would escape with the index DROPPED, no re-create
+        # attempt and no statement the caller can act on. The graph key is provably
+        # untouched at this point, so putting the dropped set back restores the status quo
+        # exactly; what cannot be claimed is that it worked, which is what `unverified`
+        # says on the note.
+        try:
+            remaining = _coerce_definitions(list_indexes(), graph=graph)
+        except BaseException as exc:
+            restored_after_read, failed_after_read = _try_recreate(dropped, create_index)
+            error = IndexDropUnverifiedError(
+                graph=graph, dropped=dropped, reason=f"{type(exc).__name__}: {exc}"
+            )
+            with contextlib.suppress(AttributeError):
+                error.add_note(
+                    _index_state_note(
+                        graph=graph,
+                        did_not_return=False,
+                        restored=restored_after_read,
+                        failed=failed_after_read,
+                        unverified=True,
+                    )
+                )
+            raise error from exc
         if remaining:
             # Which of the DROPPED indexes are now gone — NOT `remaining`, which is the set
             # that survived. Re-creating `remaining` re-created the ones that were never
@@ -2250,6 +2379,26 @@ def restore_graph_key_safe(
         key_state["delete_attempted"] = True
         return delete()
 
+    def _guard() -> tuple[VectorIndexDefinition, ...]:
+        # The driver re-reads the catalogue through this seam — again AFTER the drop. It is
+        # coerced HERE so a failed re-read can be translated: the raw driver's
+        # `IndexDefinitionUnreadable` is written for a PRE-drop refusal, and by now its
+        # "NOTHING HAS BEEN TOUCHED" is false and its `index_guard=None` advice is the
+        # index-bearing restore this path exists to prevent (#8965 review). `delete()` has
+        # not run on this arm either, so the caller's `except` below puts the indexes back.
+        try:
+            return _coerce_definitions(list_indexes(), graph=graph)
+        except BaseException as exc:
+            if not dropped:
+                # Nothing was dropped (an index-free graph), so the pre-drop text — "NOTHING
+                # HAS BEEN TOUCHED" — is TRUE here: there is nothing to translate, and
+                # claiming indexes "were DROPPED" about an index-free graph would be a new
+                # false statement, the class this translation exists to remove.
+                raise
+            raise IndexDropUnverifiedError(
+                graph=graph, dropped=dropped, reason=f"{type(exc).__name__}: {exc}"
+            ) from exc
+
     try:
         observation = restore_graph_key(
             graph=graph,
@@ -2260,8 +2409,9 @@ def restore_graph_key_safe(
             bound_s=bound_s,
             # The guard re-reads the catalogue: if the drop above did not take, this
             # refuses BEFORE `dump()`/`delete()`. The safe path does not get to skip its
-            # own safety check just because it is the safe path.
-            index_guard=list_indexes,
+            # own safety check just because it is the safe path. `_guard` translates a
+            # FAILED read into `IndexDropUnverifiedError` (see above).
+            index_guard=_guard,
             listening=listening,
             poll_interval_s=poll_interval_s,
             witness_join_s=witness_join_s,
@@ -2295,32 +2445,45 @@ def restore_graph_key_safe(
     verified: bool | None = None
     index_ready_state: bool | None = None
     if definitions:
+        create_failures: list[tuple[VectorIndexDefinition, BaseException]] = []
         for definition in definitions:
             try:
                 create_index(definition)
+            except Exception as exc:
+                # EVERY index is ATTEMPTED, for the reason `_try_recreate` states: one bad
+                # definition must not cost the others. This loop used to `raise` inside the
+                # handler, abandoning every remaining index — the exact harm the recovery
+                # helper exists to prevent, on the MAIN path (#8965 review).
+                create_failures.append((definition, exc))
             except BaseException as exc:
-                # A re-create that fails halfway leaves the indexes BEFORE it in place and
-                # the rest missing, and the caller would otherwise get the engine's raw
-                # error with no idea which ones exist (#8965 review F3). Report the set
-                # from the catalogue, not from the loop position: the CREATE may have taken
-                # effect before it raised.
-                gone = _missing_from_catalogue(definitions, list_indexes, graph=graph)
-                unverified = gone is None
-                with contextlib.suppress(AttributeError):
-                    exc.add_note(
-                        _index_state_note(
-                            graph=graph,
-                            did_not_return=False,
-                            restored=(
-                                [] if gone is None
-                                else [d for d in definitions if d not in gone]
-                            ),
-                            failed=tuple(definitions) if gone is None else gone,
-                            graph_restored=True,
-                            unverified=unverified,
-                        )
+                # A KeyboardInterrupt/SystemExit is not "this index is bad": stop here, but
+                # still report the state of the ones already attempted below.
+                create_failures.append((definition, exc))
+                break
+        if create_failures:
+            exc = create_failures[0][1]
+            # A re-create that fails halfway leaves the indexes BEFORE it in place and
+            # the rest missing, and the caller would otherwise get the engine's raw
+            # error with no idea which ones exist (#8965 review F3). Report the set
+            # from the catalogue, not from the loop position: the CREATE may have taken
+            # effect before it raised.
+            gone = _missing_from_catalogue(definitions, list_indexes, graph=graph)
+            unverified = gone is None
+            with contextlib.suppress(AttributeError):
+                exc.add_note(
+                    _index_state_note(
+                        graph=graph,
+                        did_not_return=False,
+                        restored=(
+                            [] if gone is None
+                            else [d for d in definitions if d not in gone]
+                        ),
+                        failed=tuple(definitions) if gone is None else gone,
+                        graph_restored=True,
+                        unverified=unverified,
                     )
-                raise
+                )
+            raise exc
         recreated = True
         try:
             after = _coerce_definitions(list_indexes(), graph=graph)
