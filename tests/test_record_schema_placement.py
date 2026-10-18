@@ -281,6 +281,12 @@ def test_placement_table_resolves_to_the_recorded_totals():
 
 
 _STORAGE_DOC = REPO_ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
+#: The projection doc's own statement of what this pin asserts (`#7968`).
+_PROJECTION_DOC = (
+    REPO_ROOT / "docs" / "epics" / "2026-10-10-7879-postgres-record" / "04-projection.md"
+)
+#: The `#7950` capstone evidence README's denominators paragraph.
+_CAPSTONE_README = REPO_ROOT / "docs" / "evidence" / "7950-capstone" / "README.md"
 
 #: The appendix's own per-layer headings for the two EPISTEMIC groups — the
 #: source `§2.5`'s summary must agree with.
@@ -299,6 +305,21 @@ _RESOLVED_RE = re.compile(
     r"resolved to \*{0,2}(?P<p>\d+) PRIMARY · (?P<d>\d+) DERIVED/VOLATILE · "
     r"(?P<u>\d+) UNRESOLVED"
 )
+#: `221 properties → 192 PRIMARY / 29 DERIVED-VOLATILE / 0 U` — the same totals
+#: in the slash dialect `04-projection.md` states them in.
+_PROJECTION_TOTAL_RE = re.compile(
+    r"(?P<names>\d+) properties → (?P<p>\d+) PRIMARY / "
+    r"(?P<d>\d+) DERIVED-VOLATILE / (?P<u>\d+) U\b"
+)
+#: `**221 property names** across the seven labels\n(192 PRIMARY / 29
+#: DERIVED-VOLATILE / 0 UNRESOLVED)` — the capstone README's denominators line.
+#: The `#7955` attribution may sit inside the parenthetical (it did before the
+#: `#2782` annotation), so that tail is allowed rather than required to be bare.
+_CAPSTONE_TOTAL_RE = re.compile(
+    r"(?P<names>\d+) property names\*\*.*?\((?P<p>\d+) PRIMARY / "
+    r"(?P<d>\d+) DERIVED-VOLATILE / (?P<u>\d+) UNRESOLVED[^)]{0,40}\)",
+    re.S,
+)
 
 
 def test_no_stated_total_disagrees_with_the_pin():
@@ -309,8 +330,10 @@ def test_no_stated_total_disagrees_with_the_pin():
     **§2.5's per-layer summary** and **`STORAGE-ARCHITECTURE.md` §17.5's
     resolved totals** kept the pre-#2782 numbers — so the prose told a reader
     **187 P** while this pin (and the table it pins) said **192**. A review
-    caught it each time; nothing mechanical did. This reads the numbers back, so
-    the next row set cannot be added to one place only.
+    caught it each time; nothing mechanical did. The fix then missed two more
+    restatements (`04-projection.md`'s own sentence about what this pin asserts,
+    and the `#7950` capstone README's denominators) for exactly that reason. This
+    reads all five back, so the next row set cannot be added to one place only.
 
     Derived, never restated: the totals come from `EXPECTED_TOTALS` /
     `EXPECTED_TOTAL_NAMES`, and the per-layer summary is checked against the
@@ -379,6 +402,33 @@ def test_no_stated_total_disagrees_with_the_pin():
         "STORAGE-ARCHITECTURE §17.5's resolved totals disagree with the pin: "
         f"{resolved.group(0)!r} vs {EXPECTED_TOTALS}"
     )
+
+    # Two further restatements carried the pre-#2782 numbers and were missed by
+    # the first cut of this pin (#8976 review P2): `04-projection.md`'s own
+    # statement of what this pin asserts, and the `#7950` capstone evidence
+    # README's denominators paragraph. Both are read here, in the dialect each
+    # states them in, so neither can drift again.
+    expected = (
+        EXPECTED_TOTAL_NAMES,
+        EXPECTED_TOTALS["P"],
+        EXPECTED_TOTALS["D"],
+        EXPECTED_TOTALS["U"],
+    )
+    for label, path, pattern in (
+        ("04-projection.md's resolved-totals sentence", _PROJECTION_DOC, _PROJECTION_TOTAL_RE),
+        ("7950-capstone README's denominators", _CAPSTONE_README, _CAPSTONE_TOTAL_RE),
+    ):
+        text = path.read_text(encoding="utf-8")
+        statements = list(pattern.finditer(text))
+        assert statements, f"{label} no longer states the resolved totals"
+        for statement in statements:
+            stated_totals = tuple(
+                int(statement.group(k)) for k in ("names", "p", "d", "u")
+            )
+            assert stated_totals == expected, (
+                f"{label} disagrees with the pin — {expected} is what the table "
+                f"and EXPECTED_TOTALS say, the sentence says {statement.group(0)!r}"
+            )
 
 
 def test_the_four_layers_have_tables():
