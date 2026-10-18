@@ -14,8 +14,19 @@ which cannot see it, and were green. A green bought from the engine that cannot
 observe the failure is not evidence — the pins for both writers already existed
 and both passed while the hash moved and `version` stayed at 1.
 
-So these two tests run ONLY against a live FalkorDB, and skip (loudly, naming
-the engine) when there is none. They are the pins that would have caught it.
+So these two tests run ONLY against a live FalkorDB, and — because a live
+engine is not automatically a CAPABLE one — they first probe whether this
+engine observes a same-clause read-after-write at all, and skip naming the
+reason when it does not. `falkordb-server:v4.20.6`, which CI's docker lane
+provisions, does not: with the pre-fix order restored the pre-fix code passes
+there (measured 2026-10-18; it fails on `falkordb:6.0.1`). A green from that
+engine would be the same false evidence that let this defect ship, so this file
+refuses to produce one.
+
+The ORDER itself — which is the actual invariant — is pinned engine-
+independently, in every lane, by `tests/test_source_version_set_order_7362.py`.
+That is the guard; this file is the end-to-end confirmation on backends that can
+show the behaviour.
 """
 from __future__ import annotations
 
@@ -28,6 +39,28 @@ from tests.test_connector_source_version_5214 import GH_URL, _source, gh_issue_e
 from tortoise.projection import FalkorProjection
 
 URL = "https://example.test/8870-version-anchor"
+
+
+def _applies_set_left_to_right(proj) -> bool:
+    """Can THIS engine observe a same-clause read-after-write at all?
+
+    The defect is only visible where the `SET` items of one clause observe each
+    other. `falkordb/falkordb:6.0.1` does; the embedded backend and
+    `falkordb-server:v4.20.6` — which is what CI's provision step gives the fast
+    `test` job — evaluate every right-hand side against the PRE-write record, so
+    the pre-fix code passes there (#8870 review, measured: 2 passed on v4.20.6
+    with the broken order restored, 1 failed on 6.0.1).
+
+    Without this probe the file reports a green it did not earn: a pass here
+    would say "the writers are ordered correctly" while the engine simply could
+    not show the difference. The order itself is pinned engine-independently by
+    `tests/test_source_version_set_order_7362.py`, which needs no engine.
+    """
+    proj.g.query("CREATE (n:_SetOrderProbe8870 {a: 0})")
+    proj.g.query("MATCH (n:_SetOrderProbe8870) SET n.a = 1, n.b = n.a")
+    rows = proj.g.query("MATCH (n:_SetOrderProbe8870) RETURN n.b").result_set
+    proj.g.query("MATCH (n:_SetOrderProbe8870) DELETE n")
+    return bool(rows) and rows[0][0] == 1
 
 
 def _live_proj() -> FalkorProjection:
@@ -57,6 +90,18 @@ def _live_proj() -> FalkorProjection:
         uri or _live_utils.docker_uri("tortoise_test_8870"),
         graph_name=f"test_8870_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
+    if not _applies_set_left_to_right(proj):
+        proj.close()
+        pytest.skip(
+            "#8870: this engine evaluates every SET right-hand side against "
+            "the PRE-write record, so both orders behave identically and this "
+            "pin cannot fail here — running it would report a green it did "
+            "not earn (measured: the pre-fix code passes on "
+            "falkordb-server v4.20.6, which is what CI's docker lane "
+            "provisions, and fails on falkordb 6.0.1). The ORDER is pinned "
+            "engine-independently by "
+            "tests/test_source_version_set_order_7362.py."
+        )
     return proj
 
 
