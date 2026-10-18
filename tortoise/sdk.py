@@ -6926,7 +6926,10 @@ class TortoiseSDK:
         LIVE is the default (#1088): a point created WITHOUT an explicit
         ``status`` is live — not draft — whatever its kind. Draft is opt-in:
         pass ``status="draft"`` and it is honoured (no promotion clause,
-        ingest fold, or operator edge will move it to live).
+        ingest fold, or operator edge will move it to live; the ONE scoped
+        exception is a point the capture pass MINTS — it promotes the drafts
+        it created itself, keyed on ``promotion_ids``, and never one it merely
+        folded onto).
 
         Decision parts (#2199) — pointKind in {decision, option, criterion,
         evidence} created WITHOUT an explicit status — land LIVE (not draft)
@@ -7117,14 +7120,28 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
-        # #1088: LIVE is the default for everything added to the graph; an
-        # agent that deliberately asks for draft gets draft, and it is
-        # honoured. "Was status given?" is decided BEFORE the pop so an
+        # #1088 / #6107: LIVE is the default for everything added to the
+        # graph; an agent that deliberately asks for draft gets draft, and it
+        # is honoured. "Was status given?" is decided BEFORE the pop so an
         # explicit status (the capture/extraction paths pass status="draft" +
         # extractedFrom, or an agent staging a draft deliberately) is explicit
-        # BY CONSTRUCTION, keeps full manual control, and preserves the
-        # #344/#1212 fail-closed posture. Precedent: #2199 did exactly this
-        # for the decide-part kinds.
+        # BY CONSTRUCTION and keeps full manual control — with ONE scoped
+        # exception: a point the command itself MINTS. The capture pass
+        # promotes the drafts IT created (``promotion_ids``), never a folded
+        # or pre-existing draft (#1088), so "explicit draft is never moved
+        # live" is true of a point this write did NOT mint, not of a capture's
+        # own extracted claims. Precedent: #2199 did exactly this for the
+        # decide-part kinds.
+        #
+        # OVERRIDES: the fail-closed create posture of #344/#1212 (a
+        # non-decide kind defaulted to status='draft', so a plainly-created
+        # point was born EP-inert) — `live` is the default for everything
+        # added to the graph, and `draft` is the deliberate caller-chosen
+        # exception instead. Owner ruling 2026-10-09, recorded with its
+        # OVERRIDES marker on #6107. Reason: the fail-closed protection and
+        # the invisibility were the SAME mechanism — a goal created plainly
+        # and wired only as an operator TARGET was never promoted, so EP
+        # discarded the whole arm while the run still reported converged=True.
         explicit_status = "status" in props
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which
@@ -25536,6 +25553,16 @@ class TortoiseSDK:
         `:Event` peer reports `""`. `""` therefore means "this peer's layer
         exposes no `status`", and it is now reached by LOOKING at the peer's
         label rather than by never asking.
+
+        A THIRD meaning is `""`: the sweep leg for that peer's label FAILED
+        (a raise is logged and skipped, so the other labels' statuses survive —
+        the per-label isolation below), or that peer's own status row was
+        malformed (skipped per row, so the other rows survive). Neither is
+        distinguishable from "no lifecycle state" in this value; labelling them
+        is R1 on #8996. A peer can therefore be PRESENT in the payload with `""`
+        because its label's status leg died, which is exactly the conflation the
+        widening above was added to end — stated rather than left to be
+        rediscovered.
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
@@ -25545,21 +25572,53 @@ class TortoiseSDK:
         related_ids = [e.get("related_id") for e in entries if e.get("related_id")]
         statuses: dict[str, str] = {}
         if related_ids:
-            try:
-                rows: list = []
-                for _q in epistemic_label_queries(
-                        "MATCH (n:{label}) WHERE n.id IN $ids "
-                        "RETURN n.id, n.status"):
+            rows: list = []
+            for _q in epistemic_label_queries(
+                    "MATCH (n:{label}) WHERE n.id IN $ids "
+                    "RETURN n.id, n.status"):
+                try:
                     rows.extend(proj.g.query(
                         _q,
                         params={"ids": related_ids},
                         timeout=200,
                     ).result_set)
-                statuses = {row[0]: row[1] or "" for row in rows}
-            except Exception:
-                pass
+                except Exception:
+                    # ONE label failing must not blank every peer's status: the
+                    # sweep widens, so a leg that fails can only fail to add.
+                    _logger.warning(
+                        "related_status lookup failed for one epistemic "
+                        "label — the other labels' statuses are kept",
+                        exc_info=True)
+                    continue
+            for row in rows:
+                try:
+                    statuses[row[0]] = row[1] or ""
+                except Exception:
+                    # A malformed status row must not turn an ADVISORY
+                    # annotation into a whole-read failure on this public method
+                    # (D1: a decoration never fails the read). Per ROW, not per
+                    # comprehension: one bad row may cost exactly one peer,
+                    # never every peer — which is what a single dict-comprehension
+                    # under one handler would do (measured: rows
+                    # [("p1", "live"), (["x"], "live")] → {} → p1 loses "live").
+                    _logger.warning(
+                        "related_status row malformed — that peer's status is "
+                        "left blank, the rest are kept", exc_info=True)
+                    continue
         for e in entries:
-            e["related_status"] = statuses.get(e.get("related_id"), "")
+            try:
+                e["related_status"] = statuses.get(e.get("related_id"), "")
+            except TypeError:
+                # A NON-SCALAR `related_id` is unhashable. It is in scope by
+                # design: `get_relationships`' dedupe key is deliberately total,
+                # so a row whose `other.id` came back as a replayed/diagnostic
+                # list is KEPT and reaches here. Blanking that one peer's
+                # annotation is the whole cost — a decoration must never fail the
+                # read (D1), which is what the per-row guard above promises and
+                # what an unguarded lookup here would have broken one line later
+                # (measured: `statuses.get(['bad-id'])` → TypeError, whole read
+                # lost AFTER the sweep had logged that it succeeded).
+                e["related_status"] = ""
         return entries
 
     # ── Point-in-time restore (E6 #1538, D6) ─────────────────────────
