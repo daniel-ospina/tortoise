@@ -654,7 +654,25 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   makes a zero-length window genuinely empty; evaluated as R2 of the #5362 plan),
 >   accept the closed ambiguity, or a third shape — tracked at **#7818**. Until it
 >   is decided, a shared boundary instant is a known property of the closed
->   reading, not a defect to be silently patched reader-by-reader.
+>   reading, not a defect to be silently patched reader-by-reader. The flip is
+>   **not a predicate-only change**, and the reason is measured rather
+>   than argued. `commit_schema.validate_validity_window` permits
+>   `validTo == validFrom` (#5374), so a zero-length `[t, t]` window is already
+>   persistable and this closed `_covers` covers exactly one instant: at `t` the
+>   read answers `status="found"` with the point as `valid_point` (measured
+>   against `get_historical_knowledge`'s `_covers`, which rejects only `vT < t`).
+>   Under `[vF, vT)` that window covers **no** instant and the
+>   same read answers `status="absent"` — the shape of honest absence — while
+>   #5361's `malformed` flag stays **silent**, because that detection is strictly
+>   inverted (`validTo < validFrom`, `_inverted` returning `kt < kf`, so an
+>   equal pair is not inverted) and a zero-length window is not inverted. Both
+>   predicates are cited by **symbol**: the line numbers they carried rotted twice
+>   (#8337's rename, then #8487's merge into the same file, +291 lines), and a
+>   reader cannot tell a rotted line from a current one. So a half-open `_covers`
+>   needs the well-formed-**empty** signal
+>   R2 names *together with* it, as a reply state of its own; the predicate alone
+>   would turn every already-persisted single-instant belief into a claim that was
+>   never true at any instant, with no way for a reader to tell.
 >
 **Per-end precision and the 3-state end (#2350, E-prec).** The window pair
 above carries an **additive** precision layer: `validFromPrecision` /
@@ -676,7 +694,7 @@ END-only: a window with no datable start is not a window.
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
 > copies verbatim into `validFrom` on the same node
-> (`point_props["validFrom"] = pr.point.when`, hosted_api.py:9461-9484).
+> (`point_props["validFrom"] = pr.point.when`, in `tortoise/hosted_api.py`).
 > It is the same value under the §4.1 spelling, not a second slot — `validFrom` and the payload's occurrence date are **one slot under two spellings**, which is why they grouped together in the field map.
 
 **Axis 2 — Transaction time: "when did our record of it exist?"** The
