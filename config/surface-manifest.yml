@@ -292,6 +292,17 @@ response_fields:
     when the write declares an extractedFrom this door does not wire (event writes have no `no_source`, see tortoise_create_entity).
     Additive key; the node properties are unchanged (#8171, review P2)
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT when there is no advisory, so the response stays byte-identical
+- response: tortoise_create_point
+  field: advisories
+  emitted_when: 'a CLAIM written with no source and no provenance is flagged — {advisories: [{code, node_id, message,
+    advisory}]} with code `no_source`, naming the cheap fix `extractedFrom=''session:<id>''` (the session that produced
+    the assertion, registered sourceKind=agentSession). Advisory-only: the write has already landed, the key never blocks
+    or refuses, and it changes nothing that was stored. Absent when the write carries a materialized extractedFrom (a
+    declared or `session_id`-inferred ref — this door creates the :Source and the edge) or an authored word
+    (`credibility=`, which #398 rules IS a source); a bare legacy point-level `sourceKind` does not silence it, because
+    it is an annotation with no link behind it (#8171)'
+  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, so that response stays
+    byte-identical
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
@@ -795,8 +806,10 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent —
-    returns existing Point if content matches.'
+  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent — returns
+    existing Point if content matches. Declaring extractedFrom materializes that :Source and links it (#8171); a fresh
+    write with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}] — advisory
+    only, never a block).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
   used_by: agents, tooling, skill-docs, docs
