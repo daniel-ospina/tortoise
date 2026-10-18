@@ -447,6 +447,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(3)  # EXIT_USAGE
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -1566,6 +1567,61 @@ def _worktree_liveness(
     return True, f"exists=yes gitdir=yes age={age_hours:.1f}h"
 
 
+# ── PASS-SCOPED ENUMERATION CACHE (agent-infra #1985 follow-up) ──────────────────────────────────
+# WHY. A refresh pass runs this tool once PER CANDIDATE (6 in a pass). Each run re-executes the same
+# three whole-repo enumerations: `for-each-ref refs/heads` (~342), `for-each-ref refs/remotes`
+# (~1,239) and `rev-list --first-parent origin/main` (entire main history). That is N x the work, it
+# slows every pass into contention with the controller's own sweep, and a contended call reads as an
+# UNQUERYABLE SURFACE — which is not a verdict, so the backlog never fills and create activity stops.
+#
+# WHAT. An OPT-IN cache, set by the caller for the duration of ONE pass:
+#   COLLISION_PREFLIGHT_CACHE      directory to cache in (unset => no caching, behaviour unchanged)
+#   COLLISION_PREFLIGHT_CACHE_TTL  seconds a cached enumeration stays valid (default 300)
+# Keyed by repo+namespace, written atomically, and only SUCCESSFUL results are stored — an unreadable
+# surface must never be cached as "empty", which would turn a probe failure into a clean verdict.
+# A stale cache cannot make a wrong verdict unsafe here: within a pass the branch set is stable, and
+# the TTL bounds anything longer.
+def _cache_path(key: str) -> "str | None":
+    d = os.environ.get("COLLISION_PREFLIGHT_CACHE") or ""
+    if not d:
+        return None
+    digest = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
+    return os.path.join(d, digest + ".json")
+
+
+def _cache_get(key: str):
+    path = _cache_path(key)
+    if not path:
+        return None
+    try:
+        ttl = float(os.environ.get("COLLISION_PREFLIGHT_CACHE_TTL") or 300)
+    except ValueError:
+        ttl = 300.0
+    if ttl <= 0:
+        return None
+    try:
+        if time.time() - os.path.getmtime(path) > ttl:
+            return None
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _cache_put(key: str, value) -> None:
+    path = _cache_path(key)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(value, fh)
+        os.replace(tmp, path)
+    except Exception:
+        return
+
+
 def _git_refs(
     git_bin: str, repo: str, namespace: str, timeout: float,
 ) -> list[tuple[str, str]]:
@@ -1575,6 +1631,10 @@ def _git_refs(
     needs it per ref: asking per-ref (`git rev-parse`) would be one subprocess
     per branch, and this repo carries ~900 local and ~1,300 remote refs.
     """
+    ckey = f"git_refs|{repo}|{namespace}"
+    cached = _cache_get(ckey)
+    if isinstance(cached, list):
+        return [(str(a), str(b)) for a, b in cached]
     rc, out, err, timed_out = _run(
         [git_bin, "for-each-ref", "--format=%(refname)%09%(objectname)", namespace],
         repo, timeout,
@@ -1592,6 +1652,7 @@ def _git_refs(
         if not name or name.endswith("/HEAD"):
             continue
         refs.append((name, sha.strip()))
+    _cache_put(ckey, [[a, b] for a, b in refs])
     return refs
 
 
@@ -1628,12 +1689,18 @@ def _first_parent_shas(
     2" rather than as "nothing is merged" — an unreadable witness must never
     become a downgrade.
     """
+    fkey = f"first_parent|{repo}"
+    cached = _cache_get(fkey)
+    if isinstance(cached, list):
+        return {str(x) for x in cached}
     rc, out, _err, _to = _run(
         [git_bin, "rev-list", "--first-parent", "origin/main"], repo, timeout,
     )
     if rc != 0:
         return None
-    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+    chain = {ln.strip() for ln in out.splitlines() if ln.strip()}
+    _cache_put(fkey, sorted(chain))
+    return chain
 
 
 def _ancestor_merged_refs(
@@ -3419,6 +3486,21 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
         # rebuild is a real measurement, and only if IT cannot answer is the
         # question unmeasured. A stale, other-repo, or unstamped board falls
         # through to the same rebuild, which is served from memory.
+    # ⛔ THE GATE'S OWN CACHE — NOT the shared board. `build_state` here is a PARTIAL board (no per-PR
+    # CI, no review `diff-match`), so writing it to `fleet_state.DEFAULT_OUT` would degrade it for every
+    # other consumer (see the note above `return rebuilt, "rebuilt", ""`). Caching it in the gate's
+    # PRIVATE cache degrades nothing: the only reader is this gate, and the value is the same partial
+    # board it would have computed anyway.
+    # WHY IT MATTERS: a refresh pass runs this tool once PER CANDIDATE, and the rebuild measured 15.9 s
+    # of a 19 s run (`fleet_state.open_issues` alone 11.2 s + 3 s of backoff). Six candidates paid it six
+    # times, which pushed a pass into contention with the controller's own sweep; a contended surface
+    # reads as UNQUERYABLE, which is not a verdict, so the backlog never filled and create activity
+    # stopped. Paying it once per pass is honest; paying it once per candidate is waste.
+    board_key = f"partial_board|{slug}"
+    cached_board = _cache_get(board_key)
+    if isinstance(cached_board, dict) and not _board_can_answer(cached_board) \
+            and _board_is_for_repo(cached_board, slug):
+        return cached_board, "rebuilt-cache", ""
     try:
         rebuilt = fleet_state.build_state(
             repo=slug,
@@ -3454,6 +3536,7 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
     # fallback as if it were the board. A read-only gate must not do that. Paying
     # the rebuild on every pre-flight while the cache is stale is the honest
     # price; the board's own writer repairs it.
+    _cache_put(f"partial_board|{slug}", rebuilt)
     return rebuilt, "rebuilt", ""
 
 

@@ -5587,6 +5587,51 @@ class HolderGateTests(unittest.TestCase):
         self.assertIs(state, fresh)
         build.assert_called_once()
 
+    def test_a_rebuild_is_cached_for_the_pass_and_reused(self):
+        # ⛔ THE PASS-SCOPED CACHE (agent-infra #1985 follow-up). A refresh pass runs this tool once
+        # PER CANDIDATE, and the board rebuild measured 15.9 s of a 19 s run. Six candidates paid it
+        # six times, which pushed passes into contention with the controller's own sweep; a contended
+        # GitHub read is an UNQUERYABLE SURFACE — not a verdict — so the backlog never filled and
+        # CREATE ACTIVITY STOPPED with no error anywhere. Measured after the fix: 16.7 s -> 3.4 s per
+        # candidate, identical verdicts, one rebuild per pass.
+        self.assertFalse(self.board.exists())
+        fresh = _fleet_board_state()
+        with tempfile.TemporaryDirectory() as cache, \
+             mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_CACHE": cache,
+                                          "COLLISION_PREFLIGHT_CACHE_TTL": "300"}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh) as build:
+            first_state, first_source, _ = self.cp._read_board(SLUG, str(self.tmp))
+            second_state, second_source, _ = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual(first_source, "rebuilt")
+        self.assertEqual(second_source, "rebuilt-cache")
+        self.assertEqual(second_state, first_state)
+        build.assert_called_once()          # ← the whole point: ONE rebuild for the pass
+
+    def test_without_the_env_the_cache_is_inert(self):
+        # Default behaviour must be BYTE-IDENTICAL to before the change: no env, no caching.
+        self.assertFalse(self.board.exists())
+        fresh = _fleet_board_state()
+        env = {k: v for k, v in os.environ.items() if k != "COLLISION_PREFLIGHT_CACHE"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh) as build:
+            _s1, src1, _ = self.cp._read_board(SLUG, str(self.tmp))
+            _s2, src2, _ = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual((src1, src2), ("rebuilt", "rebuilt"))
+        self.assertEqual(build.call_count, 2)
+
+    def test_the_cache_never_writes_the_shared_board(self):
+        # The partial-board write-back stays forbidden: the cache is a PRIVATE artifact of the gate,
+        # and `fleet_state.DEFAULT_OUT` must not appear or change.
+        self.assertFalse(self.board.exists())
+        fresh = _fleet_board_state()
+        with tempfile.TemporaryDirectory() as cache, \
+             mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_CACHE": cache}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh):
+            self.cp._read_board(SLUG, str(self.tmp))
+            self.cp._read_board(SLUG, str(self.tmp))
+        self.assertFalse(self.board.exists(),
+                         "the gate must never write fleet_state.DEFAULT_OUT")
+
     def test_an_aged_board_is_rebuilt(self):
         # Serving an aged cache is the unsafe direction: a lane that began work
         # after the last build is invisible in it, which reads as "nobody is
