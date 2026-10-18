@@ -23,7 +23,7 @@ the contract, why each field exists, the attack the contract *adds*, and the ver
 issue's tasks 2, 4 and 5.
 
 > **Provenance — re-measured, because the issue body is stale.** #3524's line anchors do not resolve
-> (`oauth.py:1372,1592`, `hosted_api.py:23409`, `hosted_api.py:23284-23292` are unrelated code today), and
+> (`oauth.py:1425,1592`, `hosted_api.py:23409`, `hosted_api.py:23284-23292` are unrelated code today), and
 > its `flow-map.md` F14 citation lives in a repo this one cannot open. The authoritative statements are
 > **`SCOPE.md` §4 W3, §9 class 4 and §10** (private `daniel-ospina/premise-labs`,
 > `engineering/auth/SCOPE.md`), which post-date the issue body and which #3501's own scope comment names as

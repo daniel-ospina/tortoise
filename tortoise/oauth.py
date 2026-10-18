@@ -720,8 +720,8 @@ def _canonical_redirect_target(registered: str, presented: str) -> str:
     NO authority, returned verbatim (no port to vary, and `urlunsplit` would
     promote a `//`-leading path into a netloc), and (e) a trailing empty `?`.
 
-    Total (never raises) and idempotent: rebuilding from a rebuilt target
-    returns it unchanged.
+    Total (never raises), and idempotent for a target the NAVIGABLE-port branch
+    produced; a target ending in an EMPTY port re-canonicalizes on a second pass.
 
     Called ONLY after `_redirect_uri_matches` accepted the pair; the `presented`
     port it copies is the one component the matcher never inspects.
