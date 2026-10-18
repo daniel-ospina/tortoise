@@ -1258,8 +1258,8 @@ ontology:
   extends: core
   objectKinds: [epic, issue, code, bug, incident]
   subclassOf: {epic: Project, issue: WorkItem, bug: Problem, incident: Problem}
-  equivalentTo: {issue: [pm:task]}
-  pointKinds: [requirement, technicalDebt, risk]
+  equivalentTo: {issue: [pm:issue]}
+  pointKinds: [technicalDebt, risk]
   documentKinds: [architectureDoc, apiSpec]
   kindDefs:                     # extractor prompt material (v3, epic #909)
     epic:
@@ -1284,8 +1284,13 @@ extraction:                     # extraction activation + enforcement (v3)
   enforcement:
     default: warn
     kinds:
-      requirement: retry
+      incident: retry
 ```
+
+> `requirement` is declared once, by `product-strategy`, as an **Object** kind
+> (`subclassOf: requirement: WorkItem`, #7848 owner ruling) — it is not a dev
+> point kind. The epistemic claim about a requirement is a separate Point linked
+> to it.
 
 Packs are loaded via the pack registry (`PackRegistry`) at startup; their kinds extend the core vocabulary and are queryable via `expand_kind` / `equivalentTo`. The manifest is **declarative only — no code executes on load**; connector/tool entrypoints are code references that are allowlisted (starter packs) and rejected on hosted tenant uploads (ontology-only v1, epic #1891). Authoring guidance: `docs/EXPANSION_PACKS.md` (behavior) + `packs/_template/manifest.yaml` (machine-checkable schema).
 
