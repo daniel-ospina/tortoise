@@ -346,18 +346,20 @@ jobs:
                     "response contract changed, so a clean pass cannot be told "
                     "from an unverified one; failing closed")
               sys.exit(1)
-          # The counters are coerced to DIGITS before use. Two defects die here:
+          # The counters are coerced to INTEGERS before use. Two defects die here:
           # a value carrying a newline could forge a workflow command from this
           # printer (the same forgery `show_body` indents away), and a STRING count
           # would pass the truthiness tests below while `checked == 0` silently
-          # stopped matching.
+          # stopped matching. STRICT, not "the digits inside whatever this is":
+          # filtering digits turns 2.0 into 20 and -3 into 3, a silent 10x on a green
+          # pass, so anything that is not plain digits fails closed.
           def _count(value, name):
-              digits = "".join(ch for ch in str(value) if ch.isdigit())
-              if digits == "":
-                  print(f"::error::reconcile summary field {name} is not a number "
+              text = str(value).strip()
+              if not text.isdigit():
+                  print(f"::error::reconcile summary field {name} is not an integer "
                         "- the response contract changed; failing closed")
                   sys.exit(1)
-              return int(digits)
+              return int(text)
           data = dict(data)
           for _k in ("checked", "repaired", "unchanged", "unverified", "skipped"):
               data[_k] = _count(data.get(_k), _k)
@@ -380,8 +382,8 @@ jobs:
                 print(f"::warning::{data['unverified']} org(s) could not be verified "
                       "against an active Stripe subscription (Stripe named none, the "
                       "customer lookup failed, or pricing.json could not be read) - not "
-                      "downgraded, review them; if pricing.json is unreadable, every "
-                      "org lands here")
+                      "downgraded, review them; a broken pricing.json shows up "
+                      "here AND as failed rows naming the ladder")
           if data["checked"] == 0:
               # Loud, never fatal. The enumeration is CERTIFIED complete before
               # this point (an uncertifiable one raises and 500s), so 0 means a

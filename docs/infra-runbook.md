@@ -490,11 +490,13 @@ customer's writes) and a `direction`:
   pricing ladder could not be READ (#750.8), which makes "is this tier paid?"
   UNKNOWN rather than "no" — an unread file is not evidence that a stored `pro`
   org pays nothing, so it is counted here instead of `skipped`. In that third
-  case EVERY org with a Stripe binding lands here at once: a large single-day
-  jump is `product/pricing.json`, not a mass cancellation. Nothing was verified
-  against a subscription, so this is NOT `unchanged` — and it is deliberately
-  not auto-downgraded either. Counted and logged loudly; a non-zero number is a
-  person to look at.
+  case the signature is a MIX, not a clean sweep: bound orgs whose repair
+  path also touches the ladder land in `failed` (reddening the run) with
+  rows naming the error, so a single-day jump in `unverified` TOGETHER
+  WITH `failed` rows is `product/pricing.json`, not a mass cancellation.
+  Nothing was verified against a subscription, so this is NOT `unchanged` —
+  and it is deliberately not auto-downgraded either. Counted and logged
+  loudly; a non-zero number is a person to look at.
 - `skipped` — nothing to reconcile: no `subscription_id` / `stripe_customer_id`
   at all, **or** a Stripe customer binding whose stored `tier` is at or below
   Free's cap — there is no entitlement to verify. The usual cause is an

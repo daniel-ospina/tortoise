@@ -1760,8 +1760,9 @@ class TestBillingReconcileDriverVerdicts:
         type check, so a string count printed as-is and skipped the empty-fleet
         warning — a reshaped response passed as a clean pass. A value carrying a
         newline could also emit a real workflow command from THIS printer, the
-        forgery `show_body` indents away. Counters are now coerced to digits and
-        a non-numeric one fails closed.
+        forgery `show_body` indents away. Counters are now required to be plain
+        integers, and anything else — non-numeric, float-shaped, negative — fails
+        closed rather than being reinterpreted.
         """
         import subprocess
         import threading
@@ -1810,7 +1811,16 @@ class TestBillingReconcileDriverVerdicts:
         # A non-numeric counter must fail the run, not pass as a clean one.
         proc, out = _run({**base, "checked": "lots"})
         assert proc.returncode == 1, f"a reshaped counter passed: {out}"
-        assert "checked" in out and "not a number" in out, out
+        assert "checked" in out and "not an integer" in out, out
+
+        # A float/negative-shaped counter must NOT be reinterpreted: filtering
+        # digits would turn 2.0 into 20 and -3 into 3 (measured), a silent 10x
+        # on a green pass.
+        for bad in (2.0, -3):
+            proc, out = _run({**base, "checked": bad})
+            assert proc.returncode == 1, (
+                f"a non-integer counter {bad!r} passed as a clean count: {out}")
+            assert "checked=" not in out, out
 
         # A newline inside a counter must not become a workflow command.
         proc, out = _run({**base, "unverified": "1\n::error::FORGED-BY-PAYLOAD"})

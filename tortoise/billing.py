@@ -898,8 +898,9 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
             # ``unverified`` (logged, warned, never auto-downgraded: the
             # documented outage policy), an unpaid one in ``skipped``.
             _logger.warning(
-                "billing reconcile: %s has an inactive stored subscription and "
-                "the customer lookup failed — not verified, not downgraded",
+                "billing reconcile: %s has a stored subscription that is not "
+                "PROVEN current and the customer lookup failed - not verified, "
+                "not downgraded",
                 org_id)
             return {"org_id": org_id, "action": "noop",
                     "status": sub.get("status")}
