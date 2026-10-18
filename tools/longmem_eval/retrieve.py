@@ -1052,6 +1052,16 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
             # #2518 (C2 #2513): the entity/fact-augmented key expansion
             # sparse-leg pass (default False — byte-identical when off).
             entity_key_expansion=entity_key_expansion,
+            # #8487: the SDK's rank-time valid-time selection is OFF here by
+            # design. This lane is the LAST order-owner of its measured
+            # surface (the C6 prefer-latest pass below runs on the FINAL
+            # pool, after every other pool-mover), and its re-merge sorts by
+            # RRF anyway — so the SDK-side reorder would be discarded while
+            # still moving which ids survive the ``limit`` cut. Leaving it on
+            # would perturb a sealed arm's page composition without any
+            # measurement of the product behaviour; the arm's own prefer-latest
+            # placement is unchanged.
+            _valid_time_rerank=False,
             **_sdk_kwargs,
         ):
             merged[h["id"]] = h

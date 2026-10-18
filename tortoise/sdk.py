@@ -21586,6 +21586,14 @@ class TortoiseSDK:
         # up to 3-30k keys read and biases `f` HIGH — the direction that removes
         # the saving the instrument measures. Default True = product reads.
         _record_reads: bool = True,
+        # #8487: PRIVATE — the read-path VALID-TIME selection (valid time as a
+        # selection signal, not just decoration). Default True = the product
+        # behaviour below; the LongMemEval eval lane passes False because it
+        # owns rank-time placement on its FINAL pool
+        # (``tools/longmem_eval/retrieve.py``, "the LAST order-owner of the
+        # measured surface") and its sealed arm must not have its page
+        # composition moved by this change.
+        _valid_time_rerank: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -21784,11 +21792,33 @@ class TortoiseSDK:
             structural legs keep the ORIGINAL query (date tokens would
             dilute the sparse OR-union). A DATE-PINNED query ("where did I
             live in 2024?") is deliberately NOT anchored and gets no fresh
-            bias (the invert-recency guard). Rank-time prefer-latest is a
-            caller concern (the eval applies it on its final pool — see
-            ``tools.longmem_eval.retrieve``): a stable reorder layered here
-            would be discarded by the eval's RRF re-sort. Default
-            ``time_aware=False`` → byte-identical, zero extra work.
+            bias (the invert-recency guard). Default ``time_aware=False`` →
+            byte-identical, zero extra work.
+
+            RANK-TIME VALID-TIME SELECTION (#8487) is NOT behind
+            ``time_aware``: a PREFER-LATEST query is answered from the
+            currently-valid versions whatever the anchor arm is set to.
+            Before the #8487 wiring the ranker was blind to validity — a
+            measured three-claim knowledge-update graph returned the ENDED
+            claim (``validTo`` past, ``status='live'``) and a
+            NOT-YET-EFFECTIVE claim inside the page as current facts, because
+            nothing in the read path consumed the window. On the
+            pre-truncation fused candidate set (the same seam as
+            ``exclude_status``, so ``limit`` applies AFTER the selection) the
+            page is stably reordered live-first via
+            ``tortoise.time_aware.prefer_latest_ids``: membership is
+            PRESERVED (never a filter — a historical read keeps its
+            evidence), order within each group is stable, undated entries are
+            never demoted, and an all-stale pool is returned untouched. The
+            reorder fires only when the fused page actually carries a
+            non-current entry, so an undated corpus reads byte-identically.
+            The decision is recorded on ``leg_trace`` as a ``valid_time``
+            entry (reason + demoted count) — that entry plus each hit's own
+            window (``valid_from``/``valid_to``/``end_state``/
+            ``superseded_by``) is the audit trail for "which version was
+            selected, and why". ``TORTOISE_VALID_TIME_RERANK=0`` is the
+            operator kill switch; ``_valid_time_rerank=False`` is the
+            in-process opt-out.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -22476,6 +22506,52 @@ class TortoiseSDK:
                 _logger.warning(
                     "turn-echo exclusion failed — pass-through", exc_info=True)
 
+        # 5e. (#8487) VALID-TIME SELECTION — prefer the CURRENTLY-VALID version.
+        #     Runs at the SAME pre-truncation seam as ``exclude_status`` (#898)
+        #     so ``limit`` counts already-selected candidates: a stale claim
+        #     demoted AFTER the cut has already consumed the page slot a live
+        #     one deserved. Measured defect, re-measured 2026-10-18: a
+        #     three-claim knowledge-update graph (ended / current / not-yet-
+        #     effective) came back from this method in pure relevance order with
+        #     the ended claim INSIDE the page as a current fact (rank 0 in one
+        #     read shape, rank 1 in another), and on a present-tense query the
+        #     2099-dated claim ranked first. Nothing filtered it: a claim can be
+        #     ``live`` and carry a window (`hosted_api`'s create arm writes
+        #     ``validFrom`` on live points, `mining` stamps it from the session
+        #     date), so terminal-STATUS exclusion is orthogonal to valid TIME.
+        #     The mechanism is ``time_aware.prefer_latest_order``'s rules — #2520
+        #     wrote it and the eval lane applies it to its FINAL pool, but the
+        #     product read path never did; ``prefer_latest_ids`` is the id-level
+        #     adapter over the state map the decoration reads anyway.
+        #     Never a filter: membership is preserved and an all-stale pool is
+        #     left alone. Cost when nothing is dated: one intent scan (two
+        #     bounded regexes) and ONE batch state read reused by step 7.6.
+        _valid_time_state: dict[str, dict] | None = None
+        if (query and _valid_time_rerank and result_ids
+                and entity_type == "point" and order_by == "relevance"):
+            from . import time_aware as _valid_time_rules
+            if _valid_time_rules.prefer_latest_enabled():
+                try:
+                    _vt_state = fetch_point_epistemic_state(graph, result_ids)
+                    result_ids, _vt_stats = _valid_time_rules.prefer_latest_ids(
+                        result_ids, _vt_state, query=query,
+                        question_date=_valid_time_rules.resolve_question_date(
+                            query_date))
+                    _valid_time_state = _vt_state
+                except Exception:
+                    # Fail-open, like every other decoration on this path: a
+                    # validity read must never fail a read.
+                    _logger.warning(
+                        "valid-time selection failed — pass-through",
+                        exc_info=True)
+                    _valid_time_state = None
+                else:
+                    if status_trace is not None:
+                        status_trace.append(_trace_entry(
+                            "valid_time", ran=True, degraded=False,
+                            reason=_vt_stats["reason"],
+                            count=len(_vt_stats["demoted"])))
+
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
 
@@ -22748,7 +22824,15 @@ class TortoiseSDK:
             if decoration_failed else ""
         )
         # 7.6. Promoted epistemic state (status/superseded_by/supersedes/subject) — #1353 D8/D10
-        point_state = fetch_point_epistemic_state(graph, result_ids) if entity_type == "point" else {}
+        #      #8487: reuse the read step 5e already made when the valid-time
+        #      selection ran (the page is a SUBSET of the pool it read, so a
+        #      subset of its map is the same map) — one batch read per query,
+        #      not two.
+        point_state = (_valid_time_state
+                       if (entity_type == "point"
+                           and _valid_time_state is not None)
+                       else (fetch_point_epistemic_state(graph, result_ids)
+                             if entity_type == "point" else {}))
 
         # 8. Build SearchResult objects, filter, and order
         results = []

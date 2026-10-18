@@ -17,13 +17,18 @@ distinct causes, all fixed here or by the callers of this module:
    text**, independent of any label.
 3. **Rank order is blind to supersession state.** ``superseded_by`` /
    ``validTo`` / ``expiredAt`` (E5 #1537, E6 #1538) exist precisely so a read
-   surface can prefer the latest version, and no rank-time surface does.
-   → :func:`prefer_latest_order`.
+   surface can prefer the latest version, and no rank-time surface did.
+   → :func:`prefer_latest_order` (the eval lane, #2520) and
+   :func:`prefer_latest_ids` (the SDK read path, #8487).
 
 Publication surface: pure functions + one frozen dataclass. No DB access,
 no I/O, no LLM calls, no random, no clock — the same inputs always give the
 same output. The eval lane (:mod:`tools.longmem_eval.retrieve`) and the SDK
-(:meth:`tortoise.sdk.TortoiseSDK.tortoise_fts_query`) are thin callers.
+(:meth:`tortoise.sdk.TortoiseSDK.tortoise_fts_query`) are thin callers —
+the eval lane has called :func:`prefer_latest_order` since #2520, and the
+SDK's rank-time half was wired by **#8487** (:func:`prefer_latest_ids`,
+step 5e of the read path: valid time as a SELECTION signal, membership-
+preserving, on the pre-truncation fused candidate set).
 
 Relationship to the two existing temporal detectors — deliberately distinct,
 NOT a third copy of one concept:
@@ -65,12 +70,18 @@ __all__ = [
     "DEFAULT_TIME_AWARE_RECENCY_WEIGHT",
     "PREFER_LATEST",
     "QUERY_DATE_SUFFIX",
+    "VALIDITY_RERANK_ENV",
     "TemporalIntent",
     "dense_query_for",
     "detect_temporal_intent",
+    "env_flag_from_value",
     "inject_query_date",
+    "is_not_yet_effective",
     "is_stale_entry",
+    "prefer_latest_enabled",
+    "prefer_latest_ids",
     "prefer_latest_order",
+    "resolve_question_date",
 ]
 
 # ── intent kinds ────────────────────────────────────────────────────────────
@@ -353,4 +364,219 @@ def prefer_latest_order(
         return reordered, stats
     stats["applied"] = True
     stats["reason"] = "latest-first"
+    return reordered, stats
+
+
+# ── #8487: the read-path wiring (valid time as a SELECTION signal) ──────────
+#
+# The measured defect (#8487, re-measured 2026-10-18 on the shipped read
+# path): a three-claim knowledge-update graph — an ENDED claim
+# (``validTo`` in the past, ``status='live'``), its CURRENT successor and a
+# NOT-YET-EFFECTIVE claim — came back from ``tortoise_fts_query`` in pure
+# relevance order with every window ignored: the ended claim served as
+# current, and on a present-tense query the 2099-dated claim ranked FIRST.
+#
+# The rank-time machinery already existed (:func:`prefer_latest_order`,
+# #2520) and had exactly ONE caller: the eval lane
+# (``tools/longmem_eval/retrieve.py``, on its final pool — the placement the
+# #2520 plan pinned as D3). The SDK used the dense-leg half of C6
+# (``dense_query_for``) and never the rank-time half, so the module
+# docstring's "the eval lane and the SDK are thin callers" described one
+# caller. D3 justified that with "the default product read path excludes
+# terminal points at base retrieval, so there is nothing to demote" — which
+# is FALSE for valid TIME: terminal-STATUS exclusion is orthogonal to a
+# window, and ``hosted_api`` writes ``validFrom`` on LIVE points. #8487
+# (owner-filed) therefore reopened D3's product half; the amendment is
+# recorded in that plan doc.
+#
+# These three helpers are the missing adapter, kept here (not in ``sdk.py``)
+# so the decision stays a pure function over already-fetched state: no DB, no
+# clock, no I/O — the same property :func:`prefer_latest_order` carries.
+
+#: The kill switch for the read-path validity rerank (#8487). Default ON:
+#: the reorder is MEMBERSHIP-PRESERVING and byte-identical when no candidate
+#: carries a closed/terminal window, so it cannot reorder a corpus that has
+#: no stale version in the page — a knob, not an arm that must be measured
+#: before it can be on. Explicit falsy (0/false/no/off) turns it off for an
+#: operator who wants the pre-#8487 relevance order back.
+VALIDITY_RERANK_ENV = "TORTOISE_VALID_TIME_RERANK"
+
+
+def prefer_latest_enabled(raw: object = None) -> bool:
+    """Is the read-path validity rerank ON (#8487)?
+
+    ``raw`` is the environment VALUE (``None`` = read ``os.environ``), so a
+    test never mutates the process environment. Resolution follows the ONE
+    declared env contract (#4097, ``tortoise.env_truthy.env_flag``):
+    unset/blank/garbage → the default (ON), explicit truthy → ON, explicit
+    falsy → OFF. A typo therefore never flips the knob.
+    """
+    if raw is None:
+        from .env_truthy import env_flag
+
+        return env_flag(VALIDITY_RERANK_ENV, True)
+    return env_flag_from_value(raw, True)
+
+
+def env_flag_from_value(raw: object, default: bool) -> bool:
+    """``env_flag``'s resolution over a RAW VALUE instead of a variable name.
+
+    Reads the SAME two vocabularies the declared contract owns
+    (``tortoise.env_truthy.TRUTHY`` / ``FALSY``, #4097) rather than
+    re-spelling them, so an injected value resolves exactly as the
+    environment would.
+    """
+    from .env_truthy import FALSY, TRUTHY
+
+    value = "" if raw is None else str(raw).strip().lower()
+    if not value:
+        return default
+    if value in TRUTHY:
+        return True
+    if value in FALSY:
+        return False
+    return default
+
+
+def resolve_question_date(query_date: str | None = None, *,
+                          today: str | None = None) -> str:
+    """The date a ``prefer-latest`` selection is evaluated at.
+
+    ``question_date`` is a parameter of :func:`is_stale_entry`, not its own
+    clock: with it absent a window's mere PRESENCE reads as closed (the
+    documented fallback), which would demote a claim whose ``validTo`` is in
+    the FUTURE — a scheduled end, i.e. still true. A live read therefore has
+    to name the instant it is answering for:
+
+    * the caller's ``query_date`` when it names one (the eval lane passes the
+      question's date — the #2520 contract), else
+    * today's UTC date — "is this true NOW" is precisely the question a
+      ``prefer-latest`` query asks.
+
+    ``today`` is injectable so the function stays clock-free under test.
+    An unparseable ``query_date`` falls through to ``today`` (never raises,
+    never invents a bound).
+    """
+    named = _as_date(query_date) if query_date else None
+    if named:
+        return named
+    if today is not None:
+        resolved = _as_date(today)
+        if resolved:
+            return resolved
+    return datetime.now(UTC).date().isoformat()
+
+
+def is_not_yet_effective(entry: dict, *, question_date: str | None = None) -> bool:
+    """Whether one retrieved entry's window has not STARTED at ``question_date``.
+
+    DELIBERATELY a different question from :func:`is_stale_entry`, and kept a
+    separate predicate rather than folded into it. ``is_stale_entry`` answers
+    "is this a NOT-CURRENT VERSION of its fact" — and its answer for a future
+    window is NO, a decision pinned by
+    ``tests/test_time_aware_2520.py::test_future_window_is_not_stale`` and
+    consumed by the eval lane's stale census, so it must not move.
+
+    This predicate answers the read-path question the ontology's valid time
+    (``ONTOLOGY.md`` §4.7) exists to answer: *has this claim started being true
+    yet?* A claim whose ``valid_from`` lies AFTER the instant being answered is
+    not a stale version of anything — it is a claim that was never true at that
+    instant, and serving it as the answer to "what is true now" is the same
+    class of error as serving an ended one.
+
+    Only the START is read. An absent/unparseable ``valid_from`` (an open
+    start — a legacy undated claim) is never demoted: absence of a window is
+    not evidence that the claim has not begun. An unparseable
+    ``question_date`` disables the check entirely (nothing to compare to).
+    """
+    qd = _as_date(question_date) if question_date else None
+    if qd is None:
+        return False
+    raw = entry.get("valid_from")
+    if raw is None or raw == "":
+        return False
+    start = _as_date(raw)
+    if start is None:
+        return False
+    return start > qd
+
+
+def prefer_latest_ids(
+        ids: list[str],
+        states: dict[str, dict],
+        *,
+        query: str | None,
+        question_date: str | None = None,
+        enabled: bool = True,
+) -> tuple[list[str], dict]:
+    """The ID-level adapter of :func:`prefer_latest_order` (#8487).
+
+    The read path selects ids before it builds hit dicts, so the reorder has
+    to happen there or the stale claim has already consumed a page slot.
+    ``states`` is the batch epistemic-state map
+    (``search_engine.fetch_point_epistemic_state``) — its keys are exactly
+    the ones :func:`is_stale_entry` reads (``status`` / ``superseded_by`` /
+    ``valid_to`` / ``expired_at``), so an entry is ``{"id": pid, **state}``
+    and no second vocabulary is minted here.
+
+    Returns ``(ids, stats)``. ``stats`` is :func:`prefer_latest_order`'s dict
+    plus ``intent`` (the detected kind), ``ended`` / ``not_yet_effective``
+    (the two demotion reasons, counted) and ``demoted`` (the ids moved below
+    the current rows — the audit trail #8487 asks for: a caller can say WHICH
+    version was displaced and why). Semantics, unchanged from the rules
+    function: membership is preserved, order within each group is stable, an
+    id with no state is NOT stale (an honest absence is never a demotion),
+    and an all-stale pool is returned untouched (never-starve).
+
+    Two demotion classes, both validated above, both demoted in ONE stable
+    group (the relative relevance order of two non-current claims is not
+    re-ranked — neither is "more true now"):
+
+    * ``ended`` — :func:`is_stale_entry` (superseded / terminal / closed
+      window) — the version this fact USED to have;
+    * ``not_yet_effective`` — :func:`is_not_yet_effective` — a window that has
+      not started at the answered instant.
+    """
+    items = list(ids)
+    stats: dict = {"applied": False, "reason": "", "live": 0, "stale": 0,
+                   "intent": None, "demoted": [], "ended": 0,
+                   "not_yet_effective": 0}
+    if not enabled:
+        stats["reason"] = "disabled"
+        return items, stats
+    intent = detect_temporal_intent(query)
+    stats["intent"] = intent.kind
+    if intent.kind != PREFER_LATEST:
+        stats["reason"] = "no-prefer-latest-intent"
+        return items, stats
+
+    demoted_flags: list[bool] = []
+    for pid in items:
+        entry = dict(states.get(pid) or {})
+        if is_stale_entry(entry, question_date=question_date):
+            stats["ended"] += 1
+            demoted_flags.append(True)
+        elif is_not_yet_effective(entry, question_date=question_date):
+            stats["not_yet_effective"] += 1
+            demoted_flags.append(True)
+        else:
+            demoted_flags.append(False)
+    current = [pid for pid, dead in zip(items, demoted_flags, strict=True)
+               if not dead]
+    demoted = [pid for pid, dead in zip(items, demoted_flags, strict=True)
+               if dead]
+    stats["live"], stats["stale"] = len(current), len(demoted)
+    if not demoted:
+        stats["reason"] = "no-stale-entries"
+        return items, stats
+    if not current:
+        stats["reason"] = "all-stale-never-starve"
+        return items, stats
+    reordered = current + demoted
+    if reordered == items:
+        stats["reason"] = "already-latest-first"
+        return reordered, stats
+    stats["applied"] = True
+    stats["reason"] = "latest-first"
+    stats["demoted"] = demoted
     return reordered, stats

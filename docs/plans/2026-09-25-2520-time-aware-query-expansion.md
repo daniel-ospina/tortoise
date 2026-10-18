@@ -110,6 +110,30 @@ would collide on the word `recency` (a window there, a freshness preference here
   nothing to demote. The SDK/product rank-time path is **intentionally not** made
   prefer-latest-aware (recorded under "Not covered").
 
+  > **AMENDED 2026-10-18 (#8487 — owner-filed; this paragraph's product half is SUPERSEDED).**
+  > The **owner** (daniel-ospina) filed **#8487** on 2026-10-13 — *after* this decision — requiring
+  > the read path to consume valid time: "Implement temporal selection in the retrieval/ranking
+  > path — order candidate facts by validity and prefer the latest valid version for present-tense
+  > queries." An owner instruction outranks this team-owned plan's scoping decision, so the product
+  > rank-time path IS now prefer-latest-aware (`tortoise/sdk.py::tortoise_fts_query`, step 5e).
+  > Recorded here rather than silently replaced, per the `OVERRIDES:` rule.
+  >
+  > The rationale above was also **factually incomplete**, which is why the reversal is a correction
+  > and not only an authority change: terminal-STATUS exclusion is orthogonal to valid TIME. A
+  > `Point` can be `live` and still not current — `hosted_api`'s create arm writes
+  > `validFrom = pr.point.when` on a live point (E6 #1538 D3, no status transition), and `mining`
+  > stamps `n.validFrom` from the session's frontmatter date — so a future- or past-dated live claim
+  > is product-writable. Measured on the shipped read path (2026-10-18): a three-claim
+  > knowledge-update graph (ended / current / not-yet-effective, all `status='live'`) came back in
+  > pure relevance order, the ENDED claim served as current and, on a present-tense query, the
+  > 2099-dated claim ranked FIRST. Nothing to demote was false.
+  >
+  > What did **not** move: the eval-lane placement pinned above (the reorder stays the LAST
+  > order-owner of the measured surface — `tools/longmem_eval/retrieve.py` additionally passes
+  > `_valid_time_rerank=False` so its sealed arm's page composition is unchanged). What is still
+  > open is **#8487 scope 1** — a read-side temporal parameter (`as_of`) on the canonical MCP/SDK
+  > target surface, which needs the owner's surface approval and is NOT part of this change.
+
 **D4 — `time_aware` is applied for NON-TR questions only (TR no-regression).** The eval resolves
 the arm once and passes the query-side anchor only when `not is_tr`; TR keeps its R5 stack
 completely untouched. Stated explicitly because the SDK levers are intent-gated, not category-gated
@@ -342,6 +366,13 @@ consumes the kwargs Task 2 adds). Final verification is last.
   `tortoise_recall` mode=state) exclude terminal points at base retrieval, so there is nothing to
   demote. A product-facing rank-time path would need a score/order contract the eval honours and
   its own test; that is **not** this task's scope (recorded, not silently claimed).
+  > **AMENDED 2026-10-18 (#8487):** the product half of this entry is CLOSED. The owner-filed
+  > #8487 required a product-facing rank-time path and one was shipped —
+  > `tortoise/sdk.py::tortoise_fts_query` step 5e selects on valid time before the `limit` cut
+  > (membership-preserving, `leg_trace`-recorded, `TORTOISE_VALID_TIME_RERANK=0` kill switch), with
+  > its own docker-lane tests (`tests/test_time_aware_sdk_2520.py`) and hermetic rules tests
+  > (`tests/test_time_aware_2520.py`). The eval-lane placement pinned above is unchanged. See the
+  > amendment under **D3** for why the "nothing to demote" premise did not hold.
 - The product's terminal-exclusion recall gap for **explicit-date history** ("where did I live in
   2024?" unreachable on the default search path) — this plan guarantees the fix does not *worsen*
   it and does not apply the fresh bias to it. Closing it needs a time-travel read surface; the
