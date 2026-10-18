@@ -139,12 +139,16 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     On THIS fixture the refusal is structural, not the value guard: measured
     normalised overlap is 0.80 and 0.60 against a 0.90 collapse threshold and
     the four turns are distinct, so no value pair is a collapse candidate on
-    its own account. The guard IS still consulted (39× per provenance arm on
-    the ≥0.90 content leg, plus one incidental same-turn pair whose quote does
-    not overlap), but every refusal leaves the outcome unchanged — disabling it
-    reproduces the receipt byte-for-byte. That is why the verdict's `why` says
-    so, and names where the guard's own regression lives
-    (`tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse`).
+    its own account. The guard IS still consulted, and this test pins that to
+    the COUNTERS the instrument records — not to words in a sentence. The
+    difference is not academic: an earlier revision pinned the substring
+    "not exercised here" and was false; its replacement pinned "still
+    consulted" and would have survived deleting the same-turn call site (a real
+    regression: with it gone, 300 and 400 in one turn collapse). A claim about
+    a mechanism has to move when the mechanism moves, so the assertions below
+    read `guard_calls` / `guard_refusals` / `disabling_guard_changes_output`
+    and check the `why` reproduces them.
+
     Neither "the guard caused this" nor "the guard never runs" is true here.
     """
     arm = receipt["arms"]["post_2978_assembly"]
@@ -152,12 +156,66 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     assert arm["value_slots"] == 4
     verdict = receipt["verdicts"]["value_safety"]
     assert "assembly=4/4" in verdict["measured"]
-    assert "0.90 collapse threshold" in verdict["why"], verdict["why"]
-    # The guard is CONSULTED (measured: 119 calls, 2 refusals on an incidental
-    # same-turn pair) and determines nothing (disabling it is a no-op). Pin
-    # both halves so neither half can be "tidied" into a false statement.
-    assert "still consulted" in verdict["why"], verdict["why"]
-    assert "byte-for-byte" in verdict["why"], verdict["why"]
+    # ── the leading clause is measured too, not written ─────────────────────
+    pairs_v = verdict["value_pairs"]
+    assert pairs_v == [
+        {"a": "v1", "b": "v2", "values": "300/400", "overlap": 0.8,
+         "turns": ["t1", "t2"], "distinct_turns": True},
+        {"a": "v3", "b": "v4", "values": "12/60", "overlap": 0.6,
+         "turns": ["t3", "t4"], "distinct_turns": True},
+    ], pairs_v
+    assert verdict["collapse_threshold"] == 0.9
+    for p in pairs_v:
+        assert p["overlap"] < verdict["collapse_threshold"], p
+        assert p["distinct_turns"] is True, p
+        assert f"normalised overlap {p['overlap']:.2f}" in verdict["why"], verdict["why"]
+        assert f"turns {p['turns'][0]}/{p['turns'][1]}" in verdict["why"], verdict["why"]
+    assert f"{verdict['collapse_threshold']:.2f} collapse threshold" in verdict["why"]
+    # the tail is conditional on the measurement, never fixed prose
+    assert all(p["distinct_turns"] for p in pairs_v)
+    assert "carry distinct turns" in verdict["why"], verdict["why"]
+    assert "NOT all on distinct turns" not in verdict["why"], verdict["why"]
+
+    # ── the guard is CONSULTED: measured, per arm, in the receipt ────────────
+    calls = verdict["guard_calls"]
+    refusals = verdict["guard_refusals"]
+    assert calls == {
+        "post_2978_assembly": 40,
+        "post_2978_assembly_value_marked": 40,
+        "provenance_free_assembly": 39,
+    }, calls
+    assert refusals == {
+        "post_2978_assembly": 1,
+        "post_2978_assembly_value_marked": 1,
+        "provenance_free_assembly": 0,
+    }, refusals
+    assert verdict["guard_total_calls"] == sum(calls.values()) == 119
+    assert verdict["guard_total_refusals"] == sum(refusals.values()) == 2
+
+    # The two refusals are ONE incidental same-turn pair per provenance-bearing
+    # arm. The provenance-free arm refuses NOTHING because its same-turn leg is
+    # inert (no `source_turn_id`) — NOT because it calls the guard less: it still
+    # makes its 39 pass-1 content-leg calls, all accepted. Both recorded pairs
+    # carry the same source turn and disjoint quotes, which is why a refusal
+    # decides nothing.
+    pairs = verdict["refused_pairs"]
+    assert len(pairs) == 2, pairs
+    assert {p["arm"] for p in pairs} == {
+        "post_2978_assembly",
+        "post_2978_assembly_value_marked",
+    }
+    assert {p["a"] for p in pairs} == {"the tea set cost 300 dollars"}
+    assert {p["b"] for p in pairs} == {"the cat sheds a lot"}
+    assert all(p["same_source_turn"] is True for p in pairs)
+    assert all(p["quote_overlap"] == 0.0 for p in pairs)
+
+    # ── and it determines NOTHING: the counterfactual is measured too ────────
+    assert verdict["disabling_guard_changes_output"] is False
+
+    # ── the sentence is composed FROM those numbers, so it cannot drift ──────
+    assert f"{verdict['guard_total_calls']} calls" in verdict["why"], verdict["why"]
+    assert f"{verdict['guard_total_refusals']} of them refusals" in verdict["why"], verdict["why"]
+    assert "leaves this arm's ids/order unchanged" in verdict["why"], verdict["why"]
 
 
 def test_marked_arm_orders_the_value_claims_first(receipt: dict) -> None:

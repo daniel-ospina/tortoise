@@ -168,7 +168,7 @@ controls pass, and every deferral is **filed** with an owner and a trigger.
 
 ## 2. Epic-level architecture (one statement; detail in the issues)
 
-**Two repositories — the product half is LANDED, the agent-infra half is open (measured 2026-10-11, #3512).** The Pi capture
+**Two repositories — the product half is LANDED, the agent-infra half is open (measured 2026-10-11, re-measured 2026-10-17, #3512).** The Pi capture
 mechanism was **real code in an internal tooling repo** (`agent-infra/extensions/tortoise-capture/` plus a **second
 overlapping recorder**, `reflect-hook.ts`), symlinked onto dev machines and released outside the product, so a capture
 regression was invisible to the product's gates. **Target: product-owned** (`tortoise/pi-hooks/`, mirroring
@@ -183,6 +183,10 @@ beside the shipped one.) **The shim is a TARGET, not current state:** agent-infr
 **directory** — so a farm machine has **two live producers** (a known class; the product-side handling of it is **#3713**'s,
 whose detector docstring already names the blind spot). The reduction to the shim, the dev-machine repoint and the **PR
 ordering** are **daniel-ospina/agent-infra#1671**; the disposition is recorded in `tortoise/pi-hooks/README.md` §Migration.
+**Re-measured 2026-10-17:** the second producer's egress is **gated now** — agent-infra `7e77470e4` (2026-10-16, #803)
+put both recorders on `extensions/shared/capture-gate.ts`, so the "ungated producer" wording this plan inherited is closed at
+source, and **two** shared modules move with the consolidation (`capture-gate.ts` *and* `capture-attribution.ts`, each with
+its own CI-run suite); the full measured inventory is `tortoise/pi-hooks/README.md` §Migration.
 **That cross-repo deliverable is #3512's** — the consolidation of the two recorders into ONE is #3515's, not #3512's (§8) —
 the hybrid is what defines the single recorder's shape, so consolidating first would write it twice.
 

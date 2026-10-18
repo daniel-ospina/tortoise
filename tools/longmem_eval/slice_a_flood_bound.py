@@ -105,6 +105,7 @@ import tortoise.retrieval as retrieval
 from tortoise.retrieval import (
     DEFAULT_CONTEXT_ITEM_CAP,
     DEFAULT_PACKAGE_MAX_VERBATIM,
+    DEFAULT_PACKAGE_VERBATIM_OVERLAP,
     assemble_context,
     package_evidence_pool,
     render_context,
@@ -178,13 +179,22 @@ _FLOOD_QUOTE = "the cat sheds a lot"
 #: The own-source TURNS are the pass-2 own-source leg's shape: POINTS (not raw
 #: chunks) whose content carries the `[user] ` prefix `_is_turn_point()` keys
 #: on and whose verbatim text CONTAINS the anchored quote — that containment is
-#: the leg that fires here (measured: stripping `quote` moves the arm, stripping
-#: `source_turn_id` leaves the receipt byte-identical). The eval lane's OTHER
-#: leg — the turn NODE's id equal to the point's `source_turn_id` — is not
-#: modelled by this fixture, so a regression in that leg would not be caught
-#: here. Their content differs only by non-fact-critical filler; a
-#: numeric filler would be a real value difference and the guard would —
-#: correctly — refuse to treat them as the same utterance.
+#: the leg that fires here. Measured on THIS pool: stripping `quote` changes the
+#: ids the arm emits; stripping `source_turn_id` leaves them unchanged — so the
+#: FLOOD BOUND is carried by containment, not by the id link. (The receipt as a
+#: whole does move when the id is stripped, for two reasons that are about what
+#: is REACHED and REPORTED rather than about the ids the arm emits: this
+#: instrument records id-derived metadata (`value_pairs[].turns`,
+#: `refused_pairs[].same_source_turn`), and with no id the same-turn guard leg is
+#: never reached, so the counters drop from 119 to 117.)
+#: The eval lane's OTHER leg — the turn NODE's id equal to the point's
+#: `source_turn_id` — is not modelled by this fixture, so a regression in that
+#: leg would not be caught here. Their content differs only by non-fact-critical
+#: filler. A numeric filler is NOT caught here: containment is indifferent to
+#: digits, and the value guard is not consulted on pass 2 at all (measured — a
+#: numeric filler in one of these turns leaves the arm's ids identical and the
+#: guard counters unchanged), so digits inside a turn tail collapse exactly as
+#: verbal filler does.
 _TURN_TAILS = (
     "which they said",
     "as they remember it",
@@ -192,8 +202,10 @@ _TURN_TAILS = (
 )
 #: The own-source CHUNKS must be DISTINCT documents (that is what makes the
 #: pass-2 leg measurable): same-session duplicate content would dedup on its
-#: own, so each chunk carries its own filler words — no digits, so the chunk
-#: set never trips the value guard.
+#: own, so each chunk carries its own filler words. They are digit-free for
+#: readability, NOT for safety: the value guard is never consulted on pass 2
+#: (measured — digit-bearing chunk fillers leave the receipt byte-identical), so
+#: a digit here could not have tripped it either way.
 _CHUNK_FILLERS = (
     "brushing",
     "vacuum",
@@ -496,6 +508,35 @@ def _slot_census(admitted: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _probe_value_guard() -> Iterator[dict[str, Any]]:
+    """Count `_pkg_differ_value_critical` calls/refusals for the duration.
+
+    The value-safety verdict makes a claim about a MECHANISM ("the guard is
+    consulted N times and refuses M"), and a claim about a mechanism that
+    nothing measures is prose: a deleted guard call site would leave the
+    receipt asserting it while every gate stayed green. So the counters are
+    recorded in the receipt and asserted by the test — the sentence is
+    composed FROM them, and a change in the mechanism moves them.
+    """
+    original = retrieval._pkg_differ_value_critical
+    counts: dict[str, Any] = {"calls": 0, "refusals": 0, "refused_pairs": []}
+
+    def _counting(a: str, b: str) -> bool:
+        counts["calls"] += 1
+        out = original(a, b)
+        if out:
+            counts["refusals"] += 1
+            counts["refused_pairs"].append({"a": a, "b": b})
+        return out
+
+    retrieval._pkg_differ_value_critical = _counting
+    try:
+        yield counts
+    finally:
+        retrieval._pkg_differ_value_critical = original
+
+
 def measure() -> dict[str, Any]:
     """Run the three primary arms + two variant arms + the duplicate-free
     control over the C2-shaped pool. The provenance-free pool is recorded as
@@ -520,7 +561,8 @@ def measure() -> dict[str, Any]:
         question_date=QUESTION_DATE,
     )
 
-    packaged, pkg_stats = package_evidence_pool(pool)
+    with _probe_value_guard() as assembly_guard:
+        packaged, pkg_stats = package_evidence_pool(pool)
     assembly = assemble_context(
         packaged,
         top_k=WINDOW_ITEM_CAP,
@@ -529,7 +571,8 @@ def measure() -> dict[str, Any]:
         question_date=QUESTION_DATE,
     )
 
-    marked_packaged, marked_stats = package_evidence_pool(pool, mark_for=_value_mark_provider)
+    with _probe_value_guard() as marked_guard:
+        marked_packaged, marked_stats = package_evidence_pool(pool, mark_for=_value_mark_provider)
     assembly_marked = assemble_context(
         marked_packaged,
         top_k=WINDOW_ITEM_CAP,
@@ -561,7 +604,8 @@ def measure() -> dict[str, Any]:
     # with no ``quote``/``source_turn_id`` the own-source leg is inert and the
     # flood is NOT bounded by pass 2. Measured, not assumed.
     bare = [{k: v for k, v in h.items() if k not in ("quote", "source_turn_id")} for h in pool]
-    bare_packaged, bare_stats = package_evidence_pool(bare)
+    with _probe_value_guard() as bare_guard:
+        bare_packaged, bare_stats = package_evidence_pool(bare)
     bare_assembly = assemble_context(
         bare_packaged,
         top_k=WINDOW_ITEM_CAP,
@@ -569,6 +613,92 @@ def measure() -> dict[str, Any]:
         max_context_tokens=MAX_CONTEXT_TOKENS,
         question_date=QUESTION_DATE,
     )
+
+    # Counterfactual for the "its refusals decide no outcome here" clause: force
+    # the guard to accept everything and re-run the provenance-bearing arm. A
+    # diff here means a refusal CHANGED the outcome, and the verdict must say so
+    # rather than assert inertness.
+    _original_guard = retrieval._pkg_differ_value_critical
+    retrieval._pkg_differ_value_critical = lambda a, b: False
+    try:
+        packaged_unguarded, _ = package_evidence_pool(pool)
+        assembly_unguarded = assemble_context(
+            packaged_unguarded,
+            top_k=WINDOW_ITEM_CAP,
+            context_item_cap=WINDOW_ITEM_CAP,
+            max_context_tokens=MAX_CONTEXT_TOKENS,
+            question_date=QUESTION_DATE,
+        )
+    finally:
+        retrieval._pkg_differ_value_critical = _original_guard
+    # ``assemble_context`` returns the ordered context ITEMS, so the projection
+    # is the id sequence plus the rendered probe text — the two things the
+    # receipt reports about the arm.
+    def _proj(items: list[dict[str, Any]]) -> list[tuple[Any, str]]:
+        return [(i.get("id"), str(i.get("quote") or i.get("content"))[:60]) for i in items]
+
+    disabling_guard_changes_output = _proj(assembly_unguarded) != _proj(assembly)
+
+    # The value PAIRS the verdict's leading clause talks about, measured: the
+    # overlap that decides whether the collapse threshold can even bite, and the
+    # turns (a pair on the same turn is a same-turn candidate; these are not).
+    _by_id = {h.get("id"): h for h in pool}
+    value_pairs = []
+    for a, b in (("v1", "v2"), ("v3", "v4")):
+        qa = str(_by_id.get(a, {}).get("quote") or "")
+        qb = str(_by_id.get(b, {}).get("quote") or "")
+        ta = _by_id.get(a, {}).get("source_turn_id")
+        tb = _by_id.get(b, {}).get("source_turn_id")
+        _num = lambda q: next((t for t in q.replace("/", " ").split() if t.isdigit()), "?")  # noqa: E731
+        value_pairs.append(
+            {
+                "a": a,
+                "b": b,
+                "values": f"{_num(qa)}/{_num(qb)}",
+                "overlap": round(retrieval._pkg_overlap(qa, qb), 4),
+                "turns": [ta, tb],
+                "distinct_turns": ta != tb,
+            }
+        )
+
+    guard_calls = {
+        "post_2978_assembly": assembly_guard["calls"],
+        "post_2978_assembly_value_marked": marked_guard["calls"],
+        "provenance_free_assembly": bare_guard["calls"],
+    }
+    guard_refusals = {
+        "post_2978_assembly": assembly_guard["refusals"],
+        "post_2978_assembly_value_marked": marked_guard["refusals"],
+        "provenance_free_assembly": bare_guard["refusals"],
+    }
+    total_calls = sum(guard_calls.values())
+    total_refusals = sum(guard_refusals.values())
+    _pool_by_quote = {h.get("quote"): h for h in pool if h.get("quote")}
+    refused_pairs = []
+    for arm_name, g in (
+        ("post_2978_assembly", assembly_guard),
+        ("post_2978_assembly_value_marked", marked_guard),
+        ("provenance_free_assembly", bare_guard),
+    ):
+        for rp in g["refused_pairs"]:
+            ha, hb = _pool_by_quote.get(rp["a"]), _pool_by_quote.get(rp["b"])
+            refused_pairs.append(
+                {
+                    "arm": arm_name,
+                    "a": rp["a"],
+                    "b": rp["b"],
+                    "same_source_turn": (
+                        ha.get("source_turn_id") == hb.get("source_turn_id")
+                        if ha and hb
+                        else None
+                    ),
+                    "quote_overlap": (
+                        round(retrieval._pkg_overlap(rp["a"], rp["b"]), 4)
+                        if hasattr(retrieval, "_pkg_overlap")
+                        else None
+                    ),
+                }
+            )
 
     receipt: dict[str, Any] = {
         "issue": 8043,
@@ -694,17 +824,64 @@ def measure() -> dict[str, Any]:
                 f"assembly="
                 f"{len(arms['post_2978_assembly']['value_claims_present'])}/4"
             ),
-            "why": "the 300/400 (normalised overlap 0.80) and 12/60 (0.60) "
-            "pairs sit below the 0.90 collapse threshold and carry distinct "
-            "turns, so no value pair is a collapse candidate on its own "
-            "account. The guard is still consulted — 39x per provenance arm "
-            "on the >=0.90 content leg, plus one incidental same-turn pair "
-            "(v1 shares source_turn_id t1 with the flood anchor; its quote "
-            "does not overlap) — and every refusal leaves the outcome "
-            "unchanged: disabling _pkg_differ_value_critical reproduces this "
-            "receipt byte-for-byte. Its own regression is "
-            "tests/test_evidence_assembly.py::"
-            "test_production_length_different_values_never_collapse",
+            # MEASURED, not asserted in prose: these counters are what a
+            # deletion of the guard (or of one of its call sites) moves. The
+            # receipt's sentence below is COMPOSED from them, so a mechanism
+            # change cannot leave a true-sounding claim behind.
+            "guard_calls": guard_calls,
+            "guard_refusals": guard_refusals,
+            "guard_total_calls": total_calls,
+            "guard_total_refusals": total_refusals,
+            "disabling_guard_changes_output": disabling_guard_changes_output,
+            "refused_pairs": refused_pairs,
+            "value_pairs": value_pairs,
+            "collapse_threshold": DEFAULT_PACKAGE_VERBATIM_OVERLAP,
+            "why": (
+                "the "
+                + " and ".join(
+                    f"{p['values']} (normalised overlap {p['overlap']:.2f}, "
+                    f"turns {p['turns'][0]}/{p['turns'][1]}"
+                    + ("" if p["distinct_turns"] else " — SAME TURN")
+                    + ")"
+                    for p in value_pairs
+                )
+                + f" pairs sit below the {DEFAULT_PACKAGE_VERBATIM_OVERLAP:.2f} "
+                "collapse threshold and "
+                + (
+                    "carry distinct turns"
+                    if all(p["distinct_turns"] for p in value_pairs)
+                    else "are NOT all on distinct turns"
+                )
+                + (
+                    ", so no value pair is a collapse candidate on its own account"
+                    if all(p["distinct_turns"] for p in value_pairs)
+                    else ". "
+                    + " and ".join(
+                        p["values"] for p in value_pairs if not p["distinct_turns"]
+                    )
+                    + (
+                        " sits on a single turn, so THAT pair is a same-turn "
+                        "candidate and the guard leg below is what this arm exercises"
+                        if sum(1 for p in value_pairs if not p["distinct_turns"]) == 1
+                        else " sit on a single turn, so THOSE pairs are same-turn "
+                        "candidates and the guard leg below is what this arm exercises"
+                    )
+                )
+                + f". The guard is still consulted — {total_calls} calls "
+                "across the three packaging arms ("
+                + ", ".join(f"{k}={v}" for k, v in guard_calls.items())
+                + f"), {total_refusals} of them refusals ("
+                + ", ".join(f"{k}={v}" for k, v in guard_refusals.items())
+                + ") — and forcing it to accept everything "
+                + (
+                    "CHANGES this arm's ids/order, so a refusal decides an outcome here"
+                    if disabling_guard_changes_output
+                    else "leaves this arm's ids/order unchanged, so no refusal decides an outcome here"
+                )
+                + ". Its own regression is "
+                "tests/test_evidence_assembly.py::"
+                "test_production_length_different_values_never_collapse"
+            ),
         },
         "provenance_leg_is_lane_scoped": {
             "measured": (
