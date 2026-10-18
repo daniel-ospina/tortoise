@@ -4938,21 +4938,33 @@ class _EntityHandlers:
             # the CASE pair is what keeps the two columns moving together if the
             # query is ever run without it. Both read the PRE-write
             # `s.contentHash` — pinned by
-            # `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`.
+            # `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`,
+            # which runs against the LIVE engine (`live_proj`) precisely because
+            # this class is invisible on the embedded one (#8870).
+            #
+            # ⛔ ORDER IS LOAD-BEARING (#8870): `s.version` is computed BEFORE
+            # `s.contentHash` is written, so its guard still sees the STORED
+            # hash. Cypher on the server engine applies SET items LEFT TO RIGHT
+            # and each item observes what the earlier ones wrote; the embedded
+            # engine does not. A `contentHash`-first list therefore reported
+            # `version` as constant on FalkorDB while the embedded lane (and
+            # this function's own pin, before it was moved onto the live
+            # engine) stayed green — a false green bought by testing on the
+            # engine that cannot see the bug.
             self.g.query(
                 "MATCH (s:Source {url: $url}) "
                 "WHERE s.sourceKind IN $ck "
                 "  AND (s.contentHash IS NULL OR s.contentHash = '' "
                 "       OR s.contentHash <> $ch) "
-                "SET s.contentHash=CASE "
-                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
-                "             OR s.contentHash <> $ch THEN $ch "
-                "        ELSE s.contentHash END, "
-                "    s.version=CASE "
+                "SET s.version=CASE "
                 "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
                 "             OR s.contentHash <> $ch "
                 "             THEN coalesce(s.version, 0) + 1 "
-                "        ELSE coalesce(s.version, 1) END",
+                "        ELSE coalesce(s.version, 1) END, "
+                "    s.contentHash=CASE "
+                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+                "             OR s.contentHash <> $ch THEN $ch "
+                "        ELSE s.contentHash END",
                 params={"url": key, "ch": ch,
                         "ck": list(_CONNECTOR_SOURCE_KINDS)},
             )
@@ -5281,10 +5293,19 @@ class _EntityHandlers:
             # contentHash/references survive, version unchanged). Stubs
             # (NULL stored hash) are still COMPLETED by a real $hash, and the
             # hash-diff bump is unchanged for callers that DO carry a hash.
-            "ON MATCH SET s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
-            "                          WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                          THEN $hash ELSE s.contentHash END, "
-            "           s.title = CASE WHEN $hash IS NULL THEN s.title "
+            # ⛔ THE GUARDED COLUMN IS WRITTEN LAST (#8870). Cypher applies the
+            # SET items of one clause LEFT TO RIGHT and each item observes the
+            # values the earlier items just wrote; the EMBEDDED engine does not
+            # (#8870 measured both: server `SET s.a=1, s.b=s.a` → `(1,1)`,
+            # embedded → `(1,None)`). Every item below tests `s.contentHash`
+            # against `$hash` to decide "is this a NEW version?", so the hash
+            # must not be installed until ALL of them have read it — otherwise
+            # each comparison reads the hash this same clause just wrote, sees
+            # "unchanged", and `version`, `updatedAt`, `validFrom`, `title` and
+            # `_searchText` are silently skipped on the only engine that can see
+            # it. Measured on FalkorDB with a content-changing repoll: hash
+            # `bf64f552…` → `01c54ed4…` with `version` stuck at 1.
+            "ON MATCH SET s.title = CASE WHEN $hash IS NULL THEN s.title "
             "                   WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                   THEN coalesce($title, s.title) ELSE s.title END, "
             # Lane L5 (#5097 review P1): the bump is GATED ON THE SAME
@@ -5388,7 +5409,12 @@ class _EntityHandlers:
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
-            "           s.format = coalesce($fmt, s.format) "
+            "           s.format = coalesce($fmt, s.format), "
+            # ⛔ LAST, and it must stay last — see the ORDER note at the head of
+            # this ON MATCH clause (#8870).
+            "           s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
+            "                             WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                             THEN $hash ELSE s.contentHash END "
             # #5024 P1-A: the atomic pre-write capture above rides the write's
             # own result. `null` (a create) is a REAL value here, not a
             # swallowed failure — the caller no longer has a pre-read that can
