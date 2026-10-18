@@ -21210,7 +21210,9 @@ class TortoiseSDK:
                 "repo_not_indexed": False,
                 "data_points": [],
                 "insight": "The graph has no prior knowledge yet — nothing to pull. "
-                            "Run tortoise_onboarding_github_index to seed it.",
+                            "Run tortoise_manage_sources(action=\"enable\", "
+                            "source=\"github_issues\") to seed it — that call "
+                            "indexes EVERY connected repo, not one.",
                 "more_in_graph": None,
                 "repo_stats": None,
             }
@@ -21247,7 +21249,10 @@ class TortoiseSDK:
                 "repo_not_indexed": True,
                 "data_points": data_points,
                 "insight": f"Graph is populated but '{repo}' has no indexed issues yet — "
-                            "run tortoise_onboarding_github_index to index it.",
+                            "run tortoise_manage_sources(action=\"enable\", "
+                            "source=\"github_issues\") to index it. That call has "
+                            "no per-repo scope: it indexes EVERY connected repo, "
+                            f"so '{repo}' is covered only if it is one of them.",
                 "more_in_graph": None,
                 "repo_stats": None,
             }
