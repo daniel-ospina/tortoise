@@ -3365,6 +3365,16 @@ surfaces:
   # class). This file pins that calendar attendees are grounded on the meeting's
   # OWN evidence before they become CRM contacts/opportunities.
   - test_8491_cal_attendee_grounding.py
+  # #8102 (pilot consumer, indicator 4 of #2081). `integrations/` is a flat
+  # NON_PYTHON_PREFIXES entry and `integrations/webhooks/pilot/app.py` matches no
+  # SOURCE_PATTERNS row, so a pilot-only change was filtered out BEFORE the
+  # "not matched -> core" fallback — the #1349/#3332/#6138 silent-drop class.
+  # Registered here AND wired through the CORE_ALSO entry in
+  # tools/ci_selection.py (the documented remedy for this class). This file pins
+  # the consumer contract against the REAL dispatcher (real httpx transport, real
+  # loopback listener): push-not-poll, signature accept/reject, and forced
+  # re-delivery producing zero duplicated effects across an app restart.
+  - test_webhook_pilot.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -5766,6 +5776,7 @@ durations:
   test_version_vector.py: 0.2
   test_volunteer_contract.py: 0.3
   test_w7_publish.py: 0.1
+  test_webhook_pilot.py: 2.0  # unmeasured — new in #8102; no sweep has collected it, so it carries the flat default exactly as an absent key would (the #3419/`test_venture_pack.py` rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file (locally ~18.6s for 9 tests — a real loopback listener, a real `httpx` transport and an embedded graph per test — so a future sweep should land well above this flat default and should be taken from the junit, not from a laptop).
   test_waitlist_form.py: 0.2
   test_website_static.py: 0.4
   test_weights.py: 0.1

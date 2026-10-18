@@ -23,6 +23,7 @@ New reference specifications should be added to `docs/reference/`.
 | **Registry Graph Schema** | [`docs/registry-graph-schema.md`](../registry-graph-schema.md) | Account layer vs. in-graph Subjects, `Graph` entity, scoped `APIKey`, and quota schema. |
 | **Ingest Contract** | [`docs/INGEST_CONTRACT.md`](../INGEST_CONTRACT.md) | Bundle API contract for `tortoise_ingest` and `sdk.ingest`. |
 | **Capacity & Limits** | [`docs/capacity.md`](../capacity.md) | Write concurrency by deployment mode, rate limits, `max_graph_nodes` plan caps, latency targets, and storage footprint. |
+| **Webhook Consumer Contract** | [`docs/reference/webhook-consumer-contract.md`](webhook-consumer-contract.md) | The receiving half of the #2081 push path: exact headers (`X-Tortoise-Signature`, `X-Tortoise-Delivery`, `X-Tortoise-Event`, `X-Tortoise-Seq`), the delivery envelope, signature verification, at-least-once dedupe rules, retry/backoff + disable semantics, receipt reads, and the gaps measured by the pilot (#8102). |
 
 ## MCP & Public SDK Surface Manifests
 

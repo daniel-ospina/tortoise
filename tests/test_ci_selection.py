@@ -8067,3 +8067,24 @@ def test_dashboard_deploy_script_change_selects_core_not_tier1():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_e2e_wrangler_prewarm.py" in r["test_files"], r
+
+
+def test_webhook_pilot_change_selects_core_not_tier1():
+    # #8102 (pilot consumer, indicator 4 of #2081): `integrations/webhooks/
+    # pilot/app.py` is the only real consumer of the push path, and its guard
+    # (tests/test_webhook_pilot.py, registered `core`) pins the consumer
+    # contract — push-not-poll, signature accept/reject, forced re-delivery
+    # producing zero duplicated effects. `integrations/` is a flat
+    # NON_PYTHON_PREFIXES entry and the app matches no SOURCE_PATTERNS row, so
+    # without the CORE_ALSO entries an app-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback, took the docs-only early return and fell
+    # back to tier-1 smoke, where that guard is NOT selected — the
+    # #1349/#3332/#6136 silent-drop class.
+    #
+    # Mutation check: removing either CORE_ALSO entry fails the matching assert.
+    for changed in ("integrations/webhooks/pilot/app.py",
+                    "integrations/webhooks/pilot/demo.py"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_webhook_pilot.py" in r["test_files"], (changed, r)

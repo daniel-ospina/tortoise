@@ -1286,7 +1286,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_surface_tools_change_selects_core_not_tier1.
              "tools/surface-guard.py",
-             "tools/surface_manifest.py")
+             "tools/surface_manifest.py",
+             # #8102 (pilot consumer, indicator 4 of #2081): the pilot app and its
+             # demo own tests/test_webhook_pilot.py (registered `core`), but
+             # `integrations/` is a flat NON_PYTHON_PREFIXES entry and neither
+             # path matches a SOURCE_PATTERNS row — so a pilot-only change came
+             # back with `changed == []`, took the docs-only early return and fell
+             # back to tier-1 smoke: the consumer-contract pins (push-not-poll,
+             # signature accept/reject, forced re-delivery producing zero
+             # duplicated effects) would not have run on the PR that edits the
+             # only real consumer of the push path. Same #1349/#3332/#3616
+             # silent-drop class as the `tools/` entries above; `CORE_ALSO` (not
+             # `TOOL_CARVEOUTS`) because the guard is `core`-registered, and a
+             # name in a surface's test_files only runs when that surface is
+             # ALREADY selected. Pinned by
+             # tests/test_ci_selection.py::test_webhook_pilot_change_selects_core_not_tier1.
+             "integrations/webhooks/pilot/app.py",
+             "integrations/webhooks/pilot/demo.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
