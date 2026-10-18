@@ -23,9 +23,19 @@ name: billing-reconcile-cron
 # answers 200 with a summary. This job fails the run AND PAGES TELEGRAM when:
 #   * the request itself fails (curl rc != 0: app down / internal key wrong /
 #     the 600 s client ceiling), or
-#   * the endpoint answers 503 `enumeration_incomplete` (the pass could not
-#     certify the WHOLE fleet, so it compared an unknown fraction of it and
-#     refuses to report that as clean), or
+#   * the endpoint answers 503 — and the CAUSE is named, because the three 503
+#     causes want OPPOSITE responses:
+#       - `enumeration_incomplete`: the pass could not certify the WHOLE fleet,
+#         so it compared an unknown fraction of it and refuses to report that as
+#         clean — RETRY once the control plane is readable.
+#       - `reconcile_stuck`: a previous pass has held the reconcile lock past
+#         its staleness bound and is presumed WEDGED — the fleet is NOT being
+#         reconciled, and retrying will NOT help (the lock clears when that pass
+#         ends or the process restarts).
+#       - anything else: UNRECOGNISED — the driver refuses to name a runbook it
+#         cannot verify, and says so instead of guessing. Do not collapse these
+#         arms back into one: naming the wrong cause was a real defect here.
+#     (see `_BILLING_RECONCILE_STALE_S` in `tortoise/hosted_api.py`), or
 #   * the response cannot be read as a summary at all (not a JSON object, or
 #     missing any field the verdict below keys on — a shape change must fail
 #     closed, never read as a clean pass), or

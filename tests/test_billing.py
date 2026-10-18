@@ -2632,13 +2632,20 @@ class TestReconcileSweep:
         monkeypatch.setattr(ha, "_BILLING_RECONCILE_INFLIGHT", _Held())
         headers = {"Authorization": "Bearer internal-test-key"}
 
-        # The bound is not a free knob: it must stay well clear of the driver's
-        # own client ceiling (``curl -m 600`` in the cron step) or a HEALTHY
-        # long pass gets libelled "presumed WEDGED" and pages on a working
-        # fleet. Pinned, so shrinking it is not a green change.
+        # The bound is not a free knob, and it is bounded in BOTH directions.
+        # Below: it must stay well clear of the driver's own client ceiling
+        # (``curl -m 600`` in the cron step) or a HEALTHY long pass gets libelled
+        # "presumed WEDGED" and pages on a working fleet. Above: it must stay
+        # inside the 24 h cadence, or a genuinely wedged pass answers 202 to
+        # every run, the scheduled branch exits 0, and the page NEVER fires —
+        # the silent direction, and the one a "raise it to be safe" edit takes.
         assert ha._BILLING_RECONCILE_STALE_S >= 3600.0, (
             "the staleness bound must keep a wide margin over the driver's "
             "600 s client ceiling, or a healthy long pass pages as wedged"
+        )
+        assert ha._BILLING_RECONCILE_STALE_S < 86400.0, (
+            "the staleness bound must stay inside the daily cadence, or a "
+            "wedged pass is never paged at all"
         )
 
         # A hold inside the bound is the documented benign overlap.
