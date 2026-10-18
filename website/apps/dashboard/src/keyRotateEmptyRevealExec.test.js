@@ -51,6 +51,10 @@ import { stripComments } from './testSupport.js'
 // too, so a test that extracted a local declaration would fail loudly rather
 // than silently stop guarding the seams.
 import { revealablePlaintext, revealableMintPlaintext } from './sessionKey.js'
+// #4721 (review P2): the banner's message normaliser, IMPORTED from its real
+// home (upsellGate.js) rather than stubbed — a stub with different null
+// semantics would let the composed banner be tested against the stub.
+import { errorMessage } from './upsellGate.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -336,6 +340,10 @@ test('#8249 (review P2): the composed banner shows the refusal, not the refresh 
   // failure (rotate succeeded, follow-up `loadAll('')` failed) must render the
   // destroyed-key message. On the pre-fix main.jsx the helper does not exist,
   // so the extraction throws — the test cannot pass vacuously.
+  //
+  // #4721 (review P2): "outranks" is a PRECEDENCE, not a discard — the refusal
+  // renders FIRST and the transient text after it, so no truth is dropped
+  // (see the latched-refusal/409 case below).
   const { calls, regenerateKey } = rotateEnv({
     response: { id: 'k-new', key_prefix: 'tt_rot_new' },
     loadAll: (c) => { c.error.push('Failed to fetch') },
@@ -345,16 +353,61 @@ test('#8249 (review P2): the composed banner shows the refusal, not the refresh 
     'the refresh failure did land in the error slot (the precondition for the displacement)')
   const refusal = refusalOf(calls)
   const { errorBannerText } = build(
-    { errorMessage: (e) => (typeof e === 'string' ? e : (e && e.message) || 'error') },
+    { errorMessage },
     ['function errorBannerText'])
-  assert.equal(errorBannerText('Failed to fetch', refusal), refusal,
-    'the retained refusal OUTRANKS the refresh error in the composed banner')
+  const composed = errorBannerText('Failed to fetch', refusal)
+  assert.ok(composed.startsWith(refusal),
+    'the retained refusal OUTRANKS the refresh error — it renders FIRST, so it is never hidden')
+  assert.match(composed, /Failed to fetch/,
+    'and the transient text is appended rather than discarded — the refusal is a precedence, not a filter')
   assert.equal(errorBannerText('Failed to fetch', ''), 'Failed to fetch',
     'an absent refusal leaves the error slot authoritative — the three-branch banner is unchanged')
   assert.equal(errorBannerText(null, 'only a refusal'), 'only a refusal',
     'and a refusal with no error renders alone')
   assert.match(mainJsxCode, /\{errorBannerText\(error, rotateRefusalText\)\}/,
     'the JSX banner must render the composed message, not `error ? errorMessage(error) : rotateRefusalText`')
+})
+
+test('#4721 (review P2): a LATCHED refusal does not swallow a newer definite 4xx detail', async () => {
+  // The sequence the #8249 refusal's own remedy invites: it ends "Refresh the
+  // list, revoke the unused replacement row, and create a new key". A user who
+  // instead retries the rotate on the now-dead row gets the non-occupying 409 —
+  // and until this fix `errorBannerText` returned the latched refusal and the
+  // 409 detail (the one thing the definite-4xx branch exists to restore) never
+  // reached the screen. Both are true, so both must render, refusal first.
+  let call = 0
+  const env = rotateEnv({
+    // 1st: the plaintext-less 2xx that latches the #8249 refusal for org-A.
+    // 2nd: the definite non-occupying 409 on the row that 1st rotate killed.
+    apiImpl: async () => {
+      call += 1
+      if (call === 1) return { id: 'k-new', key_prefix: 'tt_rot_one' }
+      throw Object.assign(new Error(ROTATE_409_NOT_OCCUPYING), { status: 409 })
+    },
+    loadAll: revokedReload,
+  })
+  await env.regenerateKey('k-old')
+  const refusal = refusalOf(env.calls)
+  assert.match(refusal, /has already been revoked/,
+    'precondition: the plaintext-less rotate latched the destroyed-key refusal')
+  await env.regenerateKey('k-old')
+  const surfaced = env.calls.error.filter(Boolean).at(-1)
+  assert.equal(surfaced, ROTATE_409_NOT_OCCUPYING,
+    'the definite 409 detail is the LAST write to the transient slot')
+  assert.equal(refusalOf(env.calls), refusal,
+    'and the refusal is not cleared — a refusal can never erase the destruction record')
+  const { errorBannerText } = build(
+    { errorMessage },
+    ['function errorBannerText'])
+  const banner = errorBannerText(surfaced, refusal)
+  assert.ok(banner.startsWith(refusal),
+    'the retained destruction record still renders FIRST (#8249 precedence kept)')
+  assert.match(banner, /rotate requires a live key/,
+    'and the newer definite 4xx detail is REACHABLE in the banner (#4721)')
+  // Non-vacuity: the pre-fix helper is `refusalText || errorMessage(error)`.
+  const preFix = (e, r) => r || (typeof e === 'string' ? e : (e && e.message) || 'error')
+  assert.doesNotMatch(preFix(surfaced, refusal), /rotate requires a live key/,
+    'the pre-fix banner DROPS the detail this case is about')
 })
 
 test('#8249: a team switch during the rotate RTT retains the plaintext-less refusal', async () => {
@@ -613,6 +666,136 @@ test('#4355: a rotate 402 is the OVER-cap case and uses the over-cap copy', asyn
   assert.match(notice, /rotate cap: /, 'the 402 routes to the rotate-specific notice')
   assert.match(notice, /Team api_keys limit reached/)
   assert.deepEqual(calls.error, ['', ''], 'the cap notice owns the message slot (no raw error)')
+})
+
+// ── #4721: a DEFINITE refusal is not an ambiguous one ──────────────────────
+//
+// The disclosure above exists for failures where the client cannot know what
+// the server did. Two rotate 409s are the opposite: the reply is in hand, and
+// it says nothing was left behind — the lost-claim race ROLLED BACK the
+// replacement, and the non-occupying refusal minted nothing at all. Both
+// arrive with the target row `revoked_at` set (a concurrent revoke or rotate
+// really did kill it), so the re-read the ambiguous branch performs finds a
+// revoked row and reports a COMPLETED rotate — telling the user to revoke a
+// replacement that does not exist. These cases pin the server's own detail.
+const ROTATE_409_LOST_CLAIM =
+  'API key is no longer active — it was revoked while this rotation ran; the replacement was rolled back. Retry or rotate another key.'
+const ROTATE_409_NOT_OCCUPYING =
+  'API key is not active — rotate requires a live key that occupies a key slot'
+// The state that turns the ambiguous branch into the false completed-rotate
+// claim: the target row is dead, so `after.revoked_at` is set.
+const revokedReload = () => [
+  { id: 'k-old', key_id: 'k-old', revoked_at: '2026-09-21T00:00:00.000Z' },
+]
+// Every disclosure the branch must NOT make about a rotate that minted
+// nothing: no completion claim, no replacement to go revoke, no ambiguity.
+function assertNoReplacementClaim(msg) {
+  assert.doesNotMatch(msg, /may have completed/, 'the rotate provably did not complete')
+  assert.doesNotMatch(msg, /replacement key exists/, 'no replacement exists — none was minted')
+  assert.doesNotMatch(msg, /shows as revoked/, 'the old row is dead, but that is not evidence of a completed rotate')
+  assert.doesNotMatch(msg, /could not be confirmed/, 'the server stated the outcome precisely')
+  assert.doesNotMatch(msg, /Revoke the unused replacement/, 'nothing is left to revoke')
+}
+
+test('#4721: a rotate 409 (lost claim) surfaces the server detail, never a completed-rotate claim', async () => {
+  // The row IS revoked on re-read (a concurrent rotate/revoke won the row), so
+  // a branch that re-reads and reports "it may have completed" is describing
+  // an outcome the server already denied, and naming a replacement this
+  // request rolled back.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error(ROTATE_409_LOST_CLAIM), { status: 409 }),
+    loadAll: revokedReload,
+  })
+  await regenerateKey('k-old')
+  const surfaced = calls.error.filter(Boolean)
+  assert.deepEqual(surfaced, [ROTATE_409_LOST_CLAIM],
+    "a definite refusal keeps the server's own detail — it is the precise account of what happened")
+  assert.equal(calls.loadAll, 1,
+    'the table must show what the refusal describes — the target row IS revoked server-side')
+  assert.deepEqual(calls.rotateOutcomes, [],
+    'a refusal can never latch a reveal — no plaintext was delivered')
+  assertNoReplacementClaim(surfaced.join('\n'))
+})
+
+test('#4721: a rotate 409 (non-occupying row) surfaces the server detail and mints nothing', async () => {
+  // The other deterministic 409: the target was already revoked/expired/
+  // bootstrap, so the cap never charged it and the server minted nothing.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error(ROTATE_409_NOT_OCCUPYING), { status: 409 }),
+    loadAll: revokedReload,
+  })
+  await regenerateKey('k-old')
+  const surfaced = calls.error.filter(Boolean)
+  assert.deepEqual(surfaced, [ROTATE_409_NOT_OCCUPYING],
+    "the server's refusal detail is the disclosure — that is the pre-#4355 behaviour this branch restores")
+  assert.equal(calls.loadAll, 1,
+    'the table still re-reads — a definite refusal says the row is not live, so the row must not render as live')
+  assert.deepEqual(calls.rotateOutcomes, [],
+    'and a refusal still latches no reveal — nothing was minted')
+  assertNoReplacementClaim(surfaced.join('\n'))
+})
+
+test('#4721: the definite-4xx branch refreshes FIRST, so a failing refresh cannot clobber the server detail', async () => {
+  // The rejected alternative was "no reload: the refresh owns the same `error`
+  // slot and would overwrite the one message that says why the rotate was
+  // refused". `loadAll` DOES own that slot on its own failure — which is why
+  // the ORDER is the guarantee here: the refresh runs first and the server's
+  // detail is written last, so it is the last word. Reverse the two statements
+  // and this case fails on its final assertion (the network error wins), which
+  // is exactly the regression the ordering protects against.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error(ROTATE_409_LOST_CLAIM), { status: 409 }),
+    loadAll: (c) => { c.error.push('Failed to fetch') },
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1, 'the definite branch still refreshes the table')
+  assert.deepEqual(calls.error.filter(Boolean), ['Failed to fetch', ROTATE_409_LOST_CLAIM],
+    'the refresh lands first and the server detail is written after it — it must survive a refresh failure')
+  assert.equal(calls.error.at(-1), ROTATE_409_LOST_CLAIM,
+    'the server detail is the LAST write to the shared error slot')
+})
+
+test('#4721: the 409/5xx split is decided by the STATUS, not by the reloaded row', async () => {
+  // Same server-side state, same refresh stub — only the status differs. A 4xx
+  // is a reply in hand (the server decided); a 5xx is not (the request may have
+  // been executed before the failure). This is the NON-VACUITY pair: collapse
+  // the branch back to `setError(e.message)` for every non-402 and the 5xx half
+  // fails; drop the definite branch and the 409 half fails.
+  const definite = rotateEnv({
+    reject: Object.assign(new Error(ROTATE_409_LOST_CLAIM), { status: 409 }),
+    loadAll: revokedReload,
+  })
+  await definite.regenerateKey('k-old')
+  const ambiguous = rotateEnv({
+    reject: Object.assign(new Error('Bad gateway'), { status: 502 }),
+    loadAll: revokedReload,
+  })
+  await ambiguous.regenerateKey('k-old')
+  assert.deepEqual(definite.calls.error.filter(Boolean), [ROTATE_409_LOST_CLAIM],
+    'a 4xx keeps the server detail verbatim')
+  assert.equal(ambiguous.calls.loadAll, 1, 'a 5xx still re-reads the true state')
+  const ambiguousMsg = ambiguous.calls.error.filter(Boolean).at(-1) || ''
+  assert.match(ambiguousMsg, /may have completed/,
+    'a 5xx may have completed server-side — the disclosure must stay')
+  assert.match(ambiguousMsg, /cannot be shown/)
+})
+
+test('#4721: every definite 4xx refusal keeps the server detail (not only 409)', async () => {
+  // The class, not the instance: the same rule must hold for a POLICY 403, a
+  // 404, or a 422 — the server answered, so its message is the truth.
+  for (const status of [400, 403, 404, 422, 429]) {
+    const detail = `refused ${status}`
+    const { calls, regenerateKey } = rotateEnv({
+      reject: Object.assign(new Error(detail), { status }),
+      loadAll: revokedReload,
+    })
+    await regenerateKey('k-old')
+    assert.deepEqual(calls.error.filter(Boolean), [detail],
+      `${status} must surface the server detail, not an inferred outcome`)
+    assert.equal(calls.loadAll, 1,
+      `${status} must still refresh the table — the message does not replace the truth`)
+    assert.deepEqual(calls.rotateOutcomes, [], `${status}: no reveal`)
+  }
 })
 
 test('#4355: rotating a row whose prefix we hold clears the held plaintext (row truth)', async () => {

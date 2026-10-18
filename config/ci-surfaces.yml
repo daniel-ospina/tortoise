@@ -1081,6 +1081,11 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #5612: concurrent journal appends are serialised and the recovery read
+  # salvages a damaged mid-file line. `tortoise/log.py` matches no
+  # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
+  # guard HERE is what makes the file selected for the code it holds.
+  - test_5612_journal_append_serialization.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -1088,6 +1093,16 @@ surfaces:
   - test_read_ledger.py
   - test_5509_name_keyed_identity_reads.py
   - test_7925_route_parity.py
+  # #6211: `tortoise/ep.py` and `tortoise/sdk.py` are SHARED_MODULES, so a
+  # change to either selects the FULL matrix on its own; this `core` arm is
+  # belt-and-braces for a `config/ci-surfaces.yml`-only diff (which selects
+  # `core` and nothing else — measured: 561 files, both 6211 files included),
+  # and the cap being read out of `compute_confidence`'s result is an sdk.py
+  # contract. Dual-registered with `ep`, which owns the `tortoise/analyze.py`
+  # cap these tests assert against (a matched surface REPLACES the core
+  # fallback, so neither arm alone covers both edits — #2938 convention).
+  - test_6211_ep_result_shape.py
+  - test_6211_ep_scale.py
   # #8864: the shared-name MERGE-key guard — the write-side twin of #5509/#3633.
   # `_upsert_object`/`_upsert_subject` (tortoise/projection/entities.py) key the
   # MERGE on the NAME, so a name held by 2+ carriers made `ON MATCH` stamp ONE
@@ -3384,6 +3399,16 @@ surfaces:
   - test_ep_draft_filter.py
   - test_ep_dirty_persist.py
   - test_ep_local_395.py
+  # #6211: EP at the graph's own scale — the 200-operator selection cap made
+  # VISIBLE in `compute_confidence`'s result, and the timed-out affected-
+  # subgraph hop typed (`EPSubgraphHopError`). The cap lives in
+  # `tortoise/analyze.py` (an `ep` SOURCE_PATTERN), so an analyze.py-only
+  # change must run the guards that read the cap out of the result —
+  # dual-registered with `core`, the arm a `config/ci-surfaces.yml`-only diff
+  # selects. `tortoise/ep.py` / `tortoise/sdk.py` need neither arm: they are
+  # SHARED_MODULES and select the FULL matrix on their own (measured).
+  - test_6211_ep_result_shape.py
+  - test_6211_ep_scale.py
   - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   # #2500: the pre-#2490 terminal-EP backfill guard. Dual-registered with
@@ -4930,6 +4955,14 @@ durations:
   test_body_cap_sweep.py: 3.6
   test_agent_signup_idempotency.py: 3.5
   test_ep_local_395.py: 22.0
+  # #6211: locally measured on this host, docker lane, whole-file wall time over
+  # several runs (shape: 23 tests / 12-19 s; scale: 4 tests / 10-19 s incl. the
+  # 3,353-claim fixture build). The spread is host load, not test content, so
+  # the rows take the upper end — an UNDERstated weight skews the balancer in
+  # exactly the direction that hurts a PR-added file (#3514 note above). Both
+  # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
+  test_6211_ep_result_shape.py: 19.0
+  test_6211_ep_scale.py: 19.0
   test_round_trip_parity.py: 0.8
   test_longmem_rerank.py: 6.3
   test_pack_manifest_store_extraction.py: 5.2
@@ -5535,6 +5568,7 @@ durations:
   test_lint_config.py: 0.1
   test_lint_tripwire.py: 0.1
   test_log.py: 0.3
+  test_5612_journal_append_serialization.py: 3.2
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1
