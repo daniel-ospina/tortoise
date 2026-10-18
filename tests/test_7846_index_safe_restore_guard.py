@@ -72,6 +72,29 @@ _INDEXED_ROWS = [
 #: A graph with no index at all — the issue's own control case.
 _UNINDEXED_ROWS: list = []
 
+#: A SECOND vector index on the same graph, on another label — the multi-index case the
+#: first review round found the fake engine could not express.
+_SECOND_INDEX_ROW = [
+    "Entity",
+    "[vec]",
+    "{vec: [VECTOR]}",
+    "{vec: {dimension: 384, similarityFunction: cosine, M: 16, efConstruction: 200, "
+    "efRuntime: 10}}",
+    "english",
+    "[]",
+    "NODE",
+    "OPERATIONAL",
+    "{}",
+]
+
+
+def _row_key(row) -> str:
+    """A stable identity for a raw catalogue row (its properties cell)."""
+    try:
+        return str(row[1])
+    except (TypeError, IndexError):
+        return str(row)
+
 
 def _catalogue_row(definition, *, options=None) -> list:
     """The row an engine returns after ``CREATE VECTOR INDEX ... OPTIONS {...}``.
@@ -96,36 +119,64 @@ def _catalogue_row(definition, *, options=None) -> list:
 
 
 class _FakeGraph:
-    """A graph whose only real property is the ORDER and PRESENCE of the calls made."""
+    """A graph whose only real property is the ORDER and PRESENCE of the calls made.
 
-    def __init__(self, rows=None, *, drop_works=True, echo=None, restore_error=None):
-        self.catalogue = [list(row) for row in (rows if rows is not None else [])]
+    Holds a CATALOGUE OF ROWS rather than a bool, so it can model the cases the first
+    review round found unrepresentable: two vector indexes, a drop that raises on the
+    second, a create that raises on the second, a drop that answers OK and does nothing.
+    """
+
+    def __init__(self, rows=None, *, drop_works=True, echo=None, restore_error=None,
+                 dump_error=None, drop_fails_on=(), create_fails_on=()):
+        #: keyed by the properties cell so insertion order survives and a per-index drop
+        #: can remove exactly one row
+        self.rows: dict[str, list] = {
+            _row_key(row): list(row) for row in (rows if rows is not None else [])
+        }
         self.drop_works = drop_works
         self.echo = echo
         self.restore_error = restore_error
+        self.dump_error = dump_error
+        self.drop_fails_on = set(drop_fails_on)
+        self.create_fails_on = set(create_fails_on)
         self.calls: list = []
         #: The catalogue AS IT WAS when `dump()` ran — the mutation detector for "skip the
         #: drop before the DUMP".
         self.catalogue_at_dump: list | None = None
 
+    @property
+    def catalogue(self) -> list:
+        return list(self.rows.values())
+
     # --- the engine seams -------------------------------------------------------
     def list_indexes(self):
         self.calls.append("list_indexes")
-        return [list(row) for row in self.catalogue]
+        return [list(row) for row in self.rows.values()]
 
     def drop_index(self, definition):
         self.calls.append(f"drop:{definition.property}")
-        if self.drop_works:
-            self.catalogue = []
+        if definition.property in self.drop_fails_on:
+            raise RuntimeError(f"engine refused to drop {definition.property}")
+        if not self.drop_works:
+            return  # answers OK and does nothing — the silent no-op
+        for key, row in list(self.rows.items()):
+            parsed = vector_index_definitions([row], graph="g7846")
+            if parsed and parsed[0].signature() == definition.signature():
+                del self.rows[key]
 
     def create_index(self, definition):
         self.calls.append(f"create:{definition.property}")
+        if definition.property in self.create_fails_on:
+            raise RuntimeError(f"engine refused to create {definition.property}")
         options = self.echo(definition) if self.echo is not None else None
-        self.catalogue = [_catalogue_row(definition, options=options)]
+        row = _catalogue_row(definition, options=options)
+        self.rows[_row_key(row)] = row
 
     def dump(self):
         self.calls.append("dump")
-        self.catalogue_at_dump = [list(row) for row in self.catalogue]
+        self.catalogue_at_dump = [list(row) for row in self.rows.values()]
+        if self.dump_error is not None:
+            raise self.dump_error
         return b"x" * 64
 
     def delete(self):
@@ -482,7 +533,179 @@ def test_a_failed_restore_does_not_re_create_the_index_over_a_deleted_graph() ->
     assert "CREATE VECTOR INDEX" in notes, (
         f"the dropped index definition was not handed to the caller: {notes!r}"
     )
-    assert "have NOT been re-created" in notes
+    assert "NOT re-created" in notes
+    assert "may ALREADY BE DELETED" in notes, (
+        f"the note does not warn that the graph key may be gone — the caller would "
+        f"re-create an index over a graph it assumes exists: {notes!r}"
+    )
+
+
+def test_a_dump_failure_re_creates_the_index_because_the_KEY_was_never_deleted() -> None:
+    """#8965 review F5: the post-drop note described a state that was not the case.
+
+    ``dump()`` runs BEFORE ``delete()``, so a ``dump()`` that raises leaves the graph key
+    exactly where it was — the one post-drop state where putting the index back restores the
+    status quo perfectly. Telling the caller "the restore did not return, re-create it once
+    the graph is back" about a graph that was never touched invites it to abandon an index
+    that is one ``CREATE`` away.
+    """
+    engine = _FakeGraph(_INDEXED_ROWS, dump_error=RuntimeError("DUMP failed"))
+
+    with pytest.raises(RuntimeError) as raised:
+        engine.safe()
+
+    assert "DUMP failed" in str(raised.value)
+    assert "delete" not in engine.calls, "the DEL ran after the DUMP failed"
+    creates = [call for call in engine.calls if call.startswith("create:")]
+    assert creates == ["create:embedding"], (
+        f"the dropped index was not put back although the graph key was never deleted: "
+        f"{engine.calls}"
+    )
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "NEVER deleted" in notes, f"the note does not say the key survived: {notes!r}"
+    assert "ALREADY BE DELETED" not in notes
+
+
+def test_a_drop_that_RAISES_halfway_puts_back_what_it_dropped() -> None:
+    """#8965 review F3: a raising drop loop used to lose index #1 with no trace.
+
+    ``dropped`` was set only AFTER the loop completed, so a ``drop_index`` that raised on the
+    second index propagated the engine's raw error with ``dropped=False``: the note was
+    skipped and the first index — already dropped — was never mentioned or restored.
+    """
+    engine = _FakeGraph(
+        [list(_INDEXED_ROWS[0]), list(_SECOND_INDEX_ROW)], drop_fails_on={"vec"}
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        engine.safe()
+
+    assert "refused to drop vec" in str(raised.value)
+    assert "dump" not in engine.calls, "the DUMP ran although the drop loop raised"
+    creates = [call for call in engine.calls if call.startswith("create:")]
+    assert creates == ["create:embedding"], (
+        f"the index that WAS dropped before the raise was not put back: {engine.calls}"
+    )
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "re-created" in notes and "NEVER deleted" in notes, (
+        f"the note does not report the index that was restored: {notes!r}"
+    )
+
+
+def test_two_indexes_where_one_drop_does_nothing_names_the_index_it_LOST() -> None:
+    """#8965 review F2: the recovery re-created ``remaining``, i.e. the SURVIVOR.
+
+    With two indexes and a drop that takes effect for one only, the old code re-created the
+    one that had never been dropped (failing, and swallowed) and left the one that HAD been
+    dropped gone — while the message claimed the graph was untouched.
+    """
+    engine = _FakeGraph([list(_INDEXED_ROWS[0]), list(_SECOND_INDEX_ROW)])
+
+    # Drop the first for real, answer OK-and-do-nothing for the second.
+    real_drop = engine.drop_index
+
+    def _partially_broken(definition):
+        if definition.property == "vec":
+            engine.calls.append("drop:vec")
+            return
+        real_drop(definition)
+
+    with pytest.raises(IndexDropIncompleteError) as raised:
+        engine.safe(drop_index=_partially_broken)
+
+    error = raised.value
+    assert [str(definition.property) for definition in error.remaining] == ["vec"]
+    # The DROPPED-and-gone index is the one that must be put back, and the SURVIVOR must not
+    # be re-created (pre-fix it was: `create:vec` appears and this fails).
+    assert "create:embedding" in engine.calls, (
+        f"the index that WAS dropped was not put back: {engine.calls}"
+    )
+    assert "create:vec" not in engine.calls, (
+        f"the recovery re-created the index that had never been dropped, leaving the lost "
+        f"one gone: {engine.calls}"
+    )
+    assert [str(definition.property) for definition in error.restored] == ["embedding"]
+    assert error.failed == (), (
+        "the re-create succeeded, so nothing should be reported as lost"
+    )
+    assert "dump" not in engine.calls
+
+
+def test_a_re_create_that_RAISES_halfway_names_what_it_could_not_restore() -> None:
+    """#8965 review F3 (re-create arm): a partial re-create must not be a bare engine error.
+
+    The graph has already been restored at this point, so the caller must be able to tell
+    "the restore failed" from "the restore worked and one index is missing" — and must get
+    the statement needed to finish the job.
+    """
+    engine = _FakeGraph(
+        [list(_INDEXED_ROWS[0]), list(_SECOND_INDEX_ROW)], create_fails_on={"vec"}
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        engine.safe()
+
+    assert "refused to create vec" in str(raised.value)
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "NOT re-created" in notes and "vec" in notes, (
+        f"the note does not name the index that is missing: {notes!r}"
+    )
+    assert "CREATE VECTOR INDEX" in notes, (
+        f"the note carries no statement to finish the re-create: {notes!r}"
+    )
+    assert "WAS restored" in notes and "do NOT re-issue" in notes, (
+        f"the note does not stop the caller re-issuing the restore: {notes!r}"
+    )
+
+
+def test_an_unrecognised_index_type_refuses_instead_of_reading_as_index_free() -> None:
+    """#8965 review F4: the guard FAILED OPEN on any token it did not know.
+
+    ``if VECTOR_INDEX_TYPE in types`` skipped everything else, so an engine that renamed,
+    re-cased or extended the type token made the graph read as index-FREE and BOTH entry
+    points issued exactly the index-bearing RESTORE this change exists to prevent. The
+    polarity is now an allowlist of known non-vector tokens.
+    """
+    engine = _FakeGraph(
+        [
+            ["Point", "[embedding]", "{embedding: [vector]}", "{}", "english", "[]",
+             "NODE", "OPERATIONAL", "{}"],
+        ]
+    )
+
+    with pytest.raises(IndexDefinitionUnreadable) as raised:
+        engine.raw()
+
+    assert engine.destructive_calls() == [], (
+        f"an unrecognised index type was read as index-free and the restore ran: {engine.calls}"
+    )
+    assert "does not recognise" in str(raised.value)
+
+    # ... and the safe path refuses it too, before anything is dropped.
+    engine = _FakeGraph(
+        [
+            ["Point", "[embedding]", "{embedding: [GEO]}", "{}", "english", "[]",
+             "NODE", "OPERATIONAL", "{}"],
+        ]
+    )
+    with pytest.raises(IndexDefinitionUnreadable):
+        engine.safe()
+    assert engine.calls == ["list_indexes"]
+
+
+def test_a_catalogue_seam_that_answers_None_refuses_rather_than_reading_as_empty() -> None:
+    """#8965 review F4: a seam that could not read the catalogue must not answer "empty".
+
+    An index-free graph answers ``[]``; ``None`` means nothing was read. Publishing "no
+    index" about an unread catalogue is the same fail-open as the type-token allowlist.
+    """
+    engine = _FakeGraph(_INDEXED_ROWS)
+
+    with pytest.raises(IndexDefinitionUnreadable) as raised:
+        engine.raw(index_guard=lambda: None)
+
+    assert engine.destructive_calls() == []
+    assert "returned None" in str(raised.value)
 
 
 def test_an_overrun_does_not_re_create_the_index_either() -> None:
