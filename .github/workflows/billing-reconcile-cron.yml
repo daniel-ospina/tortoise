@@ -28,8 +28,9 @@ name: billing-reconcile-cron
 #       - `enumeration_incomplete`: the pass could not certify the WHOLE fleet,
 #         so it compared an unknown fraction of it and refuses to report that as
 #         clean. ALL THREE raise sites are STRUCTURAL — a partial page, a
-#         LOWER-BOUND page (`billing.py:1081`), or a missing
-#         `query_all`/`query_with_total` seam (`billing.py:1072`) — so blind
+#         LOWER-BOUND page (`the enumeration is a LOWER BOUND`), or a missing
+#         `query_all`/`query_with_total` seam (`exposes neither query_all nor
+#         query_with_total`) — so blind
 #         retrying does not repair them; the body's `reason` names the leg. (A
 #         control-plane OUTAGE is a different path entirely: `query_all` raises a
 #         bare RuntimeError, which this endpoint does not catch, so it arrives as
@@ -342,12 +343,15 @@ jobs:
           )
           print(summary)
           if data["unverified"]:
-              # Not a failure: Stripe answered and named no active subscription.
-              # Loud anyway — an org stored as billed that Stripe does not
-              # recognise is a person someone should look at.
+              # Not a failure: no active subscription could be established. TWO
+              # causes land here (Stripe named none, or the customer lookup
+              # failed), so this line must not assert which. Loud anyway — an
+              # org stored as billed that nothing could verify against a live
+              # subscription is a person someone should look at.
               print(f"::warning::{data['unverified']} org(s) are stored as billed "
-                    "but Stripe names no active subscription (not verified, not "
-                    "downgraded) — review them")
+                    "but could not be verified against an active Stripe "
+                    "subscription (Stripe named none, or the customer lookup "
+                    "failed) — not downgraded, review them")
           if data["checked"] == 0:
               # Loud, never fatal. The enumeration is CERTIFIED complete before
               # this point (an uncertifiable one raises and 500s), so 0 means a

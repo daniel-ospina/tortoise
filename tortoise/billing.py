@@ -1126,11 +1126,14 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
       and ``skipped`` says how many of them (plus the never-checked-out ones)
       had nothing to verify. Counted so a silent enumeration shrink is visible
     - ``repaired`` / ``unchanged`` — stored tier changed / did not
-    - ``unverified`` — Stripe answered but named NO active subscription for an
-      org whose stored tier is PAID — i.e. one that claims more entitlement
+    - ``unverified`` — no active Stripe subscription could be established for
+      an org whose stored tier is PAID — i.e. one that claims more entitlement
       than Free (``_is_paid_tier``; ``reconcile_org`` reports ``action:
-      "noop"``). Counted SEPARATELY from ``unchanged`` because nothing was
-      verified against a subscription: folding it into ``unchanged`` would
+      "noop"``). TWO causes land here and the counter does not distinguish
+      them: Stripe ANSWERED and named no active subscription, or the customer
+      LIST failed and the org was deliberately left alone (a provider error is
+      not a verdict). Counting it SEPARATELY from ``unchanged`` because nothing
+      was verified against a subscription: folding it into ``unchanged`` would
       report an unexamined org as verified-clean, which is exactly the
       read-only-reconciler failure the ``unrepaired`` guard exists to catch.
       Decided from the LADDER, not from the presence of an identity: a customer
@@ -1221,20 +1224,25 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
             # verify — counting it as ``unverified`` put healthy orgs in the
             # operator's queue forever (and emitted a daily ``::warning::`` in
             # the driver). ``unverified`` is kept for the case it names: a PAID
-            # tier with no active subscription.
+            # tier with no active subscription. ⛔ Both arms are reached when
+            # Stripe NAMED no active subscription AND when the customer LIST
+            # failed and the org was deliberately left alone, so neither the
+            # counter nor its log line may assert that Stripe answered.
             if not _is_paid_tier(before_tier):
                 summary["skipped"] += 1
                 _logger.info(
                     "billing reconcile: %s has a Stripe binding but no active "
-                    "subscription and is stored at the unpaid tier %r — "
-                    "nothing to verify (abandoned checkout)",
+                    "subscription could be established and is stored at the "
+                    "unpaid tier %r — nothing to verify (the usual cause is "
+                    "an abandoned checkout)",
                     org_id, before_tier)
                 continue
             summary["unverified"] += 1
             _logger.warning(
-                "billing reconcile: %s is stored as billed (tier=%r) but "
-                "Stripe names no active subscription — not verified, not "
-                "downgraded", org_id, before_tier)
+                "billing reconcile: %s is stored as billed (tier=%r) but no "
+                "active Stripe subscription could be established — not "
+                "verified, not downgraded (Stripe named none, or the customer "
+                "lookup failed)", org_id, before_tier)
             continue
         expected_tier = outcome.get("tier")
         after_tier = after.get("tier")

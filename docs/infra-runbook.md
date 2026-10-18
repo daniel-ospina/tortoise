@@ -475,9 +475,12 @@ customer's writes) and a `direction`:
   no-op**: an unrecognised tier is NOT this case, it resolves to Free's cap and
   ranks normally. Never paged; investigate the pricing file.
 - `unverified` — the org's stored tier is PAID (it claims more entitlement than
-  Free) but Stripe answered with NO active subscription. Nothing was verified
-  against a subscription, so this is NOT `unchanged` — and it is deliberately
-  not auto-downgraded either. Counted and logged loudly; a non-zero number is a
+  Free) but no active subscription could be established for it. Two causes land
+  here and the counter does not distinguish them: Stripe answered and named no
+  active subscription, or the customer lookup itself failed (a provider error is
+  not a verdict, so the org is left alone). Nothing was verified against a
+  subscription, so this is NOT `unchanged` — and it is deliberately not
+  auto-downgraded either. Counted and logged loudly; a non-zero number is a
   person to look at.
 - `skipped` — nothing to reconcile: no `subscription_id` / `stripe_customer_id`
   at all, **or** a Stripe customer binding that never became a paid

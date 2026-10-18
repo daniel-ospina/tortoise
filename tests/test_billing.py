@@ -2740,10 +2740,13 @@ class TestReconcileSweep:
             headers={"Authorization": "Bearer internal-test-key"})
         assert r.status_code == 503, r.text
         assert r.json()["status"] == "enumeration_incomplete"
-        # The refusal has SEVERAL legs and only some clear on retry (an
-        # unreadable control plane does; a lower-bound page and a missing
-        # enumeration seam do not). A fixed detail string threw that away and
-        # sent every operator down the retry path, so the leg must be carried.
+        # The refusal has SEVERAL legs and NONE of them clears on retry: a
+        # lower-bound page, a missing enumeration seam, and an unrecognised
+        # arm are all structural. (A control-plane OUTAGE is a different path —
+        # `query_all` raises a bare RuntimeError, which the endpoint does not
+        # catch, so it arrives as a 500 and never reaches this arm.) A fixed
+        # detail string threw the distinction away and sent every operator down
+        # the retry path, so the leg must be carried.
         assert "CERTIFIED complete" in r.json().get("reason", ""), r.text
 
 
