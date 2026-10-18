@@ -58,7 +58,11 @@ the mistake it invites, so it is labelled.
 
 ## Per-surface evidence
 
-Commands below ran from `.worktrees/capstone-2008-1976` (clean checkout of the verified commit) unless marked, with
+Commands below ran at `180fe6fd3` from `.worktrees/capstone-2008-1976` (clean checkout of the verified commit),
+**except** the batch **A/B** rows — surfaces 1, 2, 7, 11, 14, 15, surface 16's suite, and surface 10's server leg
+(`test_onboarding_w4_settings.py`) — which ran from the **hub**
+checkout at the anchor `fbc1d96d5` (see "Which sha" above and Lane conditions below; the two heads' intervening file
+lists are enumerated there). Every command uses
 `L="$(.venv/bin/python tools/test_lane.py uri)"; TORTOISE_DB_URI=<lane> .venv/bin/python -m pytest …`.
 
 | Surface | Assigned layer | Suite(s) | Result |
