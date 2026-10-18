@@ -1785,7 +1785,10 @@ class _EntityHandlers:
             )
         return extra
 
-    def _upsert_point_props(self, p: dict) -> tuple[bool, bool, frozenset]:
+    def _upsert_point_props(
+            self, p: dict, *,
+            from_prewipe_snapshot: bool = False,
+    ) -> tuple[bool, bool, frozenset]:
         """Write all Point node properties (no edges).
 
         Single source of truth for Point property parity between apply() and
@@ -1801,6 +1804,18 @@ class _EntityHandlers:
         ``_content_hash`` — so in those cases the existing value is PRESERVED.
         #4042's pass-1b content boundary needs that outcome exactly, never a
         ``bool(content)`` guess.
+
+        ``from_prewipe_snapshot`` says WHERE this payload came from, because
+        the deny-drop report below has to name the right cause: ``False`` (the
+        default, and every journal arm — live ``apply``/``_upsert``, rebuild
+        pass 1a's journal records, the promote folds) means the record IS the
+        journal, so a deny-listed key it carries was journaled and only the
+        policy refuses it. ``True`` means the entry came from the #548 pre-wipe
+        GRAPH snapshot rebuilt for an id the journal never recorded (rebuild
+        pass 1a's synthetic events) — there the journal gap is REAL as well,
+        and the report must not deny it (#8018 review: the class that used to
+        be told "not a journal gap" was the EP-state class, `_REPLAY_GAP_PROPS`,
+        which is exactly the class whose only carrier IS that snapshot).
 
         ``persisted_extra_keys`` is the key set ``_persist_extra_props``
         actually handed to the engine (a ``None``, a non-persistable value, and
@@ -2187,22 +2202,44 @@ class _EntityHandlers:
         # warning emitted O(N) lines and buried genuine violations. On the live
         # path the set persists for the process, which is the right cadence for
         # a policy-level signal.
+        # #8018 review: the de-dup key carries the SOURCE and the text is chosen
+        # by it, because two sources feed this report and their causes DIFFER.
+        # On the journal arm the record carries the key and only the writer's
+        # policy refuses it; on the #548 arm the point has NO journal record at
+        # all, so the journal gap is real too — `posterior_alpha`/`outdated`/
+        # `expiredAt`/`content_hash` are carried ONLY by that snapshot
+        # (`_REPLAY_GAP_PROPS`, #2943). Keying the de-dup on the bare key let the
+        # arm that happened to run first (synthetic events sort first) speak for
+        # the other, which re-minted the very misattribution #8018 removed — the
+        # report told a reader "not a journal gap" about EP state, the one class
+        # where the journal IS the gap.
         for key in self._POINT_DENY - self._POINT_HANDLED:
             if p.get(key) is None:
                 continue
             warned = getattr(self, "_deny_drop_warned", None)
             if warned is None:
                 warned = self._deny_drop_warned = set()
-            if key in warned:
+            if (from_prewipe_snapshot, key) in warned:
                 continue
-            warned.add(key)
+            warned.add((from_prewipe_snapshot, key))
+            if from_prewipe_snapshot:
+                logger.warning(
+                    "Point prop %r dropped — deny-listed (recompute/EP-owned, "
+                    "#2795): this point has NO journal record, so the value "
+                    "came from the #548 pre-wipe graph snapshot and the writer "
+                    "refuses the key by policy — the journal gap is REAL here "
+                    "as well, unlike a journal-covered point, where the "
+                    "record itself carries the key and only the policy refuses "
+                    "it (#8018)", key)
+                continue
             logger.warning(
                 "Point prop %r dropped — deny-listed (recompute/EP-owned, "
-                "#2795): the payload DOES carry it and the replay writer "
-                "refuses it by policy, so this is a policy drop, not a "
-                "journal gap. Keys that are never journaled by design (EP "
-                "state, #2884) do not reach this report — every key here "
-                "was just read out of the payload (#8018)", key)
+                "#2795): this point IS journal-covered, the record carries it "
+                "and the replay writer refuses it by policy, so this is a "
+                "policy drop, not a journal gap. Keys the journal never "
+                "carries by design (EP state, #2884) reach this report on the "
+                "#548 snapshot arm instead, which names that source (#8018)",
+                key)
         # (b) a policy-denied list is also reported: the live SDK writer stores
         # raw lists, but replay refuses an UNDECLARED one, so the drop MUST be
         # visible (#2795 indicator 4 / D7). `tags` was this branch's exemplar

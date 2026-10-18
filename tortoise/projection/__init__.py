@@ -10471,8 +10471,14 @@ class FalkorProjection(
                 # fields it actually wrote — the pass-1b content boundary
                 # needs the outcome, never a `bool(content)` guess (the
                 # embedder can be unavailable while the hash still computes).
+                # #8018 review: `event_source[seq] is None` marks a SYNTHETIC
+                # event — one rebuilt from the #548 pre-wipe GRAPH snapshot for
+                # an id with no journal record (see the `events` construction
+                # above) — so the writer's deny report names THAT source instead
+                # of asserting the journal is not the gap.
                 wrote_embedding, wrote_content_hash, persisted_extras = (
-                    self._upsert_point_props(p))
+                    self._upsert_point_props(
+                        p, from_prewipe_snapshot=event_source[seq] is None))
                 # #4042: record this creation's per-source-file chronology
                 # anchors (see their declaration above). A synthetic event
                 # has `src is None` and never forms a boundary. #3860

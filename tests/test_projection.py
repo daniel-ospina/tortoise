@@ -805,6 +805,63 @@ def test_falkor_point_deny_list_drop_is_reported(caplog):
         pass  # shared session projection — module helper owns close
 
 
+def test_falkor_rebuild_deny_report_names_its_source(caplog):
+    """#8018 review: TWO sources feed the deny-drop report and their causes
+    DIFFER, so each arm must name its own — and neither may speak for the
+    other.
+
+    A journal-covered point carries the key in its record, so only the
+    writer's POLICY refuses it. A graph-only point has NO journal record at
+    all: its value came from the #548 pre-wipe snapshot, where the journal gap
+    is REAL — that is exactly what `_REPLAY_GAP_PROPS` names (`posterior_alpha`,
+    `outdated`, `expiredAt`, `content_hash` are carried ONLY by that snapshot).
+    So "not a journal gap" is false for the EP-state class, and the pre-review
+    message asserted it as the text of an EP-state report.
+
+    Both arms run in ONE rebuild, sharing the key `reason`, so this also pins
+    the de-dup key: it is `(source, key)`, not the bare key. With the bare key
+    the synthetic arm (which sorts first) suppressed the journal arm's report
+    and only the wrong-cause text survived. Pre-fix this test fails on BOTH
+    counts — no source is named, and the snapshot record claims "not a journal
+    gap"."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    api, log = _api()
+    api.add_point("denied prop", provenance("d.txt", [0, 5], "q"),
+                  reason="because")
+    proj = FalkorProjection(_tmp("deny_source.db"), graph_name="test")
+    try:
+        # Graph-only: no journal record for this id on that log dir, so the
+        # #548 snapshot is its ONLY carrier. Same deny key as the journaled
+        # point above, plus the EP-state key the report used to misattribute.
+        proj.g.query(
+            "CREATE (n:Point {id:'go-ep', content:'y', pointKind:'statement', "
+            "is_operator:false, status:'live', reason:'r', "
+            "posterior_alpha:2.0})")
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
+        denied = [r.getMessage() for r in caplog.records
+                  if "deny-listed" in r.getMessage()]
+        snapshot_arm = [m for m in denied if "NO journal record" in m]
+        journal_arm = [m for m in denied if "IS journal-covered" in m]
+        assert journal_arm, caplog.text
+        assert snapshot_arm, caplog.text
+        # The journal arm keeps the corrected attribution #8018 asked for.
+        for msg in journal_arm:
+            assert "'reason'" in msg, msg
+            assert "policy drop, not a journal gap" in msg, msg
+        # The snapshot arm must NOT re-mint the false half — the journal IS the
+        # gap for the keys it carries. One report per deny key on this arm.
+        assert any("'reason'" in m for m in snapshot_arm), caplog.text
+        assert any("'posterior_alpha'" in m for m in snapshot_arm), caplog.text
+        for msg in snapshot_arm:
+            assert "not a journal gap" not in msg, msg
+    finally:
+        proj.close()
+
+
 def test_falkor_rebuild_preserves_nested_list_prop_on_object_layer():
     """#2795 / #2894 (code-review): FalkorDB stores arbitrarily NESTED arrays
     of scalars, so the shared `_persist_extra_props` value-type filter must
