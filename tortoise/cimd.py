@@ -70,7 +70,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import socket
 import threading
 import time
 from collections import OrderedDict
@@ -79,7 +78,11 @@ from urllib.parse import unquote, urlparse
 import httpcore
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
-from .security import is_global_address  # #8103: the ONE address policy
+from .security import (  # #8103: the ONE address policy
+    AddressRefusal,
+    is_global_address,
+    resolve_global_addresses,
+)
 
 __all__ = [
     "CimdError",
@@ -139,10 +142,6 @@ FETCH_MAX_S = 6.0
 #: How long a resolution waits for an in-flight slot before refusing. Bounded,
 #: so a saturated cap fails fast instead of parking a caller indefinitely.
 IN_FLIGHT_WAIT_S = 2.0
-
-# Deprecated special-purpose ranges (6to4 relay anycast, RFC 7526; IPv6
-# site-local, RFC 3879) now live with the shared predicate in ``security``
-# (#8103) — see ``security._IPV4_6TO4_RELAY``.
 
 
 class CimdError(Exception):
@@ -277,28 +276,26 @@ def public_addresses(host: str, port: int) -> list[str]:
     """Resolve ``host`` and return its addresses **only if every one is
     public** — a host that resolves to a mix of public and private addresses is
     refused outright rather than filtered, so an attacker cannot win by
-    publishing one public A record beside a private one."""
+    publishing one public A record beside a private one.
+
+    #8103: the resolve-and-refuse LOOP lives in
+    :func:`security.resolve_global_addresses` (the webhook connect-time pin runs
+    the same one). This function owns only the ``CimdError`` wording, because two
+    copies of the loop drift exactly as two copies of the predicate did — they
+    had already disagreed on whether the cap applies before or after validation.
+    """
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except OSError as exc:
-        raise CimdError(f"could not resolve client_id host {host!r}.") from exc
-    addresses: list[str] = []
-    for info in infos[:MAX_ADDRESSES]:
-        raw = info[4][0]
-        try:
-            ip = ipaddress.ip_address(raw)
-        except ValueError as exc:
+        return list(resolve_global_addresses(host, port, cap=MAX_ADDRESSES))
+    except AddressRefusal as exc:
+        if exc.reason == AddressRefusal.UNRESOLVED:
+            raise CimdError(f"could not resolve client_id host {host!r}.") from exc
+        if exc.reason == AddressRefusal.UNREADABLE:
             raise CimdError("client_id host resolved to an unparsable address.") from exc
-        if not is_public_address(ip):
+        if exc.reason == AddressRefusal.NON_GLOBAL:
             raise CimdError(
                 "client_id host resolves to a non-public address "
-                f"({ip}) — refusing to fetch.")
-        text = str(ip)
-        if text not in addresses:
-            addresses.append(text)
-    if not addresses:
-        raise CimdError(f"client_id host {host!r} did not resolve.")
-    return addresses
+                f"({exc.address}) — refusing to fetch.") from exc
+        raise CimdError(f"client_id host {host!r} did not resolve.") from exc
 
 
 class _DeadlineStream(httpcore.NetworkStream):

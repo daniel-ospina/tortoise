@@ -386,9 +386,10 @@ def _pinned_targets(url: str, *, resolver=None
     or one that was private all along, would make this process sign and POST an
     event payload to an address the tenant never should have reached.
 
-    So the delivery resolves FIRST, judges EVERY answer with the same
-    :func:`security.resolve_webhook_addresses` policy the registration gate
-    uses, and then pins the socket: the returned URL carries the VETTED
+    So the delivery resolves FIRST, judges EVERY answer with the shared policy
+    :func:`security.is_global_address` — the same predicate the registration gate
+    applies to a literal, wrapped for the connect half in
+    :func:`security.resolve_webhook_addresses` — and then pins the socket: the returned URL carries the VETTED
     ADDRESS, while the returned ``host_header`` and ``sni`` keep the HTTP
     ``Host`` header and the TLS server name on the hostname. Resolve-then-
     hand-the-name-to-the-client would only NARROW the TOCTOU window (the

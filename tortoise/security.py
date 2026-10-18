@@ -1324,6 +1324,87 @@ def is_global_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool
                 and not ip.is_unspecified)
 
 
+class AddressRefusal(ValueError):
+    """A resolution answer the shared address policy refuses.
+
+    Carries the machine-readable pieces — ``reason``, the ``host``, and (when
+    there is one) the offending ``address`` — so each caller keeps its OWN
+    sentence. :func:`resolve_global_addresses` owns the algorithm; the wording
+    belongs to the caller whose receipt a human reads (#8103).
+
+    Internal carrier: callers translate it (``resolve_webhook_addresses`` into a
+    receipt-readable ``ValueError``, ``cimd.public_addresses`` into
+    ``CimdError``), so nothing should catch it instead of the translation.
+    """
+
+    UNRESOLVED = "unresolved"   # getaddrinfo itself failed
+    UNREADABLE = "unreadable"   # an answer that is not an IP address
+    NON_GLOBAL = "non-global"   # an answer that is not globally routable
+    EMPTY = "empty"             # resolved to nothing at all
+
+    def __init__(self, reason: str, host: str, *, address: str | None = None,
+                 detail: str = "") -> None:
+        self.reason = reason
+        self.host = host
+        self.address = address
+        self.detail = detail
+        super().__init__(f"{reason}: {host}" + (f" {detail}" if detail else ""))
+
+
+def resolve_global_addresses(
+    host: str,
+    port: int,
+    *,
+    resolver=None,
+    cap: int | None = None,
+) -> tuple[str, ...]:
+    """Resolve ``host`` and return its addresses **only if every one passes**
+    :func:`is_global_address`.
+
+    THE one resolve-and-refuse loop, shared by both SSRF controls (#8103): the
+    webhook connect-time pin (:func:`resolve_webhook_addresses`) and the
+    client-id metadata fetch (``cimd.public_addresses``). Sharing the PREDICATE
+    was only half of it — the loop around it was copied, and two copies of a
+    refusal algorithm drift exactly as two copies of a predicate do (they had
+    already disagreed on whether the cap applies before or after validation).
+    Callers own their exception TYPE and their SENTENCE by translating
+    :class:`AddressRefusal`; owning the algorithm is not owning the wording.
+
+    A MIXED answer (public v4 beside private v6) is refused WHOLE rather than
+    filtered, so publishing one allowed record beside a disallowed one buys
+    nothing. ``cap`` truncates AFTER every answer has been judged: truncating
+    first would leave the tail unread, so a hostile resolver could hide a private
+    answer past the cap.
+
+    ``resolver`` is injectable (a ``getaddrinfo``-shaped callable) so the policy
+    is testable without DNS. Stdlib-only, so this module keeps its no-cycle
+    guarantee.
+    """
+    resolve = resolver or socket.getaddrinfo
+    try:
+        infos = resolve(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as e:
+        raise AddressRefusal(
+            AddressRefusal.UNRESOLVED, host, detail=e.__class__.__name__) from e
+    addresses: list[str] = []
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except (IndexError, TypeError, ValueError) as e:
+            raise AddressRefusal(
+                AddressRefusal.UNREADABLE, host,
+                detail=e.__class__.__name__) from e
+        if not is_global_address(addr):
+            raise AddressRefusal(
+                AddressRefusal.NON_GLOBAL, host, address=str(addr))
+        text = str(addr)
+        if text not in addresses:
+            addresses.append(text)
+    if not addresses:
+        raise AddressRefusal(AddressRefusal.EMPTY, host)
+    return tuple(addresses[:cap] if cap is not None else addresses)
+
+
 def resolve_webhook_addresses(host: str, port: int, *, resolver=None) -> tuple[str, ...]:
     """Resolve ``host`` for a delivery and return its addresses **only if every
     one passes** :func:`is_global_address` (#8103, the connect-time half).
@@ -1336,39 +1417,31 @@ def resolve_webhook_addresses(host: str, port: int, *, resolver=None) -> tuple[s
     which is refused WHOLE rather than filtered, so publishing one allowed
     record beside a disallowed one buys nothing.
 
-    ``resolver`` is injectable (a ``getaddrinfo``-shaped callable) so the
-    policy is testable without DNS. Returns the vetted addresses in answer
-    order; raises ``ValueError`` with a receipt-readable reason otherwise.
-    Stdlib-only, so this module keeps its no-cycle guarantee.
+    The loop itself lives in :func:`resolve_global_addresses` (shared with
+    ``cimd``); this wrapper owns only the receipt-readable wording a tenant sees
+    on a failed delivery. ``resolver`` is injectable so the policy is testable
+    without DNS. Raises ``ValueError``; never ``AddressRefusal``, which is an
+    internal carrier.
     """
-    resolve = resolver or socket.getaddrinfo
     try:
-        infos = resolve(host, port, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError) as e:
-        raise ValueError(
-            f"webhook target {host!r} could not be resolved at connect time "
-            f"({e.__class__.__name__}) — refusing to deliver") from e
-    addresses: list[str] = []
-    for info in infos:
-        try:
-            addr = ipaddress.ip_address(info[4][0])
-        except (IndexError, TypeError, ValueError) as e:
+        return resolve_global_addresses(host, port, resolver=resolver)
+    except AddressRefusal as e:
+        if e.reason == AddressRefusal.UNRESOLVED:
+            raise ValueError(
+                f"webhook target {host!r} could not be resolved at connect time "
+                f"({e.detail}) — refusing to deliver") from e
+        if e.reason == AddressRefusal.UNREADABLE:
             raise ValueError(
                 f"webhook target {host!r} resolved to an unreadable address "
-                f"({e.__class__.__name__}) — refusing to deliver") from e
-        if not is_global_address(addr):
+                f"({e.detail}) — refusing to deliver") from e
+        if e.reason == AddressRefusal.NON_GLOBAL:
             raise ValueError(
                 f"webhook target {host!r} resolves to a non-global address "
-                f"({addr}) — loopback/private/link-local targets are refused "
-                f"at connect time")
-        text = str(addr)
-        if text not in addresses:
-            addresses.append(text)
-    if not addresses:
+                f"({e.address}) — loopback/private/link-local targets are refused "
+                f"at connect time") from e
         raise ValueError(
             f"webhook target {host!r} did not resolve at connect time — "
-            f"refusing to deliver")
-    return tuple(addresses)
+            f"refusing to deliver") from e
 
 
 def validate_webhook_url(url: str) -> str:
@@ -1388,9 +1461,10 @@ def validate_webhook_url(url: str) -> str:
     * no userinfo (``https://user:pass@host/``) — the credentials would be
       stored in the graph and logged in receipts, and they add nothing;
     * a host is required, and it must not be a blocked name, a blocked
-      suffix, or an IP LITERAL that ``ipaddress.is_global`` rejects
-      (loopback, private, link-local, multicast, reserved, unspecified, and
-      IPv6 ULA all fail that predicate);
+      suffix, or an IP LITERAL that :func:`is_global_address` rejects (loopback,
+      private, link-local, multicast, reserved, unspecified, IPv6 ULA, NAT64 and
+      the deprecated 6to4-relay / site-local ranges) — see that function for the
+      exact ranges rather than for a list that can re-stale here;
     * the URL must be at most ``MAX_WEBHOOK_URL_LEN`` characters.
 
     DNS REBINDING is NOT closed HERE, and no longer left open: this is the
