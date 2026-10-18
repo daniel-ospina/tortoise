@@ -97,6 +97,13 @@ surfaces:
   # same surfaces — an `sdk.py` change selects the full matrix, and the
   # narrower surfaces are what keep it from going silently green.
   - test_7951_update_point_outbox.py
+  # #7951 (increment 4a, the DELETE door): `delete_point` appends its
+  # `EntityMutated` op=delete record BEFORE the `DETACH DELETE`, so a delete
+  # the journal never recorded cannot be performed — apply-first here does not
+  # merely lose a write, it lets the next replay UNDO the deletion. Same
+  # `tortoise/sdk.py` subject as the create/update suites above, so it rides
+  # the same six-surface matrix.
+  - test_7951_delete_point_outbox.py
   - test_7677_create_org_retry_idempotent.py  # #7677: wait-bound retry must not 409 on the caller's own org; owns to `api` (the change pins tortoise/hosted_api.py + tortoise/supabase_control.py create-org lanes)
   # #7968 / PR #8179 review P1: DUAL-REGISTERED with `core` below. The guard
   # pins `purge_org_control_plane` in `tortoise/supabase_control.py`, which IS a
@@ -1214,6 +1221,13 @@ surfaces:
   # same surfaces — an `sdk.py` change selects the full matrix, and the
   # narrower surfaces are what keep it from going silently green.
   - test_7951_update_point_outbox.py
+  # #7951 (increment 4a, the DELETE door): `delete_point` appends its
+  # `EntityMutated` op=delete record BEFORE the `DETACH DELETE`, so a delete
+  # the journal never recorded cannot be performed — apply-first here does not
+  # merely lose a write, it lets the next replay UNDO the deletion. Same
+  # `tortoise/sdk.py` subject as the create/update suites above, so it rides
+  # the same six-surface matrix.
+  - test_7951_delete_point_outbox.py
   # #5141: `graph-scripts/backfill_references.py` matches no named surface and
   # falls through to `core`, so this arm is what runs the script's smoke test on
   # a graph-script-only diff. The pre-existing coverage could not see the
@@ -3181,6 +3195,13 @@ surfaces:
   # same surfaces — an `sdk.py` change selects the full matrix, and the
   # narrower surfaces are what keep it from going silently green.
   - test_7951_update_point_outbox.py
+  # #7951 (increment 4a, the DELETE door): `delete_point` appends its
+  # `EntityMutated` op=delete record BEFORE the `DETACH DELETE`, so a delete
+  # the journal never recorded cannot be performed — apply-first here does not
+  # merely lose a write, it lets the next replay UNDO the deletion. Same
+  # `tortoise/sdk.py` subject as the create/update suites above, so it rides
+  # the same six-surface matrix.
+  - test_7951_delete_point_outbox.py
   # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
   # selects `ep`, so this registration is what runs the guard on a dream.py
   # change. Dual-registered under `core` (above) for its
@@ -3311,6 +3332,13 @@ surfaces:
   # same surfaces — an `sdk.py` change selects the full matrix, and the
   # narrower surfaces are what keep it from going silently green.
   - test_7951_update_point_outbox.py
+  # #7951 (increment 4a, the DELETE door): `delete_point` appends its
+  # `EntityMutated` op=delete record BEFORE the `DETACH DELETE`, so a delete
+  # the journal never recorded cannot be performed — apply-first here does not
+  # merely lose a write, it lets the next replay UNDO the deletion. Same
+  # `tortoise/sdk.py` subject as the create/update suites above, so it rides
+  # the same six-surface matrix.
+  - test_7951_delete_point_outbox.py
   - test_8686_selfhost_operational_state.py
   - test_served_skill_byte_parity.py
   # #3094: DUAL-REGISTERED with `core`/`eval`. The empty-means-unset URI-read
@@ -3587,6 +3615,13 @@ surfaces:
   # same surfaces — an `sdk.py` change selects the full matrix, and the
   # narrower surfaces are what keep it from going silently green.
   - test_7951_update_point_outbox.py
+  # #7951 (increment 4a, the DELETE door): `delete_point` appends its
+  # `EntityMutated` op=delete record BEFORE the `DETACH DELETE`, so a delete
+  # the journal never recorded cannot be performed — apply-first here does not
+  # merely lose a write, it lets the next replay UNDO the deletion. Same
+  # `tortoise/sdk.py` subject as the create/update suites above, so it rides
+  # the same six-surface matrix.
+  - test_7951_delete_point_outbox.py
   - test_5359_unchecked_window_writers.py
   - test_7108_operator_scope_predicate.py
   # #7936: DUAL-REGISTERED with `core` (above). `tortoise/ids.py` is an exact
@@ -3747,6 +3782,7 @@ surfaces:
   - test_time_aware_sdk_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_time_aware_eval_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
+  - longmem_eval/test_slice_a_flood_bound.py  # #8043: the Slice A flooding bound + its receipt's reproducibility — dual-registered (eval + sdk) because `tortoise/retrieval.py` is this surface's own: a retrieval.py-only change must re-run the gate that pins the window bound
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the migration oracle pins `retrieval.ask_env_bool` as a migrated site)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
@@ -3845,6 +3881,13 @@ surfaces:
   # same surfaces — an `sdk.py` change selects the full matrix, and the
   # narrower surfaces are what keep it from going silently green.
   - test_7951_update_point_outbox.py
+  # #7951 (increment 4a, the DELETE door): `delete_point` appends its
+  # `EntityMutated` op=delete record BEFORE the `DETACH DELETE`, so a delete
+  # the journal never recorded cannot be performed — apply-first here does not
+  # merely lose a write, it lets the next replay UNDO the deletion. Same
+  # `tortoise/sdk.py` subject as the create/update suites above, so it rides
+  # the same six-surface matrix.
+  - test_7951_delete_point_outbox.py
   # #7809: DUAL-REGISTERED with `api`/`core` — this guard pins
   # `tortoise/embeddings.py::_embedder_warmup_enabled` (the flag resolution the
   # hosted lifespan now calls), and that module is an EXACT
@@ -3906,6 +3949,20 @@ surfaces:
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
+  # #8043 (Slice A of #2683): the reader-window FLOODING BOUND, measured
+  # hermetically on the shipped `assemble_context`/`package_evidence_pool` —
+  # the pre-#2978 baseline shape, the post-#2978 reallocation, the assembly's
+  # 1 + max_verbatim bound, and the duplicate-free control. Registered HERE
+  # because the instrument is `tools/longmem_eval/slice_a_flood_bound.py` (a
+  # SOURCE_PATTERNS entry of this surface), and DUAL with the `sdk` surface
+  # ABOVE because the functions it pins live in `tortoise/retrieval.py`
+  # (registered there: `evidence_assembly` is on the eval arm path,
+  # `assemble_context` is the shared product window). A slice-tool-only change
+  # DOES select a surface — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of
+  # this one — so what this row buys is the guard's presence in that selection:
+  # without it the receipt's reproducibility gate does not run on the change
+  # that can move the receipt.
+  - longmem_eval/test_slice_a_flood_bound.py
   - eval/write_path/test_write_path_corpus.py
   - eval/write_path/test_write_path_grading.py
   - eval/write_path/test_write_path_runner.py
@@ -5182,6 +5239,18 @@ durations:
   # file's declared cost, not because the gate requires it. Refresh from the
   # first post-merge main run.
   longmem_eval/test_ingest_stall_guard.py: 2.0
+  # #8043: new file in this pool, never sampled by a CI run, so it takes the
+  # flat 2.0s default under the #3400/#4221 convention (a local timing is not
+  # the input). Measured locally at ~3s wall for the whole file (12 tests; the
+  # module-scoped `measure()` fixture is the only cost) — refresh from the
+  # first post-merge main run. The entry is the file's declared cost, NOT a
+  # gate requirement: measured on this head (2026-10-17, this worktree) with
+  # the repo's own predicate, `duration_coverage_issues()` is empty with AND
+  # without this row — the fast pool sits above the 90% `DURATION_COVERAGE_MIN`
+  # floor, on THIN headroom (a few files), so no percentage is restated here on
+  # purpose. (The same "the floor needs this row" justification was retired for
+  # the entry above; do not re-introduce it.)
+  longmem_eval/test_slice_a_flood_bound.py: 2.0
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
   test_3926_error_prop_guard.py: 0.3
@@ -5702,6 +5771,7 @@ durations:
   test_7951_write_doors.py: 6.2
   test_7951_create_point_outbox.py: 3.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 772/858 = 89.98% — the same shape as the `test_7950_capstone_probe.py` row above. Local embedded-lane reading 3.2s (14 tests × ~0.23s). Refresh from the first post-merge run that includes it.
   test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). Refresh from the first post-merge run that includes it.
+  test_7951_delete_point_outbox.py: 5.0  # unmeasured — #7951 increment 4a (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default, which drops `duration_coverage_issues()` under the 90% floor — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 4.3–6.8 s when the file collected 6 tests; at this head it collects 10 (T1-T10, TWO of which call `rebuild_all` — T3 and T8) and measured 7.5 s here on the same lane, so the 5.0 weight is a lower-ish bound in the right neighbourhood rather than a stale one. Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4
   test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
   test_env_contract_covers_supabase_config.py: 2.0  # #4030: appended by hand so the entry exists at all — main sat only just above the guard's floor (764/848 fast files = 90.09%), and this new fast file tipped `duration_coverage_issues()` below it (764/849 = 89.99%, formatted as the `90.0%` in that error). Local estimate: 3.24 s measured for this file plus its paired pin in test_ci_selection.py, most of it one conftest import. `tools/ci_timing.py --refresh-durations` replaces it with the CI-measured value.

@@ -3599,11 +3599,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_point.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
   lifecycle: active
   used_by: tooling, skill-docs, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling'
+  reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
