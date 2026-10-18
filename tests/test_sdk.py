@@ -1456,13 +1456,23 @@ class TestExplicitDraftIsHonoured1088:
     command may move it to live. Only an explicit promotion (``promote_point``
     or ``update_point(status="live")``) may do that.
 
-    Non-vacuous because the pre-#1088 code did the opposite on every path
-    pinned here — with ONE exception, named rather than counted: the four
-    decide-part parameters of ``test_create_point_defaults_to_live`` were born
-    live already (#2199), so they are a BIRTH-STATUS pin for the universal
-    ruling (#6107's acceptance rail asks for them), not evidence for the
-    inversion. ``statement`` is the only discriminating parameter, and it is
-    the one the pre-#1088 code defaulted to 'draft'.
+    Non-vacuous on the paths #1088 CHANGED — the create default and the three
+    promotion clauses. Two other families are deliberately NOT inversion
+    evidence, named rather than counted:
+
+    (i) the four decide-part parameters of ``test_create_point_defaults_to_live``
+        were born live already (#2199) — a BIRTH-STATUS pin for the universal
+        ruling (#6107's acceptance rail asks for them). ``statement`` is the
+        only discriminating parameter: it is the kind the pre-#1088 code
+        defaulted to 'draft'.
+    (ii) the over-narrowing pins pass on the pre-#1088 code as well, and red
+        only if the narrowed ``IS NULL``-only clauses are removed outright:
+        ``test_1088_null_status_is_still_filled_with_live`` (the old
+        ``IS NULL OR = 'draft'`` clause also filled a never-set status),
+        ``test_1088_explicit_draft_still_promotable`` and
+        ``test_1088_explicit_draft_promotable_via_update_point`` (the
+        ``promote_point`` / ``update_point`` draft→live guards are untouched by
+        #1088), and ``test_1088_update_point_still_refuses_terminal_resurrection``.
     """
 
     @pytest.mark.parametrize("kind", [
