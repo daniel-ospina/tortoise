@@ -29,9 +29,9 @@ This epic's deploy surface is **web dashboard + hosted API + served agent skill*
 
 E2E-1 and E2E-12 are **walked in a browser**; the other ten are verified through the suites their surface map assigns them (integration, contract, skill lint, unit). "Walked" is not claimed for a scenario driven only by pytest.
 
-**Surfaces: 17 of 17 exercised at their assigned layer; 16 green; 1 that has never passed under load.** Stated precisely, because "verified" is a claim about a sha and about a pass:
+**Surfaces: 17 of 17 exercised at their assigned *automated* layer; 16 green; 1 that has never passed under load; 2 whose manual leg was not run.** Stated precisely, because "verified" is a claim about a sha and about a pass:
 
-- **Which sha:** batches **A and B** ran at the anchor commit `fbc1d96d5` (surfaces 1–7, 9–11, 14–16); batches **C, D and the browser walk E** ran at `180fe6fd3` (surfaces 3, 5, 6, 8, 12, 13, 17). The two heads differ only by main's own merges in between, none touching onboarding code, and the per-batch file lists in lane conditions let any batch be re-derived at either head. The **browser walk — the evidence for the epic's own UI claims — is all at `180fe6fd3`**.
+- **Which sha:** batches **A and B** ran at the anchor commit `fbc1d96d5` — surfaces **1, 2, 7, 9, 10, 11, 14, 15, 16**; batches **C, D and the browser walk E** ran at `180fe6fd3` — surfaces **3, 4, 5, 6, 8, 12, 13, 17**. (Surface 4's evidence is the fork-card specs inside `test_dashboard_onboarding.py`, i.e. the browser walk, so it is a `180fe6fd3` surface.) The two heads differ only by main's own merges in between, none touching onboarding code, and the per-batch file lists in lane conditions let any batch be re-derived at either head. The **browser walk — the evidence for the epic's own UI claims — is all at `180fe6fd3`**.
 - **Which pass:** **surface 7 (seed) has never passed under load** — one of its 54 tests returns a 504 wait-budget error (D1, 5/5 reproductions, green in 9.08 s on a quiet host). Surface 11 (capture disclosure) failed one test in a batch and passed alone (D2).
 - **Which layer was not reached:** surfaces 5 and 15 each carry a **manual** leg in the test-design map that this run did not execute (their automated layers are green) — see the rows.
 
@@ -64,7 +64,7 @@ Commands below ran from `.worktrees/capstone-2008-1976` (clean checkout of the v
 
 **Totals, stated so the arithmetic can be checked:** **676 passed** across the batches below (200 + 121 + 123 + 170 + 40 + 22) and **1 skipped** (from batch F). Failures split by scope: **3 in-scope failures** — batch A's 1 (D1) and batch B's 2 (D2, D3), each named and reproduced — plus **batch F's 40 failures, which are D4 and outside the epic's 17 surfaces**, listed separately rather than netted into the in-scope count. Batch F also contributes the single skip, so it is counted for passes and skips but not folded into the in-scope failure tally.
 
-```
+```text
 A  200 passed, 1 failed   state ×6 + seed ×2                      (D1)
 B  121 passed, 2 failed   w4_settings, variants, w6_capture,
                           capture_disclosure_template, w11,
@@ -149,7 +149,7 @@ The indicator asks for walk-through friction observations **and a W11 funnel rea
 `onboarding_decide_complete`, deduped). The event machinery is verified (surface 14, `test_onboarding_telemetry_w11.py`);
 the **funnel read is not obtainable from this machine**, because hosted capture is over quota:
 
-```
+```text
 [tortoise-capture] Hosted capture FAILED (HTTP 402 — {"code":"quota_exceeded",
  "message":"Team points limit reached: 25000 in use + 138 estimated for this capture
  exceeds 25000. Upgrade your plan. ...","used":25000,"limit":25000})
@@ -211,17 +211,17 @@ naming what failed (D5 below — an observation, not a defect, because the copy 
 ## Verdict
 
 **PASS for the epic's own surfaces, with the coverage stated exactly.** 17 of 17 surfaces were exercised at their
-assigned layer and **16 are green**; the one that is not — surface 7, the seed endpoint — has never passed under load
+assigned **automated** layer and **16 are green**; the one that is not — surface 7, the seed endpoint — has never passed under load
 (D1). Two surfaces carry a **manual leg this run did not execute** (5 and 15, both green at their automated layers), and
-the batches that cover surfaces 1–7 and 9–11, 14–16 ran at the anchor commit `fbc1d96d5` while the browser walk and the
-remaining suites ran at `180fe6fd3` (see the sha grouping above). All 12 high-level E2E scenarios are covered with
+the batches covering surfaces 1, 2, 7, 9–11 and 14–16 ran at the anchor commit `fbc1d96d5`, while the browser walk and
+the remaining suites (surfaces 3–6, 8, 12, 13, 17) ran at `180fe6fd3` — see the sha grouping above. All 12 high-level E2E scenarios are covered with
 evidence; **2 of them (`E2E-1`, `E2E-12`) were walked in a real browser** (40/40), the other ten through their assigned
 suites. The two UI claims the epic rests on — a calm Overview and a Settings home — are confirmed on screen as well as
 in assertions.
 
 Of the three in-scope failures: **D2** was green only on re-run (a load-sensitive flake), **D1** never went green under
-load (5/5 reproductions — it passes on a quiet host, which is why the classification is unresolved and recorded on
-#8000), and **D3** was **proven** an environment artifact with a single-variable control (a 28 Sep build output against
+load (5/5 reproductions — it passes on a quiet host, which is why the classification is unresolved and recorded on #8000),
+and **D3** was **proven** an environment artifact with a single-variable control (a 28 Sep build output against
 an 18 Oct source; the same test passes in a checkout built from the same lineage). One *layer* — the deployed
 auth/identity journey, D4 — was not driven at all because it needs a production session. The W11 funnel read
 (indicator 5) is unmeasurable while hosted capture returns 402.
