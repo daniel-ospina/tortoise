@@ -119,12 +119,25 @@ HELPER = "quiesce_testclient_background_work"
 #: the module now applies the seam and this guard covers it.
 #: `test_supabase_control.py` is the one real exclusion AMONG THE MODULES THIS
 #: GUARD CLASSIFIES: those tests drive `provision_org` / `_session_user_org`
-#: directly with no `TestClient`, so no lifespan, so no sweep.
-CONSUMERS = (
-    "test_export_delete.py",
-    "test_pack_state.py",
-    "test_writer_inventory.py",
-)
+#: directly with no `TestClient`, so no lifespan, so no sweep (its own index pin
+#: is exclusive by construction, not by quiescing).
+#:
+#: The specific FIXTURES that must apply the seam, per consumer module. This is
+#: deliberately FIXTURE-granular: module granularity was a hole a review caught,
+#: because a module that keeps one quiescing fixture and loses another (e.g.
+#: `sb_client` drops it while `reg_client` keeps it) still has an import and a
+#: call somewhere, so a module-level check stays green — and the lost fixture's
+#: index pin silently returns to the #4816 1-in-N flake. The index is the fixture
+#: FUNCTION name; every one of these is where `TestClient(app)` is entered.
+CONSUMER_FIXTURES: dict[str, tuple[str, ...]] = {
+    "test_export_delete.py": ("sb_client", "reg_client"),
+    "test_pack_state.py": ("supabase_client",),
+    "test_writer_inventory.py": ("client",),
+}
+
+#: The consumer MODULES — the modules above, in a stable order, for the cheaper
+#: module-level half of the check (does the module import the seam at all).
+CONSUMERS = tuple(CONSUMER_FIXTURES)
 
 
 def _production_pointers() -> list[tuple[Path, str, str, str]]:
@@ -240,4 +253,42 @@ def test_the_seam_is_defined_once_and_imported_by_its_consumers():
     assert not missing, (
         "these fixtures must IMPORT the shared quiesce and apply it:\n  "
         + "\n  ".join(missing)
+    )
+
+    # FIXTURE-granular half (a review caught the hole): the loop above is
+    # satisfied by ONE call anywhere in the module, so a consumer that keeps
+    # `reg_client`'s call and loses `sb_client`'s stays green — and that lost
+    # fixture's index pin silently returns to the #4816 1-in-N flake. Each
+    # named fixture must itself call the seam.
+    unquiesced: list[str] = []
+    for module, fixtures in CONSUMER_FIXTURES.items():
+        tree = ast.parse((TESTS_DIR / module).read_text(encoding="utf-8"))
+        bodies = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        for fixture in fixtures:
+            node = bodies.get(fixture)
+            if node is None:
+                unquiesced.append(f"{module}:{fixture} — fixture not found")
+                continue
+            applies = any(
+                isinstance(call, ast.Call)
+                and (
+                    (isinstance(call.func, ast.Name)
+                     and call.func.id == HELPER)
+                    or (isinstance(call.func, ast.Attribute)
+                        and call.func.attr == HELPER)
+                )
+                for call in ast.walk(node)
+            )
+            if not applies:
+                unquiesced.append(
+                    f"{module}:{fixture} — does not call {HELPER}"
+                )
+    assert not unquiesced, (
+        "these fixtures open `TestClient(app)` on a shared store and must each "
+        "apply the quiesce themselves (a module-level call is not enough):\n  "
+        + "\n  ".join(unquiesced)
     )

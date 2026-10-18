@@ -2148,10 +2148,11 @@ def rpc_call_named(fake, name: str):
     THE RULE THIS DOES NOT OVERRIDE (#8920): a fixture that QUIESCES the
     lifespan's background work (`tests._http_fixtures.quiesce_testclient_background_work`)
     gives the test exclusive ownership of `rpc_calls`, so an index pin there is
-    legitimate — ``fake.rpc_calls[0]`` in `test_export_delete.py` /
-    `test_pack_state.py` / `test_supabase_control.py` relies on exactly that,
-    and each site says so. "Never by index" applies to a fixture that lets the
-    sweep run.
+    legitimate — ``fake.rpc_calls[0]`` in `test_export_delete.py` and
+    `test_pack_state.py` relies on exactly that. `test_supabase_control.py`'s
+    index pin relies on a DIFFERENT fact: it has no `TestClient` at all, so no
+    lifespan arms a sweep. Each site states which. "Never by index" applies to
+    a fixture that lets the sweep run.
 
     Returns the ``(fn, body)`` tuple, so callers keep their body assertions.
     """

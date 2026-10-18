@@ -166,11 +166,16 @@ def quiesce_testclient_background_work(monkeypatch) -> None:
        plus `_refresh_cost_allocation`) — and this list exists so the next
        addition is visible, not to be re-derived here. It was INCOMPLETE until
        #4816: it named three of the six and omitted
-       `_reconcile_metering_periods` (#4241), the only one that calls an
-       **RPC** on the control plane (`metering_repair_period_bounds`) and
-       therefore the one that could land in `FakeControlPlane.rpc_calls` ahead
-       of a test's own call. That omission is exactly the flake this seam now
-       prevents.
+       `_reconcile_metering_periods` (#4241), the only one whose control-plane
+       **RPC** runs on EVERY cycle — it is guarded only by
+       `is_supabase_enabled()` and then *queries* for unusable periods, so
+       `metering_repair_period_bounds` is recorded on
+       `FakeControlPlane.rpc_calls` whether or not the fixture seeded anything.
+       The purge sweeps also reach the control plane (`purge_org_record`,
+       `account_deletion_claim_org`) but only when an eligible row exists,
+       which these fixtures do not seed — so the metering RPC was the one that
+       could land ahead of a test's own call unsolicited. That omission is
+       exactly the flake this seam now prevents.
 
        Enumerated for reference: `_sweep_events`, `_purge_deleted_orgs`,
        `_purge_deleted_accounts`, `_sweep_oauth_retention`,

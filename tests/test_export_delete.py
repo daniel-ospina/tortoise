@@ -1038,10 +1038,13 @@ class TestDashboardCreatedTeamRoundTrip:
         # Index pin, deliberately (#8920): `sb_client` applies
         # `quiesce_testclient_background_work` BEFORE entering the app, so the
         # lifespan's boot sweep cannot record its #4241
-        # `metering_repair_period_bounds` RPC first — and the guard module
-        # `tests/test_8920_harness_pointer.py` keeps that fixture in its
-        # CONSUMERS list. If the quiesce ever regresses, this pin returns to the
-        # #4816 1-in-N flake; `test_pack_state.py`'s clean arm is the detector.
+        # `metering_repair_period_bounds` RPC first.
+        #
+        # WHAT IS ACTUALLY GUARDED, exactly: `tests/test_8920_harness_pointer.py`
+        # pins this FIXTURE by name (`CONSUMER_FIXTURES`) — it asserts that
+        # `sb_client` itself calls the seam, so a regression here reddens in CI
+        # rather than only flaking this pin. A regression of the shared helper
+        # (not of this call site) also reddens `test_pack_state.py`'s clean arm.
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{org_id}"
