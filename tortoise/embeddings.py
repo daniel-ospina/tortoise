@@ -23,6 +23,7 @@ import time
 
 import numpy as np
 
+from . import embed_gate  # #5008: the S5 EMBED gate (which rows earn a vector)
 from .env_truthy import env_flag  # #4097: the declared truthy contract
 from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
@@ -992,6 +993,57 @@ def encode_for_store(
     """
     vec = compute_embedding(content)
     return _degrade_to_width([vec], expected_dim)[0]
+
+
+def encode_for_row(
+    content: str, expected_dim: int | None,
+) -> list[float] | None:
+    """The EMBED-gated submission step for a WRITTEN row (#5008).
+
+    This is the one place a write path asks *"should this row carry a
+    vector?"*. :func:`encode_for_store` stays the raw, dim-declaring primitive
+    (reads, backfills and repairs call it directly and are **not** gated); the
+    graph writers call this instead, so the predicate is enforced at exactly
+    one seam and a new writer cannot re-inherit the unenforced state that
+    `#5008` is about — the same reasoning `vector_write` uses for the
+    clear-then-set invariant.
+
+    Exactly two outcomes:
+
+    * **``EMBED``** (the default, and the whole behaviour while
+      ``TORTOISE_EMBED_GATE`` is unset) ⇒ :func:`encode_for_store`.
+    * **``NO-EMBED``** ⇒ ``None``. The row is still written; it simply carries
+      no vector. Every caller already treats ``None`` as "this write produced
+      no vector" — the arms that PRESERVE a stored vector on null are why a
+      re-write does not resurrect rent, and the arms that WIPE (a content edit)
+      are why a node never holds a vector for text it no longer carries.
+
+    The decision is logged (`info`) with the **shared** rule id, so a
+    draft-and-run over real rows can be counted from the log before the flag is
+    trusted — the measurement `#5008` asks for, without a new stats channel in
+    the projection.
+
+    ⚠️ **Live/replay parity** holds by construction: the verdict is a pure
+    function of the TEXT, and live and replay encode the same text, so gating
+    both sides (they both call this seam) cannot make one carry a vector the
+    other does not — the `#5004` divergence class.
+
+    ⚠️ **Deliberately NOT routed through here**, so the boundary is written
+    down rather than inferred: `encode_batch_for_store` (the session TURN
+    writers — a `Turn` is not an extracted row, and the batched form has one
+    vector per windowed turn, not per candidate), and
+    `graph-scripts/backfill_embeddings.py` (the re-encode tool, whose job is to
+    RESTORE vectors — gating it would make it unable to restore one).
+    """
+    if embed_gate.embed_gate_enabled():
+        verdict = embed_gate.embedding_verdict(content)
+        if verdict is not None:
+            logger.info(
+                "embed gate: no vector for this row — %s [%s]",
+                verdict["reason"], verdict["rule_id"],
+            )
+            return None
+    return encode_for_store(content, expected_dim)
 
 
 def encode_batch_for_store(

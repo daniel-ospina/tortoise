@@ -7440,8 +7440,8 @@ class TortoiseSDK:
         # self-consistent injected encoder is stored instead of silently NULLed.
         embedding = None
         try:
-            from .embeddings import encode_for_store
-            embedding = encode_for_store(
+            from .embeddings import encode_for_row
+            embedding = encode_for_row(
                 content, self._get_proj().required_embedding_dim)
         except Exception:
             pass  # Graceful — embedding is optional
@@ -10789,9 +10789,9 @@ class TortoiseSDK:
             # — a `None` new_content is "no content edit" there, so it must not
             # derive (or wipe) a vector either.
             try:
-                from .embeddings import encode_for_store
+                from .embeddings import encode_for_row
                 props["embedding"] = (
-                    encode_for_store(_new_content, proj.required_embedding_dim)
+                    encode_for_row(_new_content, proj.required_embedding_dim)
                     if _new_content else None)
             except Exception:
                 props["embedding"] = None
