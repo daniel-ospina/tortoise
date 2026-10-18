@@ -489,7 +489,7 @@ def _resolver(*addresses: str, seen: list | None = None):
 class _Dialed(BaseException):
     """Sentinel raised when a REFUSED target still reached the wire.
 
-    A ``BaseException`` subclass on purpose (P2, #9034 review): ``post`` ends its
+    A ``BaseException`` subclass on purpose: ``post`` ends its
     per-candidate block with ``except Exception`` so that a transport failure
     stays a receipt — an ``AssertionError`` sentinel is an ``Exception`` and is
     therefore laundered into ``(None, "AssertionError: ...")``, which ANY
@@ -500,8 +500,9 @@ class _Dialed(BaseException):
 def _no_dial(monkeypatch):
     """Fail LOUDLY (and unswallowably) if a refusal still reaches the wire.
 
-    Returns the list of URLs the transport tried to dial, so a test can assert
-    none happened even if some future code learns to catch ``BaseException``.
+    Returns the list of ``httpx.Client`` constructor calls the transport made
+    (the pinned URL is only known to ``Client.post``), so a test can assert none
+    happened even if some future code learns to catch ``BaseException``.
     """
     import httpx
 
@@ -522,7 +523,9 @@ def _no_dial(monkeypatch):
     ("http://127.0.0.1/cb", "is not a globally routable address"),
     # A blocked NAME — again refused before any resolution happens.
     ("http://localhost/cb", "is a local/private name"),
-    # Scheme and credential rules come from the same predicate.
+    # Scheme and credential rules come from the same predicate. This row is
+    # ALSO refused by ``_pinned_targets``' own scheme guard, so it survives
+    # deleting the re-check; the literal/name/credential rows do not.
     ("ftp://hooks.example.com/cb", "scheme must be http or https"),
     ("https://user:pw@hooks.example.com/cb", "must not carry credentials"),
 ])
@@ -534,9 +537,10 @@ def test_connect_reapplies_the_registration_policy_to_graph_written_urls(
 
     The refusal REASON is asserted per URL, and the no-dial sentinel is a
     ``BaseException``: the injected resolver answers a GLOBAL address for every
-    host, so if the re-check were dropped these URLs would be dialed — a
-    "some error at all" assertion would then accept the swallowed
-    ``AssertionError`` and pass (that was the vacuity this replaces).
+    host, so dropping the re-check makes the literal, name and credential rows
+    dial — a "some error at all" assertion would then accept the swallowed
+    sentinel and pass (that was the vacuity this replaces). The ``ftp://`` row is
+    the exception: ``_pinned_targets`` refuses the scheme itself.
     """
     dialed = _no_dial(monkeypatch)
     status, error = wd.WebhookTransport(
@@ -548,7 +552,7 @@ def test_connect_reapplies_the_registration_policy_to_graph_written_urls(
 
 def test_connect_idna_encodes_an_idn_host_for_resolution_host_and_sni(
         monkeypatch):
-    """An IDN (non-ASCII) callback host keeps delivering (#9034 review P1).
+    """An IDN (non-ASCII) callback host keeps delivering.
 
     ``Host`` is a header value and ``sni_hostname`` a TLS server name; httpx
     encodes neither with a utf-8 fallback, so handing it the raw
@@ -803,7 +807,7 @@ def test_the_pinned_request_reaches_the_vetted_peer_on_the_wire(monkeypatch):
 
 def test_the_pinned_request_verifies_tls_against_the_name_not_the_pinned_ip(
         monkeypatch, tmp_path):
-    """The HTTPS half, end to end over a REAL TLS socket (#9034 review Note A).
+    """The HTTPS half, end to end over a REAL TLS socket.
 
     Every real subscription uses https, and the pin dials an IP literal while
     keeping the name for SNI. If ``extensions={'sni_hostname': ...}`` did not
@@ -902,10 +906,100 @@ def test_the_pinned_request_verifies_tls_against_the_name_not_the_pinned_ip(
     assert got["body"] == b'{"k":1}'
 
 
+def test_a_caller_supplied_host_header_cannot_duplicate_the_pinned_one(monkeypatch):
+    """The pin OWNS ``Host``: a caller-supplied ``host`` in ANY case spelling is
+    DROPPED rather than left beside ours.
+
+    Two Host headers make h11 refuse the request outright
+    (``LocalProtocolError: Found multiple Host: headers``), which turns the
+    override into a hard delivery failure and then, through the attempt ceiling,
+    into a DISABLED subscription. The failure is fail-closed, so this is
+    availability rather than routing — but the seam advertises header injection.
+    """
+    import httpx
+
+    seen: dict = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, url, **kwargs):
+            seen.update(kwargs["headers"])
+            return type("R", (), {"status_code": 200})()
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    status, error = wd.WebhookTransport(
+        resolver=_resolver("93.184.216.34")).post(
+            "https://hooks.example.com/cb", b"{}",
+            {"host": "attacker.example", "Content-Type": "application/json"})
+    assert (status, error) == (200, None), (status, error)
+    host_keys = [k for k in seen if k.lower() == "host"]
+    assert host_keys == ["Host"], seen
+    assert seen["Host"] == "hooks.example.com", seen
+
+
+def test_the_env_ca_bundle_still_applies_despite_trust_env_false(monkeypatch):
+    """``trust_env=False`` is load-bearing (an env proxy would re-resolve the
+    name and discard the pin) — but httpx reads ``SSL_CERT_FILE`` /
+    ``SSL_CERT_DIR`` ONLY when ``trust_env`` is ON, so switching it off silently
+    dropped the CA seam an operator-configured deployment relies on: every https
+    delivery would fail verification and the subscription would eventually be
+    disabled, with the cause appearing nowhere in the diff.
+
+    The transport therefore restores that seam explicitly — and leaves ``verify``
+    unset when the environment sets neither, so the default path is httpx's own.
+    """
+    import ssl
+
+    import httpx
+
+    captured: dict = {}
+    context_calls: list = []
+    sentinel = ssl.create_default_context()
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *a, **k):
+            return type("R", (), {"status_code": 200})()
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    monkeypatch.setattr(
+        ssl, "create_default_context",
+        lambda **kwargs: (context_calls.append(kwargs), sentinel)[1])
+    transport = wd.WebhookTransport(resolver=_resolver("93.184.216.34"))
+
+    for key in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    assert transport.post("https://hooks.example.com/cb", b"{}", {})[0] == 200
+    assert "verify" not in captured, captured
+    assert context_calls == []
+
+    monkeypatch.setenv("SSL_CERT_FILE", "/operator/ca.pem")
+    assert transport.post("https://hooks.example.com/cb", b"{}", {})[0] == 200
+    assert captured["verify"] is sentinel, captured
+    assert captured["trust_env"] is False, captured
+    assert context_calls == [{"cafile": "/operator/ca.pem", "capath": None}]
+
+
 def test_the_connect_loop_spends_one_budget_across_all_vetted_addresses(
         monkeypatch):
     """The worst case for ONE delivery is ``timeout_s``, not N × ``timeout_s``
-    (#9034 review Note C).
+    (found in review: the cap bounded COUNT, not TIME).
 
     The address cap bounds the loop by COUNT. Without a shared deadline a
     hostile resolver answering eight blackholed global addresses turns one event
@@ -1005,7 +1099,7 @@ def test_the_address_policy_has_exactly_one_home():
     # ...but a BEHAVIOURAL comparison of two copies cannot detect the drift this
     # pins: if the algorithm were re-inlined into ``cimd``, both copies would
     # agree on every address above and the assertion would still pass (#9034
-    # review Note B). So pin the SOURCE: ``cimd.is_public_address`` must be a
+    # of a delegation). So pin the SOURCE: ``cimd.is_public_address`` must be a
     # pure delegation — one ``return`` of a call to ``is_global_address`` and no
     # classification of its own.
     import ast
@@ -1022,8 +1116,10 @@ def test_the_address_policy_has_exactly_one_home():
         call.func, "id", "")
     assert callee == "is_global_address", ast.dump(call)
 
-    # And the two non-global classes ``is_global`` alone lets through are
-    # refused by the shared predicate (multicast, 6to4 relay anycast).
+    # And the non-global classes ``is_global`` ALONE lets through are refused by
+    # the shared predicate — named rather than counted here (the full
+    # enumeration lives in tests/test_cimd_ssrf.py): multicast and the 6to4 relay
+    # anycast are asserted directly below.
     assert not is_global_address(ipaddress.ip_address("224.0.0.1"))
     assert not is_global_address(ipaddress.ip_address("192.88.99.1"))
 

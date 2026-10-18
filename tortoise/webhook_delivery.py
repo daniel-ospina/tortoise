@@ -70,6 +70,7 @@ import hmac
 import json
 import logging
 import os
+import ssl
 import time
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -367,9 +368,11 @@ def verify_signature(secret: str, header: str, body: bytes, *,
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 #: How many vetted addresses one delivery may DIAL. Every answer is validated
-#: (a mixed answer is refused whole), but the connect loop needs a bound of its
-#: own: a hostile resolver can answer with a long list and each attempt costs a
-#: ``TIMEOUT_S`` connect. Same cap as ``cimd.MAX_ADDRESSES``, same reason.
+#: (a mixed answer is refused whole), and the loop is bounded by COUNT here while
+#: the shared budget in ``WebhookTransport.post`` bounds it by TIME — both are
+#: needed: each candidate is a separate socket and a separate TLS handshake, so
+#: time alone would still open as many sockets as the resolver invented inside
+#: the budget. Same number as ``cimd.MAX_ADDRESSES``.
 MAX_PINNED_ADDRESSES = 8
 
 
@@ -496,7 +499,11 @@ class WebhookTransport:
 
         The candidate addresses share ONE ``timeout_s`` budget, so a hostile
         resolver cannot turn one delivery into ``MAX_PINNED_ADDRESSES`` connect
-        timeouts: the worst case is ``timeout_s`` regardless of the answer.
+        timeouts. Stated exactly: the CONNECT phase is bounded by ``timeout_s`` in
+        total. ``httpx``'s float timeout is a PER-PHASE timeout, so a candidate
+        that completes its connect inside the budget may still spend one further
+        read/write phase after the last deadline check — the same per-phase
+        property the pre-pin ``httpx.post(timeout=...)`` had for a single target.
         """
         try:
             candidates = _pinned_targets(url, resolver=self._resolver)
@@ -506,26 +513,41 @@ class WebhookTransport:
             return None, redact_error(e)
         import httpx
 
-        out_headers = dict(headers)
+        # Scrub any caller-supplied ``Host`` in ANY case spelling before setting
+        # ours: two Host headers make h11 refuse the request outright, so a
+        # stray lowercase key would turn the override into a hard delivery
+        # failure instead of an override.
+        out_headers = {k: v for k, v in headers.items() if k.lower() != "host"}
         # ``Host`` and ``sni_hostname`` are the same for every candidate — the
         # pin moves the ADDRESS only, never the name the subscriber's vhost and
         # its certificate are keyed on.
         host_header, sni = candidates[0][1], candidates[0][2]
         out_headers["Host"] = host_header
         extensions = {"sni_hostname": sni} if sni else None
+        # ``trust_env=False`` keeps an env-configured proxy from re-resolving the
+        # name and discarding the pin — but httpx reads ``SSL_CERT_FILE`` /
+        # ``SSL_CERT_DIR`` ONLY when ``trust_env`` is on, so turning it off also
+        # silently dropped the CA seam an operator-configured deployment relies
+        # on. Restored EXPLICITLY here: a bundle supplied by env var still
+        # verifies. Left UNSET otherwise, so an unset environment keeps httpx's
+        # own default (and any ``verify`` a caller injects).
+        cafile = os.environ.get("SSL_CERT_FILE")
+        capath = os.environ.get("SSL_CERT_DIR")
+        client_kwargs: dict = {"follow_redirects": False, "trust_env": False}
+        if cafile or capath:
+            client_kwargs["verify"] = ssl.create_default_context(
+                cafile=cafile, capath=capath)
         # Connect-class failures move on to the NEXT vetted address; any other
-        # error is the answer (a read timeout on address 2 is not fixed by
-        # trying address 1 again).
+        # error is the answer — a read-phase failure is not attributable to the
+        # address (the peer, or a middlebox in front of it, answered), so walking
+        # on to the untried candidates would not fix it.
         connect_errors = (httpx.ConnectError, httpx.ConnectTimeout)
         error: str | None = None
-        # The ADDRESS CAP bounds the loop by count, not by TIME: eight
-        # blackholed answers at the 10 s default is ~80 s of wall clock for ONE
-        # event, against ~10 s before the pin — exactly the amplification the
-        # docstring's "a hostile resolver cannot spend a connect timeout per
-        # invented answer" claims to have closed. So one overall budget spans
-        # the candidates: each attempt gets what is left of it, and the loop
-        # stops when it is gone (a fresh full ``TIMEOUT_S`` per address is what
-        # multiplied).
+        # The ADDRESS CAP bounds the loop by COUNT; the budget bounds it by TIME.
+        # Eight blackholed answers at the 10 s default would otherwise be ~80 s
+        # of wall clock for ONE event, against ~10 s before the pin. Each attempt
+        # gets what is left of one overall budget, and the loop stops when it is
+        # gone.
         deadline = time.monotonic() + self.timeout_s
         for pinned_url in (candidate[0] for candidate in candidates):
             remaining = deadline - time.monotonic()
@@ -537,8 +559,8 @@ class WebhookTransport:
                 break
             attempt_timeout = min(float(self.timeout_s), remaining)
             try:
-                with httpx.Client(timeout=attempt_timeout, follow_redirects=False,
-                                  trust_env=False) as client:
+                with httpx.Client(timeout=attempt_timeout,
+                                  **client_kwargs) as client:
                     resp = client.post(pinned_url, content=body,
                                        headers=out_headers, extensions=extensions)
                 return resp.status_code, None

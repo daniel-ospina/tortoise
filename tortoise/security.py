@@ -1263,7 +1263,7 @@ MAX_WEBHOOK_URL_LEN = 2048
 
 #: Hostnames that resolve to the loopback interface (or the cloud metadata
 #: endpoint) on the deployments we run on, and that a user could register as a
-#: webhook target. `ipaddress.is_global` already covers the IP-LITERAL forms;
+#: webhook target. `is_global_address` already covers the IP-LITERAL forms;
 #: this set covers the NAMES, which are not IP literals and so never reach it.
 #: `169.254.169.254` (the GCP/AWS IMDS address) is covered by the IP branch
 #: (link-local is not global), and is listed here as a NAME only because
@@ -1282,11 +1282,12 @@ _BLOCKED_WEBHOOK_HOST_SUFFIXES = (
 )
 
 
-#: Deprecated special-purpose ranges that ``ipaddress.is_global`` still reports
-#: as global (#2847 review P2): 6to4 relay anycast (RFC 7526) and IPv6
-#: site-local (RFC 3879). Effectively unroutable, but the predicate claims
-#: "globally routable" so it must not admit them. Moved here with
-#: :func:`is_global_address` from ``cimd`` so the address policy has ONE home.
+#: The 6to4 relay anycast range (RFC 7526). ``ipaddress.is_global`` still
+#: reports it as global, and it is effectively unroutable, so the predicate must
+#: not admit it. This constant holds ONLY that range — IPv6 site-local
+#: (``fec0::/10``, RFC 3879) is the sibling ``ip.is_site_local`` branch inside
+#: :func:`is_global_address`, not a member of this object. Moved here with the
+#: predicate from ``cimd`` so the address policy has ONE home.
 _IPV4_6TO4_RELAY = ipaddress.ip_network("192.88.99.0/24")
 
 
