@@ -1072,6 +1072,61 @@ def _module_level_embedded_only(tree) -> bool:
     return False
 
 
+def _modules_with_module_level_embedded_only(
+    registered: set[str], *, root: Path | None = None,
+) -> list[str]:
+    """The SOURCE-SCAN half of the carve-out guard: unregistered modules that
+    bind a module-level `embedded_only` pytestmark anywhere on disk.
+
+    Factored out of the test so the #9017 pre-filter below is exercised
+    END-TO-END by a test, not just described in a comment. The first cut of
+    #9017 pinned the filter with an assertion over the spelling battery that
+    hard-coded the token, so reverting the filter to `embedded_only` left every
+    test green — a pin that could not fail (review cycle 2, P1-A).
+
+    The universe mirrors pytest's own collection: BOTH default `python_files`
+    patterns (`test_*.py` and `*_test.py`) — a marker module named the second
+    way is collected and skipped exactly the same. Skips key on real path
+    PARTS: a substring test over the whole absolute path would step over a
+    collected file under a directory that merely contains ".venv".
+    """
+    root = _TESTS_ROOT if root is None else root
+    rel_base = _REPO_ROOT if root == _TESTS_ROOT else root.parent
+    offenders: list[str] = []
+    skip_parts = {"__pycache__", ".venv", ".git", "node_modules"}
+    for path in sorted(root.rglob("*.py")):
+        if not (path.name.startswith("test_") or path.name.endswith("_test.py")):
+            continue
+        if skip_parts & set(path.relative_to(root).parts):
+            continue
+        # parse BYTES: ast honours a PEP 263 coding declaration, so a latin-1
+        # module (importable, collected) is read rather than skipped by a utf-8
+        # decode error. An UNREADABLE file still raises, exactly as before #9017
+        # — this scan must not convert a read failure into a silent pass.
+        raw = path.read_bytes()
+        # #9017: skip the parse for a file that cannot bind a module-level
+        # `pytestmark`. The token is `pytestmark`, NOT the marker name, because
+        # `_module_level_embedded_only` deliberately returns True for shapes that
+        # never spell the marker: an IMPORT (`from _marks import pytestmark`), a
+        # call binding (`globals().update(pytestmark=...)`), and a marker name
+        # built by concatenation (`getattr(pytest.mark, P + '_only')`).
+        # Filtering on `embedded_only` would drop those three and turn a
+        # deliberate red into a silent green — the hole this guard exists to
+        # close (#3845). Every return-True path in the detector needs
+        # `pytestmark` in source, so it is the token that is invariant: 74 of the
+        # scan's 1,064 files carry it, 23 carry the marker. Measured in the
+        # suite 2026-10-18: this test 9.07s -> 0.73s CPU.
+        if b"pytestmark" not in raw:
+            continue
+        try:
+            tree = ast.parse(raw)
+        except (SyntaxError, UnicodeDecodeError, ValueError):
+            continue  # not importable source; pytest would not collect it either
+        if _module_level_embedded_only(tree) and path.stem not in registered:
+            offenders.append(str(path.relative_to(rel_base)))
+    return offenders
+
+
 def test_module_level_embedded_only_modules_are_carve_out(request):
     # #4047: it is the MODULE-level form of the marker that can go silent.
     # `@pytest.mark.embedded_only` on one test skips that test under a URI and
@@ -1113,27 +1168,7 @@ def test_module_level_embedded_only_modules_are_carve_out(request):
             exact.append(mod.nodeid)
 
     # ── SOURCE SCAN ─────────────────────────────────────────────────────────
-    offenders = []
-    # The universe mirrors pytest's own collection: BOTH default `python_files`
-    # patterns (`test_*.py` and `*_test.py`) — a marker module named the second
-    # way is collected and skipped exactly the same. Skips key on real path
-    # PARTS: a substring test over the whole absolute path would step over a
-    # collected file under a directory that merely contains ".venv".
-    skip_parts = {"__pycache__", ".venv", ".git", "node_modules"}
-    for path in sorted(_TESTS_ROOT.rglob("*.py")):
-        if not (path.name.startswith("test_") or path.name.endswith("_test.py")):
-            continue
-        if skip_parts & set(path.relative_to(_TESTS_ROOT).parts):
-            continue
-        try:
-            # parse BYTES: ast honours a PEP 263 coding declaration, so a
-            # latin-1 module (importable, collected) is read rather than
-            # skipped by a utf-8 decode error.
-            tree = ast.parse(path.read_bytes())
-        except (SyntaxError, UnicodeDecodeError, ValueError):
-            continue  # not importable source; pytest would not collect it either
-        if _module_level_embedded_only(tree) and path.stem not in registered:
-            offenders.append(str(path.relative_to(_REPO_ROOT)))
+    offenders = _modules_with_module_level_embedded_only(registered)
     assert not exact, (
         "a test module in this session carries a module-level embedded_only "
         "pytestmark but is not in the carve-out registry — it is collected here "
@@ -1952,6 +1987,13 @@ def _under_platform_condition(node, parents, platform_names) -> bool:
     return False
 
 
+# The token `_platform_gates` pre-filters on (#9017). A named constant, not a
+# literal inside the function, so `test_every_gated_spelling_carries_the_scan_
+# prefilter_token` pins the SAME object the scan uses — a pin that compares the
+# battery to its own literal cannot fail when the scan's token changes.
+_PLATFORM_GATE_TOKEN = b"platform"
+
+
 def _platform_gates(path: Path) -> list[str]:
     """Names of test files that are dev-machine-only evidence.
 
@@ -1991,9 +2033,28 @@ def _platform_gates(path: Path) -> list[str]:
 
     Unreadable source yields no gates rather than an exception: a file pytest
     cannot parse cannot be collected either, so the suite is already red.
+
+    #9017: a file whose bytes do not contain `platform` is skipped WITHOUT a
+    parse. Every gate this scanner can see names the platform and every
+    spelling of that naming carries the literal token: `sys.platform`,
+    `from sys import platform as …`, `import platform as p`,
+    `getattr(sys, "platform")`, and the string form
+    `skipif("sys.platform != 'darwin'")`. The battery below
+    (`_PLATFORM_GATE_SPELLINGS`) asserts that property for every spelling it
+    knows — including the one that must stay UNFLAGGED but still mentions the
+    platform — so a future spelling that does NOT carry the token reds the
+    suite instead of being silently filtered out here. The filter is worth it:
+    the scan's universe is 1,068 files and 59 of them mention the platform, so
+    it skips 83% of the run time (measured 2026-10-18: the prefiltered and
+    prefilter-free scanners agree gate-for-gate over all 1,068 files, at 27.22s
+    vs 4.57s CPU; in the suite `test_platform_gated_tests_are_registered` went
+    23.24s -> 3.66s CPU).
     """
+    raw = path.read_bytes()
+    if _PLATFORM_GATE_TOKEN not in raw:
+        return []
     try:
-        tree = ast.parse(path.read_bytes())
+        tree = ast.parse(raw)
     except (SyntaxError, UnicodeDecodeError):
         return []
     platform_names = _platform_aliases(tree)
@@ -2203,3 +2264,102 @@ def test_platform_gate_scan_covers_the_known_spellings(tmp_path):
         f"nowhere in CI unregistered: {missed}")
     assert not overreach, (
         f"these are not platform gates but are now flagged: {overreach}")
+
+
+def test_every_gated_spelling_carries_the_scan_prefilter_token():
+    """The prefilter's precondition, pinned (#9017).
+
+    Non-vacuity: `test_platform_gate_scan_covers_the_known_spellings` already
+    runs `_platform_gates` over every spelling, so a prefilter that stopped
+    matching this token reds THERE (the scan would return no gates). This test
+    pins the precondition itself — that no spelling is gate-detected without
+    carrying `_PLATFORM_GATE_TOKEN` — so the two cannot drift apart.
+
+    `_platform_gates` skips any file whose bytes lack `_PLATFORM_GATE_TOKEN`
+    WITHOUT parsing it — 1,009 of the scan's 1,068 files (94% of the FILES; 83%
+    of the run time, because the 59 that survive include the big ones). The
+    filter is only sound while every detectable gate names the platform, so a
+    new spelling that reached the scan some other way (a dynamic getattr, a
+    marker name that never mentions the platform) would be filtered out
+    silently, which is exactly the false green the scan exists to prevent.
+
+    A gate's condition must come from `sys.platform`, `import platform`,
+    `from sys import platform`, or a string naming it — every one of those
+    sources spells the token. This test states that as an assertion instead of
+    leaving it to a comment: a spelling that breaks the property reds HERE,
+    next to the spelling, rather than disappearing from CI.
+    """
+    token = _PLATFORM_GATE_TOKEN.decode()
+    missing = [src for src, gated in _PLATFORM_GATE_SPELLINGS
+               if gated and token not in src]
+    assert not missing, (
+        "these spellings are platform gates the prefilter would never parse, "
+        f"so they can no longer be detected at all: {missing}")
+
+
+# Every shape `_module_level_embedded_only` is written to recognise, in the
+# direction each one must go. THREE rows never spell `embedded_only` and would be
+# silently dropped by a prefilter on the MARKER NAME: the value is bound by an
+# import, by an import under an alias, or by a call/`getattr` whose name is built
+# by concatenation — and the detector returns True for exactly those,
+# deliberately ("unknowable here, so unknowable counts as marked"). That is why
+# the source scan prefilters on `pytestmark`.
+_EMBEDDED_MARK_SPELLINGS: tuple[tuple[str, bool], ...] = (
+    ("import pytest\npytestmark = pytest.mark.embedded_only\n", True),
+    ("from _marks import pytestmark\n", True),
+    ("from x import pytestmark as pytestmark\n", True),
+    ("globals().update(pytestmark=pytest.mark.embedded_only)\n", True),
+    ("import pytest\nmark = pytest.mark.embedded_only\npytestmark = mark\n", True),
+    ("import pytest\nP = 'embedded'\npytestmark = getattr(pytest.mark, P + '_only')\n", True),
+    ("import pytest\npytestmark = [pytest.mark.embedded_only] if X else []\n", True),
+    ("import pytest\npytestmark = pytest.mark.slow\n", False),
+    ("import pytest\ndef test_x(): pass\n", False),
+)
+
+
+def test_module_scope_embedded_only_scan_covers_the_known_spellings():
+    """The detector's battery — the mirror of `_PLATFORM_GATE_SPELLINGS`.
+
+    The counter-part pin for `test_platform_gate_scan_covers_the_known_spellings`:
+    the source scan in `test_module_level_embedded_only_modules_are_carve_out`
+    now skips files that cannot bind `pytestmark`, so the shapes that must stay
+    DETECTABLE need a battery of their own. Without it, narrowing the detector
+    (or the prefilter) is invisible until a module is skipped green.
+    """
+    missed, overreach = [], []
+    for source, marked in _EMBEDDED_MARK_SPELLINGS:
+        if _module_level_embedded_only(ast.parse(source)) != marked:
+            (missed if marked else overreach).append(source)
+    assert not missed, (
+        "these module-level embedded_only bindings are no longer detected, so "
+        f"the module would be collected and skipped green: {missed}")
+    assert not overreach, (
+        f"these are not module-level embedded_only bindings but red: {overreach}")
+
+
+def test_the_embedded_source_scan_REPORTS_every_known_spelling(tmp_path):
+    """The source scan, END TO END, over every shape it must catch (#9017).
+
+    Deliberately runs `_modules_with_module_level_embedded_only` — token filter,
+    read, parse and detector — against a real directory, instead of asserting a
+    token string against the battery. The first cut of this test did the latter,
+    and review cycle 2 killed it by mutation: reverting the filter to
+    `b"embedded_only"` (which skips the import / call-bound shapes the detector
+    reds on) left EVERY test green, because the assertion only ever compared the
+    battery to a literal. This one reds, because the import shape never reaches
+    the detector at all.
+    """
+    expected = set()
+    for i, (source, marked) in enumerate(_EMBEDDED_MARK_SPELLINGS):
+        name = f"test_probe_{i}_x.py"
+        (tmp_path / name).write_text(source)
+        if marked:
+            expected.add(name)
+    # A file whose name pytest would not collect must be ignored even when it
+    # carries the marker: the scan's universe is the collection, not the tree.
+    (tmp_path / "helper.py").write_text("import pytest\npytestmark = pytest.mark.embedded_only\n")
+    reported = {Path(o).name
+                for o in _modules_with_module_level_embedded_only(set(), root=tmp_path)}
+    assert reported == expected, (
+        "the source scan's token pre-filter changed what it can SEE — these "
+        f"missed: {sorted(expected - reported)}, unexpected: {sorted(reported - expected)}")
