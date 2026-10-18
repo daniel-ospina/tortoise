@@ -799,8 +799,8 @@ def event_head_seq(graph) -> int:
       fails its ``prev >= 0 AND prev < $max`` grant test — so a graph holding one
       stops emitting until someone repairs the node. Only a non-integral float is
       BUMPED (``2.9`` → ``3.9``, re-issuing a seq an existing ``:GraphEvent``
-      already holds — the #4653 class; the ``capture_watermark`` coercion in the
-      next bullet is recorded on #9059).
+      already holds — the #4653 class; #9059 records the ``bool``/numeric-string
+      coercion below, while the ``2.9`` truncation is measured here).
     * a rebuild is NOT a repair path — it does both, by branch. Its pre-wipe
       ``capture_watermark`` reads through ``int()``, so anything ``int()`` ACCEPTS
       is COERCED (``'5'`` → ``5``, ``True`` → ``1``, ``2.9`` → ``2``) and the
@@ -808,13 +808,16 @@ def event_head_seq(graph) -> int:
       counter comes back as a TRUSTED ``1`` and a ``2.9`` as a trusted ``2``, both
       on a graph that had already issued seqs 1..3, so the next emit RE-ISSUES an
       already-issued seq (the #4653 class) — truncation LOWERS the head, so it is
-      not a repair either. Note the compared quantity: ``:GraphEvent`` rows are
-      not replayed after a rebuild (#4664), so that ``1`` is below the seqs the
-      graph HAD issued, not below any surviving row. And a value ``int()`` REJECTS
-      (a non-numeric string) or one outside ``0 .. MAX_SEQ`` makes that read
-      RAISE, so the rebuild REFUSES: it aborts BEFORE the wipe and the counter is
-      left untouched — the one outcome ``next_seq`` also gives, but reached by
-      aborting a whole rebuild rather than by declining one seq.
+      not a repair either. ``:GraphEvent`` rows are not replayed after a rebuild
+      (#4664), so that ``1`` is below the seqs the graph HAD issued, not below any
+      surviving row. And a value ``int()`` REJECTS (a non-numeric string) or one
+      outside ``0 .. MAX_SEQ`` makes that read RAISE, so the rebuild REFUSES: it
+      aborts BEFORE the wipe and the counter is left untouched — the one outcome
+      ``next_seq`` also gives, but reached by aborting a whole rebuild rather than
+      by declining one seq. A counter at exactly ``MAX_SEQ`` is INSIDE the domain,
+      so it is captured unchanged and the rebuild COMPLETES — and the graph still
+      cannot emit, because ``next_seq`` refuses it as exhausted: that one is
+      neither coerced nor refused by the rebuild.
 
     ⛔ THE ONE CASE THIS FIX'S OVER-ADMISSION IS NOT A CHEAP NO-OP. Every
     unbounded admission ``_BEHIND_PREDICATE`` enumerates costs one SDK open and

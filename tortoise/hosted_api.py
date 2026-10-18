@@ -2938,16 +2938,18 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # `MATCH (e:GraphEvent) RETURN max(e.seq)` — the label aggregate the steady path
 # deliberately avoids — so a broken graph pays a scan per pass, and it keeps
 # paying it, and the counter does not become trustworthy on its own:
-# `next_seq` REFUSES a non-number, a `bool` and a negative and leaves them
-# unchanged, and only a non-integral float is bumped instead (`2.9` -> `3.9`,
-# re-issuing a seq: the #4653 class). The rebuild path is NOT a repair path: it
-# COERCES anything `int()` accepts (a numeric string, a `bool`, a truncated `2.9`)
-# and proceeds (so a `True` counter comes back as a trusted `1` on a graph that had
-# already issued seqs 1..3 and the next emit RE-ISSUES an already-issued seq —
-# #4653; #9059), and it REFUSES what `int()` rejects or what falls outside
-# `0 .. MAX_SEQ` by aborting the whole rebuild before the wipe, LEAVING THE COUNTER
-# UNTOUCHED — so do not read the repair story off this comment; see
-# `webhook_delivery.event_head_seq`'s docstring. The alternative reading of that
+# `next_seq` REFUSES a non-number, a `bool`, a negative and one at/above
+# `event_store.MAX_SEQ`, and leaves them unchanged; only a non-integral float is
+# bumped instead (`2.9` -> `3.9`, re-issuing a seq: the #4653 class). The rebuild
+# path is NOT a repair path: it COERCES anything `int()` accepts (a numeric string,
+# a `bool`, a truncated `2.9`) and proceeds (so a `True` counter comes back as a
+# trusted `1` on a graph that had already issued seqs 1..3 and the next emit
+# RE-ISSUES an already-issued seq — #4653; #9059), and it REFUSES what `int()`
+# rejects or what falls outside `0 .. MAX_SEQ` by aborting the whole rebuild before
+# the wipe, LEAVING THE COUNTER UNTOUCHED — so read neither the counter's fate nor
+# the repair story off this comment; see `webhook_delivery.event_head_seq`'s
+# docstring for what the HEAD does with a corrupt counter, and #9059 for the
+# measured write-side detail. The alternative reading of that
 # counter (as 0) made every subscription look caught up, so the graph was never
 # dispatched again — silently. Over-admitting a broken graph is the cheap side of
 # that asymmetry; the ONE case where it is not a cheap no-op (a fractional
