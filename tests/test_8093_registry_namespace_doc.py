@@ -267,19 +267,25 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
     # — and "on the hosted provision paths" — walk straight back in beside the
     # "not by the deployment lane" negation, producing the self-contradiction
     # this correction exists to remove.
-    assert not re.search(r"hosted[^.]{0,60}provision path",
+    # The family is "hosted … paths/lanes", NOT "hosted … provision path": a
+    # guard that requires the word `provision` lets the third spelling of the
+    # refuted grouping — "on the hosted Supabase-lane paths" — back in green,
+    # beside the negation asserting the opposite (measured). The only legitimate
+    # `hosted` mention in this clause ("reached through the hosted API") is more
+    # than 60 characters from the next `path`/`lane`, so it stays clear.
+    assert not re.search(r"hosted[^.]{0,60}\b(?:paths?|lanes?)\b",
                          _flat(_namespace_cell())), (
-        "the cell must not generalise the default graph's shape to the hosted "
-        "provision paths: `register_user` / `agent_signup` mint `org_{org_id}` "
-        "in BOTH lanes, `provision_tenant` is selfhost-ONLY, and the registry "
-        "create_org lane is hosted too — no hosted/provision grouping decides "
-        "the shape")
+        "the cell must not group the default graph's shape by deployment "
+        "(\"the hosted ... paths/lanes\"): `register_user` / `agent_signup` mint "
+        "`org_{org_id}` in BOTH lanes, `provision_tenant` is selfhost-ONLY, and "
+        "the registry create_org lane is hosted too — no hosted grouping "
+        "decides the shape")
     # The Supabase-lane `create_org` is a deriver of `org_{org_id}`, so it must
     # sit on that side — naming it on the `org_{name}` side attributes a mint of
     # the wrong shape to it (`agent_signup` is guarded the same way above; this
     # one is a phrase because `create_org` also legitimately appears in the
     # registry half as `sdk.org_create`'s lane name).
-    assert "Supabase-lane `create_org`" in supabase_half, (
+    assert "Supabase-lane `create_org`" in _flat(supabase_half), (
         "the Supabase-lane `create_org` must be named among the `org_{org_id}` "
         "derivers (`hosted_api` mints `org_{org_id}` there); moving it across "
         "the `org_{name}` marker inverts the attribution")
