@@ -195,7 +195,12 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         `org_{org_id}` before any lane branch; `provision_tenant` is selfhost-only
         and also mints it). `_org_graph_name` is the EXPORT seam — the open half
         is `_open_org_graph_sdk` / `_graph_has_org_namespace`, pinned by the
-        legacy test.
+        legacy test. The `org_{org_id}` deriver list must name the registry
+        `kind='default'` node by its MINTER, not as a bare deriver: that node
+        KIND is written with both shapes (`agent_signup`'s registry branch with
+        `org_{org_id}`, `sdk.org_create` with `org_{name}`), so an unqualified
+        listing sends a reader resolving a registry default node to a graph
+        that may not exist.
     """
     from tortoise.hosted_api import _org_graph_name
 
@@ -248,10 +253,38 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "shape follows the minting path and not the deployment lane. Dropping "
         "the negation leaves 'decided by the deployment lane:' followed by a "
         "list of functions, a self-contradiction the shapes alone cannot detect")
-    assert "on every hosted provision path" not in _flat(_namespace_cell()), (
-        "the cell must not generalise the shape to 'every hosted provision "
-        "path': a hosted selfhost register/signup mints `org_{org_id}`, and the "
-        "registry create_org lane is hosted too")
+    # The pre-#9052 cell's ACTUAL wording, not a phrase nobody ever wrote: it
+    # attributed `org_{org_id}` to "the hosted Supabase-lane provision paths", a
+    # lane split. (The first draft of this pin asserted "on every hosted
+    # provision path" — which appears in NEITHER version, so it read as a guard
+    # and guarded nothing.)
+    assert "hosted Supabase-lane provision paths" not in _flat(_namespace_cell()), (
+        "the cell must not attribute `org_{org_id}` to 'the hosted "
+        "Supabase-lane provision paths' — `register_user` and `agent_signup` "
+        "mint it before any lane branch, and the registry create_org lane is "
+        "hosted too")
+    # The registry `kind='default'` node is NOT a deriver on its own: the same
+    # node KIND is written with BOTH shapes — `agent_signup`'s registry branch
+    # with `org_{org_id}` (`hosted_api.py`, `namespace=graph_name`), `sdk.org_create`
+    # with `org_{name}` — so listing it beside the functions hands a reader
+    # resolving a registry default node two contradictory rules and no way to
+    # choose, which is the silent-empty-read class this cell exists to prevent.
+    flat_clause = _flat(clause)
+    assert ("`agent_signup` (including the registry `kind='default'` node it "
+            "writes)") in flat_clause, (
+        "the clause must attribute the registry `kind='default'` node to the "
+        "MINTER that writes it — `agent_signup`'s registry branch stores "
+        "`org_{org_id}` there, so the node is named through the function, never "
+        "as a bare deriver")
+    assert "and the registry `kind='default'` node" not in flat_clause, (
+        "the registry `kind='default'` node must not be listed as one more "
+        "`org_{org_id}` deriver: `sdk.org_create` writes that same node KIND "
+        "with `org_{name}`, so the artifact alone does not decide the shape")
+    assert "so the path, never the node kind, decides" in flat_clause, (
+        "the clause must say the NODE KIND is not the discriminator — without "
+        "it a reader resolving a registry default node has `org_{org_id}` from "
+        "this clause and `org_{name}` from the bullet below, and nothing says "
+        "which applies")
     # The `org_{name}` half's code side: the registry lane's stored org
     # `graph_name` — `sdk.org_create` derives it from the org name (spaces →
     # `_`) and the registry `kind='default'` node takes it as its namespace. The
@@ -262,6 +295,21 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "`sdk.org_create` must keep deriving the registry-lane default "
         "namespace as org_{name} (spaces → `_`) — the §Graph cell states that "
         "shape for that lane, so a change here re-stales the cell")
+    # The node-kind claim's CODE side — two SITES, one node KIND, two shapes. The
+    # cell says the `kind='default'` node is written from each path's own
+    # `graph_name`, so the node kind never decides; without these two pins that
+    # claim is the doc agreeing with itself.
+    assert ('self._graph_create(tid, "default", kind="default", namespace=graph_name)'
+            in sdk_src), (
+        "`sdk.org_create` must keep writing the registry `kind='default'` node "
+        "from ITS `graph_name` (`org_{name}`) — the cell's claim that the node "
+        "KIND takes both shapes rests on this site")
+    hosted_src = (REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+    assert ('sdk._graph_create(org_id, "default", kind="default", namespace=graph_name)'
+            in hosted_src), (
+        "`agent_signup`'s registry branch must keep writing that SAME "
+        "`kind='default'` node kind from its own `graph_name` "
+        "(`org_{org_id}`) — the other half of the cell's node-kind claim", )
 
     assert "team_<name>" not in clause, (
         "the pre-#3543 `team_<name>` is not the default graph's namespace")
@@ -447,7 +495,12 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
         SHAPE claim is pinned to the same two namespace shapes the §Graph cell
         states — the two docs describe one fact, so a row reverting to a single
         lane's shape while the cell states both reds here instead of passing as
-        two independent prose statements.
+        two independent prose statements. Its ATTRIBUTION and its AXIS are
+        pinned as the cell's are: the pre-#9052 row ("Which lane mints the graph
+        decides the shape") satisfied every presence assertion — it carried
+        `org_{org_id}` before its `org_{name}` marker and named `sdk.org_create`
+        after it — so presence alone left the correction revertible VERBATIM
+        with this test green.
     """
     row = _coarse_isolation_row()
     for shape in DEFAULT_SHAPES:
@@ -456,7 +509,8 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
             "second description of the same fact, and a row that keeps only one "
             "lane's shape contradicts the §Graph cell this pin also reads")
     # The row's ATTRIBUTION too, on the same axis as the cell: which derivers
-    # produce which shape. Presence alone let a swapped attribution pass.
+    # produce which shape. Presence alone let a swapped attribution pass — and
+    # let the WHOLE pre-#9052 row pass, so the axis is asserted next.
     row_org_id_half, row_name_half = row.split("`org_{name}`", 1)
     # Backticked standalone shape — see the cell's note: the custom shape
     # `org_{org_id}_{gid}` is also stated in this row and would satisfy a bare
@@ -471,6 +525,32 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
         "the row must not claim the deployment lane decides the shape — "
         "`register_user` / `agent_signup` mint `org_{org_id}` before any lane "
         "branch, and `provision_tenant` is selfhost-only")
+    # The AXIS, positively and negatively — the correction this PR makes, not
+    # just the shapes it lists. `origin/main`'s row states "Which lane mints the
+    # graph decides the shape, not whether the deployment is hosted" and passes
+    # everything above, so the row could be reverted verbatim, green.
+    for deriver in ("provision_tenant", "register_user", "agent_signup"):
+        assert deriver in row_org_id_half, (
+            f"the row must name `{deriver}` among its `org_{{org_id}}` derivers "
+            "— the same set the §Graph cell enumerates, and the set the row "
+            "itself now names; a lane-based split drops these")
+    assert "minting path" in row.lower(), (
+        "the row must state the axis POSITIVELY — the default graph's shape "
+        "follows the minting path — so a revert to the lane framing cannot pass "
+        "on the shape list alone")
+    assert "not the deployment lane" in row, (
+        "and the negation, as the cell states it: the deployment lane is not the "
+        "discriminator (`register_user` / `agent_signup` mint `org_{org_id}` "
+        "before any lane branch, `provision_tenant` is selfhost-ONLY yet mints "
+        "it too)")
+    assert "Which lane mints" not in row, (
+        "the row must not carry the literal pre-#9052 claim that the lane that "
+        "mints decides the shape — that is the framing this PR corrects")
+    assert "the registry default node" not in row, (
+        "the row must not list the registry `kind='default'` node as a bare "
+        "deriver: that node KIND is written with BOTH shapes (`agent_signup`'s "
+        "registry branch with `org_{org_id}`, `sdk.org_create` with "
+        "`org_{name}`), so it must be named by its minter, as the cell does")
     cited = re.findall(r"supabase/migrations/[\w.\-]+\.sql", row)
     assert cited, (
         "the coarse-isolation row must keep citing the `graphs` table's own "
