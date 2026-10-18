@@ -453,6 +453,21 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later module. DELIBERATE_URI.
     "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                            r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
+    # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
+    # the assertion is that `_live_uri()` uses it AS-IS instead of probing a
+    # second endpoint to decide whether to run (the pre-fix gate probed the
+    # legacy port and then dialled the URI). The two delenvs are
+    # DELIBERATE_EMBEDDED_LANE — the URI-less cases: the docker-test-lane
+    # fallback, and the no-endpoint-at-all skip that must route through
+    # `_live_utils.LIVE_URI_SKIP_REASON` rather than a hand-written reason.
+    # Every site is a function-scoped `monkeypatch` call, auto-undone by pytest
+    # at teardown, so no lane flip can leak into a later module.
+    # MIXED INTENT: DELIBERATE_URI + DELIBERATE_EMBEDDED_LANE.
+    "test_8870_version_anchor_write_order.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.setenv\(\s*$',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
@@ -603,8 +618,18 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
     stack: list[tuple[int, str, str]] = []  # (indent, kind, name)
     paren = 0
     pending_fixture = False
+    triple: str | None = None
     for i, line in enumerate(lines):
-        stripped = line.strip()
+        # Count brackets in CODE ONLY. A bracket inside a string literal or a
+        # comment is not a continuation: `assert "(as of" in text` left the
+        # counter stuck at 1 for the rest of the file, so every later `def`
+        # (guarded on `paren == 0`) was skipped and its body was attributed to
+        # the LAST function that opened — measured on
+        # `tests/test_time_aware_sdk_2520.py`, where a compliant
+        # `@contextmanager` helper was reported as a mutation inside an
+        # unrelated test (#8937 / #8487).
+        code, triple = _code_only(line, triple)
+        stripped = code.strip()
         if stripped.startswith("@") and paren == 0:
             # precise fixture-marker test: `.fixture(` / `.fixture\n` — a
             # bare "fixture" substring (usefixtures, parametrize ids) must
@@ -612,17 +637,17 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             if re.search(r'\.fixture\b', stripped):
                 pending_fixture = True
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        elif re.match(r'^(\s*)(?:async\s+)?def\s+\w+', line) and paren == 0:
-            ind = len(line) - len(line.lstrip())
+        elif re.match(r'^(\s*)(?:async\s+)?def\s+\w+', code) and paren == 0:
+            ind = len(code) - len(code.lstrip())
             while stack and stack[-1][0] >= ind:
                 stack.pop()
-            name = re.match(r'^(\s*)(?:async\s+)?def\s+(\w+)', line).group(2)
+            name = re.match(r'^(\s*)(?:async\s+)?def\s+(\w+)', code).group(2)
             stack.append((ind, "fixture" if pending_fixture else "fn", name))
             pending_fixture = False
             scopes[i] = stack[-1][1:]
         elif stripped and paren == 0 \
                 and not stripped.startswith(("#", "def", "@")):
-            ind = len(line) - len(line.lstrip())
+            ind = len(code) - len(code.lstrip())
             while stack and stack[-1][0] >= ind:
                 stack.pop()
             if ind == 0:
@@ -630,14 +655,62 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
         else:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        # paren balance for continuation detection (brackets in string
-        # literals are a documented heuristic limitation)
-        for ch in line:
+        # paren balance for continuation detection, over code only
+        for ch in code:
             if ch in "([{":
                 paren += 1
             elif ch in ")]}":
                 paren = max(0, paren - 1)
     return scopes
+
+
+def _code_only(line: str, triple: str | None) -> tuple[str, str | None]:
+    """The CODE part of one line: string literals and comments replaced by
+    spaces, so a bracket inside them cannot unbalance a continuation count.
+
+    Tracks a triple-quoted region across lines (docstrings are the common
+    case). Single/double-quoted literals are consumed whole, honouring
+    backslash escapes; a `#` outside a string starts a comment."""
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if triple is not None:
+            end = line.find(triple, i)
+            if end == -1:
+                return "".join(out), triple
+            i = end + len(triple)
+            triple = None
+            out.append(" " * len(line[end:end + 3]))
+            continue
+        ch = line[i]
+        if ch == "#":
+            out.append(" " * (n - i))
+            break
+        if line.startswith('"""', i) or line.startswith("'''", i):
+            triple = line[i:i + 3]
+            out.append("   ")
+            i += 3
+            continue
+        if ch in "\"'":
+            quote = ch
+            out.append(" ")
+            i += 1
+            while i < n:
+                if line[i] == "\\":
+                    out.append("  ")
+                    i += 2
+                    continue
+                if line[i] == quote:
+                    out.append(" ")
+                    i += 1
+                    break
+                out.append(" ")
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), triple
 
 
 def _scope_at(scopes: list, lineno: int) -> tuple[str, str | None]:
@@ -917,6 +990,52 @@ def test_uri_mutations_restored():
         "each with a save-restore (capture os.environ.get + assign back in "
         "a finally/after yield) or monkeypatch auto-undo:\n"
         + "\n".join(violations))
+
+
+def test_a_bracket_inside_a_string_does_not_freeze_the_scope_map():
+    """A bracket in a STRING or COMMENT is not a continuation line.
+
+    Measured defect (#8937 / #8487): `assert "(as of" in text` inside a test
+    body left the paren counter at 1 for the rest of the file, so every later
+    `def` — guarded on `paren == 0` — was skipped and its body was attributed
+    to the LAST function that opened. `tests/test_time_aware_sdk_2520.py`'s
+    compliant `@contextmanager` helper was then reported as an unrestored
+    mutation inside an unrelated test, i.e. a false RED on a correct file.
+    """
+    src = (
+        "def test_first():\n"
+        "    assert not any('(as of' in t for t in xs)\n"
+        "    assert True\n"
+        "\n"
+        "\n"
+        "@contextmanager\n"
+        "def _helper():\n"
+        "    old = os.environ.get(\"TORTOISE_DB_URI\")\n"
+        "    os.environ[\"TORTOISE_DB_URI\"] = 'docker://x/y'\n"
+        "    try:\n"
+        "        yield\n"
+        "    finally:\n"
+        "        os.environ[\"TORTOISE_DB_URI\"] = old\n"
+    )
+    scopes = _scope_map(src)
+    assert scopes[8][0] != "fn" or scopes[8][1] != "test_first", (
+        "the mutation line was attributed to the PREVIOUS function — a bracket "
+        "inside a string literal froze the scope map")
+    assert scopes[8] == ("fn", "_helper"), scopes[8]
+
+
+def test_a_bracket_inside_a_comment_does_not_freeze_the_scope_map():
+    """Same class, comment arm: `# (see #8487)` must not count as an opener."""
+    src = (
+        "def test_first():\n"
+        "    x = 1  # (see #8487\n"
+        "\n"
+        "\n"
+        "def second():\n"
+        "    os.environ[\"TORTOISE_DB_URI\"] = 'docker://x/y'\n"
+    )
+    scopes = _scope_map(src)
+    assert scopes[5] == ("fn", "second"), scopes[5]
 
 
 def test_module_scoped_pop_without_restore_reds():
