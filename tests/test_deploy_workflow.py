@@ -1597,9 +1597,12 @@ class TestBillingReconcileDriverVerdicts:
 
         first = "f69f0773cfa54c62b900c13c6a"
         second = "aaaabbbbccccddddeeeeffff11"
+        # A registry ULID on the NON-200 path, which only the shell shape rule
+        # can redact (no row is about it, so the by-value pass cannot help).
+        registry = "0006559a1ff-aaaabbbbcccc"
         payload = json.dumps({
             "status": "reconcile_stuck",
-            "detail": f"a previous pass is wedged (orgs {first},{second})",
+            "detail": f"a previous pass is wedged (orgs {first},{second},{registry})",
         })
 
         class _Handler(BaseHTTPRequestHandler):
@@ -1636,11 +1639,21 @@ class TestBillingReconcileDriverVerdicts:
 
         emitted = proc.stdout + proc.stderr
         assert proc.returncode == 1, emitted
-        assert "reconcile_stuck" in emitted, (
-            f"a wedged pass must be NAMED, not reported as an unreadable "
-            f"control plane:\n{emitted}"
+        # Assert on the MESSAGE, not the token: the body is printed by
+        # ``show_body`` in this same branch, so `reconcile_stuck` appears even
+        # when the naming branch is deleted. The misdiagnosis to kill is the
+        # ENUMERATION text — a cause that clears itself, sending the operator to
+        # retry forever — so its ABSENCE, and the STUCK wording, are the test.
+        assert "is STUCK" in emitted, (
+            f"a wedged pass must be NAMED as stuck, not reported as an "
+            f"unreadable control plane:\n{emitted}"
         )
-        for raw in (first, second):
+        assert "enumeration_incomplete" not in emitted, (
+            f"a wedged pass was paged as an enumeration failure — the operator "
+            f"would retry a cause that never clears:\n{emitted}"
+        )
+        assert "retry once the control plane is readable" not in emitted, emitted
+        for raw in (first, second, registry):
             assert raw not in emitted, (
                 f"{raw} reached the PUBLIC log through the non-200 body:\n{emitted}"
             )

@@ -2632,6 +2632,15 @@ class TestReconcileSweep:
         monkeypatch.setattr(ha, "_BILLING_RECONCILE_INFLIGHT", _Held())
         headers = {"Authorization": "Bearer internal-test-key"}
 
+        # The bound is not a free knob: it must stay well clear of the driver's
+        # own client ceiling (``curl -m 600`` in the cron step) or a HEALTHY
+        # long pass gets libelled "presumed WEDGED" and pages on a working
+        # fleet. Pinned, so shrinking it is not a green change.
+        assert ha._BILLING_RECONCILE_STALE_S >= 3600.0, (
+            "the staleness bound must keep a wide margin over the driver's "
+            "600 s client ceiling, or a healthy long pass pages as wedged"
+        )
+
         # A hold inside the bound is the documented benign overlap.
         monkeypatch.setattr(ha, "_BILLING_RECONCILE_STARTED_AT", _time.monotonic())
         fresh = client.post("/v1/internal/billing/reconcile", headers=headers)

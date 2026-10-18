@@ -203,11 +203,19 @@ jobs:
             # check a control plane that is fine, while the real cause (a dead
             # pass holding the lock until the process restarts) goes unsaid.
             cause="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$out" 2>/dev/null || true)"
-            if [ "$cause" = "reconcile_stuck" ]; then
-              echo "::error::billing reconcile is STUCK (HTTP 503 reconcile_stuck) — a previous pass has held the lock past the staleness bound and is presumed wedged. The fleet is NOT being reconciled, and the lock clears only when that pass ends or the process restarts; retrying will NOT help."
-            else
-              echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair, retry once the control plane is readable"
-            fi
+            case "$cause" in
+              reconcile_stuck)
+                echo "::error::billing reconcile is STUCK (HTTP 503 reconcile_stuck) — a previous pass has held the lock past the staleness bound and is presumed wedged. The fleet is NOT being reconciled, and the lock clears only when that pass ends or the process restarts; retrying will NOT help."
+                ;;
+              enumeration_incomplete)
+                echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair, retry once the control plane is readable"
+                ;;
+              *)
+                # Do NOT guess. Claiming a cause we did not read is the same
+                # fault one remove out: the operator runs the wrong runbook.
+                echo "::error::billing reconcile returned HTTP 503 with an UNRECOGNISED cause${cause:+ (status=${cause})} — read the body below before acting; the driver will not name a runbook it cannot verify"
+                ;;
+            esac
             show_body "$out"
             exit 1
           fi
