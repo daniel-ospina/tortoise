@@ -5302,12 +5302,13 @@ durations:
   test_migration_append_only.py: 0.9
   test_notify.py: 0.4
   test_pack_kinds.py: 1.2
-  # #2818: a NEW file's first weight, from ONE local embedded-lane run
-  # (48 tests, ~4.9s at 87cc4fe33) rather than a sweep — the flat-default
-  # convention recorded above for a file no sweep has collected yet
-  # (the #3419 `test_venture_pack.py` precedent). Replace with the sweep
-  # value when one collects it; do not read this as a measured weight.
-  test_pack_value_declarations_2818.py: 4.9
+  # #2818: a NEW file's first weight — the #3400/#3419 flat default, NOT a
+  # local timing (a measured-on-this-box 4.9 was written here first and is
+  # deliberately gone: a weight is a SHARD-LAYOUT input, so a number that does
+  # not model CI decides which files run together). The row's PRESENCE is what
+  # holds duration_coverage_issues() above the 90% floor. Replace with the CI
+  # junit value when a sweep collects it.
+  test_pack_value_declarations_2818.py: 2.0
   test_session_index_lock.py: 0.5
   eval/write_path/test_write_path_corpus.py: 0.5
   test_analyze_scoped.py: 0.6

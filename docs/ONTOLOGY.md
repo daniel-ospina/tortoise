@@ -1289,43 +1289,6 @@ extraction:                     # extraction activation + enforcement (v3)
 
 Packs are loaded via the pack registry (`PackRegistry`) at startup; their kinds extend the core vocabulary and are queryable via `expand_kind` / `equivalentTo`. The manifest is **declarative only — no code executes on load**; connector/tool entrypoints are code references that are allowlisted (starter packs) and rejected on hosted tenant uploads (ontology-only v1, epic #1891). Authoring guidance: `docs/EXPANSION_PACKS.md` (behavior) + `packs/_template/manifest.yaml` (machine-checkable schema).
 
-### Kind value-field declarations (`kindDefs.<kind>.values`, #2818)
-
-A kindDef may declare the **value properties the kind carries**. This is a *declaration*, not a
-storage contract, and the vocabulary is **closed** (it extends the same "declared surface, not an
-open props bag" rule the rest of `kindDefs` follows):
-
-```yaml
-kindDefs:
-  fundingTranche:
-    description: A tranche of a financing round
-    values:
-      - name: committedAmountMinor   # the BARE property name (no namespace)
-        valueKind: money             # money|percent|multiple|duration|quantity
-        required: true               # optional, default false
-        cardinality: one             # optional: one (default) | many
-```
-
-- `valueKind` is WS-C's value **shape** discriminator, not a storage type: `money` is a shape over
-  `amountMinor` + `currency` + `minorUnitExponent`; a scalar `type` is the value model's business
-  (#2782/#2817). The shape's companion props are **not** declared here — they are core-registered
-  properties a pack binds.
-- Names are **bare** (`committedAmountMinor`, never `venture:committedAmountMinor`): the pack
-  namespaces its kinds, not its properties (WS-B OD2). A declared name must be a bare identifier
-  (letters, digits, underscores — not starting with a digit), since it is rendered raw into the
-  prompt.
-- An unknown entry key, an unknown `valueKind`, a duplicate name, or a namespaced name is a
-  validation **error** (vocabulary and shape rules: `tortoise/pack_values.py`, called from
-  `PackRegistry._validate`; also refused by `tortoise pack validate` and the hosted install).
-- The declaration reaches the **extraction prompt** (the S2/S4 master renders
-  `[values: committedAmountMinor(money, required)]` on the kind) and is deliberately kept OUT of
-  the classification index text, so `kind_index.cache_key_for` never rotates on install.
-- It stores nothing: the write path for a declared value field is the value model (#2782).
-
-§5's kind vocabularies above are **unchanged** by this key — `values` declares properties ON a
-kind, it adds no kind. The #2747 drift guard parses §5's kind fenced blocks and must keep seeing
-exactly the same sets.
-
 ---
 
 ## §10. Epistemic Recency Modulation

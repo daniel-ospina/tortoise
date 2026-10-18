@@ -50,8 +50,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import embed_gate
-from tortoise import value_gate
+from tortoise import embed_gate, value_gate
 from tortoise.embeddings import EMBEDDING_DIM, encode_for_row, encode_for_store
 from tortoise.sdk import TortoiseSDK
 
