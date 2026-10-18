@@ -92,9 +92,9 @@ key, with env (`TORTOISE_CAPTURE_CLOUD=0`) and a repo-local
 |---|---|
 | `extensions/tortoise-capture/index.ts` + `index.test.ts` | **real files** (33,983 B + 39,290 B) — **not** a shim, **not** a symlink |
 | `extensions/reflect-hook.ts` + `reflect-hook.test.ts` | **real files** (16,758 B + 21,584 B) — **not** a symlink |
-| `extensions/shared/capture-gate.ts` | **added by #803** — the one egress gate both recorders now share; imported by the two recorders only |
-| `extensions/shared/capture-attribution.ts` | imported by the two recorders only — no other extension imports it |
-| CI | `reflect-hook.test.ts` has its own step in agent-infra's `.github/workflows/ci-main.yml` (`#611`), and both `shared/*.test.ts` suites run through that job's `extensions/shared/*.test.ts` glob; `tortoise-capture/index.test.ts` is executed by **no** agent-infra workflow — the extension glob is `extensions/*/test*.mjs`, which does not match a `.ts` file |
+| `extensions/shared/capture-gate.ts` | **added by agent-infra#803** — the one egress gate both recorders now share; imported by both recorders and by both recorder suites (`reflect-hook.test.ts`, `tortoise-capture/index.test.ts`) |
+| `extensions/shared/capture-attribution.ts` | imported by both recorders and by `reflect-hook.test.ts` — no other extension imports it |
+| CI | `reflect-hook.test.ts` has its own step in agent-infra's `.github/workflows/ci-main.yml` (agent-infra#611), and both `shared/*.test.ts` suites run through that job's `extensions/shared/*.test.ts` glob; `tortoise-capture/index.test.ts` is executed by **no** agent-infra workflow — the extension glob is `extensions/*/test*.mjs`, which does not match a `.ts` file |
 | Ship-list | `manifest.json` lists **both** (`reflect-hook.ts`, `tortoise-capture/`), so `bin/agent-infra.js` materializes both on a farm machine |
 
 **What must move with the consolidation — the complete inventory, measured.**

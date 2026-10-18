@@ -50,7 +50,7 @@ the table it points at ("table above") records that
 "complete inventory" omitted the two shared modules' **own suites** — which that
 same table's CI row says are executed by the ``extensions/shared/*.test.ts``
 glob. Both are pinned here, and the note's assertions are scoped to the NOTE
-block rather than to the 273-line file: a whole-file substring check cannot tell
+block rather than to the whole file: a whole-file substring check cannot tell
 "the note says X" from "X appears somewhere", and the pre-fix README already
 contained both ``1671`` and the per-recorder CI row.
 """
@@ -84,7 +84,7 @@ def _prose(path: Path) -> str:
     The stale claims these tests pin out are **line-wrapped** in the README and
     split by ``//`` comment markers in the extension's header, so a raw
     substring check over either record is vacuous — verified against the
-    pre-fix records from ``git show HEAD:…`` before these assertions were
+    pre-fix records from ``git show origin/main:…`` before these assertions were
     written: every assertion that pins a **new** fact fails there and passes on
     the corrected text. The qualifier is load-bearing — two clauses of the
     inventory guard (``capture-attribution.ts`` is named, and the cross-repo
@@ -102,7 +102,7 @@ def _prose(path: Path) -> str:
 #: How the README's measured current-state blockquote opens. It is a blockquote,
 #: so it is delimited by ``>`` — which is what makes a NOTE-scoped assertion
 #: possible: a whole-file substring check cannot tell "the note says X" from "X
-#: appears somewhere in 273 lines", and a note can lose its content while the
+#: appears somewhere in the file", and a note can lose its content while the
 #: file still contains every word of it elsewhere (measured: the pre-#3512
 #: README already contained ``1671`` and the CI row).
 _NOTE_PREFIX = "> **Current state:"
@@ -314,7 +314,7 @@ def test_the_shim_is_recorded_as_target_state_not_current_state():
     Every assertion here is scoped to the NOTE, not to the file: the pre-#3512
     README already contained ``1671`` (the cross-repo deliverable paragraph) and
     the per-recorder CI row, so a whole-file check would stay green while the
-    note lost its content — measured against ``git show HEAD:…``.
+    note lost its content — measured against ``git show origin/main:…``.
     """
     note = _note_block(SEAM_README)
     assert "TARGET" in note, (

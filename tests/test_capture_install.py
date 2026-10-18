@@ -3539,14 +3539,18 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
     silently — the generation alone catches a revert, the digest catches a byte
     change, and only BOTH moving together is green.
 
-    Measured consequence (the pre-fix state, verified: ``git show
-    HEAD:tortoise/pi-hooks/tortoise-capture.ts`` is generation 3 with sha256
-    ``8caaf76c…21cf``): an installed copy of those bytes reads
-    ``modified-artifact`` — a BLOCKING "local edit" finding — against the
-    corrected shipped file.  That is the accusation the bump removes.
+    Measured consequence: the pre-#3512 shipped bytes (``git show
+    origin/main:tortoise/pi-hooks/tortoise-capture.ts``, generation 3, sha256
+    ``1f653d9b…0580``) are a generation behind this file, so an install made
+    from them reads ``stale-artifact`` ("reinstall") rather than a false "local
+    edit"; a byte change that leaves the generation alone is what reads
+    ``modified-artifact``, and the sibling
+    ``test_a_same_generation_header_edit_reads_as_a_local_edit`` below executes
+    that classification.  Moving both together is what keeps an install from
+    carrying either accusation.
 
-    Mutation: revert the header to the pre-#3512 text (generation 3, sha256
-    ``8caaf76c…21cf``) with this pair left alone — this REDs on the digest; bump
+    Mutation: revert the header to the pre-#3512 text (``1f653d9b…0580``,
+    generation 3) with this pair left alone — this REDs on the digest; bump
     only the digest for a prose edit — this REDs on the generation.
     """
     generation, digest = _PINNED_PI_SEAM_INSTALL_CONTRACT
