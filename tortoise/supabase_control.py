@@ -1600,6 +1600,72 @@ class InvitationError(Exception):
         self.status = status
 
 
+def expire_stale_invitations(cp, *, now: str | None = None,
+                            org_id: str | None = None,
+                            email: str | None = None) -> int:
+    """#8089: materialise the clock-expired terminal state — every ``pending``
+    invitation whose ``expires_at`` has passed becomes ``expired``.
+
+    Returns how many rows flipped, so a caller can report honestly and a no-op
+    run is distinguishable from a silent one (0 rows is a real answer).
+
+    WHY THIS EXISTS. ``expires_at`` is a DERIVED terminal state in this lane:
+    ``invitation_accept``, ``invitation_accept_by_id``, ``invitation_resend``,
+    ``pending_invitations_for_email`` and the hosted route's Pro-capacity read
+    all compare it to now. The DEDUP did not. Its authoritative layer is the
+    0008 partial unique index ``uq_invitations_org_email_pending ON (org_id,
+    email) WHERE status = 'pending'``, and a partial-index predicate must be
+    IMMUTABLE — so ``WHERE status='pending' AND expires_at > now()`` is not a
+    legal predicate (``now()`` is STABLE, not IMMUTABLE). Nothing else ever
+    wrote 'expired' for a CLOCK expiry either: ``invitation_expire`` is an
+    ADMIN action reached only from the owner/admin route, and no sweep ran on
+    this table — so an invite that expired by the clock kept
+    ``status='pending'`` indefinitely, held its index entry, and rejected every
+    re-invite for that address with 409 forever. That is #1890's defect (fixed
+    there by deriving expiry, registry lane) reached here by a different
+    mechanism that no predicate edit can close.
+
+    ONE conditional ``UPDATE ... WHERE status='pending' AND expires_at <= now``
+    is the whole fix, and it stays safe with the index as the authority:
+
+    * the PATCH's OWN matched rows ARE the return value, so the count is exact
+      and there is no read-then-write window (the same claim posture the
+      accept / rotate / single-use paths already use);
+    * a row a concurrent accept flipped is no longer ``pending`` → not matched,
+      and an invite minted concurrently carries a FUTURE ``expires_at`` → not
+      matched, so the sweep can never expire a live invite;
+    * a NULL ``expires_at`` (legacy / never-expires) never satisfies an ordered
+      comparison, so a sweep leaves it ``pending`` — exactly as every other
+      expiry read treats a null expiry as "never expires".
+
+    A concurrent double-mint window is NOT opened: the flip only removes rows
+    whose link is already dead, and the partial unique index still serialises
+    the two INSERTs (the loser is mapped to the documented 409).
+
+    Two callers, deliberately: ``invitation_mint`` scopes it to the (org, email)
+    it is about to replace, so a re-invite works whether or not a sweep has
+    run; ``hosted_api._sweep_expired_invitations`` runs it unscoped on the
+    boot/periodic sweep seam so the terminal-state backlog is materialised for
+    EVERY other reader too. A sweep with no live caller is the #1890 bug — the
+    mint-path call is what makes correctness independent of the sweep.
+    """
+    now = now or datetime.now(UTC).isoformat()
+    filters: list[tuple[str, str, object]] = [
+        ("status", "eq", "pending"), ("expires_at", "lte", now)]
+    if org_id is not None:
+        filters.append(("org_id", "eq", org_id))
+    if email is not None:
+        filters.append(("email", "eq", email))
+    flipped = cp.query(
+        "invitations",
+        method="PATCH",
+        select=["id"],
+        filters=filters,
+        json_body={"status": "expired"},
+    )
+    return len(flipped or [])
+
+
 def invitation_mint(cp, org_id: str, email: str, role: str,
                     invited_by: str, expires_days: int = 7,
                     inviter_email: str | None = None) -> dict:
@@ -1612,7 +1678,15 @@ def invitation_mint(cp, org_id: str, email: str, role: str,
 
     Dedup: the 0008 partial unique index (org_id, email) WHERE
     status='pending' — a duplicate PENDING invite raises InvitationError(409);
-    accepted/revoked invites don't block a fresh re-invite.
+    accepted/revoked/EXPIRED invites don't block a fresh re-invite.
+    "expired" is the load-bearing word there: the index predicate is IMMUTABLE,
+    so it cannot compare ``expires_at`` to ``now()``, and an invite that dies by
+    the clock used to keep ``status='pending'`` forever and 409 every re-invite
+    (#8089). ``expire_stale_invitations`` is therefore run for THIS (org, email)
+    before the dup pre-check — the stale row becomes ``expired``, drops out of
+    the index, and the insert lands. The pre-check below stays the friendly
+    fast-path and the index stays the authoritative dedup; the flip only ever
+    touches a link that is already dead.
 
     Role: 0008 CHECK closes the enum to 'admin' | 'member' (owner is not
     invitable — single-owner model, D7 #574).
@@ -1628,6 +1702,12 @@ def invitation_mint(cp, org_id: str, email: str, role: str,
         raise InvitationError("org_id and valid email required", status=422)
     if role not in ("admin", "member"):
         raise InvitationError("role must be 'admin' or 'member'", status=422)
+
+    # #8089: retire THIS address's clock-expired pending row BEFORE the dup
+    # pre-check and the insert. Scoped (never a global sweep on a request path)
+    # and conditional on status='pending' AND expires_at <= now, so a live
+    # invite is untouched and the 409 below keeps its meaning.
+    expire_stale_invitations(cp, org_id=org_id, email=email)
 
     dup = cp.query(
         "invitations",
@@ -1733,6 +1813,14 @@ def invitation_accept(cp, token: str, user_id: str,
             raise InvitationError("Invitation has already been accepted")
         if status == "revoked":
             raise InvitationError("Invitation has been revoked")
+        if status == "expired":
+            # #8089: 'expired' used to be reachable only through the admin
+            # expire-now action; the clock-expiry sweep now MATERIALISES it for
+            # every invite whose expires_at passed, so this is the common shape
+            # for a dead link. Same wording as the derived-expiry branch below:
+            # the mechanism that retired the row is not the invitee's business,
+            # and "not pending" told them nothing actionable.
+            raise InvitationError("Invite token expired")
         raise InvitationError("Invitation is not pending")
     exp = _parse_ts(inv.get("expires_at"))
     if exp is not None and exp <= now:
@@ -1983,6 +2071,18 @@ def invitation_rescind(cp, invitation_id: str, org_id: str,
     Idempotent for already-revoked invites (mirrors the registry SDK); an
     ACCEPTED (used) invite cannot be rescinded — the membership already
     exists.
+
+    #8089: 'expired' is idempotent too, for the same reason 'revoked' is. Until
+    the clock-expiry sweep existed, nothing ever wrote 'expired' for a clock
+    expiry, so a dead link still read ``pending`` here and the
+    status-conditional PATCH below matched — this call answered
+    ``{"revoked": True}``. Now either half of that fix RETIRES the row (the
+    scheduled sweep, or the mint-path flip for that org+email), and the same
+    admin call fell through to the concurrent-accept 409 — on a row the
+    dashboard's pending list can still show (``pending_invitations`` has no
+    expiry filter). 'expired' is as terminal as 'revoked', and the terminal
+    answer must not depend on WHICH mechanism retired the row, so both are
+    answered idempotently.
     """
     mem = membership_for_user_org(cp, actor_user_id, org_id)
     if not mem or mem["role"] not in ("owner", "admin"):
@@ -1999,7 +2099,11 @@ def invitation_rescind(cp, invitation_id: str, org_id: str,
     if inv.get("status") == "accepted":
         raise InvitationError(
             "Invitation already accepted — cannot rescind", status=409)
-    if inv.get("status") == "revoked":
+    if inv.get("status") in ("revoked", "expired"):
+        # 'expired' joins 'revoked': both are terminal, so both are a no-op
+        # success (#8089). The row's status is deliberately NOT rewritten —
+        # the expiry instant is the truth of when the invite died (only admin
+        # expire-now stamps ``expires_at``).
         return {"revoked": True, "already": True,
                 "invitation_id": invitation_id}
     # Status-conditional PATCH + re-read (code-review P2, PR #864): a
@@ -4815,6 +4919,11 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
             raise InvitationError("Invitation has already been accepted")
         if status == "revoked":
             raise InvitationError("Invitation has been revoked")
+        if status == "expired":
+            # #8089: the by-id twin of the token path's 'expired' branch — the
+            # clock-expiry sweep materialises this status, so a dead invite must
+            # read as expired here too rather than as a generic "not pending".
+            raise InvitationError("Invite token expired")
         raise InvitationError("Invitation is not pending")
     exp = _parse_ts(inv.get("expires_at"))
     if exp is not None and exp <= now:

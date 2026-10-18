@@ -614,6 +614,14 @@ surfaces:
   # the `core` fallback (#2938), so a core-only registration would never run on
   # an api-only PR. Same shape as the #4241 entry above.
   - test_1890_invite_ghost_sweep_schedule.py
+  # #8089: the Supabase lane's clock-expiry sweep and its live caller. Registered
+  # with `api` for the SAME reason as the #1890 row above: the step
+  # (`_sweep_expired_invitations`) and both call sites (`_run_boot_sweeps` +
+  # `_event_retention_loop`) live in tortoise/hosted_api.py, which SELECTS `api`
+  # — a named-surface match REPLACES the `core` fallback (#2938), so a core-only
+  # registration would never run on an api-only PR. The seam it calls
+  # (`expire_stale_invitations`) is tortoise/supabase_control.py, also `api`.
+  - test_8089_expired_invitation_sweep.py
   # #5388: org-enumeration completeness as a SERVER-READ property. Registered on
   # `api` and NOT dual-registered: the file pins tortoise/hosted_api.py (the
   # page-walk and its `order="id"` contract) and tortoise/supabase_control.py
@@ -6045,6 +6053,12 @@ durations:
   # a test is added, which is the failure this file exists to catch.
   # Refresh from the next sweep that collects it.
   test_1890_invite_ghost_sweep_schedule.py: 4.9  # unmeasured — local wall reading, no source leg collected it; refresh from the next sweep
+  # #8089: unmeasured at PR time — a file ADDED by this PR cannot appear in a
+  # junit artifact, so it has no swept duration (the #8849/#5275 trap). 11.0 is
+  # the local wall reading on this host for the whole file. The test count is
+  # deliberately NOT stated: a hand-written count here goes stale the moment a
+  # test is added. Refresh from the first post-merge sweep that collects it.
+  test_8089_expired_invitation_sweep.py: 11.0  # unmeasured — local wall reading, added by #8089; refresh from the next sweep
   test_5142_ontology_record.py: 3.7
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
