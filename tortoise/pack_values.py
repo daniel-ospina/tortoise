@@ -138,7 +138,10 @@ def validate_value_fields(kind: str, spec: dict) -> list[str]:
             )
             name = None
         else:
-            name = name.strip()
+            # NOT stripped: the name must be bare AS WRITTEN. A leading or
+            # trailing space is a declaration error like any other whitespace
+            # (and the docs say so), not something to silently normalize into a
+            # different property name.
             if ":" in name:
                 errors.append(
                     f"{where}: value field name '{name}' must be BARE — "
@@ -237,10 +240,10 @@ def declared_value_fields(spec: object) -> list[dict]:
         # unhashable (`TypeError`) and the compiler must degrade, not raise.
         if not isinstance(value_kind, str) or value_kind not in VALUE_KINDS:
             continue
-        name = name.strip()
-        # The compiler mirrors the validator's bare-identifier rule: a name
-        # with a colon passes nothing to the prompt, and neither does one that
-        # is not a bare identifier (the field name is rendered raw).
+        # The compiler mirrors the validator's bare-identifier rule, on the
+        # name AS WRITTEN (no strip): a name with a colon or edge whitespace
+        # passes nothing to the prompt, and neither does one that is not a bare
+        # identifier (the field name is rendered raw).
         if not is_bare_value_field_name(name) or name in seen:
             continue
         seen.add(name)

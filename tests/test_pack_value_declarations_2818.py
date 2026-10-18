@@ -205,6 +205,8 @@ class TestMalformedDeclarationIsPrecise:
         ([{"name": 3, "valueKind": "money"}], "'name' must be a non-empty"),
         ([{"name": "a b", "valueKind": "money"}],
          "must be a bare property identifier"),
+        ([{"name": " amountMinor ", "valueKind": "money"}],
+         "must be a bare property identifier"),
         ([{"name": "a, b", "valueKind": "money"}],
          "must be a bare property identifier"),
         ([{"name": "a\nb", "valueKind": "money"}],
@@ -267,7 +269,7 @@ class TestMalformedDeclarationIsPrecise:
         # validator refuses it (the compiler reads raw YAML, including a
         # tenant manifest that may never have passed the validator).
         for bad in (f"{NS}:committedAmountMinor", "a, b", "a\nb", "a(b",
-                    "a b", "1amount"):
+                    "a b", "1amount", " amountMinor ", "amountMinor\t"):
             assert declared_value_fields({"values": [
                 {"name": bad, "valueKind": "money"}]}) == [], bad
         assert declared_value_fields({"values": [
@@ -367,13 +369,18 @@ class TestDeclarationReachesThePrompt:
         assert "The list is CLOSED" in rules
         assert "[values:" in rules
 
-    def test_compact_mode_names_no_kind_the_selection_dropped(self, tmp_path):
+    def test_the_rule_block_names_no_kind(self, tmp_path):
+        # The rule slot is POLICY, never vocabulary: WHICH fields exist is
+        # rendered once, per kind, in PACK KINDS. Naming a kind here would be a
+        # second source for one vocabulary — and in compact mode it would name
+        # kinds the story selection had dropped. Assert it for EVERY pack kind
+        # (a name-absence check on one story would be vacuous: `_select_pack_
+        # kinds` fails OPEN for a namespace with no `_PACK_TRIGGERS` entry).
         _, master = self._brief_and_master(tmp_path)
-        # A story with no matching trigger for the pack: the kind is dropped
-        # from PACK KINDS, so the rule slot must not name it either.
-        compact = v2._render_master_compact(master, "unrelated story")
-        if f"{NS}:{KIND}" not in compact:
-            assert f"{NS}:{KIND}" not in v2._s2s4_rules(master)
+        assert master["pack_kinds"], "fixture must carry a pack kind"
+        rules = v2._s2s4_rules(master)
+        for kind in master["pack_kinds"]:
+            assert kind not in rules, kind
 
     def test_the_tenant_overlay_carries_the_declaration(self):
         # The hosted path compiles the SAME loop, so a tenant pack's value
@@ -387,16 +394,26 @@ class TestDeclarationReachesThePrompt:
 
     def test_classify_later_suppresses_the_declaration(self, tmp_path):
         # #1695 core-only mode takes the pack vocabulary OUT of the S2/S4
-        # prompt; a namespaced pack kind must not reappear in the rule slot
-        # through its value declarations (nor in the master render).
+        # prompt; the value-field POLICY block must leave with it. Pin the
+        # BLOCK ITSELF (not a field name — the block deliberately names no
+        # field, so a name-absence assertion here would pass even if the
+        # render_s2/s4 plumbing regressed), and pin the positive control so a
+        # permanently-absent block cannot pass this either.
         _, master = self._brief_and_master(tmp_path)
+        empty_s4 = ({"results": []}, {"items": []})
         assert "KIND VALUE FIELDS" not in v2._s2s4_rules(master,
                                                         core_only=True)
-        assert "committedAmountMinor" not in v2.render_s2_prompt(
+        assert "KIND VALUE FIELDS" not in v2.render_s2_prompt(
             master, core_only=True)
-        assert "committedAmountMinor" not in v2.render_s4_prompt(
-            "a tranche story", {"results": []}, {"items": []},
-            master=master, core_only=True)
+        assert "KIND VALUE FIELDS" not in v2.render_s4_prompt(
+            "a tranche story", *empty_s4, master=master, core_only=True)
+        # …and the SAME master DOES carry it when core-only is off, which is
+        # what makes the absence above a suppression and not a plumbing gap.
+        assert "KIND VALUE FIELDS" in v2._s2s4_rules(master)
+        assert "KIND VALUE FIELDS" in v2.render_s2_prompt(
+            master, core_only=False)
+        assert "KIND VALUE FIELDS" in v2.render_s4_prompt(
+            "a tranche story", *empty_s4, master=master, core_only=False)
 
     def test_a_props_less_kind_renders_exactly_as_before(self, tmp_path):
         # Byte-identity for the no-op case, in all three render entry points.
