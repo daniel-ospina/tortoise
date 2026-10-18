@@ -179,12 +179,29 @@ def _select_current_subscription(subs):
                 # downgraded silently on a green run.
                 return unrankable[0]
             kept, kept_rank = _best_ranked(ending)
+            if kept is None or kept_rank is None:
+                # ⛔ The ladder flipped between the scan above and
+                # ``_best_ranked`` (``pricing._load`` caches only on SUCCESS,
+                # so an unreadable file is re-read on every call). Comparing
+                # against a ``None`` rank would raise ``TypeError`` and report
+                # a crash instead of the config fault — fail closed on the
+                # same rule as the scan.
+                return ending[0]
             cand_rank = _subscription_rank(candidate)
             if cand_rank is None or cand_rank < kept_rank:
                 return kept
         return candidate
     if ending:
-        return ending[0]
+        # ⛔ With NO non-ending candidate the ending set must STILL be resolved
+        # by RANK, never by Stripe's listing order: mirroring the lower-ranked
+        # one there rewrites the pointer and records a clean
+        # ``repaired``/``down``, which is the same silent downgrade one line
+        # further down.
+        unrankable = [s for s in ending if _subscription_rank(s) is None]
+        if unrankable:
+            return unrankable[0]
+        kept, _rank = _best_ranked(ending)
+        return kept if kept is not None else ending[0]
     for sub in subs:
         if sub.get("status") in _ACTIVE_STATUSES:
             return sub
@@ -914,12 +931,13 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       still-in-force entry cannot be ranked — the one the comparison would
       keep, or a SIBLING in the same ending set, which ``_best_ranked`` skips
       and would otherwise lose silently — that entry is kept and cannot be
-      mirrored, because the raise happens inside ``mirror_subscription``
-      before any write: the org is a FAILED row with its stored tier intact
-      and the run reds. That is the fail-closed answer, and the only one that
-      never revokes a period already paid for. When instead it is the NEWER
-      candidate's cap that cannot be read, the still-in-force one is kept and
-      mirrors normally: ``unchanged`` when the store already held that tier
+      mirrored in EITHER shape named here (both raise inside
+      ``mirror_subscription`` before any write; the ``null`` cap below is the
+      shape that does not), so the org is a FAILED row with its stored tier
+      intact and the run reds. That is the fail-closed answer, and the only
+      one that never revokes a period already paid for. When instead it is the
+      NEWER candidate's cap that cannot be read, the still-in-force one is kept
+      and mirrors normally: ``unchanged`` when the store already held that tier
       (the usual case), an ordinary ``repaired`` when it had drifted — an UP
       drift still pages and reds as always. The unpriceable candidate is NOT
       applied and nothing is logged about it, and it does not self-heal: when
@@ -928,14 +946,18 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       ⛔ ``None`` from an unreadable ladder is not the only shape a cap can go
       missing in: a tier whose required keys are PRESENT but whose
       ``max_graph_nodes`` is ``null`` is returned as-is by ``tier_limits``, so
-      it ranks as unreadable AND mirrors without raising — a case this arm
-      does not fail closed on (#8943).
-      ⛔ This is the CADENCE's guarantee, not the whole system's. The
-      ``customer.subscription.updated`` webhook writes provider truth for the
-      subscription its event NAMES — a new, cheaper one included, and the
-      stored pointer with it — at any time, before or after a pass; only the
-      next pass re-mirroring the still-in-force sub undoes it, and that path
-      does not carry this rank guard yet (#8942).
+      it ranks as unreadable AND mirrors without raising — the run can green,
+      and can even record a ``repaired`` tier change nobody proved (#8943).
+      ⛔ This is the CADENCE's guarantee, not the whole system's, and the
+      ``customer.subscription.updated`` webhook can defeat it BEFORE the next
+      pass: the handler writes provider truth for the subscription its event
+      NAMES — a new, cheaper one included, and the stored pointer with it — at
+      any time. Nothing in the cadence undoes that, because the rewritten
+      pointer reads as CURRENT (``_stored_pointer_is_current``), so the next
+      pass mirrors the cheaper subscription and reports ``unchanged``; the
+      ending subscription is never listed. Restoring the tier needs an
+      operator (``reconcile_org`` with the pointer back) or a later event
+      (#8942 tracks the rank guard that path lacks).
       ⛔ If the LIST itself FAILS, none of that applies: the org is returned as
       ``action: "noop"`` and left alone (a provider error is not a verdict —
       mirroring the stored one there would re-cap a paying org, which is the

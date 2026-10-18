@@ -482,40 +482,53 @@ the higher tier until the period ends, and only then drops. When a
 still-in-force cap **cannot be read** (a price rotated out of
 `STRIPE_PRICE_IDS`, a ladder missing a required limit key) that sub is kept for
 the same reason — and because a subscription that cannot be RANKED cannot be
-mirrored at all, the org lands in `failed` with its stored tier untouched and
-the run reds: loud, never a silent downgrade. That covers an unrankable sibling
-in the same ending set too, which is why a red run can appear for an org whose
-new subscription would not even have been a downgrade. The remedy is the
-catalog, never the tier — and it is a **swap**, so read this first:
-`STRIPE_PRICE_IDS` holds exactly one id per (tier, interval), and putting a
-retired id back **overwrites** the id that slot holds now. The orgs sitting on
-the displaced id then red in their turn, and that plan's Upgrade CTA starts
-offering the retired price. Restore the id only when nothing is on the current
-one; otherwise move that subscription onto the current price. A `failed` row
-whose error names `pricing.json` (a missing limit key) has the same remedy as
-`direction: null`: fix the ladder. Note that a cap which is present but `null`
-is returned by `tier_limits` as-is — it ranks as unreadable and still mirrors,
-so it does not raise and can green a run (#8943). And `failed[].org_id` is a
-stable fingerprint (`org-…`), not the real id: re-read the payload through
-`/v1/internal/billing/reconcile` with `FASTAPI_INTERNAL_KEY` when you need the
-customer. The same `failed` row appears when this arm **withholds an upgrade**:
-the newer subscription is pricier in Stripe, but the pass cannot see that —
-with the kept sub unreadable the comparison never runs. When instead only the
-**newer** sub's cap cannot be read, the still-in-force one is mirrored normally:
-the row is `unchanged` when the store already held that tier (the usual case)
-and an ordinary `repaired` when it had drifted — an UP drift still pages and
-reds as always. That candidate is not applied and nothing is logged about it,
-and it does not self-heal: when it later becomes the only live subscription the
-pass reds for it until the catalog is fixed. All of this is the **cadence's**
-guarantee, not the system's: the `customer.subscription.updated` webhook
-applies provider truth for the subscription its event names — a new, cheaper
-one included — at any time, before or after a pass, and only the next pass
-re-mirroring the still-in-force sub undoes it; that path does not yet carry the
-rank guard (#8942). A **genuine** cancellation still downgrades the moment
-Stripe says so: with no live subscription at the customer there is nothing to
-prefer and the stored one is mirrored. A customer lookup that **fails** is
-neither — the org is left alone and counted `unverified` (paid tier) or
-`skipped` (unpaid).
+mirrored in either shape named here (both raise before any write), the org
+lands in `failed` with its stored tier untouched and the run reds: loud, never
+a silent downgrade. That covers an unrankable sibling in the same ending set
+too, which is why a red run can appear for an org whose new subscription would
+not even have been a downgrade.
+
+**A red run naming a price id or `pricing.json`: fix the CATALOG, never the
+tier.** `STRIPE_PRICE_IDS` holds exactly one id per (tier, interval), so putting
+a retired id back **overwrites** the id that slot holds now: the orgs sitting on
+the displaced id then red in their turn, and — if the id is the MONTHLY one —
+that plan's Upgrade CTA starts offering the retired price. Before touching the
+slot, list the subscriptions currently on that id in Stripe (filter by the
+price): restore the id only when nothing is on it. If something is, do not swap
+— moving a live subscription's price is a money-moving, prorating action on an
+org that has already paid through `current_period_end`, so it needs the billing
+owner, not the runbook. A `failed` row whose error names `pricing.json` (a
+missing limit key) has the same remedy as `direction: null`: fix the ladder.
+
+Note that a cap which is present but `null` is returned by `tier_limits` as-is
+— it ranks as unreadable and still mirrors, so it does not raise: the run can
+green, and can even record a `repaired` tier change nobody proved (#8943). And
+in the **Actions** log `failed[].org_id` is a stable fingerprint (`org-…`), not
+the real id — the JSON payload carries the real one; re-fetch it with the curl
+at the top of this section unchanged (it carries `--max-time 600` and
+`--fail-with-body`), remembering that a fresh POST starts a NEW pass, so expect
+`202 already_running` / `503 reconcile_stuck` as documented. The same `failed`
+row appears when this arm **withholds an upgrade**: the newer subscription is
+pricier in Stripe, but the pass cannot see that — with the kept sub unreadable
+the comparison never runs. When instead only the **newer** sub's cap cannot be
+read, the still-in-force one is mirrored normally: the row is `unchanged` when
+the store already held that tier (the usual case) and an ordinary `repaired`
+when it had drifted — an UP drift still pages and reds as always. That
+candidate is not applied and nothing is logged about it, and it does not
+self-heal: when it later becomes the only live subscription the pass reds for
+it until the catalog is fixed. All of this is the **cadence's** guarantee, not
+the system's, and the `customer.subscription.updated` webhook can defeat it
+BEFORE the next pass: the handler applies provider truth for the subscription
+its event names — a new, cheaper one included, and the stored pointer too —
+at any time. Nothing in the cadence undoes that: the rewritten pointer reads as
+current, so the next pass mirrors the cheaper subscription and reports
+`unchanged` and the ending one is never listed. Restoring the tier needs an
+operator (a per-org reconcile with the pointer back) or a later event; the
+missing rank guard on that path is #8942. A **genuine** cancellation still
+downgrades the moment Stripe says so: with no live subscription at the customer
+there is nothing to prefer and the stored one is mirrored. A customer lookup
+that **fails** is neither — the org is left alone and counted `unverified`
+(paid tier) or `skipped` (unpaid).
 
 A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
 `alerted` / `failed` / `unrepaired` and one `drift` row per repaired org, each

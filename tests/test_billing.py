@@ -616,7 +616,7 @@ class TestApplyLimitsAndReconcile:
         ``_subscription_rank`` returns ``None`` for a price the catalog does not
         know (pinned by the test above) AND for a pricing ladder that cannot be
         READ at all (``_paid_tier_floor`` catching ``tier_limits``). Both put an
-        ENDING, still-in-force sub on the ``kept is None`` arm, and both
+        ENDING, still-in-force sub on the unrankable-ending arm, and both
         docstrings claim the same outcome — the org is a FAILED row with its
         stored tier and pointer intact. The second leg raises one call LATER
         (``apply_limits`` -> ``tier_limits``, after ``subscription_plan``
@@ -3275,6 +3275,16 @@ class TestReconcileSweep:
             assert bl._select_current_subscription(order) is ending_rotated, (
                 "an unrankable ending sibling must not let a newer sub at its "
                 f"rankable sibling's cap win — got {order}")
+
+        # ⛔⛔⛔ And the SAME rule decides an ending set with NO non-ending
+        # candidate: there the set used to be resolved by Stripe's LISTING
+        # ORDER, so a rankable lower sibling listed first won and the pass
+        # recorded the downgrade as a clean ``repaired``/``down``.
+        for order in ([ending_solo_old, ending_rotated],
+                      [ending_rotated, ending_solo_old]):
+            assert bl._select_current_subscription(order) is ending_rotated, (
+                "with no live candidate the ending set must still be resolved "
+                f"by rank, never by listing order — got {order}")
 
     def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
         """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.
