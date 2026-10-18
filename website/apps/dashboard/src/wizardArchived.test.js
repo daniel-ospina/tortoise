@@ -227,7 +227,7 @@ function orFallbacks(ast) {
     if (node.type !== 'LogicalExpression' || node.operator !== '||') return
     const value = literalString(node.right)
     if (value === null) return
-    out.push({ value, start: node.start, left: node.left.type === 'Identifier' ? node.left.name : null })
+    out.push({ value, start: node.start, left: node.left.type === 'Identifier' ? node.left.name : null, node })
   })
   return out.sort((a, b) => a.start - b.start)
 }
@@ -257,21 +257,65 @@ function welcomeCardWindow(ast) {
   // outside every consumer, so a `wizard-title` placed there — above the
   // provisioning/error fork, and therefore rendered in ALL THREE card states — redded
   // nothing (measured). The head is now required to sit INSIDE the card it belongs to.
-  const cards = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-card'))
-  assert.equal(cards.length, 1,
-    'the welcome CARD (div.welcome-card) must resolve exactly once — it is the region every in-card pin certifies')
+  const card = welcomeCard(ast)
   const heads = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
   assert.equal(heads.length, 1,
     'the welcome-head block must resolve exactly once (a pin over an empty or unbounded window is a false green)')
-  assert.ok(heads[0].start > cards[0].start && heads[0].end < cards[0].end,
+  assert.ok(heads[0].start > card.start && heads[0].end < card.end,
     'the welcome-head block must sit INSIDE the welcome card — otherwise the window starts wherever a class happens to be')
-  const start = cards[0].start
+  const start = card.start
   const end = archivedGateStart(ast)
   assert.notEqual(end, -1,
     'the archived-block boundary must resolve (an unresolved end makes the window the rest of the file)')
   assert.ok(end > heads[0].end,
     'the archived block must come AFTER the live card\'s `div.welcome-head` content — a gate that resolves inside it ends the window inside the region it certifies, and a label after it is invisible')
   return { start, end }
+}
+
+/** The single `div.welcome-card` — the region every in-card pin certifies. */
+function welcomeCard(ast) {
+  const cards = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-card'))
+  assert.equal(cards.length, 1,
+    'the welcome CARD (div.welcome-card) must resolve exactly once — it is the region every in-card pin certifies')
+  return cards[0]
+}
+
+/**
+ * The JSX subtree the archived gate RENDERS — `{start, end}` of the `&&` expression's
+ * right side — or `null` when the gate is not the `&& (<jsx>)` form. The live card
+ * legitimately contains this block (it is kept for the A0 rollback), so the
+ * content-anchored in-card pin has to exclude exactly this span and nothing else.
+ */
+function archivedSubtree(ast) {
+  const gate = archivedGates(ast)[0]
+  if (!gate) return null
+  const jsxish = (n) => n && (n.type === 'JSXElement' || n.type === 'JSXFragment')
+  let span = null
+  walk(ast.program, (node, parent) => {
+    if (span || node !== gate || !parent) return
+    if (parent.type === 'LogicalExpression' && parent.operator === '&&'
+      && parent.left === gate && jsxish(parent.right)) {
+      span = { start: parent.right.start, end: parent.right.end }
+    }
+  })
+  return span
+}
+
+/**
+ * Every `wizardSteps[…]` READ in `ast` whose offset is not inside `span` (the
+ * archived subtree), as offsets in file order. A read inside the LIVE card is the
+ * #2912 duplicate stage label: the live heading must name the stage through
+ * `wizardStageLabel`, not by indexing the legacy array.
+ */
+function wizardStepsReadsOutside(ast, span) {
+  const out = []
+  walkNodes(ast, (node) => {
+    if (node.type !== 'MemberExpression') return
+    if (!(node.object?.type === 'Identifier' && node.object.name === 'wizardSteps')) return
+    if (span && node.start >= span.start && node.end <= span.end) return
+    out.push(node.start)
+  })
+  return out.sort((a, b) => a - b)
 }
 
 /**
@@ -366,7 +410,11 @@ function subtreeText(node) {
     if (n.type === 'StringLiteral') parts.push(n.value)
     if (n.type === 'TemplateElement') parts.push(n.value.cooked ?? n.value.raw)
   })
-  return parts.join('')
+  // #3726 cycle 4 (P2): collapsing whitespace is what the RENDERER does, so a reflow
+  // of the copy across source lines — byte-identical HTML, verified with the repo's
+  // own render probe — is a no-op here instead of a false red on a pin about a
+  // missing fallback.
+  return parts.join('').replace(/\s+/g, ' ')
 }
 
 /**
@@ -395,9 +443,24 @@ function readyCopyOrgFallbacks(ast) {
   // The MINIMAL carriers: an ancestor of the copy's element also holds the text, and
   // accepting ancestors would let a decoy anywhere in the card through.
   const minimal = carriers.filter((e) => !carriers.some((o) => o !== e && o.start > e.start && o.end < e.end))
+  // #3726 cycle 4 (P3): carrying the text is not RENDERING the fallback. A decoy in
+  // the same paragraph (`You're set up in <strong>{shownOrgName}</strong>. {false &&
+  // <span>{shownOrgName || 'your organization'}</span>}`) satisfied the pin while the
+  // live copy rendered `You're set up in .` (measured). The `||` must therefore be
+  // render-REACHABLE from its carrier: no short-circuit or ternary on the way up.
+  const parents = new Map()
+  walk(ast.program, (node, parent) => { if (parent) parents.set(node, parent) })
+  const reachableFrom = (f, carrier) => {
+    let n = parents.get(f.node)
+    while (n && n !== carrier.node) {
+      if (n.type === 'LogicalExpression' || n.type === 'ConditionalExpression') return false
+      n = parents.get(n)
+    }
+    return n === carrier.node
+  }
   return orFallbacks(ast)
     .filter((f) => f.left === 'shownOrgName'
-      && minimal.some((e) => f.start > e.start && f.start < e.end))
+      && minimal.some((e) => f.start > e.start && f.start < e.end && reachableFrom(f, e)))
     .map((f) => f.value)
 }
 
@@ -508,6 +571,20 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   const inCardTitles = SRC_JSX.filter((e) => e.start > headOpen && e.start < headEnd && hasClass(e.cls, 'wizard-title'))
   assert.deepEqual(inCardTitles, [],
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
+  // #3726 cycle 4 (P2): the pin above is anchored to the class NAME, so four
+  // spellings of the same defect rendered with it GREEN (measured): a classless
+  // `<p>{wizardSteps[wizardStep]}</p>` inside the head, the `class=` alias (not
+  // `className`), the same inside the ready-copy paragraph, and any copy placed BELOW
+  // the archived block — the window ends at the gate, so nothing under the rollback
+  // block was watched at all. Anchor the negative pin to the DEFECT instead: the
+  // stage label must not INDEX THE LEGACY ARRAY anywhere in the live card outside the
+  // archived subtree.
+  const card = welcomeCard(SRC_AST)
+  const archivedSpan = archivedSubtree(SRC_AST)
+  const inCardStepReads = wizardStepsReadsOutside(SRC_AST, archivedSpan)
+    .filter((offset) => offset > card.start && offset < card.end)
+  assert.deepEqual(inCardStepReads, [],
+    'no in-card stage label may return — anchored to the `wizardSteps[…]` READ, so a classless or `class=` copy, or one below the archived block, cannot evade it')
   // The archived block's title still READS wizardSteps (kept for rollback): the
   // element's own subtree must contain the `wizardSteps[...]` member read, which a
   // nearby comment or an unrelated 400-character slice cannot satisfy.
@@ -732,6 +809,49 @@ test('#3726 falsifiability: the <h1> pin is selected by class and names every ov
     'an <h1> that no longer calls wizardStageLabel must redden the pin')
 })
 
+test('#3726 falsifiability: the in-card pin is anchored to the wizardSteps READ, not to a class name', () => {
+  // The negative pin's window is the live card EXCLUDING the archived subtree. Anchor
+  // it to the read, or four spellings of the same #2912 defect render with it green.
+  const gate = '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (<p className="wizard-title">{wizardSteps[wizardStep]}</p>)}'
+  const build = (inner) => [
+    '<div className="welcome-card">',
+    '  <div className="welcome-head">',
+    inner,
+    '  </div>',
+    `  ${gate}`,
+    '</div>',
+  ].join('\n')
+  const read = (source) => {
+    const ast = parseModule(source)
+    const card = welcomeCard(ast)
+    return wizardStepsReadsOutside(ast, archivedSubtree(ast))
+      .filter((offset) => offset > card.start && offset < card.end)
+  }
+  // The archived block's OWN read is legitimately in the card: excluded, so the
+  // control below is `[]` and the pin is not vacuous by construction.
+  assert.deepEqual(read(build('    <h1 className="welcome-title">ready</h1>')), [],
+    'the archived block\'s own wizardSteps read is not an in-card stage label')
+  for (const [label, inner] of [
+    ['classless', '    <p>{wizardSteps[wizardStep]}</p>'],
+    ['the class= alias', '    <p class="wizard-title">{wizardSteps[wizardStep]}</p>'],
+    ['a template className', '    <p className={`wizard-title ${wizardStep}`}>{wizardSteps[wizardStep]}</p>'],
+  ]) {
+    assert.equal(read(build(inner)).length, 1,
+      `an in-card stage label spelled ${label} must be SEEN — the class-name pin alone misses it`)
+  }
+  // …and a copy BELOW the archived block is still inside the card, where the
+  // window-to-the-gate pin cannot see it.
+  const below = [
+    '<div className="welcome-card">',
+    '  <div className="welcome-head"><h1 className="welcome-title">ready</h1></div>',
+    `  ${gate}`,
+    '  <p>{wizardSteps[wizardStep]}</p>',
+    '</div>',
+  ].join('\n')
+  assert.equal(read(below).length, 1,
+    'a stage label BELOW the archived block is still in the live card — the window-to-the-gate pin never reaches it')
+})
+
 test('#3726 falsifiability: the in-card title pin fires on EVERY className spelling', () => {
   // The negative pin is the one where a false green is worst, so prove it can red:
   // a re-introduced in-card stage label spelled as a JSX expression or a template
@@ -832,6 +952,22 @@ test('#3726 falsifiability: the ready-copy pin is anchored to the welcome card, 
   const spaced = `${card('{ shownOrgName || `your organization` }')}\n${archived}\n${otherCard}`
   assert.deepEqual(readyCopyOrgFallbacks(parseModule(spaced)), ['your organization'],
     'spacing and a template-literal fallback are formatting, not behaviour')
+  // …and so is a REFLOW: the same copy split across source lines renders byte-identical
+  // HTML (verified with the repo's render probe), so it must not red a pin that is
+  // about a missing fallback.
+  const reflowed = card("{shownOrgName || 'your organization'}")
+    .replace("You're set up in <strong>", "You're set up\n                            in <strong>")
+  assert.ok(reflowed !== card("{shownOrgName || 'your organization'}")
+    && !reflowed.includes("You're set up in"), 'the synthetic really reflowed the copy')
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${reflowed}\n${archived}`)), ['your organization'],
+    'a whitespace-only reflow of the ready copy is a no-op')
+  // #3726 cycle 4 (P3): carrying the text is not RENDERING the fallback. A dead decoy
+  // in the same paragraph must not satisfy the pin while the live copy renders
+  // "You're set up in .".
+  const deadDecoy = card('{shownOrgName}')
+    .replace("</strong></p>", "</strong>. {false && <span>{shownOrgName || 'your organization'}</span>}Next, choose</p>")
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${deadDecoy}\n${archived}`)), [],
+    'a non-rendered decoy in the SAME paragraph must not satisfy the ready-copy pin')
 })
 
 test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan T7)', () => {
