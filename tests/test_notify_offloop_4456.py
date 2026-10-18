@@ -37,7 +37,7 @@ These tests are behavioural where it matters:
   callable, so a revert to the inline shape fails regardless of argument.
 
 The ``best_effort`` op-set invariant is co-owned by
-``tests/test_control_plane_offload_3498.py::test_never_raise_offload_sites_pass_best_effort``
+``tests/test_control_plane_offload_3498.py::test_best_effort_offload_sites_carry_the_flag``
 (``billing_notify`` is declared there).
 """
 
@@ -329,7 +329,7 @@ def test_stripe_billing_notify_bound_miss_returns_promptly(monkeypatch):
     against a 0.1 s bound separates the two shapes with room to spare. The
     ``best_effort=True`` flag itself is pinned structurally by
     ``test_webhook_notify_direct_call_is_inside_the_offload_boundary`` and by
-    ``test_control_plane_offload_3498.py::test_never_raise_offload_sites_pass_best_effort``;
+    ``test_control_plane_offload_3498.py::test_best_effort_offload_sites_carry_the_flag``;
     this test pins the OUTCOME (a bound miss neither 500s nor blocks the
     handler).
 

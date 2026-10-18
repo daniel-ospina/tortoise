@@ -268,6 +268,14 @@ surfaces:
   # tortoise/monitoring.py and tortoise/supabase_control.py, which select the
   # `api` surface.
   - test_org_create_pool_7678.py
+  # #8920 (review P3): the harness-pointer integrity guard. `tortoise/hosted_api.py`
+  # is the file that RECORDS `tests/_http_fixtures.quiesce_testclient_background_work`
+  # as the canonical #3472/#3505 seam, and it is an EXACT `api` SOURCE_PATTERN
+  # match that REPLACES the `core` fallback — so an `api`-only change to that
+  # comment (a rename relay, or a rename that forgets one) would otherwise run
+  # no guard at all. Dual-registered with `core` (below) because half the check
+  # is dead-symbol references inside `tests/`, which `core` is the fallback for.
+  - test_8920_harness_pointer.py
   # #3365: the session-capture ADMISSION key must name the graph the data path
   # actually OPENS — a legacy key bound to the org's default graph (a real
   # `g_<hex>` id routing to the same physical graph as an org-wide key) must
@@ -701,6 +709,12 @@ surfaces:
   # class. See the `core` entry for the other half.
   - test_postgres_storage.py
   - test_oauth_mcp.py
+  # #2853: the `oauth_clients` row count that ruling C made part of the decision.
+  # Registered on `api` because the ONLY file it guards, `tortoise/hosted_api.py`,
+  # is an exact `api` SOURCE_PATTERN — so a change to the endpoint runs the guards
+  # that keep it from answering with a number that is not the count (a page
+  # length, or a confident 0 for an unstated total), and the on-loop read pin.
+  - test_oauth_clients_count_2853.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
   - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
@@ -1358,6 +1372,14 @@ surfaces:
   # against `hosted_backup`'s OWN primitives (`DUMP_FORMAT`,
   # `_sanitize_label`), which keeps that half honest without a DB.
   - test_retype_8882.py
+  # #8882 (Phase 1 measurement): the OFFLINE census of a logical dump —
+  # `tortoise/graph_census.py` matches no SOURCE_PATTERN, so a module-only
+  # change falls through to `core` and this guard runs with it (same
+  # reasoning as `test_retype_8882.py` directly above, and the two share one
+  # input contract). DB-free by construction: the subject IS a
+  # `tortoise-logical-dump-v1` dict, so the census is a pure function and the
+  # file needs no graph, no URI and no carve-out registration.
+  - test_graph_census_8882.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
   # inputs it reads select `core`: `tortoise/record_projection.py` matches no
@@ -1906,6 +1928,11 @@ surfaces:
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
+  # #8920 (review P3): production pointers into `tests/` must resolve, and no
+  # source may still name a symbol the move renamed away. DB-free and static,
+  # so it belongs on the general lane; the `api` arm above covers the exact
+  # `tortoise/hosted_api.py` pointer that replaced `core` in `select()`.
+  - test_8920_harness_pointer.py
   - test_analytics_offloop_4015.py  # #4015: analytics emit off-loop + Stripe fail-soft (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
@@ -3050,8 +3077,9 @@ surfaces:
   # and the same fallback: `tortoise/pi-hooks/README.md` matches no
   # SOURCE_PATTERNS entry, so a README-only edit selects `core` through the
   # `tortoise/` prefix — which is the only arm that runs the guard on the change
-  # it guards. (A `docs/` edit is deliberately skipped by NON_PYTHON_PREFIXES,
-  # so the plan's own copy is covered by review of the `.md`, not by this arm.)
+  # it guards.  (A `docs/` edit is skipped by NON_PYTHON_PREFIXES, but the plan
+  # doc is itself a CORE_ALSO claim entry in `tools/ci_selection.py` (#3554), so a
+  # plan-only edit selects `core` and runs this guard too.)
   - test_pi_capture_disposition.py
   # #3575 P1-A: this pins `tortoise/session_import/parsers.py::window_turns`.
   # `tortoise/session_import/` maps to no named surface, so a parsers.py change
@@ -3970,6 +3998,7 @@ surfaces:
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
+  - longmem_eval/test_server_posture_2969.py  # #2969 suggested fix 3: the eval refuses a defragging graph server (`CONFIG GET activedefrag`); opt-in `disable` applies the incident mitigation + read-back and FAILS CLOSED when it cannot read the value or open the probe (the one exception to UNKNOWN-and-proceed, which stays soft for `require-off`/`allow`); a readable value that is neither `yes` nor `no` is UNKNOWN, never `off`; wiring aborts before BOTH model loads (R6 cross-encoder pre-warm + `--model` injection), the embedder pre-flight and the dataset download (hermetic: a fake connection records commands AND a loopback RESP2 server drives the REAL `_connection_from_uri` builder — the anti-inert leg)
   # #8043 (Slice A of #2683): the reader-window FLOODING BOUND, measured
   # hermetically on the shipped `assemble_context`/`package_evidence_pool` —
   # the pre-#2978 baseline shape, the post-#2978 reallocation, the assembly's
@@ -5268,6 +5297,10 @@ durations:
   # file's declared cost, not because the gate requires it. Refresh from the
   # first post-merge main run.
   longmem_eval/test_ingest_stall_guard.py: 2.0
+  # #2969 suggested fix 3: new file in this pool, never sampled by a CI run →
+  # the flat 2.0s default under the #3400/#4221 convention (a local timing is
+  # not the input). Refresh from the first post-merge main run.
+  longmem_eval/test_server_posture_2969.py: 2.0
   # #8043: new file in this pool, never sampled by a CI run, so it takes the
   # flat 2.0s default under the #3400/#4221 convention (a local timing is not
   # the input). Measured locally at ~3s wall for the whole file (12 tests; the

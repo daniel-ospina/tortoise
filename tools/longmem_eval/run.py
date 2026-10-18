@@ -160,6 +160,11 @@ from .retrieve import (
     retrieve_for_question,
     run_integrity_gate,
 )
+from .server_posture import (
+    ServerPostureError,
+    enforce_server_posture,
+    resolve_activedefrag_policy,
+)
 from .stall_guard import (
     DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
     DEFAULT_EVAL_SOCKET_TIMEOUT_S,
@@ -6644,29 +6649,15 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # R6 (#1545): the effective rerank config (CLI > env > default) resolves
     # BEFORE the loop; env resolution + re-validation happen ONLY when the
     # effective rerank is ON (a baseline run never reads the R6 env vars —
-    # Gate 7). Then pre-warm the cross-encoder ONCE (also gated on the
-    # effective rerank being on — a baseline run never loads the ~90MB
-    # model); a pre-warm failure does NOT disable the run (per-question
-    # get_scorer TTL-retries continue, D8b) and model_load_ms is recorded
-    # once in the report config.
+    # Gate 7). The config resolution is pure (env + CLI only), so it stays
+    # above the #2969 posture gate — a knob typo still fails loud before any
+    # socket is dialled. The ~90MB cross-encoder PRE-WARM is the expensive
+    # half and runs AFTER the gate (see below).
     rr = _resolve_rerank(
         rerank=args.rerank, rerank_model=args.rerank_model,
         rerank_pool=args.rerank_pool, per_session_cap=args.rerank_cap,
         mmr_lambda=args.rerank_lambda, max_k=max(ks))
     rerank_prewarm: dict | None = None
-    if rr["rerank_on"]:
-        from .rerank import get_scorer
-        t0 = time.monotonic()
-        scorer, reason = get_scorer(rr["model"])
-        model_load_ms = round((time.monotonic() - t0) * 1000.0, 2)
-        rerank_prewarm = {"model_load_ms": model_load_ms,
-                          "prewarmed": scorer is not None, "reason": reason}
-        if scorer is None:
-            print(f"[longmem_eval] WARNING: cross-encoder pre-warm failed "
-                  f"({reason[:120]}…) — rerank stays ON; per-question "
-                  f"TTL-retries continue (each question degrades to "
-                  f"rerank-off with a recorded reason, D8b)",
-                  file=sys.stderr)
 
     # #1349 HNSW spot-check: a dedicated evidence producer — winner + control
     # in one pass over the FULL question set, paired artifact at the pinned
@@ -6690,6 +6681,52 @@ def _run_main(parser: argparse.ArgumentParser, args,
         if 10 not in ks:
             parser.error("--spot-check measures turn_recall@10 / ndcg@10 — "
                          f"10 must be in --k (got {','.join(map(str, ks))})")
+
+    # #2969 (suggested fix 3): the SERVER posture FIRST — before BOTH model
+    # loads (the R6 cross-encoder pre-warm below, and the embedder injection
+    # ``--model``, which can spend ``--load-timeout`` loading a candidate),
+    # before the embedder pre-flight, and before the dataset download. The
+    # measured incident was a container in a continuous active-defrag loop that
+    # turned a ~25 min/question ingest into >4 h of silent grind; #3068 bounds
+    # the wait but does not make such a server a valid measurement target.
+    # Only ``--db`` runs have a graph server to check (the embedded lane is a
+    # local unix socket). The policy is resolved here too so a typo fails at
+    # RUN START, not mid-question.
+    if db_uri is not None:
+        try:
+            activedefrag_policy = resolve_activedefrag_policy()
+        except ValueError as _e:
+            raise SystemExit(str(_e)) from None
+        try:
+            enforce_server_posture(db_uri=db_uri,
+                                   policy=activedefrag_policy)
+        except ServerPostureError as e:
+            print("[longmem_eval] GRAPH-SERVER POSTURE GATE FAILED — aborting "
+                  "before the run starts (no questions executed):",
+                  file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            raise SystemExit(1) from e
+
+    # R6 (#1545): pre-warm the cross-encoder ONCE — gated on the effective
+    # rerank being on (a baseline run never loads the ~90MB model), and
+    # placed AFTER the #2969 posture gate so a refused run never pays that
+    # load (qwen-style rerank arms included: `--rerank` is a documented eval
+    # A/B arm). A pre-warm failure does NOT disable the run (per-question
+    # get_scorer TTL-retries continue, D8b) and model_load_ms is recorded
+    # once in the report config.
+    if rr["rerank_on"]:
+        from .rerank import get_scorer
+        t0 = time.monotonic()
+        scorer, reason = get_scorer(rr["model"])
+        model_load_ms = round((time.monotonic() - t0) * 1000.0, 2)
+        rerank_prewarm = {"model_load_ms": model_load_ms,
+                          "prewarmed": scorer is not None, "reason": reason}
+        if scorer is None:
+            print(f"[longmem_eval] WARNING: cross-encoder pre-warm failed "
+                  f"({reason[:120]}…) — rerank stays ON; per-question "
+                  f"TTL-retries continue (each question degrades to "
+                  f"rerank-off with a recorded reason, D8b)",
+                  file=sys.stderr)
 
     # #1349: inject the candidate embedder BEFORE the pre-flight so the
     # singleton IS the candidate (probe records resolved revision; HARD-FAILs

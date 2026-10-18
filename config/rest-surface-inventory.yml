@@ -276,6 +276,15 @@ routes:
   - method: POST
     path: /v1/internal/driver/heartbeat
     class: control-plane
+  # #2853 (ruling C, 2026-10-13): the number of stored `oauth_clients`
+  # registrations, behind `_check_internal` (FASTAPI_INTERNAL_KEY) and
+  # read-only. Control-plane because the count is the WHOLE table's — every
+  # tenant's DCR / CIMD / operator-issued rows — which a tenant key must never
+  # see. The ruling accepted unbounded growth and made ONE thing mandatory: a
+  # way to see the number, so the acceptance cannot lapse unobserved.
+  - method: GET
+    path: /v1/internal/oauth/clients/count
+    class: control-plane
   # #3514 (epic #1714 J4): the CROSS-ORG demand count behind `_check_internal`
   # (FASTAPI_INTERNAL_KEY) — the operator plane, deliberately outside tenant
   # registry scope: it aggregates every team's demand rows, which is what the

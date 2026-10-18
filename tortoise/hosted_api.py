@@ -16907,6 +16907,164 @@ def _parse_as_of(as_of: str | None) -> date:
     return day
 
 
+@app.get("/v1/internal/oauth/clients/count")
+async def oauth_clients_count(request: Request):
+    """How many `oauth_clients` registrations are stored — the number #2853's ruling C watches.
+
+    Operator-only (``_check_internal``), read-only. The count covers the WHOLE
+    table — every DCR registration, every CIMD row, and any row an operator
+    inserts directly — because the ruling's question is how many stored
+    registrations accumulate, not how many came from one producer. Credentials
+    the provider holds instead of storing here (the ``oauth_anthropic_creds``
+    alternative in ``docs/oauth-mcp.md``, which is not implemented in this repo)
+    are NOT rows, so they are deliberately not part of this number: adding them
+    would be a count that is not the count.
+
+    Ruling C (owner @daniel-ospina, 2026-10-13) accepted that ``oauth_clients``
+    grows without limit: **no prune, no expiry, no cap**. The ruling makes THIS
+    NUMBER part of the decision rather than an optional extra — "watch it" is
+    empty unless the count is observable, and a decision that cannot be seen
+    degrading is the unrecorded slide the ruling exists to prevent.
+
+    ``count`` is the SERVER's own COUNT (``count_exact=True``), never
+    ``len(rows)``: PostgREST truncates a page at the deployment's ``max_rows``,
+    so a page length is a floor that reads like a total. When the server states
+    no total (``query_with_total`` → ``None``) this reports
+    ``status="unavailable"`` with a reason and **no** ``count`` — a confident
+    zero is the one wrong answer here, because it would read as "nothing has
+    accumulated" and silently retire the decision.
+
+    No alert threshold *in this change*: ruling C decided the growth BOUND only
+    (none — no prune, no expiry, no cap) and explicitly left "warning periods"
+    undecided, so a threshold is neither forbidden nor decided by it. Shipping
+    none is this change's scope call, recorded on #2853 — and the deferred half
+    is TRACKED rather than retired: **#8923** owns the scheduled reader plus its
+    threshold (sequenced after #3134's 2026-11-15 measurement supplies the
+    scale), and that work must NOTIFY — never prune, cap or expire. The revisit
+    triggers are the ruling's own, and are returned so a reader need not go
+    find them.
+    """
+    _check_internal(request)
+
+    # Imported locally like the neighbouring control-plane callers (`rpc`,
+    # `sweep_oauth_retention`, `_iter_registered_orgs`): the module keeps this
+    # import function-local, and resolving it from `tortoise.supabase_control`
+    # at call time is also what lets a test substitute the seam.
+    from tortoise.supabase_control import get_control_plane
+
+    def _read_count():
+        # `limit=1` keeps the row payload trivial; `count_exact` is what asks
+        # the server for the full total the number is supposed to be.
+        return get_control_plane().query_with_total(
+            "oauth_clients", select=["id"], limit=1, count_exact=True,
+        )
+
+    try:
+        # OFF the event loop (the #2988/#3498/#3718 class): `query_with_total`
+        # is a SYNCHRONOUS `httpx.Client.get` with a 5 s per-phase timeout, and
+        # this module runs ONE uvicorn worker (`Dockerfile.hosted`, no
+        # `--workers`) — so an inline call here stalls EVERY concurrent request
+        # for the whole round trip, which is exactly what #2988 measured
+        # ("every route in the process timed out"). `_cp_offload` is this
+        # module's seam for control-plane I/O from an async body (its sibling
+        # `retention_cohort` offloads through `_run_off_loop`).
+        #
+        # `pool="telemetry"` is STATED, not inherited: `best_effort=True` alone
+        # would silently reroute this call there via `_cp_offload`'s
+        # `effective_pool`, and the choice is load-bearing. An operator probe
+        # must not hold an AUTH worker — this is a full-table COUNT on the one
+        # table ruling C accepted as unbounded, and the auth lane's failure mode
+        # is a total outage. The documented trade-off of that pool applies: it
+        # is shared with telemetry writes, so a saturated backlog can render
+        # this `unavailable` while the control plane is healthy. A visible,
+        # logged refusal is the right failure for a probe; auth capacity is not.
+        #
+        # `best_effort` so the seam's OWN failure reaches the caller as a value
+        # instead of a 503: `_cp_offload` then returns `OFFLOAD_REFUSED` (the
+        # submission never ran) or `None` (the wait bound expired — the worker
+        # may still be running it), which are reported apart below. Helper
+        # exceptions still propagate (#3498) and are caught by the fail-soft arm.
+        read = await _cp_offload(
+            _read_count, op="oauth_clients_count", pool="telemetry",
+            best_effort=True,
+        )
+    except Exception as exc:  # fail soft, never a confident 0
+        # The HTTP body deliberately carries only the exception TYPE (an operator
+        # needs to know the read failed, not the fleet's internals), but the
+        # server log must carry the detail: `query_with_total` raises a
+        # RuntimeError whose message holds the real cause (e.g. `HTTP 503`), and
+        # without this the unavailable path leaves no trace to diagnose. Mirrors
+        # the retention-cohort endpoint's own unavailable-path warning.
+        _logger.warning(
+            "oauth clients count: control plane read failed", exc_info=True,
+        )
+        return {
+            "status": "unavailable",
+            "reason": f"control plane read failed: {type(exc).__name__}",
+            "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+        }
+    if read is None or read is OFFLOAD_REFUSED:
+        # The offload delivered no RESULT, and the two seam outcomes here are
+        # NOT the same event (#4456): a REFUSED submission never ran, while a
+        # wait bound that expired abandons only the AWAIT — the worker that
+        # picked the submission up runs `query_with_total` to completion, so the
+        # read may be running at this instant. Neither is a count, but saying
+        # "did not run" would be false in exactly the incident this endpoint
+        # exists to report, so the body names the outcome actually observed.
+        refused = read is OFFLOAD_REFUSED
+        _logger.warning(
+            "oauth clients count: offload delivered no result (%s)",
+            "submission refused — the read never ran" if refused
+            else "wait bound expired — the read may still be running",
+        )
+        return {
+            "status": "unavailable",
+            "reason": (
+                "the offload refused the read, so it never ran; an unasked "
+                "count is not a count"
+                if refused else
+                "the offload's wait bound expired before the read returned; a "
+                "count that was not collected is not a count"
+            ),
+            "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+        }
+    _rows, total = read
+    if total is None:
+        # `_content_range_total` returns None for FIVE shapes, and this arm sees
+        # all of them: no header, no `/` in it, an empty total, a `*` total
+        # (PostgREST's answer when `Prefer: count=exact` was not honoured), or an
+        # unparseable one. None is "could not be confirmed", never "no rows": a
+        # healthy EMPTY deployment sends `*/0`, which parses to `0` and renders
+        # `ok` with `count: 0`, so the body does draw the EMPTY-vs-UNSTATED
+        # distinction. What no surface can say is WHICH of the five occurred, so
+        # this warning is the only server-side record that the arm fired at all —
+        # that is exactly what the caplog assertion in
+        # `test_an_unstated_total_is_unavailable_and_carries_no_count` pins.
+        _logger.warning(
+            "oauth clients count: control plane stated no numeric total "
+            "(Content-Range absent, or a `*` / empty / unparsable total); "
+            "reporting unavailable rather than 0",
+        )
+        return {
+            "status": "unavailable",
+            "reason": (
+                "the control plane did not state a numeric total in its "
+                "Content-Range; a page length is not a total"
+            ),
+            "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+        }
+    return {
+        "status": "ok",
+        "count": total,
+        "table": "oauth_clients",
+        "ruling": (
+            "#2853 option C (2026-10-13) — unbounded growth accepted: "
+            "no prune, no expiry, no cap"
+        ),
+        "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
+    }
+
+
 @app.get("/v1/internal/retention/cohort")
 async def retention_cohort(request: Request, as_of: str | None = None):
     """The retention indicator over the whole fleet. Operator-only, read-only.
@@ -23866,7 +24024,7 @@ def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
 # ['reg-old']`) came from a third, different overlap: the lifespan's background
 # entry racing a DIRECT `_purge_deleted_orgs()` call on the test body's thread,
 # which bypasses the worker entirely (#3511 quiesced the test; the harness
-# pattern is recorded in `tests/test_export_delete._quiesce_testclient_background_work`).
+# pattern is recorded in `tests/_http_fixtures.quiesce_testclient_background_work`).
 # No direct caller exists in production, but that IS the shape a future one
 # would take, and the guard holds against it too.
 #
@@ -35730,13 +35888,58 @@ def _billing_email_like(value: object) -> bool:
     return bool(local) and bool(domain)
 
 
-def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
+def _billing_owner_email(org_id: str) -> str | None:
+    """The org's OWN address in the Supabase lane: the ACTIVE OWNER's verified
+    user email (#4508). Fail-soft — ``None`` on any error.
+
+    Why not ``organizations.email``: #1765 demoted that column to a stale-prone
+    contact field (``claim_membership`` no longer writes it), and it is
+    populated ONLY by the lanes that pass ``p_email`` to the ``provision_team``
+    RPC — ``/v1/register`` and the Edge Function. Every SESSION-lane create
+    (``create_org``, the onboarding sub-org, the new-org checkout webhook)
+    passes no ``p_email``, so the column is NULL exactly where a session
+    member is the one clicking Upgrade. The owner's USER email is the property
+    #1765 promoted, and the oauth lane already prefers it over the column when
+    it builds the same org dict (``oauth._owner_email_or``).
+
+    Two calls, both inside the threaded checkout body that is already talking
+    to Stripe: a control-plane membership read plus a GoTrue admin GET — a
+    revenue-path latency cost, so ``_billing_checkout_sync`` calls this ONLY
+    when step 1 of the chain cannot answer (``organizations.email`` is not
+    email-shaped). The guard here is LOAD-BEARING, not defensive padding —
+    ``owner_email`` swallows the admin-API transport error but its
+    ``owner_user_id`` control-plane read is outside that guard, so a
+    control-plane failure would otherwise escape as a 500 on an upgrade the
+    member is entitled to. Caught here, the chain simply degrades to the
+    #4504 session fallback.
+    """
+    from tortoise.supabase_control import get_control_plane, owner_email
+    try:
+        value = owner_email(get_control_plane(), org_id)
+    except Exception:  # degrade, never block a checkout
+        return None
+    return value.strip() if _billing_email_like(value) else None
+
+
+def _billing_customer_email(sdk: TortoiseSDK | None, org: dict,
+                            *, owner_email: str | None = None) -> str:
     """Resolve the billing email via the fallback chain (review fix 1):
 
     1. ``Org.email`` — set at /v1/register (self-service orgs); the resolved
        org dict carries it in BOTH lanes (registry Team node / Supabase orgs
        row) and is read as the ``t.email`` twin (#4640: Supabase mode passes
        ``sdk=None`` — the registry graph is deleted post-#669).
+    1b. The ACTIVE OWNER's verified user email (#4508) — the Supabase-lane
+       twin of 1, but only where step 1 of the chain cannot answer: the
+       ``organizations.email`` column is NULL **or not email-shaped** (a
+       session-lane create leaves it NULL; #1765 leaves stale contact values
+       on the others, and ``_billing_email_like`` is what rejects those). The
+       caller gates the READ on that same ``_billing_email_like`` predicate
+       (``_billing_checkout_sync``), so an org whose step 1 answers never pays
+       for the control-plane + GoTrue round-trips. Inserted AFTER 1 so the
+       landed precedence keeps holding, and BEFORE 2/3 so a non-owner member
+       clicking **Upgrade** can never bind their own personal address as the
+       org's Stripe customer.
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
@@ -35773,6 +35976,15 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
     # the t.email that read returns, so this is a selfhost no-op.
     if _billing_email_like(org.get("email")):
         return org["email"].strip()
+    # #4508: the org's owner — the Supabase-lane answer for an org whose
+    # ``organizations.email`` is NULL (every session-created org; see
+    # ``_billing_owner_email``). Additive: it sits after ``Org.email`` so
+    # #4640's precedence is untouched, and before the key-creator/session
+    # links because it is the org's identity rather than a per-request
+    # caller's. ``owner_email`` (the parameter) is only ever resolved in the
+    # Supabase lane — selfhost passes None and the chain is byte-identical.
+    if _billing_email_like(owner_email):
+        return owner_email.strip()
     # #4727: the control-plane twin of step 2's "key used for THIS request"
     # link. The two registry reads below never run in Supabase mode
     # (``sdk is None``), so a provision-path org whose ``organizations.email``
@@ -35869,7 +36081,31 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     if status in _BILLING_ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="team already has an active subscription")
 
-    email = _billing_customer_email(sdk, org)
+    # #4508: the org's own address, resolved BEFORE the chain so the
+    # per-member session fallback is never preferred over the owner's. Only
+    # the Supabase lane can answer it (a control-plane read); the registry
+    # lane's ``t.email`` is step 1 of the chain itself.
+    #
+    # #8931 review (P2): gate the read on the condition that makes it USABLE.
+    # Step 1 of the chain returns on ``org["email"]`` (the ``organizations.email``
+    # column, which ``_session_user_org`` stamps), so for the majority lane —
+    # ``/v1/register`` and Edge-Function orgs — resolving it first bought a
+    # control-plane ``org_memberships`` read plus a synchronous GoTrue admin
+    # GET (``timeout=10.0``, supabase_control.py) whose value was discarded.
+    # This is a pure short-circuit: step 1 is re-checked inside
+    # ``_billing_customer_email``, so precedence and outcomes are unchanged.
+    # Every case that CONSUMES the value still resolves it — an org whose
+    # column is NULL, including the backfill case (a stored
+    # ``stripe_customer_id`` with an empty ``customer_email``) — so nothing
+    # depends on the gate. The review's alternative shape (a lazy zero-arg
+    # resolver threaded into the chain) is equivalent; this one keeps the
+    # precedence decision in the single place that already owns it.
+    owner_addr = (
+        _billing_owner_email(org_id)
+        if supabase_mode and not _billing_email_like(org.get("email"))
+        else None
+    )
+    email = _billing_customer_email(sdk, org, owner_email=owner_addr)
     try:
         client = StripeClient()
         if stored_customer_id:  # noqa: SIM108
@@ -37065,14 +37301,24 @@ async def billing_reconcile(request: Request):
 # client early-returns like the shared primitive.
 #
 # Accepted limitations (PR body carries the full list): in-process stores ⇒
-# real capacity is limit × machines and resets on restart (#1677 / #2853 own
-# oauth_clients row pruning — owner @daniel-ospina, date 2026-10-15); the
+# real capacity is limit × machines and resets on restart; the
 # limiter runs before body parsing, so invalid-JSON / oversized POSTs DO
 # consume budget; the anonymous aggregate is a one-source DoS (trusted CIDRs
 # unaffected); the exemption's security rests on the Fly edge stripping
 # client `Fly-*` headers (assumption 12 — dated re-verification with an
-# operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
-# filings from this work: #3124 (the shared per-IP primitive + the generic
+# operator recipe is #3126, owner @daniel-ospina, 2026-11-15).
+#
+# #2853's commitment (owner @daniel-ospina, dated 2026-10-15) was DISCHARGED by
+# the owner's ruling C on 2026-10-13, and is not left to lapse quietly: growth
+# of `oauth_clients` is ACCEPTED as an unbounded condition — no prune, no
+# expiry, no cap — and the ruling makes the row count observable rather than
+# optional ("watch it" is empty without a number) — served by
+# `oauth_clients_count` (`GET /v1/internal/oauth/clients/count`, defined
+# earlier in this module). Revisit only on the ruling's
+# own triggers, held in `_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS`. The #1677
+# in-process-store half of this limitation is unchanged by that ruling.
+#
+# Sibling filings from this work: #3124 (the shared per-IP primitive + the generic
 # middleware's store — now bounded: reclaim-inactive + reject-new/shared
 # overflow + O(1) hot path), #3125 (`_check_claim_rate_limit`
 # keys on the proxy IP), #3134 (dated measurement of real DCR volume —
@@ -37089,6 +37335,15 @@ async def billing_reconcile(request: Request):
 # #2038 precedent (PR #2049 review) — see also the docs limitation in
 # docs/oauth-mcp.md. The phase-1/phase-2 seam already exists, so moving the
 # charge past `register_client` is the follow-up if #2051 is taken up.
+#: The two conditions that reopen #2853's ruling C — named so the acceptance
+#: is not a default that holds forever (the ruling's own "Triggers to revisit").
+_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS = (
+    "2026-11-15: the separately-owned measurement of real DCR volume (#3134) "
+    "turns the unknown into a number; real growth reopens the retention "
+    "question, and it is then a decision with a size attached",
+    "the connection mechanism moves off per-connection Dynamic Client "
+    "Registration; re-evaluate against the new mechanism, not against this one",
+)
 _OAUTH_DCR_WINDOW_S = 3600
 _OAUTH_DCR_PER_HOUR_DEFAULT = 20
 _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600

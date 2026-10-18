@@ -120,12 +120,16 @@ no-regression leg.
 
 ```bash
 # regenerate the receipt (writes docs/runbook/8043-slice-a-t-gate-receipt.json)
-TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m tools.longmem_eval.slice_a_flood_bound
+TORTOISE_TEST_CARVE_OUT=1 uv run python -m tools.longmem_eval.slice_a_flood_bound
 # verify it reproduces without writing (the guard the test runs)
-TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m tools.longmem_eval.slice_a_flood_bound --check
+TORTOISE_TEST_CARVE_OUT=1 uv run python -m tools.longmem_eval.slice_a_flood_bound --check
 # the guard
-TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/longmem_eval/test_slice_a_flood_bound.py -q -p no:cacheprovider
+TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/longmem_eval/test_slice_a_flood_bound.py -q -p no:cacheprovider
 ```
+
+> `uv run`, not `.venv/bin/python`: a linked worktree has no `.venv` of its own
+> until `uv sync` creates one, so the absolute form reds with "no such file"
+> on exactly the checkout the gate is normally re-run in.
 
 The instrument is deterministic (no clock, no path, no RNG in the receipt), so
 regenerating it is a **no-diff** operation; any diff is a real change in the
@@ -181,9 +185,10 @@ nothing regresses on withdrawal") — and the arms **are** OFF everywhere
   `TORTOISE_ASK_EVIDENCE_ASSEMBLY` is likewise read only in `retrieve`-time
   code (A8, `tortoise/ask_lane.py`) — and none of the ingest cache's own inputs
   changes when either flips (`ingest_cache_fingerprint`: extractor code
-  version, extraction model id, extraction prompt digest, the question JSON,
-  `chunk_turns`, `session_workers` — no such flag among them; both are also
-  absent from the read-side knob list the run fingerprint records), so flipping
+  version, extraction model id, extraction prompt digest, the question id, the
+  question JSON, `chunk_turns`, `session_workers` — no such flag among them;
+  both are also absent from the read-side knob list the run fingerprint
+  records), so flipping
   the LME flag **alone** does not invalidate the ingest cache. The ON/OFF A/B therefore costs **2× reader+judge calls and
   0 extra ingest** — the cheapest end-to-end arm available.
 * withdrawing is trivially reversible later; re-deriving the capability is not.

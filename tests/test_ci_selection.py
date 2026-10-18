@@ -1717,6 +1717,31 @@ def test_retype_snapshot_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_graph_census_tool_change_selects_core_not_tier1():
+    # #8882 review P1: tools/graph_census.py is the CLI for the measured census
+    # and owns tests/test_graph_census_8882.py, registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a CLI-only diff came back with `changed == []` and took
+    # the docs-only early return: `select()` returned NO surface, so the file's own
+    # CLI-contract cases (--out/--samples, the 0/1/2 exit-code split, --diff) never
+    # ran on the PR editing the CLI. Registering the test under `core` does not
+    # help — a name in a surface's test_files only runs when that surface is
+    # already selected.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["tools/graph_census.py"])`
+    # -> surfaces=[], full=False, test_graph_census_8882.py absent. The same
+    # measurement is what tools/queue_conflict_census.py and tools/edge_census.py
+    # record: an instrument that makes an uncounted class visible must not be
+    # invisible to CI selection itself. CORE_ALSO (not TOOL_CARVEOUTS) is the
+    # deliberate choice: the suite is hermetic and DB-free.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/graph_census.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_graph_census_8882.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_orchestrator_harness_change_selects_core_not_tier1():
     # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
     # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's

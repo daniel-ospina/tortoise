@@ -24,7 +24,10 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
 import pytest  # noqa: I001
 
-from tests._http_fixtures import patched_tortoise_sdk
+from tests._http_fixtures import (
+    patched_tortoise_sdk,
+    quiesce_testclient_background_work,
+)
 from tests.fake_control_plane import rpc_call_named
 from tests._verdict import require_answered
 from tortoise.pack_state import (
@@ -452,6 +455,14 @@ def supabase_client(monkeypatch):
         "organizations": [dict(FREE_TEAM)],
         "invitations": [],
     })
+    # #4816: `TestClient(app)` entry arms `_run_boot_sweeps` — mode-independent —
+    # and its metering step calls `get_control_plane().rpc(...)`, which under
+    # this fixture IS the `FakeControlPlane` built above. A sweep landing before
+    # the request is what made `fake.rpc_calls[0]` read the sweep — the failure
+    # this issue reports. Quiesce the lifespan-armed work (the seam
+    # #3472/#3505 already established) instead of tolerating the noise in
+    # every assertion.
+    quiesce_testclient_background_work(monkeypatch)
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
     import tortoise.supabase_control as sc
@@ -504,46 +515,50 @@ class TestProvisioningHooks:
             "email": "founder@example.com", "password": "hunter2secret"})
         assert r.status_code == 200, r.text
         org_id = r.json()["org_id"]
-        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
+        # Index pin, deliberately, and the OPPOSITE of the parametrized test
+        # below (#8920): `supabase_client` applies
+        # `quiesce_testclient_background_work` BEFORE entering the app, so no
+        # background RPC can precede this request — and the clean arm of
+        # `test_create_team_activates_packs_supabase_mode` asserts that premise
+        # (`metering_repair_period_bounds` is never recorded) instead of
+        # assuming it. A name-selected pin here would hide a quiesce regression.
+        assert fake.rpc_calls[0][0] == "provision_team"
         sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
 
-    def test_provision_pin_survives_a_boot_sweep_rpc(self, supabase_client):
-        """#4816: the provision pin must not depend on INDEX.
+    @pytest.mark.parametrize("sweep_noise", [False, True])
+    def test_create_team_activates_packs_supabase_mode(self, supabase_client, sweep_noise):
+        """Site 2 (/v1/organizations): activation rides the provision_team RPC hook.
 
-        ``_run_boot_sweeps`` is armed as a task at boot and its metering repair
-        calls ``get_control_plane().rpc("metering_repair_period_bounds", …)``
-        (#4241). In this fixture that control plane IS the fake, so the sweep's
-        RPC can land before the request's own — which is why
-        ``test_create_team_activates_packs_supabase_mode`` failed about 1 run in
-        4 and never reproduced alone. Seeding the sweep's call makes the race
-        deterministic: this test reddens an index-based pin every time.
+        #4816: `sweep_noise=True` seeds the boot sweep's RPC (``metering_repair_period_bounds``,
+        #4241) BEFORE the request, which is exactly what the lifespan-armed sweep does when it
+        wins the race. The fixture quiesces the sweep, so the clean arm is the normal case;
+        the noisy arm pins that the assertion reads the REQUEST's call and not whichever call
+        landed first — the deterministic form of a failure that used to reproduce once in four
+        full-session runs and never alone.
         """
         from tortoise.hosted_api import app, get_current_user
         tc, fake, db_path = supabase_client
-        # Exactly what the boot sweep records when it wins the race.
-        fake.rpc_calls.append(("metering_repair_period_bounds", {}))
+        if sweep_noise:
+            fake.rpc_calls.append(("metering_repair_period_bounds", {}))
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U1, "email": "user-1@example.com"}
         r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         org_id = r.json()["org_id"]
-        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
-        sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
-        rows = _read_installs(sdk)
-        assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
-
-    def test_create_team_activates_packs_supabase_mode(self, supabase_client):
-        """Site 2 (/v1/organizations): activation rides the provision_team RPC hook."""
-        from tortoise.hosted_api import app, get_current_user
-        tc, fake, db_path = supabase_client
-        app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": _U1, "email": "user-1@example.com"}
-        r = tc.post("/v1/organizations", json={"name": "acme"})
-        assert r.status_code == 200, r.text
-        org_id = r.json()["org_id"]
-        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
+        if not sweep_noise:
+            # The fixture quiesces the lifespan-armed work, so the request's own
+            # call must be the ONLY one recorded. Naming one sweep would go
+            # green the moment a different (or renamed) sweep started landing —
+            # which is precisely how this flake got in. Exact order, so any
+            # polluter fails here instead of as a 1-in-N flake elsewhere.
+            assert [c[0] for c in fake.rpc_calls] == ["provision_team"], (
+                "the boot sweep must be quiesced in supabase_client (#4816)")
+        provision = rpc_call_named(fake, "provision_team")
+        assert provision[0] == "provision_team"
+        # exactly one provision, and the sweep (if seeded) is not it
+        assert [c[0] for c in fake.rpc_calls].count("provision_team") == 1
         sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())

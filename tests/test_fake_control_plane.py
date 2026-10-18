@@ -720,3 +720,20 @@ def test_json_path_arrow_keeps_the_json_type() -> None:
     f = _cas_fake(version=3)
     assert f.query("organizations", select=["id"],
                    filters=[("onboarding_state->state_version", "eq", 3)]) == [{"id": _ORG}]
+
+
+def test_rpc_call_named_selects_by_name_and_fails_loudly() -> None:
+    """#4816: the helper must select the REQUEST's call, not index 0, and it must
+    RAISE when the named call is absent — otherwise a stub returning a plausible
+    tuple would satisfy the pins silently."""
+    import pytest
+
+    from tests.fake_control_plane import FakeControlPlane, rpc_call_named
+
+    fake = FakeControlPlane({})
+    fake.rpc_calls.append(("metering_repair_period_bounds", {}))
+    fake.rpc_calls.append(("provision_team", {"p_org_name": "acme"}))
+    assert rpc_call_named(fake, "provision_team")[1]["p_org_name"] == "acme"
+
+    with pytest.raises(AssertionError, match="observed RPCs"):
+        rpc_call_named(fake, "provision_org_v2")
