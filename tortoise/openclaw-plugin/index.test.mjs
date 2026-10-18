@@ -11,9 +11,12 @@ import { test } from "node:test";
 
 import register, {
   captureRecords,
+  createContinuity,
   createDedupe,
   readConfig,
+  reflexPayload,
   runCommand,
+  runHosted,
   spoolDir,
   spoolFile,
   stateDir,
@@ -109,12 +112,27 @@ test("createDedupe: a repeated block is injected once per session key", () => {
   assert.equal(dedupe("s2", "same"), true);
 });
 
-test("runCommand: reads the block off stdout; a failing command yields ''", async () => {
+test("createContinuity: the last block per session, '' when none", () => {
+  const continuity = createContinuity();
+  assert.equal(continuity.prior("s1"), "");
+  continuity.remember("s1", "b1");
+  continuity.remember("s1", "b2");
+  assert.equal(continuity.prior("s1"), "b2");
+  assert.equal(continuity.prior("s2"), "");
+});
+
+test("runCommand: pipes the reflex contract; a failing command yields ''", async () => {
   const dir = mkdtempSync(join(tmpdir(), "tortoise-oc-"));
+  const capture = join(dir, "stdin.json");
   const good = join(dir, "good.sh");
-  writeFileSync(good, "#!/bin/sh\ncat >/dev/null\nprintf 'block:%s' \"$1\"\n");
+  writeFileSync(good, `#!/bin/sh\ncat > ${capture}\nprintf 'block'\n`);
   chmodSync(good, 0o755);
-  assert.equal(await runCommand(good, "hello", 2000), "block:volunteer");
+  assert.equal(await runCommand(good, "hello", 2000), "block");
+  assert.deepEqual(JSON.parse(readFileSync(capture, "utf8")), {
+    window: [{ role: "user", content: "hello" }],
+    session_id: null,
+    prior_context: null,
+  });
 
   const bad = join(dir, "bad.sh");
   writeFileSync(bad, "#!/bin/sh\nexit 3\n");
@@ -196,5 +214,129 @@ test("register: llm_output appends each session to its OWN spool file", async ()
   } finally {
     if (previous === undefined) delete process.env.TORTOISE_OPENCLAW_SPOOL_DIR;
     else process.env.TORTOISE_OPENCLAW_SPOOL_DIR = previous;
+  }
+});
+
+test("reflexPayload: the machine contract, with continuity in prior_context", () => {
+  assert.deepEqual(JSON.parse(reflexPayload("hi")), {
+    window: [{ role: "user", content: "hi" }],
+    session_id: null,
+    prior_context: null,
+  });
+  // A payload KEY (not an argv flag) is what makes an older `tortoise`
+  // ignore continuity and still run — an unknown flag would exit non-zero and
+  // the fail-open catch would inject nothing, silently, on every turn.
+  assert.deepEqual(
+    JSON.parse(reflexPayload("hi", { sessionId: "s1", priorContext: "blk" })),
+    {
+      window: [{ role: "user", content: "hi" }],
+      session_id: "s1",
+      prior_context: "blk",
+    },
+  );
+});
+
+test("register: hands the reflex the block it injected last turn (continuity)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tortoise-oc-"));
+  const log = join(dir, "payloads.jsonl");
+  const bin = join(dir, "fake-tortoise.sh");
+  // Records the payload it was handed and answers with a block derived from
+  // the prompt, so two turns produce two DIFFERENT blocks (the digest dedupe
+  // cannot be what suppresses anything here).
+  writeFileSync(
+    bin,
+    `#!${process.execPath}\n` +
+      `const fs = require("node:fs");\n` +
+      `let raw = "";\n` +
+      `process.stdin.on("data", (c) => { raw += c; });\n` +
+      `process.stdin.on("end", () => {\n` +
+      `  fs.appendFileSync(${JSON.stringify(log)}, raw + "\\n");\n` +
+      `  const body = JSON.parse(raw);\n` +
+      `  process.stdout.write("block-for:" + body.window[0].content);\n` +
+      `});\n`,
+  );
+  chmodSync(bin, 0o755);
+
+  const api = fakeApi({ command: bin });
+  register(api);
+  const hook = api.hooks.get("before_prompt_build");
+
+  const first = await hook({ prompt: "alpha" }, { trigger: "user", sessionKey: "s1" });
+  assert.deepEqual(first, { prependContext: "block-for:alpha" });
+  const second = await hook({ prompt: "beta" }, { trigger: "user", sessionKey: "s1" });
+  assert.deepEqual(second, { prependContext: "block-for:beta" });
+
+  // A different session starts clean — continuity is per session key.
+  const other = await hook({ prompt: "gamma" }, { trigger: "user", sessionKey: "s2" });
+  assert.deepEqual(other, { prependContext: "block-for:gamma" });
+
+  const calls = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(calls.length, 3);
+  // Turn 1 has nothing to suppress; turn 2 carries TURN 1's block, which is
+  // the reflex's only re-mention-suppression input.
+  assert.deepEqual(calls[0], {
+    window: [{ role: "user", content: "alpha" }],
+    session_id: "s1",
+    prior_context: null,
+  });
+  assert.deepEqual(calls[1], {
+    window: [{ role: "user", content: "beta" }],
+    session_id: "s1",
+    prior_context: "block-for:alpha",
+  });
+  assert.deepEqual(calls[2], {
+    window: [{ role: "user", content: "gamma" }],
+    session_id: "s2",
+    prior_context: null,
+  });
+});
+
+test("runHosted: posts the documented /v1/context contract, not a bare prompt", async () => {
+  const realFetch = globalThis.fetch;
+  let seen = null;
+  globalThis.fetch = async (url, options) => {
+    seen = { url, options };
+    return { ok: true, json: async () => ({ block: "hosted-block", pointers: [] }) };
+  };
+  try {
+    const block = await runHosted(
+      "https://api.test.example/",
+      "k",
+      "what do we know?",
+      500,
+      { sessionId: "s1", priorContext: "prev-block" },
+    );
+    assert.equal(block, "hosted-block");
+    assert.equal(seen.url, "https://api.test.example/v1/context");
+    assert.equal(seen.options.method, "POST");
+    assert.equal(seen.options.headers.Authorization, "Bearer k");
+    // `window` is REQUIRED by VolunteerContextRequest (tortoise/hosted_api.py):
+    // the old `{prompt}` body is a 422, which the fail-open catch turns into a
+    // silent no-injection with no signal at all.
+    assert.deepEqual(JSON.parse(seen.options.body), {
+      window: [{ role: "user", content: "what do we know?" }],
+      session_id: "s1",
+      prior_context: "prev-block",
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("runHosted: no key, a refused request and a non-JSON body are all ''", async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    assert.equal(await runHosted("https://api.test", "", "p", 100), "");
+    for (const response of [
+      { ok: false, json: async () => ({ detail: "Invalid API key" }) },
+      { ok: true, json: async () => { throw new Error("not json"); } },
+    ]) {
+      globalThis.fetch = async () => response;
+      assert.equal(await runHosted("https://api.test", "k", "p", 100), "");
+    }
+    globalThis.fetch = async () => { throw new Error("unreachable"); };
+    assert.equal(await runHosted("https://api.test", "k", "p", 100), "");
+  } finally {
+    globalThis.fetch = realFetch;
   }
 });

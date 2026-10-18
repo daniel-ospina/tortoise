@@ -20,7 +20,10 @@ What is graded here:
   ``parse_openclaw`` reads, pinned from BOTH sides (this file and the plugin's
   own ``node --test`` suite, which is executed when Node >= 22.18 is present);
 * the packaging — every shipped plugin file is matched by a package-data
-  pattern, so a wheel install ships a plugin OpenClaw can load.
+  pattern, so a wheel install ships a plugin OpenClaw can load;
+* the hosted leg's request body — emitted by the shipped `runHosted` under a
+  stubbed `fetch` and validated by the server's own `VolunteerContextRequest`,
+  so a drift is a red test rather than a silent 422 in a user's turn.
 """
 from __future__ import annotations
 
@@ -558,3 +561,59 @@ def test_session_verify_reaches_openclaw_and_is_honestly_unverifiable():
     reason = session_verify.UNVERIFIABLE_REASON["openclaw"]
     assert "not firable by this command" in reason
     assert "index.mjs" in reason
+
+
+# ── the hosted leg's request contract (both languages) ────────────────────
+
+#: The body the plugin posts is graded by the SERVER'S OWN model, not by a
+#: hand-copy: `runHosted` is executed under a stubbed `fetch` and the JSON it
+#: emitted is validated by the real `VolunteerContextRequest`. A seam that
+#: drifts from the documented contract fails here instead of 422-ing in a
+#: user's OpenClaw turn, where the fail-open catch makes it invisible.
+_HOSTED_DRIVER = """
+import { runHosted } from __ENTRY__;
+let seen = null;
+globalThis.fetch = async (url, options) => {
+  seen = { url, method: options.method, body: options.body };
+  return { ok: true, json: async () => ({ block: "hosted-block" }) };
+};
+const block = await runHosted("https://api.test.example", "k", "what do we know?", 500, {
+  sessionId: "s-1",
+  priorContext: "the-block-we-injected",
+});
+console.log(JSON.stringify({ seen, block }));
+"""
+
+
+@pytest.mark.skipif(
+    _node_version() is None or _node_version() < _NODE_MIN,
+    reason="node >= 22.18 required for the .mjs loader (esm + node:test)")
+def test_hosted_body_is_the_contract_the_server_validates(tmp_path):
+    """The plugin's hosted leg posted `{prompt}` — `POST /v1/context` requires
+    `window`, so every hosted turn 422'd and the fail-open catch injected
+    nothing, silently (the README's apiKey config is the ONLY reflex path for a
+    user without the local CLI). Pin the emitted body against the real model."""
+    from tortoise.hosted_api import VolunteerContextRequest
+
+    node = shutil.which("node")
+    driver = tmp_path / "hosted.mjs"
+    driver.write_text(_HOSTED_DRIVER.replace("__ENTRY__", json.dumps(ENTRY.as_uri())))
+    proc = subprocess.run(
+        [node, str(driver)], capture_output=True, text=True, timeout=120,
+        cwd=str(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["block"] == "hosted-block"
+    assert payload["seen"]["url"] == "https://api.test.example/v1/context"
+    assert payload["seen"]["method"] == "POST"
+
+    body = json.loads(payload["seen"]["body"])
+    request = VolunteerContextRequest.model_validate(body)  # 422s if it drifts
+    assert request.window[0].role == "user"
+    assert request.window[0].content == "what do we know?"
+    assert request.session_id == "s-1"
+    assert request.prior_context == "the-block-we-injected"
+
+    # …and the body this replaces is refused, so the pin is not vacuous.
+    with pytest.raises(Exception):
+        VolunteerContextRequest.model_validate({"prompt": "what do we know?"})

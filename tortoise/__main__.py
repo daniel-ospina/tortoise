@@ -5320,6 +5320,11 @@ def _cmd_volunteer(args) -> int:
     both share tortoise/volunteer.py), and prints the injected block text
     (default) or the full response contract (--json).
 
+    Continuity (cross-turn re-mention suppression) rides ``--prior-context``
+    (or the same key in the JSON contract): the block this seam injected on an
+    earlier turn. It is the reflex's ONLY suppression input — ``--session-id``
+    is carried, not consulted (#2120).
+
     Hook ergonomics: clean silence (no pointers above the gate) prints
     nothing and exits 0 — never an error. Failures are honest: text mode
     prints to stderr and exits 1; --json mode emits {status: error, ...} on
@@ -5366,6 +5371,12 @@ def _cmd_volunteer(args) -> int:
         payload = None
     window = None
     session_id = args.session_id
+    # #2120: the reflex's re-mention suppression reads `prior_context` (the
+    # block a seam injected on an earlier turn) — never `session_id`, which is
+    # carried but not consulted by the decision. Without this input a per-turn
+    # seam re-fires a pointer it already surfaced, which is the false-fire the
+    # W3 harness scores as passing (it feeds prior_context through the SDK).
+    prior_context = getattr(args, "prior_context", None)
     # #2383: honor the advertised payload knobs when the window came in as a
     # {window, session_id, min_confidence, max_pointers, why} contract dict
     # (previously only window/session_id were read and the rest silently
@@ -5378,6 +5389,8 @@ def _cmd_volunteer(args) -> int:
             and all(isinstance(t, dict) for t in payload["window"])):
         window = payload["window"]
         session_id = payload.get("session_id") or args.session_id
+        if isinstance(payload.get("prior_context"), str):
+            prior_context = payload["prior_context"]
         if isinstance(payload.get("min_confidence"), (int, float)):
             payload_min_c = min(1.0, max(0.0, float(payload["min_confidence"])))
         if isinstance(payload.get("max_pointers"), int):
@@ -5426,6 +5439,7 @@ def _cmd_volunteer(args) -> int:
     body = {
         "window": window,
         "session_id": session_id,
+        "prior_context": prior_context,
         "min_confidence": (payload_min_c
                            if payload_min_c is not None
                            else getattr(args, "min_confidence", 0.7)),
@@ -5462,6 +5476,7 @@ def _cmd_volunteer(args) -> int:
             data = sdk.volunteer_context(
                 window=window,
                 session_id=session_id,
+                prior_context=prior_context,
                 min_confidence=body["min_confidence"],
                 max_pointers=body["max_pointers"],
                 why=body["why"],
@@ -14434,7 +14449,13 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON window file (list of {role, content} turns, a bare string "
              "prompt, or {window, session_id, ...}) — default: read stdin")
     vol.add_argument("--session-id", default=None,
-                     help="Session continuity id (re-mention suppression)")
+                     help="Session id sent with the reflex request (continuity "
+                          "/ telemetry; the re-mention suppression SET comes "
+                          "from --prior-context, not from this id)")
+    vol.add_argument("--prior-context", default=None,
+                     help="The block this seam injected on an earlier turn: the "
+                          "reflex then suppresses pointers already surfaced in "
+                          "it (cross-turn re-mention dedupe). Omit on turn 1")
     vol.add_argument("--min-confidence", type=float, default=0.7,
                      help="Confidence gate (default 0.7)")
     vol.add_argument("--max-pointers", type=int, default=3,

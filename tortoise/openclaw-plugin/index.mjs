@@ -1,4 +1,4 @@
-// tortoise-hook-version: 1
+// tortoise-hook-version: 2
 // Tortoise volunteering-memory seam for OpenClaw (epic #2080, issue #2120).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -104,8 +104,32 @@ export function readConfig(apiConfig, env = process.env) {
   };
 }
 
-/** Run the ONE canonical reflex: `tortoise volunteer < prompt`. */
-export function runCommand(command, prompt, timeoutMs) {
+/**
+ * The reflex stdin payload for one turn — the JSON contract `tortoise
+ * volunteer` documents (a `{window, …}` dict), NOT a flag set.
+ *
+ * ``prior_context`` is the CONTINUITY input (#2120 indicator 4): the block
+ * this seam injected on an earlier turn, which the reflex's own stage-5
+ * re-mention suppression reads. ``session_id`` is carried (validated, sent)
+ * but is NOT consulted by the decision — the suppression set comes from
+ * ``prior_context`` alone, so a seam that passes only a session id suppresses
+ * nothing.
+ *
+ * A dict on stdin (rather than `--prior-context` argv flags) is deliberate:
+ * a `tortoise` older than this seam ignores an unknown payload key and still
+ * runs, while an unknown FLAG is an argparse error — which `runCommand`'s
+ * fail-open turns into no injection at all, silently, on every turn.
+ */
+export function reflexPayload(prompt, { sessionId, priorContext } = {}) {
+  return JSON.stringify({
+    window: [{ role: "user", content: prompt }],
+    session_id: sessionId ? String(sessionId) : null,
+    prior_context: priorContext ? String(priorContext) : null,
+  });
+}
+
+/** Run the ONE canonical reflex: `tortoise volunteer` over one turn's window. */
+export function runCommand(command, prompt, timeoutMs, continuity = {}) {
   return new Promise((resolve) => {
     const child = execFile(
       command,
@@ -118,12 +142,20 @@ export function runCommand(command, prompt, timeoutMs) {
       return;
     }
     child.stdin.on("error", () => {});
-    child.stdin.end(prompt);
+    child.stdin.end(reflexPayload(prompt, continuity));
   });
 }
 
-/** Run the reflex over the hosted pipeline: `POST /v1/context`. */
-export async function runHosted(apiUrl, apiKey, prompt, timeoutMs) {
+/**
+ * Run the reflex over the hosted pipeline: `POST /v1/context`.
+ *
+ * The body is the DOCUMENTED request contract
+ * (``VolunteerContextRequest`` in ``tortoise/hosted_api.py``): a ``window`` of
+ * ``{role, content}`` turns (required — a bare ``{prompt}`` is a 422 and the
+ * fail-open catch would silently inject nothing) plus the optional
+ * ``session_id`` / ``prior_context`` continuity fields.
+ */
+export async function runHosted(apiUrl, apiKey, prompt, timeoutMs, continuity = {}) {
   if (!apiKey) return "";
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -134,7 +166,13 @@ export async function runHosted(apiUrl, apiKey, prompt, timeoutMs) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({
+        window: [{ role: "user", content: prompt }],
+        session_id: continuity.sessionId ? String(continuity.sessionId) : null,
+        prior_context: continuity.priorContext
+          ? String(continuity.priorContext)
+          : null,
+      }),
       signal: controller.signal,
     });
     if (!response.ok) return "";
@@ -156,6 +194,25 @@ export function createDedupe() {
     if (seen.get(sessionKey) === digest) return false;
     seen.set(sessionKey, digest);
     return true;
+  };
+}
+
+/**
+ * Cross-turn CONTINUITY (#2120 indicator 4).
+ *
+ * The digest dedupe above only catches an IDENTICAL block. A turn whose block
+ * changes by one pointer (a second pointer clears the gate, or one drops out)
+ * re-surfaces the pointers this session already saw — the false fire the reflex
+ * itself suppresses, but only when it is handed `prior_context`. So remember
+ * the last block per session key and pass it back as that input.
+ */
+export function createContinuity() {
+  const last = new Map();
+  return {
+    prior: (sessionKey) => last.get(sessionKey) ?? "",
+    remember: (sessionKey, block) => {
+      last.set(sessionKey, block);
+    },
   };
 }
 
@@ -205,18 +262,25 @@ export function captureRecords(event, ctx, now = Date.now()) {
 export default function register(api) {
   const config = readConfig(api?.config);
   const dedupe = createDedupe();
+  const continuity = createContinuity();
 
   api.on("before_prompt_build", async (event, ctx) => {
     try {
       if (ctx?.trigger && ctx.trigger !== "user") return undefined;
       const prompt = textOf(event?.prompt).slice(0, MAX_PROMPT_CHARS);
       if (!prompt.trim()) return undefined;
+      const sessionKey = textOf(ctx?.sessionKey) || "openclaw";
+      const session = {
+        sessionId: sessionKey,
+        priorContext: continuity.prior(sessionKey),
+      };
       const block = config.command
-        ? await runCommand(config.command, prompt, config.timeoutMs)
-        : await runHosted(config.apiUrl, config.apiKey, prompt, config.timeoutMs);
+        ? await runCommand(config.command, prompt, config.timeoutMs, session)
+        : await runHosted(config.apiUrl, config.apiKey, prompt, config.timeoutMs, session);
       const text = textOf(block).trim();
       if (!text) return undefined;
-      if (!dedupe(textOf(ctx?.sessionKey) || "openclaw", text)) return undefined;
+      if (!dedupe(sessionKey, text)) return undefined;
+      continuity.remember(sessionKey, text);
       return { prependContext: text };
     } catch {
       return undefined;
