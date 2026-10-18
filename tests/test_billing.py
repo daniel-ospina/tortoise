@@ -2912,10 +2912,16 @@ class TestReconcileSweep:
         Uncaught, that refusal renders as an opaque ``500 {"detail": "Internal
         Server Error"}`` — and the daily driver's ``::error::`` line is the
         page, so "HTTP 500" names nothing an operator can act on. ``503
-        enumeration_incomplete`` names which leg refused, and all three legs are
-        STRUCTURAL (a partial page, a lower-bound page, a missing enumeration
-        seam), so a retry alone does not repair them (the fleet was not READ,
-        not mis-repaired).
+        enumeration_incomplete`` names which leg refused, and the legs do NOT
+        share one remedy: a lower-bound page and a missing enumeration seam are
+        STRUCTURAL, while a partial page is usually a row inserted or deleted
+        mid-walk and certifies on the next run — retried ONCE, not declared
+        structural on sight.
+
+        The ``reason`` cannot tell the partial leg's sub-causes apart (one
+        message covers an unusable cursor, an unordered page, an ignored
+        filter, the page cap and a mid-walk delete), which is why the REMEDY is
+        stated per leg rather than per message.
         """
         import tortoise.supabase_control as sc
         from tortoise import billing as bl
