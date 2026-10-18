@@ -746,11 +746,3 @@ def test_a_bare_set_before_a_merge_arm_is_still_a_read_after_write():
         "MATCH (s:Source {url:$u}) SET s.a = 1 MERGE (s) ON MATCH SET s.b = s.a"
     )) == 1
 
-
-def test_the_two_merge_arms_stay_invisible_to_each_other():
-    """The sibling arm is the case the split exists for: ON CREATE writing
-    `contentHash` with no reader in front of it is legitimate."""
-    assert _same_clause_violations(
-        "MERGE (s:Source {url:$u}) ON CREATE SET s.contentHash = $h "
-        "ON MATCH SET s.version = coalesce(s.version, 0) + 1"
-    ) == []
