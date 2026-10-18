@@ -508,6 +508,15 @@ def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None,
         ensure_tenant_packs(sdk, graph_name=graph_name)
         rows = _read_installs(g)
     catalog = _resolve_catalog()
+    # #2728 review P2-2: the read must report the SOURCE THE WRITE WOULD STORE.
+    # ``set_graph_packs`` writes ``rec.get("source")
+    # or ("starter" if ns in starter else "manual")``. This read defaulted a
+    # NULL ``source`` to ``starter`` unconditionally, so a record with no source
+    # (the import path MERGEs version/status/installed_at only — no source) for
+    # a NON-starter namespace read "Starter" and became "Manual" after the first
+    # Save: exactly the "column flipped after a Save" defect the Source column
+    # exists to prevent. Same derivation on both sides, one authority.
+    starter = set(_starter_namespaces())
     out: list[dict] = []
     for ns, version, status, source, installed_at in rows:
         if (status or PACK_STATUS_ACTIVE) == PACK_STATUS_REMOVED and not include_removed:
@@ -520,7 +529,7 @@ def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None,
             "tier": meta.get("tier", "free"),
             "description": meta.get("description", ""),
             "status": status or "active",
-            "source": source or "starter",
+            "source": source or ("starter" if ns in starter else "manual"),
             "installed_at": installed_at,
         })
     return sorted(out, key=lambda p: p["namespace"])

@@ -684,6 +684,64 @@ class TestGraphPacksRest:
             "the offer must carry the RECORD's source — the value the re-add "
             "will store — not a fresh starter-set derivation that says manual")
 
+    def test_a_null_source_record_reads_the_value_the_save_will_store(
+            self, sel_client):
+        """#2728 review P2-2: the READ's ``source`` derivation is the WRITE's.
+
+        ``get_tenant_packs`` defaulted a NULL ``source`` to ``starter``
+        unconditionally, while ``set_graph_packs`` derives
+        ``rec.get("source") or ("starter" if ns in starter else "manual")``.
+        A record with NO source is produced by the live import path
+        (``_apply_import_pack_config`` MERGEs version/status/installed_at and
+        never ``source``), so restoring a dump that names a catalog NON-starter
+        showed **"Starter"** on the row and — after any edit + Save wrote
+        ``source='manual'`` — became **"Manual"**: the "column flipped after a
+        Save" defect the Source column exists to prevent, and the contract the
+        ``_packs_payload`` docstring and ``docs/EXPANSION_PACKS.md`` state.
+
+        FAIL-ON: pre-fix the row reads ``starter`` for ``venture`` (a catalog
+        non-starter), i.e. a different value from the one the Save below
+        stores — the two assertions disagree with each other, which is the
+        whole defect. The record is seeded raw because no API path mints a
+        sourceless install (only a restored pre-``source`` dump does).
+        """
+        tc, db_path = sel_client
+        org = "t-sel-null-source"
+        _seed_org(db_path, org)
+        _auth(tc, org)
+        # ``org_<org_id>`` is the physical graph the route resolves;
+        # ``_make_sdk(graph_name=…)`` is the EXACT construction
+        # ``_graph_packs_view_for`` reads it through, so the seed cannot land on
+        # a sibling graph (a `namespace=f"org_{org}"` SDK would prepend `org_`
+        # a second time).
+        import tortoise.hosted_api as ha
+        tenant = ha._make_sdk(graph_name=f"org_{org}")
+        tenant._get_proj().g.query(
+            "MERGE (p:PackInstall {namespace: $ns}) "
+            "SET p.version = '0.1.0', p.status = 'active'",
+            params={"ns": "venture"})
+        read = tc.get(f"/v1/graphs/default/packs?org_id={org}")
+        assert read.status_code == 200, read.text
+        rows = {p["namespace"]: p for p in read.json()["packs"]}
+        assert "venture" in rows, (
+            "the seeded install must be the record the route reads "
+            f"(got {sorted(rows)})")
+        read_source = rows["venture"]["source"]
+        assert read_source == "manual", (
+            "a sourceless record for a NON-starter namespace must read as "
+            "manual — the value set_graph_packs writes for it — not a "
+            "starter default that flips on the next Save")
+        # …and the proof that "manual" is the value the write stores: any edit
+        # (here a no-op re-save of the same set) leaves the column unchanged.
+        saved = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": "venture"}], "expected_revision": 0})
+        assert saved.status_code == 200, saved.text
+        saved_source = {p["namespace"]: p
+                        for p in saved.json()["packs"]}["venture"]["source"]
+        assert saved_source == read_source, (
+            "the read and the write must agree on source, or the Source "
+            "column flips under the user on Save")
+
     def test_put_then_get_round_trips_and_version_stays_monotonic(
             self, sel_client):
         tc, db_path = sel_client

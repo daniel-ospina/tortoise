@@ -907,11 +907,37 @@ function SettingsTab(props) {
           to one graph only.
         </p>
         {selectorGraphs(graphs).length === 0 ? (
-          <p className="dim small">
-            {packs.graphsLoaded
-              ? 'No graphs yet — create one on the Graphs tab, then configure its packs here.'
-              : 'Loading graphs…'}
-          </p>
+          /* #2728 review P2-1: a FAILED graph read is not "still loading".
+             `graphsLoaded` is set only on a 200, so gating the empty copy on it
+             alone left a failed (or denied) first read rendering
+             "Loading graphs…" forever — with no error copy and no retry — the
+             same eternal-shimmer state #1842 P2-1 removed from the Graphs tab.
+             The status bit is what distinguishes "not read yet" from "read and
+             empty"; the error arm also carries the retry, because the Settings
+             door to the Configured-packs modal does not exist without a graph
+             to select. */
+          packs.graphsStatus === 'error' ? (
+            <>
+              <p className="dim small" role="alert">
+                Couldn't load graphs — check your connection and try again.
+              </p>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => packs.onRetryGraphs()}
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            <p className="dim small">
+              {packs.graphsStatus === 'denied'
+                ? 'Graph list is only visible to members.'
+                : packs.graphsStatus === 'ok'
+                  ? 'No graphs yet — create one on the Graphs tab, then configure its packs here.'
+                  : 'Loading graphs…'}
+            </p>
+          )
         ) : (
           <>
             <div className="packs-home-controls">
@@ -10734,7 +10760,15 @@ function claimIntentInFlight() {
               canManage: isOwnerAdmin,
               // A graph list that has not loaded yet is not "no graphs" — the
               // empty copy must not be shown for a state we have not read.
-              graphsLoaded,
+              // #2728 review P2-1: the three-way STATUS (loading / ok / error /
+              // denied), not the `graphsLoaded` boolean, is what the home reads:
+              // a failed load is not a load in progress, and a denied list is
+              // not an empty one. `graphsLoaded` stays true only on a 200, so
+              // it cannot answer either question on its own.
+              graphsStatus,
+              // The error arm's retry: the SAME funnel every other refresh uses
+              // (team switch, delete, create) — never a bespoke fetch.
+              onRetryGraphs: () => loadGraphs(currentOrgId),
               onSelectGraph: (gid) => {
                 setPacksHomeGraphId(gid)
                 setPacksHomeBody(null)

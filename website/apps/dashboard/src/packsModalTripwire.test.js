@@ -73,6 +73,32 @@ test('#2728: the Settings home exists, is addressable, and renders the shared co
     'a failed read must be a distinct state — an empty count is legitimate on this surface')
 })
 
+test('#2728: the Settings home states a FAILED graph read instead of shimmering forever', () => {
+  // #2728 review P2-1. The home's only graph-list input used to be
+  // `packs.graphsLoaded`, which is set true only on a 200 — so a first load that
+  // FAILED (or a list the caller is denied) rendered "Loading graphs…"
+  // indefinitely, with no error copy and no retry, and the Settings door to the
+  // Configured-packs modal never appeared. The status bit is what separates
+  // "not read yet" from "read and empty".
+  const home = sliceBetween(
+    '<h3 id={PACK_SETTINGS_SECTION_ID} tabIndex={-1}>Configured packs</h3>',
+    '</section>')
+  assert.ok(home.length > 200, 'the Configured-packs home slice is suspiciously small')
+  assert.match(home, /packs\.graphsStatus === 'error'/, (
+    'a failed graph read needs its own branch — without it the empty/loading '
+    + 'ternary falls through to the loading copy forever'))
+  assert.match(home, /Couldn't load graphs — check your connection and try again\./,
+    'the error arm must say what happened, mirroring the Graphs tab (#1842 P2-1)')
+  assert.match(home, /onClick=\{\(\) => packs\.onRetryGraphs\(\)\}/,
+    'a failure with no retry is a dead end — and this door cannot be reached at all without graphs')
+  assert.match(home, /packs\.graphsStatus === 'denied'/,
+    "a denied graph list is not an empty one — it must not claim the team has no graphs")
+  assert.match(home, /packs\.graphsStatus === 'ok'[\s\S]{0,80}No graphs yet/,
+    "the 'No graphs yet' copy is gated on a READ (ok), not on 'has not failed'")
+  assert.doesNotMatch(home, /packs\.graphsLoaded/,
+    'the load BOOLEAN cannot distinguish failed from loading — the status bit must be the gate')
+})
+
 test('#2728: the SettingsTab receives the graphs prop it never had, plus the packs bundle', () => {
   const call = sliceBetween('<SettingsTab', 'onReload: () => loadPacksSummary(packsHomeGraphId),')
   assert.match(call, /\bgraphs=\{graphs\}/,
@@ -81,6 +107,10 @@ test('#2728: the SettingsTab receives the graphs prop it never had, plus the pac
     'the packs bundle (summary read + handlers) is passed as one prop')
   assert.match(call, /canManage: isOwnerAdmin/,
     'write capability is derived from the role the server enforces, not re-invented')
+  assert.match(call, /graphsStatus,/,
+    'the home needs the graph-list STATUS, not just the loaded boolean (#2728 review P2-1)')
+  assert.match(call, /onRetryGraphs: \(\) => loadGraphs\(currentOrgId\)/,
+    'the retry must reuse the single graphs funnel every other refresh goes through')
 })
 
 test('#2728: both entry points open the SAME dialog state', () => {
