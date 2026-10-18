@@ -36883,6 +36883,11 @@ async def billing_reconcile(request: Request):
     channel by the reconciler itself. A concurrent run returns **202**
     ``{"status": "already_running"}`` and does NO work (the next scheduled run
     retries; nothing queues) — a caller must not read 202 as a completed pass.
+    ⛔ UNLESS the in-flight pass has held the lock past
+    ``_BILLING_RECONCILE_STALE_S``: then it answers **503**
+    ``{"status": "reconcile_stuck"}`` instead, because that pass is presumed
+    WEDGED and retrying will not help (wait for it to end or restart the
+    process). 202 is the benign overlap; 503 ``reconcile_stuck`` is the alarm.
 
     Fails CLOSED on an uncertifiable enumeration — **503**
     ``{"status": "enumeration_incomplete"}`` — so the daily driver's red run is

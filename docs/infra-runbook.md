@@ -438,7 +438,11 @@ what the org pays. The only server-side evidence of the price is the org's
 
 **Repair the FLEET now** (internal key required). There is no per-org route:
 this reconciles **every** billed org, and a run already in flight answers `202
-{"status": "already_running"}` having done nothing.
+{"status": "already_running"}` having done nothing — **unless** that run has
+held the lock past the staleness bound, in which case it is presumed wedged and
+answers `503 {"status": "reconcile_stuck"}` instead. 202 is a benign overlap
+(the next scheduled run retries); `reconcile_stuck` is **not retryable** — wait
+for the pass to end or restart the process.
 
 ```bash
 # --max-time is required, not decoration: /v1/internal/ is prefix-exempt from

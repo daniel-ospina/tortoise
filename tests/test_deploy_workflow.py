@@ -1503,6 +1503,66 @@ class TestBillingReconcileDriverVerdicts:
             f"{expected} — {why}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
 
+    def test_an_unrecognised_503_cannot_forge_a_workflow_command(self):
+        """#8904 review round 4: ``status`` is REMOTE data in a PUBLIC log.
+
+        The unrecognised-cause arm prints the response body's ``status`` so an
+        operator can see the shape of an unknown 503. Interpolated raw, a value
+        carrying a newline emits a SECOND line, and a line beginning
+        ``::error::`` is parsed by the runner as a workflow command — an
+        injected annotation from a response body. The value is redacted and
+        flattened before it is printed; this pins both halves.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        payload = json.dumps({"status": "evil\n::error::FORGED"})
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "workflow_dispatch",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert proc.returncode == 1, (
+            "an unrecognised 503 is a failed pass\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+        lines = proc.stdout.splitlines()
+        assert not any(ln.startswith("::error::FORGED") for ln in lines), (
+            "a newline in the response body forged a workflow command:\n"
+            f"{proc.stdout}")
+        assert "UNRECOGNISED" in proc.stdout, (
+            "the arm must still name the cause it could not match"
+            f"\n{proc.stdout}")
+
     def test_the_public_log_never_carries_a_customer_org_id(self):
         """#8904 review round 3: this repository's Actions log is PUBLIC.
 
