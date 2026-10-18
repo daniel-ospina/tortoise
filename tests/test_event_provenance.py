@@ -683,34 +683,87 @@ class TestComputeReputationNegative:
         result = sdk.compute_reputation("nonexistent-subject")
         assert result.get("mean", 0) == 0.5
 
-    def test_reputation_excludes_outdated_points(self, sdk):
-        """Outdated (superseded) claim points should not count toward reputation."""
-        subj = sdk.create_point("statement", "agent")
+    def test_reputation_excludes_an_outdated_nand_target(self, sdk):
+        """An outdated target's NAND does not count toward reputation.
+
+        #8622 replaced the previous form of this test, whose assertion was
+        ``nand_count == 0 or total_events >= 0`` — always true, so it could not
+        fail under any behaviour while its docstring claimed the outdated NAND
+        "should not count". Same split as the IMPL half: INVALIDATE leaves the
+        edge on the terminal point, which is the state the ``outdated`` filter
+        exists for.
+        """
+        subj = sdk.create_subject("nand-outdated-agent", "reviewer")
         claim = sdk.create_point("statement", "claim that failed")
         new_claim = sdk.create_point("statement", "corrected claim")
 
-        # Agent performs an event that NANDs the failed claim
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-out-1",
             "eventId": "ev-out-1",
             "eventKind": "review",
-            "subject": subj["id"],
+            "subject": subj["name"],
         })
-        # Direct event-to-point NAND (operator-free, per reputation query pattern)
-        proj.g.query(
-            "MATCH (e:Event {eventId:'ev-out-1'}), (p:Point {id:$pid}) "
-            "CREATE (e)-[:NAND]->(p)",
-            params={"pid": claim["id"]},
-        )
+        sdk.create_direct_edge("NAND", "ev-out-1", claim["id"],
+                               promote_source=False)
+        sdk.invalidate_point(claim["id"], new_claim["id"])
 
-        # Supersede the failed claim → outdated
-        sdk.supersede_point(claim["id"], new_claim["id"])
+        # Witness — the NAND really landed on the (now outdated) target.
+        landed = proj.g.query(
+            "MATCH (:Event {eventId:'ev-out-1'})-[:NAND]->(:Point {id:$pid}) "
+            "RETURN count(*)",
+            params={"pid": claim["id"]},
+        ).result_set[0][0]
+        assert landed == 1, "the event's NAND edge was not written; the filter below is untested"
 
         result = sdk.compute_reputation(subj["id"])
-        # After supersede, the outdated claim's NAND should not count
-        assert result.get("nand_count", 0) == 0 or result.get("total_events", 0) >= 0
+        assert result["nand_count"] == 0
+        assert result["total_events"] == 0
+        assert result["mean"] == 0.5
+
+    def test_reputation_counts_a_nand_whose_claim_was_superseded(self, sdk):
+        """A supersede TRANSFER moves the NAND onto the successor, so it counts.
+
+        The twin of ``test_compute_reputation_counts_an_event_whose_claim_was_superseded``
+        for the NAND direction: same transfer leg, same consequence
+        (``edges_transferred == 1``, nothing stranded, the score follows the
+        successor). Measured before #8622: the edge was deleted and this read
+        was neutral.
+        """
+        subj = sdk.create_subject("nand-transfer-agent", "reviewer")
+        claim = sdk.create_point("statement", "claim that was wrong")
+        successor = sdk.create_point("statement", "corrected claim")
+
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-out-2",
+            "eventId": "ev-out-2",
+            "eventKind": "review",
+            "subject": subj["name"],
+        })
+        sdk.create_direct_edge("NAND", "ev-out-2", claim["id"],
+                               promote_source=False)
+        assert sdk.compute_reputation(subj["id"])["nand_count"] == 1
+
+        result = sdk.supersede_point(claim["id"], successor["id"])
+        assert result["edges_transferred"] == 1
+
+        targets = [r[0] for r in proj.g.query(
+            "MATCH (:Event {eventId:'ev-out-2'})-[:NAND]->(t) "
+            "RETURN t.id").result_set]
+        assert targets == [successor["id"]], targets
+        stranded = proj.g.query(
+            "MATCH (old:Point {id:$old})-[r:IMPL|NAND]-(t) RETURN ID(r)",
+            params={"old": claim["id"]},
+        ).result_set
+        assert not stranded, stranded
+
+        after = sdk.compute_reputation(subj["id"])
+        assert after["nand_count"] == 1
+        assert after["total_events"] == 1
+        assert after["outcomes"][0]["point_id"] == successor["id"]
 
 
 class TestCreateEventNegative:
@@ -789,12 +842,14 @@ class TestNegativePaths:
     def test_compute_reputation_excludes_an_outdated_claim(self, sdk):
         """compute_reputation excludes outdated claims, neutral 0.5 when all superseded.
 
-        #8622 note: the edge is created AFTER the supersede on purpose. An
-        ``IMPL`` edge incident to a point that is then superseded is MOVED onto
-        the successor by the 2a-DIRECT transfer (E2E-11.6: zero direct edges
-        remain incident to a superseded point), so it no longer witnesses the
-        reader's ``outdated`` filter — building the edge afterwards pins exactly
-        the filter this test is about, without depending on the transfer.
+        #8622 note: this is the INVALIDATE route, and it is the one where the
+        reader's ``outdated`` filter still fires. A ``supersede_point`` MOVES the
+        event's edge onto the successor (E2E-11.6: zero direct edges remain
+        incident to a superseded point), so after a transfer the target is live
+        and legitimately counts (see the sibling test). ``invalidate_point``
+        marks the point terminal and deliberately LEAVES its edges in place —
+        the state this filter exists for — so the fixture is built through the
+        public write path rather than by raw Cypher.
         """
         subj = sdk.create_subject("all-superseded-agent", "analyst")
         claim = sdk.create_point("statement", "superseded claim")
@@ -809,15 +864,18 @@ class TestNegativePaths:
             "eventKind": "analysis",
             "subject": subj["name"],
         })
+        sdk.create_direct_edge("IMPL", "ev-sup-all", claim["id"],
+                               promote_source=False)
+        # Invalidate, do NOT supersede: the edge stays on the now-outdated claim.
+        sdk.invalidate_point(claim["id"], replacement["id"])
 
-        # Supersede the claim → outdated, THEN record the event's assertion
-        # about it (the transfer cannot move an edge that does not exist yet).
-        sdk.supersede_point(claim["id"], replacement["id"])
-        proj.g.query(
-            "MATCH (e:Event {eventId:'ev-sup-all'}), (p:Point {id:$pid}) "
-            "CREATE (e)-[:IMPL]->(p)",
+        # Witness — a no-op write must not be able to pass this test vacuously.
+        landed = proj.g.query(
+            "MATCH (:Event {eventId:'ev-sup-all'})-[:IMPL]->(:Point {id:$pid}) "
+            "RETURN count(*)",
             params={"pid": claim["id"]},
-        )
+        ).result_set[0][0]
+        assert landed == 1, "the event's IMPL edge was not written; the filter below is untested"
 
         # Reputation should be neutral — outdated claim excluded
         rep = sdk.compute_reputation(subj["id"])
@@ -865,7 +923,7 @@ class TestNegativePaths:
             "RETURN t.id").result_set]
         assert targets == [replacement["id"]], targets
         stranded = proj.g.query(
-            "MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old}) RETURN ID(r)",
+            "MATCH (old:Point {id:$old})-[r:IMPL|NAND]-(t) RETURN ID(r)",
             params={"old": claim["id"]},
         ).result_set
         assert not stranded, stranded
