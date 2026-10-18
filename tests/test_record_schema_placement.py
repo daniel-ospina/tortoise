@@ -280,6 +280,107 @@ def test_placement_table_resolves_to_the_recorded_totals():
     assert counts == EXPECTED_TOTALS, counts
 
 
+_STORAGE_DOC = REPO_ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
+
+#: The appendix's own per-layer headings for the two EPISTEMIC groups — the
+#: source `§2.5`'s summary must agree with.
+_LAYER_HEADING_RE = re.compile(
+    r"^## (?P<group>Point \(node\)|Edges / operators).*?— (?P<names>\d+) properties "
+    r"\(PRIMARY (?P<p>\d+) · DERIVED/VOLATILE (?P<d>\d+) · UNRESOLVED (?P<u>\d+)\)",
+    re.M,
+)
+#: `**221 names → 192 PRIMARY · 29 DERIVED/VOLATILE · 0 UNRESOLVED**`
+_FINAL_COUNTS_RE = re.compile(
+    r"\*\*(?P<names>\d+) names → (?P<p>\d+) PRIMARY · "
+    r"(?P<d>\d+) DERIVED/VOLATILE · (?P<u>\d+) UNRESOLVED"
+)
+#: `resolved to 192 PRIMARY · 29 DERIVED/VOLATILE · 0 UNRESOLVED` (bold optional)
+_RESOLVED_RE = re.compile(
+    r"resolved to \*{0,2}(?P<p>\d+) PRIMARY · (?P<d>\d+) DERIVED/VOLATILE · "
+    r"(?P<u>\d+) UNRESOLVED"
+)
+
+
+def test_no_stated_total_disagrees_with_the_pin():
+    """Every prose restatement of the totals moves WITH the table (#8976 P2).
+
+    The same defect landed three times on this PR: the appendix header was
+    updated for the five `#2782` rows while **§2.7's "Final counts"**,
+    **§2.5's per-layer summary** and **`STORAGE-ARCHITECTURE.md` §17.5's
+    resolved totals** kept the pre-#2782 numbers — so the prose told a reader
+    **187 P** while this pin (and the table it pins) said **192**. A review
+    caught it each time; nothing mechanical did. This reads the numbers back, so
+    the next row set cannot be added to one place only.
+
+    Derived, never restated: the totals come from `EXPECTED_TOTALS` /
+    `EXPECTED_TOTAL_NAMES`, and the per-layer summary is checked against the
+    appendix's OWN section headings (which the section headings themselves
+    already have to sum to `EXPECTED_TOTAL_NAMES`).
+    """
+    doc = PLACEMENT_DOC.read_text(encoding="utf-8")
+
+    # §2.7 — the resolved totals, stated as "N names → P PRIMARY · D D/V · U U"
+    final = [
+        line for line in doc.splitlines() if line.startswith("**Final counts:**")
+    ]
+    assert len(final) == 1, f"§2.7's 'Final counts' line is gone or duplicated: {final}"
+    stated = _FINAL_COUNTS_RE.search(final[0])
+    assert stated, f"§2.7's 'Final counts' no longer states the totals: {final[0]!r}"
+    assert (
+        int(stated.group("names")),
+        int(stated.group("p")),
+        int(stated.group("d")),
+        int(stated.group("u")),
+    ) == (EXPECTED_TOTAL_NAMES, EXPECTED_TOTALS["P"], EXPECTED_TOTALS["D"], EXPECTED_TOTALS["U"]), (
+        "§2.7's 'Final counts' disagrees with the pin — 192 P / 221 names are "
+        f"what the table and EXPECTED_TOTALS say, the sentence says {stated.group(0)!r}"
+    )
+
+    # §2.5 — the epistemic layer summary must equal the two appendix headings it
+    # summarises (`Point` + edges/operators), so a row added to either moves it.
+    headings = {m.group("group").split(" (")[0]: m for m in _LAYER_HEADING_RE.finditer(doc)}
+    assert set(headings) == {"Point", "Edges / operators"}, sorted(headings)
+    layer = {
+        key: sum(int(headings[g].group(key)) for g in headings)
+        for key in ("names", "p", "d", "u")
+    }
+    section = re.search(
+        r"^#### 2\.5 Epistemic.*?\((?P<names>\d+) names · (?P<p>\d+) P · "
+        r"(?P<d>\d+) D · (?P<u>\d+) U\)",
+        doc,
+        re.M,
+    )
+    assert section, "§2.5's per-layer heading no longer states its totals"
+    assert all(int(section.group(k)) == layer[k] for k in layer), (
+        "§2.5 disagrees with the appendix headings it summarises — the heading "
+        f"says {section.group(0)!r}, the appendix sums to {layer}"
+    )
+    point_line = re.search(r"`Point` \((?P<names>\d+): (?P<p>\d+) P / (?P<d>\d+) D / (?P<u>\d+) U\)", doc)
+    assert point_line, "§2.5's `Point` per-layer line is gone"
+    assert (
+        int(point_line.group("names")),
+        int(point_line.group("p")),
+        int(point_line.group("d")),
+        int(point_line.group("u")),
+    ) == tuple(int(headings["Point"].group(k)) for k in ("names", "p", "d", "u")), (
+        f"§2.5's `Point` line disagrees with the appendix heading: {point_line.group(0)!r}"
+    )
+
+    # STORAGE-ARCHITECTURE §17.5 — the resolved totals, one paragraph above the
+    # record-schema sentence this PR amends.
+    storage = _STORAGE_DOC.read_text(encoding="utf-8")
+    resolved = _RESOLVED_RE.search(storage)
+    assert resolved, "STORAGE-ARCHITECTURE §17.5 no longer states the resolved totals"
+    assert (
+        int(resolved.group("p")),
+        int(resolved.group("d")),
+        int(resolved.group("u")),
+    ) == (EXPECTED_TOTALS["P"], EXPECTED_TOTALS["D"], EXPECTED_TOTALS["U"]), (
+        "STORAGE-ARCHITECTURE §17.5's resolved totals disagree with the pin: "
+        f"{resolved.group(0)!r} vs {EXPECTED_TOTALS}"
+    )
+
+
 def test_the_four_layers_have_tables():
     """The four layers each have a physical home; procedural deliberately has none."""
     tables = parse_sql_columns()
@@ -477,6 +578,38 @@ def test_the_money_columns_are_the_integer_shape_not_floats():
     assert types.get("amount_minor") == "bigint", types
     assert types.get("minor_unit_exponent") == "integer", types
     assert set(types) == set(MONEY_COLUMNS), types
+
+
+def test_the_money_note_declares_the_column_types_the_migration_has():
+    """The doc's column types ARE the migration's, not a restatement (#8976 P3-1).
+
+    The note under the `Point` table lists the physical shape a reader will go
+    looking for in `public.point`. It said `as_of date` while the migration — and
+    `tortoise/money.py`, which types `asOf` as `str` — say `text`: the doc
+    described a column that does not exist. Both sides are read here, so the note
+    cannot drift from the SQL again.
+    """
+    doc = PLACEMENT_DOC.read_text(encoding="utf-8")
+    note = [
+        line for line in doc.splitlines() if line.startswith("> **Where the money value lives")
+    ]
+    assert len(note) == 1, f"the money-storage note is gone or duplicated: {len(note)}"
+    declared = dict(re.findall(r"`(\w+) (bigint|text|integer|date|numeric)`", note[0]))
+    sql = (REPO_ROOT / "supabase" / "migrations" / MONEY_MIGRATION).read_text(encoding="utf-8")
+    actual = {
+        m.group(1): m.group(2).lower()
+        for m in re.finditer(
+            r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+(\w+)", sql, re.I
+        )
+    }
+    assert set(declared) == set(MONEY_COLUMNS), (
+        f"the note declares {sorted(declared)}, the money columns are {MONEY_COLUMNS}"
+    )
+    assert declared == actual, (
+        f"the note's column TYPES disagree with the migration: doc {declared} vs "
+        f"SQL {actual} — a reader following the note would look for a column the "
+        "record does not have"
+    )
 
 
 def test_every_table_is_tenant_scoped_and_rls_enabled():
