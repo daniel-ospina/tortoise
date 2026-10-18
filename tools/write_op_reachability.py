@@ -64,10 +64,13 @@ Modes
                        (a LOWER BOUND: can confirm the defect, cannot certify)
 
 Exit codes — a MISSING MEASUREMENT IS NEVER A PASS
-    0  STATED yield, and every published tier can deliver its allowance at it
-    1  UNREACHABLE — a stated yield, or a measured lower bound, that no tier can
-       deliver. Both are sound: a lower bound that already overshoots means
-       reality overshoots too.
+    0  STATED yield, and every EVALUATED tier can deliver its allowance at it
+       (all published tiers unless `--tier` restricts the set — the verdict text
+       says which, and names how many of the published tiers it covers)
+    1  UNREACHABLE — a stated yield, or a measured lower bound, that NOT every
+       tier can deliver (the condition is "any tier fails", not "all fail").
+       Both are sound: a lower bound that already overshoots means reality
+       overshoots too.
     2  NOT MEASURABLE — no yield supplied, the ledger was not consulted or could
        not be read, the org has not written yet, or writes were billed without
        recording a node yield. Also every bad/unrankable INPUT (a nonsense yield,
@@ -165,7 +168,23 @@ def _evaluate_or_exit2(ap: argparse.ArgumentParser, tiers: list[str],
 
 
 def _print_table(rows: list[dict], nodes_per_op: float, source: str,
-                 *, certified: bool = True) -> None:
+                 *, certified: bool = True,
+                 published: int | None = None) -> None:
+    """Render the per-tier table and the verdict.
+
+    ``published`` is the number of tiers the price book publishes. When it is
+    larger than ``len(rows)`` the caller restricted the evaluation with
+    ``--tier``, and EVERY verdict must speak for the evaluated subset only —
+    a pass produced from less than the thing it certifies is the same
+    overclaim this tool exists to refuse (see the measured-lower-bound path
+    below, which qualifies its verdict for the same reason).
+    """
+    subset = published is not None and published > len(rows)
+    if subset:
+        scope = (f"EVALUATED tier{'s' if len(rows) != 1 else ''} "
+                 f"({len(rows)} of {published} published)")
+    else:
+        scope = ("published tier" if len(rows) == 1 else "published tiers")
     print(f"nodes per billed write op (r): {nodes_per_op:g}   [{source}]")
     print()
     head = (f"{'tier':<6} {'allowance':>10} {'node cap':>10} {'cap/allw':>9} "
@@ -184,17 +203,24 @@ def _print_table(rows: list[dict], nodes_per_op: float, source: str,
     short = [r for r in rows if not r["reachable"]]
     if not short:
         if certified:
-            print("VERDICT: REACHABLE — every published tier can deliver its "
-                  "write-op allowance at this yield.")
+            if subset:
+                print(f"VERDICT: REACHABLE — every {scope} can deliver its "
+                      "write-op allowance at this yield.")
+            else:
+                print("VERDICT: REACHABLE — every published tier can deliver "
+                      "its write-op allowance at this yield.")
         else:
             # The TEXT header must carry the same qualification as the exit
             # code and the JSON verdict: a measured yield is a LOWER BOUND.
             print("VERDICT: REACHABLE AT THE RECORDED LOWER BOUND — "
-                  "NOT CERTIFIED.")
+                  "NOT CERTIFIED."
+                  + (f" (evaluated: {len(rows)} of {published} published "
+                     f"tiers)" if subset else ""))
         return
     worst = max(short, key=lambda r: r["unreachable_share"])
-    print(f"VERDICT: UNREACHABLE — {len(short)}/{len(rows)} published tiers "
-          f"cannot deliver their allowance at r={nodes_per_op:g}.")
+    print(f"VERDICT: UNREACHABLE — {len(short)}/{len(rows)} {scope} "
+          f"cannot deliver {'its' if len(rows) == 1 else 'their'} allowance "
+          f"at r={nodes_per_op:g}.")
     print(f"  worst: {worst['tier']} — the cap refuses after "
           f"{worst['reachable_ops']:,} of the {worst['allowance']:,} monthly "
           f"write ops it sells, and the cap never resets.")
@@ -249,10 +275,13 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "source": "stated", "nodes_per_op": args.nodes_per_op,
                 "tiers": rows,
+                "tiers_evaluated": len(rows),
+                "tiers_published": len(published),
                 "verdict": "REACHABLE" if reachable else "UNREACHABLE",
             }, indent=2))
         else:
-            _print_table(rows, args.nodes_per_op, "stated")
+            _print_table(rows, args.nodes_per_op, "stated",
+                         published=len(published))
         return EXIT_REACHABLE if reachable else EXIT_UNREACHABLE
 
     if args.org:
@@ -306,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "source": "ledger", "org": args.org, "ledger": yield_view,
                 "tiers": rows,
+                "tiers_evaluated": len(rows),
+                "tiers_published": len(published),
                 "lower_bound": True,
                 "verdict": ("REACHABLE AT THE RECORDED LOWER BOUND "
                             "(NOT CERTIFIED)" if reachable else "UNREACHABLE"),
@@ -315,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
                                   f"period={yield_view['period']}, "
                                   f"{yield_view['write_ops']:,} ops / "
                                   f"{yield_view['nodes_written']:,} nodes",
-                         certified=False)
+                         certified=False, published=len(published))
             if reachable:
                 print()
                 print("⚠️ NOT CERTIFIED: the recorded yield is a LOWER BOUND — "

@@ -571,3 +571,47 @@ class TestToolContract:
         payload = json.loads(capsys.readouterr().out)
         for row in payload["tiers"]:
             assert isinstance(row["unreachable_share_pct"], (int, float))
+
+    def test_a_tier_restricted_pass_does_not_claim_the_whole_book(
+            self, capsys, synthetic_book):
+        """`--tier` evaluates a SUBSET: the verdict must say so.
+
+        A pass produced from less than the thing it certifies is the exact
+        overclaim this tool refuses at the measured-lower-bound boundary, and
+        `--tier` can enter it from the other side: with a two-tier book where
+        `bad` is unreachable at r=2, `--tier good` exits 0 — sound for `good`,
+        but a line reading "every published tier can deliver" would be false
+        (2 published, 1 evaluated). "every EVALUATED tier (1 of 2 published)"
+        is the only wording that survives both facts.
+        """
+        synthetic_book({"good": _tier(allowance=1_000, cap=3_000),
+                        "bad": _tier(allowance=1_000, cap=500)})
+        mod = self._tool()
+        assert mod.main(["--nodes-per-op", "2", "--tier", "good"]) == 0
+        out = capsys.readouterr().out
+        assert "every EVALUATED tier (1 of 2 published)" in out, out
+        # The unqualified claim would be false for this book.
+        assert "every published tier can deliver" not in out, out
+
+    def test_a_tier_restricted_unreachable_counts_only_what_it_evaluated(
+            self, capsys, synthetic_book):
+        """The UNREACHABLE headline's denominator is the evaluated set, not the
+        published one: `--tier bad` measured 1 tier, not 2."""
+        synthetic_book({"good": _tier(allowance=1_000, cap=3_000),
+                        "bad": _tier(allowance=1_000, cap=500)})
+        assert self._tool().main(["--nodes-per-op", "2", "--tier", "bad"]) == 1
+        out = capsys.readouterr().out
+        assert "1/1 EVALUATED tier (1 of 2 published)" in out, out
+        assert "1/2 published tiers" not in out, out
+
+    def test_json_carries_the_evaluated_scope(self, capsys, synthetic_book):
+        """Machine consumers get the same qualification the text carries:
+        tiers_evaluated < tiers_published is what marks a subset verdict."""
+        synthetic_book({"good": _tier(allowance=1_000, cap=3_000),
+                        "bad": _tier(allowance=1_000, cap=500)})
+        self._tool().main(["--nodes-per-op", "2", "--tier", "good",
+                           "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["tiers_evaluated"] == 1
+        assert payload["tiers_published"] == 2
+        assert payload["verdict"] == "REACHABLE"
