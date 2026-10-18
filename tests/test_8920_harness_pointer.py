@@ -36,6 +36,11 @@ WHAT THIS PINS
    not reachable by any other guard.
 3. The seam is SHARED, not re-copied: the helper is DEFINED exactly once
    (`tests/_http_fixtures.py`) and each consumer IMPORTS it (AST, not grep).
+   The consumer list included a FALSE premise until the second review: it
+   excluded `test_writer_inventory.py` on the claim that the boot sweep cannot
+   reach that module's fake. It can — the same #4816 `rpc_calls` race, merely
+   never asserted on. `CONSUMERS` now names it, so this check reddens on the
+   pre-fix module (no import) and on any future consumer that copies instead.
 
 NON-VACUITY: on the pre-fix head (`f0d5144`) check 1 reddens on the
 `hosted_api.py` pointer (`tests.test_export_delete` has no attribute
@@ -88,10 +93,24 @@ STALE_NAMES = (
 SHARED_MODULE = "_http_fixtures"
 HELPER = "quiesce_testclient_background_work"
 #: Every fixture module that opens `TestClient(app)` on a shared store and
-#: therefore needs the quiesce. `test_supabase_control.py` / `test_writer_
-#: inventory.py` drive the app without the boot sweep reaching their fake, so
-#: they are not consumers of this seam.
-CONSUMERS = ("test_export_delete.py", "test_pack_state.py")
+#: therefore needs the quiesce. THREE today, not two: `test_writer_inventory.py`
+#: was excluded on a FALSE premise ("the boot sweep does not reach their
+#: fake"). It does — its `supabase_env` fixture monkeypatches
+#: `supabase_control.get_control_plane` to `FakeControlPlane`, and the sweep's
+#: metering step resolves that name at call time, so
+#: `metering_repair_period_bounds` landed in `fake.rpc_calls` there too; that
+#: module simply never noticed because every pin is name/filter-selected. The
+#: premise is the defect a future reader would trust before adding an index
+#: assertion to that module, so the module now applies the seam and this guard
+#: covers it.
+#: `test_supabase_control.py` is the one real exclusion: those tests drive
+#: `provision_org` / `_session_user_org` directly with no `TestClient`, so no
+#: lifespan, so no sweep.
+CONSUMERS = (
+    "test_export_delete.py",
+    "test_pack_state.py",
+    "test_writer_inventory.py",
+)
 
 
 def _production_pointers() -> list[tuple[Path, str, str, str]]:

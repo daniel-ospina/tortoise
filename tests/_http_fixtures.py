@@ -133,7 +133,8 @@ async def quiet_boot_sweeps() -> None:
 
 def quiesce_testclient_background_work(monkeypatch) -> None:
     """#3472/#3505: make `TestClient(app)` entry safe for the fixtures that call it
-    (``sb_client``, ``reg_client``, ``supabase_client``).
+    (``sb_client``, ``reg_client``, ``supabase_client``, and
+    ``test_writer_inventory.client``).
 
     `_lifespan` arms background work for EVERY `TestClient(app)` entry,
     regardless of control-plane mode, and part of it touches the same store
@@ -211,7 +212,7 @@ def quiesce_testclient_background_work(monkeypatch) -> None:
        (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect:
        `path` is nulled, so `_is_embedded` is False), so no redislite daemon
        exists and no double-start is possible. NONE of the callers
-       (`test_export_delete`, `test_pack_state`) is in
+       (`test_export_delete`, `test_pack_state`, `test_writer_inventory`) is in
        `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that
        branch. On that lane the protection the callers actually get is item 1
        — the BOOT-SWEEP quiesce, which removes the second caller of
