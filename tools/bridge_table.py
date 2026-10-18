@@ -445,12 +445,37 @@ _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|.*\|\s*
 #     DIFFERENT name built green with 24 rows. Fixed in the row loop, not here: a repeated
 #     number OR a repeated name is a row error (`_row_identity_error`).
 #   * the wrap straddled a BLANK line, so the orphan fell outside every body — fixed here:
-#     a pipe-bounded first non-blank line after the body closes is a fragment of the row
-#     it followed.
+#     a first non-blank line after the body closes that is table-fragment-shaped is a
+#     fragment of the row it followed.
 #   * the continuation was SEPARATOR-SHAPED (`|---|---|---|`), which was skipped as table
 #     syntax — fixed here: a separator AFTER a row has started is not the header's.
-# A row whose cell continued is thus unrepresentable however the wrap is spelled; it
-# cannot be expressed by widening, because the orphan is the datum.
+#
+# ⛔ Round 4: the blank-straddling rule left TWO residuals, both measured green on the real
+# doc at row 21 (`rows=23`, `row_errors=[]`, `main()` → 0, artifact WRITTEN, partition
+# 5/7/0 → 4/7/1, `mitigate_operator` quoted from the TRUNCATED row as though it were the
+# whole thing) — the same false `refuted` (#8930 review, round 4):
+#   * the fragment was spelled with NO PIPE (`… annotate_operator, |` ⏎ blank ⏎
+#     `mitigate_operator`), which a PIPE-BOUND test passes straight through. The test is
+#     therefore a FRAGMENT test, not a pipe test: the line — with trailing commas and
+#     whitespace stripped — is also a fragment when it is a comma-separated list whose
+#     every token is a name this doc absorbs (`_is_member_list`). That is the `Absorbs`
+#     cell's own spelling, and a real sentence cannot take that shape, because it carries
+#     at least one token that is not such a name — which is what keeps the doc's own
+#     post-table paragraphs green.
+#   * the fragment was not the FIRST non-blank line after the close (a prose line landing
+#     between the blank and the fragment), and the row was consumed on first use, so the
+#     fragment was never inspected. The scan now runs to the next TABLE instead
+#     (`_starts_a_table`), so any number of intervening prose lines is fine.
+#
+# What is caught is stated exactly, because an over-claim here is what let round 3 read as
+# complete: every wrap whose remainder stays TABLE SYNTAX (row-shaped, pipe-bounded,
+# separator-shaped) or is a bare `Absorbs` member list fails the build. The one shape it
+# does NOT catch is a remainder that reflowed into an ORDINARY SENTENCE (`… and the
+# duplicate name is dropped`): that is indistinguishable from the doc's own post-table
+# prose, so reporting it would refuse real paragraphs. A row whose cell continued is not
+# therefore "unrepresentable however it is spelled" — it cannot be expressed by WIDENING
+# the row parse, because the orphan is the datum, and the prose-shaped spelling is a known,
+# recorded gap rather than a closed one.
 _APPROVED_HEADER = re.compile(r"^\|\s*#\s*\|\s*Tool\s*\|\s*Absorbs\s*\|\s*$")
 _APPROVED_SEPARATOR = re.compile(r"^\|[\s:|-]+\|\s*$")
 # The same prefix on its own, so an INCOMPLETE row is REPORTED instead of skipped: a line
@@ -632,23 +657,85 @@ def _row_identity_error(
     )
 
 
+def _is_member_list(stripped: str, known: set[str]) -> bool:
+    """Whether `stripped` is a bare `Absorbs` MEMBER LIST — the pipe-less fragment shape.
+
+    An `Absorbs` cell is a comma-separated list of names, so the remainder of a cell that
+    reflowed onto its own line is that list too: `mitigate_operator`, or
+    `` `mitigate_operator`, `annotate_operator` ``. Trailing commas and whitespace are
+    stripped first, because a wrap keeps the cell's own separator on the line it left.
+
+    EVERY token must be a name this doc can absorb. That is what keeps genuine prose green:
+    the doc's own paragraphs follow both of its tables, and a real sentence carries at
+    least one token that is not a name — a word, a punctuation run, a backticked
+    identifier that is not on the surface — so it cannot take this shape. Measured on the
+    real doc: every line of both post-table gaps (9 after the WRITE table, 1 after the READ
+    table) is not a member list, and neither is any heading, bullet or blockquote there
+    (`test_the_real_approved_doc_parses_every_row_with_no_row_error`).
+    """
+    body = stripped.rstrip(", \t")
+    if not body:
+        return False
+    tokens = [t.strip().strip("`").strip() for t in body.split(",")]
+    return all(tokens) and all(t in known for t in tokens)
+
+
+def _is_table_fragment(stripped: str, known: set[str]) -> bool:
+    """Whether a line after a CLOSED body is a reflowed fragment of the row it followed.
+
+    Two spellings, and the round-3 rule was only the first: PIPE-BOUNDED (it starts or ends
+    with `|`, i.e. table syntax), or a bare MEMBER LIST (`_is_member_list`). A paste or a
+    soft reflow produces either. Anything else is prose, which is not reported — see
+    `_is_member_list` for why that is a measurement and not a convenience.
+    """
+    if stripped.startswith("|") or stripped.endswith("|"):
+        return True
+    return _is_member_list(stripped, known)
+
+
+def _starts_a_table(lines: Sequence[str], i: int) -> bool:
+    """Whether `lines[i]` is the HEADER of a table, so the post-close scan must stop there.
+
+    The scan after a closed body runs past intervening prose, and the doc has an UNRELATED
+    table further down (`| Name | Why |`) whose rows are pipe-bounded too — scanning into it
+    would refuse the document the owner approved. A markdown table always states its header
+    and its `|---|` separator together, while an orphaned continuation is a single line, so
+    "a pipe-bounded line whose next non-blank line is a separator" separates the two
+    structurally rather than by distance (#8930 review, round 4).
+
+    The approved header is matched earlier in the loop, so this covers every OTHER table.
+    The residual is a fragment that is itself immediately followed by a new table's
+    separator; that spelling is contrived and is not claimed to be caught.
+    """
+    line = lines[i].strip()
+    if not (line.startswith("|") or line.endswith("|")):
+        return False
+    for following in lines[i + 1 :]:
+        following = following.strip()
+        if following:
+            return bool(_APPROVED_SEPARATOR.match(following))
+    return False
+
+
 def _body_error(
     stripped: str,
     owner: tuple[int, str] | None,
     *,
     closed_by_blank: bool,
+    known: set[str] | None = None,
 ) -> str | None:
     """The approved-table body test: `None` when `stripped` is legitimate table syntax.
 
     Three ways a line inside the table is NOT legitimate, each measured green on the real
     doc with the artifact written and `mitigate_operator` falsely refuted (#8930 review,
-    round 3, P2):
+    rounds 3-4, P2):
 
-      * the first non-blank line after the body closes on a BLANK line, when it is
-        table-fragment-shaped (starts OR ends with `|`). The wrap straddles the blank that
-        ends the table, so the orphan belongs to no body at all and no in-body rule can see
-        it. A line that is NOT pipe-bounded is not reported: real prose follows both of the
-        doc's tables, and a bare paragraph is indistinguishable from one.
+      * a non-blank line after the body closes on a BLANK line, when it is
+        table-fragment-shaped: PIPE-BOUNDED (starts OR ends with `|`), or a bare
+        comma-separated MEMBER LIST whose every token is a name this doc absorbs. The wrap
+        straddles the blank that ends the table, so the orphan belongs to no body at all
+        and no in-body rule can see it. Prose is NOT reported: real paragraphs follow both
+        of the doc's tables, and a sentence cannot be a member list.
       * a SEPARATOR after any row has started. The header's own separator comes BEFORE every
         row (`owner is None`), so a later one is a row's continuation reflowed into a
         `|---|` line — table syntax that silently swallowed the member.
@@ -657,21 +744,21 @@ def _body_error(
 
     `owner` is the row the line continues — the one above it inside a body, or the one the
     body closed on. The diagnostic names it, because the failure it causes is stated in
-    terms of that row's membership.
+    terms of that row's membership. `known` is the absorbed-name universe the member-list
+    test needs; it is required for `closed_by_blank` and is not read otherwise.
     """
     if closed_by_blank:
-        if not (stripped.startswith("|") or stripped.endswith("|")):
+        if not _is_table_fragment(stripped, known if known is not None else _known_names()):
             return None
         return (
             f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
             f"after row {owner[0]} (`{owner[1]}`), on the far side of a BLANK line: "
-            f"{stripped!r} is table-fragment-shaped (it starts or ends with `|`) and is the "
-            "first non-blank line after the body closed, so a row's cells have REFLOWED "
-            "across the blank that ends the table — the row still parses with the members "
+            f"{stripped!r} is table-fragment-shaped — it is pipe-bounded, or it is a "
+            "comma-separated list whose every token is a name this doc absorbs — and it "
+            "appears between the blank that ends the table and the next table, so a row's "
+            "cells have REFLOWED across that blank — the row still parses with the members "
             "on this fragment missing, which renders as a false 'no approved row absorbs "
-            "it' for each of them. (A table header placed directly after another table with "
-            "no prose between them is the one legitimate line of this shape: separate the "
-            "tables, or complete the row above.)"
+            "it' for each of them"
         )
     if _APPROVED_SEPARATOR.match(stripped):
         if owner is None:  # the header's own separator — real table syntax
@@ -785,18 +872,30 @@ def _parse_approved(
     # it, so the build fails and no artifact carries the truncated membership (#8930 review,
     # round 2, P1).
     last_row: tuple[int, str] | None = None
-    # A body that ended on a BLANK line leaves one more thing to inspect: the first
-    # non-blank line after it. The wrap straddling that blank put its remainder outside
-    # every body, so no in-body rule could see it (#8930 review, round 3, P2).
+    # A body that ended on a BLANK line leaves its row OPEN to a reflow that straddles that
+    # blank: the remainder belongs to no body, so no in-body rule can see it. The scan runs
+    # past the blank and past ANY prose that lands in between, until the next table — the
+    # approved header (which resets it) or a foreign table's header+separator
+    # (`_starts_a_table`). Consuming it on the first non-blank line hid a fragment behind a
+    # single intervening paragraph (#8930 review, rounds 3-4, P2).
     closed_row: tuple[int, str] | None = None
     in_table = False
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if not in_table and closed_row is not None and stripped:
-            closed, closed_row = closed_row, None
-            err = _body_error(stripped, closed, closed_by_blank=True)
-            if err:
-                row_errors.append(err)
+            if _starts_a_table(lines, index):
+                closed_row = None  # a table of its own: the gap is over
+            elif not _APPROVED_ROW_START.match(stripped):
+                # Only a line the ROW PARSE could not place is evidence of the wrap. A row
+                # sitting here is one the row loop already read — rows 22-23 land "in the
+                # gap" merely because the wrap broke the body above them — so reporting it
+                # would blame an intact row for another row's reflow.
+                err = _body_error(
+                    stripped, closed_row, closed_by_blank=True, known=known
+                )
+                if err:
+                    row_errors.append(err)
         if _APPROVED_HEADER.match(stripped):
             in_table, last_row, closed_row = True, None, None
             continue
@@ -845,7 +944,9 @@ def _approved_menu() -> dict[str, dict]:
     states its own split into `update_knowledge` + `supersede_knowledge`) — not from any
     target token in the cell, because the cell's prose states other relations too; `quote`
     is the WHOLE table row, by construction, so it cannot be a truncation of what the doc
-    says.
+    says — and that is enforced, not assumed: a row that lost cells to a reflow is a
+    `row_errors` entry, so the build fails and no artifact quotes it (the body test and
+    `_row_identity_error` are what make the sentence true).
     """
     return _parse_approved(APPROVED_DOC.read_text(encoding="utf-8"))[0]
 

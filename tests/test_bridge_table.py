@@ -2716,6 +2716,242 @@ def test_a_separator_shaped_continuation_still_fails_the_build(
     out.unlink()
 
 
+def test_a_pipe_less_continuation_after_a_blank_line_still_fails_the_build(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 6 — the wrap straddles the blank AND the remainder carries no `|` at all.
+
+    `…annotate_operator, |` ⏎ *(blank)* ⏎ `mitigate_operator`: round 3's post-blank rule
+    reported a line there only when it was PIPE-BOUNDED, so the pipe-less spelling a paste
+    or a soft reflow produces went straight through. Measured before the fix: `main()` → 0,
+    artifact WRITTEN, `rows=23`, `row_errors=[]`, partition 5/7/0 → 4/7/1, and the artifact
+    quoting the TRUNCATED row as though it were "the approved row itself … so it cannot be a
+    truncation of what the doc says" (#8930 review, round 4, P2).
+
+    The rule is a FRAGMENT test, not a pipe test: an `Absorbs` remainder is a
+    comma-separated list of names, a shape a sentence cannot take — which is what keeps the
+    doc's own post-table paragraphs green (`_is_member_list`).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    edited = real.replace(
+        cell, cell.replace("mitigate_operator |", "|\n\nmitigate_operator"), 1
+    )
+    assert edited != real, "the pipe-less blank-line wrap did not change the doc"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "pipe-less-after-blank")
+
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, (
+        f"every row still parses here ({len(menu)}) — the bare remainder is the only evidence"
+    )
+    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert len(row_errors) == 1, f"the bare fragment was not reported exactly once: {row_errors}"
+    assert (
+        "ORPHANED continuation line after row 21 (`adjust_relationship`), on the far side "
+        "of a BLANK line" in row_errors[0]
+    ), f"the diagnostic does not name the row and the blank: {row_errors[0]!r}"
+    assert "'mitigate_operator'" in row_errors[0], (
+        "the diagnostic does not quote the bare remainder, so it cannot be about it: "
+        f"{row_errors[0]!r}"
+    )
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0]
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "a pipe-less continuation across a blank line did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert not out.exists(), "the build failed but still wrote the artifact"
+
+    # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
+    _disable_the_round_3_guards(monkeypatch)
+    menu_off, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
+    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert bt.main() == 0, "with the guards disabled this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+        "the mutation did not reproduce the false refutation — the test proves nothing"
+    )
+    out.unlink()
+
+
+def test_a_fragment_that_is_not_the_first_line_after_the_close_still_fails_the_build(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 7 — a prose line lands BETWEEN the closing blank and the fragment.
+
+    The round-3 scan consumed `closed_row` on the first non-blank line, so it inspected
+    exactly one line and a single intervening paragraph hid the fragment completely.
+    Measured before the fix: `main()` → 0, artifact WRITTEN, `row_errors=[]`,
+    `mitigate_operator` falsely refuted (#8930 review, round 4, P2). The scan now runs to
+    the next TABLE, so any number of prose lines in between is fine.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    edited = real.replace(
+        cell,
+        cell.replace(
+            "mitigate_operator |",
+            "|\n\nThat table above is the write half.\n\nmitigate_operator",
+        ),
+        1,
+    )
+    assert edited != real, "the not-first-after-close wrap did not change the doc"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "fragment-not-first")
+
+    menu, _, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, (
+        f"every row still parses here ({len(menu)}) — the fragment is the only evidence"
+    )
+    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert len(row_errors) == 1, (
+        "the fragment behind a prose line was not reported exactly once — the intervening "
+        f"paragraph still shadows it: {row_errors}"
+    )
+    assert (
+        "ORPHANED continuation line after row 21 (`adjust_relationship`)" in row_errors[0]
+    ), f"the diagnostic does not name the row the wrap truncated: {row_errors[0]!r}"
+    assert "'mitigate_operator'" in row_errors[0], row_errors[0]
+    assert "That table above is the write half" not in row_errors[0], (
+        "the intervening PROSE was reported; only the fragment may be: "
+        f"{row_errors[0]!r}"
+    )
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "a fragment behind a prose line did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert not out.exists(), "the build failed but still wrote the artifact"
+
+    # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
+    _disable_the_round_3_guards(monkeypatch)
+    menu_off, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
+    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert bt.main() == 0, "with the guards disabled this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+        "the mutation did not reproduce the false refutation — the test proves nothing"
+    )
+    out.unlink()
+
+
+def test_ordinary_post_table_prose_stays_green(tmp_path, monkeypatch, capsys) -> None:
+    """ANTI-FALSE-POSITIVE COMPANION: the fragment test must not refuse real prose.
+
+    This one passes BEFORE and AFTER the round-4 widening, which is the point: the guard has
+    to reach a pipe-less fragment without ever reporting a paragraph. A block of ordinary
+    post-table prose is planted IMMEDIATELY after the WRITE table's closing blank — where
+    both the round-3 rule and the widened scan look — and the build must stay green with all
+    23 rows, no row error, and 4 closures.
+
+    The block deliberately carries the three shapes that a looser test would eat:
+      * a sentence with commas in it;
+      * a comma-separated run of words that are NOT absorbed names;
+      * a sentence that NAMES two absorbed members and then keeps talking (the pin on the
+        guard's known limit: a remainder reflowed into an ordinary sentence cannot be told
+        from prose, and the module comment beside `_APPROVED_HEADER` records that as
+        accepted rather than claiming it is caught);
+    plus a heading, a bulleted list and a blockquote, none of which is table-shaped.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    anchor = "\n**Rows 22 and 23 are settled OFF the MCP"
+    assert anchor in real, "the paragraph after the WRITE table is not in the doc — stale test"
+    prose = [
+        "Every write tool above is grantable, once the tenancy rows are settled, and it "
+        "says nothing about reads.",
+        "writes, reads, and the tenancy switch, so this list is not a member list",
+        "`mitigate_operator`, `annotate_operator`, plus the operator tools it replaces",
+    ]
+    blocklike = [
+        "## A heading in the gap",
+        "- a bullet that names `adjust_relationship` and then says more",
+        "> a quoted aside about the write half",
+    ]
+    planted = "\n\n".join(prose + blocklike)
+    edited = real.replace(anchor, "\n" + planted + "\n" + anchor, 1)
+    assert edited != real, "the prose block was not planted in the gap"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "prose-in-the-gap")
+
+    menu, closures, row_errors = bt._approved_state()
+    assert row_errors == [], f"the prose in the gap tripped a guard: {row_errors}"
+    assert len(menu) == bt.APPROVED_MIN_ROWS == 23, len(menu)
+    assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
+    # Row 21 is untouched here, and its third member is still read — the prose block did not
+    # cost the parse a row, which is what a false positive would look like from a distance.
+    assert "mitigate_operator" in menu["adjust_relationship"]["members"]
+
+    # NOT VACUOUS: every planted paragraph really is a COMMA LIST, so the green above is the
+    # fragment test answering NO rather than the prose never reaching it. (The predicate's
+    # own behaviour is pinned separately — this test deliberately depends on no round-4
+    # symbol, because it has to pass before the widening as well as after it.)
+    for paragraph in prose:
+        assert "," in paragraph, paragraph
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 0, "an ordinary post-table paragraph failed the build"
+    capsys.readouterr()
+    assert out.exists(), "the green build wrote no artifact"
+    out.unlink()
+
+
+def test_the_fragment_predicate_is_a_member_list_test_not_a_pipe_or_comma_test() -> None:
+    """The round-4 predicate in isolation: what it reports, and what it must not.
+
+    The guard has to reach a pipe-less remainder WITHOUT becoming a comma test — a looser
+    rule reports the doc's own post-table paragraphs and refuses the document the owner
+    approved. Each case below is one of those two directions, so neither can drift.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    known = bt._known_names()
+    # FRAGMENTS — a bare member list, in every spelling a reflow produces.
+    for fragment in (
+        "mitigate_operator",
+        "mitigate_operator,",  # a trailing comma kept from the cell
+        "mitigate_operator, annotate_operator",
+        "`mitigate_operator`, `annotate_operator`,",
+        "operator_action, annotate_operator, mitigate_operator",  # row 21's own cell
+        "| mitigate_operator |",  # pipe-bounded: the round-3 spelling, unchanged
+        "mitigate_operator |",
+    ):
+        assert bt._is_table_fragment(fragment, known), fragment
+        assert bt._is_member_list(fragment.strip("| "), known), fragment
+
+    # NOT fragments — prose, and the near-misses that a comma test would eat.
+    for line in (
+        "**Rows 22 and 23 are settled OFF the MCP (2026-09-22).** `manage_deployment` is "
+        "account tenancy",
+        "writes, reads, and the tenancy switch, so this list is not a member list",
+        "`mitigate_operator`, `annotate_operator`, plus the operator tools it replaces",
+        "## WRITE — 14 tools",
+        "- a bullet that names `adjust_relationship` and then says more",
+        "> a quoted aside about the write half",
+        "",
+        ",",
+    ):
+        assert not bt._is_table_fragment(line, known), line
+
+    # The predicate sees a list of ONE name that is not absorbed either: a known-ness test,
+    # not a shape test, which is why it is the doc's OWN universe that decides.
+    assert not bt._is_member_list("zzz_not_a_tool", known)
+    assert not bt._is_member_list("mitigate_operator, zzz_not_a_tool", known)
+
+
 def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -> None:
     """ANTI-FALSE-POSITIVE: the row guards must not reject the REAL document.
 
@@ -2762,7 +2998,7 @@ def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -
     # row — and every line after it is a row prefix. That is the mid-body separator rule,
     # and the real doc satisfies it without an exemption.
     bodies: list[list[str]] = []
-    after_close: list[str] = []
+    gaps: list[list[str]] = []
     lines = real.splitlines()
     body: list[str] | None = None
     for i, ln in enumerate(lines):
@@ -2773,8 +3009,8 @@ def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -
             continue
         if body is None:
             continue
-        if not s:  # the blank line that ends this body; the next non-blank one is pinned
-            after_close.append(next((x.strip() for x in lines[i + 1:] if x.strip()), ""))
+        if not s:  # the blank line that ends this body; the gap after it is pinned below
+            gaps.append(_post_close_gap(lines, i + 1, bt))
             body = None
             continue
         body.append(s)
@@ -2790,14 +3026,46 @@ def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -
                 f"a separator appears AFTER rows started ({s!r}) — the real doc must never "
                 "need an exemption from the mid-body separator rule"
             )
-    # (c) the first non-blank line after each body closes is prose, never pipe-bounded —
-    # so the post-blank fragment guard has nothing to fire on in the real doc.
-    assert len(after_close) == 2, after_close
-    for s in after_close:
-        assert not (s.startswith("|") or s.endswith("|")), (
-            f"the real doc has a pipe-bounded line directly after a table body ({s!r}); the "
-            "post-blank fragment guard would refuse the document the owner approved"
-        )
+    # (c) nothing in the gap between a body's closing blank and the NEXT table is
+    # fragment-shaped — in EITHER spelling (pipe-bounded, or a bare `Absorbs` member list).
+    # Pinned with the module's own predicate and its own termination rule, over the WHOLE
+    # gap rather than just its first line, so a later widening of the fragment test cannot
+    # start refusing the document the owner approved. Measured on the real doc: 0 fragments
+    # in 2 gaps — the READ gap holds 1 line (the `## WRITE` heading) and the WRITE gap holds
+    # 9 (its paragraph, the `## Removed entirely` heading, which ends at the doc's own
+    # `| Name | Why |` table).
+    assert len(gaps) == 2, gaps
+    assert [len(g) for g in gaps] == [1, 9], [len(g) for g in gaps]
+    known = bt._known_names()
+    for gap in gaps:
+        for s in gap:
+            assert not bt._is_table_fragment(s, known), (
+                f"the real doc has a fragment-shaped line in the gap after a table body "
+                f"({s!r}); the post-blank fragment guard would refuse the document the "
+                "owner approved"
+            )
+            # ...and the bare-member-list half of the test is not satisfied either, even
+            # with the pipe rule out of the picture.
+            assert not bt._is_member_list(s, known), (s, gap)
+
+
+def _post_close_gap(lines: list[str], start: int, bt) -> list[str]:
+    """Every non-blank line after a body's closing blank, up to the next table.
+
+    Mirrors `_parse_approved`'s termination rule (`_APPROVED_HEADER`, or `_starts_a_table`
+    for a foreign table) so the pin cannot drift from the guard it pins.
+    """
+    gap: list[str] = []
+    for i in range(start, len(lines)):
+        s = lines[i].strip()
+        if not s:
+            continue
+        if bt._APPROVED_HEADER.match(s) or bt._starts_a_table(lines, i):
+            break
+        if bt._APPROVED_ROW_START.match(s):  # a row the row loop already read — not a gap
+            continue
+        gap.append(s)
+    return gap
 
 
 
