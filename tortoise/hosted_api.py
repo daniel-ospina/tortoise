@@ -1516,6 +1516,55 @@ def _sweep_invite_ghosts() -> None:
         _logger.warning("invite ghost sweep failed: %s", exc)
 
 
+def _sweep_expired_invitations() -> None:
+    """#8089: give the control-plane lane's clock-expiry a LIVE caller.
+
+    ``expires_at`` is a DERIVED terminal state in the Supabase lane, but its
+    DEDUP is the 0008 partial unique index ``(org_id, email) WHERE
+    status='pending'`` — and a partial-index predicate must be IMMUTABLE, so
+    it cannot compare ``expires_at`` to ``now()``. Nothing ever flipped a
+    clock-expired row out of ``pending`` either: ``invitation_expire`` is an
+    admin action, and this table had no sweep at all. So an expired invitation
+    held its index entry FOREVER and 409'd every re-invite for that address.
+
+    ``invitation_mint`` now retires the (org, email) row it is about to replace
+    (#8089), which fixes the BLOCKING path on its own. This sweep is the other
+    half: it materialises the terminal state for every other reader (the owner
+    pending list, the Pro seat count, the accepted/expired split) and it keeps
+    the terminal-state backlog from growing, which is the operator-visible
+    indicator. Scheduled, not operator-run — the same seam as the sibling
+    sweeps: armed by ``_run_boot_sweeps`` at boot and by
+    ``_event_retention_loop`` on the periodic interval (hourly by default).
+    Idempotent by construction (the second run finds nothing), so re-running
+    every cycle is a no-op.
+
+    Supabase-only; the inverse of ``_sweep_invite_ghosts`` above, whose
+    registry graph does not exist in Supabase mode (#669). Unlike that one,
+    the count is logged on every run that actually flipped something — a silent
+    GC is indistinguishable from "nothing to do" (#4872), and this number IS
+    the indicator the issue asks to be either zeroed or reported.
+
+    Best-effort by construction (mirrors the other sweeps): a failure logs a
+    WARNING and never kills the runner.
+    """
+    try:
+        from tortoise.supabase_control import (
+            expire_stale_invitations,
+            get_control_plane,
+            is_supabase_enabled,
+        )
+
+        if not is_supabase_enabled():
+            return
+        swept = expire_stale_invitations(get_control_plane())
+        if swept:
+            _logger.info(
+                "expired invitation sweep flipped %s stale pending row(s) to "
+                "'expired'", swept)
+    except Exception as exc:  # a GC sweep must never crash the runner
+        _logger.warning("expired invitation sweep failed: %s", exc)
+
+
 def _reconcile_metering_periods() -> None:
     """#4241: give the period-bound repair a PERIODIC caller.
 
@@ -1700,6 +1749,15 @@ async def _event_retention_loop(interval: float) -> None:
             "invite ghost sweep",
             functools.partial(run_on_daemon_worker, _sweep_invite_ghosts,
                               name="tortoise-boot-sweep"))
+        # #8089: the Supabase lane's clock-expiry had no materialising caller at
+        # all — a partial unique index cannot say `expires_at > now()`, so an
+        # expired invite sat at status='pending' and 409'd every re-invite
+        # forever. Same cadence as the sibling sweeps; the mint path flips its
+        # own (org, email) row so correctness never depends on this running.
+        await _guarded_step(
+            "expired invitation sweep",
+            functools.partial(run_on_daemon_worker, _sweep_expired_invitations,
+                              name="tortoise-boot-sweep"))
         # #4241: repair subscription orgs whose period anchor is unusable.
         # Before this, the idempotent repair had exactly one caller — its own
         # migration — so an org broken after that deploy never healed.
@@ -1746,6 +1804,12 @@ async def _run_boot_sweeps() -> None:
                       # #1890: same runner as the periodic loop, so the boot and
                       # periodic paths for the invite-ghost sweep cannot drift.
                       ("invite ghost sweep", _sweep_invite_ghosts),
+                      # #8089: the Supabase lane's half of the same concern —
+                      # materialise clock-expired invitations so the partial
+                      # unique index stops blocking re-invites. The SAME runner
+                      # as the periodic loop, for the same no-drift reason.
+                      ("expired invitation sweep",
+                       _sweep_expired_invitations),
                       # #4241: the SAME runner as the periodic loop, so the
                       # boot and periodic paths for the anchor repair cannot
                       # drift apart — the property _guarded_step exists for.
