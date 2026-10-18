@@ -28,6 +28,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1586,3 +1587,206 @@ class TestVolunteerTrustBoundary:
         assert "hosted (127.0.0.1:" in r.stderr
         assert str(cfg) in r.stderr  # identity file named
         assert "attacker" not in r.stderr
+
+
+# ── #2124 matrix provenance — the DEMAND-GATED harnesses ─────────────────
+#
+# This matrix has recorded an optimistic contract for a sibling lane three
+# times (#2120's `.claw` / `handle_AgentRequest`, #2121's `.agents.yml`,
+# #2122's Claude-shaped `beforeSubmitPrompt`) and a lane then BUILT on each
+# one. #2124's body named a seam nobody had measured against the harness, so
+# the re-measured contract is pinned here: a correction that lives only in
+# prose gets re-fabricated by the next reader — in EITHER direction, which is
+# why the pins below guard the evidence as well as the recommendation.
+
+_SEAM_DIR = _REPO_ROOT / "docs" / "research" / "2026-09-01-gbrain-learnings"
+_SEAM_DOC = _SEAM_DIR / "platform-seams.md"
+_SEAM_GATED_MARKER = "NOT built — demand-gated"
+
+
+def _matrix_row(harness: str) -> str:
+    """The single `#2124` contracts-table row for a demand-gated harness."""
+    rows = []
+    for line in _SEAM_DOC.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) > 2 and cells[0].startswith("#2124") and cells[1] == harness:
+            rows.append((line, " | ".join(cells)))
+    assert len(rows) == 1, (
+        f"expected exactly one #2124 row for {harness!r} in {_SEAM_DOC.name}, "
+        f"found {[r[1][:60] for r in rows]}")
+    return rows[0][1]
+
+
+def test_seam_matrix_pins_the_measured_gemini_contract():
+    """Gemini CLI's per-turn seam is `BeforeAgent` → `additionalContext`.
+
+    The model hook `BeforeModel` / `llm_request` is Gemini CLI's TOO — its own
+    reference documents it (`BeforeModel` fires before sending a request, input
+    `llm_request` {model, messages, config}), and
+    `platform-landscape.md:192-194` records it from the same primary page.
+    Google ADK's `before_model_callback(callback_context, llm_request)` (#2125)
+    independently uses that parameter NAME, and an earlier revision of this
+    correction read the shared name as proof the seam was "another harness's" —
+    the matrix now RECOMMENDS `BeforeAgent` (per-turn, no message rewriting)
+    while recording that `BeforeModel` exists, and it may never do less: the
+    denial is what a later lane would build against.
+
+    The sibling record `platform-landscape.md` is pinned too, and on the
+    RECOMMENDATION rather than on symbol presence: the two docs must both say
+    `BeforeAgent` is the per-turn seam it is (`BeforeModel` is per LLM call).
+    Presence alone is not agreement — the lines that carried the wrong
+    recommendation also contained both symbol names.
+
+    Also retracted, and pinned here: the shared script's bare-text default. At
+    Gemini CLI stdout is strict JSON, and a non-JSON emission is rendered as a
+    `systemMessage` — its reference defines that as shown to the user in the
+    terminal, i.e. never injected into the model's context.
+    """
+    text = _SEAM_DOC.read_text(encoding="utf-8")
+    assert "BeforeAgent" in text, (
+        "the matrix must name Gemini CLI's measured per-turn event")
+    assert "hookSpecificOutput.additionalContext" in text
+    assert "BeforeModel" in text and "llm_request" in text, (
+        "the matrix must record Gemini CLI's model hook too — an earlier "
+        "revision denied it exists, and that denial is what this pins against")
+    # The two records must AGREE — and AGREEMENT IS THE RECOMMENDATION, not
+    # symbol presence. `platform-landscape.md` is the live sibling record
+    # (indexed at docs/00_index.md) and the correction names it, so a reader
+    # arriving from either side must find the same measurement. An earlier
+    # revision of this test asserted only that the sibling CONTAINS the two
+    # names, which passed on text that recommended the opposite seam (:47
+    # "`BeforeModel` … → per-turn injection", :111 "→ append pointer block …
+    # Real per-turn seam", :193, :239) — green guard, contradicting docs. The
+    # sibling's Gemini rows are corrected in this pass, and the pin is per
+    # LINE: no line may pair `BeforeModel` with a per-turn recommendation
+    # without naming `BeforeAgent` too.
+    assert "platform-landscape.md" in text, (
+        "the correction must reconcile with platform-landscape.md by NAME — "
+        "otherwise a reader of :192-193 finds a matrix that contradicts it")
+    sibling = (_SEAM_DIR / "platform-landscape.md").read_text(encoding="utf-8")
+    assert "BeforeModel" in sibling and "llm_request" in sibling, (
+        "platform-landscape.md still records BeforeModel/llm_request as "
+        "Gemini CLI's — if THAT changed, re-measure both docs in one pass")
+    assert "BeforeAgent" in sibling, (
+        "platform-landscape.md must name Gemini CLI's per-turn seam too — the "
+        "matrix recommends `BeforeAgent` → `hookSpecificOutput.additionalContext`, "
+        "and a sibling doc that names only `BeforeModel` sends a lane arriving "
+        "from there to the wrong seam (the divergence #8963's review found)")
+    per_turn_seam = re.compile(
+        r"per-?turn|append pointer block|message mutation", re.IGNORECASE)
+    for line in sibling.splitlines():
+        if "BeforeModel" not in line or not per_turn_seam.search(line):
+            continue
+        assert "BeforeAgent" in line, (
+            "platform-landscape.md again presents `BeforeModel` as the per-turn "
+            "seam without naming `BeforeAgent`: `BeforeModel` fires per LLM "
+            "CALL and mutates `llm_request`; the per-TURN seam to register is "
+            "`BeforeAgent` → `hookSpecificOutput.additionalContext`. Both docs "
+            "must be fixed in one pass: "
+            f"{line.strip()[:200]!r}")
+    # ...and no line may deny Gemini CLI owns that seam (the retracted reading).
+    denial = re.compile(r"wrong harness|ADK['’]s object|not Gemini CLI",
+                        re.IGNORECASE)
+    for line in text.splitlines():
+        if "BeforeModel" not in line and "llm_request" not in line:
+            continue
+        assert not denial.search(line), (
+            "the matrix again denies that Gemini CLI owns BeforeModel/"
+            "llm_request: its reference documents that hook (input "
+            "llm_request {model, messages, config}); ADK merely shares the "
+            "parameter name — the collision is not identity: "
+            f"{line.strip()[:200]!r}")
+    # The retracted bare-text claim may appear only INSIDE its own correction —
+    # the record has to be able to say what was wrong. Same rule, same reason,
+    # as tests/test_openclaw_seam.py::_fabricated_mentions_are_corrections,
+    # but at LINE granule: this doc's natural re-entry point for the phrase is
+    # a new ROW of the correction TABLE, and a markdown table row is one
+    # paragraph (no blank lines), so a paragraph-granule check would wave
+    # through an optimistic row added next to the word "Retracted".
+    for line in text.splitlines():
+        if "harmless where unsupported" not in line:
+            continue
+        assert re.search(r"retract|not an injection|non-injection", line,
+                         re.IGNORECASE), (
+            "the retracted claim is presented as the contract again: at "
+            "Gemini CLI a bare-text emission is a NON-injection (strict-JSON "
+            "stdout → systemMessage, shown to the user in the terminal), "
+            "which must not read as the fail-open posture: "
+            f"{line.strip()[:200]!r}")
+
+
+def test_volunteer_turn_default_arm_does_not_claim_injection():
+    """The `*)` arm is where a gemini/opencode harness lands TODAY.
+
+    Its comment must not repeat the claim #2124's re-measurement retracted: a
+    bare block on stdout is not an injection anywhere (at Gemini CLI non-JSON
+    stdout becomes a `systemMessage` shown to the user; a harness that parses
+    no stdout delivers nothing). The arm itself STAYS — a hook must never fail
+    a turn — and it points at the correction so the next implementer finds the
+    finding instead of the retracted sentence.
+    """
+    src = _HOOK.read_text(encoding="utf-8")
+    assert "harmless where unsupported" not in src, (
+        "volunteer-turn.sh repeats the retracted claim — the default arm is "
+        "the branch an unregistered harness falls into, so this is the one "
+        "place the claim becomes an implementation")
+    default_arm = src[src.rindex("\n  *)"):]
+    assert "printf '%s\\n' \"$BLOCK\"" in default_arm, (
+        "the default arm must keep printing (a hook that fails its turn is "
+        "worse than a non-injection)")
+    assert re.search(r"systemMessage|not an injection", default_arm), (
+        "the default arm must say what actually happens to a bare block")
+    assert "platform-seams.md" in default_arm, (
+        "the default arm must point at the correction log")
+
+
+def test_demand_gated_harnesses_have_no_installer(tmp_path):
+    """The matrix says "NOT built — demand-gated"; the CLI must agree.
+
+    BOTH directions are checked, because claim drift runs both ways:
+
+    * A (doc → CLI): each gated harness's ROW must still carry the
+      demand-gate marker and claim NO shipped registration — a row retitled
+      "shipped (`install gemini`)" is the #2120/#2121/#2122 failure (and the
+      shape of the Cline row), and it now fails here instead of only in prose.
+    * B (CLI → doc): `tortoise install gemini|opencode` must refuse, and the
+      listing must still DECLARE both (silently dropping them reads as "no
+      such harness", not "deferred").
+
+    What this is NOT: direction B is a pre-existing drift guard that goes green
+    on any tree, and direction A only bites once the re-measured per-harness
+    rows exist — so this is a guard over `tortoise/__main__.py` + the matrix,
+    not evidence about any one change.
+    """
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+    listing = _run(["install", "--list"], env, cwd=str(tmp_path))
+    assert listing.returncode == 0, listing.stderr
+    assert "gemini, opencode" in listing.stdout, (
+        "the demand-gated pair must stay declared in the install listing")
+    for harness, row_name in (("gemini", "Gemini CLI"),
+                              ("opencode", "OpenCode")):
+        # Direction A — the doc may not claim a registration the CLI cannot
+        # write. Cleaned of 'shipped (`install …`)' or of the gate marker, the
+        # row is the #2120/#2121/#2122 failure in advance.
+        row = _matrix_row(row_name)
+        assert _SEAM_GATED_MARKER in row, (
+            f"the {row_name} row lost its demand-gate marker "
+            f"({_SEAM_GATED_MARKER!r}) — the matrix and the CLI must agree: "
+            f"{row[:200]!r}")
+        assert not re.search(r"shipped\s*\(\s*`?install", row, re.IGNORECASE), (
+            f"the {row_name} row claims a SHIPPED registration while `tortoise "
+            "install` cannot write it — a row describing a contract nobody "
+            f"built (the #2120/#2121/#2122 failure): {row[:200]!r}")
+        # Direction B — the CLI must refuse, and must say so as an invalid
+        # choice (not as a silent fall-through to some other harness).
+        assert f"install {harness}" not in listing.stdout, (
+            f"the listing offers `install {harness}`, but #2124's demand gate "
+            "is unmet — the adapter is not built")
+        r = _run(["install", harness, "--dir", str(tmp_path / "proj")], env,
+                 cwd=str(tmp_path))
+        assert r.returncode != 0 and "invalid choice" in r.stderr, (
+            f"`install {harness}` must not exist until the demand gate is met: "
+            f"{r.stdout}{r.stderr}")
