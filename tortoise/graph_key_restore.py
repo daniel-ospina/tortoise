@@ -149,6 +149,16 @@ is the one a caller should default to:
 
     read the index definition -> DROP the index -> DUMP -> DEL -> RESTORE -> re-CREATE
 
+    ⚠️ WHAT THAT SEQUENCE COSTS, stated because the safe path is safer but not free. Between
+    the ``DROP`` and the completion of the re-``CREATE``, OTHER graphs keep serving — that is
+    the whole point — but THIS graph has NO vector index at all, so vector queries against it
+    return no neighbours (or an engine "no such index") for that window, which is minutes
+    rather than milliseconds at the sizes #7846 measures. And unless the caller passes
+    ``index_ready``, the return does NOT wait for the re-created index's build: the report
+    carries ``index_ready=None``, i.e. UNPROVEN, and the index may still be under construction
+    engine-side and answer PARTIAL neighbours. Pass an ``index_ready`` probe when the call
+    must mean "queryable" rather than "the statement was accepted".
+
 Because the vector index travels INSIDE the graph key's serialized payload (measured —
 ``docs/evidence/7846-indexed-graph-restore/README.md`` §4a), the index must be off the
 graph BEFORE the ``DUMP``, not after; a restore of an index-free payload has no index to
@@ -199,10 +209,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-#: The repo's SINGLE catalogue-row reader (#3154/#3441), IMPORTED rather than copied: this
-#: module carried a verbatim copy of ``index_catalogue._cell``, i.e. one more reader of the
-#: same row that can drift from the others (#8965 review). ``index_catalogue`` imports
-#: nothing, so this stays hermetic.
+#: The repo's SINGLE catalogue-row reader (#3154/#3441), IMPORTED rather than copied, so
+#: this module cannot drift from the other readers of the same row. ``index_catalogue``
+#: imports nothing, so this stays hermetic.
 from tortoise.index_catalogue import catalogue_cell as _cell
 
 logger = logging.getLogger(__name__)
@@ -596,6 +605,32 @@ def _scalar(value: Any) -> str | int:
     return _unquote_text(value)
 
 
+def _properties_column_names(row: Any) -> tuple[str, ...]:
+    """The property NAMES in a catalogue row's ``properties`` column (``row[1]``).
+
+    ``vector_index_definitions`` must read this column AS WELL AS the per-property kinds map
+    (``row[2]``): reading the kinds map alone answers "not index-bearing" for a row whose
+    ``properties`` column names a property the map omits, which skipped the row and left
+    ``restore_graph_key`` free to issue the very index-bearing RESTORE this module exists to
+    refuse (#8965 review).
+
+    Decoded HERE rather than through ``index_catalogue.indexed_field_names`` because a
+    binary-safe client hands the cell over as ``bytes``: that helper's ``str(part)`` yields
+    the repr (``b'[embedding]'``), not the name, and this module already owns the
+    two-shape decoders (``_cell_text``/``_list_items``/``_mapping_entries``) for that.
+    """
+    cell = _cell(row, 1)
+    if cell is None:
+        return ()
+    try:
+        items = _list_items(_cell_text(cell))
+    except ValueError:
+        # A bare scalar rather than a list cell — a shape a differing engine may send. It
+        # names ONE property; anything more would be a guess.
+        return (_unquote_text(_cell_text(cell)).strip(),)
+    return tuple(_unquote_text(item).strip() for item in items if item.strip())
+
+
 def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[VectorIndexDefinition, ...]:
     """Every VECTOR index in a ``CALL db.indexes()`` reply, as typed definitions.
 
@@ -618,8 +653,34 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
                 graph=graph, detail=f"the per-property TYPE cell is not a map ({exc})",
                 cell=_cell(row, 2),
             ) from None
+        types_by_name = {name: types_cell for name, types_cell in property_types}
         vector_properties = []
-        for name, types_cell in property_types:
+        # ⛔ THE NAMES COME FROM BOTH CATALOGUE COLUMNS (#8965 review). This loop used to
+        # iterate the kinds map (``row[2]``) alone, so a row whose ``properties`` list
+        # (``row[1]``) names a property the map omits produced NO vector property, was
+        # SKIPPED as non-vector, and left `restore_graph_key` free to issue the
+        # index-bearing RESTORE that blocks the instance — the exact P0 this module exists
+        # to prevent.
+        indexed_names = list(_properties_column_names(row))
+        for kind_name in types_by_name:
+            if kind_name not in indexed_names:
+                indexed_names.append(kind_name)
+        for name in indexed_names:
+            if name not in types_by_name:
+                # Indexed, but its KIND is not stated, so a VECTOR index cannot be ruled
+                # out. Skipping is the fail-open this guard exists to refuse; it is the
+                # same state as an unrecognised token below.
+                raise IndexDefinitionUnreadable(
+                    graph=graph,
+                    detail=(
+                        f"the indexed property {name!r} is listed in the properties "
+                        f"column but has no entry in the per-property TYPE cell, so its "
+                        f"index kind cannot be stated. Treating it as non-vector could "
+                        f"issue an index-bearing RESTORE"
+                    ),
+                    cell=_cell(row, 2),
+                )
+            types_cell = types_by_name[name]
             try:
                 types = _type_tokens(types_cell)
             except ValueError as exc:
@@ -627,6 +688,19 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
                     graph=graph, detail=f"the TYPE list of {name!r} is not a list ({exc})",
                     cell=types_cell,
                 ) from None
+            if not types:
+                # An EMPTY token list states no kind either — same fail-open as an absent
+                # entry, and it used to reach the non-vector skip by falling through with
+                # `unknown == ()`.
+                raise IndexDefinitionUnreadable(
+                    graph=graph,
+                    detail=(
+                        f"the indexed property {name!r} carries an EMPTY index-type list, "
+                        f"so its index kind cannot be stated. Treating it as non-vector "
+                        f"could issue an index-bearing RESTORE"
+                    ),
+                    cell=types_cell,
+                )
             if VECTOR_INDEX_TYPE in types:
                 vector_properties.append(name)
                 continue
@@ -2128,6 +2202,25 @@ def _try_recreate(
     return restored, failed
 
 
+def _append_state_to_message(exc: BaseException, state: str) -> None:
+    """Make an index-state report reachable from ``str(exc)``, not only from ``__notes__``.
+
+    ``add_note`` is rendered ONLY by a formatted traceback — ``str(exc)`` and ``repr(exc)``
+    do not carry ``__notes__``. So a caller doing what callers do (``logger.error("%s",
+    exc)``, ``return {"error": str(exc)}`` from an API, ``print(f"ERROR: {exc}")``) received
+    the engine's raw error and nothing about a graph now serving WITHOUT its vector index —
+    the silent recall loss this whole path exists to prevent (#8965 review).
+
+    The exception TYPE is deliberately preserved: callers distinguish "the restore did not
+    return" from "an index could not be re-created" by type and several tests pin that, so
+    a new wrapper type would trade a real contract for the message. Only a single-string-arg
+    message is extended — appending to structured args would corrupt what ``str(exc)`` means
+    for those types.
+    """
+    if len(exc.args) == 1 and isinstance(exc.args[0], str):
+        exc.args = (f"{exc.args[0]}\n{state}",)
+
+
 def _index_state_note(
     *,
     graph: str,
@@ -2308,16 +2401,18 @@ def restore_graph_key_safe(
             restored, failed = _try_recreate(
                 dropped if gone is None else gone, create_index
             )
+            state = _index_state_note(
+                graph=graph,
+                did_not_return=False,
+                restored=restored,
+                failed=failed,
+                unverified=unverified,
+            )
             with contextlib.suppress(AttributeError):
-                exc.add_note(
-                    _index_state_note(
-                        graph=graph,
-                        did_not_return=False,
-                        restored=restored,
-                        failed=failed,
-                        unverified=unverified,
-                    )
-                )
+                exc.add_note(state)
+            if failed:
+                # An index IS missing: the loss must reach `str(exc)`, not only the note.
+                _append_state_to_message(exc, state)
             raise
         # ⛔ THE READ THAT PROVES THE DROP TOOK MUST NOT RAISE RAW (#8965 review). It runs
         # AFTER every `drop_index()`, so a transport blip here — or an
@@ -2428,17 +2523,23 @@ def restore_graph_key_safe(
                 # "the restore did not return, re-create it yourself" about a graph that was
                 # never touched sends it to rebuild an index that is one CREATE away.
                 restored, failed = _try_recreate(dropped, create_index)
+            # The set the note reports as LOST: whatever did not come back, plus every
+            # dropped index neither re-created nor already counted. Named once so the
+            # message and the note cannot disagree.
+            lost = list(failed) + [
+                d for d in dropped if d not in restored and d not in failed
+            ]
+            state = _index_state_note(
+                graph=graph,
+                did_not_return=key_state["delete_attempted"],
+                restored=restored,
+                failed=lost,
+            )
             with contextlib.suppress(AttributeError):
-                exc.add_note(
-                    _index_state_note(
-                        graph=graph,
-                        did_not_return=key_state["delete_attempted"],
-                        restored=restored,
-                        failed=list(failed) + [
-                            d for d in dropped if d not in restored and d not in failed
-                        ],
-                    )
-                )
+                exc.add_note(state)
+            if lost:
+                # An index IS missing: the loss must reach `str(exc)`, not only the note.
+                _append_state_to_message(exc, state)
         raise
 
     recreated = False
@@ -2469,20 +2570,22 @@ def restore_graph_key_safe(
             # effect before it raised.
             gone = _missing_from_catalogue(definitions, list_indexes, graph=graph)
             unverified = gone is None
+            state = _index_state_note(
+                graph=graph,
+                did_not_return=False,
+                restored=(
+                    [] if gone is None
+                    else [d for d in definitions if d not in gone]
+                ),
+                failed=tuple(definitions) if gone is None else gone,
+                graph_restored=True,
+                unverified=unverified,
+            )
             with contextlib.suppress(AttributeError):
-                exc.add_note(
-                    _index_state_note(
-                        graph=graph,
-                        did_not_return=False,
-                        restored=(
-                            [] if gone is None
-                            else [d for d in definitions if d not in gone]
-                        ),
-                        failed=tuple(definitions) if gone is None else gone,
-                        graph_restored=True,
-                        unverified=unverified,
-                    )
-                )
+                exc.add_note(state)
+            # Something DID fail to re-create, so an index is missing: the loss belongs in
+            # the message, not only in the note (see _append_state_to_message).
+            _append_state_to_message(exc, state)
             raise exc
         recreated = True
         try:

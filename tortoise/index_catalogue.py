@@ -52,9 +52,9 @@ def catalogue_cell(row, index: int):
     the repair sweep's case) is wrapped in a bare ``except Exception``.
 
     PUBLIC because this is the repo's single catalogue-ROW reader, and a caller that
-    needs the row anyway must import it rather than copy it: ``graph_key_restore.py``
-    carried a verbatim copy, i.e. a seventh reader of the same row, after this module's
-    own docstring asked for one definition (#8965 review).
+    needs the row anyway must import it rather than copy it: one reader per row, so
+    ``graph_key_restore.py`` cannot drift from the others by reading the same row its own
+    way.
     """
     try:
         return row[index]

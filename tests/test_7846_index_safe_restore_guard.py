@@ -758,6 +758,41 @@ def test_a_re_create_that_RAISES_halfway_names_what_it_could_not_restore() -> No
     )
 
 
+def test_the_missing_index_is_in_the_MESSAGE_not_only_in_the_note() -> None:
+    """#8965 review: a note alone is INVISIBLE to the caller — ``str(exc)`` omits ``__notes__``.
+
+    ``BaseException.add_note`` fills ``__notes__``, which ONLY a formatted traceback
+    renders. So the ordinary caller patterns — ``logger.error("%s", exc)``, ``return
+    {"error": str(exc)}`` from an API, ``print(f"ERROR: {exc}")`` — received the engine's
+    raw error and nothing about a graph now serving WITHOUT its vector index, which is the
+    silent recall loss this whole path exists to prevent. The pre-existing tests proved the
+    NOTE existed; they could not see that no caller ever receives it.
+
+    The exception TYPE is kept (callers distinguish "the restore did not return" from "an
+    index is missing" by type), so this asserts on the message text alone.
+    """
+    engine = _FakeGraph(
+        [list(_INDEXED_ROWS[0]), list(_SECOND_INDEX_ROW)], create_fails_on={"vec"}
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        engine.safe()
+
+    message = str(raised.value)
+    assert "NOT re-created" in message, (
+        f"the index loss is note-only, so `str(exc)` — what every ordinary caller logs or "
+        f"returns — says nothing about a graph that is now serving unindexed: {message!r}"
+    )
+    assert "vec" in message, message
+    assert "CREATE VECTOR INDEX" in message, (
+        f"the message carries no statement to finish the re-create: {message!r}"
+    )
+    # ... and the note is still there for the traceback reader.
+    assert "NOT re-created" in " ".join(getattr(raised.value, "__notes__", [])), (
+        "the note stopped being attached; keep both, the message AND the note"
+    )
+
+
 def test_a_failing_re_create_does_not_abandon_the_REMAINING_indexes() -> None:
     """#8965 review: the MAIN re-create loop abandoned the rest on the first raise.
 
@@ -822,6 +857,59 @@ def test_an_unrecognised_index_type_refuses_instead_of_reading_as_index_free() -
     with pytest.raises(IndexDefinitionUnreadable):
         engine.safe()
     assert engine.calls == ["list_indexes"]
+
+
+def test_a_property_the_kinds_map_omits_refuses_instead_of_reading_as_index_free() -> None:
+    """#8965 review P1: the guard read ONLY the kinds column and FAILED OPEN on the other.
+
+    ``vector_index_definitions`` iterated the per-property TYPE cell (``row[2]``) alone, so
+    a row whose ``properties`` column (``row[1]``) named a property that the kinds map
+    omitted yielded NO vector property, was skipped as non-vector, and left
+    ``restore_graph_key`` free to issue the index-bearing RESTORE that blocks the instance
+    — the exact P0 this change exists to prevent. ``index_catalogue.indexed_field_names``
+    is the repo's reader for this question and documents why BOTH columns must be read.
+
+    Two shapes reached that skip, and both must refuse with ZERO destructive calls: a
+    property absent from the kinds map, and a property whose token list is EMPTY (which
+    fell through because ``unknown == ()``).
+    """
+    omitted = [
+        ["Point", "[embedding]", "{}",
+         "{embedding: {dimension: 384, similarityFunction: cosine}}",
+         "english", "[]", "NODE", "OPERATIONAL", "{}"],
+    ]
+    empty_tokens = [
+        ["Point", "[embedding]", "{embedding: []}", "{}",
+         "english", "[]", "NODE", "OPERATIONAL", "{}"],
+    ]
+
+    for rows, expected in ((omitted, "no entry in the per-property TYPE cell"),
+                           (empty_tokens, "EMPTY index-type list")):
+        engine = _FakeGraph(rows)
+        with pytest.raises(IndexDefinitionUnreadable) as raised:
+            engine.raw()
+        assert expected in str(raised.value), str(raised.value)
+        assert engine.destructive_calls() == [], (
+            f"an index the kinds map did not state was read as index-free and the "
+            f"RESTORE ran: {engine.calls}"
+        )
+
+        # ... and the safe path must not fall through to the UNSAFE one: with no
+        # definition it would drop nothing, re-create nothing and never verify.
+        engine = _FakeGraph(rows)
+        with pytest.raises(IndexDefinitionUnreadable):
+            engine.safe()
+        assert engine.calls == ["list_indexes"], engine.calls
+
+    # The control: the SAME rows with the kind stated are a definition, not a refusal —
+    # so the two arms above cannot pass by the guard going blind to the shape.
+    stated = [
+        ["Point", "[embedding]", "{embedding: [VECTOR]}",
+         "{embedding: {dimension: 384, similarityFunction: cosine}}",
+         "english", "[]", "NODE", "OPERATIONAL", "{}"],
+    ]
+    definitions = vector_index_definitions(stated, graph="g")
+    assert len(definitions) == 1, definitions
 
 
 def test_a_catalogue_seam_that_answers_None_refuses_rather_than_reading_as_empty() -> None:
