@@ -40,6 +40,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import ast
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -407,17 +408,35 @@ _SPLIT_INTO = re.compile(r"splits this into([^;]*)")
 _CELL_PROSE = "—"
 # `onboarding_*` — the doc's shorthand for a family of names (row 23).
 _WILDCARD = re.compile(r"`([a-z_][a-z0-9_]*)\*`")
-# A numbered table row — and it must be COMPLETE ON ONE PHYSICAL LINE, i.e. it has to end
-# in `|` on the same line (`…\s*\|.*\|\s*$`). `cells` is split out of ONE line, so a row
-# whose `Absorbs` cell REFLOWED onto a second line parsed as a row with a SHORTER member
-# list: measured, adding a newline inside row 21's cell still parsed 23 rows with no guard
-# firing, `mitigate_operator` silently left the row, and the regenerated artifact reported
+# A numbered table row. The trailing `|` is a SYNTACTIC requirement of the table shape, not
+# a completeness test (completeness is decided by the table BODY — see `_APPROVED_HEADER`
+# below). `cells` is split out of ONE line, so a row whose `Absorbs` cell REFLOWED onto a
+# second line parsed as a row with a SHORTER member list: measured, adding a newline inside
+# row 21's cell still parsed 23 rows with no guard firing, `mitigate_operator` silently left
+# the row, and the regenerated artifact reported
 # `tortoise_mitigate_operator` as "*(no approved row names it)*" / **refuted**, shifting
 # the partition from 5/7/0 to 4/7/1 — a false claim about the owner-approved doc, in the
 # artifact #4513 exists to make trustworthy (#8930 review, P1).
 # Deliberately NOT a widening that joins continuation lines: a wrapped row must be
 # DETECTED (`_APPROVED_ROW_START` + the diagnostics in `_parse_approved`), never accepted.
 _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|.*\|\s*$")
+# ⛔ `_APPROVED_ROW` only proves the line ENDS in `|` — it is NOT a completeness test, and
+# reading it as one left the guard above bypassable. When a wrap leaves a `|` at the END of
+# the first physical line (`…annotate_operator, |` ⏎ `| mitigate_operator |`) the prefix
+# matches and `cells` is split from line 1 alone; the continuation matches no row pattern
+# and was never inspected. Measured on the real doc, row 21, BOTH shapes built GREEN and
+# wrote the artifact (`rows=23`, `row_errors=[]`, `main()` → 0) while `mitigate_operator`
+# left the row — the same false `refuted` claim, on a green build with no diagnostic, and
+# the NATURAL way a person or agent repairs a wrapped row (keep each line looking like
+# table syntax) (#8930 review, round 2).
+#
+# So completeness is decided by the TABLE BODY, not by the row regex: from the
+# `| # | Tool | Absorbs |` header to the next blank line, every non-blank line must be a
+# separator or an `_APPROVED_ROW_START` — anything else is a REFLOWED continuation and
+# fails the build. A row whose cell continued is thus unrepresentable no matter how the
+# wrap is spelled, and it is impossible to express by widening: the orphan is the datum.
+_APPROVED_HEADER = re.compile(r"^\|\s*#\s*\|\s*Tool\s*\|\s*Absorbs\s*\|\s*$")
+_APPROVED_SEPARATOR = re.compile(r"^\|[\s:|-]+\|\s*$")
 # The same prefix on its own, so an INCOMPLETE row is REPORTED instead of skipped: a line
 # that starts like a row and does not end in `|` is a reflow, and a two-cell row (`| 3 |
 # `recall_beliefs` |`) has no `Absorbs` cell to read at all.
@@ -551,9 +570,11 @@ def _parse_approved(
     """One parse of the approved doc: (approved row name -> row, closures, row errors).
 
     `row_errors` is a row the parse could not read COMPLETELY — a row that reflowed onto a
-    second line, or one with too few cells. It is an ERROR, never a silent skip: dropping
-    the row narrows what the doc says the row absorbs, and the verdicts treat that set as
-    the row's approved home (#8930 review, P1/P2a).
+    second line (detected by its cell prefix not ending in `|`, or by the orphaned
+    continuation line that the wrap leaves in the table body), or one with too few cells.
+    It is an ERROR, never a silent skip: dropping the row narrows what the doc says the row
+    absorbs, and the verdicts treat that set as the row's approved home (#8930 review,
+    P1/P2a).
     """
     known = _known_names()
     closures = _approved_closures(text)
@@ -606,6 +627,44 @@ def _parse_approved(
             "closes": set(),
         }
 
+    # BODY INTEGRITY — the completeness test `_APPROVED_ROW` is NOT. A separate pass, because
+    # it answers a different question: not "is this line a row" but "is the table the rows
+    # sit in intact". From the `| # | Tool | Absorbs |` header until the next blank line,
+    # every non-blank line must be a separator or a row prefix; anything else is a REFLOWED
+    # CONTINUATION — the continuation of the row above it, which has ALREADY parsed with the
+    # members on this line missing. Appended before any cell was read from it, so the build
+    # fails and no artifact carries the truncated membership (#8930 review, round 2, P1).
+    last_row: tuple[int, str] | None = None
+    in_table = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _APPROVED_HEADER.match(stripped):
+            in_table, last_row = True, None
+            continue
+        if not in_table:
+            continue
+        if not stripped:  # a blank line ends the table body (the doc has TWO such tables)
+            in_table, last_row = False, None
+            continue
+        start = _APPROVED_ROW_START.match(stripped)
+        if start:
+            last_row = (int(start.group(1)), start.group(2))
+            continue
+        if _APPROVED_SEPARATOR.match(stripped):
+            continue
+        owner = (
+            f"row {last_row[0]} (`{last_row[1]}`)"
+            if last_row
+            else "the header (before any row)"
+        )
+        row_errors.append(
+            f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
+            f"after {owner}: {stripped!r} is neither a `| N | name | … |` row nor a "
+            "separator, so a row's cells have REFLOWED onto a second physical line — the "
+            "row still parses, but every member on the wrapped remainder silently leaves "
+            "it, which renders as a false 'no approved row absorbs it' for each of them"
+        )
+
     # Apply the closure the doc states, one hop at a time until it settles: a member
     # that `sit inside`s another member is a member too.
     by_outer: dict[str, set[str]] = {}
@@ -650,7 +709,7 @@ def _approved_state() -> tuple[dict[str, dict], list[tuple[str, set[str]]], list
 def _approved_errors(
     menu: dict[str, dict],
     closures: list[tuple[str, set[str]]],
-    row_errors: tuple[str, ...] = (),
+    row_errors: Sequence[str] = (),
 ) -> list[str]:
     """Row-level parse errors FIRST, then the structural guards.
 

@@ -2267,6 +2267,145 @@ def test_approved_row_with_two_cells_reports_a_diagnostic_not_an_traceback(
         assert "IndexError" not in err and "Traceback" not in err, err
 
 
+def _assert_an_orphaned_continuation_fails_the_build(
+    tmp_path, monkeypatch, capsys, continuation: str
+) -> None:
+    """A wrapped row that leaves an ORPHANED line in the table body must fail the build.
+
+    `_APPROVED_ROW` only proves the line ENDS in `|`; it is not a completeness test. When a
+    wrap leaves a `|` at the end of line 1 the row prefix still matches, `cells` is split
+    from line 1 alone, and the continuation matches no row pattern — so it was never
+    inspected at all. Measured on the real doc, row 21, both callers of this helper built
+    GREEN (`rows=23`, `row_errors=[]`, `main()` → 0) and wrote an artifact asserting
+    `tortoise_mitigate_operator` "*(no approved row names it)*" / **refuted** — the same
+    false claim about the owner-approved doc the P1 was raised for, with no diagnostic.
+
+    The mutation is in the test, so the guard cannot rot into a tautology: with the orphan
+    test DISABLED (every body line reads as a separator) the exact same document parses,
+    builds green and writes the false artifact; with it ON the build is red and nothing is
+    written. Both halves are asserted here, in that order.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    wrapped = real.replace(
+        cell, cell.replace("mitigate_operator |", continuation), 1
+    )
+    assert wrapped != real, f"the wrap {continuation!r} did not change the doc"
+    path = tmp_path / "row-orphaned.md"
+    path.write_text(wrapped, encoding="utf-8")
+    out = tmp_path / "bridge-table.md"
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+    monkeypatch.setattr(bt, "OUT", out)
+
+    # ---- the guard ON: the orphan line is reported, attributed to the row it truncates.
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, (
+        f"every row is still syntactically a row here ({len(menu)} parsed) — the orphan "
+        "line is the ONLY evidence, which is why the body, not the row regex, decides"
+    )
+    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
+        "this shape is supposed to TRUNCATE row 21 — if it no longer does, the test no "
+        "longer reproduces the defect"
+    )
+    assert len(row_errors) == 1, f"the orphan line was not reported exactly once: {row_errors}"
+    assert "ORPHANED continuation line after row 21 (`adjust_relationship`)" in row_errors[0], (
+        f"the diagnostic does not name the row the wrap truncated: {row_errors[0]!r}"
+    )
+    errs = bt._approved_errors(menu, closures, row_errors)
+    assert errs[0] == row_errors[0], (
+        f"the specific cause must print BEFORE the generic row-count diagnostic: {errs}"
+    )
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])  # WRITE mode, not --check
+    assert bt.main() == 1, f"the wrap {continuation!r} did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "ORPHANED continuation line after row 21" in err, err
+    assert not out.exists(), (
+        f"the build failed but still wrote {out.name} — a false refutation of the "
+        "owner-approved doc is exactly what must not reach the artifact"
+    )
+
+    # ---- MUTATION: disable the orphan test (every body line reads as a separator). Same
+    # document, same row parse — and the defect comes straight back, green, in the artifact.
+    monkeypatch.setattr(bt, "_APPROVED_SEPARATOR", re.compile(r".*"))
+    menu_off, _, row_errors_off = bt._approved_state()
+    assert row_errors_off == [], (
+        f"the mutation did not disable the orphan test: {row_errors_off}"
+    )
+    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert bt.main() == 0, "with the orphan test disabled this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+        "the mutation did not reproduce the defect — the test proves nothing"
+    )
+    out.unlink()
+
+
+def test_orphaned_continuation_line_that_starts_with_a_pipe_fails_the_build(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 1: `…annotate_operator, |` ⏎ `| mitigate_operator |`.
+
+    The first line still ENDS in `|`, so `_APPROVED_ROW` matches and the continuation was
+    never read — measured green with `rows=23`/`row_errors=[]` before the fix. This is the
+    shape a person or agent produces when repairing a wrapped row, because every physical
+    line keeps looking like table syntax (#8930 review, round 2, P1).
+    """
+    _assert_an_orphaned_continuation_fails_the_build(
+        tmp_path, monkeypatch, capsys, "|\n| mitigate_operator |"
+    )
+
+
+def test_orphaned_continuation_line_without_a_pipe_fails_the_build(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 2: `…annotate_operator, |` ⏎ `mitigate_operator |`.
+
+    Same escape, spelled without the leading `|` — the continuation is a bare member list,
+    so it is not even shaped like a row. Both shapes shared ONE root: completeness was
+    decided by how a line ENDS, never by whether the table body is intact. Also measured
+    green with `rows=23`/`row_errors=[]` before the fix (#8930 review, round 2, P1).
+    """
+    _assert_an_orphaned_continuation_fails_the_build(
+        tmp_path, monkeypatch, capsys, "|\nmitigate_operator |"
+    )
+
+
+def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -> None:
+    """ANTI-FALSE-POSITIVE: the orphan guard must not reject the REAL document.
+
+    `docs/product/canonical-mcp-tools.md` holds TWO `| # | Tool | Absorbs |` tables
+    (bounded by a blank line each) and its rows are long enough that a badge-counting
+    guard could easily start refusing legitimate lines. The orphan test is therefore
+    pinned to the real doc's own numbers: 23 rows, no row errors, `--check` rc 0. If a
+    later tightening starts firing on the document the owner approved, this fails first.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    menu, closures, row_errors = bt._parse_approved(real)
+    assert row_errors == [], f"the real doc tripped a row guard: {row_errors}"
+    assert len(menu) == bt.APPROVED_MIN_ROWS == 23, (
+        f"the real doc must parse its own 23 rows, parsed {len(menu)}"
+    )
+    assert bt._approved_errors(menu, closures, row_errors) == [], (
+        "the real doc must raise no approved-menu error at all"
+    )
+    assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
+    # Row 21 is complete in the real doc, so the guard must see its third member.
+    assert "mitigate_operator" in menu["adjust_relationship"]["members"]
+    # ...and the entry point the gate runs agrees.
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
+    assert bt.main() == 0, "--check went red on the unmodified approved doc"
+
+
+
 def _d4_membership_lines(doc: str) -> list[str]:
     """The `X/Y `sit inside` Z` lines of §D4's membership paragraph."""
     section = _section(doc, "### D4 —")
