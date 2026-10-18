@@ -198,6 +198,48 @@ def test_shared_claim_key_merges_commutatively():
     assert fwd == rev, (
         "the merged survivor — and therefore the budgeted subset — depends on "
         f"ROW ORDER: forward={fwd} reversed={rev}")
+    # ...and the survivor must be the one that KEEPS the relevant claim in the
+    # budget. An order-stable merge that always discards it would satisfy the
+    # equality above and be useless.
+    assert fwd == {"p1": 0.05}, (
+        "the merge is stable but always demotes the relevant claim out of the "
+        f"budget: {fwd}")
+
+
+def test_shared_claim_key_tolerates_a_mixed_type_claim_id():
+    """A raw property id can be an int on an out-of-tree graph.
+
+    Comparing two claim ids of different types raises, and the handler around
+    the read turns that into an empty ``{}`` for EVERY contested point — a
+    silent false negative. Both the merge and the sort key compare ``str()``.
+    """
+    from tortoise.ranking import resolve_contested_relevance
+
+    class _Mixed:
+        def __init__(self, order):
+            self.order = order
+            self.g = self
+
+        class _Rows:
+            def __init__(self, rows):
+                self.result_set = rows
+
+        def query(self, cypher, params=None):
+            rows = [
+                ("p1", 12345, 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "12345", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "c0", 1002, "an unrelated weather note", 1.0, 1.0),
+            ]
+            if self.order == "reversed":
+                rows = list(reversed(rows))
+            return self._Rows(rows)
+
+    fwd = resolve_contested_relevance(_Mixed("forward"), ["p1"], "cache rollback")
+    rev = resolve_contested_relevance(_Mixed("reversed"), ["p1"], "cache rollback")
+    assert fwd == rev, f"mixed-type claim ids split on row order: {fwd} vs {rev}"
+    assert fwd == {"p1": 0.05}, (
+        "a mixed-type claim id produced no boost at all — the read swallowed a "
+        f"TypeError: {fwd}")
 
 
 # ── Unit: batch relevance resolution (S8 N+1 guard) ────────────────────────

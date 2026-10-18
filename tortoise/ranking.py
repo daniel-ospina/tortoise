@@ -282,13 +282,22 @@ def resolve_contested_relevance(
             mean = (a_f / s) if s > 0 else 0.5
             # Keyed on the INTERNAL node id, so two distinct counter-claims that
             # coalesce to one identity do not overwrite each other.
-            # COMMUTATIVE merge, not last-wins. Two rows can share one
-            # ``claim_nid`` with DIFFERENT mean/content: when ``src`` carries no
-            # stored EP, the alpha/beta fall through to the NANDer ``c``'s, so
-            # two NANDers over one source disagree. A plain assignment let Cypher
-            # row order pick the survivor — measured: `{}` one way and
-            # `{'p1': 0.05}` the other, the identical signature this read was
-            # already fixed for once.
+            # COMMUTATIVE and TOTAL, not last-wins. Two rows can share one
+            # ``claim_nid`` with different ``mean``/``content`` (when ``src``
+            # stores no EP the alpha/beta chain falls through to the NANDer's),
+            # AND with different ``claim_id`` (``claim_nid`` is then ``id(src)``
+            # while ``claim_id`` falls through to the NANDer's). ``claim_id`` is
+            # the sort key's second component, so a first-seen tie there decided
+            # the budgeted subset — measured: 12 of 24 row orders boosted, 12
+            # did not.
+            #
+            # The tie-break is the SMALLER ``str(claim_id)``, deliberately: the
+            # larger one sorts the node AFTER unrelated claims and can push it
+            # out of the budget, so a node's own alternative claim ids must not
+            # be able to demote it. ``str()`` on both sides because the id is a
+            # raw property value and a mixed-type comparison (``12345`` vs
+            # ``"12345"``) raises inside the outer handler, which would silently
+            # return ``{}`` for the whole read.
             slot = pending.setdefault(pid, {})
             candidate = {
                 "content": str(content or ""),
@@ -297,20 +306,16 @@ def resolve_contested_relevance(
                 "nid": claim_nid,
             }
             previous = slot.get(claim_nid)
-            # ``claim_id`` is part of the TOTAL order too: when ``src`` carries
-            # neither key, ``claim_nid`` is ``id(src)`` (non-null) while
-            # ``claim_id`` falls through to the NANDer's, so two rows for one
-            # node can differ in ``claim_id`` alone — and that value is the
-            # sort key's second component, so first-seen would decide the
-            # budgeted subset (measured: 12 of 24 row orders boosted, 12 did
-            # not). ``str()`` because the id is a raw property value and mixed
-            # types would raise inside the outer handler and return ``{}``.
-            if previous is None or (
-                    candidate["mean"], candidate["content"],
-                    str(candidate["claim_id"])) > (
-                    previous["mean"], previous["content"],
-                    str(previous["claim_id"])):
+            if previous is None:
                 slot[claim_nid] = candidate
+            else:
+                cand_rank = (candidate["mean"], candidate["content"])
+                prev_rank = (previous["mean"], previous["content"])
+                if cand_rank > prev_rank or (
+                        cand_rank == prev_rank
+                        and str(candidate["claim_id"])
+                        < str(previous["claim_id"])):
+                    slot[claim_nid] = candidate
         boosts: dict[str, float] = {}
         for pid, claims in pending.items():
             chosen = sorted(
@@ -320,8 +325,12 @@ def resolve_contested_relevance(
                 # subset, and therefore the boost, was decided by Cypher row
                 # order (measured: the same three-claim tie group boosted
                 # forward and did not boost reversed).
-                key=lambda c: (0 if c["mean"] >= 0.6 else 1, c["claim_id"],
-                               c["nid"]))
+                # ``str()`` on the claim id as well: a mixed-type pair (an int
+                # id beside a string one) makes a raw comparison raise inside
+                # the handler below, which would return ``{}`` for the whole
+                # read — measured on a graph with both.
+                key=lambda c: (0 if c["mean"] >= 0.6 else 1,
+                               str(c["claim_id"]), c["nid"]))
             texts = [c["content"] for c in chosen[:_claim_budget]]
             if _query_touches_conflict(query, texts):
                 boosts[pid] = W4_CONTESTED_BOOST

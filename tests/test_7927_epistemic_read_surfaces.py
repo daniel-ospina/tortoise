@@ -1194,6 +1194,10 @@ def test_legacy_repair_refuses_when_its_pattern_is_ambiguous(sdk):
         if issue.fix == "":
             assert "repair by hand" in issue.detail, (
                 f"the refusal is unexplained: {issue.detail!r}")
+            # The >1 branch keeps ITS wording — otherwise a change that folded
+            # it into the zero-match message would leave the suite green.
+            assert "matches more than the one edge" in issue.detail, (
+                f"the ambiguity refusal lost its cause: {issue.detail!r}")
             continue
         pattern = issue.fix.split("-[r:mitigates]->")[1].split(" DELETE")[0]
         matched = proj.g.query(
