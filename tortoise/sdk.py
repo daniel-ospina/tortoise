@@ -5252,6 +5252,31 @@ class InvertedSupersedeWindow(ValueError):
         self.predecessor_valid_from = predecessor_valid_from
 
 
+class UnapprovedKindNamespace(ValueError):
+    """#5475 — a kind write refused because it names a pack the graph lacks.
+
+    Subclasses ``ValueError`` because that is the contract every SDK write door
+    publishes (callers and tests catch ``ValueError``), but it is a NAMED type
+    so a transport boundary can tell this DETERMINISTIC payload refusal from a
+    transient graph failure WITHOUT parsing the message — which the MCP layer
+    rewrites (``_scrub_error``) and which the hosted commit door would
+    otherwise turn into a retry-advising 500 for a payload that will refuse
+    identically on every retry (the #5363 precedent, one class over).
+
+    The facts ride as attributes (the offending ``prop``/``kind``/``namespace``
+    and the graph's ``installed`` set) so a boundary that renders a
+    client-facing error does not have to re-derive them from the prose.
+    """
+
+    def __init__(self, message, *, prop: str, kind: str, namespace: str,
+                 installed: frozenset[str] | None):
+        super().__init__(message)
+        self.prop = prop
+        self.kind = kind
+        self.namespace = namespace
+        self.installed = installed
+
+
 def _refuse_inverted_point_window(g, props: dict, *,
                                   point_id: str | None = None) -> None:
     """#5359: refuse an INVERTED validity window at a Point write boundary.
@@ -6944,7 +6969,22 @@ class TortoiseSDK:
         writer itself originates.
         """
         self._validate_kind(kind)
+        # #5475: `pointKind` is one of the properties
+        # `pack_state.graph_kind_namespaces` mines the approval set from, so the
+        # point door widened it exactly as the entity doors did — measured at
+        # HEAD: `create_point("totally:madeUpKind", ...)` on a `dev`-only graph
+        # left `['dev', 'totally']` behind. `_validate_kind` above only WARNS,
+        # so it is not a gate. Same rule, same ONE home, same refusal message
+        # as the entity funnel (`_refuse_unapproved_kind`).
+        self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # The props passthrough accepts the OTHER mined key names too
+        # (`objectKind`, `eventKind`, ...), and each of those is persisted on
+        # the Point and mined back into the approval set — measured:
+        # `create_point("statement", "x", objectKind="marketing:campaign")`
+        # widened a `dev`-only graph. Gate the whole mined key set, exactly as
+        # the entity funnel does.
+        self._refuse_unapproved_kinds_in_props(props)
         # #329: server-managed fields rejected on the props passthrough
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)
@@ -7400,8 +7440,8 @@ class TortoiseSDK:
         # self-consistent injected encoder is stored instead of silently NULLed.
         embedding = None
         try:
-            from .embeddings import encode_for_store
-            embedding = encode_for_store(
+            from .embeddings import encode_for_row
+            embedding = encode_for_row(
                 content, self._get_proj().required_embedding_dim)
         except Exception:
             pass  # Graceful — embedding is optional
@@ -10749,9 +10789,9 @@ class TortoiseSDK:
             # — a `None` new_content is "no content edit" there, so it must not
             # derive (or wipe) a vector either.
             try:
-                from .embeddings import encode_for_store
+                from .embeddings import encode_for_row
                 props["embedding"] = (
-                    encode_for_store(_new_content, proj.required_embedding_dim)
+                    encode_for_row(_new_content, proj.required_embedding_dim)
                     if _new_content else None)
             except Exception:
                 props["embedding"] = None
@@ -12182,13 +12222,35 @@ class TortoiseSDK:
         # emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER, §4.4) so a
         # transfer×emission crash cannot leave the stale descriptor in the
         # JSONL while the live edge moves.
+        # #8622: the OTHER endpoint may carry ANY of the four epistemic
+        # labels (#7902 / owner ruling #7813 — a direct IMPL/NAND is explicitly
+        # allowed to connect any two of :Point/:Subject/:Object/:Event). The
+        # transfer legs therefore anchor each endpoint on the label that
+        # actually resolved it; a hardcoded ``:Point`` on the far endpoint
+        # matched NOTHING, so the MERGE was a constrained no-op and the
+        # delete-leg below removed the ORIGINAL edge — the transfer silently
+        # DESTROYED the edge live, and the replay (which received the same
+        # endpoint contract) dropped it too. ``labels(t)`` rides the same
+        # traversal, so no extra round trip is spent resolving the far node.
+        def _epistemic_label(node_id: str) -> str | None:
+            """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
+            for _label in EPISTEMIC_LABELS:
+                found_row = proj.g.query(
+                    f"MATCH (n:{_label} {{id:$id}}) RETURN ID(n) LIMIT 1",
+                    params={"id": node_id},
+                ).result_set
+                if found_row:
+                    return _label
+            return None
+
+        new_label = _epistemic_label(new_id) if new_id else None
         for direction in ("out", "in"):
             if direction == "out":
                 dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             else:
                 dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             rows = proj.g.query(dq, params={"old_id": old_id}).result_set
             # Filter: exclude edges whose OTHER endpoint is an operator Point
             # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
@@ -12209,6 +12271,14 @@ class TortoiseSDK:
             rows = plain
             for row in rows:
                 rtype, r, tid, rid = row[0], row[1], row[2], row[3]
+                # #8622: the label that ACTUALLY carries the far endpoint, in
+                # EPISTEMIC_LABELS order (Point-first) — the same first-wins
+                # order ``create_direct_edge``'s probe uses, so the write and
+                # the transfer can never disagree about a multi-labelled node.
+                _row_labels = set(row[4] or ()) if len(row) > 4 else set()
+                tid_label = next(
+                    (lbl for lbl in EPISTEMIC_LABELS if lbl in _row_labels),
+                    None)
                 # FalkorDB returns an Edge object — read its properties.
                 rdict = dict(r.properties) if hasattr(r, "properties") else {}
                 if tid == new_id:
@@ -12256,25 +12326,36 @@ class TortoiseSDK:
                 # Two-step MERGE (FalkorDB quirk — same as create_direct_edge):
                 # MATCH the existing nodes, then MERGE the edge between them
                 # (never creates duplicate nodes; collapses to one edge).
-                if direction == "out":
-                    mq = (f"MATCH (new:Point {{id:$new_id}}), "
-                          f"(t:Point {{id:$tid}}) "
-                          f"MERGE (new)-[nr:{rtype}]->(t)")
-                else:
-                    mq = (f"MATCH (t:Point {{id:$tid}}), "
-                          f"(new:Point {{id:$new_id}}) "
-                          f"MERGE (t)-[nr:{rtype}]->(new)")
-                proj.g.query(mq, params={"new_id": new_id, "tid": tid})
-                _keep = {k: v for k, v in rdict.items()
-                         if k in ("direction", "confidence", "weight",
-                                  "label", "batch_id")}
-                proj.g.query(
-                    f"MATCH (a:Point {{id:$a}})-[r:{rtype}]->"
-                    f"(b:Point {{id:$b}}) SET r += $attrs",
-                    params={"a": (tid if direction == "in" else new_id),
-                            "b": (new_id if direction == "in" else tid),
-                            "attrs": _keep},
-                )
+                # #8622: anchor BOTH endpoints on their resolved labels. An
+                # unresolvable label means the endpoint is not an epistemic
+                # node (a raw/legacy edge the write path itself refuses), so
+                # the transfer cannot be performed — the delete-leg below still
+                # runs, mirroring the pre-#7902 "no such endpoint" outcome
+                # WITHOUT the silent hope that a :Point match existed.
+                if new_label is not None and tid_label is not None:
+                    if direction == "out":
+                        mq = (f"MATCH (new:{new_label} {{id:$new_id}}), "
+                              f"(t:{tid_label} {{id:$tid}}) "
+                              f"MERGE (new)-[nr:{rtype}]->(t)")
+                    else:
+                        mq = (f"MATCH (t:{tid_label} {{id:$tid}}), "
+                              f"(new:{new_label} {{id:$new_id}}) "
+                              f"MERGE (t)-[nr:{rtype}]->(new)")
+                    proj.g.query(mq, params={"new_id": new_id, "tid": tid})
+                    _keep = {k: v for k, v in rdict.items()
+                             if k in ("direction", "confidence", "weight",
+                                      "label", "batch_id")}
+                    if direction == "out":
+                        _a_label, _b_label = new_label, tid_label
+                    else:
+                        _a_label, _b_label = tid_label, new_label
+                    proj.g.query(
+                        f"MATCH (a:{_a_label} {{id:$a}})-[r:{rtype}]->"
+                        f"(b:{_b_label} {{id:$b}}) SET r += $attrs",
+                        params={"a": (tid if direction == "in" else new_id),
+                                "b": (new_id if direction == "in" else tid),
+                                "attrs": _keep},
+                    )
                 # Delete the OLD edge by its internal id (precision),
                 # constrained to the old point's incident edges (REVIEW-FIX
                 # P2: never graph-wide — internal ids may be reused).
@@ -14064,20 +14145,20 @@ class TortoiseSDK:
                 # The healed legacy mitigation carries the recorded #2199
                 # default too (same birth fact `create_point` records).
                 self._stamp_authored_word(mid, system_default=True)
-            # The OPERATOR is the dirty root here, not the mitigation: EP reads
-            # the changed strength off the operator's factor, and only a
-            # seeded operator pulls its inputs into the affected set. The
-            # CREATE path below marks exactly this pair ([mid, id]); the
-            # update path must match it. Marking `[mid]` alone is no longer a
-            # dead end — `_reverse_bfs_neighbors` now matches the mitigation
-            # back-link direction too — but the pair is what this path is
-            # specified to mark, and it does not depend on that helper's
-            # shape. The in-process flow hides a missing mark behind the
-            # operator's own creation-time ep_dirty flag; `ep_dirty` is
+            # #7505: mark the MITIGATION only — NOT the operator. What the
+            # re-mitigation needs is the operator's INPUTS recomputed, and
+            # `_reverse_bfs_neighbors` already returns them as claims through
+            # the mitigation back-link branch `(m)-[:IMPL]->(op)` (#6599). The
+            # operator id itself is not a factor participant, so no converged
+            # pass can subtract it from `_dirty_roots` (that is #2422's class),
+            # and marking it pinned `_auto_dream_mode()` to 'local' forever on
+            # every mitigation. The in-process flow hid the missing mark behind
+            # the operator's own creation-time ep_dirty flag; `ep_dirty` is
             # deliberately NOT journaled (#5166), so a rebuilt/replayed graph
-            # has no such mask and a re-mitigation would silently not move
-            # confidence. (#5566 review P2.)
-            self._mark_dirty([mid, id])
+            # has no such mask — the INPUT marks are what carry the
+            # re-mitigation, and they are computed, not assumed (#5566 review
+            # P2).
+            self._mark_dirty([mid])
             return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
@@ -14136,7 +14217,12 @@ class TortoiseSDK:
         else:
             self._stamp_authored_word(mid, system_default=True)
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
-        self._mark_dirty([mid, id])
+        # #7505: `[mid]` only — same reasoning as the update path above. `mid`
+        # reaches the operator's inputs through the reverse-BFS back-link
+        # branch and is itself swept as a neutral link (it forms no factor);
+        # the OPERATOR is deliberately not marked, because an operator root is
+        # not sweepable and would pin the dream mode to 'local'.
+        self._mark_dirty([mid])
         # #548: emit events for rebuild parity
         self._emit_event("PointAdded", point=self.get_point(mid))
         # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
@@ -19596,17 +19682,28 @@ class TortoiseSDK:
         """Sweep a converged pass's affected claims from BOTH the in-memory
         dirty set and the graph flags (#1163).
 
+        The sweep set is the run's ``affected`` claims PLUS the roots no pass
+        can ever sweep (:meth:`_unsweepable_dirty_roots`, #7505). The second
+        term is not a retention relaxation: those roots are invisible to the
+        ``affected`` rule by CONSTRUCTION (they form no factor, so
+        ``_affected_claims`` can never admit them), so subtracting only
+        ``affected`` retains them for the life of the graph — the defect
+        #7505 records. Roots the pass did NOT reach for any other reason
+        (capped, truncated, non-converged — the W4 retention of #1243) are
+        still never swept.
+
         The graph sweep is epoch-guarded: a flag stamped at a NEWER epoch
         than ``run_ep`` (the pass's world-view snapshot) is never cleared —
         a concurrent process re-marked it dirty mid-run and its marking
         must survive. ``run_ep=None`` (single-process callers without a
         snapshot) clears unconditionally.
         """
-        self._dirty_roots -= affected
-        self._reset_retry_state(affected)
-        if not affected:
+        swept = set(affected) | self._unsweepable_dirty_roots(affected)
+        self._dirty_roots -= swept
+        self._reset_retry_state(swept)
+        if not swept:
             return
-        ids = list(affected)
+        ids = list(swept)
         if run_ep is None:
             self._get_proj().g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
@@ -19620,6 +19717,120 @@ class TortoiseSDK:
                 "SET n.ep_dirty = null, n.ep_dirty_at = null",
                 params={"ids": ids, "run_ep": run_ep},
             )
+
+    def _unsweepable_dirty_roots(self, affected: set[str]) -> set[str]:
+        """Dirty roots that NO pass can ever clear: the NEUTRAL-LINK ones — a
+        node that has an ``IMPL|NAND`` edge but participates in no EP factor,
+        so ``_affected_claims`` can never admit it (#7505).
+
+        ``_sweep_dirty_roots``' only clearing rule is SUBTRACT the run's
+        ``affected`` set, and ``TortoiseEP._affected_claims`` admits exactly
+        two shapes: an operator's INPUT (``(op)-[:IMPL|NAND]->(c)`` — the
+        direction ``_affected_factors`` reads, #5566) and an endpoint of an
+        operator-less ``IMPL|NAND`` edge (#888 W5). A node that has an
+        ``IMPL|NAND`` edge but is neither can never appear in ``affected``, so
+        every converged pass retains it forever. That is the #2422
+        terminal-point class — `_mark_dirty` excludes terminal points from the
+        persist WHERE for precisely this reason — and this is the same
+        exclusion for the NEUTRAL-LINK class (#5025): an edge that forms no
+        factor must not make a node a dirty root.
+
+        MEASURED (#7505, head): after `mitigate_operator` the mitigation
+        point ``mid`` carries a persisted ``ep_dirty`` that no pass cleared —
+        its only edge is ``(m)-[:IMPL]->(op)``, a reverse-only IMPL that
+        #6599 correctly keeps out of ``affected``. ``_dirty_roots`` grew one
+        permanent entry per mitigation, ``dream_health_check()``'s
+        ``stale_backlog`` could not drain, and every mitigation pinned
+        ``_auto_dream_mode()`` to 'local'.
+
+        THREE CLASSES ARE DELIBERATELY EXEMPT — this is not "drop every root
+        the pass did not reach":
+
+        * AN OPERATOR. It does form a factor, so dropping it on convergence
+          is sound only if the pass provably ran that factor — and it may not
+          have: an explicit-k pass is truncated at the operator cap
+          (``op_cap``, #1241), and #6211 is exactly a converged pass that did
+          not cover every factor. Nor is ``affected`` a witness: stale-first
+          and full passes report the UNION of their per-batch affected sets,
+          so one operator's two inputs can sit in different batches without
+          its factor ever running. The only sound witness is the run's own
+          factor-operator set, which the sweep is not given. So
+          `mitigate_operator` stops MAKING the operator a root instead (its
+          inputs are already reached through the mitigation back-link branch
+          of `_reverse_bfs_neighbors`, #6599) — see that call site. A root an
+          operator still acquires from the `update_point` write family
+          (`invalidate_point` refuses operators) therefore remains a
+          permanently unsweepable root, exactly as it was before #7505; that
+          residual is tracked, not silently assumed away.
+        * A ROOT WITH **NO** ``IMPL|NAND`` EDGE AT ALL (an isolated claim).
+          Its pass computes nothing (the #3139 ``no_ep_factors`` legitimate
+          no-op), so sweeping its flag would be a no-op sweeping its own
+          backlog — the exact failure #3139 forbids. It is retained, as
+          before; that is a different decision (#6211 territory), not this
+          issue's.
+        * A NON-``:Point`` ROOT — the #7927 pinned gap: never graph-persisted,
+          never selected by the dream BFS. Left EXACTLY as it was, so this fix
+          neither widens nor silently tidies that boundary.
+
+        The residue is classified with three batched queries, and ONLY the
+        roots the ``affected`` subtraction did not clear are examined — a pass
+        whose every root was a claim issues none at all.
+        """
+        candidates = set(self._dirty_roots) - set(affected)
+        if not candidates:
+            return set()
+        proj = self._get_proj()
+        ids = sorted(candidates)
+        # The classification is :Point-only, exactly like the rest of the dirty
+        # lifecycle (`_mark_dirty`'s persist, `_hydrate_dirty_roots`,
+        # `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`).
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "RETURN n.id, (n.is_operator = true OR n.op_type IS NOT NULL)",
+            params={"ids": ids},
+        ).result_set
+        points = {r[0] for r in rows}
+        # An OPERATOR is retained (see above) — its factor can be recomputed by
+        # a later pass even though the operator itself is not an affected
+        # claim. `op_type` is the legacy operator marker (#2205/#3139 form).
+        participants = {r[0] for r in rows if r[1]}
+        # (1) an operator's INPUT. Direction is load-bearing: a mitigation
+        # points AT an operator (``(m)-[:IMPL]->(op)``), so it is the operator
+        # that would match here, never ``m``.
+        participants |= {r[0] for r in proj.g.query(
+            "MATCH (o:Point)-[:IMPL|NAND]->(n:Point) "
+            "WHERE n.id IN $ids "
+            "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
+            "RETURN DISTINCT n.id",
+            params={"ids": ids},
+        ).result_set}
+        # (2) the two facts the remaining classes need from the edges, in ONE
+        # sweep: does the candidate have an IMPL|NAND edge at all (the class
+        # boundary — an isolated claim has none and is retained), and is that
+        # edge's far endpoint a PLAIN node (the operator-less direct-edge
+        # admission of #888 W5; a mitigation's far endpoint is the OPERATOR,
+        # which is what keeps it out of `affected` and is measured here).
+        # The far endpoint is ANY epistemic label, not `(d:Point)`: #7902/
+        # #7853 widened the direct-edge admission in `_affected_claims` and
+        # `_affected_factors` Batch 3 past Point->Point, so a `:Point` whose
+        # only plain neighbour is a `:Subject` is a factor participant and must
+        # not be classified unsweepable. The id-anchored half stays `:Point`
+        # because the candidate universe above is `:Point`-only.
+        edge_rows = proj.g.query(
+            "MATCH (n:Point)-[:IMPL|NAND]-(d) "
+            f"WHERE n.id IN $ids AND {epistemic_disjunction('d')} "
+            "RETURN DISTINCT n.id, "
+            "((d.is_operator IS NULL OR d.is_operator = false) "
+            "AND d.op_type IS NULL) AS d_plain",
+            params={"ids": ids},
+        ).result_set
+        edge_bearing = {r[0] for r in edge_rows}
+        # A direct-edge factor needs a plain FAR endpoint; the near endpoint's
+        # plainness is guaranteed for every non-operator candidate (an
+        # operator is already in `participants`). The #2205/#3139
+        # index-independent form is used for the far endpoint.
+        participants |= {r[0] for r in edge_rows if r[1]}
+        return (points & edge_bearing) - participants
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
@@ -19660,9 +19871,26 @@ class TortoiseSDK:
                 op_ids.append(r[0])
         claim_ids: list[str] = []
         if op_ids:
+            # #7505 (review P1): the operator's INPUTS are widened to ANY
+            # epistemic label, exactly as the READ half was (#7902/#7853:
+            # `_affected_claims`' op-seed query and `_affected_factors`
+            # Batch 2 both widen `c`). This query is the only path by which a
+            # mitigation write reaches the operator's factor — `(m)-[:IMPL]->
+            # (op)` is a neutral link, so `mid` alone admits nothing — and a
+            # `:Point`-only spelling silently drops every operator whose inputs
+            # are non-`:Point` labels: the pass becomes a clean no-op
+            # (`diagnostic='no_factors'`) and a mitigated strength stops moving
+            # belief. Measured on an `IMPL` from a `:Subject` to an `:Object`:
+            # a 0.5 mitigation left the target's posterior at 1.262738 instead
+            # of 1.140587. The operator side stays id-anchored, so the id index
+            # still anchors the traversal. Non-`:Point` ids this returns enter
+            # the in-memory mirror only (`_mark_dirty`'s persist/prune are
+            # `:Point`-anchored — the #7927 gap), which is the same shape
+            # `create_operator(inputs=[…:Subject…])` already has.
             rows = proj.g.query(
-                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
-                "WHERE op.id IN $oids RETURN DISTINCT c.id",
+                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c) "
+                f"WHERE op.id IN $oids AND {epistemic_disjunction('c')} "
+                "RETURN DISTINCT c.id",
                 params={"oids": op_ids},
             ).result_set
             claim_ids = [r[0] for r in rows]
@@ -19930,7 +20158,9 @@ class TortoiseSDK:
             local: {mode, iterations, converged, affected_claims,
                     budget_used, coverage} — converged retained for the
                     dirty-root logic (roots covered by the affected set are
-                    cleared; roots outside stay dirty for a later dream).
+                    cleared; roots outside stay dirty for a later dream —
+                    except a NEUTRAL-LINK root, which no pass can ever cover
+                    and is cleared instead, #7505).
             stale-first: {mode, batches, converged_all, converged,
                     affected_claims, budget_used, coverage} — converged =
                     this pass's window-level convergence (drives the
@@ -20209,8 +20439,11 @@ class TortoiseSDK:
 
         Dirty-root clearing keeps the #395-era retention semantics (roots in
         the affected set are cleared; roots OUTSIDE the dreamed subgraph
-        stay dirty for a later dream; an empty affected set subtracts
-        nothing) — the non-convergence divergence is owned by 903-C5.
+        stay dirty for a later dream) — the non-convergence divergence is
+        owned by 903-C5. The one addition is #7505: a NEUTRAL-LINK root (one
+        that has an ``IMPL|NAND`` edge but forms no EP factor, so no pass can
+        ever put it in an affected set) is cleared too, because retaining it
+        would retain it forever (:meth:`_unsweepable_dirty_roots`).
         """
         anchors = list(self._dirty_roots)
         if not anchors:
@@ -20272,9 +20505,10 @@ class TortoiseSDK:
         mirrors the pass's seed expansion and liveness predicates (#6597), so
         ``affected ⊆ closure``; a budget-bounded pass simply reports < 1.0.
         The dirty-root logic is driven from the window-level ``converged``
-        flag: a converged pass clears the affected roots; a failed pass clears
-        nothing (W4 retention — non-converged regions reselect via the window
-        union).
+        flag: a converged pass clears the affected roots (plus the
+        NEUTRAL-LINK roots no pass could ever reach — #7505, see
+        `_sweep_dirty_roots`); a failed pass clears nothing (W4 retention —
+        non-converged regions reselect via the window union).
         """
         result = dreamer.dream_window(budget=budget, max_hops=max_hops,
                                      warm_start=warm_start)
@@ -20332,8 +20566,9 @@ class TortoiseSDK:
         # P2-review (#1243): a CONVERGED full pass resolves every reachable
         # region — clear the affected roots' retry state so a later failed
         # window pass cannot surface an already-converged region as
-        # stale_unresolved, and prune deleted-point zombies. #1163: the
-        # guarded sweep stands down when the stale-run guard fired (a
+        # stale_unresolved (the shared sweep also clears the NEUTRAL-LINK roots
+        # no pass can reach — #7505), and prune deleted-point zombies. #1163:
+        # the guarded sweep stands down when the stale-run guard fired (a
         # concurrent process re-marked dirty mid-pass).
         if result.get("converged_all", False) and not getattr(
                 dreamer, "_last_flush_skipped", False):
@@ -25285,6 +25520,22 @@ class TortoiseSDK:
         on demand. Each entry gains `related_status` (the neighbor's point
         status — live/superseded/retracted/draft) so the full-fidelity view is
         not blind to terminal state (#689/#898 posture).
+
+        A neighbour is an epistemic node, so the status lookup sweeps all four
+        labels (#6976): with `MATCH (n:Point)` a peer that the #8882 re-typing
+        migration moved to `:Object`/`:Subject`/`:Event` came back with
+        `related_status: ""` — an advisory field that cannot tell "this peer has
+        no lifecycle state" from "this read never looked at its label".
+
+        The value is the PEER LAYER's own lifecycle status, so what it can carry
+        is layer-bound: `:Point` carries `status` (live / superseded /
+        retracted / draft / outdated / archived), `:Object` and `:Subject`
+        carry their own `status` families (which include `deprecated`), and an
+        `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
+        a different vocabulary this field deliberately does not mix in, so an
+        `:Event` peer reports `""`. `""` therefore means "this peer's layer
+        exposes no `status`", and it is now reached by LOOKING at the peer's
+        label rather than by never asking.
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
@@ -25295,11 +25546,15 @@ class TortoiseSDK:
         statuses: dict[str, str] = {}
         if related_ids:
             try:
-                rows = proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
-                    params={"ids": related_ids},
-                    timeout=200,
-                ).result_set
+                rows: list = []
+                for _q in epistemic_label_queries(
+                        "MATCH (n:{label}) WHERE n.id IN $ids "
+                        "RETURN n.id, n.status"):
+                    rows.extend(proj.g.query(
+                        _q,
+                        params={"ids": related_ids},
+                        timeout=200,
+                    ).result_set)
                 statuses = {row[0]: row[1] or "" for row in rows}
             except Exception:
                 pass
@@ -27917,6 +28172,199 @@ class TortoiseSDK:
                 kind, sorted(known_kinds("pointKind")), kind,
             )
 
+    #: #5475: the general kind a writer can always fall back to, per kind
+    #: property — all CORE spellings, i.e. the anti-paralysis half of the
+    #: owner's 2026-10-17 ruling ("an 'other' or more general kind … so we
+    #: don't completely block the writer in paralyzing bureaucracy").
+    #: ``objectKind``/``subjectKind`` = ``other`` (the SDK/REST default and a
+    #: declared canonical object kind); ``eventKind`` = ``occurrence`` and
+    #: ``pointKind`` = ``statement`` (the extractor's own fallbacks);
+    #: ``documentKind`` has no declared general kind, so it names none rather
+    #: than inventing one.
+    _KIND_GENERAL_FALLBACKS: ClassVar[dict[str, str]] = {
+        "objectKind": "other",
+        "subjectKind": "other",
+        "eventKind": "occurrence",
+        "pointKind": "statement",
+    }
+
+    def _refuse_unapproved_kind(self, prop: str, kind) -> None:
+        """#5475: the INPUT constraint — a write may not name an unapproved pack.
+
+        ``pack_state.graph_kind_namespaces`` MINES the graph's data for
+        ``ns:kind`` values and folds those namespaces into the graph's
+        APPROVAL set, so a write door that persisted an unvalidated kind value
+        WIDENED the very set that is supposed to gate it: on a ``dev``-only
+        graph, ``create_object(objectKind='marketing:contentBrief')`` made the
+        whole ``marketing`` pack writable (measured at HEAD on all four SDK
+        entity doors — object / subject / event / entity — plus the point
+        door). The graph then asserts that a pack nobody approved is
+        installed, which is a durable record that is WRONG, not merely a
+        permissive write.
+
+        This is called from the ONE funnel every entity write passes through
+        (``_create_entity``) and from the point door (``create_point``), not
+        per public method: ``create_object``/``create_subject``/``create_event``
+        relay to ``create_entity``, ``create_document`` and ``create_source``
+        reach ``_create_entity`` directly, and the hosted commit door
+        (``hosted_api._execute_commit_writes``) calls ``create_entity`` — so
+        the chokepoint is where the four mandated doors and every sibling door
+        MEET. A per-door check would leave the next door open (that was the
+        shape of the defect: the REST doors were gated and the SDK ones were
+        not).
+
+        REJECT, never silently normalise (#5475 owner ruling, Option A): a
+        rewrite would store a kind the caller did not write and the write
+        would be metered and audited under it. The message therefore states
+        what happened, why, and what to do — including the approved spellings
+        the graph WOULD accept and the general core kind, so the writer is
+        never paralysed (the ruling's other half).
+
+        A bare kind, an empty namespace, a ``core:`` spelling and a graph with
+        no ``:PackInstall`` records are all admitted by
+        ``pack_state.kind_named_packs``/``unapproved_kind_pack`` — this is not
+        a blanket ban on writes. The ``eventKind`` spelling is additionally
+        checked through the #5184 bare-kind attribution, because a BARE event
+        kind that one catalog pack declares is mined back into that pack's
+        namespace (comment 2026-10-13: a fix here must constrain BOTH
+        spellings).
+
+        ⚠️ COST — the gate read is a WHOLE-GRAPH scan
+        (``graph_installed_namespaces``: 8 property scans, ~6 ms at 300 nodes,
+        O(nodes)) and it runs ONCE PER WRITE that names a pack — NOT once per
+        capture: a capture that stores N pack-kinded entities pays N scans
+        (measured ~8–27 ms per call at 5k nodes), which is the price of a
+        correct closure at the write door. It is skipped entirely for a
+        spelling that names none (bare / empty / ``core:``), which is the
+        overwhelming majority of writes (every core kind, and every
+        ``core:Project``-spelled extraction result), so a capture pays nothing
+        for its core kinds. A batch-scoped cache of the resolved set (a
+        data-version signal feeding the plan, the optimization
+        ``pack_state.graph_kind_namespaces`` already names) is a follow-up, not
+        a property this gate may drop: a stale set can only over-refuse.
+        """
+        from .pack_state import _ATTRIBUTABLE_BARE_KIND_KEYS, kind_named_packs
+        if not kind_named_packs(
+                kind, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS):
+            # Cheap pre-check FIRST: a spelling that names no pack cannot widen
+            # the approval set, so the whole-graph read is not paid for it. The
+            # attribution leg is a MEMOIZED catalog read, never a graph read.
+            return
+        exc = self._unapproved_kind_refusal(
+            prop, kind, _installed_namespaces_for_gate(self))
+        if exc is not None:
+            raise exc
+
+    def _unapproved_kind_refusal(self, prop: str, kind, approved):
+        """The ``UnapprovedKindNamespace`` covering this write, or ``None``.
+
+        Split out of ``_refuse_unapproved_kind`` so a caller that has ALREADY
+        read the approval set can reuse the decision AND its Option-A message
+        without paying a second whole-graph scan — the hosted commit door
+        resolves the set for Layer-1 before its write phase, and pre-validates
+        the payload's entity kinds with it (#5475 review: a refusal raised
+        mid-write leaves the commit `partial`, so it must be decided before the
+        first write).
+
+        Pure with respect to the graph: it decides from ``approved`` only.
+        """
+        from .pack_state import (
+            _ATTRIBUTABLE_BARE_KIND_KEYS,
+            approved_kind_alternatives,
+            unapproved_kind_pack,
+        )
+        # The attribution flag is DERIVED from pack_state's own declaration of
+        # which keys attribute a BARE value back to a pack (today:
+        # ``eventKind``), never re-spelled here: a second copy would stop
+        # constraining a key the mining leg starts attributing — the same
+        # widening under a new name.
+        pack_ns = unapproved_kind_pack(
+            kind, approved, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS)
+        if pack_ns is None:
+            return None
+        approved_ns = ", ".join(sorted(approved or ())) or "none"
+        alternatives = approved_kind_alternatives(kind, approved, prop=prop)
+        # The remedy is a LIST of what the caller can do (the owner ruling's
+        # third element), so the punctuation cannot drift as clauses are added.
+        # ⛔ The wording ALSO has to survive the MCP layer's error scrubber
+        # (``mcp_server._scrub_error``): its rule is ``(host=|at |to )[\w.-]+``,
+        # which -- because the alternation has no word boundary -- bites any
+        # ``at ``/``to `` SUBSTRING, i.e. "Wh**at **next" and "th**at **pack".
+        # This message crosses that boundary on every MCP tool call, and a
+        # scrubbed remedy is the one half of Option A a writer acts on. Hence
+        # "Next steps:"/"install the pack"/"for this graph", never
+        # "What next"/"that pack"/"to this graph"/"What to do". The rule is
+        # mechanical, so it is PINNED: the door tests assert the raw message is
+        # a fixed point of ``_scrub_error``.
+        remedies = [
+            "write a kind from the core vocabulary, or from a pack this graph "
+            f"HAS approved ({approved_ns})",
+        ]
+        if alternatives:
+            more = "".join(f" (or {alt!r})" for alt in alternatives[1:])
+            remedies.append(
+                "the same kind IS declared by an approved pack — write "
+                f"{alternatives[0]!r}{more}")
+        remedies.append(
+            f"with user approval, add the {pack_ns!r} ontology pack for this "
+            "graph (PUT /v1/graphs/{graph_id}/packs)")
+        what_next = "; ".join(remedies)
+        general = self._KIND_GENERAL_FALLBACKS.get(prop)
+        fallback = (
+            f" A kind you cannot classify is never blocked: the bare general "
+            f"kind {general!r} names no pack and always writes."
+            if general else
+            " A kind you cannot classify is never blocked: a bare "
+            "(un-namespaced) kind names no pack and always writes.")
+        return UnapprovedKindNamespace(
+            f"refused {prop}={kind!r}: it names the ontology pack namespace "
+            f"{pack_ns!r}, which this graph has not approved — the write was "
+            "NOT stored. Why: kinds are namespaced by ontology pack, and this "
+            "graph's approved set is mined from the kind values it already "
+            "holds, so a write naming an unapproved namespace would install "
+            "the pack by writing it — any caller could grant itself any "
+            "pack, and the namespace/kind vocabulary would balloon until it "
+            f"no longer names anything. Next steps: pick one — {what_next}. "
+            f"{fallback.strip()}",
+            prop=prop, kind=kind if isinstance(kind, str) else str(kind),
+            namespace=pack_ns, installed=approved)
+
+    def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
+        """Run the #5475 gate over EVERY kind property a write is carrying.
+
+        The five public doors do not hand their kind in one shape: the entity
+        aliases use ``objectKind``/``subjectKind``/``eventKind``, the document
+        door ``documentKind``, ``create_source`` ``sourceKind``, ``create_point``
+        its positional ``kind`` PLUS a free-form props passthrough that accepts
+        any of the other mined key names. Every one of those values is persisted
+        on the node and mined back into the approval set by
+        ``pack_state.graph_kind_namespaces``, so the gate reads the same key set
+        it mines (``_KIND_PROP_KEYS``) rather than a per-door list — a door that
+        let one through would re-open the widening under a name the check did
+        not know.
+
+        ``uses[]`` is checked here too: the Event fold (``projection._upsert_event``)
+        MERGEs an ``:Object`` stub per use item with ``objectKind = item['kind']``
+        — a kind property written by a door that never names it as one (measured:
+        ``create_event(..., uses=[{'name': 'x', 'kind': 'marketing:campaign'}])``
+        widened a ``dev``-only graph before this check existed).
+        """
+        from .pack_state import _KIND_PROP_KEYS as _gated_kind_props
+        for kind_prop in _gated_kind_props:
+            if kind_prop in props:
+                self._refuse_unapproved_kind(kind_prop, props.get(kind_prop))
+        uses = props.get("uses")
+        if isinstance(uses, dict):
+            uses = [uses]
+        elif isinstance(uses, str):
+            uses = []  # a legacy bare-string use writes objectKind='other'
+        if isinstance(uses, (list, tuple)):
+            for item in uses:
+                if isinstance(item, dict):
+                    # The fold's own default is 'other' (a bare core kind), so
+                    # an absent 'kind' is the same write it will perform.
+                    self._refuse_unapproved_kind("objectKind", item.get("kind"))
+
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
@@ -27953,6 +28401,17 @@ class TortoiseSDK:
         interleave — could swap each other's captured pre-write state and lose
         a real version transition.
         """
+        # ── #5475: the approved-pack gate — ONE site for every ENTITY write ──
+        # `create_entity` (subject/object/event/document) relays here,
+        # `create_document` and `create_source` reach this funnel directly, and
+        # the hosted commit door calls `create_entity` — so this is where all
+        # of them MEET. The check runs on exactly the properties
+        # `pack_state.graph_kind_namespaces` MINES the approval set from
+        # (`_KIND_PROP_KEYS`) plus the Event fold's `uses[].kind` leg, because
+        # a gate that skipped one of them would leave the widening leg it
+        # closes open under another name; and it runs BEFORE any write, so a
+        # refusal leaves the graph untouched.
+        self._refuse_unapproved_kinds_in_props(props)
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the

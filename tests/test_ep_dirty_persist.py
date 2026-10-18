@@ -176,6 +176,68 @@ def test_converged_dream_sweeps_graph_flags():
             sdk.close()
 
 
+def test_mitigation_write_leaves_no_permanent_dirty_root():
+    """#7505: a mitigation write must not leave an UNSWEEPABLE dirty root.
+
+    `mitigate_operator` marks the mitigation point (and, before the fix, the
+    operator it damps). `_sweep_dirty_roots` has ONE clearing rule — subtract
+    the run's `affected` set — and #6599 correctly keeps a mitigation OUT of
+    that set: its only edge is `(m)-[:IMPL]->(op)`, a reverse-only IMPL that
+    forms no factor (#5566 neutral-link rule). So neither id was ever
+    cleared: `_dirty_roots` grew one permanent entry per mitigation,
+    `dream_health_check()`'s `stale_backlog` never drained, every
+    mitigation pinned `_auto_dream_mode()` to 'local', and the mitigation's
+    persisted `ep_dirty` survived every pass.
+
+    Red on origin/main and green with the fix; the confidence delta is
+    asserted too, so the fix cannot "clear the flag" by dropping the
+    propagation the write exists for.
+    """
+    with _db() as db:
+        sdk = _open(db)
+        try:
+            src = sdk.create_point("statement", "src claim", dedup=False,
+                                   status="live")["id"]
+            clm = sdk.create_point("statement", "clm claim", dedup=False,
+                                   status="live")["id"]
+            sdk.set_point_baseline(src, 3.0, 1.0)
+            sdk.set_point_baseline(clm, 1.0, 1.0)
+            op = sdk.create_operator("IMPL", src, [clm])["id"]
+            assert sdk.compute_confidence()["converged"]
+            conf_before = sdk.get_confidence(clm)["mean"]
+            assert not _ep_dirty_ids(sdk), "baseline converged state is clean"
+
+            mid = sdk.mitigate_operator(
+                op, "weaker than it looks", strength=0.5)["id"]
+            # The mitigation is a factor participant's NEIGHBOUR, so the write
+            # legitimately dirties the operator's inputs — that is the
+            # propagation. What must NOT survive is a flag nobody can clear.
+            assert mid in _ep_dirty_ids(sdk), "the write marks the mitigation"
+
+            assert sdk.compute_confidence()["converged"]
+
+            # No belief corruption: the strength still reaches EP's factor.
+            assert sdk.get_confidence(clm)["mean"] < conf_before, (
+                "the mitigation must still dampen the operator's factor")
+
+            assert mid not in _ep_dirty_ids(sdk), (
+                "a mitigation must not keep a persisted ep_dirty flag after a "
+                "converged pass — no pass can ever clear it (#7505)")
+            assert mid not in sdk._dirty_roots
+            assert op not in sdk._dirty_roots, (
+                "the mitigated operator is not a factor participant: as a "
+                "dirty root it can never be swept (#7505)")
+            assert sdk.dream_health_check()["stale_backlog"] == 0, (
+                "the stale backlog must drain — a permanently non-empty one "
+                "is what pins _auto_dream_mode() to 'local'")
+            # The observable that was unreachable at head: with the backlog
+            # drained, the next no-arg pass has nothing left to do.
+            assert sdk.compute_confidence().get(
+                "diagnostic") == "no_dirty_roots"
+        finally:
+            sdk.close()
+
+
 # ── ep_version guard: stale run cannot clobber newer writes ──────
 
 

@@ -1987,9 +1987,10 @@ class _EntityHandlers:
         # #331 (review r4): only embed real content — an empty string
         # produced a junk vector in the HNSW index.
         elif not op and p.get("content"):
+        # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
-                from tortoise.embeddings import encode_for_store
-                embedding = encode_for_store(
+                from tortoise.embeddings import encode_for_row
+                embedding = encode_for_row(
                     p.get("content", ""), self.required_embedding_dim)
             except Exception:
                 pass
@@ -3789,10 +3790,11 @@ class _EntityHandlers:
             _log_identity_skip("Subject", sid, "id (MERGE key)")
             return
         # Compute embedding for Subject name (#7845)
+        # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
         try:
-            from tortoise.embeddings import encode_for_store
-            embedding = encode_for_store(
+            from tortoise.embeddings import encode_for_row
+            embedding = encode_for_row(
                 name, self.required_embedding_dim)
         except Exception:
             pass
@@ -3940,10 +3942,11 @@ class _EntityHandlers:
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
         # Compute embedding from name (#7845)
+        # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
         try:
-            from tortoise.embeddings import encode_for_store
-            embedding = encode_for_store(
+            from tortoise.embeddings import encode_for_row
+            embedding = encode_for_row(
                 name, self.required_embedding_dim)
         except Exception:
             pass
@@ -4220,9 +4223,10 @@ class _EntityHandlers:
                 ev.get("content", ""),
             ]))
             if doc_content.strip():
+                # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
-                    from tortoise.embeddings import encode_for_store
-                    embedding = encode_for_store(
+                    from tortoise.embeddings import encode_for_row
+                    embedding = encode_for_row(
                         doc_content, self.required_embedding_dim)
                 except Exception:
                     pass
@@ -4507,9 +4511,10 @@ class _EntityHandlers:
                 inner.get("object", ""),
             ]))
             if event_content.strip():
+                # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
-                    from tortoise.embeddings import encode_for_store
-                    embedding = encode_for_store(
+                    from tortoise.embeddings import encode_for_row
+                    embedding = encode_for_row(
                         event_content, self.required_embedding_dim)
                 except Exception:
                     pass

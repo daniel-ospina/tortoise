@@ -266,7 +266,7 @@ def test_a10_object_object_direct_edge_survives_rebuild(a10):
     of :Point/:Subject/:Object/:Event, so the replay must resolve each
     endpoint by an id-anchored per-label sweep — a :Point-hardcoded fold would
     silently drop every Object↔Object edge (the defect the repoint leg's
-    direct branch still carries)."""
+    direct branch carried until #8622 widened it)."""
     _, events, sdk = a10
     oa = sdk.create_object("Widget A", "product")["id"]
     ob = sdk.create_object("Widget B", "product")["id"]
@@ -279,6 +279,145 @@ def test_a10_object_object_direct_edge_survives_rebuild(a10):
         "created-fold is not label-agnostic (#7902)"
     )
     assert _direct_edge(sdk, oa, ob)[3] == "related-to"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #8622: the DirectEdgeRepoint TRANSFER is label-agnostic (#7902)
+# ══════════════════════════════════════════════════════════════════════
+# A direct IMPL/NAND may connect ANY two of :Point/:Subject/:Object/:Event
+# (owner ruling #7813, landed for the write path by #7902). #8499's follow-up
+# made the DirectEdgeCreated CREATION fold label-agnostic; the supersede
+# transfer pair — the LIVE 2a-DIRECT leg (sdk.py) and its pass-2b REPLAY
+# consumer (projection/__init__.py) — still hardcoded :Point on BOTH
+# endpoints. Measured on that tree, a Point→Object direct edge was destroyed
+# by ``supersede_point`` itself (the transfer MERGE matched zero rows, then
+# the old edge was deleted) and the replay of its descriptor dropped it too,
+# so the edge was gone from BOTH graphs — not (as first reported) live-only.
+# Both legs are widened here, so live and replay agree on the transferred
+# edge, which is the only state that keeps the durability promise.
+
+
+def _edge_shape(sdk, a, b, rel="IMPL"):
+    """(endpoint labels, attrs) of the direct edge a→b, or None."""
+    rows = sdk._get_proj().g.query(
+        f"MATCH (x {{id:$a}})-[r:{rel}]->(y {{id:$b}}) "
+        "RETURN labels(x), labels(y), r.direction, r.confidence, r.weight, "
+        "r.label, r.batch_id",
+        params={"a": a, "b": b}).result_set
+    return list(rows[0]) if rows else None
+
+
+def _incident_direct_count(sdk, pid):
+    """Direct IMPL/NAND edges incident to ``pid`` in EITHER direction."""
+    g = sdk._get_proj().g
+    out = _count(g, "MATCH (x {id:$id})-[r:IMPL|NAND]->() "
+                    "RETURN count(r)", {"id": pid})
+    inn = _count(g, "MATCH ()-[r:IMPL|NAND]->(x {id:$id}) "
+                    "RETURN count(r)", {"id": pid})
+    return out + inn
+
+
+@pytest.mark.parametrize("rel,direction,make_endpoint", [
+    # (old)-[:IMPL]->(object)
+    ("IMPL", "out", lambda sdk: sdk.create_object("Widget", "product")["id"]),
+    # (object)-[:NAND]->(old)
+    ("NAND", "in", lambda sdk: sdk.create_object("Widget", "product")["id"]),
+    # (subject)-[:IMPL]->(old) — the OTHER non-Point carrier
+    ("IMPL", "in", lambda sdk: sdk.create_subject("Acme")["id"]),
+], ids=["point-to-object", "object-to-point", "subject-to-point"])
+def test_a10_transferred_direct_edge_with_non_point_endpoint(
+        a10, rel, direction, make_endpoint):
+    """#8622: the supersede transfer moves a non-Point-ended direct edge to the
+    successor LIVE, and the rebuild lands the SAME edge with the SAME attrs.
+
+    Three assertions, in the order the defect was misfiled:
+      1. LIVE — the edge exists at the successor (it was silently DELETED by
+         the transfer, not merely lost on replay);
+      2. the superseded prior holds zero incident direct edges (E2E-11.6);
+      3. REPLAY — ``rebuild_all`` reproduces the edge and its attributes,
+         i.e. live == rebuilt (the #330 divergence class this issue is about).
+    """
+    _, events, sdk = a10
+    old = sdk.create_point("statement", "The widget ships.")["id"]
+    other = make_endpoint(sdk)
+    if direction == "out":
+        sdk.create_direct_edge(rel, old, other, confidence=0.6, weight=0.25,
+                               label="related-to",
+                               batch_id="01BATCH0000000000000000002")
+    else:
+        sdk.create_direct_edge(rel, other, old, confidence=0.6, weight=0.25,
+                               label="related-to",
+                               batch_id="01BATCH0000000000000000002")
+    successor = sdk.create_point("statement", "The widget ships today.")["id"]
+
+    if direction == "out":
+        assert _edge_shape(sdk, successor, other, rel) is None  # precondition
+    else:
+        assert _edge_shape(sdk, other, successor, rel) is None  # precondition
+
+    sdk.supersede_point(old, successor)
+
+    # 1. LIVE transfer — the defect destroyed the edge here, before any replay.
+    if direction == "out":
+        live_after = _edge_shape(sdk, successor, other, rel)
+    else:
+        live_after = _edge_shape(sdk, other, successor, rel)
+    assert live_after is not None, (
+        "supersede_point deleted the direct edge instead of transferring it — "
+        "the live 2a-DIRECT transfer MERGE is not label-agnostic (#8622)"
+    )
+    assert live_after[5] == "related-to" and live_after[3] == 0.6, (
+        f"the transfer dropped the edge attrs: {live_after}"
+    )
+    # 2. Zero incident direct edges at the superseded prior (E2E-11.6).
+    assert _incident_direct_count(sdk, old) == 0, (
+        "a direct edge stayed incident to the superseded point"
+    )
+
+    # 3. REPLAY — same edge, same attrs, exactly one (no parallel edge).
+    _rebuild(sdk, events)
+    if direction == "out":
+        rebuilt = _edge_shape(sdk, successor, other, rel)
+        count = _direct_edge_count(sdk, successor, other, rel)
+    else:
+        rebuilt = _edge_shape(sdk, other, successor, rel)
+        count = _direct_edge_count(sdk, other, successor, rel)
+    assert count == 1, (
+        f"expected exactly one transferred edge post-rebuild, got {count}"
+    )
+    assert rebuilt == live_after, (
+        "the rebuilt graph diverged from live on the transferred non-Point-"
+        f"ended direct edge: rebuilt={rebuilt} live={live_after}"
+    )
+    assert _incident_direct_count(sdk, old) == 0, (
+        "the rebuild re-materialised a direct edge at the superseded point"
+    )
+
+
+def test_a10_transferred_non_point_edge_follows_a_supersede_chain(a10):
+    """#8622 chain leg: the label sweep must resolve each endpoint in its FINAL
+    form, so a two-step supersede still lands the Object-ended edge on the last
+    successor (mirroring ``test_direct_edge_chain_resolves_to_final_successor``
+    for the Point→Point case)."""
+    _, events, sdk = a10
+    old = sdk.create_point("statement", "The widget ships.")["id"]
+    obj = sdk.create_object("Widget", "product")["id"]
+    sdk.create_direct_edge("IMPL", old, obj, label="related-to")
+    mid = sdk.create_point("statement", "The widget ships (v2).")["id"]
+    final = sdk.create_point("statement", "The widget ships (v3).")["id"]
+    sdk.supersede_point(old, mid)
+    sdk.supersede_point(mid, final)
+
+    _rebuild(sdk, events)
+
+    assert _direct_edge_count(sdk, final, obj) == 1, (
+        "the Object-ended direct edge did not arrive at the FINAL successor"
+    )
+    assert _direct_edge_count(sdk, mid, obj) == 0, (
+        "the edge was stranded at the intermediate successor"
+    )
+    assert _incident_direct_count(sdk, old) == 0
+    assert _incident_direct_count(sdk, mid) == 0
 
 
 def test_a10_created_then_superseded_does_not_double_the_edge(a10):
