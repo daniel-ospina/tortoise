@@ -18881,7 +18881,15 @@ class TortoiseSDK:
         try:
             results = self.tortoise_fts_query(
                 query_text, entity_type="point", limit=200,
-                _record_reads=False)  # #7983: a review pool, not a caller read
+                _record_reads=False,  # #7983: a review pool, not a caller read
+                # #8487 (review round 6, P2): this pool is consumed as a
+                # MEMBERSHIP filter — both ``review_add`` (orders the
+                # suggestions by SIMILARITY itself) and ``review_prune``
+                # discard the read order — so the only thing the valid-time
+                # selection could still do here is move which ids survive the
+                # ``limit`` cut: an unmeasured composition change on a product
+                # surface. Opt out, like ``recall_state``.
+                _valid_time_rerank=False)
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -22781,7 +22789,12 @@ class TortoiseSDK:
             # #7983: a CANDIDATE pool — the fallback's rows are re-scored, some
             # dropped by the max_rrf gate and the rest reranked below, so what
             # the caller receives is recorded at the return instead.
-            fts_results = self.tortoise_fts_query(q, limit=limit, _record_reads=False)
+            fts_results = self.tortoise_fts_query(
+                q, limit=limit, _record_reads=False,
+                # #8487: the fallback's rows are re-scored into a confidence
+                # band below, so this is another candidate pool whose order the
+                # caller re-owns.
+                _valid_time_rerank=False)
             results = []
             max_rrf = max(
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
@@ -22909,9 +22922,14 @@ class TortoiseSDK:
             # Fetch a wider candidate pool than `limit` (review P3): the gate
             # below filters post-retrieval, so a relevant hit ranked just past
             # the limit would otherwise be invisible at small limits.
+            # #8487: a CANDIDATE pool — ``_issue_insight_rank(...)[:limit]``
+            # re-owns the order below, so the SDK-side validity selection could
+            # only move which ids survive that cut. Same shape as
+            # recall_state's opt-out.
             semantic_hits = self.tortoise_fts_query(
                 text, entity_type="point", limit=max(limit * 5, 20),
                 _record_reads=False,  # #7983: a candidate pool
+                _valid_time_rerank=False,  # #8487: caller re-owns the order
             )
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
@@ -23319,6 +23337,53 @@ class TortoiseSDK:
         # up to 3-30k keys read and biases `f` HIGH — the direction that removes
         # the saving the instrument measures. Default True = product reads.
         _record_reads: bool = True,
+        # #8487: PRIVATE — the read-path VALID-TIME selection (valid time as a
+        # selection signal, not just decoration). Default True = the product
+        # behaviour below. Passed False by a caller that RE-OWNS the order of
+        # these rows downstream: its ordering is what the caller sees, so the
+        # only thing this selection can still do is move which ids survive the
+        # ``limit`` cut — an unmeasured composition change. The lanes that do
+        # that:
+        #   * ``tools/longmem_eval/retrieve.py`` (the evals' last order-owner);
+        #   * ``recall_state`` / ``recall_gaps`` (StateRanker / GapsRanker
+        #     re-sort the whole pool before the cut) and ``issue_insight`` /
+        #     ``suggest_entry_points`` (``_issue_insight_rank`` / an RRF-derived
+        #     confidence band, same shape) — each passes False at its own call
+        #     site with the reason recorded there;
+        #   * ``_review_pool`` / ``_resolve_subgraph_seed`` (#8487 review round
+        #     6, P2) — a review pool is consumed as a MEMBERSHIP filter and a
+        #     subgraph seed set as an expansion START set, so neither keeps the
+        #     order; only the pre-cut composition of their ids could move, which
+        #     is an unmeasured change to two product surfaces;
+        #   * ``tools/fusion_formula_ab.py`` / ``tools/ask_pool_admission_probe``
+        #     (a controlled measurement that must stay comparable to its own
+        #     recorded numbers);
+        #   * ``tortoise/extractor_v2.py::_fts_rows`` (#8487 review round 7, P2)
+        #     — S3's capture-time prior leg: ``search_graph`` accumulates the
+        #     rows into id-keyed dicts (order discarded) and link-before-create
+        #     / supersession resolution consumes them as a SET, at ``limit=3``.
+        #     A pre-cut composition change there is unmeasured and lands on the
+        #     WRITE path, so it opts out at its own call site.
+        # The ASK lane and its mirrors (``tools/ask_recall_bench.py``,
+        # ``tools/gen_ask_transcripts.py``) keep it ON: they measure/replay the
+        # shipped reader, so they must include the selection.
+        #
+        # OVERRIDES (#1745, recorded 2026-10-18 on #8487): this retrieval lever
+        # ships DEFAULT ON, where #1745's fail-safe convention keeps a new
+        # lever OFF until a measured delta adopts it (the convention
+        # ``entity_key_expansion`` and ``time_aware`` above follow). #8487 is
+        # OWNER-filed and requires the read path itself to consume valid time,
+        # so a default-OFF lever would ship the issue unimplemented. The delta
+        # is on the record rather than assumed: the shipped ask lane's context
+        # order moved on merge —
+        # ``tests/fixtures/ask_llm_transcripts/all-superseded-stale-evidence.json``
+        # was regenerated (the current session block now precedes the
+        # superseded one; ``user_message_hash`` c14618… → 495593…), and the
+        # three-claim measurement on the shipped read path is in the #8487
+        # plan-doc amendment (D3). The record lives here, in that plan doc, and
+        # on #8487 itself, so the next lane reading the #1745 convention finds
+        # why this lever is the exception.
+        _valid_time_rerank: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -23341,9 +23406,13 @@ class TortoiseSDK:
         # C6 (#2520, #2513): time-aware query expansion — the query-side
         # date anchor. ``time_aware`` gates the C6 branch; ``query_date``
         # is the question's date (YYYY-MM-DD, or a timestamp truncated to
-        # it). Default OFF (the #1745 fail-safe decision, matching
-        # ``entity_key_expansion``): the branch is never entered and the
-        # output is byte-identical.
+        # it). TWO consumers, and only one of them is behind ``time_aware``:
+        # with ``time_aware=False`` the C6 dense-anchor branch is never
+        # entered, but ``query_date`` is STILL the reference instant of the
+        # #8487 rank-time valid-time selection (§5e), so passing it can change
+        # the returned order without ``time_aware`` (the ask lane does exactly
+        # that). ``query_date=None`` leaves both consumers on their default
+        # (the wall-clock date for §5e) and is the byte-identical path.
         query_date: str | None = None,
         time_aware: bool = False,
     ) -> list[dict]:
@@ -23366,8 +23435,17 @@ class TortoiseSDK:
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
         (the product's DEFAULT_POOL_SIZE = 120, #1947/G2). pool_size/floor
         only raise the candidate window (str_limit); the RETURNED limit is
-        unchanged — truncation at result_ids[:limit] precedes EP
-        decoration, so a deeper pool has zero decoration cost. pool_size
+        unchanged — truncation at result_ids[:limit] precedes EP decoration,
+        so a deeper pool has zero cost for the RETURNED page's EP decoration.
+        ONE exception (#8487 review round 7, P3): a Point read with temporal
+        intent runs the valid-time SELECTION before that cut, so it reads
+        epistemic state over the pre-cut pool (up to pool_size) — one wider
+        ``OPTIONAL MATCH``-joined state read, capped by
+        ``search_engine._DECORATION_TIMEOUT_MS`` (200 ms). That read fails
+        OPEN: past the budget the selection is skipped and the leg records
+        ``reason="state_read_incomplete"`` with ``degraded=False``, so a very
+        deep pool on a temporal query can silently DECLINE the selection
+        rather than fail the read. pool_size
         is an EXACT override: a value below limit*2 LOWERS the pool to
         pool_size (the env floor only raises — max(limit*2, floor)).
         #1348. Resolution is the product's
@@ -23517,11 +23595,48 @@ class TortoiseSDK:
             structural legs keep the ORIGINAL query (date tokens would
             dilute the sparse OR-union). A DATE-PINNED query ("where did I
             live in 2024?") is deliberately NOT anchored and gets no fresh
-            bias (the invert-recency guard). Rank-time prefer-latest is a
-            caller concern (the eval applies it on its final pool — see
-            ``tools.longmem_eval.retrieve``): a stable reorder layered here
-            would be discarded by the eval's RRF re-sort. Default
-            ``time_aware=False`` → byte-identical, zero extra work.
+            bias (the invert-recency guard). Default ``time_aware=False`` →
+            byte-identical, zero extra work.
+
+            RANK-TIME VALID-TIME SELECTION (#8487) is NOT behind
+            ``time_aware``: a PREFER-LATEST query is answered from the
+            currently-valid versions whatever the anchor arm is set to.
+            Before the #8487 wiring the ranker was blind to validity — a
+            measured three-claim knowledge-update graph returned the ENDED
+            claim (``validTo`` past, ``status='live'``) and a
+            NOT-YET-EFFECTIVE claim inside the page as current facts, because
+            nothing in the read path consumed the window. On the
+            pre-truncation fused candidate set (the same seam as
+            ``exclude_status``, so ``limit`` applies AFTER the selection) the
+            page is stably reordered live-first via
+            ``tortoise.time_aware.prefer_latest_ids``: nothing is filtered
+            (a historical read keeps its evidence in the fused pool), order
+            within each group is stable, undated entries are never demoted, and
+            an all-stale pool is returned untouched. Pool membership is what is
+            preserved — ``limit`` still applies after the selection, so a
+            demoted row leaves the RETURNED PAGE when the page is already full
+            of current rows. The
+            reorder fires only when the fused page actually carries a
+            non-current entry, so an undated corpus reads byte-identically.
+            The decision is recorded on ``leg_trace`` as a ``valid_time``
+            entry (reason + demoted count) — that entry plus each hit's own
+            window (``valid_from``/``valid_to``/``end_state``/
+            ``superseded_by``) is the audit trail for "which version was
+            selected, and why". An UNUSABLE state read (short map, a raised
+            read, or the selection raising) records
+            ``reason="state_read_incomplete"`` / ``"state_read_failed"`` /
+            ``"selection_failed"`` with ``degraded=False``: the entry's
+            ``degraded`` flag is the memory layer's impairment signal, which
+            ``ask_lane``/``read_status`` fold into the caller-facing
+            degradation status, so an ORDERING impairment that step 7.6's
+            page-width re-read fully recovers must not claim it. When that
+            page-width read ITSELF comes back empty for a non-empty page, an
+            ``epistemic_state`` entry with ``degraded=True`` is recorded — a
+            read that did not run is a degradation, an order that could not be
+            improved is not.
+            ``TORTOISE_VALID_TIME_RERANK=0`` is the
+            operator kill switch; ``_valid_time_rerank=False`` is the
+            in-process opt-out.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -24209,6 +24324,151 @@ class TortoiseSDK:
                 _logger.warning(
                     "turn-echo exclusion failed — pass-through", exc_info=True)
 
+        # 5e. (#8487) VALID-TIME SELECTION — prefer the CURRENTLY-VALID version.
+        #     Runs at the SAME pre-truncation seam as ``exclude_status`` (#898)
+        #     so ``limit`` counts already-selected candidates: a stale claim
+        #     demoted AFTER the cut has already consumed the page slot a live
+        #     one deserved. Measured defect, re-measured 2026-10-18: a
+        #     three-claim knowledge-update graph (ended / current / not-yet-
+        #     effective) came back from this method in pure relevance order with
+        #     the ended claim INSIDE the page as a current fact (rank 0 in one
+        #     read shape, rank 1 in another), and on a present-tense query the
+        #     2099-dated claim ranked first. Nothing filtered it: a claim can be
+        #     ``live`` and carry a window (`hosted_api`'s create arm writes
+        #     ``validFrom`` on live points, `mining` stamps it from the session
+        #     date), so terminal-STATUS exclusion is orthogonal to valid TIME.
+        #     The mechanism is ``time_aware.prefer_latest_order``'s rules — #2520
+        #     wrote it and the eval lane applies it to its FINAL pool, but the
+        #     product read path never did; ``prefer_latest_ids`` is the id-level
+        #     adapter over the state map the decoration reads anyway.
+        #     Never a FILTER: membership of the fused pool is preserved and an
+        #     all-stale pool is left alone. Nothing is exempted from the
+        #     ``limit`` cut either, so a demoted row keeps its pool membership
+        #     but leaves the RETURNED PAGE when a full page of current rows
+        #     precedes it (the ask lane reads with ``include_terminal=True`` for
+        #     the ``[SUPERSEDED BY]`` marker, so it sees the marker on the rows
+        #     that survive — not a promise that every demoted row is returned).
+        #     Cost: one intent scan (two bounded regexes) evaluated BEFORE any
+        #     graph read, so a query with no PREFER-LATEST intent pays no state
+        #     read here at all; when the intent is present the read is
+        #     POOL-width (the pre-truncation set — up to ``pool_size``, default
+        #     120, not the page's ``limit``) because the selection must happen
+        #     before the cut, and that read is reused by step 7.6 when it is
+        #     complete (otherwise 7.6 does its own page-width read — the
+        #     pre-#8487 behaviour).
+        _valid_time_state: dict[str, dict] | None = None
+        if (query and _valid_time_rerank and result_ids
+                and entity_type == "point" and order_by == "relevance"):
+            from . import time_aware as _valid_time_rules
+            if _valid_time_rules.prefer_latest_enabled():
+                # INTENT FIRST (#8487 review P2). ``prefer_latest_ids`` gates on
+                # the intent internally, i.e. AFTER the state read, so the read
+                # used to fire on every topical query and be discarded. Two
+                # bounded regexes here decide whether the pool-width read is
+                # worth issuing at all.
+                _vt_intent = _valid_time_rules.detect_temporal_intent(query)
+                if _vt_intent.kind != _valid_time_rules.PREFER_LATEST:
+                    if status_trace is not None:
+                        status_trace.append(_trace_entry(
+                            "valid_time", ran=True, degraded=False,
+                            reason="no-prefer-latest-intent", count=0))
+                else:
+                    _vt_covered = False
+                    # The audit REASON for an unusable map, split by WHAT
+                    # failed (#8487 review round 5, P3): "state_read_failed"
+                    # when the state read raised, "state_read_incomplete" when
+                    # it came back short, and the selection's OWN
+                    # "selection_failed" when ``prefer_latest_ids`` raised. One
+                    # shared handler could not tell the first from the last.
+                    _vt_reason = "state_read_incomplete"
+                    _vt_stats = {"reason": "state_read_incomplete",
+                                 "demoted": []}
+                    try:
+                        _vt_state = fetch_point_epistemic_state(
+                            graph, result_ids)
+                    except Exception:
+                        # Belt on top of braces: the helper swallows its own
+                        # failures, so this is reachable only if the seam
+                        # changes — and then the leg must say WHICH read died.
+                        _logger.warning(
+                            "valid-time state read failed — pass-through",
+                            exc_info=True)
+                        _vt_state = {}
+                        _vt_reason = "state_read_failed"
+                    # COMPLETENESS, not presence (#8487 review P1).
+                    # ``fetch_point_epistemic_state`` NEVER raises — it
+                    # swallows every failure and returns what it has (in
+                    # practice ``{}``) — and ``{} is not None``, so
+                    # caching on ``is not None`` let a failed read stand in
+                    # for the page's state: step 7.6 skipped its own read
+                    # and every hit lost ``status`` / ``superseded_by`` /
+                    # the validity window, i.e. a superseded claim was
+                    # served WITHOUT its ``[SUPERSEDED BY]`` marker while
+                    # the trace below still reported a clean selection.
+                    # Publish the map for reuse only when it covers every
+                    # id it was asked for.
+                    _vt_covered = bool(_vt_state) and all(
+                        pid in _vt_state for pid in result_ids)
+                    if _vt_state:
+                        try:
+                            result_ids, _vt_stats = (
+                                _valid_time_rules.prefer_latest_ids(
+                                    result_ids, _vt_state, query=query,
+                                    question_date=(
+                                        _valid_time_rules.resolve_question_date(
+                                            query_date))))
+                            _valid_time_state = (
+                                _vt_state if _vt_covered else None)
+                        except Exception:
+                            # Fail-open, like every other decoration on this
+                            # path: a validity read must never fail a read.
+                            _logger.warning(
+                                "valid-time selection failed — pass-through",
+                                exc_info=True)
+                            _valid_time_state = None
+                            _vt_covered = False
+                            _vt_stats = {"reason": "selection_failed",
+                                         "demoted": []}
+                            _vt_reason = "selection_failed"
+                    if status_trace is not None:
+                        # TWO different facts, TWO different fields (#8487
+                        # review round 6, P2). ``count`` is what the selection
+                        # DID — and it is the same question whether or not the
+                        # map was complete enough to reuse at step 7.6: a
+                        # SHORT (non-empty) map still demotes every id it has
+                        # state for, so a `count=0` there would report "no
+                        # selection" on a read whose page order demonstrably
+                        # moved, and would discard ``demoted`` — the audit
+                        # trail this leg exists for (#8487 scope 3).
+                        # ``reason`` is WHY the leg ended where it did:
+                        # the selection's OWN reason when the map was complete
+                        # (``latest-first`` / ``already-latest-first`` /
+                        # ``no-stale-entries``), else the impairment that made
+                        # it unusable and which step 7.6's own page-width read
+                        # had to cover — ``state_read_incomplete`` (short map),
+                        # ``state_read_failed`` (it raised) or
+                        # ``selection_failed`` (``prefer_latest_ids`` raised).
+                        #
+                        # ``degraded`` is DELIBERATELY False (#8487 review
+                        # P1). In a leg trace that flag is not audit-only:
+                        # ``ask_lane`` folds ANY degraded leg into the
+                        # response's ``retrieval_degraded`` and
+                        # ``read_status.classify_leg_trace`` turns it into
+                        # STATUS_DEGRADED — and every other ``degraded=True``
+                        # entry in this trace means "a retrieval leg did not
+                        # run" (vector skipped, TF-IDF produced the rows).
+                        # Here nothing was degraded: the hits are complete and
+                        # step 7.6 re-reads the page state, so the hits keep
+                        # ``status`` / ``superseded_by`` / the window. Claiming
+                        # a degradation would redden a healthy read — for
+                        # temporal intent only, which no caller could
+                        # interpret. The REASON carries the impairment.
+                        status_trace.append(_trace_entry(
+                            "valid_time", ran=True, degraded=False,
+                            reason=(_vt_stats["reason"] if _vt_covered
+                                    else _vt_reason),
+                            count=len(_vt_stats["demoted"])))
+
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
 
@@ -24481,7 +24741,38 @@ class TortoiseSDK:
             if decoration_failed else ""
         )
         # 7.6. Promoted epistemic state (status/superseded_by/supersedes/subject) — #1353 D8/D10
-        point_state = fetch_point_epistemic_state(graph, result_ids) if entity_type == "point" else {}
+        #      #8487: reuse the read step 5e already made ONLY when that map is
+        #      known COMPLETE (step 5e leaves ``_valid_time_state`` None when
+        #      the map came back empty or short — a failed read). The page is a
+        #      SUBSET of the pool it read, so a complete map IS the page's map
+        #      (one batch read per query, not two); an incomplete one is not,
+        #      and the page then fetches its own state, exactly as it did before
+        #      #8487 — a validity read must never be able to strip a page's
+        #      epistemic decoration. When THIS read also comes back empty for a
+        #      non-empty page (the helper swallows the failure), the leg trace
+        #      says so (``epistemic_state``, ``degraded=True``): that entry means
+        #      "a read did not run", and it is the honest home for the impairment
+        #      the ordering leg must not claim (#8487 review round 5, P3).
+        if entity_type == "point" and _valid_time_state is not None:
+            point_state = _valid_time_state
+        elif entity_type == "point":
+            point_state = fetch_point_epistemic_state(graph, result_ids)
+            # #8487 review round 5 (P3): the impairment step 5e no longer
+            # claims lives HERE. ``fetch_point_epistemic_state`` swallows its
+            # failure and returns ``{}``, and every id on this page came from a
+            # Point match — so an empty map for a non-empty page means the
+            # decoration read did not run. The silence predates #8487, but 5e
+            # used to be its accidental witness; with the ordering leg
+            # honestly reporting ``degraded=False`` (an ordering impairment is
+            # not a degradation), the honest home for "the decoration did not
+            # run" is this read, where ``degraded`` means exactly that.
+            if (status_trace is not None and result_ids
+                    and not any(pid in point_state for pid in result_ids)):
+                status_trace.append(_trace_entry(
+                    "epistemic_state", ran=False, degraded=True,
+                    reason="state_read_failed", count=0))
+        else:
+            point_state = {}
 
         # 8. Build SearchResult objects, filter, and order
         results = []
@@ -25374,9 +25665,17 @@ class TortoiseSDK:
         if read_status_out is not None:
             _point_status = {}
             _object_status = {}
+        # #8487: this is a CANDIDATE pool whose order the caller RE-OWNS —
+        # StateRanker.rerank sorts the whole pool by relevance×confidence×
+        # centrality and only then applies ``[:limit]`` (see "1. Candidate
+        # pool" below). The SDK-side validity selection's ordering would
+        # therefore be discarded, leaving only its pool-composition effect,
+        # which is a behaviour change nothing measures. Same reasoning as the
+        # eval lane's opt-out (#8487 review; ``_valid_time_rerank`` docstring).
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
+            _valid_time_rerank=False,  # #8487: caller re-owns the order
             exclude_status=exclude_status,
             include_terminal=include_superseded,
             # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
@@ -25392,6 +25691,7 @@ class TortoiseSDK:
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
                 _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
+                _valid_time_rerank=False,  # #8487: caller re-owns the order
                 include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
@@ -25856,7 +26156,11 @@ class TortoiseSDK:
                 query, kind=kind, entity_type="point", limit=pool,
                 exclude_status=exclude_status,
                 include_terminal=include_superseded,
-                _record_reads=False)  # #7983: a candidate pool
+                _record_reads=False,  # #7983: a candidate pool
+                # #8487: GapsRanker.rerank re-sorts the pool and ``[:limit]``
+                # is applied to THAT order, so this is the same
+                # re-owned-order shape as recall_state.
+                _valid_time_rerank=False)
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -25986,7 +26290,13 @@ class TortoiseSDK:
         # the expansion pulls in the entities they touch).
         return [r["id"] for r in self.tortoise_fts_query(
             seed.strip(), entity_type="point", limit=5,
-            _record_reads=False)]  # #7983: a seed lookup, not a caller read
+            _record_reads=False,  # #7983: a seed lookup, not a caller read
+            # #8487 (review round 6, P2): these ids are an expansion SEED SET
+            # (``SubgraphExpander.expand``), never a page a caller reads in
+            # order, so the selection's ordering is discarded here and the only
+            # effect left is which ≤5 seeds survive the cut — an unmeasured
+            # change to the returned subgraph. Opt out, like ``recall_state``.
+            _valid_time_rerank=False)]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 

@@ -26,6 +26,9 @@ import {
   MEMORY_SOURCES_HREF,
   OverviewEmptyActions,
   GraphMissingEmptyStateActions,
+  GRAPH_MISSING_KEYS_LABEL,
+  GRAPH_MISSING_SETUP_LABEL,
+  graphMissingPrimaryAction,
   SDK_DOCS_HREF,
   ONBOARDING_FUNNEL_HREF,
   emptyStateActionRoute,
@@ -195,8 +198,14 @@ test('#3890 wiring: the D5 empty state renders the guarded action (no inline des
 // the onboarding FUNNEL url, which for a SIGNED-IN user round-trips to the app
 // root rather than opening a chooser (see the test below and #3890). Do not read
 // this label as "this URL is the chooser".
-const renderActions = (buildFork, onGoToKeys = () => {}) =>
-  renderToStaticMarkup(React.createElement(GraphMissingEmptyStateActions, { buildFork, onGoToKeys }))
+// The action set's PRIMARY action is role-derived (#4628, below); these
+// #4637 route tests are about the ROUTE, so they render the OWNER arm — the arm
+// that existed when they were written. The member arm has its own tests at the
+// end of this file.
+const renderActions = (buildFork, { isOwnerAdmin = true, onGoToKeys = () => {}, onContinueSetup = () => {} } = {}) =>
+  renderToStaticMarkup(React.createElement(GraphMissingEmptyStateActions, {
+    buildFork, isOwnerAdmin, onGoToKeys, onContinueSetup,
+  }))
 
 test('#4637: a BUILD-fork organization is never offered the agent-connection route', () => {
   const html = renderActions(true)
@@ -239,7 +248,9 @@ test('#4637: the self/undecided fork keeps the agent-connection route, and the t
 
 test('#4637: the action set still drives the API Keys tab (the primary surface)', () => {
   let calls = 0
-  const tree = GraphMissingEmptyStateActions({ buildFork: true, onGoToKeys: () => { calls += 1 } })
+  const tree = GraphMissingEmptyStateActions({
+    buildFork: true, isOwnerAdmin: true, onGoToKeys: () => { calls += 1 }, onContinueSetup: () => {},
+  })
   const button = React.Children.toArray(tree.props.children).find((c) => c && c.type === 'button')
   assert.ok(button, 'the action set must contain the API Keys button')
   assert.equal(button.props.className, 'btn-primary')
@@ -274,6 +285,13 @@ test('#4637 wiring: main.jsx renders the guarded action set with the derived for
     `the action set must take the derived fork — got ${actionTags[0]}`)
   assert.match(actionTags[0], /onGoToKeys=\{/,
     `the first-party API Keys handler must stay wired — got ${actionTags[0]}`)
+  // #4628: the role fact and the setup door are wired at the same call site. The
+  // SEMANTIC guard is the probe test below (it reads the effective props); these
+  // two are the locator's supplement.
+  assert.match(actionTags[0], /isOwnerAdmin=\{isOwnerAdmin\}/,
+    `the action set must take the role fact — got ${actionTags[0]}`)
+  assert.match(actionTags[0], /onContinueSetup=\{openResumeWizard\}/,
+    `the member arm's door must be the one resume door (#2005) — got ${actionTags[0]}`)
   // …and no inline route action may survive beside it
   assert.ok(!mainCode.includes('Connect your agent →'),
     'the inline agent-connection action must be gone from main.jsx')
@@ -302,7 +320,7 @@ test('#4637 wiring: the graph-missing action set receives the derived fork (effe
       // import would otherwise be certified by a probe bound to this test's
       // choice of module.
       imports: importsFromMain(mainJsxSource, ['GraphMissingEmptyStateActions']),
-      bindings: { isBuildFork: buildFork, setTab: '() => {}' },
+      bindings: { isBuildFork: buildFork, setTab: '() => {}', isOwnerAdmin: 'true', openResumeWizard: '() => {}' },
     })
     assert.equal(probe.props.buildFork, buildFork === 'true',
       `the action set must receive the fork fact as a boolean — got ${probe.props.buildFork} from ${probe.source}`)
@@ -317,4 +335,123 @@ test('#4637 wiring: the graph-missing action set receives the derived fork (effe
         `self fork: the agent-connection route must render — got ${probe.html}`)
     }
   }
+})
+
+// ── #4628: the graph-missing card's PRIMARY action is role-derived ──────────
+//
+// The card's one primary action was `Go to API Keys →` for every role. That is a
+// real destination for an owner/admin and a dead end for a member: the tab's own
+// copy is "Only owners and admins can create or rotate keys in this dashboard.
+// Paste an existing key into the setup step to connect an agent.", and the card
+// that sends them there is the NO-KEY arm (they hold no key to paste). These are
+// EXECUTED renders + element trees, so a reformat cannot defeat them; the RED
+// direction is the role derivation in `overviewEmptyAction.js`.
+const renderActionTree = (isOwnerAdmin, handlers = {}) => GraphMissingEmptyStateActions({
+  buildFork: false, isOwnerAdmin, ...handlers,
+})
+
+test('#4628: graphMissingPrimaryAction is owner/admin-only on the strict boolean', () => {
+  // The keys tab is a POST /v1/team/keys surface (`_require_owner_admin`), so
+  // ONLY a true owner/admin fact may select it. Every other value — a role
+  // string, a truthy 1, a missing prop — takes the setup step, the destination
+  // that works for every role (fail-safe, this module's `buildFork === true`
+  // convention).
+  for (const isOwnerAdmin of [true]) {
+    assert.deepEqual(graphMissingPrimaryAction(isOwnerAdmin), { id: 'keys', label: GRAPH_MISSING_KEYS_LABEL })
+  }
+  for (const isOwnerAdmin of [false, undefined, null, 'owner', 'admin', 'member', 1, 0, {}]) {
+    assert.deepEqual(graphMissingPrimaryAction(isOwnerAdmin), { id: 'setup', label: GRAPH_MISSING_SETUP_LABEL },
+      `isOwnerAdmin=${JSON.stringify(isOwnerAdmin)} must not reach the owner-only tab`)
+  }
+  // the labels are pinned as LITERALS (every other assertion compares a render
+  // against the constant that produced it, so a typo in the extraction would
+  // otherwise sail through — the #3890 lesson)
+  assert.equal(GRAPH_MISSING_KEYS_LABEL, 'Go to API Keys →')
+  assert.equal(GRAPH_MISSING_SETUP_LABEL, 'Continue setup →')
+})
+
+test('#4628: a member is never handed the owner-only API Keys action', () => {
+  for (const isOwnerAdmin of [false, undefined, 'member']) {
+    let keys = 0
+    let setup = 0
+    const tree = renderActionTree(isOwnerAdmin, { onGoToKeys: () => { keys += 1 }, onContinueSetup: () => { setup += 1 } })
+    const html = renderToStaticMarkup(tree)
+    assert.ok(!html.includes('Go to API Keys'), `a member must never be offered the owner-only tab — got ${html}`)
+    assert.match(html, /Continue setup →/, `a member must be offered the setup step — got ${html}`)
+    assert.equal((html.match(/class="btn-primary"/g) || []).length, 1,
+      'exactly one primary action, whatever the role')
+    // the handler, not just the label: the action that DOES render opens the
+    // wizard's connect step (the #2005 resume door) and never the keys tab
+    const button = React.Children.toArray(tree.props.children).find((c) => c && c.type === 'button')
+    assert.equal(button.props.className, 'btn-primary')
+    button.props.onClick()
+    assert.equal(setup, 1, 'the member primary action must open the setup step')
+    assert.equal(keys, 0, 'the member primary action must never open the keys tab')
+  }
+})
+
+test('#4628: an owner/admin keeps Go to API Keys → (the destination they can act on)', () => {
+  let keys = 0
+  let setup = 0
+  const tree = renderActionTree(true, { onGoToKeys: () => { keys += 1 }, onContinueSetup: () => { setup += 1 } })
+  const html = renderToStaticMarkup(tree)
+  assert.match(html, /Go to API Keys →/, `an owner/admin keeps the tab they can create keys in — got ${html}`)
+  assert.ok(!html.includes('Continue setup'), 'the owner arm is unchanged — no second primary label')
+  const button = React.Children.toArray(tree.props.children).find((c) => c && c.type === 'button')
+  button.props.onClick()
+  assert.equal(keys, 1, 'the owner primary action must open the API Keys tab')
+  assert.equal(setup, 0, 'the owner arm must not be rerouted to the setup step')
+})
+
+test('#4628: the fork-derived route is unchanged by role', () => {
+  // The role decides the PRIMARY action only; the second (fork-derived) route is
+  // the same for every role, on both forks.
+  for (const isOwnerAdmin of [true, false]) {
+    assert.match(renderActions(false, { isOwnerAdmin }), /Connect your agent →/)
+    assert.match(renderActions(true, { isOwnerAdmin }), /SDK documentation →/)
+  }
+})
+
+// SEMANTIC wiring guard (#4628): compile the real call site and read the
+// EFFECTIVE props + the RENDER. A text pin is satisfied by
+// `isOwnerAdmin={isOwnerAdmin === false}`; the rendered label is not.
+test('#4628 wiring: main.jsx hands the action set the REAL role and the resume door', async () => {
+  for (const isOwnerAdmin of ['true', 'false']) {
+    const [probe] = await probeTags(mainJsxSource, {
+      tag: 'GraphMissingEmptyStateActions',
+      imports: importsFromMain(mainJsxSource, ['GraphMissingEmptyStateActions']),
+      bindings: { isBuildFork: 'false', setTab: '() => {}', isOwnerAdmin, openResumeWizard: '() => {}' },
+    })
+    assert.equal(probe.props.isOwnerAdmin, isOwnerAdmin === 'true',
+      `the action set must receive the role fact itself — got ${probe.props.isOwnerAdmin} from ${probe.source}`)
+    assert.equal(typeof probe.props.onContinueSetup, 'function',
+      'the member arm must be handed a door that exists')
+    if (isOwnerAdmin === 'true') {
+      assert.ok(/Go to API Keys/.test(probe.html), `owner/admin: the tab must render — got ${probe.html}`)
+      assert.ok(!/Continue setup/.test(probe.html))
+    } else {
+      assert.ok(!/Go to API Keys/.test(probe.html),
+        `member: the owner-only tab must NOT render — got ${probe.html}`)
+      assert.ok(/Continue setup/.test(probe.html), `member: the setup step must render — got ${probe.html}`)
+    }
+  }
+})
+
+test('#4628 wiring: the graph-missing card carries no inline API Keys action, and the survivor is role-gated', () => {
+  const mainCode = stripComments(mainJsxSource)
+  // The card region: from its own predicate to the next Overview section opener
+  // (the structural scoping the note module's snippet-branch test uses — the two
+  // Overview empty states share a className, so a lazy match can read the wrong
+  // card).
+  const cardStart = mainCode.indexOf("{tab === 'overview' && team && !showReentryCard && overviewGraphMissing")
+  const cardEnd = mainCode.indexOf("{tab === 'overview' && team && !showReentryCard && team.graph_ready !== false", cardStart)
+  assert.ok(cardStart > -1 && cardEnd > cardStart, 'the graph-missing card region must be locatable')
+  assert.ok(!mainCode.slice(cardStart, cardEnd).includes('Go to API Keys'),
+    'the graph-missing card must not carry an inline API Keys action — its primary is role-derived (#4628)')
+  // The ONE remaining live literal is the re-entry card's affordance, and it is
+  // role-gated by the note module's derivation. (The other occurrence in the file
+  // is the `LEGACY_WIZARD_ARCHIVED` rollback block: dead code while the flag is
+  // false, so it never renders.)
+  assert.match(mainCode, /keyTabAffordance\(\{[^}]*isOwnerAdmin[^}]*\}\)/,
+    'the surviving inline affordance must be role-gated by the note module derivation')
 })
