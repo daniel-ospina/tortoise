@@ -220,7 +220,15 @@ def resolve_contested_relevance(
             # the audit wiring checks use; all three widened in this change, so
             # they must not disagree on how a node is addressed.
             "WHERE coalesce(c.id, c.eventId) <> coalesce(n.id, n.eventId) "
-            "AND (src.id IS NULL OR src.eventId IS NULL "
+            # The SELF-REFERENCE guard: skip the comparison only when ``src``
+            # has NO identity at all (an unkeyed optional match). Written with
+            # ``OR`` across the two keys it is dead for every ordinary source —
+            # a :Point/:Subject/:Object carries ``id`` and no ``eventId``, so
+            # ``src.eventId IS NULL`` was TRUE and the row was admitted, letting
+            # a self-referential NAND (``create_operator('NAND', p, [p])`` is
+            # accepted) boost the contested point by its OWN text — measured:
+            # ``{'self-x': 0.05}`` where the pre-widening guard returned ``{}``.
+            "AND (coalesce(src.id, src.eventId) IS NULL "
             "     OR coalesce(src.id, src.eventId) "
             "        <> coalesce(n.id, n.eventId)) AND ("
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "

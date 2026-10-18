@@ -554,6 +554,32 @@ def test_contested_relevance_reads_non_point_target_and_counter_claim(sdk):
     assert boosts == {target: W4_CONTESTED_BOOST}
 
 
+def test_contested_relevance_never_boosts_a_point_from_its_own_text(sdk):
+    """The self-reference guard must survive the identity WIDENING.
+
+    ``src`` is an OPTIONAL match, so the guard skips the comparison only when
+    it has no identity at all. Widening it to the two-key form with ``OR``
+    across the keys kills the guard for every ordinary source: a :Point carries
+    ``id`` and no ``eventId``, so ``src.eventId IS NULL`` is TRUE and the row is
+    admitted — and ``create_operator('NAND', p, [p])`` is ACCEPTED, so the point
+    boosts itself by overlapping its own content. Measured before this test:
+    ``{'self-x': 0.05}`` where the pre-widening read returned ``{}``.
+    """
+    proj = sdk._get_proj()
+    pid = _point(sdk, "cache rollback is the safer default")
+    # input == target == the contested point: the self-referential NAND shape.
+    op = sdk.create_operator("NAND", pid, [pid])["id"]
+    proj.g.query(
+        "MATCH (op:Point {id:$op})-[r:NAND]->(n) SET r.idx = 1", params={"op": op})
+    proj.g.query(
+        "MATCH (op:Point {id:$op})-[ri:INPUT]->(n) SET ri.idx = 0", params={"op": op})
+
+    boosts = resolve_contested_relevance(proj, [pid], "cache rollback")
+    assert boosts == {}, (
+        "the point was boosted by its OWN text — the self-reference guard is "
+        f"dead for a source that carries one key and not the other: {boosts}")
+
+
 def test_contested_relevance_reads_non_point_nand_input_source(sdk):
     """The NAND operator's idx-0 counter-argument (``src``) is its own
     traversal position: a :Subject source must be readable, or the row is
@@ -795,3 +821,109 @@ def test_audit_wiring_check_names_a_key_less_event_by_its_real_key(sdk):
         "unapplicable, which is the defect this test exists for")
     assert _edges("mitigated_by") == 1, (
         "the emitted repair did not create the replacement edge")
+
+
+def test_legacy_repair_is_idempotent_on_a_half_migrated_pair(sdk):
+    """A HALF-APPLIED migration — both edges on the same pair — is precisely the
+    state this check reports, so the repair must not mint a SECOND
+    ``mitigated_by``: parallel direct edges between one pair share a single
+    message slot (``ep._affected_factors``), so a duplicated edge is graph
+    corruption performed by the suggested fix."""
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'audit-op-dupe', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    proj.g.query("CREATE (m:Subject {id:'audit-dup-target', name:'a target', "
+                 "subjectKind:'concept', status:'live'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'audit-op-dupe'}), (m:Subject {id:'audit-dup-target'}) "
+        "MERGE (op)-[:mitigates]->(m) MERGE (op)-[:mitigated_by]->(m)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == "audit-op-dupe"]
+    assert legacy, "fixture broken: the half-migrated pair was not reported"
+    proj.g.query(legacy[0].fix)
+
+    counts = {
+        rel: proj.g.query(
+            f"MATCH (:Point {{id:'audit-op-dupe'}})-[r:{rel}]->() "
+            "RETURN count(r)").result_set[0][0]
+        for rel in ("mitigates", "mitigated_by")
+    }
+    assert counts == {"mitigates": 0, "mitigated_by": 1}, (
+        f"the repair must converge the pair, not duplicate the edge: {counts}")
+
+
+def test_legacy_repair_addresses_only_the_key_the_node_carries(sdk):
+    """The repair is KEY-SPECIFIC, and that is a correctness property, not
+    polish: ``coalesce(m.id, m.eventId) = 'X'`` equates two DIFFERENT
+    properties, so a key-agnostic match also reaches an unrelated node that
+    happens to carry ``X`` under the other key — a shape ``consistency``
+    explicitly models (#8879) — and would repair edges outside the issue's own
+    ``point_kinds`` scope."""
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'audit-op-collide', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    # The REPORTED endpoint: keyed on eventId.
+    proj.g.query("CREATE (m:Event {eventId:'collide', eventKind:'test', "
+                 "name:'keyless twin'})")
+    # An unrelated node carrying the SAME token as its ``id``.
+    proj.g.query("CREATE (x:Event {id:'collide', eventKind:'test', "
+                 "name:'id twin'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'audit-op-collide'}), (m:Event {eventId:'collide'}) "
+        "MERGE (op)-[:mitigates]->(m)")
+    proj.g.query(
+        "MATCH (op:Point {id:'audit-op-collide'}), (x:Event {id:'collide'}) "
+        "MERGE (op)-[:mitigates]->(x)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == "audit-op-collide"]
+    # BOTH edges are legacy mitigates edges, so the check reports both — one
+    # issue per edge. What must NOT happen is one issue's repair reaching the
+    # other endpoint, so each fix is executed ALONE and the survivor asserted.
+    assert len(legacy) == 2, (
+        f"expected one issue per legacy edge, got {[i.fix for i in legacy]}")
+    by_key = {}
+    for issue in legacy:
+        for key in ("eventId", "id"):
+            if f"(m {{{key}:'collide'}})" in issue.fix:
+                by_key[key] = issue
+    assert set(by_key) == {"eventId", "id"}, (
+        "the repair is key-agnostic again — it must name the key the node "
+        f"actually carries: {[i.fix for i in legacy]}")
+
+    proj.g.query(by_key["eventId"].fix)
+    remaining = [r[0] for r in proj.g.query(
+        "MATCH (:Point {id:'audit-op-collide'})-[r:mitigates]->(m) "
+        "RETURN m.name").result_set]
+    assert remaining == ["id twin"], (
+        "the repair for the eventId-keyed endpoint also rewrote the unrelated "
+        f"id-keyed node that happens to carry the same token: {remaining}")
+
+
+def test_legacy_repair_survives_an_id_that_needs_quoting(sdk):
+    """A ``fix`` is a statement the caller PASTES AND RUNS, so an id with an
+    apostrophe in it must still produce one that parses. ``create_point``
+    accepts any string as an id, and a bare interpolation turns an ordinary
+    ``claim-o'brien`` into a ``ResponseError`` — an emitted-but-unapplicable
+    repair, which is the defect class this whole check exists to close."""
+    proj = sdk._get_proj()
+    quoted_op = "audit-op-o'brien"
+    proj.g.query("CREATE (op:Point {id:$i, is_operator:true, status:'live', "
+                 "pointKind:'operator'})", params={"i": quoted_op})
+    proj.g.query("CREATE (m:Subject {id:'audit-quote-target', name:'target', "
+                 "subjectKind:'concept', status:'live'})")
+    proj.g.query(
+        "MATCH (op:Point {id:$i}), (m:Subject {id:'audit-quote-target'}) "
+        "MERGE (op)-[:mitigates]->(m)", params={"i": quoted_op})
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == quoted_op]
+    assert legacy, "fixture broken: the quoted-id operator was not reported"
+    proj.g.query(legacy[0].fix)   # must not raise
+    assert proj.g.query(
+        "MATCH (:Point {id:$i})-[r:mitigates]->() RETURN count(r)",
+        params={"i": quoted_op}).result_set[0][0] == 0

@@ -224,6 +224,35 @@ def _count(proj, query: str, params: dict | None = None) -> int:
     return r.result_set[0][0] if r.result_set else 0
 
 
+def _quoted(value: object) -> str:
+    """Render ``value`` as a single-quoted literal safe to EMBED in a ``fix``.
+
+    Every repair string in this module is a fresh statement a caller may paste
+    and run (that is what a ``fix`` IS), so a graph value inside one has to be
+    a LITERAL, not raw text (#7927 review). An id is caller-supplied
+    (``create_point(..., id=…)`` accepts any string) or ingest-supplied, so
+    without this an ordinary id containing an apostrophe (``claim-o'brien``)
+    makes the emitted repair a ``ResponseError`` — the same
+    emitted-but-unapplicable repair the key-agnostic MATCH below exists to
+    close — and a crafted one can widen or truncate the statement. Measured on
+    the embedded engine: ``'cla\\'im-1'`` round-trips exactly, while a bare
+    ``'cla'im-1'`` is a ResponseError.
+
+    Both escape orders are NOT equivalent: ``\\`` must be escaped FIRST, or an
+    escaped backslash left in front of a quote re-opens the literal. Control
+    characters are escaped the same way (a raw newline is not inside a legal
+    Cypher string). The result is also a legal PYTHON literal, which is why the
+    three SDK-call suggestions can use the same helper.
+    """
+    text = (str(value)
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t"))
+    return "'" + text + "'"
+
+
 def _rows(proj, query: str, params: dict | None = None) -> list:
     r = proj.g.query(query, params=params or {})
     return r.result_set if r else []
@@ -441,7 +470,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="high",
             node_id=str(nid),
             detail=f"Superseded point '{content}' has no :CORRECTS edge from its replacement",
-            fix=(f"Link the replacement: tortoise_supersede('{nid}', '<new_id>') "
+            fix=(f"Link the replacement: tortoise_supersede({_quoted(nid)}, '<new_id>') "
                  f"or MATCH (old:Point {{id:'{nid}'}}), "
                  f"(new:Point {{id:'<replacement>'}}) CREATE (new)-[:CORRECTS]->(old)"),
         )
@@ -605,7 +634,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # strength= is the SDK/MCP kwarg — sanctioned band [0.10, 0.50],
             # 0.50 = strongest dampening (single source: tortoise/weights.py
             # module docstring, #2315); the skill's relevance-attack range.
-            fix=(f"tortoise_mitigate_operator('{op_id}', 'Relevant because...', "
+            fix=(f"tortoise_mitigate_operator({_quoted(op_id)}, 'Relevant because...', "
                  "strength=0.3)"),
         )
         for op_id, conf, tgt_content in rows6
@@ -626,16 +655,45 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "MATCH (op:Point {is_operator: true})-[mit:mitigates]->(m)\n"
         f"WHERE {epistemic_disjunction('m')} AND {_op_in_kinds('op', 'm')}\n"
         # #7927: ``m`` may be an :Event keyed on ``eventId`` with no ``id``
-        # (legacy / out-of-tree — ``_upsert_event`` sets both), so the identity
-        # is coalesced. That value alone is NOT enough: the repair below used to
-        # MATCH ``(m {id:'<value>'})``, which matches NOTHING on an
-        # eventId-keyed node, so the emitted fix silently left the very edge
-        # this check reports. Hence the coalesced WHERE below.
-        "RETURN DISTINCT op.id, coalesce(m.id, m.eventId), "
+        # (legacy / out-of-tree — ``_upsert_event`` sets both), so BOTH keys are
+        # returned and the repair is rendered against whichever one the node
+        # actually carries. Coalescing the value and matching it key-agnostic
+        # was not enough: ``coalesce(m.id, m.eventId) = 'X'`` equates two
+        # DIFFERENT properties, so the repair could also address an unrelated
+        # node that happens to carry ``X`` under the other key (a reachable
+        # shape — ``consistency._graph_view`` models ``:Event {eventId:'X'}``
+        # alongside ``:Event {id:'X'}``, #8879), i.e. a repair wider than the
+        # issue it accompanies.
+        "RETURN DISTINCT op.id, m.id, m.eventId, "
         "coalesce(m.content, m.name, m.title, '') "
         f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
+
+    def _legacy_repair(op_id, m_id, m_eid) -> str:
+        """A repair that addresses EXACTLY the edge the issue names.
+
+        Key-specific on purpose: the node's own key (``id`` first, ``eventId``
+        for a keyless legacy :Event) pins the blast radius to one endpoint. A
+        node carrying NEITHER key has no addressable identity at all — the
+        pattern then omits the property and the edge is what identifies ``m``,
+        so every legacy ``mitigates`` edge from this operator is repaired (the
+        only honest reading when the endpoints are indistinguishable).
+
+        ``MERGE``, not ``CREATE``: this check reports a state a PARTIALLY
+        applied migration leaves behind (both edges present on the same pair),
+        and two parallel direct edges between one pair share a single message
+        slot (``ep._affected_factors``) — the repair must not mint the second.
+        """
+        if m_id is not None:
+            target = f"(m {{id:{_quoted(m_id)}}})"
+        elif m_eid is not None:
+            target = f"(m {{eventId:{_quoted(m_eid)}}})"
+        else:
+            target = "(m)"
+        return (f"MATCH (op:Point {{id:{_quoted(op_id)}}})-[r:mitigates]->"
+                f"{target} DELETE r MERGE (op)-[:mitigated_by]->(m)")
+
     _record("legacy_mitigates_edge", [
         AuditIssue(
             issue_type="legacy_mitigates_edge",
@@ -646,15 +704,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # #7927: ``m`` is unlabeled in the FIX too — it may now be a
             # :Subject/:Object/:Event, and a ``(m:Point {id:…})`` pattern would
             # match nothing, making the suggested repair a silent no-op that
-            # leaves the very edge this issue reports. The match is key-AGNOSTIC
-            # for the same reason: an eventId-keyed ``:Event`` has no ``id``
-            # property, so ``(m {{id:'…'}})`` is just as unaddressable.
-            fix=(f"MATCH (op:Point {{id:'{op_id}'}})-[r:mitigates]->(m) "
-                 f"WHERE coalesce(m.id, m.eventId) = '{m_id}' "
-                 f"DELETE r CREATE (op)-[:mitigated_by]->(m)"),
+            # leaves the very edge this issue reports.
+            fix=_legacy_repair(op_id, m_id, m_eid),
             legacy=True,
         )
-        for op_id, m_id, m_content in rows6b
+        for op_id, m_id, m_eid, m_content in rows6b
     ], count6b, legacy=True)
 
     # ── 7. missing_sourceKind_source (medium, #1158) ──────────────
@@ -704,7 +758,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             detail=(f"Source '{src_url}' (backing evidence '{ev_content}') "
                     "resolves to a NEUTRAL tier (no explicit credibilityTier / "
                     "tier-form or registry-tiered sourceKind)"),
-            fix=(f"tier the source: tortoise_set_source_tier('{src_url}', "
+            fix=(f"tier the source: tortoise_set_source_tier({_quoted(src_url)}, "
                  f"'T0'..'T4') or create_source('{src_url}', kind, tier=...)"),
         )
         for src_url, ev_id, ev_content in rows7
@@ -775,7 +829,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                                 f"(validFrom {w_from!r} > validTo {w_to!r}) — no "
                                 "instant is covered, so temporal queries cannot "
                                 "see it"),
-                        fix=(f"Repair the window: tortoise_update_point('{wid}', "
+                        fix=(f"Repair the window: tortoise_update_point({_quoted(wid)}, "
                              "{'validTo': '<at-or-after validFrom>'})"),
                     ))
         if len(window_rows) < CHECK8_PAGE:

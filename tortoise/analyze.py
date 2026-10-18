@@ -425,7 +425,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                           op_cap: int = 200,
                           stats: dict[str, Any] | None = None
                           ) -> tuple[set[str], set[tuple[str, str, str]]]:
-    """BFS subgraph selection from anchor Points — A9 return contract.
+    """BFS subgraph selection from anchor epistemic nodes — A9 return contract.
 
     Returns ``(operator_ids, factor_anchors)``:
       operator_ids  — operator Point IDs for the operator-mediated factors

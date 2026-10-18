@@ -345,7 +345,10 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
             NEVER re-included (#2422).
 
     Legacy nodes without a stored status are LIVE (the entity write path
-    defaults ``coalesce($st, n.status, 'live')``), hence the NULL checks.
+    defaults ``coalesce($st, n.status, 'live')``), hence the NULL checks. This
+    is also why an EPISTEMIC-LABEL widening (#7927) needs no per-label status
+    branch: ``:Event`` stores ``eventStatus`` and no ``status`` at all, so it
+    reads LIVE here exactly as a legacy Point does.
     """
     terminal = _terminal_excluded(clause)
     if include_draft:
@@ -384,6 +387,13 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 #     unconditional four-label sweep is what breached the #395 AC5 latency
 #     bound (0.73s -> 1.50s against a 1.2s limit) — a Point-only id set must
 #     stay ONE anchored read.
+#
+# ``:Event`` carries ``eventStatus``, never ``status`` (its lifecycle has no
+# status fold — ``consistency._STATUS_COMPARED_LABELS``). That does NOT need a
+# per-label branch on a widened leg: ``_live_only`` treats an ABSENT status as
+# LIVE (``_terminal_excluded``'s NULL check), so an Event passes the same
+# predicate a Point does, and the draft filter is a no-op for it by
+# construction rather than by a special case (#7927).
 # ══════════════════════════════════════════════════════════════════════════
 
 #: The four labels on which confidence propagates (#7813 ruling). Ordered
