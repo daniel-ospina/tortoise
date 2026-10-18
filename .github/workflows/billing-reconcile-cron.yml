@@ -178,26 +178,42 @@ jobs:
           fi
           if [ "$status" != "200" ]; then
             echo "::error::billing reconcile returned HTTP ${status}"
+            # Diagnostics are not sacrificed with the redaction: the body is
+            # printed through the same shape-redactor used for the summary.
+            show_body "$out"
             exit 1
           fi
           python3 - "$out" <<'PY'
-          import hashlib, json, sys
+          import hashlib, json, re, sys
+
+          _UUID = re.compile(
+              r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+              re.IGNORECASE)
 
           def redact_row(row):
-              """Replace a customer org id with a STABLE fingerprint.
+              """Replace customer org ids with a STABLE fingerprint.
 
               The Actions log of this public repository must not publish which
               customer is on which paid tier (#8895 review P2). A fingerprint
               still lets an operator correlate one org across runs, which is
               all the log needs.
+
+              Redaction is by SHAPE, not only by key: ``failed[].error`` is the
+              scrubbed provider message and embeds the id in prose
+              (``no organizations row matched id='<uuid>'``), so a key-based
+              filter alone would publish it anyway.
               """
               if not isinstance(row, dict):
                   return row
-              out = dict(row)
-              if "org_id" in out:
-                  digest = hashlib.sha256(
-                      str(out["org_id"]).encode()).hexdigest()[:10]
-                  out["org_id"] = f"org-{digest}"
+              out = {}
+              for key, value in row.items():
+                  if isinstance(value, str):
+                      value = _UUID.sub("<org-id>", value)
+                  if key == "org_id" and value:
+                      digest = hashlib.sha256(
+                          str(value).encode()).hexdigest()[:10]
+                      value = f"org-{digest}"
+                  out[key] = value
               return out
 
           try:

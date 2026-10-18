@@ -50,6 +50,33 @@ _logger = logging.getLogger(__name__)
 _STRIPE_API = "https://api.stripe.com/v1"
 _ACTIVE_STATUSES = ("active", "trialing", "past_due")
 
+#: Statuses that mean the STORED subscription pointer is still the customer's
+#: CURRENT one. Deliberately narrower than ``_ACTIVE_STATUSES``: ``past_due``
+#: counts for ENFORCEMENT (a failing card must not lose its tier, and
+#: ``mirror_subscription`` agrees) but NOT for pointer freshness — a failed-card
+#: org that re-subscribes gets a NEW active subscription while the old one sits
+#: at ``past_due``, which is exactly the stale pointer the fleet cadence exists
+#: to follow. Reusing one tuple for both questions left that org capped.
+_POINTER_CURRENT_STATUSES = ("active", "trialing")
+
+
+def _select_current_subscription(subs):
+    """The subscription that represents the customer's CURRENT entitlement.
+
+    A customer can hold BOTH a live subscription and one that is only still
+    being enforced (``past_due``) — that is precisely the re-subscribe-with-a-
+    failed-card flow — and Stripe lists them in its own order. Taking the first
+    entry therefore mirrored whatever came first, which could be the ``past_due``
+    one and re-capped the org at the OLD tier. Prefer a live subscription, and
+    fall back to a ``past_due`` one only when no live one exists (enforcement
+    still applies to a failing card).
+    """
+    for statuses in (_POINTER_CURRENT_STATUSES, _ACTIVE_STATUSES):
+        for sub in subs:
+            if sub.get("status") in statuses:
+                return sub
+    return None
+
 
 class BillingError(Exception):
     """Base billing error — the caller decides how to surface it."""
@@ -790,25 +817,38 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
         # rewrites ``subscription_id``, so the pointer heals), and fall back to
         # the stored one only when there is none — a real cancellation, which
         # must still downgrade.
-        if sub.get("status") in _ACTIVE_STATUSES or not customer_id:
+        if sub.get("status") in _POINTER_CURRENT_STATUSES or not customer_id:
             summary = mirror_subscription(sdk, org_id, sub)  # gates tier on status
             return {"org_id": org_id, "action": "mirror_subscription", **summary}
-        subs = client.list_subscriptions(customer_id)
-        for candidate in subs:
-            if candidate.get("status") in _ACTIVE_STATUSES:
-                summary = mirror_subscription(sdk, org_id, candidate)
-                return {
-                    "org_id": org_id,
-                    "action": "mirror_customer_first_active",
-                    **summary,
-                }
+        try:
+            subs = client.list_subscriptions(customer_id)
+        except Exception:  # noqa: BLE001, RUF100 — a provider error is not a verdict
+            # The stored status is ALREADY inactive, so this LIST can only ever
+            # IMPROVE the outcome (find a newer active subscription). A provider
+            # error here — a customer Stripe no longer knows, or a transient
+            # outage — must not turn a CORRECT downgrade into a permanent
+            # ``failed`` row that reds every daily pass and misleads the
+            # operator: fall back to the stored subscription, which can never
+            # resurrect an inactive one.
+            _logger.warning(
+                "billing reconcile: %s has an inactive stored subscription but "
+                "the customer lookup failed — mirroring the stored one", org_id)
+            subs = []
+        current = _select_current_subscription(subs)
+        if current is not None:
+            summary = mirror_subscription(sdk, org_id, current)
+            return {
+                "org_id": org_id,
+                "action": "mirror_customer_first_active",
+                **summary,
+            }
         summary = mirror_subscription(sdk, org_id, sub)
         return {"org_id": org_id, "action": "mirror_subscription", **summary}
     subs = client.list_subscriptions(customer_id)
-    for sub in subs:
-        if sub.get("status") in _ACTIVE_STATUSES:
-            summary = mirror_subscription(sdk, org_id, sub)
-            return {"org_id": org_id, "action": "mirror_customer_first_active", **summary}
+    current = _select_current_subscription(subs)
+    if current is not None:
+        summary = mirror_subscription(sdk, org_id, current)
+        return {"org_id": org_id, "action": "mirror_customer_first_active", **summary}
     return {"org_id": org_id, "action": "noop"}
 
 

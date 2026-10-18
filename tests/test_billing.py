@@ -438,6 +438,68 @@ class TestApplyLimitsAndReconcile:
         assert t["tier"] == "free"
         assert t["subscription_status"] == "canceled"
 
+    def test_reconcile_inactive_pointer_survives_a_customer_lookup_failure(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8895 review P2: the customer LIST is a FALLBACK, not a prerequisite.
+
+        The stored sub is already inactive, so the LIST can only improve the
+        outcome. A provider error on it (a customer Stripe no longer knows, a
+        transient outage) must not turn a CORRECT downgrade into a permanent
+        ``failed`` row that reds every daily pass and hides the real state.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("list-failure")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_gone', "
+            "t.stripe_customer_id='cus_gone', t.tier='pro', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        gone = {"id": "sub_gone", "status": "canceled",
+                "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(gone))
+        monkeypatch.setattr(
+            billing.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                billing.StripeAPIError("no such customer: 'cus_gone'")))
+        reconcile_org(sdk, team["id"])  # must NOT raise
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "free"
+        assert t["subscription_status"] == "canceled"
+
+    def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8895 review P2: ``past_due`` keeps the TIER (enforcement) but is NOT
+        a fresh POINTER.
+
+        A failed-card org that re-subscribes gets a new active subscription
+        while the old one sits at ``past_due`` — exactly the resubscribe flow
+        this repair exists for. Reusing ``_ACTIVE_STATUSES`` for pointer
+        freshness left that org capped.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("past-due-pointer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_pastdue', "
+            "t.stripe_customer_id='cus_1'",
+            params={"id": team["id"]},
+        )
+        past_due = {"id": "sub_pastdue", "status": "past_due",
+                    "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        active = {"id": "sub_new", "status": "active", "current_period_end": 9999,
+                  "cancel_at_period_end": False,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(past_due))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [past_due, active])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active"
+        assert t["tier"] == "team"
+        assert t["subscription_id"] == "sub_new"
+
     def test_reconcile_noop_without_identifiers(self, stripe_env, billing_sdk):
         sdk = billing_sdk
         team = sdk.org_create("noop-team")

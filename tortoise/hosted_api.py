@@ -36880,7 +36880,15 @@ async def billing_reconcile(request: Request):
     if _BILLING_RECONCILE_INFLIGHT.locked():
         return JSONResponse(status_code=202,
                             content={"status": "already_running"})
-    async with _BILLING_RECONCILE_INFLIGHT:
+    await _BILLING_RECONCILE_INFLIGHT.acquire()
+    # The lock is handed to the PASS when one is handed off to a worker thread
+    # (``_release_when_finished``), and released by this ``finally`` only for a
+    # path that never handed one off. Releasing on cancellation would let the
+    # driver's retry start a SECOND pass over the same fleet while the first is
+    # still writing: the 202 guard would then describe a pretence rather than a
+    # fact (#8895 review P2).
+    handed_off = False
+    try:
         from tortoise.supabase_control import is_supabase_enabled
 
         # #4726 discipline: in Supabase mode the pass must NEVER construct a
@@ -36890,30 +36898,34 @@ async def billing_reconcile(request: Request):
         try:
             if is_supabase_enabled():
                 sdk = None
-                result = await asyncio.to_thread(reconcile_subscriptions, None)
             else:
                 sdk = await asyncio.to_thread(_registry_sdk)
-                # ⛔ Do NOT close the SDK from this request's ``finally``.
-                # ``asyncio.to_thread`` cannot cancel its thread, so a cancelled
-                # request (the driver's 600 s ceiling, a client disconnect) ran
-                # the ``finally`` while the pass was STILL writing through
-                # ``sdk`` — closing the projection mid-pass and losing every
-                # repair it had not yet committed, while the summary went
-                # nowhere (#8895 review P2). Close on COMPLETION instead, and
-                # shield the await so cancelling the request cannot cancel a
-                # pass that is already writing.
-                fut = asyncio.ensure_future(
-                    # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
-                    # rides a worker hand-off so it cannot hold the single uvicorn
-                    # event loop (the #2988/#3498 class).
-                    asyncio.to_thread(reconcile_subscriptions, sdk))
 
-                def _close_when_finished(_f: asyncio.Future) -> None:
+            def _release_when_finished(_f: asyncio.Future) -> None:
+                # Close first, then hand the lock back: these are ONE unit. A
+                # second pass must never start while the SDK this pass writes
+                # through is still open — the original defect, in reverse.
+                if sdk is not None:
                     with suppress(Exception):
                         sdk.close()
+                with suppress(Exception):
+                    _BILLING_RECONCILE_INFLIGHT.release()
 
-                fut.add_done_callback(_close_when_finished)
-                result = await asyncio.shield(fut)
+            # ⛔ ``asyncio.to_thread`` cannot cancel its thread, so the SDK must
+            # NOT be closed from this request's ``finally``: a cancelled request
+            # (the driver's 600 s ceiling, a client disconnect) would close the
+            # projection mid-pass and lose every repair not yet committed, while
+            # the summary went nowhere (#8895 review P2). Close on COMPLETION.
+            fut = asyncio.ensure_future(
+                # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
+                # rides a worker hand-off so it cannot hold the single uvicorn
+                # event loop (the #2988/#3498 class).
+                asyncio.to_thread(reconcile_subscriptions, sdk))
+            handed_off = True
+            fut.add_done_callback(_release_when_finished)
+            # Shield: cancelling the REQUEST must not cancel a pass that is
+            # already writing. The callback above still runs on completion.
+            result = await asyncio.shield(fut)
         except BillingEnumerationError as exc:
             # The pass refuses to reconcile a fleet it cannot certify COMPLETE.
             # That is not a request error — it is "the source is unavailable or
@@ -36931,7 +36943,11 @@ async def billing_reconcile(request: Request):
                          "detail": "the fleet enumeration could not be "
                                    "confirmed complete — refusing to report a "
                                    "partial pass as clean"})
-    return result
+        return result
+    finally:
+        if not handed_off:
+            with suppress(Exception):
+                _BILLING_RECONCILE_INFLIGHT.release()
 
 
 # ── OAuth 2.1 for remote MCP (#524) ─────────────────────────────────────
