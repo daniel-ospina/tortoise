@@ -1587,19 +1587,61 @@ def test_d4_never_calls_a_row_unnamed_while_naming_its_home() -> None:
                 f"gives its approved home and quotes its row: {line!r}"
             )
 
-    # The counts partition the rows: placed + elsewhere + silent == all of them.
+    # The counts partition the rows: placed + elsewhere + no place == all of them, and each
+    # bucket is the one the verdicts establish — "placed ELSEWHERE" is reserved for rows that
+    # HAVE an approved home, because `refuted` no longer implies the doc places the method
+    # somewhere (a method it never absorbs reads `refuted` too).
     m = re.search(
         r"\*\*(\d+) of (\d+) disputed rows are placed by the approved menu where this\s*"
-        r"map places them; (\d+) are placed ELSEWHERE by it; (\d+) are not\s*"
-        r"covered by it at all\.\*\*",
+        r"map places them; (\d+) are placed ELSEWHERE by it; (\d+) have\s*"
+        r"no place in it at all\.\*\*",
         section,
     )
     assert m, f"§D4's summary sentence is not in the rendered shape: {section[-2000:]!r}"
-    placed, total, elsewhere, silent = (int(g) for g in m.groups())
-    assert placed + elsewhere + silent == total == len(rows), (
-        f"§D4's counts ({placed}+{elsewhere}+{silent} vs {total}) do not partition the "
+    placed, total, elsewhere, uncovered = (int(g) for g in m.groups())
+    assert placed + elsewhere + uncovered == total == len(rows), (
+        f"§D4's counts ({placed}+{elsewhere}+{uncovered} vs {total}) do not partition the "
         f"{len(rows)} rendered rows"
     )
+    elsewhere_want = [
+        a for a in approved if a["homes"] and a["dest_verdict"] in ("refuted", "rehomed")
+    ]
+    uncovered_want = [
+        a for a in approved if not a["homes"] or a["dest_verdict"] == "unstated"
+    ]
+    assert elsewhere == len(elsewhere_want), (
+        f"§D4 counts {elsewhere} rows as placed ELSEWHERE; the rows with a home and a "
+        f"disagreeing verdict are {[a['tool'] for a in elsewhere_want]}"
+    )
+    assert uncovered == len(uncovered_want), (
+        f"§D4 counts {uncovered} rows as having no approved place; the home-less rows are "
+        f"{[a['tool'] for a in uncovered_want]}"
+    )
+
+
+def test_d4_evidence_line_names_a_token_its_quoted_row_contains() -> None:
+    """The evidence line must name the alias the MATCH was made on, not the SDK method.
+
+    `tortoise_invalidate`'s SDK method is `invalidate_point`, which occurs 0 times in the
+    approved doc — the match is on its other alias, `invalidate`. Printing the SDK method
+    made the claim unverifiable against the row quoted directly beneath it (#8930 review).
+    """
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    section = _section(doc, "### D4 —")
+    approved_doc = (ROOT / "docs" / "product" / "canonical-mcp-tools.md").read_text(
+        encoding="utf-8"
+    )
+
+    lines = [line for line in section.splitlines() if " is absorbed by " in line]
+    assert lines, "§D4 rendered no evidence line — this test would be vacuous"
+    for line in lines:
+        claimed = re.search(r"— (.+?) is absorbed by `([a-z_]+)`:", line)
+        assert claimed, f"an evidence line is not in the rendered shape: {line!r}"
+        name = claimed.group(1).split(" (")[0].strip("`")
+        assert name in approved_doc, (
+            f"the evidence line names `{name}`, which the approved doc never states — the "
+            f"quoted row below it cannot be checked against the claim: {line!r}"
+        )
 
 
 def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypatch) -> None:
@@ -1711,6 +1753,84 @@ def test_approved_menu_guard_fails_closed_when_a_closure_is_dropped(tmp_path, mo
     errs = bt._approved_errors(menu, closures)
     assert errs and "transitive-closure" in errs[0], (
         f"a dropped closure statement did not fail the build: {errs}"
+    )
+
+
+def test_approved_menu_guard_fails_closed_when_a_single_row_is_dropped(
+    tmp_path, monkeypatch
+):
+    """The row bound is the doc's own count, and the numbering must stay gapless.
+
+    A loose floor (20 of 23) let THREE rows vanish green; the reviewer's single-row reflow
+    (row 3 wrapped out of the `| N | name | absorbs |` shape) parsed 22 rows, passed every
+    guard, and flipped `belief_timeline`/`provenance`/`session_context` to "no approved row
+    absorbs it" — asserting the menu is silent about a method its own row 3 names (#8930).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    row3 = next(line for line in real.splitlines() if line.startswith("| 3 |"))
+    dropped = real.replace(row3 + "\n", "")
+    assert dropped != real, "row 3 is not in the doc — test is stale"
+    path = tmp_path / "row-dropped.md"
+    path.write_text(dropped, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+
+    menu, closures = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS - 1, (
+        "one row must be gone here — that is what the bound has to catch"
+    )
+    errs = bt._approved_errors(menu, closures)
+    assert errs and "silently dropping rows" in errs[0], (
+        f"dropping one approved row did not fail the build: {errs}"
+    )
+
+    # ...and the numbering catches a drop the COUNT cannot: a doc that grows a row while
+    # losing another still has >= the bound, but a hole in the sequence.
+    renumbered = real.replace("| 3 |", "| 4 |", 1)
+    path2 = tmp_path / "row-renumbered.md"
+    path2.write_text(renumbered, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path2)
+    menu2, closures2 = bt._approved_state()
+    assert len(menu2) == bt.APPROVED_MIN_ROWS, "the count is unchanged — only the numbering moved"
+    errs = bt._approved_errors(menu2, closures2)
+    assert errs and "are missing from the" in errs[0], (
+        f"a hole in the row numbering did not fail the build: {errs}"
+    )
+
+
+def test_approved_menu_guard_fails_closed_when_a_member_moves_after_the_em_dash(
+    tmp_path, monkeypatch
+):
+    """Prose is not a member list — including when the doc puts a MEMBER in the prose.
+
+    The em-dash rule is what stops prose minting a home, and it cuts both ways: a member
+    list misplaced after the dash silently strips that member, and for the very row #4513
+    §1 is about the artifact then prints "no approved row absorbs `annotate_operator`" over
+    the approved row that absorbs it (#8930 review).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    moved = real.replace(
+        "| 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |",
+        "| 21 | `adjust_relationship` | operator_action, mitigate_operator — "
+        "annotate_operator also |",
+    )
+    assert moved != real, "row 21 is not in the doc — test is stale"
+    path = tmp_path / "member-after-dash.md"
+    path.write_text(moved, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+
+    menu, closures = bt._approved_state()
+    assert "annotate_operator" not in menu["adjust_relationship"]["members"], (
+        "the misplaced list must be the failure under test, so the member is gone here"
+    )
+    errs = bt._approved_errors(menu, closures)
+    assert errs and "AFTER" in errs[0] and "annotate_operator" in errs[0], (
+        f"a current tool name in the cell's prose did not fail the build: {errs}"
     )
 
 

@@ -410,18 +410,19 @@ _WILDCARD = re.compile(r"`([a-z_][a-z0-9_]*)\*`")
 _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|")
 _IDENT = re.compile(r"[a-z_][a-z0-9_]*")
 
-# The doc's title claims 23 rows. A bound, not a count: it exists so a parse break
-# (a table reflowed out of the `N | name | absorbs` shape) fails the build instead
-# of quietly resolving every disputed row to "no approved row" — a guard that
-# resolves nothing cannot fail, and would read as green.
-APPROVED_MIN_ROWS = 20
+# The doc's title claims 23 rows, and every row it states is numbered. The bound is the
+# doc's own count, not a loose floor: at 20, THREE rows could vanish from the parse with a
+# green build, and a lost row 3 turns `belief_timeline`/`provenance`/`session_context` into
+# "no approved row absorbs it" — the exact false claim §D4 exists to prevent. Adding a row
+# keeps the build green; losing one (or renumbering) needs a human to update this.
+APPROVED_MIN_ROWS = 23
 
 # The doc states FOUR transitive-closure statements, over four containers (`get`,
-# `overview`, `query`, `index_files`). Counted separately from the rows for the same
-# reason: dropping one leaves every row intact and the build green, while the members it
-# carried are gone — and the next disputed row naming them reads `refuted`, a false claim
-# that the approved menu places it elsewhere. A reflow, not a doc edit, is the likely
-# cause, which is exactly what this bound must catch.
+# `overview`, `query`, `index_files`). Counted separately from the rows because dropping
+# one leaves every ROW intact and the build green, while the members it carried are gone:
+# the container's absorbing row loses them from `members`, and the next disputed row naming
+# them renders "no approved row absorbs it" — a row the doc absorbs it in. A reflow, not a
+# doc edit, is the likely cause, which is exactly what this bound must catch.
 APPROVED_MIN_CLOSURES = 4
 
 # The doc states exactly ONE beta split (row 17's "splits this into `update_knowledge` +
@@ -482,6 +483,12 @@ def _cell_members(cell: str, name: str, known: set[str]) -> set[str]:
     `run_onboarding` — a row the doc says was dropped FOR it. `members` is what the
     verdicts call a row's approved HOME, so a prose-minted member is a false home.
 
+    The rule cuts both ways, so `_prose_names` reports the mirror risk: a CURRENT name
+    stated after the dash is either prose ABOUT a tool or a member list the em dash
+    misplaced. Only the first is legitimate for a target-surface name (row 17's "fields on
+    `update_knowledge`", row 23's "dropped for `check_connection`"), which is what the
+    guard keys on.
+
     A `prefix_*` token is a FAMILY, and row 23 states its members that way ("the seven
     `onboarding_*`"). Expanding it is reading the doc, not inferring: without it the seven
     real tools read as "no approved row absorbs" — the opposite of the row.
@@ -491,6 +498,25 @@ def _cell_members(cell: str, name: str, known: set[str]) -> set[str]:
     for prefix in _WILDCARD.findall(head):
         members |= {k for k in known if k.startswith(prefix) and k != name}
     return members
+
+
+def _prose_names(cell: str) -> list[str]:
+    """Known names stated in a cell's PROSE that are not target-surface names.
+
+    A target name in the prose is a sentence about a tool (row 23's "dropped for
+    `check_connection`"); a CURRENT tool name there is a member list the em dash was
+    misplaced into — which silently strips that member, and for a disputed row prints "no
+    approved row absorbs it" about the row the doc absorbs it in.
+    """
+    if _CELL_PROSE not in cell:
+        return []
+    known = _known_names()
+    post = cell.split(_CELL_PROSE, 1)[1]
+    # NOT backtick-only: a misplaced list can arrive bare ("… mitigate_operator —
+    # annotate_operator also"), and a bare name is just as lost as a quoted one.
+    return sorted(
+        {n for n in _IDENT.findall(post) if n in known and n not in TARGET_MCP}
+    )
 
 
 def _approved_closures(text: str) -> list[tuple[str, set[str]]]:
@@ -522,10 +548,11 @@ def _parse_approved(text: str) -> tuple[dict[str, dict], list[tuple[str, set[str
             "lineno": int(row.group(1)),
             "members": _cell_members(cells[2], name, known) | {name},
             "successors": sorted({t for c in clauses for t in c["targets"]}),
+            "prose_names": _prose_names(cells[2]),
             # How many `splits this into` clauses the cell states, and any name they state
-            # that did not resolve — so a clause that parses to NO target, or to a
-            # PARTIAL one, fails the build instead of reading as "this row has fewer
-            # successors" (the same fail-open direction as a dropped closure).
+            # that did not resolve — so a clause that parses to NO target, or to a PARTIAL
+            # one, fails the build instead of reading as "this row has fewer successors"
+            # (the same fail-open direction as a dropped closure).
             "split_clauses": len(clauses),
             "split_unresolved": sorted({t for c in clauses for t in c["unresolved"]}),
             "quote": line.rstrip(),
@@ -588,6 +615,31 @@ def _approved_errors(
             f"least {APPROVED_MIN_ROWS} — the doc's own title claims 23); the table shape has "
             "changed and the parse is now silently dropping rows"
         ]
+    # Every row the doc states is numbered, so a NaN in the sequence is a row the parse
+    # dropped — which the count alone cannot see when a reflow BLENDS with a doc edit.
+    linenos = sorted(r["lineno"] for r in menu.values())
+    missing = sorted(set(range(1, linenos[-1] + 1)) - set(linenos))
+    if missing:
+        return [
+            f"approved row number(s) {', '.join(str(n) for n in missing)} are missing from the "
+            f"parse of {APPROVED_DOC.name} (parsed {len(menu)} rows, numbered "
+            f"{linenos[0]}-{linenos[-1]}); a row the doc states is being dropped, so every "
+            "method it absorbs would render as 'no approved row absorbs it'"
+        ]
+    # A CURRENT tool name in a cell's PROSE is a member list the em dash was misplaced
+    # into — which silently strips that member from its row.
+    prose = sorted(
+        (n, names) for n, r in menu.items() if (names := r["prose_names"])
+    )
+    if prose:
+        detail = "; ".join(
+            f"`{n}` ← {', '.join(f'`{t}`' for t in names)}" for n, names in prose
+        )
+        return [
+            f"approved row(s) in {APPROVED_DOC.name} name a CURRENT tool in the prose AFTER "
+            f"the em dash: {detail}; prose is not a member list, so that name loses its "
+            "approved home and renders as 'no approved row absorbs it'"
+        ]
     # A closure statement that does not RESOLVE is a parse break, not a doc that states an
     # empty closure. Resolution — not presence — is the test, and it is ALL-or-nothing:
     # the applied membership is a `known` filter, so one unresolved name narrows the row
@@ -618,8 +670,8 @@ def _approved_errors(
             f"{APPROVED_DOC.name} (expected at least {APPROVED_MIN_CLOSURES} — the doc states "
             "that `index_sessions` and `ingest_corpus` sit inside `index_files`, alongside the "
             "`get`/`overview`/`query` closures); a reflow the parse cannot read shrinks every "
-            "row's membership silently, and the next disputed row naming those members reads "
-            "`refuted` — a false claim that the approved menu places it elsewhere"
+            "row's membership silently, and the next disputed row naming those members renders "
+            "'no approved row absorbs it' — a row the doc absorbs it in"
         ]
     # The CONTAINER must be a name the doc actually uses (a row, or a member of one):
     # renaming only the closure sentence's container to a name the doc never mentions
@@ -751,6 +803,10 @@ def _approved_readings(
                         "row_no": menu[h]["lineno"],
                         "quote": menu[h]["quote"],
                         "successors": menu[h]["successors"],
+                        # The alias the MATCH was made on: the doc names `invalidate`, not
+                        # the SDK method `invalidate_point`, and the evidence line quotes
+                        # the row — so it must name the token that row actually contains.
+                        "matched": sorted(aliases & menu[h]["members"]),
                     }
                     for h in homes
                 ],
@@ -770,12 +826,17 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
     empty-quote branch printed "no approved row absorbs `x`" a few lines under a table
     cell that named several rows absorbing it — two cells of one generated section
     asserting opposite things, in the artifact the owner reads for the evidence (#8930).
+
+    The absorbed name is the one the MATCH was made on (`invalidate`), not necessarily the
+    SDK method (`invalidate_point`): the quoted row beneath it has to contain the token the
+    line claims it absorbs, or the owner cannot check the claim against the doc.
     """
     out: list[str] = []
     for a in approved:
         if len(a["homes"]) > 1:
             out.append(
-                f"- **`{a['tool']}`** — `{a['method']}` is absorbed by SEVERAL approved rows: "
+                f"- **`{a['tool']}`** — `{a['method'] or a['tool']}` is absorbed by SEVERAL "
+                "approved rows: "
                 + ", ".join(f"`{h['name']}` (row {h['row_no']})" for h in a["homes_detail"])
                 + ":"
             )
@@ -787,7 +848,10 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
                 f"`{a['method'] or a['tool']}`."
             )
             continue
-        out.append(f"- **`{a['tool']}`** — `{a['method']}` is absorbed by `{a['home']}`:")
+        matched = a["homes_detail"][0]["matched"]
+        named = ", ".join(f"`{m}`" for m in matched) if matched else f"`{a['method']}`"
+        sdk = f" (SDK `{a['method']}`)" if a["method"] and a["method"] not in matched else ""
+        out.append(f"- **`{a['tool']}`** — {named}{sdk} is absorbed by `{a['home']}`:")
         out.append(f"  > {a['quote']}")
     return out
 
@@ -1500,7 +1564,12 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "**Nothing is decided here.** Where the two approved docs disagree, the ruling is the",
         "owner's and the map is NOT edited — the disagreement is shown with BOTH citations so it",
         "is visible at the row. What the approved menu *can* settle mechanically is narrower:",
-        "does a target the row's citation names actually absorb this method? The sibling",
+        "does a target the row's citation names actually absorb this method?",
+        "",
+        "**Scope, stated exactly:** these are the rows Part D above already flags (D2/D2b/D3).",
+        "A row Part D does not flag is NOT here even when the approved menu disagrees with it —",
+        "covering every cited row is the whole-`Destination` derivation in #4518/#5063, which",
+        "this section deliberately does not pre-empt. The sibling",
         "`docs/product/sdk-rename-table.md` (§C3b) reads these rows from beta's prose ALONE and",
         "states a winner on several of them; this section is the other approved doc's side of the",
         "same rows, not a correction of it.",
@@ -1514,14 +1583,18 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "  does not claim the doc places it SOMEWHERE ELSE — a method the doc never absorbs at",
         "  all reads `refuted` too, and its evidence line below says so.)",
         "- **`rehomed`** — the approved doc **does** absorb this method, but into a different row",
-        "  than this map's destination, and it never names the destination at all. Read with",
-        "  `refuted`: the two approved docs disagree. It is NOT `unstated` — the `Approved home`",
-        "  cell and the quoted row below name the method, so the approved menu does answer it.",
+        "  than this map's destination, and the destination is neither an approved row nor a",
+        "  name any row's beta split states. Read with `refuted`: the two approved docs",
+        "  disagree. It is NOT `unstated` — the `Approved home` cell and the quoted row below",
+        "  name the method, so the approved menu does answer it.",
         "- **`unstated`** — the approved doc names neither this target nor any row that absorbs",
         "  this method, so it neither supports nor refutes it. A row resting only on `unstated` is",
         "  genuinely owner-open.",
         "",
-        "The membership set is the doc's OWN closure, parsed from its statements that",
+        "The membership set is the doc's OWN closure: it states in prose that",
+        "`get_point`/`get_events`/`get_operator`/`get_governance` `sit inside` `get`, that",
+        "`health`/`status`/`stale`/`taxonomy`/`list_pointkinds`/`list_sources`/`list_tags`/",
+        "`list_namespaces`/`list_graphs`/`list_topics` `sit inside` `overview`, that",
         "`paginated_query` and `query_points_by_tag` `sit inside` `query`, and that",
         "`index_sessions` and `ingest_corpus` `sit inside` `index_files` — a name it collapses",
         "without listing still resolves, and a closure the parse drops fails the build.",
@@ -1549,34 +1622,59 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
     else:
         out.append("| *(none)* | | | | | |")
 
+    # The summary is a PARTITION of the rows, and each bucket's claim is exactly what the
+    # verdict establishes: `refuted` no longer means "the doc places it elsewhere" (a method
+    # the doc never absorbs reads `refuted` too), so "placed ELSEWHERE" is reserved for rows
+    # that HAVE a home, and a home-less `refuted` row belongs with `unstated` — neither is
+    # placed by the approved menu.
     agrees = sum(1 for a in approved if a["dest_verdict"] in ("row", "successor"))
-    refuted = [a["tool"] for a in approved if a["dest_verdict"] == "refuted"]
+    placed_elsewhere = [
+        a["tool"]
+        for a in approved
+        if a["homes"] and a["dest_verdict"] in ("refuted", "rehomed")
+    ]
+    refuted_with_home = [
+        a["tool"] for a in approved if a["dest_verdict"] == "refuted" and a["homes"]
+    ]
+    refuted_no_home = [
+        a["tool"] for a in approved if a["dest_verdict"] == "refuted" and not a["homes"]
+    ]
     rehomed = [a["tool"] for a in approved if a["dest_verdict"] == "rehomed"]
     unstated = [a["tool"] for a in approved if a["dest_verdict"] == "unstated"]
-    elsewhere = len(refuted) + len(rehomed)
+    uncovered = len(refuted_no_home) + len(unstated)
     out += [
         "",
         f"**{agrees} of {len(approved)} disputed rows are placed by the approved menu where this",
-        f"map places them; {elsewhere} are placed ELSEWHERE by it; {len(unstated)} are not",
-        "covered by it at all.** Every count is computed from the doc, not typed.",
+        f"map places them; {len(placed_elsewhere)} are placed ELSEWHERE by it; {uncovered} have",
+        "no place in it at all.** Every count is computed from the doc, not typed.",
         "",
     ]
-    if refuted:
+    if refuted_with_home:
         out.append(
             "- **The approved menu contradicts the map on**: "
-            + ", ".join(f"`{t}`" for t in refuted)
+            + ", ".join(f"`{t}`" for t in refuted_with_home)
             + " — an approved row (or a successor of one) covers the map's destination and does"
-            " **not** absorb the method. Two owner-approved docs disagreeing is an owner ruling,"
-            " not a build step, so the destinations stand and the conflict is recorded here."
+            " **not** absorb the method, while another row does. Two owner-approved docs"
+            " disagreeing is an owner ruling, not a build step, so the destinations stand and"
+            " the conflict is recorded here."
         )
     if rehomed:
         out.append(
             "- **The approved menu absorbs the method in a DIFFERENT row than the map's"
-            " destination** (and never names that destination at all): "
+            " destination** (and the destination is neither an approved row nor one any beta"
+            " split names): "
             + ", ".join(f"`{t}`" for t in rehomed)
             + " — the same disagreement as the sentence above, reached through a different"
             " door: the method is NOT unnamed, its approved home is in the table and the"
             " whole approved row is quoted below."
+        )
+    if refuted_no_home:
+        out.append(
+            "- **The approved menu covers the map's destination and does not absorb the method "
+            "ANYWHERE**: "
+            + ", ".join(f"`{t}`" for t in refuted_no_home)
+            + " — the destination row exists and excludes the method, and no other approved row"
+            " takes it, so the map's destination has no approved answer."
         )
     if unstated:
         out.append(

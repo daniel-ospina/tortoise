@@ -389,7 +389,12 @@ build stayed green (#4513 §1/§2).
 **Nothing is decided here.** Where the two approved docs disagree, the ruling is the
 owner's and the map is NOT edited — the disagreement is shown with BOTH citations so it
 is visible at the row. What the approved menu *can* settle mechanically is narrower:
-does a target the row's citation names actually absorb this method? The sibling
+does a target the row's citation names actually absorb this method?
+
+**Scope, stated exactly:** these are the rows Part D above already flags (D2/D2b/D3).
+A row Part D does not flag is NOT here even when the approved menu disagrees with it —
+covering every cited row is the whole-`Destination` derivation in #4518/#5063, which
+this section deliberately does not pre-empt. The sibling
 `docs/product/sdk-rename-table.md` (§C3b) reads these rows from beta's prose ALONE and
 states a winner on several of them; this section is the other approved doc's side of the
 same rows, not a correction of it.
@@ -403,14 +408,18 @@ same rows, not a correction of it.
   does not claim the doc places it SOMEWHERE ELSE — a method the doc never absorbs at
   all reads `refuted` too, and its evidence line below says so.)
 - **`rehomed`** — the approved doc **does** absorb this method, but into a different row
-  than this map's destination, and it never names the destination at all. Read with
-  `refuted`: the two approved docs disagree. It is NOT `unstated` — the `Approved home`
-  cell and the quoted row below name the method, so the approved menu does answer it.
+  than this map's destination, and the destination is neither an approved row nor a
+  name any row's beta split states. Read with `refuted`: the two approved docs
+  disagree. It is NOT `unstated` — the `Approved home` cell and the quoted row below
+  name the method, so the approved menu does answer it.
 - **`unstated`** — the approved doc names neither this target nor any row that absorbs
   this method, so it neither supports nor refutes it. A row resting only on `unstated` is
   genuinely owner-open.
 
-The membership set is the doc's OWN closure, parsed from its statements that
+The membership set is the doc's OWN closure: it states in prose that
+`get_point`/`get_events`/`get_operator`/`get_governance` `sit inside` `get`, that
+`health`/`status`/`stale`/`taxonomy`/`list_pointkinds`/`list_sources`/`list_tags`/
+`list_namespaces`/`list_graphs`/`list_topics` `sit inside` `overview`, that
 `paginated_query` and `query_points_by_tag` `sit inside` `query`, and that
 `index_sessions` and `ingest_corpus` `sit inside` `index_files` — a name it collapses
 without listing still resolves, and a closure the parse drops fails the build.
@@ -431,11 +440,11 @@ without listing still resolves, and a closure the parse drops fails the build.
 | `tortoise_set_source_tier` | `manage_source_trust` | `manage_source_trust` (row 14) | *(none)* | **row** | `list_knowledge` — **refuted** |
 
 **5 of 12 disputed rows are placed by the approved menu where this
-map places them; 7 are placed ELSEWHERE by it; 0 are not
-covered by it at all.** Every count is computed from the doc, not typed.
+map places them; 7 are placed ELSEWHERE by it; 0 have
+no place in it at all.** Every count is computed from the doc, not typed.
 
-- **The approved menu contradicts the map on**: `tortoise_get_source_reliability`, `tortoise_paginated_query`, `tortoise_query`, `tortoise_query_points_by_tag` — an approved row (or a successor of one) covers the map's destination and does **not** absorb the method. Two owner-approved docs disagreeing is an owner ruling, not a build step, so the destinations stand and the conflict is recorded here.
-- **The approved menu absorbs the method in a DIFFERENT row than the map's destination** (and never names that destination at all): `tortoise_belief_timeline`, `tortoise_provenance`, `tortoise_session_context` — the same disagreement as the sentence above, reached through a different door: the method is NOT unnamed, its approved home is in the table and the whole approved row is quoted below.
+- **The approved menu contradicts the map on**: `tortoise_get_source_reliability`, `tortoise_paginated_query`, `tortoise_query`, `tortoise_query_points_by_tag` — an approved row (or a successor of one) covers the map's destination and does **not** absorb the method, while another row does. Two owner-approved docs disagreeing is an owner ruling, not a build step, so the destinations stand and the conflict is recorded here.
+- **The approved menu absorbs the method in a DIFFERENT row than the map's destination** (and the destination is neither an approved row nor one any beta split names): `tortoise_belief_timeline`, `tortoise_provenance`, `tortoise_session_context` — the same disagreement as the sentence above, reached through a different door: the method is NOT unnamed, its approved home is in the table and the whole approved row is quoted below.
 
 **The approved row itself, for each disputed row that has one** (whole table row, by
 construction, so it cannot be a truncation of what the doc says):
@@ -448,7 +457,7 @@ construction, so it cannot be a truncation of what the doc says):
   > | 3 | `recall_beliefs` | recall, belief_timeline, provenance, session_context, get_confidence, calibrate_summary |
 - **`tortoise_get_source_reliability`** — `get_source_reliability` is absorbed by `manage_source_trust`:
   > | 14 | `manage_source_trust` | assess_source, get_source_reliability, set_source_tier |
-- **`tortoise_invalidate`** — `invalidate_point` is absorbed by `revise_knowledge`:
+- **`tortoise_invalidate`** — `invalidate` (SDK `invalidate_point`) is absorbed by `revise_knowledge`:
   > | 17 | `revise_knowledge` | update, update_point, update_entity, supersede, invalidate, retract_point, promote_point, set_point_baseline — the beta target **splits this into `update_knowledge` + `supersede_knowledge`**; promote/baseline become **fields on `update_knowledge`** |
 - **`tortoise_mitigate_operator`** — `mitigate_operator` is absorbed by `adjust_relationship`:
   > | 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |
