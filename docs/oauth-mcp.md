@@ -338,10 +338,26 @@ does not itself cap row growth, because anyone can mint a URL. The reachable
 rate is bounded by the **CIMD fetch** limiter above (600/hr aggregate,
 in-process) — **not** by the DCR limiter, which CIMD never touches — and, since
 #3669, also by a process-wide in-flight cap and a per-window wall-clock budget
-(see "Limitations"). Pruning for
-the pre-existing DCR-generated rows remains owned by **#2853 / #1677 (owner
-@daniel-ospina, dated 2026-10-15)**; CIMD adds one row per client
-implementation in normal operation but does add to that backlog under abuse.
+(see "Limitations"). Growth of
+the pre-existing DCR-generated rows is **ACCEPTED, not forgotten**: owner
+@daniel-ospina ruled **option C** on 2026-10-13 (#2853) — no retention window,
+no expiry, no deletion path, and no cap — which discharged that commitment on
+the dated review. The ruling requires the number to be visible, so the count is
+an operator endpoint:
+
+```bash
+curl -s -m 20 -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+  https://<api-host>/v1/internal/oauth/clients/count
+```
+
+It returns `{"status":"ok","count":N,…}` from the server's own `COUNT`, or
+`{"status":"unavailable","reason":…}` with **no** `count` when the server
+states no total — a missing number is never rendered as `0`, because a
+confident zero would read as "nothing has accumulated" and retire the decision.
+The ruling names its own revisit triggers (the 2026-11-15 measurement, or a move
+off per-connection DCR) and the endpoint returns them, so the acceptance is not
+open-ended. CIMD adds one row per client implementation in normal operation but
+can add rows that nothing reclaims under abuse.
 
 Idempotency under concurrency rests on the schema's `id text PRIMARY KEY`
 (`supabase/migrations/0016_oauth.sql`): two simultaneous first authorizations of
@@ -476,10 +492,12 @@ Accepted limitations (see the code comment for the full list):
 
 - The stores are **in-process**, so real capacity is `limit × machines` and
   resets on restart. Out-of-process limiting is #1677.
-- `oauth_clients` row pruning is **not** part of this policy — #2853 owns it
-  (owner @daniel-ospina, review date 2026-10-15); the shared per-IP bucket
-  primitive's key space is bounded by #3124 (reclaim-inactive + reject-new /
-  shared overflow).
+- `oauth_clients` row growth is **ACCEPTED, not pending** — owner ruling C on
+  2026-10-13 (#2853) retired the pruning question: no retention window, no
+  expiry, no deletion path, no cap. The number is visible at
+  `GET /v1/internal/oauth/clients/count` (see the growth-bound table above);
+  the shared per-IP bucket primitive's key space is still bounded by #3124
+  (reclaim-inactive + reject-new / shared overflow).
 - The limiter runs **before body parsing**, so an invalid-JSON or oversized
   POST still consumes budget (charges ≤ 600/hr anonymous + 1200/hr trusted);
   row writes are not bounded by it.

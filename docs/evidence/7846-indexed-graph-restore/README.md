@@ -172,20 +172,29 @@ shard would answer vector search with an empty result does not hold on any engin
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | the restore completes in bounded time with an observable rebuild, or fails with an explicit error | **Partly — upstream.** It completes; the rebuild is *not* observable and an over-running caller gets a socket timeout, not an actioned error |
-| 2 | the instance continues to serve other graphs throughout the restore | **UNMET — upstream.** It blocks for the whole rebuild (2 497.7 ms at 30 000 nodes, measured) |
+| 1 | the restore completes in bounded time with an observable rebuild, or fails with an explicit error | **Partly — upstream for the rebuild, MET at our boundary for the bound and the error.** The rebuild is still not observable and still emits nothing. A caller using `tortoise/graph_key_restore.py` now owns the bound (`bound_s`) and gets a typed, measured error instead of a socket timeout |
+| 2 | the instance continues to serve other graphs throughout the restore | **UNMET — upstream.** It blocks for the whole rebuild (2 497.7 ms at 30 000 nodes, measured). The driver now MEASURES that outage per restore (`blocked_ms`) instead of leaving it inferred |
 | 3 | a regression test does dump → delete → restore on an index-bearing graph and asserts the server still answers `PING` | **MET — `tests/test_indexed_graph_key_restore_7846.py`** (docker lane; the populated index is a precondition, so it cannot pass vacuously) |
 | 4 | the fate of the index across a restore is documented and asserted | **MET — PRESERVED, payload-carried** (§4). Asserted same-name in the regression test; the cross-name proof runs OUTSIDE CI because on the pinned engine it is the crash trigger |
-| 5 | the failure mode is distinguishable from load | **UNMET — upstream.** No progress, no timeout, no log line, no error — and in the crash case, no error reply at all |
+| 5 | the failure mode is distinguishable from load | **MET ONLY FOR A CALLER THAT ADOPTS THE MODULE — and no production call site adopts it yet.** Upstream unchanged: the engine still emits no progress, no timeout and no log line, so an instance blocked by a rebuild and a genuinely dead one look identical from a bare client. `tortoise/graph_key_restore.py` watches from a second connection and separates them: a witness PING that never answers plus a port that still ACCEPTS a TCP connection is *blocked (not load, not a crash)*; a REFUSED port is *the process died* (#8270). Two different errors, two different recoveries. ⚠️ Nothing in the product calls `restore_graph_key` (`rg` finds the module and its tests, no caller), so the restore production actually performs — `tortoise/hosted_backup.py::_graph_copy_with_restore_bound`, a bounded `GRAPH.COPY` swap (delete live → copy temp → live) — is **UNWITNESSED**: it has an explicit read bound and still makes no second-connection measurement, so for the wired path this criterion stays **UNMET** |
 
-Criteria 2 and 5 are not fixable in this repository: they are properties of the engine's restore
-path. This doc states them unmet rather than asserting around them — the in-repo test asserts
-other graphs and `PING` **after** the restore, never *through* it.
+Criteria 2, and the engine half of 5, are not fixable in this repository: they are properties
+of the engine's restore path. This doc states them unmet rather than asserting around them —
+the in-repo test asserts other graphs and `PING` **after** the restore, never *through* it. What
+IS fixable here is the reading of the event, and the driver above fixes it **for a caller that
+adopts it**: it turns "the instance answered nothing for as long as my socket would wait" into a
+measurement with a cause, and the regression test asserts the outage it measures is the
+restore's own (it ends when the restore does, and is no longer than it). That is a
+capability, not a landing: **no production call site adopts the driver yet**, and the wired
+restore path (`hosted_backup`'s `GRAPH.COPY`) is unwitnessed.
 
 ## 6. Two defects to route, and why they are not one
 
 - **The silence** (§3) — the restore blocks the instance with no observable progress. Upstream,
-  and the half that makes the issue's symptom unreadable from outside.
+  and the half that makes the issue's symptom unreadable from outside. The engine is still
+  silent; a caller that adopts `tortoise/graph_key_restore.py` is no longer — but nothing in the
+  product adopts it yet, so the wired path (`hosted_backup`'s `GRAPH.COPY`) is still silent
+  (criterion 5 is met for adopters only).
 - **The crash** (§4) — `falkordb-server:v4.20.6`, the CI pin, dies on an indexed new-name restore
   while the source exists. Filed as **#8270**, cross-referenced to this one: the trigger is
   narrower and the blast radius is *larger* (a hard exit, not an unresponsive process), and the
@@ -235,6 +244,17 @@ python docs/evidence/7846-indexed-graph-restore/crash_isolate.py 16420 kept
 
 Exit code 2 from `verify.py` means **INVALID HARNESS** — the index was not populated, so the run
 says nothing about an index-bearing restore (see §1).
+
+The criterion-5 driver is exercised by the regression test itself, against whatever engine
+`TORTOISE_DB_URI` names (the index-free control is not needed — the witness and the port probe
+are what is being asserted):
+
+```bash
+TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
+    uv run pytest tests/test_indexed_graph_key_restore_7846.py -v
+# the driver's own branches, no server needed:
+uv run pytest tests/test_7846_restore_is_not_silent.py -v
+```
 
 ## 9. Committed logs
 
