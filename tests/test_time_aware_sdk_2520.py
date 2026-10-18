@@ -427,6 +427,58 @@ def test_the_selection_runs_before_the_limit_cut(ku_graph):
 
 
 @_DOCKER_ONLY
+def test_a_short_state_map_records_the_demotions_it_did_make(ku_graph,
+                                                            monkeypatch):
+    """FAIL VALUE: a NON-EMPTY but SHORT state map recording ``count=0`` /
+    "no selection" on a read whose page order it demonstrably moved (#8487
+    review round 6, P2).
+
+    Completeness decides REUSE (``_valid_time_state``, so step 7.6 re-reads),
+    not whether the selection runs: a partial map still carries the real state
+    of the ids it holds, so the demotion of those ids is genuinely applied —
+    and the audit leg must report it instead of claiming "nothing happened"
+    (#8487 scope 3). The empty-map case the sibling test covers cannot see this,
+    because there the selection is skipped entirely.
+
+    Reachable: the FIRST state read of the query is made to cover exactly ONE
+    of the three pool ids — the ended claim, the one whose state map is
+    load-bearing (``is_stale_entry`` needs it to demote).
+    """
+    sdk, ids = ku_graph
+    import tortoise.search_engine as _se
+    real = _se.fetch_point_epistemic_state
+    calls: list[int] = []
+
+    def _short_then_real(graph, point_ids):
+        calls.append(len(point_ids))
+        if len(calls) == 1:
+            # PARTIAL, not empty: only the ended claim's real state comes back.
+            return real(graph, [ids["ended"]])
+        return real(graph, point_ids)
+
+    monkeypatch.setattr(_se, "fetch_point_epistemic_state", _short_then_real)
+    trace: list[dict] = []
+    on = _order(sdk, _PRESENT_QUERY, leg_trace=trace)
+    # The selection DID run over that partial map, and its ordering reached the
+    # page: the ended claim (relevance rank 0 — the sibling test's measured
+    # precondition) is demoted.
+    assert on[-1] == ids["ended"], (
+        f"a short map still demotes the ids it holds: {on}")
+    entry = _valid_time_entry(trace)
+    assert entry["count"] == 1, (
+        "the audit leg must count the demotions it MADE, not the completeness "
+        f"of the map; got {entry}")
+    assert entry["reason"] == "state_read_incomplete", (
+        "the reason still has to say the map was short — that is what made "
+        f"step 7.6 re-read; got {entry}")
+    assert entry["degraded"] is False
+    # …and the reuse half is unaffected: a short map is never reused as the
+    # page's decoration, so every hit keeps its window.
+    ended = _hit(sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10), ids["ended"])
+    assert ended["valid_to"] == "2023-06-01"
+
+
+@_DOCKER_ONLY
 def test_a_failed_state_read_does_not_strip_the_page_decoration(ku_graph,
                                                               monkeypatch):
     """FAIL VALUE: an EMPTY state map from step 5e replayed as the page's
@@ -611,6 +663,13 @@ def test_a_topical_query_pays_no_pool_width_state_read(ku_graph, monkeypatch):
 # selection on there is an unmeasured behaviour change to a product surface.
 # The eval lane's opt-out (`tools/longmem_eval/retrieve.py`) is the precedent;
 # these lanes must carry the same flag.
+#
+# Two MORE lanes of that shape were found in review round 6 and were NOT opted
+# out: `_review_pool` (a MEMBERSHIP filter for `review_add` / `review_prune`,
+# both of which order it themselves) and `_resolve_subgraph_seed` (an expansion
+# SEED SET handed to `SubgraphExpander.expand`). Neither keeps the read order,
+# so for both the only remaining effect is which ids survive the cut — the same
+# composition change the eval lane is protected from.
 
 _RE_OWNING_LANES = (
     # (label, method name, args, kwargs)
@@ -618,6 +677,11 @@ _RE_OWNING_LANES = (
     ("issue_insight", "issue_insight", ("billing ledger", "the database"), {}),
     ("suggest_entry_points", "suggest_entry_points", ("billing ledger",), {}),
     ("recall_gaps", "recall_gaps", (_PLAIN_QUERY,), {}),
+    # #8487 review round 6, P2: the review pool is a MEMBERSHIP filter and the
+    # subgraph seed is an expansion START SET — neither consumes the order.
+    ("_review_pool", "_review_pool", ("billing ledger now",), {}),
+    ("_resolve_subgraph_seed", "_resolve_subgraph_seed",
+     ("billing ledger now",), {}),
 )
 
 

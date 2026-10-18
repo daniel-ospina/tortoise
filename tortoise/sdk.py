@@ -17648,7 +17648,15 @@ class TortoiseSDK:
         try:
             results = self.tortoise_fts_query(
                 query_text, entity_type="point", limit=200,
-                _record_reads=False)  # #7983: a review pool, not a caller read
+                _record_reads=False,  # #7983: a review pool, not a caller read
+                # #8487 (review round 6, P2): this pool is consumed as a
+                # MEMBERSHIP filter — both ``review_add`` (orders the
+                # suggestions by SIMILARITY itself) and ``review_prune``
+                # discard the read order — so the only thing the valid-time
+                # selection could still do here is move which ids survive the
+                # ``limit`` cut: an unmeasured composition change on a product
+                # surface. Opt out, like ``recall_state``.
+                _valid_time_rerank=False)
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -22109,6 +22117,11 @@ class TortoiseSDK:
         #     ``suggest_entry_points`` (``_issue_insight_rank`` / an RRF-derived
         #     confidence band, same shape) — each passes False at its own call
         #     site with the reason recorded there;
+        #   * ``_review_pool`` / ``_resolve_subgraph_seed`` (#8487 review round
+        #     6, P2) — a review pool is consumed as a MEMBERSHIP filter and a
+        #     subgraph seed set as an expansion START set, so neither keeps the
+        #     order; only the pre-cut composition of their ids could move, which
+        #     is an unmeasured change to two product surfaces;
         #   * ``tools/fusion_formula_ab.py`` / ``tools/ask_pool_admission_probe``
         #     (a controlled measurement that must stay comparable to its own
         #     recorded numbers).
@@ -23150,34 +23163,43 @@ class TortoiseSDK:
                                          "demoted": []}
                             _vt_reason = "selection_failed"
                     if status_trace is not None:
-                        if _vt_covered:
-                            status_trace.append(_trace_entry(
-                                "valid_time", ran=True, degraded=False,
-                                reason=_vt_stats["reason"],
-                                count=len(_vt_stats["demoted"])))
-                        else:
-                            # A short map is a FAILED READ OF THE STATE, never
-                            # an all-current pool: the audit leg must not claim
-                            # a selection that could not be made (#8487 scope 3).
-                            #
-                            # ``degraded`` is DELIBERATELY False (#8487 review
-                            # P1). In a leg trace that flag is not audit-only:
-                            # ``ask_lane`` folds ANY degraded leg into the
-                            # response's ``retrieval_degraded`` and
-                            # ``read_status.classify_leg_trace`` turns it into
-                            # STATUS_DEGRADED — and every other ``degraded=True``
-                            # entry in this trace means "a retrieval leg did not
-                            # run" (vector skipped, TF-IDF produced the rows).
-                            # Here nothing was degraded: the hits are complete and
-                            # step 7.6 re-reads the page state (this PR's other
-                            # half), so the hits keep ``status`` /
-                            # ``superseded_by`` / the window. Claiming a
-                            # degradation would redden a healthy read — for
-                            # temporal intent only, which no caller could
-                            # interpret. The REASON carries the impairment.
-                            status_trace.append(_trace_entry(
-                                "valid_time", ran=True, degraded=False,
-                                reason=_vt_reason, count=0))
+                        # TWO different facts, TWO different fields (#8487
+                        # review round 6, P2). ``count`` is what the selection
+                        # DID — and it is the same question whether or not the
+                        # map was complete enough to reuse at step 7.6: a
+                        # SHORT (non-empty) map still demotes every id it has
+                        # state for, so a `count=0` there would report "no
+                        # selection" on a read whose page order demonstrably
+                        # moved, and would discard ``demoted`` — the audit
+                        # trail this leg exists for (#8487 scope 3).
+                        # ``reason`` is WHY the leg ended where it did:
+                        # the selection's OWN reason when the map was complete
+                        # (``latest-first`` / ``already-latest-first`` /
+                        # ``no-stale-entries``), else the impairment that made
+                        # it unusable and which step 7.6's own page-width read
+                        # had to cover — ``state_read_incomplete`` (short map),
+                        # ``state_read_failed`` (it raised) or
+                        # ``selection_failed`` (``prefer_latest_ids`` raised).
+                        #
+                        # ``degraded`` is DELIBERATELY False (#8487 review
+                        # P1). In a leg trace that flag is not audit-only:
+                        # ``ask_lane`` folds ANY degraded leg into the
+                        # response's ``retrieval_degraded`` and
+                        # ``read_status.classify_leg_trace`` turns it into
+                        # STATUS_DEGRADED — and every other ``degraded=True``
+                        # entry in this trace means "a retrieval leg did not
+                        # run" (vector skipped, TF-IDF produced the rows).
+                        # Here nothing was degraded: the hits are complete and
+                        # step 7.6 re-reads the page state, so the hits keep
+                        # ``status`` / ``superseded_by`` / the window. Claiming
+                        # a degradation would redden a healthy read — for
+                        # temporal intent only, which no caller could
+                        # interpret. The REASON carries the impairment.
+                        status_trace.append(_trace_entry(
+                            "valid_time", ran=True, degraded=False,
+                            reason=(_vt_stats["reason"] if _vt_covered
+                                    else _vt_reason),
+                            count=len(_vt_stats["demoted"])))
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
@@ -25000,7 +25022,13 @@ class TortoiseSDK:
         # the expansion pulls in the entities they touch).
         return [r["id"] for r in self.tortoise_fts_query(
             seed.strip(), entity_type="point", limit=5,
-            _record_reads=False)]  # #7983: a seed lookup, not a caller read
+            _record_reads=False,  # #7983: a seed lookup, not a caller read
+            # #8487 (review round 6, P2): these ids are an expansion SEED SET
+            # (``SubgraphExpander.expand``), never a page a caller reads in
+            # order, so the selection's ordering is discarded here and the only
+            # effect left is which ≤5 seeds survive the cut — an unmeasured
+            # change to the returned subgraph. Opt out, like ``recall_state``.
+            _valid_time_rerank=False)]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
