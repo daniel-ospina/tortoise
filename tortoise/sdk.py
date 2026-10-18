@@ -18417,12 +18417,14 @@ class TortoiseSDK:
         for pid in point_ids:
             p = self.get_point(pid)
             before[pid] = p.get("confidence", 0.5) if p else 0.5
-        # #344: conscious opt-out from the fail-closed gate — the gate is
-        # graph-wide (no anchors/factors are passed, so it would audit every
-        # evidence point); this run's epistemic content is fully carried by
-        # the Beta(10,1) evidence prior on the decision Point; the approval
-        # path deliberately opts out (never a silent swallow; the gate stays
-        # on for every explicit compute_confidence()).
+        # #344: conscious opt-out from the fail-closed gate. #7739 scoped the
+        # no-arg gate to the dirty roots and their closure (it is no longer
+        # graph-wide), and this call still passes no anchors/factors — but the
+        # opt-out stands on its own reason, not on the old scope: this run's
+        # epistemic content is fully carried by the Beta(10,1) evidence prior
+        # on the decision Point, so there is no uncalibrated evidence input to
+        # demand. Deliberate, never a silent swallow, and it does not relax the
+        # gate for any other caller: each one opts out explicitly or not at all.
         self.compute_confidence(evidence={decision_id: (10, 1)},
                                 require_calibration=False)
         deltas = {}
@@ -20186,13 +20188,18 @@ class TortoiseSDK:
                   mode="full" ONLY when ``mode`` is None (I1 rule 2).
             max_hops: EP subgraph expansion (keep ≥2 — contract with
                       _mark_dirty).
-            require_calibration: gate the EP run on calibration state —
-                  raises CalibrationError when evidence-kind points are
-                  uncalibrated (#1157). None (default) resolves to the shared
-                  posture, TORTOISE_EP_REQUIRE_CALIBRATION (default True —
-                  fail-closed, post-#344; set it to "0" to opt out). Dream
-                  WRITES n.confidence,
-                  so it must never silently run uncalibrated EP (#7478).
+            require_calibration: gate the EP run on calibration state.
+                  ``mode="local"`` scopes the gate to the seeds the pass hands
+                  ``ep.run`` plus the dirty roots (#7739) — an unrelated point
+                  elsewhere in the graph does not refuse the drain.
+                  ``full`` stays whole-graph by contract and ``stale-first``
+                  keeps the whole-graph posture (its window is chosen inside
+                  the pass), so those two still refuse a foreign point.
+                  None (default) resolves to the shared posture,
+                  TORTOISE_EP_REQUIRE_CALIBRATION (default True — fail-closed,
+                  post-#344; set it to "0" to opt out). Dream WRITES
+                  n.confidence, so it must never silently run uncalibrated EP
+                  (#7478).
             stamp_dreamed_at: when False, the pass never writes
                   lastDreamedAt (epic 903-C2) — the read-triggered
                   lazy-consistency paths (get_confidence /
@@ -21075,7 +21082,10 @@ class TortoiseSDK:
             rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default).
             direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default).
             require_calibration: fail-closed gate — raises CalibrationError
-                when evidence points are uncalibrated. None (default) resolves
+                when an uncalibrated evidence point the SELECTION can consume
+                is found (anchors/factors: the run's consumed set; no-arg: the
+                dirty roots and their closure, #7739) — not for an unrelated
+                point elsewhere in the graph. None (default) resolves
                 to the shared TORTOISE_EP_REQUIRE_CALIBRATION posture
                 (default "1" → True fail-closed, post-#344). Pass False
                 explicitly to opt out and run EP on topology alone (the #7478
@@ -21571,7 +21581,10 @@ class TortoiseSDK:
         Calibration posture (#1157): the lazy dream path WRITES n.confidence
         and the read returns belief numbers — both must be gated on
         calibration like compute_confidence. require_calibration=True raises
-        CalibrationError when evidence-kind points are uncalibrated; None
+        CalibrationError when THIS CLAIM is uncalibrated (the read puts only
+        this claim in a natural parameter, #7739) and, when the claim is a
+        dirty root, when the lazy dream consumes an uncalibrated point — never
+        for an unrelated point elsewhere in the graph. None
         (default) resolves to the shared TORTOISE_EP_REQUIRE_CALIBRATION
         posture (default True — fail-closed, post-#344; set
         TORTOISE_EP_REQUIRE_CALIBRATION to "0" to opt out).
