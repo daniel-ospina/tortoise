@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 from tests.fake_control_plane import (  # noqa: E402
     TIMESTAMPTZ_COLUMNS,
     FakeControlPlane,
+    rpc_call_named,
 )
 
 
@@ -720,3 +721,32 @@ def test_json_path_arrow_keeps_the_json_type() -> None:
     f = _cas_fake(version=3)
     assert f.query("organizations", select=["id"],
                    filters=[("onboarding_state->state_version", "eq", 3)]) == [{"id": _ORG}]
+
+
+# ── ``rpc_call_named``: the shared provision-RPC pin (#4816, #4241) ─────────
+# The pin's whole claim is "this endpoint provisioned through the provision_team
+# RPC", and its safety argument is that a switch to a DIFFERENT provision wrapper
+# matches nothing and RAISES instead of silently passing. That raise is new
+# behaviour introduced with the helper, so it is pinned here rather than trusted.
+
+def test_rpc_call_named_selects_by_name_not_index() -> None:
+    """A background boot-sweep RPC at index 0 must not be read as the request's
+    own call (#4816): selection is by NAME."""
+    fake = FakeControlPlane()
+    fake.rpc_calls.extend([
+        ("metering_repair_period_bounds", {}),
+        ("provision_team", {"p_org_id": "org-1"}),
+    ])
+    assert rpc_call_named(fake, "provision_team") == (
+        "provision_team", {"p_org_id": "org-1"})
+
+
+def test_rpc_call_named_raises_naming_the_observed_rpcs() -> None:
+    """A different provision wrapper finds nothing and raises LOUDLY — an
+    AssertionError listing what was observed, never a bare StopIteration and
+    never a silent pass."""
+    fake = FakeControlPlane()
+    fake.rpc_calls.append(("provision_team_with_token", {}))
+    with pytest.raises(AssertionError) as excinfo:
+        rpc_call_named(fake, "provision_team")
+    assert "provision_team_with_token" in str(excinfo.value)

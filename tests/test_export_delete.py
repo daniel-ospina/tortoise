@@ -1127,8 +1127,7 @@ class TestDashboardCreatedTeamRoundTrip:
         body = r.json()
         org_id = body["org_id"]
         assert body["graph_name"] == f"org_{org_id}"  # Indicator 1
-        fn, p = rpc_call_named(fake, "provision_team")
-        assert fn == "provision_team"
+        _fn, p = rpc_call_named(fake, "provision_team")
         assert p["p_graph_name"] == f"org_{org_id}"
         # data-plane write (the real write path: namespace=org_id)
         seed_sdk = _seed_graph(db_path, org_id=org_id, n_points=1, n_events=0)  # noqa: F841

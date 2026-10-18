@@ -1824,7 +1824,9 @@ class TestTask8Helpers:
             "p_tier": "free", "p_max_users": 1, "p_max_graphs": 1,
             "p_ops_allowance": 10000, "p_graph_size_cap": 10000,
         })
-        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
+        # The pin IS the call: rpc_call_named raises (naming the observed RPCs)
+        # when the provision wrapper used some other RPC than provision_team.
+        rpc_call_named(fake, "provision_team")
         assert any(t["id"] == "team-new-1" for t in fake.tables["organizations"])
         mem = [m for m in fake.tables["org_memberships"]
                if m["org_id"] == "team-new-1"]
