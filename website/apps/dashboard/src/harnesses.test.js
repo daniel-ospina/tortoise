@@ -412,7 +412,8 @@ test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () =
   const pi = HARNESS_INSTALL.pi(KEY)
   assert.match(pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
   assert.match(pi, /\.pi\/agent\/extensions/)
-  // the Memory-sources inline row installs the SAME seam (one shared constant)
+  // the Settings disclosure renders the SAME seam (one shared constant) — the
+  // shared row itself carries only the pointer (#3513 §2)
   assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
   assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
 })

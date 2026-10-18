@@ -31,7 +31,10 @@
 //      mount renders the recipe as a COLLAPSED, UNCONDITIONAL disclosure. This
 //      is the render-level proof that the shared row is not itself an install
 //      surface, and that "Settings carries it collapsed" is a real collapsed
-//      `<details>`, not a comment.
+//      `<details>`, not a comment. Because that disclosure renders once per
+//      supported harness, the summary must also NAME its own row (an identical
+//      accessible name on four controls is the ambiguity #3700 exists to
+//      remove), and its label/copy comes from the copy module, never a literal.
 //
 // WHAT IT IS NOT. It renders the COMPONENT with fabricated props — it cannot
 // see that `main.jsx` still mounts it (the tripwire pins that mount), nor any
@@ -60,7 +63,12 @@ import {
   HARNESS_NAMES,
   HARNESS_ORDER,
 } from './harnesses.js'
-import { captureErrorForHarness, harnessAttributionForHarness, CAPTURE_INSTALL_POINTER } from './captureStatus.js'
+import {
+  CAPTURE_INSTALL_POINTER,
+  CAPTURE_MANUAL_INSTALL_LABEL,
+  captureErrorForHarness,
+  harnessAttributionForHarness,
+} from './captureStatus.js'
 
 // The shipped stylesheet, loaded into the jsdom document (vite.config.js sets
 // `test.css: true`). Without this the visibility assertion in test 2 would read
@@ -75,6 +83,19 @@ const SUPPORTED = 'claude'
 const UNSUPPORTED = HARNESS_ORDER.find((h) => !HARNESS_CAPTURE_SUPPORT[h])
 
 const norm = (s) => s.replace(/\s+/g, ' ').trim()
+// The accessible name a screen reader announces for a control: its
+// `aria-labelledby` targets when present (HTML-AAM's first rule for name
+// computation), otherwise its own text content. Read here rather than asserted
+// against the DOM shape so the test states the USER-visible outcome.
+const accessibleName = (el) => {
+  const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+  if (!ids.length) return norm(el.textContent)
+  return norm(ids.map((id) => {
+    const target = el.ownerDocument.getElementById(id)
+    assert.ok(target, `aria-labelledby="${id}" must resolve to a rendered element`)
+    return target.textContent
+  }).join(' '))
+}
 const rowOf = (container, h) => container.querySelector(`#harness-note-${h}`).closest('.harness-status')
 const disclosureOf = (container, h) => rowOf(container, h).querySelector('.harness-status-name .dim.small')
 
@@ -230,8 +251,9 @@ test("#3513 §2: the SETTINGS mount carries the recipe as a COLLAPSED disclosure
   assert.ok(details, 'the Settings mount renders the manual-install disclosure')
   assert.equal(details.hasAttribute('open'), false,
     'the disclosure is COLLAPSED by default — never expanded at first paint')
-  assert.equal(norm(details.querySelector('summary').textContent), 'Install manually',
-    'the disclosure has a labelled, focusable summary (the default <details> tab stop)')
+  assert.equal(norm(details.querySelector('summary').textContent), CAPTURE_MANUAL_INSTALL_LABEL,
+    'the disclosure has a labelled, focusable summary (the default <details> tab stop) — ' +
+    'and its label is the copy module\'s value, not a literal re-typed in the card')
   const snippet = details.querySelector('pre.snippet')
   assert.ok(snippet, 'the collapsed disclosure holds the install command')
   assert.equal(snippet.textContent, HARNESS_CAPTURE_INSTALL[SUPPORTED],
@@ -241,6 +263,37 @@ test("#3513 §2: the SETTINGS mount carries the recipe as a COLLAPSED disclosure
     'the neighbouring row renders ITS command — a single literal cannot satisfy both rows')
   assert.equal(rowOf(container, UNSUPPORTED).querySelector('details.manual-install'), null,
     'an unsupported row has no install path, so it renders no command')
+})
+
+test('#3513 §2: each Settings summary NAMES its harness — four rows must not announce the same control', () => {
+  // The Settings mount renders the disclosure on EVERY supported row
+  // (`surface === 'settings' && supported`), so the summary — a native tab stop
+  // a screen reader lists as a control — appears once per supported harness.
+  // With its own text as the accessible name, ALL of them announce the identical
+  // "Install manually" and the user navigating by control cannot tell which
+  // harness each disclosure installs, while the content behind it is per-harness
+  // (HARNESS_CAPTURE_INSTALL[h]). #3700's whole point is that a row says WHICH
+  // harness a claim belongs to. The summary therefore borrows the row's own name
+  // group, and this asserts the USER-visible outcome, not the attribute.
+  const state = { session_recording: true }
+  const { container } = render(
+    <HarnessStatusCard state={state} sessionsOn={true} wizardHarness={null} surface="settings" />)
+  const supported = HARNESS_ORDER.filter((h) => HARNESS_CAPTURE_SUPPORT[h])
+  assert.ok(supported.length > 1,
+    'precondition: more than one supported row renders a summary — otherwise the ambiguity cannot exist')
+
+  const names = supported.map((h) => {
+    const summary = rowOf(container, h).querySelector('details.manual-install summary')
+    assert.ok(summary, `${h}: the Settings row renders its disclosure summary`)
+    return accessibleName(summary)
+  })
+  supported.forEach((h, i) => {
+    assert.equal(names[i].includes(HARNESS_NAMES[h]), true,
+      `the ${h} summary must name ITS harness — announced "${names[i]}", which does not identify which ` +
+      'row the disclosure installs')
+  })
+  assert.equal(new Set(names).size, names.length,
+    `the supported rows must have DISTINCT accessible names — got ${JSON.stringify(names)}`)
 })
 
 test('#3513 §2: the Settings disclosure is UNCONDITIONAL — install state and the recording switch do not gate it', () => {

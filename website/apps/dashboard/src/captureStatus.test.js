@@ -22,7 +22,7 @@ test('recording off-switch ⇒ every harness reads off, even with probe + receip
   assert.equal(captureStatusForHarness(st, 'claude'), 'off')
 })
 
-test('recording on, no probe ⇒ install-pending (install steps shown)', () => {
+test('recording on, no probe ⇒ install-pending (the row states that state and renders the POINTER, not the recipe)', () => {
   const st = { session_recording: true }
   assert.equal(captureStatusForHarness(st, 'claude'), 'install-pending')
 })

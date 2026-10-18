@@ -13,17 +13,22 @@
 // same text, a mid-file swallow, CSS hiding the fragment).
 //
 // So the row is now an ordinary component with a NARROW prop surface (`state`,
-// `sessionsOn`, `wizardHarness` — no effects, no fetches, no app state), which
-// the DOM lane (`harnessDisclosureDom.test.jsx`, vitest + jsdom, `npm run
-// test:dom`) renders and asserts: presence, absence, exact text, the
+// `sessionsOn`, `wizardHarness`, `surface` — no effects, no fetches, no app
+// state), which the DOM lane (`harnessDisclosureDom.test.jsx`, vitest + jsdom,
+// `npm run test:dom`) renders and asserts: presence, absence, exact text, the
 // alert/name-group linkage, and — because the config loads `index.css` into the
 // document — that no rule HIDES it. The static tripwire stays as the cheap
 // accretion guard it is, and no longer carries claims a source pattern cannot
 // honour.
 //
 // `main.jsx` imports this module and renders it where the inline block used to
-// be; the DOM output is unchanged. Copy still lives in `harnesses.js` /
-// `captureStatus.js` — this module renders helpers' returns and authors none.
+// be. The #4915 extraction itself changed nothing a user could see; the DOM
+// output changed later, in #3513 §2 (below) — the row now renders the POINTER
+// where the recipe was, plus a collapsed disclosure on the Settings surface. So
+// "the DOM output is unchanged" was true of the extraction and is NOT true of
+// this file today. Copy still lives in `harnesses.js` / `captureStatus.js` —
+// this module renders their values (`HARNESS_CAPTURE_INSTALL`,
+// `CAPTURE_INSTALL_POINTER`, `CAPTURE_MANUAL_INSTALL_LABEL`) and authors none.
 //
 // #3513 §2 — THE `surface` PROP, AND WHY THE RECIPE IS NOT THE SHARED ROW'S.
 // Epic #1714's settled decision #2 (do not re-litigate): "The install runs in
@@ -49,6 +54,7 @@ import {
 } from './harnesses.js'
 import {
   CAPTURE_INSTALL_POINTER,
+  CAPTURE_MANUAL_INSTALL_LABEL,
   captureErrorForHarness,
   captureStatusForHarness,
   captureStatusLabelForHarness,
@@ -130,7 +136,18 @@ export function HarnessStatusCard({ state, sessionsOn, wizardHarness, surface = 
                 it cannot disagree with the prompt until the user opens it. */}
             {surface === 'settings' && supported && (
               <details className="manual-install">
-                <summary className="dim small">Install manually</summary>
+                {/* #3513 §2 (review): the summary is a native tab stop with its
+                    own accessible name, and this mount renders one per
+                    supported harness — four controls announcing the identical
+                    "Install manually" unless it names its OWN row. The label
+                    is copy (captureStatus.js), not a literal, so the rendered
+                    value keeps one home and the DOM lane asserts the constant.
+                    `aria-labelledby` reuses the name-group id the row already
+                    mints for the alert's `aria-describedby`, so the announced
+                    name carries the harness the disclosure installs. */}
+                <summary className="dim small" aria-labelledby={`harness-note-${h}`}>
+                  {CAPTURE_MANUAL_INSTALL_LABEL}
+                </summary>
                 <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
               </details>
             )}

@@ -21,7 +21,9 @@
 // neither `HARNESS_ATTRIBUTION` nor `HARNESS_CAPTURE_STATUS_LABEL` in code, the
 // row's support gate, that the failure line sits inside it, and that the alert
 // is described by the row name group. Plus: `main.jsx` mounts the card once, with
-// the three props it needs.
+// the four props it needs (`state`, `sessionsOn`, `wizardHarness`, `surface`), and
+// the Settings disclosure's summary is named per row and reads its label from the
+// copy module rather than a literal.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -117,6 +119,20 @@ test('#3700: the row renders the harness disclosure from the helper', () => {
     'the head must render the helper\'s VALUE as the guarded consequent of its own return, so a literal, a re-derived test, or an `&& (false && …)` around the fragment fails')
   assert.match(head, /captureStatusLabelForHarness\(\s*state\s*,\s*h\s*,?\s*\)/,
     'the state word\'s source must be the shared label helper')
+})
+
+test('#3513 §2: the Settings summary is named per row and its label comes from the copy module', () => {
+  // The Settings mount renders this disclosure once per SUPPORTED row, so an
+  // un-named summary is four indistinguishable controls (the ambiguity #3700
+  // exists to remove), and an inline literal is a second copy home. The DOM lane
+  // asserts the USER-visible name; this pins the SHAPE cheaply, so a later edit
+  // that drops either cannot land without a source change here.
+  assert.match(cardCode, /<summary[^>]*\baria-labelledby=\{\s*`harness-note-\$\{h\}`\s*\}/,
+    'the Settings disclosure summary must borrow its ROW\'s name group, or all supported rows announce the same name')
+  assert.match(cardCode, /\{\s*CAPTURE_MANUAL_INSTALL_LABEL\s*\}/,
+    'the summary label must be rendered from the copy module constant — not a literal re-typed in the card')
+  assert.doesNotMatch(cardCode, /Install manually/,
+    'harnessStatusCard.jsx authors no copy: the label lives in captureStatus.js')
 })
 
 test('#3700: the card renders the helper, never the copy constant', () => {
