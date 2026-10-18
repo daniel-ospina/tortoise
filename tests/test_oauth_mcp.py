@@ -701,7 +701,9 @@ class TestLoopbackPortAgnostic:
         the NAVIGATION (a presented host differing in case from the registered
         one, so the two values differ) is
         `TestCanonicalRedirectTarget::test_authorize_page_carries_the_rebuilt_target`
-        in `tests/test_oauth_consent_pkce.py`, not this test."""
+        in this file, not this test; the end-to-end page NAVIGATION itself is
+        `tests/test_oauth_consent_pkce.py::test_3443_navigation_uses_the_server_built_target_with_a_raw_guard_control`,
+        which runs the page under node."""
         tc, _ = api_client
         reg = _register_client(tc, redirect_uris=[self.PORTLESS])
         r = tc.get("/oauth/authorize", params={
@@ -1316,6 +1318,67 @@ class TestCanonicalRedirectTarget:
             assert "\\" not in target, (bad_port, target)
             # with no registered port there is nothing to keep either
             assert build("http://localhost/cb", presented) == "http://localhost/cb"
+
+    def test_a_bracket_that_is_not_a_host_terminator_cannot_hide_or_double_a_port(self):
+        """A ``]`` that does not belong to a bracketed host must not be read as the
+        host's end. Reading it as one started the port scan AFTER it, so the
+        separator in front of it was never found and an authority that HAS a port
+        was reported as having none — which either drops a registered port
+        (`http://localhost:8787/cb` -> `http://localhost/cb`, the scheme default)
+        or appends a presented port to an authority that already carries one
+        (`…:8787]:3118`, a URL no browser parses).
+
+        `_authority_parts` is asserted DIRECTLY for the split, because the
+        composed path cannot reach those shapes: `urlsplit` refuses them
+        (`Invalid IPv6 URL` — brackets are legal only in a host that opens with
+        ``[``), so the matcher rejects the pair and the builder's totality guard
+        answers with the registered side. Both halves are pinned: the split, and
+        the value the request path actually produces.
+        """
+        import itertools
+        from urllib.parse import urlsplit
+
+        from tortoise.oauth import _authority_parts
+        from tortoise.oauth import _canonical_redirect_target as build
+        from tortoise.oauth import _redirect_uri_matches as m
+
+        # A `]` after the separator is not a terminator…
+        assert _authority_parts("localhost:3118]") == ("localhost", "3118]")
+        assert _authority_parts("localhost:8787]") == ("localhost", "8787]")
+        # …while a real bracketed host, a `]` in USERINFO, an empty port and no
+        # port at all keep the split they had.
+        assert _authority_parts("[::1]:3118") == ("[::1]", "3118")
+        assert _authority_parts("[::1]") == ("[::1]", "")
+        assert _authority_parts("a]@[::1]:3118") == ("a]@[::1]", "3118")
+        assert _authority_parts("localhost:") == ("localhost", "")
+        assert _authority_parts("localhost") == ("localhost", "")
+
+        # The composed path: BOTH rows are refused by the matcher (so neither can
+        # ever be rebuilt-and-navigated) and the builder answers with the
+        # REGISTERED string — never the presented bytes, never a doubled port.
+        dropped = build("http://localhost:8787/cb", "http://localhost:3118]/cb")
+        doubled = build("http://localhost:8787]/cb", "http://localhost:3118/cb")
+        assert dropped == "http://localhost:8787/cb", dropped
+        assert doubled == "http://localhost:8787]/cb", doubled
+        assert ']:' not in dropped and ']:' not in doubled
+        for registered, presented in (("http://localhost:8787/cb", "http://localhost:3118]/cb"),
+                                      ("http://localhost:8787]/cb", "http://localhost:3118/cb")):
+            assert not m(registered, presented), (registered, presented)
+
+        # Which is not luck, and is why this is defence in depth rather than a
+        # live path: every netloc `urlsplit` ACCEPTS carries brackets only in a
+        # host that opens with `[`, so the rule above cannot mis-fire on anything
+        # the builder is actually handed.
+        for length in range(1, 5):
+            for chars in itertools.product("a:[]@1", repeat=length):
+                netloc = "".join(chars)
+                try:
+                    urlsplit(f"http://{netloc}/cb")
+                except ValueError:
+                    continue
+                host_at = netloc.rfind("@") + 1
+                if "]" in netloc[host_at:]:
+                    assert netloc.startswith("[", host_at), netloc
 
     def test_the_rebuild_is_total_on_unparseable_input(self):
         """`urlsplit` raises on an unbalanced IPv6 bracket (the one shape it

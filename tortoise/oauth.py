@@ -661,13 +661,30 @@ def _authority_parts(netloc: str) -> tuple[str, str]:
     RFC 3986 §3.2: the port is the last ``:``-delimited component of the
     authority. USERINFO IS STRIPPED FIRST — a ``]`` in userinfo is not the IPv6
     terminator, and reading it as one drops the presented port for a
-    registrable, matching pair — then a bracketed host ends at its ``]``.
+    registrable, matching pair — then a host that OPENS with ``[`` ends at its
+    ``]``. A ``]`` that does not belong to a bracketed host is NOT a terminator:
+    honouring it started the port scan AFTER it, so the separator in front of it
+    was never found and an authority that HAS a port was reported as having
+    none — which drops a registered port, or appends a presented port to an
+    authority that already carries one (`host:8787]:3118`). `urlsplit` refuses
+    those shapes outright (`_check_bracketed_netloc`: brackets are legal only in
+    a host that opens with ``[``), so this is defence in depth for a hand-rolled
+    parser inside the trust boundary rather than a live path — the caller's
+    ``urlsplit`` guard is what answers with the trusted side there.
+
+    ⚠️ "No ``:`` at all" and "a ``:`` with an EMPTY port text" deliberately
+    return the same ``""``: to the caller both mean "the request names the
+    scheme's default port", which is ONE branch. A port text that is PRESENT but
+    unusable is a different state, because it must keep the registered authority.
     """
     # Strip userinfo FIRST: a `]` in it is not the IPv6 terminator (reading it
     # as one dropped the presented port for a registrable, matching pair), and
     # `@` cannot follow the host, so everything after the LAST `@` is the host.
     host_at = netloc.rfind("@") + 1
-    end = netloc.find("]", host_at)
+    # …and only a host that OPENS with `[` is bracketed: a stray `]` after the
+    # port separator must not hide that separator (see the docstring).
+    bracketed = netloc.startswith("[", host_at)
+    end = netloc.find("]", host_at) if bracketed else -1
     port_at = netloc.find(":", end if end >= 0 else host_at)
     if port_at < 0:
         return netloc, ""
