@@ -41,7 +41,7 @@ import pytest
 from tortoise.analyze import _bfs_select_operators
 from tortoise.audit import audit_graph
 from tortoise.ep import TortoiseEP
-from tortoise.live import EPISTEMIC_LABELS, epistemic_labels_of
+from tortoise.live import EPISTEMIC_LABELS, epistemic_labels_of, epistemic_sweep
 from tortoise.ranking import (
     W4_CONTESTED_BOOST,
     GapsRanker,
@@ -141,6 +141,24 @@ def test_present_label_resolution_keeps_a_point_only_read_cheap(sdk):
     counter.queries.clear()
     assert epistemic_labels_of(counter, ["no-such-epistemic-node"]) == ["Point"]
     assert len(counter.queries) == len(EPISTEMIC_LABELS), counter.queries
+
+
+def test_sweep_runs_the_anchored_query_once_per_present_label(sdk):
+    """``live.epistemic_sweep`` is the ONE implementation every id-anchored
+    surface uses (analyze BFS, every ranker signal read) — it composes
+    ``epistemic_label_queries`` with ``epistemic_labels_of`` rather than
+    restating the loop per module."""
+    p = _point(sdk)
+    n = _node(sdk, "Subject", "sweep-1")
+    counter = _CountingProjection(sdk._get_proj())
+    template = "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"
+
+    assert epistemic_sweep(counter, template, {"ids": [p]}) == [[p]]
+    assert len(counter.queries) == 2, counter.queries  # resolution + 1 anchored
+
+    counter.queries.clear()
+    assert epistemic_sweep(counter, template, {"ids": [p, n]}) == [[p], [n]]
+    assert len(counter.queries) == 4, counter.queries  # 2 resolution + 2 anchored
 
 
 def test_ranker_read_costs_one_anchored_query_for_point_ids(sdk):
@@ -266,6 +284,41 @@ def test_contested_claims_does_not_flood_the_report_with_unmeasured_entities(sdk
             f"an unmeasured :{label} flooded the contested report")
 
 
+def test_contested_claims_never_lists_a_legacy_op_type_only_operator(sdk):
+    """The non-operator predicate must be the CANONICAL one — both halves.
+
+    A legacy operator (#2205/#943) carries ``op_type`` and NO ``is_operator``.
+    Admitting UNSET (which the entity labels need) re-admitted exactly that
+    class to a report about CLAIMS, and ``:Point`` has no measured gate, so it
+    coalesces to Beta(1,1) (v = 1/12) and sorts to the top. Before the widening
+    the bare ``= false`` excluded it — by NULL, but it excluded it.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (n:Point {id:'legacy-op', op_type:'NAND', label:'contra', "
+        "content:'an operator label', status:'live', "
+        "posterior_alpha:2.0, posterior_beta:2.0})")
+    assert "legacy-op" not in {c["id"] for c in sdk._get_ep().get_contested_claims()}
+
+
+def test_contested_claims_identifies_an_event_without_an_id_property(sdk):
+    """``:Event`` writers key on ``eventId`` (some stamp ``id`` too, some do
+    not). Keying the merged set on ``n.id`` collapsed every id-less Event onto a
+    ``None`` key — the first won and the rest were silently DROPPED, and the
+    survivor was unaddressable. The row identity is ``coalesce(id, eventId)``.
+    """
+    proj = sdk._get_proj()
+    for eid, name in (("ev-a", "alpha event"), ("ev-b", "beta event")):
+        proj.g.query(
+            "CREATE (e:Event {eventId:$eid, eventKind:'test', name:$n, "
+            "startedAt:'2026-01-01T00:00:00Z', "
+            "posterior_alpha:2.0, posterior_beta:2.0})",
+            params={"eid": eid, "n": name})
+
+    listed = {c["id"]: c for c in sdk._get_ep().get_contested_claims()}
+    assert {"ev-a", "ev-b"} <= set(listed), f"id-less Events dropped: {listed}"
+    assert listed["ev-b"]["content"] == "beta event"
+
+
 def test_contested_claims_lists_a_multi_labelled_node_once(sdk):
     """``:Point:Object`` is a real minted shape (``update_point``'s promote
     arm). Both label sweeps return it, so the merged set must collapse on id —
@@ -345,6 +398,25 @@ def test_ranker_load_and_support_reads_return_non_point_belief(sdk, label):
     assert support[n]["incoming_impl"] == 1
 
 
+def test_ranker_support_ignores_a_legacy_op_type_only_operator(sdk):
+    """Same canonical-predicate rule on the ranker side: an operator's own edge
+    must not count as DIRECT support for a claim (the fail-open #6871 class).
+    A legacy ``op_type``-only operator has no ``is_operator``, so the UNSET
+    admission alone would count it."""
+    target = _point(sdk, "a supported claim")
+    sdk._get_proj().g.query(
+        "CREATE (n:Point {id:'legacy-support', op_type:'IMPL', "
+        "content:'an operator', status:'live'})")
+    sdk._get_proj().g.query(
+        "MATCH (s:Point {id:'legacy-support'}), (t:Point {id:$t}) "
+        "MERGE (s)-[:IMPL]->(t)", params={"t": target})
+
+    signals = GapsRanker(projection=sdk._get_proj())._fetch_support_signals([target])
+    # ``incoming_impl`` = operator-mediated (r3) + DIRECT (r4). The legacy
+    # operator's own edge is neither, so both columns must be 0.
+    assert signals[target]["incoming_impl"] == 0, signals[target]
+
+
 def test_contested_relevance_reads_non_point_target_and_counter_claim(sdk):
     """The W4 relevance read: the CONTESTED node is id-anchored (swept) and the
     NANDer ``c`` is a traversal position (disjunction). A :Subject counter-claim
@@ -394,16 +466,18 @@ def test_contested_relevance_reads_non_point_nand_input_source(sdk):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5. Audit counts — DELIBERATE :Point-only scope (#7927 decision)
+# 5. Audit — deliberately SPLIT: counts/provenance :Point-only, wiring
+#    checks widened (#7927 decision)
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_audit_scope_is_point_only_by_decision(sdk):
-    """The audit is a REPORT over the Point wiring universe, scoped by
-    ``pointKind`` (a Point-only property) and auditing point-level provenance
-    annotations that no other label carries. Admitting the four labels here
-    would flag every Subject/Object/Event as a legacy provenance gap — a false
-    positive produced by the widening itself. So the scope stays :Point-only
-    and must not silently change either way."""
+def test_audit_counts_stay_point_only_by_decision(sdk):
+    """The audit's COUNTS and PROVENANCE checks are a report over the Point
+    wiring universe: scoped by ``pointKind`` (a Point-only property) and
+    auditing point-level ``sourceKind``/``sourceDate`` annotations that no
+    other label carries. Admitting the four labels THERE would flag every
+    Subject/Object/Event as a legacy provenance gap — a false positive
+    produced by the widening itself. So that half stays :Point-only and must
+    not silently change either way."""
     _point(sdk, "an audited claim")
     _node(sdk, "Subject", "not-audited-subject")
     _node(sdk, "Object", "not-audited-object")
@@ -412,10 +486,38 @@ def test_audit_scope_is_point_only_by_decision(sdk):
     result = audit_graph(sdk._get_proj())
     assert result.node_count == 1, (
         "audit node_count must count only in-scope Points; a changed count "
-        "means the documented :Point-only decision was silently reversed")
+        "means the documented :Point-only decision for counts was reversed")
     flagged = {i.node_id for i in result.issues}
     assert not flagged & {"not-audited-subject", "not-audited-object",
                           "not-audited-event"}
+
+
+def test_audit_mitigation_check_sees_a_non_point_endpoint(sdk):
+    """The WIRING half is widened (#7927): checks 4/5/6/6b/7 are INTEGRITY
+    checks over operator endpoints, and #7902 made a :Subject/:Object/:Event a
+    legal endpoint. Left :Point-only they reported a false CLEAN — an integrity
+    result indistinguishable from a true one (#6146). Here: a NAND operator at
+    the mitigation threshold whose only target is a :Subject must be reported.
+    """
+    subject = _node(sdk, "Subject", "audit-subject-endpoint",
+                    name="a subject belief")
+    # A second live Point so the operator is not itself degenerate, and the
+    # operator NANDs the :Subject belief with no mitigated_by edge.
+    other = _point(sdk, "a supporting claim")
+    op_id = sdk.create_operator("NAND", other, [subject])["id"]
+    sdk._get_proj().g.query(
+        "MATCH (op:Point {id:$op}) SET op.confidence = 0.2",
+        params={"op": op_id})
+
+    result = audit_graph(sdk._get_proj())
+    reported = [i for i in result.issues
+                if i.issue_type == "mitigation_recommended"]
+    assert reported, (
+        "a low-confidence NAND operator targeting a :Subject reported a false "
+        f"CLEAN: {result.check_counts}")
+    assert any("a subject belief" in i.detail for i in reported), (
+        "the :Subject endpoint was counted but its text never resolved — a "
+        f"content-only read: {[i.detail for i in reported]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -445,7 +547,10 @@ def test_svbp_extractor_includes_non_point_operator_input(sdk, label):
 
 def test_bfs_selector_uses_the_shared_label_helpers():
     src = inspect.getsource(_bfs_select_operators)
-    assert "epistemic_label_queries(" in src, "id-anchored legs must sweep live.EPISTEMIC_LABELS"
+    # The sweep itself is live.epistemic_sweep (which composes
+    # epistemic_label_queries + epistemic_labels_of) — one implementation for
+    # every id-anchored surface, never a private copy per module.
+    assert "epistemic_sweep(" in src, "id-anchored legs must sweep live.EPISTEMIC_LABELS"
     assert "epistemic_disjunction(" in src, "traversal positions must disjoin live.EPISTEMIC_LABELS"
     for hand_spelled in (
         "MATCH (n:Point) WHERE n.id IN $ids",
@@ -472,21 +577,25 @@ def test_contested_claims_uses_the_shared_label_helper():
 ])
 def test_ranker_signal_reads_use_the_shared_label_helper(fn):
     src = inspect.getsource(fn)
-    assert "_query_label_sweep(" in src, f"{fn.__qualname__} bypasses the shared sweep"
+    assert "epistemic_sweep(" in src, f"{fn.__qualname__} bypasses the shared sweep"
     assert "MATCH (n:Point) WHERE n.id IN $ids" not in src
 
 
 def test_contested_relevance_uses_the_shared_label_helpers():
     src = inspect.getsource(resolve_contested_relevance)
-    assert "_query_label_sweep(" in src
+    assert "epistemic_sweep(" in src
     assert "epistemic_disjunction(" in src
     assert "MATCH (n:Point) WHERE n.id IN $ids" not in src
 
 
-def test_audit_records_its_point_only_decision_in_reachable_code():
-    """A deliberate :Point-only scope must be FINDABLE, not inferred: the
-    decision lives in ``audit_graph``'s own body so the next reader meets it
-    where the predicate lives."""
+def test_audit_records_its_split_scope_in_reachable_code():
+    """The per-check scope decision must be FINDABLE, not inferred: it lives in
+    ``audit_graph``'s own body, next to the predicates it governs, and states
+    BOTH halves — what stays :Point-only and what was widened, each with its
+    reason. A one-sided note is how the next reader "harmonizes" the wrong
+    half."""
     src = inspect.getsource(audit_graph)
-    assert "#7927 DECISION" in src
-    assert "deliberately ``:Point``-ONLY" in src
+    assert "#7927" in src
+    assert "STAYS ``:Point``-ONLY" in src
+    assert "WIDENED (#7927)" in src
+    assert "false positive" in src and "false CLEAN" in src

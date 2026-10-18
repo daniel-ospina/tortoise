@@ -3439,7 +3439,16 @@ _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
 _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Subject", ("id", "name")),
     ("Object", ("id", "name")),
-    ("Event", ("eventId",)),
+    # #7927: ``id`` added to Event. Every epistemic read anchors on ``id``
+    # (``live.epistemic_labels_of``, the ranker sweeps, the BFS frontier legs),
+    # and Event carried only an ``eventId`` index — so the id-anchored Event
+    # leg of a sweep was a FULL LABEL SCAN on the hot rerank path (measured
+    # 2.3 ms at 5k Events, ~linear in the label population) for every result
+    # set that resolved no Point/Subject/Object, which includes the common
+    # document search. Same single-prop string index Subject/Object already
+    # carry — not the #522 kind-field / composite class the note below
+    # declines.
+    ("Event", ("eventId", "id")),
     # canonicalUrl (#5012 S0b): the S0a canonical
     # identity S0b resolves against, so the resolver
     # is an index seek, not a label scan.
