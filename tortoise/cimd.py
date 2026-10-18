@@ -70,7 +70,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import socket
 import threading
 import time
 from collections import OrderedDict
@@ -79,6 +78,11 @@ from urllib.parse import unquote, urlparse
 import httpcore
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
+from .security import (  # #8103: the ONE address policy
+    AddressRefusal,
+    is_global_address,
+    resolve_global_addresses,
+)
 
 __all__ = [
     "CimdError",
@@ -138,12 +142,6 @@ FETCH_MAX_S = 6.0
 #: How long a resolution waits for an in-flight slot before refusing. Bounded,
 #: so a saturated cap fails fast instead of parking a caller indefinitely.
 IN_FLIGHT_WAIT_S = 2.0
-
-# Deprecated special-purpose ranges that Python's `is_global` still reports as
-# global (#2847 review P2): 6to4 relay anycast (RFC 7526) and IPv6 site-local
-# (RFC 3879). Effectively unroutable, but the predicate claims "globally
-# routable" so it should not admit them.
-_IPV4_6TO4_RELAY = ipaddress.ip_network("192.88.99.0/24")
 
 
 class CimdError(Exception):
@@ -264,47 +262,40 @@ def is_public_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool
     report ``is_global=True``. An IPv4-mapped IPv6 address is judged by the
     IPv4 address it embeds, so ``::ffff:127.0.0.1`` cannot smuggle a loopback
     target past the check.
+
+    #8103: the RULE moved to ``security.is_global_address`` — the webhook
+    transport judges its connect-time answer by the same predicate, and two
+    copies of an SSRF policy drift. This name stays because it is the
+    published surface ``tests/test_cimd_ssrf.py`` pins (and ``__all__``
+    exports); the predicate body has exactly one home.
     """
-    if ip.version == 6:
-        mapped = ip.ipv4_mapped
-        if mapped is not None:
-            ip = mapped
-        elif ip.is_site_local:                  # fec0::/10 — RFC 3879
-            return False
-    if ip.version == 4 and ip in _IPV4_6TO4_RELAY:   # RFC 7526
-        return False
-    return bool(ip.is_global
-                and not ip.is_multicast
-                and not ip.is_reserved
-                and not ip.is_unspecified)
+    return is_global_address(ip)
 
 
 def public_addresses(host: str, port: int) -> list[str]:
     """Resolve ``host`` and return its addresses **only if every one is
     public** — a host that resolves to a mix of public and private addresses is
     refused outright rather than filtered, so an attacker cannot win by
-    publishing one public A record beside a private one."""
+    publishing one public A record beside a private one.
+
+    #8103: the resolve-and-refuse LOOP lives in
+    :func:`security.resolve_global_addresses` (the webhook connect-time pin runs
+    the same one). This function owns only the ``CimdError`` wording, because two
+    copies of the loop drift exactly as two copies of the predicate did — they
+    had already disagreed on whether the cap applies before or after validation.
+    """
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except OSError as exc:
-        raise CimdError(f"could not resolve client_id host {host!r}.") from exc
-    addresses: list[str] = []
-    for info in infos[:MAX_ADDRESSES]:
-        raw = info[4][0]
-        try:
-            ip = ipaddress.ip_address(raw)
-        except ValueError as exc:
+        return list(resolve_global_addresses(host, port, cap=MAX_ADDRESSES))
+    except AddressRefusal as exc:
+        if exc.reason == AddressRefusal.UNRESOLVED:
+            raise CimdError(f"could not resolve client_id host {host!r}.") from exc
+        if exc.reason == AddressRefusal.UNREADABLE:
             raise CimdError("client_id host resolved to an unparsable address.") from exc
-        if not is_public_address(ip):
+        if exc.reason == AddressRefusal.NON_GLOBAL:
             raise CimdError(
                 "client_id host resolves to a non-public address "
-                f"({ip}) — refusing to fetch.")
-        text = str(ip)
-        if text not in addresses:
-            addresses.append(text)
-    if not addresses:
-        raise CimdError(f"client_id host {host!r} did not resolve.")
-    return addresses
+                f"({exc.address}) — refusing to fetch.") from exc
+        raise CimdError(f"client_id host {host!r} did not resolve.") from exc
 
 
 class _DeadlineStream(httpcore.NetworkStream):
