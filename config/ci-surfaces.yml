@@ -2055,6 +2055,7 @@ surfaces:
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
   - test_v4_declared_mechanisms.py
+  - test_write_op_reachability.py
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).

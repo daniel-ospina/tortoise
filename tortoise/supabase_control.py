@@ -4415,6 +4415,38 @@ def metering_get(cp, org_id: str, period_start: str) -> int:
     return int(rows[0]["write_ops"]) if rows else 0
 
 
+def metering_get_write_op_counters(cp, org_id: str, period_start: str) -> dict:
+    """BOTH write-op counters for an org's window STARTING at *period_start*
+    — the supabase-mode READ path for ``metering.get_write_op_yield`` (#4495).
+
+    Returns ``{write_ops, nodes_written}``, ZEROS when the row is absent (the
+    MERGE/RPC only creates the record on the first write). A plain single-row
+    PRIMARY-KEY read, deliberately mirroring ``metering_get_usage`` and
+    ``metering_get_embed_usage`` rather than adding a SQL function.
+
+    ``nodes_written`` has been incremented atomically beside ``write_ops``
+    since ``supabase/migrations/20260813000002_metering_nodes_written.sql`` and is the
+    net-new NON-EPISODIC node yield of the billed ops (epic #909 §4.4/W-4).
+    It was recorded for the value-first commit cost driver and never READ for
+    the stock/flow relationship; #4495 is the reader. Read-only: nothing here
+    prices, caps or bills.
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
+    rows = cp.query(
+        "metering_records",
+        select=["write_ops", "nodes_written"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return {"write_ops": 0, "nodes_written": 0}
+    return {
+        "write_ops": int(rows[0].get("write_ops") or 0),
+        "nodes_written": int(rows[0].get("nodes_written") or 0),
+    }
+
+
 def metering_increment(cp, org_id: str, period_start: str, period_end: str,
                       n: int = 1, nodes_written: int = 0) -> int:
     """Increment the org's write-op counter for the window
