@@ -41,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tortoise.consistency import (
+    _GRAPH_VIEW_LABELS as _GRAPH_VIEW_LABELS_HOME,
     _PROJECTION_STATE_FORMAT,
     _PROJECTION_STATE_FORMAT_HISTORY,
     check_consistency,
@@ -652,8 +653,23 @@ def test_the_reported_bounds_name_the_digest_coverage(tmp_path):
         proj.close()
 
     assert "(label, id)" in bounds["baseline_digest_covers"]
-    for label in ("Point", "Object", "Subject", "Event"):
+    # #8859 follow-up review P2: iterate the ONE home, not a re-listed literal.
+    # The literal (`"Point", "Object", "Subject", "Event"`) stayed green when a
+    # new creation row widened `_GRAPH_VIEW_LABELS` while
+    # `baseline_digest_covers` still named the old four — the drift this bounds
+    # text exists to disclose. Reading the home makes the pin red on a widening
+    # that the report has not followed.
+    for label in _GRAPH_VIEW_LABELS_HOME:
         assert label in bounds["baseline_digest_covers"], bounds
+    # The per-label loop alone is vacuous while the home is exactly
+    # `Point/Event/Object/Subject`: a re-listed `Point/Object/Subject/Event`
+    # contains every one of those names as a substring, so it passes -- and it
+    # is the SECOND HOME that has to be impossible, not merely the widening.
+    # Pinning the home's ORDER and SEPARATOR is what makes a re-list red today:
+    # the derivation emits `Point/Event/Object/Subject`, the retired literal was
+    # `Point/Object/Subject/Event`. Proved by re-inlining the literal: this line
+    # reds, the loop above does not.
+    assert "/".join(_GRAPH_VIEW_LABELS_HOME) in bounds["baseline_digest_covers"], bounds
     assert "name" in bounds["baseline_digest_does_not_cover"], bounds
     # The residual shape the index deliberately does not reach, named so a
     # reader does not infer a coverage the code does not have ("no

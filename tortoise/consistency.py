@@ -805,9 +805,11 @@ def _graph_fingerprint(graph_view: dict,
     """Pure GRAPH-only canonical view — the baseline a later run compares to.
 
     ``graph_view`` is the ONE ``(label, id)`` graph index (:func:`_graph_view`),
-    covering every label the reference fold models — ``Point`` through
-    ``_canonical_point_fields`` and ``Object`` / ``Subject`` / ``Event`` through
-    :func:`_entity_node_view`. Keying it by label is what stops a non-Point node
+    covering every label the reference fold models — listed here from
+    ``_GRAPH_VIEW_LABELS`` (the one home) rather than re-typed from memory:
+    ``Point`` through ``_canonical_point_fields`` and every label in
+    ``_GRAPH_VIEW_LABELS`` after it through :func:`_entity_node_view`.
+    Keying it by label is what stops a non-Point node
     from being invisible to the baseline (#7936): with a Point-only index a
     graph-only ``Object``/``Subject``/``Event`` — or a belief/status rewrite on
     one — left ``db_hash`` unmoved, so the check reported a clean graph for a
@@ -2677,8 +2679,18 @@ def check_consistency(log_path: str, projection, *,
             # #7936: the `(label, id)` re-key. The digest is no longer
             # Point-only, so a graph-only non-Point node (or a belief/status
             # write on one) MOVES it and is reported as `unrecorded-mutation`.
+            # #8859 follow-up review P2 (fail-open-drift): the label list is
+            # emitted from `_GRAPH_VIEW_LABELS`, never re-listed here. The
+            # literal this replaced (`Point/Object/Subject/Event`) was a SECOND
+            # home for the set: a new `projection._ENTITY_CREATION_EVENT_LABEL`
+            # row widened the query and the digest while this bound kept naming
+            # the old four — so an operator was told the digest does not cover
+            # the new label and could dismiss a genuine `unrecorded-mutation` on
+            # it as out of scope. That is the false-GREEN #7936 exists to close.
             "baseline_digest_covers": (
-                "(label, id) over Point/Object/Subject/Event: the Point "
+                "(label, id) over "
+                + "/".join(_GRAPH_VIEW_LABELS)
+                + ": the Point "
                 "content fields plus, per entity, `status` and "
                 "`belief_compared` (graph-only, so a moved entity node moves "
                 "the baseline). `status` is covered on EVERY label here, "
