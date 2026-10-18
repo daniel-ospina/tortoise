@@ -3528,6 +3528,17 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
     4, "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498")
 
+#: One digest per generation that has ever shipped, so "bytes changed, generation
+#: left alone" cannot be certified by editing the pair above by itself: a pair is
+#: self-consistent whatever bytes it names, and the shape #3512 shipped (a
+#: comment-only header edit at generation 3) is exactly the one that must be seen.
+#: A new byte set therefore needs a NEW generation and a NEW entry here; an
+#: existing entry is never rewritten.
+_GENERATION_DIGESTS = {
+    3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
+    4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
+}
+
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
     """A shipped-artifact edit that leaves the generation alone is a regression.
@@ -3550,12 +3561,21 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
     carrying either accusation.
 
     Mutation: revert the header to the pre-#3512 text (``1f653d9b…0580``,
-    generation 3) with this pair left alone — this REDs on the digest; bump
-    only the digest for a prose edit — this REDs on the generation.
+    generation 3) with this pair left alone — this REDs on the digest; update the
+    pair's digest for a prose edit and leave the generation alone — this REDs on
+    ``_GENERATION_DIGESTS``, because a byte set cannot be certified by rewriting a
+    digest that is supposed to belong to the generation it is filed under.
     """
     generation, digest = _PINNED_PI_SEAM_INSTALL_CONTRACT
     shipped = hook_install.read_hook_version(_PI_SRC)
     actual = hashlib.sha256(_PI_SRC.read_bytes()).hexdigest()
+    assert actual == _GENERATION_DIGESTS.get(shipped), (
+        f"generation {shipped} has no recorded digest, or its bytes have changed: "
+        f"shipped bytes hash to {actual}, recorded "
+        f"{_GENERATION_DIGESTS.get(shipped)}.  A byte change belongs in a NEW "
+        "generation — bump `tortoise-hook-version`, add its digest to "
+        "_GENERATION_DIGESTS, and update the pair above; never rewrite an "
+        "existing generation's entry.")
     assert (shipped, actual) == (generation, digest), (
         "the shipped Pi seam's install contract moved: "
         f"(generation, sha256) is {(shipped, actual)}, pinned "

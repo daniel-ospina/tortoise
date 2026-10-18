@@ -187,10 +187,13 @@ class TestWizardCopyParity:
         **Only the phrasing that actually lived in THIS file is asserted here.**
         The sibling stale claim — "credential presence alone" — never appeared in
         ``harnesses.js`` at all (measured: ``git show
-        origin/main:website/apps/dashboard/src/harnesses.js | grep -c`` = 0; it
-        lived in ``tortoise/pi-hooks/README.md`` and the shipped artifact's
-        header, and is pinned there by
-        ``test_pi_capture_disposition.py::test_the_second_producers_gate_is_recorded_as_it_now_stands``).
+        origin/main:website/apps/dashboard/src/harnesses.js | grep -c`` = 0).
+        The copies this record retires are in ``tortoise/pi-hooks/README.md`` and
+        the shipped artifact's header, and are pinned there by
+        ``test_pi_capture_disposition.py::test_the_second_producers_gate_is_recorded_as_it_now_stands``;
+        the copies it deliberately does **not** reach — ``.env.example``,
+        ``docs/quickstart-cloud.md``, ``tortoise/onboarding/SKILL.md`` and its
+        served mirror — are tracked by #8900.
         Carrying it in this file's stale-phrase list would be an assertion that
         can never RED on any version of this file — a false PASS, which is the
         one thing the sibling suite refuses to ship: ``tests/test_capture_install.py``
