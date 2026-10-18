@@ -392,11 +392,14 @@ def test_a_configured_uri_is_used_without_probing_another_endpoint(monkeypatch):
     Neither fallback probe may run when a URI is configured — the pre-fix gate
     probed the legacy port and then connected to the URI.
     """
-    monkeypatch.setenv(
-        "TORTOISE_DB_URI", "docker://:@localhost:6379/tortoise_test_8870_uri")
+    # The URI is BUILT, never spelled: a `tests/_live_utils` consumer that also
+    # hardcodes a docker-lane port would pass its own probe while dialling a dead
+    # endpoint (the #5049 guard, `test_runner_ports_6673`).
+    configured = _live_utils.docker_uri("tortoise_test_8870_uri")
+    monkeypatch.setenv("TORTOISE_DB_URI", configured)
     monkeypatch.setattr(_live_utils, "legacy_reachable", _legacy_must_not_be_probed)
     monkeypatch.setattr(_live_utils, "docker_reachable", _legacy_must_not_be_probed)
-    assert _live_uri() == "docker://:@localhost:6379/tortoise_test_8870_uri"
+    assert _live_uri() == configured
 
 
 def test_no_uri_falls_back_to_the_docker_test_lane_not_the_legacy_store(
