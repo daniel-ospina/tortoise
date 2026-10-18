@@ -183,14 +183,25 @@ class TestWizardCopyParity:
 
         Mutation: restore "the other ungated producer" in ``harnesses.js`` — this
         REDs; drop the ``capture-gate.ts`` reference — this REDs.
+
+        **Only the phrasing that actually lived in THIS file is asserted here.**
+        The sibling stale claim — "credential presence alone" — never appeared in
+        ``harnesses.js`` at all (measured: ``git show
+        origin/main:website/apps/dashboard/src/harnesses.js | grep -c`` = 0; it
+        lived in ``tortoise/pi-hooks/README.md`` and the shipped artifact's
+        header, and is pinned there by
+        ``test_pi_capture_disposition.py::test_the_second_producers_gate_is_recorded_as_it_now_stands``).
+        Carrying it in this file's stale-phrase list would be an assertion that
+        can never RED on any version of this file — a false PASS, which is the
+        one thing the sibling suite refuses to ship: ``tests/test_capture_install.py``
+        states the discipline ("A test that cannot RED is a false PASS and does
+        not belong here").
         """
         html = self.HARNESSES.read_text(encoding="utf-8")
-        for stale in ("the other ungated producer",
-                      "credential presence alone"):
-            assert stale not in html, (
-                f"the Pi copy surface still describes the pre-#803 gate "
-                f"({stale!r}): reflect-hook requires an explicit `cloud: true` "
-                "since agent-infra 7e77470e4 (2026-10-16, #803)")
+        assert "the other ungated producer" not in html, (
+            "the Pi copy surface still describes the pre-#803 gate: reflect-hook "
+            "requires an explicit `cloud: true` since agent-infra 7e77470e4 "
+            "(2026-10-16, #803)")
         assert "capture-gate.ts" in html, (
             "the Pi copy surface must name the shared egress gate both "
             "agent-infra recorders now use, not a bare 'ungated' claim")
