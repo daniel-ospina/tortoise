@@ -7077,14 +7077,23 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
-        # #1088: LIVE is the default for everything added to the graph; an
-        # agent that deliberately asks for draft gets draft, and it is
-        # honoured. "Was status given?" is decided BEFORE the pop so an
+        # #1088 / #6107: LIVE is the default for everything added to the
+        # graph; an agent that deliberately asks for draft gets draft, and it
+        # is honoured. "Was status given?" is decided BEFORE the pop so an
         # explicit status (the capture/extraction paths pass status="draft" +
         # extractedFrom, or an agent staging a draft deliberately) is explicit
-        # BY CONSTRUCTION, keeps full manual control, and preserves the
-        # #344/#1212 fail-closed posture. Precedent: #2199 did exactly this
-        # for the decide-part kinds.
+        # BY CONSTRUCTION and keeps full manual control. Precedent: #2199 did
+        # exactly this for the decide-part kinds.
+        #
+        # OVERRIDES: the fail-closed create posture of #344/#1212 (a
+        # non-decide kind defaulted to status='draft', so a plainly-created
+        # point was born EP-inert) — `live` is the default for everything
+        # added to the graph, and `draft` is the deliberate caller-chosen
+        # exception instead. Owner ruling 2026-10-09, recorded with its
+        # OVERRIDES marker on #6107. Reason: the fail-closed protection and
+        # the invisibility were the SAME mechanism — a goal created plainly
+        # and wired only as an operator TARGET was never promoted, so EP
+        # discarded the whole arm while the run still reported converged=True.
         explicit_status = "status" in props
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which

@@ -1461,12 +1461,15 @@ class TestExplicitDraftIsHonoured1088:
     clause moved an explicitly-drafted source to live.
     """
 
-    def test_create_point_defaults_to_live_for_non_decide_kind(self, sdk):
+    @pytest.mark.parametrize("kind", ["statement", "decision", "option",
+                                     "criterion", "evidence"])
+    def test_create_point_defaults_to_live(self, sdk, kind):
         # 'statement' is NOT in DECIDE_PART_KINDS ({decision, option,
         # criterion, evidence}), so the pre-#1088 code defaulted it to
-        # 'draft' — this test is non-vacuous only for a genuine non-decide
-        # kind.
-        p = sdk.create_point("statement", "the sky is blue")
+        # 'draft'; the decide parts were already born live (#2199). Both
+        # families must stay live — #1088's ruling is universal, and #6107's
+        # acceptance rail is what this pin answers.
+        p = sdk.create_point(kind, "the sky is blue")
         assert p["status"] == "live"
         assert sdk.get_point(p["id"])["status"] == "live"
 
