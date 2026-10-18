@@ -196,6 +196,7 @@ from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_LIST_FIELDS,
     session_extraction_status,  # #3520: the ONE extraction-status derivation
 )
+from tortoise.session_schema import demo_session_id  # #3554: the ONE demo-session id derivation
 from tortoise.supabase_control import _service_key  # #3677
 
 # #4179: the team-account and user-account restore windows derive from the ONE
@@ -10367,7 +10368,9 @@ def _seed_demo_graph(org_id: str) -> dict:
             )
 
     # ── Episodic Layer — session events ──────────────────────────
-    session_id = f"session_demo_{org_id[:8]}"
+    # #3554: the id comes from the ONE declaration (`session_schema.demo_session_id`),
+    # not a local f-string, so the writer and any future exclusion cannot drift.
+    session_id = demo_session_id(org_id)
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
         "SET s.created_at=$now, s.turn_count=3",
@@ -12741,8 +12744,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         else:
             detail = ("Session recording is disabled for this team. Enable it "
                       "in the dashboard (Memory sources > Agent sessions) or "
-                      "via tortoise_onboarding_session_recording to capture "
-                      "sessions.")
+                      "via tortoise_manage_sources(action=\"enable\", "
+                      "source=\"agent_sessions\") to capture sessions.")
         raise HTTPException(status_code=409, detail=detail)
 
     # #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL — a missing
@@ -14434,8 +14437,9 @@ def _record_capture_last_error(org_id: str, harness: str | None,
         # would leak structure. Stringify to the message.
         detail = str(detail.get("message") or detail)
     # #4625: write-only — this caller discards the echo, and computing it
-    # costs two fresh FalkorDB connections on the event loop (see
-    # ``_update_onboarding_state``).
+    # costs a registry probe plus an org-graph open on the event loop (see
+    # ``_update_onboarding_state``; #4661 made the probe reuse its connection
+    # and sample the registry once).
     _update_onboarding_state(org_id, _echo=False, **{key: detail})
 
 
@@ -27223,7 +27227,8 @@ def _session_recording_allowed(org: dict,
 
     Resolution order: the graph's override (D-C6-1 storage) → when None the
     org default (onboarding_state.session_recording — the #1927 flag the
-    dashboard toggle + MCP tortoise_onboarding_session_recording write).
+    dashboard toggle and the MCP `tortoise_manage_sources(action="enable"
+    |"disable", source="agent_sessions")` write).
     Returns (allowed, surface) where surface names the deciding layer for
     the 409 message (``graph`` vs ``org``).
 
@@ -27794,12 +27799,11 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
     ``_echo=False`` is the WRITE-ONLY contract for callers that DISCARD that
     return (#4625): the writes above still happen; only the projection read is
     skipped, so it cannot change what was written. It exists because the
-    projection is not free — ``_get_onboarding_projection`` probes the
-    registry UP TO TWICE (one probe when the org graph is ABSENT, which
-    returns early in ``_get_onboarding_projection``; two when it is present),
-    and in URI mode each probe builds a fresh registry SDK and
-    opens a NEW FalkorDB connection (TCP + TLS handshake + ``INFO`` +
-    ``list_graphs``), synchronously, on the event loop. Returns ``{}`` when
+    projection is not free — ``_get_onboarding_projection`` samples the
+    registry ONCE (two probes before #4661) and, in URI mode, each probe used
+    to build a fresh registry SDK and open a NEW FalkorDB connection (TCP +
+    TLS handshake + ``INFO`` + ``list_graphs``), synchronously, on the event
+    loop; the connection is process-lifetime since #4661. Returns ``{}`` when
     skipped: a caller that discards the value cannot tell the difference.
     Callers that need the echo (GET/PATCH) keep the default.
 
@@ -27858,23 +27862,21 @@ def _update_onboarding_state(org_id: str, _echo: bool = True,
     # overlay is never FLOW — operational keys only.
     #
     # #4625: the echo is NOT free, and callers that DISCARD it must say so.
-    # ``_get_onboarding_projection`` reaches ``_registry_existing_graphs()``
-    # UP TO TWICE (one probe when the org graph is absent — it returns early
-    # there; two when present, the per-capture case), and in URI mode each
-    # probe builds a fresh
-    # ``_make_sdk(namespace="registry")`` and opens a NEW FalkorDB connection
-    # (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` + ``list_graphs``).
-    # An AGENT capture (the fleet case) calls this router twice — the receipt
-    # write, then the last-error clear — and discards both returns, so the
-    # discarded reads alone open four fresh connections per capture. (A
-    # no-harness capture — a session-JWT/dashboard caller — writes the bare
-    # receipt but has no last-error key, so it makes one call, two
-    # connections.) All of it runs synchronously ON the event loop, which stalls
-    # every read in flight and drives the transport-bound 504s. Measured by
-    # py-spy on the live machine: the loop thread sitting in
-    # ``do_handshake (ssl.py:1319)`` <- ``_registry_existing_graphs`` <-
-    # ``_get_onboarding_projection`` <- ``_record_capture_last_error`` <-
-    # ``_capture_session_impl``.
+    # ``_get_onboarding_projection`` samples ``_registry_existing_graphs()``
+    # (ONE probe since #4661; two before it), and in URI mode that probe used
+    # to build a fresh ``_make_sdk(namespace="registry")`` and open a NEW
+    # FalkorDB connection (TCP + TLS handshake + ``Is_Sentinel``'s ``INFO`` +
+    # ``list_graphs``) per call; #4661 makes the connection process-lifetime,
+    # so the cost is the ``list_graphs`` round trip, not a handshake. The
+    # projection also opens the org graph. An AGENT capture (the fleet case)
+    # calls this router twice — the receipt write, then the last-error clear —
+    # and discards both returns, so the discarded reads alone were four fresh
+    # connections per capture before #4661/#4625. All of it runs
+    # synchronously ON the event loop, which stalls every read in flight and
+    # drives the transport-bound 504s. Measured by py-spy on the live machine:
+    # the loop thread sitting in ``do_handshake (ssl.py:1319)`` <-
+    # ``_registry_existing_graphs`` <- ``_get_onboarding_projection`` <-
+    # ``_record_capture_last_error`` <- ``_capture_session_impl``.
     #
     # Scope: #4625 names "the capture path and install-probe", and exactly the
     # sites on those two endpoints pass ``_echo=False``. The onboarding, demo
@@ -27918,7 +27920,23 @@ class OnboardingStateResponse(BaseModel):
 _ACCEPT_AND_DROP = True  # W1 (#1997) landed — PATCH onboarding_complete is dropped on node-present orgs (plan T7)
 
 
-def _graph_has_org_namespace(org_id: str) -> bool:
+class _ProbeNotSampled:
+    """Sentinel type for ``_open_org_graph_sdk``'s ``listed`` argument.
+
+    ``None`` already MEANS something on that argument — the registry probe
+    FAILED (fail-open, #3543) — so it cannot double as "the caller did not
+    sample the listing". ``isinstance`` keeps the two distinguishable without
+    a second boolean parameter.
+    """
+
+
+_PROBE_NOT_SAMPLED = _ProbeNotSampled()
+
+
+def _graph_has_org_namespace(
+        org_id: str, *,
+        listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+) -> bool:
     """Existence check WITHOUT constructing the ORG projection (constructing
     org_{tid} would materialize an absent org graph — a read-path write,
     banned by pin 4). Probes the server-wide graph list via the registry
@@ -27931,17 +27949,113 @@ def _graph_has_org_namespace(org_id: str) -> bool:
     namespace rule and would therefore open, and so MINT, a different, absent
     graph for a legacy `team_{org_id}` org, defeating this function's purpose.
     Callers that only need the verdict (accept-and-drop gates) keep using
-    this."""
+    this.
+
+    ``listed`` optionally carries a listing the CALLER already sampled
+    (#4661). ``_get_onboarding_projection`` needs the verdict AND the open,
+    and both must come from ONE snapshot: a second probe was a second
+    FalkorDB connection in URI mode, and it could also list a DIFFERENT name
+    than the one the verdict was about. ``None`` cannot be the default — it is
+    the probe's own FAILURE signal (fail-open below)."""
     # #3543: both tenant prefixes are probed — a graph minted before the
     # rename is `team_{org_id}`, and no data migration rewrites it. Probing
     # only `org_` reported "node absent" for every pre-rename org, which made
     # the onboarding projection take the no-write FLOW-defaults path.
-    graphs = _registry_existing_graphs()
-    if graphs is None:
+    if isinstance(listed, _ProbeNotSampled):
+        listed = _registry_existing_graphs()
+    if listed is None:
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
-    return any(name in graphs for name in (f"org_{org_id}", f"team_{org_id}"))
+    return any(name in listed
+               for name in (f"org_{org_id}", f"team_{org_id}"))
+
+
+# ── #4661: the registry probe's CONNECTION is reused in URI mode ───────────
+# `_registry_existing_graphs()` sits on the onboarding projection's read path
+# (the MCP gate, GET /v1/onboarding/state, and the capture path's echo before
+# #4625 made that write-only) and every call used to build a FRESH
+# `_make_sdk(namespace="registry")`. In URI mode that is a new TCP connection +
+# TLS handshake (`ssl.create_default_context` → `load_default_certs`
+# re-parsing the system CA bundle) + the `Is_Sentinel` INFO, PER PROBE —
+# py-spy on the live box caught the loop/hot thread inside exactly that
+# handshake for seconds at a time while reads blew the 10 s transport bound.
+#
+# Only the CONNECTION is cached — the LISTING never is: `list_graphs()` is a
+# probe-before-purge / pin-4 gate, so a cached listing would be a decision on
+# stale state. Embedded mode keeps the fresh-SDK-and-close shape below: there
+# the anchor (`_FALLBACK_KEEPALIVE`) holds the redislite daemon and a fresh
+# per-call handle is the #2251 anti-stray-DB contract, and a loopback
+# connection is not the cost.
+_REGISTRY_PROBE_SDK: TortoiseSDK | None = None
+#: The `TORTOISE_DB_URI` `_REGISTRY_PROBE_SDK` was built for. A changed URI
+#: means the cached handle addresses ANOTHER server (process reconfiguration,
+#: or a test's private lane) — it is closed and rebuilt, never reused.
+_REGISTRY_PROBE_URI: str | None = None
+
+
+def _reset_registry_probe_sdk() -> None:
+    """Close + drop the cached registry probe (teardown / reconfiguration).
+
+    Used by tests: the cache is a PROCESS global, so a test that monkeypatches
+    `_make_sdk`/`TortoiseSDK` must not inherit a handle an earlier test built
+    (#5049 rule 4). The close runs OUTSIDE `_KEEPALIVE_LOCK` so a slow close
+    cannot block a concurrent construction (the #2172 lock discipline)."""
+    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI
+    if _REGISTRY_PROBE_SDK is None:
+        return
+    with _KEEPALIVE_LOCK:
+        sdk, _REGISTRY_PROBE_SDK = _REGISTRY_PROBE_SDK, None
+        _REGISTRY_PROBE_URI = None
+    try:  # noqa: SIM105
+        sdk.close()
+    except Exception:
+        pass
+
+
+def _registry_probe_sdk() -> TortoiseSDK:
+    """The process-lifetime registry SDK behind `list_graphs()` (#4661).
+
+    URI mode only — the embedded caller keeps its fresh handle. Construction
+    (and the eager `_get_proj()` that binds the projection) runs under
+    `_KEEPALIVE_LOCK`, so two worker threads cannot both build one and leak
+    the loser. A construction FAILURE is not cached: the exception propagates
+    to `_registry_existing_graphs`'s never-raise wrapper and the next probe
+    retries, so the fail-open contract is unchanged."""
+    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI
+    uri = os.environ.get("TORTOISE_DB_URI")
+    cached = _REGISTRY_PROBE_SDK
+    cached_uri = _REGISTRY_PROBE_URI
+    if cached is not None and cached_uri == uri:
+        return cached
+    with _KEEPALIVE_LOCK:
+        cached = _REGISTRY_PROBE_SDK
+        cached_uri = _REGISTRY_PROBE_URI
+        if cached is not None and cached_uri == uri:
+            return cached
+        if cached is not None:
+            # The configured server changed — a reconfiguration event, not a
+            # request event (the embedded anchor evicts on drift the same
+            # way, #1502). Drop the handle: reusing it would probe a server
+            # this process no longer talks to.
+            try:  # noqa: SIM105
+                cached.close()
+            except Exception:
+                pass
+            _REGISTRY_PROBE_SDK = None
+            _REGISTRY_PROBE_URI = None
+        sdk = _make_sdk(namespace="registry")
+        try:
+            sdk._get_proj()
+        except Exception:
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
+            raise
+        _REGISTRY_PROBE_SDK = sdk
+        _REGISTRY_PROBE_URI = uri
+        return sdk
 
 
 def _registry_existing_graphs() -> set[str] | None:
@@ -27972,8 +28086,16 @@ def _registry_existing_graphs() -> set[str] | None:
     connection — the keepalive anchor holds the daemon, #493/#1607). The
     construction sits INSIDE the try so a cross-process
     EmbeddedStoreBusyError keeps the never-raise contract.
+
+    #4661: in URI mode the handle is NOT built and closed per call — the
+    CONNECTION is process-lifetime (`_registry_probe_sdk`), because on the
+    read path the handshake, not the query, was the cost. Embedded mode keeps
+    the fresh-and-close shape above unchanged.
     """
     try:
+        if os.environ.get("TORTOISE_DB_URI"):
+            sdk = _registry_probe_sdk()
+            return set(sdk._get_proj().db.list_graphs() or [])
         sdk = _make_sdk(namespace="registry")
         try:
             graphs = sdk._get_proj().db.list_graphs() or []
@@ -27984,7 +28106,10 @@ def _registry_existing_graphs() -> set[str] | None:
         return None
 
 
-def _open_org_graph_sdk(org_id: str) -> TortoiseSDK | None:
+def _open_org_graph_sdk(
+        org_id: str, *,
+        listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+) -> TortoiseSDK | None:
     """SDK on the org's DEFAULT graph, or None when the server lists neither
     the canonical nor the pre-rename name.
 
@@ -28005,8 +28130,14 @@ def _open_org_graph_sdk(org_id: str) -> TortoiseSDK | None:
     raise → 'unavailable'); a WRITE caller must instead SKIP, because minting
     a name the probe never observed is exactly the pin-4 violation this
     helper exists to prevent.
+
+    ``listed`` optionally carries a listing the CALLER already sampled
+    (#4661): a caller that needs both the existence verdict and the open —
+    ``_get_onboarding_projection`` — must not pay a second probe, and must not
+    decide on two different snapshots.
     """
-    listed = _registry_existing_graphs()
+    if isinstance(listed, _ProbeNotSampled):
+        listed = _registry_existing_graphs()
     if not listed:
         return None
     if f"org_{org_id}" in listed:
@@ -28042,7 +28173,14 @@ def _get_onboarding_projection(org_id: str) -> dict:
     ONE projection site for GET + PATCH echo + the MCP gate/tool — they
     cannot diverge."""
     raw = _get_onboarding_state(org_id)
-    if not _graph_has_org_namespace(org_id):
+    # #4661: ONE registry probe per projection. The existence verdict and the
+    # graph OPEN below both need the listing, and each used to run its own
+    # `_registry_existing_graphs()` — in URI mode a fresh FalkorDB connection
+    # per probe (TCP + TLS + Is_Sentinel INFO) on the read path. They now
+    # share this single snapshot, which also closes the gap where the second
+    # probe could list a DIFFERENT name than the one the verdict was about.
+    listed = _registry_existing_graphs()
+    if not _graph_has_org_namespace(org_id, listed=listed):
         state = dict(raw)
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
@@ -28060,7 +28198,7 @@ def _get_onboarding_projection(org_id: str) -> dict:
         # name this line never opens. None comes back when the probe failed
         # (fail-open) or neither name is listed: fall back to the inline
         # construction so the read proceeds and raises → 'unavailable'.
-        proj = (_open_org_graph_sdk(org_id)
+        proj = (_open_org_graph_sdk(org_id, listed=listed)
                 or _make_sdk(namespace=org_id))._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         steps = _os.completed_steps(proj, org_id) if node is not None else []
@@ -29291,8 +29429,9 @@ async def set_session_recording(body: dict, org: dict = Depends(get_current_org_
     #1859 P3-3: converted from get_current_org (key-only) to the same
     non-gated dual-auth as GET/PATCH /v1/onboarding/state — the dashboard
     was rewired by #1728 to PATCH /v1/onboarding/state (session JWT), while
-    the MCP tool registry (tortoise_onboarding_session_recording) still
-    drives this endpoint with a tt_ key; both must work."""
+    the MCP surface (`tortoise_manage_sources(action="enable"
+    |"disable", source="agent_sessions")`, #3540) still drives this endpoint
+    with a tt_ key; both must work."""
     # C5 #2114 (review P2): the toggle writes onboarding state (registry/org
     # node) — org-level surface; graph-bound keys rejected (cross-graph
     # write prevention).
@@ -36799,6 +36938,100 @@ async def webhooks_stripe(request: Request):
     except Exception as e:
         _logger.error("webhook: processing failed (%s)", _safe_log(e))
         return JSONResponse(status_code=500, content={"detail": "processing failed"})
+
+
+# ── Billing mirror reconcile (#8878) ────────────────────────────────────
+#
+# The webhook above is the ONLY writer of the stored ``tier``, and the stored
+# tier IS the entitlement (``billing.effective_tier`` never derives upward).
+# One missed/failed delivery therefore capped a paying org at the lower tier
+# permanently — measured 2026-10-17 on the fleet's own org: billed on the Pro
+# price, enforced at Solo's 25 000-node cap, every hosted write refused with
+# "upgrade your plan", reads still working so nothing looked broken.
+#
+# ``billing.reconcile_org`` has existed since the #310 billing module (PR #778)
+# and had NO production caller since the boot reconcile thread went away
+# (#4262) — #4726 only re-routed it through the Supabase control-plane seam —
+# so nothing ever compared the store against Stripe. This endpoint is that
+# caller, and the
+# cadence is EXTERNAL (``.github/workflows/billing-reconcile-cron.yml`,
+# daily) for the same reason the backup pipeline chose an external driver
+# (#596): an in-process timer dies with the process, is invisible when the
+# app is crash-looping, and would re-introduce the boot-blocking Stripe call
+# #4262 removed.
+_BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
+
+
+@app.post("/v1/internal/billing/reconcile")
+async def billing_reconcile(request: Request):
+    """Reconcile EVERY billed org's mirror against live Stripe (#8878).
+
+    Internal-key only. Idempotent and safe to re-run: the pass reads Stripe
+    truth and rewrites ``tier`` + its limits, which is exactly what the
+    webhook would have written had the delivery arrived.
+
+    FLEET-WIDE — there is no per-org targeting. An operator repairing one
+    customer runs ``billing.reconcile_org(sdk, org_id)`` directly (see
+    ``docs/infra-runbook.md`` §4.2), not this route.
+
+    Returns the pass summary (``checked``/``repaired``/``unchanged``/
+    ``unverified``/``skipped``/``drift``/``unrepaired``/``failed``). ``drift``
+    entries with ``direction: "up"`` are the payable-customer-under-delivered
+    events, and each one is also paged through the existing billing notify
+    channel by the reconciler itself. A concurrent run returns **202**
+    ``{"status": "already_running"}`` and does NO work (the next scheduled run
+    retries; nothing queues) — a caller must not read 202 as a completed pass.
+
+    Fails CLOSED on an uncertifiable enumeration — **503**
+    ``{"status": "enumeration_incomplete"}`` — so the daily driver's red run is
+    the alarm rather than a partial pass reported as clean, and its log names
+    the leg instead of showing an opaque 500.
+    """
+    _check_internal(request)
+    from tortoise.billing import BillingEnumerationError, reconcile_subscriptions
+
+    if _BILLING_RECONCILE_INFLIGHT.locked():
+        return JSONResponse(status_code=202,
+                            content={"status": "already_running"})
+    async with _BILLING_RECONCILE_INFLIGHT:
+        from tortoise.supabase_control import is_supabase_enabled
+
+        # #4726 discipline: in Supabase mode the pass must NEVER construct a
+        # registry-namespaced SDK (a write vector post-#669 that RESURRECTS the
+        # deleted registry graph, #878) — ``reconcile_org``/``org_billing_identity``
+        # read the authoritative ``organizations`` row with ``sdk=None``.
+        try:
+            if is_supabase_enabled():
+                sdk = None
+                result = await asyncio.to_thread(reconcile_subscriptions, None)
+            else:
+                sdk = await asyncio.to_thread(_registry_sdk)
+                try:
+                    # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
+                    # rides a worker hand-off so it cannot hold the single uvicorn
+                    # event loop (the #2988/#3498 class).
+                    result = await asyncio.to_thread(reconcile_subscriptions, sdk)
+                finally:
+                    with suppress(Exception):
+                        sdk.close()
+        except BillingEnumerationError as exc:
+            # The pass refuses to reconcile a fleet it cannot certify COMPLETE.
+            # That is not a request error — it is "the source is unavailable or
+            # unprovable, retry" — so it answers 503 with a NAME, instead of the
+            # opaque 500 an uncaught RuntimeError produces: the driver's
+            # ``::error::`` line is the page, and "HTTP 500" names nothing an
+            # operator can act on. Every PER-ORG failure is caught inside the
+            # pass, so this exception is always the enumeration's.
+            from tortoise.security import redact_error
+            _logger.warning("billing reconcile: enumeration unavailable: %s",
+                            redact_error(exc))
+            return JSONResponse(
+                status_code=503,
+                content={"status": "enumeration_incomplete",
+                         "detail": "the fleet enumeration could not be "
+                                   "confirmed complete — refusing to report a "
+                                   "partial pass as clean"})
+    return result
 
 
 # ── OAuth 2.1 for remote MCP (#524) ─────────────────────────────────────

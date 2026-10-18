@@ -63,8 +63,10 @@ WHAT IS DELIBERATELY *NOT* DONE HERE (`Refs`, not `Closes`)
     ISSUE 2): `_upsert_document` (the `DocumentCreated` fold — it bumps
     `contentHash` + `version` on the same hash-diff gate but writes no
     `validFrom`) and `_materialize_session_source` (the capture path — it
-    rewrites `contentHash` without advancing `version` and is replayed by
-    nothing). Both leave a PRESENT-but-stale window start, which is why §4.6's
+    rewrites `contentHash` without advancing `version`; since #5097 its
+    METADATA block does replay through a trailing `SourceCreated`, which
+    carries the node's `validFrom` verbatim — so a replay no longer CLEARS a
+    window, but this writer still never MOVES one). Both leave a PRESENT-but-stale window start, which is why §4.6's
     "the prior window is closed in the same act" is scoped to the
     `create_source`/`_upsert_source` path in the docs. Extending the gate to
     them needs a minted-and-replayable instant (a clock/mint decision, not a
@@ -707,7 +709,9 @@ def test_the_mcp_source_route_still_refuses_a_forged_window(mcp_sdk):
 # `_upsert_document` (the `DocumentCreated` fold, which bumps `contentHash`
 # and `version` on the same hash-diff gate as `_upsert_source`) and
 # `_materialize_session_source` (the session-capture path, which rewrites
-# `contentHash` without advancing `version` and is replayed by nothing) are
+# `contentHash` without advancing `version` — since #5097 its metadata replays
+# via a trailing `SourceCreated` that carries the node's `validFrom` verbatim,
+# so a replay no longer CLEARS a window; neither writer MOVES one) are
 # two further writers that move a `:Source`'s version anchor. Neither moves
 # `validFrom`, so a source whose window this change created keeps the
 # PREVIOUS version's start after either write: the node then asserts the new
@@ -719,7 +723,8 @@ def test_the_mcp_source_route_still_refuses_a_forged_window(mcp_sdk):
 # window MOVES) when the gap closes. Extending the window gate here is not a
 # boundary fix: each writer needs a minted instant that is ALSO replayable —
 # `_upsert_document` journals `DocumentCreated`, and
-# `_materialize_session_source` has no replay arm at all — i.e. a clock/mint
+# `_materialize_session_source` replays only its metadata block, never a window
+# instant — i.e. a clock/mint
 # decision this PR does not take. #3644's own "Writers" section names
 # `_upsert_document` among the writers the temporal model must reach, so the
 # gap is tracked there; the docs (§4.6 / §4.7 † and the plan doc) state it.

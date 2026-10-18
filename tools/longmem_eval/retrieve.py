@@ -1342,9 +1342,16 @@ def retrieve_for_question(
     # packaging only shapes what ``assemble_context`` hands the reader (the
     # measured context is ``reader_evidence@k`` / ``reader_surface@k``). The
     # A/B switch that MEASURES the Slice A package (docs/scoping/2026-09-09-
-    # evidence-assembly-wave.md §5): identical questions, assembly ON vs OFF,
-    # deltas on the two C2 context-flooding regressions (qids b6025781 /
-    # 4f54b7c9) recovering under the arms.
+    # evidence-assembly-wave.md §9): identical questions, assembly ON vs OFF.
+    # ⛔ The pre-#2978 form of that measurement ("deltas on the two C2
+    # context-flooding regressions b6025781 / 4f54b7c9 recovering under the
+    # arms") is VOID — #2978 (PR #3000) changed the window 3 days after the
+    # slice merged, so the baseline it named cannot be produced. The
+    # re-specified gate's STRUCTURAL leg is measured and recorded
+    # (docs/runbook/8043-slice-a-t-gate.md; instrument
+    # tools/longmem_eval/slice_a_flood_bound.py); the end-to-end ON/OFF
+    # reader leg — 0 extra ingest, the arm is not in the run fingerprint —
+    # is owned by the run in #8486.
     evidence_assembly: bool | None = None,
     # C6 (#2520, #2513): time-aware query expansion — tri-state (True/False
     # explicit, None = env ``TORTOISE_LME_TIME_AWARE_QE``; only

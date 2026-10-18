@@ -1,9 +1,11 @@
 """Playwright E2E tests for the hosted onboarding welcome page (#541).
 
-Targets the live welcome page on the canonical auth host
-(tortoise.premiselabs.co/welcome — host consolidation 2026-08-17: the
-premiselabs.co copies of /welcome and the other auth/legal pages 301 to the
-tortoise host; both hosts share the premise-labs Pages project).
+`/welcome` is not served by this Pages root (#8826, #4054): on every host this
+project serves, `website/_redirects` 301s `/welcome`, `/welcome/` and
+`/welcome.html` to the app origin, and on premiselabs.co the middleware's
+APP_ONLY branch does the same (`_middleware.ts` -> APP_ORIGIN).
+`website/welcome.html` does not exist here — the page lives in the dashboard
+Pages project — so no `wrangler pages dev` preview can render it.
 
 Two test groups:
 1. Static/live tests — no Supabase session needed:
@@ -276,8 +278,13 @@ def _handle_unobserved(
         return
     fail(message)
 
-# Canonical host for the auth surface is tortoise.premiselabs.co (host
-# consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
+# `/welcome` is not served by this Pages root (#8826): on every host this project
+# serves, `website/_redirects` 301s `/welcome`, `/welcome/` and `/welcome.html` to
+# the app origin, and on premiselabs.co the middleware's APP_ONLY branch does the
+# same (`_middleware.ts` -> APP_ORIGIN). So this URL resolves, by one redirect
+# hop, to https://app.premiselabs.co/welcome. (#4054 moved the page into the
+# dashboard project; a pre-#4054 comment here said the hop landed on the tortoise
+# host, which is wrong.)
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
 # The canonical onboarding artifact is the tortoise-onboarding instructions mirror
 # (app.premiselabs.co/skills/tortoise-onboarding/SKILL.md) — W2 #1998 archived
@@ -488,8 +495,7 @@ def _fake_user_id() -> str:
 def _seed_local_session(page: Page, user_id: str) -> None:
     """Seed a supabase-js session in localStorage under BOTH storage keys —
     the prod project ref (sb-ybetwichurajbfswfeqa) and the local CLI ref
-    (127.0.0.1 → sb-127) — so the mocked tests run against either the live
-    site (tortoise.premiselabs.co) or a wrangler pages dev preview (localhost:8788)."""
+    (127.0.0.1 → sb-127)."""
     page.add_init_script(f"""
       const session = JSON.stringify({{ 
         access_token: "fake-access-token",

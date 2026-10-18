@@ -34,6 +34,7 @@ from tortoise.hosted_api import app  # noqa: I001
 from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row
 
@@ -71,7 +72,7 @@ def supabase_client(monkeypatch):
         # clear at enter; pop-pin → restore __init__ → deterministic anchor
         # close → clear overrides at exit (replaces the local
         # _patch_tortoise_sdk_init copies).
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             tc.headers.update({"Authorization": f"Bearer {TOKEN}"})
             yield tc, fake
 
@@ -80,7 +81,7 @@ def _registry_client():
     """TestClient in registry mode (no Supabase creds)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "reg.db")
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
             yield tc
 
 
@@ -270,7 +271,7 @@ class TestGithubConnectFlip:
             # fires before any SDK construction — the control-plane outage
             # short-circuits authz).
             with patched_tortoise_sdk(db_path), \
-                    TestClient(app, raise_server_exceptions=False) as tc:
+                    verdict_client(app, raise_server_exceptions=False) as tc:
                 # Seed the CSRF state directly (connect itself needs auth,
                 # which also fails closed under the error plane — the
                 # callback is the public leg under test).
@@ -383,3 +384,41 @@ class TestHealthReady:
             r = tc.get("/health/ready")
             assert r.status_code == 200, r.text
             assert r.json() == {"status": "ok", "db": "connected"}
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. All three constructions are
+    converted — the ``supabase_client`` and ``_registry_client`` fixtures and
+    ``test_callback_fails_closed_on_control_plane_outage``'s own client (which
+    keeps ``raise_server_exceptions=False`` so its 500 pin still observes a real
+    response) — so the seam covers every read bound from them:
+    ``GET``/``PATCH /v1/onboarding/state``,
+    ``POST /v1/onboarding/session-recording``,
+    ``POST /v1/onboarding/github/connect``, ``GET /v1/onboarding/github/status``,
+    ``GET /v1/onboarding/github/callback``, ``POST /v1/index/github``,
+    ``GET /health/security`` and ``GET /health/ready``, none of them exempt from
+    the bound. The plain-client
+    control is the non-vacuity leg: it is the exact ``assert 504 == 200`` shape
+    this conversion removes, and it goes RED if the route is ever exempted (the
+    middleware stops refusing, so the control's 504 assertion fails). Note the
+    sibling test's own comment: an unstubbed ``GET /user`` leg once burned the
+    bound and answered 504 *before* the assertion — the shape this seam turns
+    from a load-dependent FAIL into an INCONCLUSIVE skip.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("GET", "/v1/onboarding/state")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.get(route[1]).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get(route[1])
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /v1/onboarding/state answered" in message
