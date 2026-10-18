@@ -5,7 +5,8 @@ Org node is the authority for *enforcement*. This module provides the thin
 Stripe API wrapper (``StripeClient`` over httpx — form-encoded, timeouts), the
 validated price catalog (``PriceCatalog`` from the ``STRIPE_PRICE_IDS`` env
 JSON), lazy-grace tier resolution (``effective_tier``), the atomic tier+limits
-writer (``apply_limits``), and boot mirror repair (``reconcile_org``).
+writer (``apply_limits``), per-org mirror repair (``reconcile_org``), and the
+fleet-wide cadence that actually RUNS it (``reconcile_subscriptions``, #8878).
 
 Config degradation is LAZY by design (review fix 12): missing
 ``STRIPE_PRICE_IDS`` / ``STRIPE_SECRET_KEY`` / ``STRIPE_WEBHOOK_SECRET`` never
@@ -29,17 +30,22 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
 
 __all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
+    "BillingEnumerationError",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
     "subscription_period_bounds",
-    "mirror_subscription", "reconcile_org",
+    "mirror_subscription", "reconcile_org", "reconcile_subscriptions",
+    "org_billing_identity",
 ]
+
+_logger = logging.getLogger(__name__)
 
 _STRIPE_API = "https://api.stripe.com/v1"
 _ACTIVE_STATUSES = ("active", "trialing", "past_due")
@@ -55,6 +61,23 @@ class BillingConfigError(BillingError):
 
 class StripeAPIError(BillingError):
     """A Stripe API call failed (network, auth, 4xx/5xx)."""
+
+
+class BillingEnumerationError(BillingError, RuntimeError):
+    """The fleet could not be enumerated as a CERTIFIED-COMPLETE set.
+
+    The fail-CLOSED refusal behind ``reconcile_subscriptions``: a partial page
+    must never be published as a clean pass (#8878/#5388). It is given a name
+    of its own so the INTERNAL endpoint can answer a 5xx that SAYS what
+    happened (``503 enumeration_incomplete``) instead of an opaque 500 — the
+    daily driver's log is the page, and `billing reconcile returned HTTP 500`
+    names nothing an operator can act on.
+
+    It subclasses ``RuntimeError`` as well, deliberately: this IS a
+    control-plane seam failure (``SupabaseControlPlane`` raises ``RuntimeError``
+    for every transport/HTTP fault), so a caller that already fails closed on
+    that shape keeps working unchanged.
+    """
 
 
 # ── Secret scrubbing (log hygiene, review fix 9) ────────────────────────────
@@ -432,9 +455,18 @@ def effective_tier(org: dict, now: float | None = None) -> str:
     Deliberately NO 'active + current_period_end passed → free' branch (review
     fix 6): Stripe auto-renews, so that branch fired on every renewal before
     the webhook landed — a recurring false-downgrade outage. Missed-event drift
-    is covered by the webhook (seconds) + boot reconcile (Task 8).
+    is covered by the webhook (seconds) + ``reconcile_subscriptions`` (#8878,
+    the cadenced caller of ``reconcile_org`` — before #8878 the docstring's
+    "boot reconcile" had no production caller at all, so a missed delivery was
+    permanent).
 
-    Never returns a tier above the stored one.
+    Never returns a tier above the stored one. That is deliberate and it is
+    why drift must be repaired at the WRITE (the reconciler), not derived
+    here: the only server-side evidence of what an org pays is its Stripe
+    subscription (there is no price column on the org row, and the
+    ``checkout_price_id`` on ``/v1/team`` is the CATALOG's default CTA price
+    from ``_default_checkout_price_id()`` — pro for every org — so deriving
+    from it would upgrade every active org for free). See #8878.
     """
     if now is None:
         now = time.time()
@@ -442,12 +474,46 @@ def effective_tier(org: dict, now: float | None = None) -> str:
     if org.get("subscription_status") == "past_due":
         grace_until = org.get("grace_until")
         if grace_until is not None:
-            try:
-                if now > float(grace_until):
-                    return "free"
-            except (TypeError, ValueError):
-                pass  # unparseable grace_until → keep stored tier
+            expiry = _grace_expiry_epoch(grace_until)
+            if expiry is not None and now > expiry:
+                return "free"
     return stored
+
+
+def _grace_expiry_epoch(value) -> float | None:
+    """``grace_until`` as an epoch float, or ``None`` when unparseable.
+
+    #8878: the ONLY production writer of ``grace_until`` is the
+    ``invoice.payment_failed`` handler, which stores
+    ``datetime.isoformat()`` (``hosted_api._webhook_apply_event``). The
+    original ``float(grace_until)`` therefore raised ValueError on EVERY
+    production row and fell through to "keep the stored tier" — so even a
+    caller of this resolver could never observe the grace expiry. Both shapes
+    are accepted here: ISO-8601 (production) and a bare epoch number (the
+    shape ``effective_tier``'s unit tests pass). An unparseable value still
+    degrades to ``None`` → keep the stored tier (never a downgrade on a
+    malformed field).
+
+    ⚠️ SCOPE — this fixes the PARSING, not the enforcement: ``effective_tier``
+    still has no production caller (enforcement reads the stored columns via
+    ``quota.derived_tier``/``resolve_org_limits``), so no org's tier degrades
+    on grace today. Wiring the rule into the enforcement resolver is a
+    behaviour change owed its own decision — tracked in #8893.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    from datetime import UTC, datetime
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
 
 
 def apply_limits(sdk, org_id: str, tier: str) -> None:
@@ -717,3 +783,414 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
             summary = mirror_subscription(sdk, org_id, sub)
             return {"org_id": org_id, "action": "mirror_customer_first_active", **summary}
     return {"org_id": org_id, "action": "noop"}
+
+
+# ── Fleet-wide reconcile cadence (#8878) ────────────────────────────────────
+#
+# #8878: the STORED ``tier`` is the entitlement (``effective_tier`` never
+# derives upward) and its only writer was the Stripe webhook. A single missed
+# or failed delivery therefore capped a paying org at the lower tier FOREVER:
+# ``reconcile_org`` existed but had no production caller, so nothing ever
+# compared the store against Stripe. A paid Pro org was enforced as Solo
+# (25 000 nodes), every write refused with "upgrade your plan", and no error
+# was surfaced anywhere.
+#
+# The repair is deliberately NOT derive-on-read. A read cannot supply two
+# things this cadence has: (a) the only server-side evidence of what an
+# org pays is its Stripe subscription — there is no price column on the org row,
+# and ``/v1/team``'s ``checkout_price_id`` is the CATALOG's default CTA price
+# (``_default_checkout_price_id()`` → pro for EVERY org), so deriving from it
+# would hand every active org the Pro plan for free; and (b) a Stripe API call
+# on the enforcement path would make every write depend on Stripe's latency and
+# availability. So the store stays the read model and this cadence keeps it
+# true — the same "external driver, independent failure domain" shape the
+# backup pipeline chose (#596).
+
+#: Billing-identity columns of an org row / ``:Team`` node. Deliberately the
+#: 0006-BASE subset (``tier`` + the two Stripe identifiers) — no 0012 additive
+#: column, so the enumeration cannot 400 on a pre-0012 schema.
+_IDENTITY_FIELDS = ("id", "tier", "subscription_id", "stripe_customer_id")
+
+
+def org_billing_identity(sdk, org_id: str) -> dict:
+    """Stored tier + Stripe identity for one org, from the store the mirror writes.
+
+    Same seam discipline as ``reconcile_org``/#4726: the authoritative
+    ``organizations`` row in Supabase mode (#669 deletes the registry graph
+    there — a registry read would find nothing), the ``:Team`` node in
+    registry/selfhost mode. ``sdk`` may be ``None`` in Supabase mode.
+
+    Returns ``{}`` when the org does not exist. Raises on a store failure —
+    the caller decides (this is a READ; a silent ``{}`` would make a broken
+    control plane read as "no such org").
+    """
+    if _supabase_mode():
+        from tortoise.supabase_control import get_control_plane
+        rows = get_control_plane().query(
+            "organizations", select=list(_IDENTITY_FIELDS),
+            filters=[("id", "eq", org_id)])
+        return dict(rows[0]) if rows else {}
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.id, t.tier, t.subscription_id, "
+        "t.stripe_customer_id",
+        params={"id": org_id},
+    ).result_set
+    if not rows:
+        return {}
+    return dict(zip(_IDENTITY_FIELDS, rows[0], strict=True))
+
+
+def _paid_tier_floor(tier: str | None) -> int | None:
+    """The node cap a tier entitles: RANKS tiers for drift, and is reported.
+
+    Two jobs, both about the cap: it orders the before/after pair so a repair
+    can be classified up/down, and the same figure is published on the drift
+    row as ``from_max_nodes``/``to_max_nodes`` — the enforcement number an
+    operator reads, which is why it must come from the real ladder and not a
+    hardcoded tier order. The ladder is read from ``pricing.json`` (the single
+    source of truth for limits); the harm #8878 measured is the CAP, not the
+    label. So the ladder is the ONLY input: an unrecognised tier resolves to
+    Free's cap (``pricing.tier_limits``: "Unknown tiers default to the Free
+    limits") and ``team`` resolves to its real 600 000 — neither is special.
+
+    ``None`` therefore does NOT mean "unlimited". It means the ladder could not
+    be READ at all (``tier_limits`` raised on a malformed ``pricing.json`` —
+    #750.8, a config fault), which is the only path that reaches it. Consumers
+    must treat ``None`` as "unrankable", never as "pays the most": the whole
+    point of ranking on the cap is that an unreadable ladder must not clear
+    (pinned by
+    ``tests/test_billing.py::TestReconcileSweep::test_an_unreadable_ladder_is_unrankable_not_unlimited``).
+    """
+    from tortoise.pricing import tier_limits
+    try:
+        return tier_limits(tier or "free")["max_graph_nodes"]
+    except (KeyError, TypeError):
+        return None
+
+
+def _is_paid_tier(tier: str | None) -> bool:
+    """Whether a stored ``tier`` claims MORE entitlement than Free — from the
+    ladder, never from the presence of an identity.
+
+    The distinction decides ``unverified`` vs ``skipped`` in
+    ``reconcile_subscriptions``: a Stripe customer binding with no active
+    subscription is a routine state (``hosted_api`` persists
+    ``stripe_customer_id`` BEFORE the checkout session, so every abandoned
+    checkout leaves one) and holds no entitlement to verify, while a PAID tier
+    in that state is the thing a person must look at.
+
+    Uses ``_paid_tier_floor``, so an unrecognised tier (which resolves to
+    Free's cap) is not paid, and an UNRANKABLE ladder (``None``) is not treated
+    as paid either — the same "never claim what cannot be proved" direction
+    ``_drift_direction`` takes.
+    """
+    floor = _paid_tier_floor(tier)
+    free_floor = _paid_tier_floor("free")
+    if floor is None or free_floor is None:
+        return False
+    return floor > free_floor
+
+
+def _drift_direction(from_tier: str | None, to_tier: str | None) -> str | None:
+    """``"up"`` when the repaired tier raises the enforced cap, ``"down"`` otherwise.
+
+    An UNRANKABLE pair — both floors ``None``, i.e. the pricing ladder could not
+    be read (a malformed ``pricing.json``, not an unrecognised tier: that
+    resolves to Free's cap and ranks normally) — returns ``None``. A third
+    value, deliberately distinct from ``"down"`` because it is not a downgrade
+    either, and neither pages: the caller pages only ``"up"``, and a change we
+    cannot prove RAISED the customer's entitlement must never page as a
+    payable-customer-under-delivered event. ``None`` here is a CONFIG FAULT to
+    look at, not a no-op.
+    ``docs/infra-runbook.md`` §4.2 documents all three values.
+    """
+    before = _paid_tier_floor(from_tier)
+    after = _paid_tier_floor(to_tier)
+    if before is None and after is None:
+        return None
+    if before is None:  # unlimited → finite: a real reduction
+        return "down"
+    if after is None or after > before:
+        return "up"
+    return "down"
+
+
+def _notify_drift(org_id: str, from_tier: str | None, to_tier: str | None,
+                  status: str | None) -> None:
+    """Page on a repaired UPWARD drift — the payable-customer-under-delivered
+    event (#8878 piece 3). Best-effort: ``notify_billing_event`` never raises,
+    and a broken alert channel must not abort a reconcile pass."""
+    try:
+        from tortoise.notify import notify_billing_event
+        notify_billing_event(
+            "billing_upgrade",
+            {"org_id": org_id, "tier": to_tier, "name": org_id},
+            {
+                "tier": to_tier,
+                "subscription_status": status,
+                "message": (
+                    f"reconciler repaired tier drift {from_tier} → {to_tier} "
+                    f"(the org was capped at {from_tier}'s limits while its "
+                    "subscription was active)"
+                ),
+            },
+        )
+    except Exception as e:  # noqa: BLE001, RUF100 — the pass must complete
+        _logger.warning("billing reconcile: drift notify failed for %s: %s",
+                        org_id, _scrub_secrets(str(e)))
+
+
+def _enumerate_billed_orgs(limit: int | None = None) -> list[dict]:
+    """Every org row in the store, **certified complete** — or raise.
+
+    The fail-CLOSED half of ``reconcile_subscriptions``' contract, and the
+    reason it is its own function: ``SupabaseControlPlane.query`` is a SINGLE
+    PostgREST page and PostgREST caps a row list at ``max_rows``
+    (``PAGE_READ_SIZE``) *silently* — a truncated read arrives as a non-empty
+    PARTIAL list with no error. Reading it as the fleet would report a
+    plausible ``checked=N``, green the cron, and leave every org past the page
+    never compared to Stripe: the permanent silent cap #8878 exists to remove,
+    re-created for a suffix of the fleet. So this walks the seam that OWNS the
+    completeness contract — ``query_all``: keyset cursor on ``id``, an EMPTY
+    page as the only end-of-walk signal, ``(rows, complete)``, raising on
+    outage. ``retention_indicator`` reads the fleet the same way for the same
+    reason (#4038/#5388).
+
+    A seam object that predates ``query_all`` (a test double, an older host)
+    may still certify by the SERVER's own row count; anything it cannot vouch
+    for RAISES rather than being published as a pass.
+
+    Deliberately NO ``deleted_at IS NULL`` filter. A soft-deleted org can still
+    be BILLED, and excluding it would hide a live charge from the only pass
+    that compares the store against Stripe — the same direction
+    ``retention_indicator._fleet_rows`` records for the #3839 counters. The
+    write on such a row is ``apply_limits`` rewriting the values it already
+    holds (idempotent, values from Stripe truth).
+
+    ``limit`` caps how many rows this pass PROCESSES (ops/tests); it never
+    relaxes the certification — the walk always covers the whole table first.
+    """
+    from tortoise.supabase_control import get_control_plane
+
+    cp = get_control_plane()
+    walker = getattr(cp, "query_all", None)
+    if callable(walker):
+        rows, complete = walker(
+            "organizations", select=list(_IDENTITY_FIELDS), filters=None,
+            cursor="id")
+        if not complete:
+            raise BillingEnumerationError(
+                "billing reconcile: the org enumeration could not be CERTIFIED "
+                f"complete ({len(rows)} row(s) returned) — refusing to publish "
+                "a partial pass as a clean one (the NO_ORGS class #596, #8878)"
+            )
+        candidates = [dict(r) for r in rows]
+    else:
+        total_aware = getattr(cp, "query_with_total", None)
+        if not callable(total_aware):
+            raise BillingEnumerationError(
+                "billing reconcile: the control-plane seam exposes neither "
+                "query_all nor query_with_total, so the fleet cannot be "
+                "certified complete — refusing to reconcile a partial page"
+            )
+        rows, total = total_aware(
+            "organizations", select=list(_IDENTITY_FIELDS), order="id",
+            count_exact=True)
+        if total is None or total != len(rows):
+            raise BillingEnumerationError(
+                "billing reconcile: the enumeration is a LOWER BOUND (server "
+                f"stated {total!r}, page returned {len(rows)}) — refusing to "
+                "publish a partial pass as a clean one (#8878)"
+            )
+        candidates = [dict(r) for r in rows]
+    if limit is not None:
+        candidates = candidates[: int(limit)]
+    return candidates
+
+
+def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
+                            notifier=None) -> dict:
+    """The cadenced caller of ``reconcile_org`` (#8878): pull Stripe truth for
+    EVERY org that carries a billing identity and repair the mirror.
+
+    Why this exists at all: ``reconcile_org`` is per-org and had no production
+    caller, so a missed webhook delivery was permanent. This is the fleet-wide
+    pass the ``effective_tier`` docstring promised and nothing ran.
+
+    Fail-soft PER ORG, fail-CLOSED on enumeration. One org's failure — a
+    Stripe outage, an unknown price, or a control-plane write that matched no
+    row (``update_org_billing`` raises ``RuntimeError`` for that race) — is
+    recorded in ``failed`` AND logged, and the pass continues; a per-org error
+    must never abort a fleet pass, or one bad row (ordering is stable, by id)
+    would block every org after it on every subsequent run. A broken or
+    uncertifiable ENUMERATION raises instead: a pass that reported "0 orgs
+    checked" from a source that could not be read would read as a clean pass
+    (the NO_ORGS class #596 named).
+
+    Returns a summary dict:
+
+    - ``checked`` — orgs with a billing identity this pass attempted
+    - ``skipped`` — orgs with nothing to reconcile: no ``subscription_id`` /
+      ``stripe_customer_id`` (a free org that never checked out), or a Stripe
+      binding that never became a paid subscription (an abandoned checkout —
+      ``tier`` at or below Free's cap, so there is no entitlement to verify).
+      The second kind DID cost an attempt, so it is counted in ``checked`` as
+      well: ``checked`` is how many identity-bearing orgs the pass attempted,
+      and ``skipped`` says how many of them (plus the never-checked-out ones)
+      had nothing to verify. Counted so a silent enumeration shrink is visible
+    - ``repaired`` / ``unchanged`` — stored tier changed / did not
+    - ``unverified`` — Stripe answered but named NO active subscription for an
+      org whose stored tier is PAID — i.e. one that claims more entitlement
+      than Free (``_is_paid_tier``; ``reconcile_org`` reports ``action:
+      "noop"``). Counted SEPARATELY from ``unchanged`` because nothing was
+      verified against a subscription: folding it into ``unchanged`` would
+      report an unexamined org as verified-clean, which is exactly the
+      read-only-reconciler failure the ``unrepaired`` guard exists to catch.
+      Decided from the LADDER, not from the presence of an identity: a customer
+      binding at the unpaid tier is an abandoned checkout, not a symptom, and
+      lands in ``skipped``.
+      Deliberately NOT auto-downgraded — deciding that a stored-paid org with
+      no active Stripe subscription loses its tier is a billing decision, not
+      a reconcile detail.
+    - ``drift`` — the repaired changes, each with ``direction``: ``up`` =
+      the org was being under-delivered, ``down`` = a late downgrade/cancel
+      reached the mirror, ``None`` = the pair could not be ranked because the
+      pricing ladder could not be READ (a config fault, not an unrecognised
+      tier — that ranks at Free's cap); neither ``down`` nor ``None`` pages
+      (see ``_drift_direction``). Each row also carries
+      ``from_max_nodes``/``to_max_nodes``: the enforced node cap before and
+      after, the number that actually refused the customer's writes.
+    - ``unrepaired`` — orgs where Stripe resolved a tier the store did NOT end
+      up holding. This is the mutation guard made observable: a "reconciler"
+      that only READS the price and writes nothing lands here instead of
+      reporting success.
+    - ``failed`` — per-org errors (Stripe outage, unknown price, missing org)
+    - ``alerted`` — upward drifts that were paged (``notifier`` may replace
+      the default ``notify.notify_billing_event``; ``notifier=False`` disables)
+    """
+    if notifier is None:
+        notifier = _notify_drift
+
+    if _supabase_mode():
+        candidates = _enumerate_billed_orgs(limit)
+    else:
+        query = ("MATCH (t:Team) RETURN t.id, t.tier, t.subscription_id, "
+                 "t.stripe_customer_id ORDER BY t.id")
+        if limit is not None:
+            query += f" LIMIT {int(limit)}"
+        result = sdk._get_registry().query(query).result_set
+        candidates = [dict(zip(_IDENTITY_FIELDS, r, strict=True)) for r in result]
+
+    summary: dict = {
+        "checked": 0, "skipped": 0, "repaired": 0, "unchanged": 0,
+        "unverified": 0, "drift": [], "unrepaired": [], "failed": [],
+        "alerted": 0,
+    }
+    for row in candidates:
+        org_id = str(row.get("id") or "")
+        if not org_id:
+            continue
+        if not (row.get("subscription_id") or row.get("stripe_customer_id")):
+            # No Stripe identity means no checkout ever completed — a free org
+            # is not drift. Never a blind write (the class #4262 warned about).
+            summary["skipped"] += 1
+            continue
+        summary["checked"] += 1
+        before_tier = row.get("tier")
+        try:
+            outcome = reconcile_org(sdk, org_id)
+            # The re-read is INSIDE the guard: ``org_billing_identity``
+            # explicitly raises on a store failure ("the caller decides"), and
+            # a store failure for one org must be recorded like any other
+            # per-org failure — not abort the pass.
+            after = org_billing_identity(sdk, org_id)
+        except Exception as e:  # noqa: BLE001, RUF100 — one org never aborts the pass
+            # Caught broadly ON PURPOSE. The provider errors are
+            # ``BillingError``/``StripeAPIError``, but the control-plane write
+            # path fails with ``RuntimeError`` (a PATCH matching no row, a
+            # transport failure) — narrowing this to the provider errors let a
+            # single deleted/renamed row abort the whole fleet pass, on every
+            # run, at the same point (ordering is stable by id). Recorded AND
+            # logged: ``subscription_plan``'s contract asks the caller to
+            # "log that, keep the stored tier, and notify" — a silent count is
+            # a permanent unrepaired org nobody is told about.
+            summary["failed"].append({
+                "org_id": org_id,
+                "error": f"{e.__class__.__name__}: {_scrub_secrets(str(e))}",
+            })
+            _logger.error("billing reconcile: %s failed: %s", org_id,
+                          f"{e.__class__.__name__}: {_scrub_secrets(str(e))}")
+            continue
+        if outcome.get("action") == "noop":
+            # Stripe answered and named no ACTIVE subscription. Whether that is a
+            # symptom depends on what the STORE CLAIMS, so it is decided from
+            # the ladder and not from the presence of an identity:
+            # ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
+            # session, so EVERY abandoned checkout leaves a customer binding at
+            # ``tier=free``. That is a routine state with no entitlement to
+            # verify — counting it as ``unverified`` put healthy orgs in the
+            # operator's queue forever (and emitted a daily ``::warning::`` in
+            # the driver). ``unverified`` is kept for the case it names: a PAID
+            # tier with no active subscription.
+            if not _is_paid_tier(before_tier):
+                summary["skipped"] += 1
+                _logger.info(
+                    "billing reconcile: %s has a Stripe binding but no active "
+                    "subscription and is stored at the unpaid tier %r — "
+                    "nothing to verify (abandoned checkout)",
+                    org_id, before_tier)
+                continue
+            summary["unverified"] += 1
+            _logger.warning(
+                "billing reconcile: %s is stored as billed (tier=%r) but "
+                "Stripe names no active subscription — not verified, not "
+                "downgraded", org_id, before_tier)
+            continue
+        expected_tier = outcome.get("tier")
+        after_tier = after.get("tier")
+        if expected_tier is not None and after_tier != expected_tier:
+            # A read-only/partial reconciler is a FAILED repair, not a silent
+            # success (#8878's mutation check).
+            summary["unrepaired"].append({
+                "org_id": org_id, "expected_tier": expected_tier,
+                "stored_tier": after_tier,
+            })
+            _logger.error(
+                "billing reconcile: %s expected tier %r from Stripe but the "
+                "store holds %r — the repair did not take",
+                org_id, expected_tier, after_tier)
+            continue
+        if after_tier == before_tier:
+            summary["unchanged"] += 1
+            continue
+        summary["repaired"] += 1
+        direction = _drift_direction(before_tier, after_tier)
+        event = {
+            "org_id": org_id, "from_tier": before_tier, "to_tier": after_tier,
+            "direction": direction,
+            # The Stripe status. ``_IDENTITY_FIELDS`` deliberately excludes
+            # ``subscription_status`` (no 0012 additive column), so there is no
+            # stored value to prefer here — a second read would only ever
+            # produce ``None``.
+            "subscription_status": outcome.get("status"),
+            "from_max_nodes": _paid_tier_floor(before_tier),
+            "to_max_nodes": _paid_tier_floor(after_tier),
+        }
+        summary["drift"].append(event)
+        if direction == "up" and notifier:
+            notifier(org_id, before_tier, after_tier,
+                     event["subscription_status"])
+            summary["alerted"] += 1
+
+    repaired_up = sum(1 for d in summary["drift"] if d["direction"] == "up")
+    if summary["checked"]:
+        # #8878 piece 2: "a metric for 'reconciler changed N orgs'" — one line
+        # per pass so drift is observable rather than inferred from a support
+        # ticket.
+        _logger.info(
+            "billing reconcile: checked=%d repaired=%d (up=%d) unchanged=%d "
+            "unverified=%d skipped=%d failed=%d unrepaired=%d",
+            summary["checked"], summary["repaired"], repaired_up,
+            summary["unchanged"], summary["unverified"], summary["skipped"],
+            len(summary["failed"]), len(summary["unrepaired"]))
+    return summary

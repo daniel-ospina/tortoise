@@ -1185,6 +1185,15 @@ class _EntityHandlers:
         # `_event_guarded_merge`), and `backfill_sources` reads it back — the
         # connector content fields ride `itemState` instead of the envelope.
         "itemState", "labels", "assignees",
+        # #8398 (review P2-2): `aboutLinks` is the ``EventRecorded`` record's
+        # edge DATA, never Event content — the links are wired as graph edges
+        # and must not become node properties. It was dropped only
+        # incidentally, by ``_is_persistable_prop_value`` filtering a list of
+        # dicts; a FLAT list is a persistable value, and measured, replaying
+        # such a record yielded ``node aboutLinks = [['aboutObject:obj-1']]``
+        # — a property live never had. DECLARING it here makes the drop a
+        # property of the skip set rather than of a value's shape.
+        "aboutLinks",
         # #8010: the Slack/Linear connectors' full-text hash. It is an EDIT
         # SIGNAL, not node content — the raw text it hashes must not reach the
         # graph, and an undeclared digest string would be a persistable prop

@@ -264,6 +264,15 @@ routes:
   - method: POST
     path: /v1/internal/backups/verify-lock
     class: control-plane
+  # #8878: the fleet-wide billing mirror reconcile pass, behind `_check_internal`
+  # (FASTAPI_INTERNAL_KEY) and called by the daily `billing-reconcile-cron.yml`
+  # driver. Control-plane because it is the OPERATOR plane: it walks every org
+  # carrying a Stripe identity and rewrites each one's `tier`, across tenants — a
+  # tenant key can only ever see (and repair) its own org. Idempotent and
+  # safe to re-run; 202 `already_running` when a pass is in flight.
+  - method: POST
+    path: /v1/internal/billing/reconcile
+    class: control-plane
   - method: POST
     path: /v1/internal/driver/heartbeat
     class: control-plane
