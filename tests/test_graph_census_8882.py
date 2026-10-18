@@ -1080,3 +1080,102 @@ def test_cli_requires_a_dump(tmp_path):
 
     with pytest.raises(SystemExit):
         main([])
+
+
+# ── the exit contract, as documented ────────────────────────────────────────
+
+
+def _documented_exit_legend() -> tuple[str, ...]:
+    """The docstring's exit-code legend, one bucket per code.
+
+    ``tools/graph_census.py``'s docstring is the ONLY statement of this CLI's
+    contract — a caller keys on the code ("I passed the wrong flags" vs "this
+    dump cannot be measured") instead of parsing stderr — so the text is read
+    back here rather than trusted. The legend lists ``0`` · ``1`` · ``2`` in that
+    order, one ``·``-separated bucket each.
+    """
+    from tools.graph_census import __doc__ as doc
+
+    assert doc is not None
+    legend = doc.split("Exit codes:", 1)[1].split("\n\n", 1)[0]
+    buckets = tuple(bucket.lower() for bucket in legend.split("·"))
+    assert len(buckets) == 3, f"the legend must name exactly 0 · 1 · 2: {buckets}"
+    return buckets
+
+
+def _observed_exit(main, argv: list[str]) -> int:
+    """The exit code ``main`` produces, whether it RETURNS it or raises it."""
+    try:
+        return main(argv)
+    except SystemExit as exc:  # usage / IO errors raise, refusals return
+        return exc.code if isinstance(exc.code, int) else 1
+
+
+def test_the_documented_exit_split_is_the_one_the_cli_implements(tmp_path):
+    """The docstring's exit legend must file each shape under the code it gets.
+
+    #8907's review found the legend contradicting the code in both directions:
+    two of the four classes it listed as REFUSED (``2``) — a truncated artifact
+    and a duplicate node identity — are deliberately MEASURED and reported in
+    the report (``warnings`` / ``identities``) with exit ``0``, because refusing
+    them would hide a measurement Phase 1 exists to make (447 duplicate identity
+    groups on the #8882 snapshot would make it unmeasurable). A caller keying on
+    ``2`` therefore read a partial snapshot as measured — the failure the module
+    docstring calls worse than no census.
+
+    So each shape is RUN, its observed code recorded, and the shape's name
+    required in the legend bucket for THAT code: filing it under the wrong code
+    is a contract bug even when the behaviour is right.
+    """
+    from tools.graph_census import main
+
+    legend = _documented_exit_legend()
+
+    corrupt = _curated_shaped()
+    corrupt["nodes"].append({"dump_id": "3", "labels": ["Point"], "props": {}})
+    dangling = _curated_shaped()
+    dangling["edges"].append(_edge(1, 999, "IMPL"))
+    truncated = _curated_shaped()
+    truncated["edges"] = truncated["edges"][:1]  # the dropped subgraph's edges go with it
+    truncated["node_count"] = 6  # …while the dump still declares the full population
+    duplicated = _dump(
+        [
+            _node(1, ["Source"], id="2026-07-23-abc.md", documentKind="conversation"),
+            _node(2, ["Source"], url="2026-07-23-abc.md", sourceKind="document"),
+        ]
+    )
+    unlisted = _curated_shaped()
+    del unlisted["edges"]
+    not_object = tmp_path / "array.json"
+    not_object.write_text("[]", encoding="utf-8")
+    non_json = tmp_path / "broken.json"
+    non_json.write_text("{", encoding="utf-8")
+
+    cases = (
+        (
+            "structural corruption",
+            ["--dump", str(_write(tmp_path, corrupt, "corrupt.json"))],
+            2,
+        ),
+        ("dangling edge", ["--dump", str(_write(tmp_path, dangling, "dangling.json"))], 2),
+        ("missing node or edge list", ["--dump", str(_write(tmp_path, unlisted, "noedges.json"))], 2),
+        (
+            "truncated artifact",
+            ["--dump", str(_write(tmp_path, truncated, "truncated.json"))],
+            0,
+        ),
+        (
+            "duplicate node identity",
+            ["--dump", str(_write(tmp_path, duplicated, "duplicate.json"))],
+            0,
+        ),
+        ("not an object", ["--dump", str(not_object)], 1),
+        ("non-json", ["--dump", str(non_json)], 1),
+    )
+    for name, argv, expected in cases:
+        observed = _observed_exit(main, argv)
+        assert observed == expected, f"{name}: documented exit {expected}, observed {observed}"
+        assert name in legend[expected], (
+            f"{name!r} is not in the docstring's exit-{expected} bucket "
+            f"({legend[expected]!r}) — the legend and the behaviour disagree"
+        )

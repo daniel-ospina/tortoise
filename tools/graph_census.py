@@ -16,22 +16,40 @@ output is a report of counts per class plus the proposed keep/drop predicate.
     python tools/graph_census.py --dump snapshot.json --fragment-max-chars 60
     python tools/graph_census.py --dump snapshot.json --rules extracted,isolated
 
-Exit codes: ``0`` ok · ``1`` usage/IO (a flag mistake — an unknown or empty
-``--rules``, a negative ``--samples`` / ``--fragment-max-chars``, ``--samples``
-with ``--diff``, a missing or non-JSON file) · ``2`` refused (the dump itself is
-unusable — corruption, a truncated artifact, a dangling edge — and the problem
-list is on stderr). Argument errors therefore exit ``1``, not argparse's default
-``2``: a caller must be able to tell "I passed the wrong flags" from "this dump
-cannot be measured" without parsing stderr. Every flag-value mistake is validated
-by argparse (a ``type=`` callable raising ``ArgumentTypeError``), so it takes the
-tested ``error()`` path and cannot drift into the refusal code.
+Exit codes: ``0`` measured — the report is written, and a TRUNCATED ARTIFACT
+(declared-vs-counted disagreement → ``warnings``) or a DUPLICATE NODE IDENTITY
+(→ ``identities`` and a warning) is reported IN THE REPORT rather than refused ·
+``1`` usage/IO (a flag mistake — an unknown, empty or repeated ``--rules``, a
+negative ``--samples`` / ``--fragment-max-chars``, ``--samples`` with ``--diff``
+— or a missing or non-JSON file, or a JSON document that is NOT AN OBJECT) ·
+``2`` refused (the dump itself is STRUCTURALLY unusable — structural CORRUPTION
+such as a non-integer or repeated ``dump_id`` / non-dict prop bag / non-list
+label set, a missing node or edge list, a DANGLING EDGE — and the problem list
+is on stderr, with nothing written to ``--out``). Argument errors therefore exit
+``1``, not argparse's default ``2``: a caller must be able to tell "I passed the
+wrong flags" from "this dump cannot be measured" without parsing stderr. Every
+flag-value mistake is validated by argparse (a ``type=`` callable raising
+``ArgumentTypeError``), so it takes the tested ``error()`` path and cannot drift
+into the refusal code.
 
 Why the refusals exist: a census that silently measured a different population
 than the re-typing pass will consume is worse than no census — it would be a
-number an owner decides on. So a malformed dump, a truncated artifact, a dangling
-edge or a duplicate node identity is refused with the full problem list rather
-than reported around. (An unknown rule id is refused by :func:`census` too; the
-CLI validates ``--rules`` first, as the usage error it is.)
+number an owner decides on. So a structurally malformed dump or a dangling edge
+is refused with the full problem list rather than reported around.
+
+Two shapes are deliberately MEASURED, not refused (#8907 review): a truncated
+artifact (the dump's own ``node_count`` / ``edge_count`` disagree with what it
+carries) and a duplicate node identity (one key shared by more than one node).
+Both stay exit ``0`` because the counts still reconcile against the artifact
+actually in hand — refusing would hide the measurement behind an error, and the
+447 duplicate identity groups on the #8882 snapshot would make that snapshot
+unmeasurable altogether — so the fact is carried where a reader cannot miss it:
+top-level ``warnings`` (both) and ``identities`` (the collision). A caller
+deciding from exit code alone therefore treats ``0`` as "measured" and MUST read
+``warnings`` before trusting the numbers; ``2`` is reserved for a dump this
+instrument cannot measure at all. (An unknown rule id is refused by
+:func:`census` for API callers too; the CLI validates ``--rules`` first as the
+usage error it is, so it exits ``1``.)
 """
 
 from __future__ import annotations
