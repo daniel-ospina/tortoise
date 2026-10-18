@@ -51,7 +51,10 @@ Coverage:
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import math
 import os
 import re
 import shutil
@@ -60,6 +63,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -743,6 +747,15 @@ class CollisionPreflightTest(unittest.TestCase):
                  repo_arg: object = "__default__", cwd: Path | None = None,
                  gh_bin: Path | None = None):
         env = dict(os.environ)
+        # ⛔ THE CACHE SEAMS ARE NEUTRALISED (review P2). They are STATEFUL: an
+        # exported `COLLISION_PREFLIGHT_BOARD_CACHE` would let one run's rebuild
+        # answer a later test's pre-flight through a cache entry on the operator's
+        # own disk, which makes the suite order-dependent — the same class
+        # `tests/test_who_is_on.py` filters with its "no `COLLISION_PREFLIGHT_*`
+        # leak" env. A test that WANTS the cache sets it via `env_extra`, which is
+        # applied after this filter.
+        env = {k: v for k, v in env.items()
+               if not k.startswith("COLLISION_PREFLIGHT_")}
         env["GH_STUB_DIR"] = str(self.gh_dir)
         # ⛔ HOME IS REDIRECTED. `collision_preflight` reads the FLEET BOARD at
         # `$HOME/.pi/agent/state/fleet-state.json`, and a missing or aged board
@@ -5552,6 +5565,21 @@ class HolderGateTests(unittest.TestCase):
         patcher = mock.patch.object(self.cp.fleet_state, "DEFAULT_OUT", self.board)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # ⛔ THE CACHE SEAMS ARE STATEFUL, SO THEY ARE REMOVED FOR THE WHOLE CLASS
+        # (review P2). `COLLISION_PREFLIGHT_BOARD_CACHE` exported into the suite
+        # would make these tests order-dependent, provably: the first subtest of
+        # `test_a_fresh_but_unanswerable_board_is_rebuilt_not_believed` rebuilds (and
+        # CACHES) a board under this test's key, so every later subtest in the same
+        # test would be served `rebuilt-cache` with `build_state` never called. A
+        # test that wants the cache sets it itself, with `mock.patch.dict`.
+        env_patch = mock.patch.dict(
+            os.environ,
+            {k: v for k, v in os.environ.items()
+             if not k.startswith("COLLISION_PREFLIGHT_")},
+            clear=True,
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -5586,6 +5614,196 @@ class HolderGateTests(unittest.TestCase):
         self.assertEqual(why, "")
         self.assertIs(state, fresh)
         build.assert_called_once()
+
+    # The gate's own cache directory, DERIVED from `fleet_state.DEFAULT_OUT` (patched to
+    # `self.tmp/fleet-state.json` in `setUp`) — never named by the caller.
+    @property
+    def cache_dir(self) -> Path:
+        return self.tmp / self.cp.BOARD_CACHE_DIRNAME
+
+    def _cached_files(self) -> list[Path]:
+        return sorted(self.cache_dir.glob("*.json")) if self.cache_dir.is_dir() else []
+
+    def test_every_cache_seam_is_a_documented_row_in_the_header(self):
+        # The module header's "Env seams" table IS the contract for every other
+        # seam this tool reads, so the two cache seams are rows in it and are
+        # reachable as module constants (an inline literal lets no test patch one
+        # name and pin the contract).
+        header = self.cp.__doc__
+        for name in (self.cp.BOARD_CACHE_ENV, self.cp.BOARD_CACHE_TTL_ENV):
+            self.assertIn(name, header, f"{name} is missing from the header's Env seams table")
+        self.assertIn("OVERRIDES:", header,
+                      "the derived-not-settable directory is a departure worth marking")
+
+    def test_the_harness_neutralises_the_stateful_cache_seams(self):
+        # Review P2, the harness half: the cache seams are the first STATEFUL
+        # `COLLISION_PREFLIGHT_*` seams (the rest are a binary, a timeout or a limit),
+        # so an inherited value makes the suite order-dependent. Exported into the
+        # suite, `test_a_fresh_but_unanswerable_board_is_rebuilt_not_believed`'s first
+        # subtest caches its rebuild under this test's key and every later subtest is
+        # then served `rebuilt-cache` with `build_state` never called. `setUp` strips
+        # them; this fails if that filter is removed while the var is set.
+        for name in (self.cp.BOARD_CACHE_ENV, self.cp.BOARD_CACHE_TTL_ENV,
+                     "COLLISION_PREFLIGHT_CACHE"):
+            self.assertNotIn(name, os.environ, f"{name} leaked into the test environment")
+
+    def test_a_rebuild_is_cached_for_the_pass_and_reused(self):
+        # ⛔ THE PASS-SCOPED CACHE (agent-infra #1985 follow-up). A refresh pass runs this tool once
+        # PER CANDIDATE, and the board rebuild measured 15.9 s of a 19 s run. Six candidates paid it
+        # six times, which pushed passes into contention with the controller's own sweep; a contended
+        # GitHub read is an UNQUERYABLE SURFACE — not a verdict — so the backlog never filled and
+        # CREATE ACTIVITY STOPPED with no error anywhere. Measured after the fix: 16.7 s -> 3.4 s per
+        # candidate, identical verdicts, one rebuild per pass.
+        self.assertFalse(self.board.exists())
+        fresh = _fleet_board_state()
+        with mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_BOARD_CACHE": "1",
+                                          "COLLISION_PREFLIGHT_BOARD_CACHE_TTL": "300"}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh) as build:
+            first_state, first_source, _ = self.cp._read_board(SLUG, str(self.tmp))
+            second_state, second_source, _ = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual(first_source, "rebuilt")
+        self.assertEqual(second_source, "rebuilt-cache")
+        self.assertEqual(second_state, first_state)
+        build.assert_called_once()          # ← the whole point: ONE rebuild for the pass
+        # ...and the entry lives in the DERIVED directory, beside the board the gate reads.
+        self.assertEqual(len(self._cached_files()), 1)
+
+    def test_the_cache_directory_is_derived_and_a_caller_cannot_name_the_board(self):
+        # ⛔ REVIEW P1 — THE INVARIANT THAT MAKES THIS CACHE SAFE. A caller-selectable cache directory
+        # is a caller-selectable BOARD: `_board_can_answer` / `_board_is_for_repo` / `state_freshness`
+        # are fields read OUT of that same file, so a crafted board — fresh, answerable, correctly
+        # stamped, listing no holder — would be served as a MEASURED "nobody holds it" and clear a
+        # live holder (#3061 / #4256). This is the inverse of
+        # `test_the_board_is_read_from_default_out_not_from_a_redirected_home`: here the hostile
+        # artifact is the CACHE, and the live holder must win anyway.
+        hostile = self.tmp / "hostile-cache"
+        hostile.mkdir()
+        # Exactly the path the caller-named version computed: sha1(key)[:16] + '.json'.
+        key = f"partial_board|{SLUG}|{self.tmp}"
+        planted = hostile / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".json")
+        planted.write_text(json.dumps(_fleet_board_state()))    # answerable, stamped, NO holder
+        live = _fleet_board_state(
+            issues={ISSUE: [("lane-live", "branch slug")]},
+            lanes=[{"label": "lane-live", "live": True}],
+        )
+        with mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_BOARD_CACHE": "1",
+                                          "COLLISION_PREFLIGHT_CACHE": str(hostile)}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=live) as build:
+            state, source, why = self.cp._read_board(SLUG, str(self.tmp))
+            # The pass cache DOES work — just not over the caller's board.
+            _s2, source2, _ = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual(why, "")
+        self.assertEqual(source, "rebuilt",
+                         "the caller-named cache directory must not answer the gate")
+        self.assertEqual(source2, "rebuilt-cache")
+        build.assert_called_once()
+        self.assertEqual([h.lane for h in self.cp._holders_from_board(state, ISSUE)],
+                         ["lane-live"])
+        # ...and nothing was written into the caller-named directory, either.
+        self.assertEqual([p.name for p in hostile.iterdir()], [planted.name])
+
+    def test_the_board_key_is_per_clone_not_per_repo(self):
+        # Review P3: the key carries repo_root as well as the slug. Two CLONES of one repo sharing a
+        # cache directory must not serve each other's board — the holder attribution is computed
+        # against THAT clone's local branches and worktrees, so clone A's board can hide clone B's
+        # local-only branch (#4256).
+        fresh = _fleet_board_state()
+        with mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_BOARD_CACHE": "1"}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh) as build:
+            _s, first, _ = self.cp._read_board(SLUG, str(self.tmp))
+            _s, other, _ = self.cp._read_board(SLUG, str(self.tmp / "other-clone"))
+            _s, again, _ = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual((first, other, again), ("rebuilt", "rebuilt", "rebuilt-cache"))
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(len(self._cached_files()), 2)
+
+    def test_a_raised_ttl_cannot_serve_an_aged_board(self):
+        # Review P2: the cache hit must be bounded by the BOARD'S OWN clock, not only by the TTL. With
+        # TTL raised past fleet_state.STATE_FRESH_S, an aged board would otherwise be served as
+        # `rebuilt-cache` — a lane that began work after the cached build is invisible in it, which
+        # reads as "nobody is working this" about work that started minutes ago.
+        fresh = _fleet_board_state()
+        with mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_BOARD_CACHE": "1",
+                                          "COLLISION_PREFLIGHT_BOARD_CACHE_TTL": "1e9"}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh) as build:
+            self.cp._read_board(SLUG, str(self.tmp))               # fills the cache
+            # ⛔ POSITIVE CONTROL (review P2): without this, "the freshness clause works" and "the
+            # cache was never written" are the SAME observation — the aging loop below would be a
+            # silent no-op over zero files, and this test would pass on code with no cache at all.
+            self.assertEqual(len(self._cached_files()), 1,
+                             "the rebuild was not cached, so this test cannot be evidence")
+            _s, hit_source, _ = self.cp._read_board(SLUG, str(self.tmp))
+            self.assertEqual(hit_source, "rebuilt-cache")
+            # age the CACHED BOARD itself past the freshness window (the rewrite also refreshes the
+            # mtime, so ONLY the board's own `generated_at` can reject the hit)
+            for f in self._cached_files():
+                payload = json.loads(f.read_text())
+                payload["generated_at"] = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+                f.write_text(json.dumps(payload))
+            _state, source, _why = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual(source, "rebuilt",
+                         "an aged cached board must be REBUILT, never served, whatever the TTL says")
+        self.assertEqual(build.call_count, 2)
+
+    def test_the_ttl_seam_cannot_be_made_immortal(self):
+        # Review P1: `nan`/`inf` are the trap values for a numeric seam — `inf <= 0` is False and
+        # `x > nan` is False, so a mistyped export would otherwise make a cache entry immortal — and
+        # a TTL ABOVE the board's own window would let the gate serve a board `fleet_state` itself
+        # calls STALE. Neither is reachable: the effective TTL is finite, positive, and capped.
+        window = float(self.cp.fleet_state.STATE_FRESH_S)
+        for raw in ("inf", "-inf", "nan", "1e9", "86400"):
+            with self.subTest(ttl=raw), \
+                 mock.patch.dict(os.environ, {self.cp.BOARD_CACHE_TTL_ENV: raw}):
+                ttl = self.cp._cache_ttl()
+                self.assertTrue(math.isfinite(ttl))
+                self.assertGreater(ttl, 0)
+                self.assertLessEqual(ttl, window, f"TTL {raw!r} outlived the board's own window")
+        # <= 0 still means OFF, and a malformed value falls back to the tightest accepted default.
+        with mock.patch.dict(os.environ, {self.cp.BOARD_CACHE_TTL_ENV: "0"}):
+            self.assertEqual(self.cp._cache_ttl(), 0.0)
+        with mock.patch.dict(os.environ, {self.cp.BOARD_CACHE_TTL_ENV: "30m"}):
+            self.assertEqual(self.cp._cache_ttl(), self.cp.BOARD_CACHE_TTL_DEFAULT)
+
+    def test_without_the_env_the_cache_is_inert(self):
+        # Default behaviour must be BYTE-IDENTICAL to before the change: no env, no caching.
+        self.assertFalse(self.board.exists())
+        fresh = _fleet_board_state()
+        with mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh) as build:
+            _s1, src1, _ = self.cp._read_board(SLUG, str(self.tmp))
+            _s2, src2, _ = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual((src1, src2), ("rebuilt", "rebuilt"))
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(self._cached_files(), [], "no env => nothing may be written at all")
+
+    def test_the_cache_never_writes_the_shared_board(self):
+        # The partial-board write-back stays forbidden: the cache is a PRIVATE artifact of the gate,
+        # and `fleet_state.DEFAULT_OUT` must not appear or change.
+        self.assertFalse(self.board.exists())
+        fresh = _fleet_board_state()
+        with mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_BOARD_CACHE": "1"}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh):
+            self.cp._read_board(SLUG, str(self.tmp))
+            self.cp._read_board(SLUG, str(self.tmp))
+        self.assertFalse(self.board.exists(),
+                         "the gate must never write fleet_state.DEFAULT_OUT")
+
+    def test_a_failed_cache_write_is_not_silent(self):
+        # Review P2: a non-serialisable board would otherwise restore one rebuild per candidate — the
+        # pre-fix cost — with nothing anywhere saying so. Dropping the cache is the safe direction;
+        # doing it invisibly is not, so the put names itself on stderr.
+        fresh = _fleet_board_state()
+        fresh["unserialisable"] = object()
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_BOARD_CACHE": "1"}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh), \
+             redirect_stderr(stderr):
+            state, source, why = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual((source, why), ("rebuilt", ""))       # this run's verdict is unaffected
+        self.assertIs(state, fresh)
+        self.assertIn("board cache write failed", stderr.getvalue())
+        self.assertEqual(self._cached_files(), [])
+        self.assertEqual([p for p in self.cache_dir.iterdir() if p.name.endswith(".tmp")], [],
+                         "a failed put must not leave its temp file behind")
 
     def test_an_aged_board_is_rebuilt(self):
         # Serving an aged cache is the unsafe direction: a lane that began work

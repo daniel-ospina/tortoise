@@ -110,6 +110,96 @@ would collide on the word `recency` (a window there, a freshness preference here
   nothing to demote. The SDK/product rank-time path is **intentionally not** made
   prefer-latest-aware (recorded under "Not covered").
 
+  > **AMENDED 2026-10-18 (#8487 — owner-filed; this paragraph's product half is SUPERSEDED).**
+  > The **owner** (daniel-ospina) filed **#8487** on 2026-10-13 — *after* this decision — requiring
+  > the read path to consume valid time: "Implement temporal selection in the retrieval/ranking
+  > path — order candidate facts by validity and prefer the latest valid version for present-tense
+  > queries." An owner instruction outranks this team-owned plan's scoping decision, so the product
+  > rank-time path IS now prefer-latest-aware (`tortoise/sdk.py::tortoise_fts_query`, step 5e).
+  > Recorded here rather than silently replaced, per the `OVERRIDES:` rule.
+  >
+  > The rationale above was also **factually incomplete**, which is why the reversal is a correction
+  > and not only an authority change: terminal-STATUS exclusion is orthogonal to valid TIME. A
+  > `Point` can be `live` and still not current — `hosted_api`'s create arm writes
+  > `validFrom = pr.point.when` on a live point (E6 #1538 D3, no status transition), and `mining`
+  > stamps `n.validFrom` from the session's frontmatter date — so a future- or past-dated live claim
+  > is product-writable. Measured on the shipped read path (2026-10-18): a three-claim
+  > knowledge-update graph (ended / current / not-yet-effective, all `status='live'`) came back in
+  > pure relevance order, the ENDED claim served as current and, on a present-tense query, the
+  > 2099-dated claim ranked FIRST. Nothing to demote was false.
+  >
+  > What did **not** move: the eval-lane placement pinned above (the reorder stays the LAST
+  > order-owner of the measured surface — `tools/longmem_eval/retrieve.py` additionally passes
+  > `_valid_time_rerank=False` so its sealed arm's page composition is unchanged). What is still
+  > open is **#8487 scope 1** — a read-side temporal parameter (`as_of`) on the canonical MCP/SDK
+  > target surface, which needs the owner's surface approval and is NOT part of this change.
+  >
+  > **AMENDED 2026-10-18, after code review (heads `3705b4cb` → `58c22d26f`).** Six corrections to
+  > step 5e, all recorded here because they change what the shipped path promises:
+  >
+  > 1. **The cached state map is reused only when COMPLETE.** `fetch_point_epistemic_state` never
+  >    raises (it swallows the failure and returns `{}`), and `{} is not None`, so caching on
+  >    `is not None` let a failed read stand in for the page's state: step 7.6 skipped its own read
+  >    and the whole page lost `status` / `superseded_by` / the window — a superseded claim served
+  >    as current, on the leg added to be the audit trail. Step 5e now publishes the map only when
+  >    it covers every id it asked for, and an unusable map records the **reason** instead of a
+  >    clean selection — `state_read_incomplete` (short map), `state_read_failed` (the read
+  >    raised) or `selection_failed` (`prefer_latest_ids` raised) — with **`degraded=False`**
+  >    (see item 6: an ordering impairment is not a degradation).
+  > 2. **Intent is evaluated BEFORE the read.** It lived inside `prefer_latest_ids`, i.e. after it,
+  >    so every topical point/relevance read paid a pool-width state read and discarded it.
+  > 3. **The read is pool-width, stated as such.** Reuse by 7.6 is over the pre-truncation pool
+  >    (up to `pool_size`, default 120) under the unchanged 200 ms decoration budget — not the
+  >    page's `limit`. The docstring said "one batch state read", which was true of the count and
+  >    false of the size.
+  > 4. **Lanes that RE-OWN the order opt out.** `recall_state` / `recall_gaps` (StateRanker /
+  >    GapsRanker re-sort the pool before the cut) and `issue_insight` / `suggest_entry_points`
+  >    (`_issue_insight_rank`, an RRF-derived confidence band) pass `_valid_time_rerank=False`, as
+  >    do `tools/fusion_formula_ab.py` (its two arms must differ in the fusion arithmetic only, and
+  >    its numbers are compared to a recorded baseline) and `tools/ask_pool_admission_probe.py`
+  >    (a pool-size diff must not conflate two movers). The **ask lane and its mirrors**
+  >    (`tools/ask_recall_bench.py`, `tools/gen_ask_transcripts.py`) deliberately keep it ON: they
+  >    measure/replay the shipped reader, so a number recorded before #8487 is not comparable to one
+  >    measured after it on a prefer-latest question — re-baseline, do not opt out.
+  > 5. **"Never a filter" means the POOL, not the page.** `limit` still applies after the selection,
+  >    so a demoted row leaves the returned page when a full page of current rows precedes it. The
+  >    ask lane (which reads `include_terminal=True` for the `[SUPERSEDED BY]` marker) therefore sees
+  >    the marker on surviving rows — not a guarantee that every demoted row is returned.
+  >    `tortoise/time_aware.py`'s "no clock" publication contract was also amended: it was false the
+  >    moment `resolve_question_date` landed (one wall-clock read, `today=`-injectable), and the
+  >    consequence is that result order depends on the wall-clock date unless `query_date` is pinned.
+  > 6. **The ordering leg does NOT claim a degradation; the read that failed does** (round 5,
+  >    `58c22d26f`). `degraded` in a leg-trace entry is the memory layer's impairment signal, not an
+  >    audit-only field: `ask_lane` folds ANY degraded leg into the response's
+  >    `retrieval_degraded`, and `read_status.classify_leg_trace` turns it into `STATUS_DEGRADED`.
+  >    Every other `degraded=True` entry in that trace means "a retrieval leg did not run" (the
+  >    vector leg skipped, the TF-IDF fallback produced the rows). An ordering selection that could
+  >    not be improved — while step 7.6's page-width re-read still decorates every hit — is NOT
+  >    that: recording it degraded reddened a healthy read for temporal intent only. The honest
+  >    home for the impairment is the read that actually failed: when step 7.6's own page read comes
+  >    back empty for a non-empty page (the helper swallows the failure), the trace records
+  >    `epistemic_state: ran=False, degraded=True, reason="state_read_failed"`. So: an order that
+  >    could not be improved is `degraded=False` with a reason; a decoration read that did not run
+  >    is `degraded=True`.
+  > 7. **Default ON is a RECORDED override of the #1745 fail-safe convention** (round 8, P2).
+  >    #1745's convention — followed by ``entity_key_expansion`` and ``time_aware`` in the same
+  >    signature — is that a new retrieval lever ships **OFF** in the product until a measured
+  >    delta adopts it. This lever ships ON, and the reason is recorded rather than assumed:
+  >    #8487 is **owner-filed** and requires the read path ITSELF to consume valid time, so a
+  >    default-OFF lever would ship the issue unimplemented. The delta that #1745 asks for is on
+  >    the record: the shipped ask lane's context order moved on merge —
+  >    ``tests/fixtures/ask_llm_transcripts/all-superseded-stale-evidence.json`` was regenerated
+  >    (the current session block now precedes the superseded one, ``user_message_hash``
+  >    c14618… → 495593…), plus the three-claim read-path measurement above (an ended claim served
+  >    as current, a 2099-dated claim ranked first). The marker is repeated at the lever itself
+  >    (``tortoise/sdk.py``) and on #8487.
+  >
+  >    **OVERRIDES:** #1745's "a new retrieval lever ships default-OFF in the product until a
+  >    measured delta adopts it" — #8487 is owner-filed and requires the read path to select on
+  >    valid time, so the lever ships ON with its delta measured and recorded (regenerated ask
+  >    transcript + the three-claim read-path measurement), not deferred behind a flag the product
+  >    never sets.
+
 **D4 — `time_aware` is applied for NON-TR questions only (TR no-regression).** The eval resolves
 the arm once and passes the query-side anchor only when `not is_tr`; TR keeps its R5 stack
 completely untouched. Stated explicitly because the SDK levers are intent-gated, not category-gated
@@ -342,6 +432,13 @@ consumes the kwargs Task 2 adds). Final verification is last.
   `tortoise_recall` mode=state) exclude terminal points at base retrieval, so there is nothing to
   demote. A product-facing rank-time path would need a score/order contract the eval honours and
   its own test; that is **not** this task's scope (recorded, not silently claimed).
+  > **AMENDED 2026-10-18 (#8487):** the product half of this entry is CLOSED. The owner-filed
+  > #8487 required a product-facing rank-time path and one was shipped —
+  > `tortoise/sdk.py::tortoise_fts_query` step 5e selects on valid time before the `limit` cut
+  > (membership-preserving, `leg_trace`-recorded, `TORTOISE_VALID_TIME_RERANK=0` kill switch), with
+  > its own docker-lane tests (`tests/test_time_aware_sdk_2520.py`) and hermetic rules tests
+  > (`tests/test_time_aware_2520.py`). The eval-lane placement pinned above is unchanged. See the
+  > amendment under **D3** for why the "nothing to demote" premise did not hold.
 - The product's terminal-exclusion recall gap for **explicit-date history** ("where did I live in
   2024?" unreachable on the default search path) — this plan guarantees the fix does not *worsen*
   it and does not apply the fresh bias to it. Closing it needs a time-travel read surface; the

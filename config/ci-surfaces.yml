@@ -1802,6 +1802,21 @@ surfaces:
   # blanket-skips `contentHash` as "hash-gated"), not fail-before evidence —
   # do not count it among the pins that fail on the unfixed base.
   - test_source_rematerialisation_5024.py
+  # #8870 / #7362 (the ORDER half): every `:Source` writer that advances
+  # `(contentHash, version)` in one `SET` list must compute the ordinal BEFORE
+  # it writes the hash, and generally must not READ `s.contentHash` after
+  # WRITING it — on falkordb 6.x (the production backend) `SET` items apply
+  # left-to-right and each sees the earlier writes, so a hash-first list makes
+  # every hash-gated guard read the value the same clause just installed (the
+  # ordinal, `title`, `updatedAt`, `validFrom` and `_searchText` all freeze).
+  # The embedded engine (falkordblite) and falkordb-server v4.20.6 (the CI
+  # docker lane) read PRE-write values, so this defect is INVISIBLE to every
+  # behavioural pin in either lane — hence the pin asserts the order of the
+  # EMITTED Cypher (`_upsert_source`, `_materialize_connector_source`,
+  # `_upsert_document`), which fails on the pre-fix statements in EVERY lane.
+  # `core` is the arm that owns the change: `tortoise/projection/entities.py`
+  # selects `core`. ~5s (embedded, no embedding-model load).
+  - test_source_version_set_order_7362.py
   # #3644 (§4.6 *Versioning*, the WINDOW half): a version transition must OPEN
   # the new version's window and CLOSE the prior one in the same act —
   # `create_source` mints the window instant once (the same clock as
@@ -2201,6 +2216,23 @@ surfaces:
   # the guard runs with the code it guards. Lane: embedded (like the sibling
   # `test_connector_sources.py` below) — deliberately NOT carve_out-registered.
   - test_connector_source_version_5214.py
+  # #8870: the version-anchor WRITE ORDER, pinned BEHAVIOURALLY. It belongs on
+  # `core` for the same reason its sibling above does — `tortoise/projection/
+  # entities.py` (the choke point) selects `core`, so the guard runs with the
+  # code it guards. Its gate is a PROPERTY, not a port: it runs against the
+  # lane's own endpoint (`TORTOISE_DB_URI` as-is, else the passworded docker
+  # TEST lane — never the legacy default, which is the canonical store) and
+  # MEASURES the engine's SET-order semantics with a one-clause probe, SKIPPING
+  # (naming the property) on an engine that reads pre-write values. That matters
+  # here: the defect is invisible on such an engine, and the CI docker lane
+  # (`falkordb-server v4.20.6`) is one — an earlier version of the gate tested
+  # only that a port answered, so the file was green there on the PRE-fix
+  # statements, which is the false evidence #8870 survived on. A green now means
+  # the assertions ran on an engine that can produce a red; the skip is the
+  # honest signal elsewhere, and `test_source_version_set_order_7362.py` below
+  # guards the defect in every lane regardless. The engine-free gate tests in
+  # this file (the probe/skip-reason/URI tests) run in EVERY lane.
+  - test_8870_version_anchor_write_order.py
   - test_connector_sources.py
   # #5011: divergence detection is by CONTENT, not size — the per-projection
   # watermark + graph baseline live in a sidecar next to the journal, written by
@@ -5082,6 +5114,20 @@ durations:
   test_sdk_rename_table.py: 6.1
   test_sdk_surface.py: 2.0
   test_connector_source_version_5214.py: 20.0  # #5214: 13 tests; embedded lane (like test_connector_sources.py). Local wall time ~135s of which ~110s is the ONE-OFF embedding-model load on a cold cache (this machine cannot fetch it — the hermetic egress guard blocks HF), so ~20s is the steady-state figure; locally measured, not a junit sweep
+  # #8870: measured on this host, not a junit sweep — 129.6 s wall of which
+  # ~117 s is the SAME one-off HF model-load attempt the sibling row above
+  # excludes (the hermetic egress guard blocks it), so the steady-state figure
+  # is 12.5 s (measured with HF_HUB_OFFLINE=1: 12.46 s). Carries the #4602/#5275
+  # shape: a real local reading, to be replaced by the first sweep with a row.
+  test_8870_version_anchor_write_order.py: 12.5
+  # #8870: measured on this host, not a junit sweep — 17 tests, 8.4 s wall
+  # (`HF_HUB_OFFLINE=1`, embedded carve-out lane, loaded box; the 3.7 s row this
+  # replaced was the 14-test reading before the three `SET`-clause pins).
+  # Under the #3400 rule a new test file MUST carry a row: without one it packs
+  # at the flat 2.0 s default and drags the durations coverage floor below 90%
+  # (measured: 815/906 = 89.96%, which reds `manifest-integrity` for every lane
+  # on the branch, not just this one).
+  test_source_version_set_order_7362.py: 8.4
   test_connector_sources.py: 1.7
   test_e2e9_point_in_time.py: 2.6
   test_file_human_approval.py: 2.4
@@ -5268,7 +5314,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
-  test_extractor_v4_s4_stage_claims.py: 0.1  # #8500: `ast` walks over two source files + doc-text scans; no DB, same shape as the three v4 guards above
+  test_extractor_v4_s4_stage_claims.py: 6.9  # #8500: `ast` walks over two source files + doc-text scans, plus THREE in-process behavioural tests (`vet_gate.check_batch`/`apply_vet`, `kind_classifier`/`_apply_classify_kinds`) and a row-scoped read of §4.0; no DB. Measured 2026-10-18 with `--durations=0`: 3.96–6.97 s of call time over three runs (one `ast.parse` of the 9.5k-line `extractor_v2.py` is 0.44 s and the mutation fixtures reparse it), so the previous `0.1` under-declared ~50x (#8955 review, UNVERIFIED item)
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
