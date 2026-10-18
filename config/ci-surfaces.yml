@@ -4292,86 +4292,78 @@ tier1:
 - test_entity_attachment_brief_claims.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
-# WHY THIS BLOCK EXISTS. `test-slow (b)` was the CI critical path (median 23.8
-# min) while `test-slow (a)` finished far earlier, and open PRs piled up behind
-# one shard. The cause was not a bad split — it was the WEIGHTS the split is
-# packed from. Measured AS THE TREE STOOD BEFORE THIS CHANGE (`test_markers` 42.6
-# and `test_surface_manifest` 270.2, both before the tooling fixes below), the
-# two committed legs carried 23.42m (b) / 13.30m (a), a 1.76:1 imbalance that NO
-# packing of those weights could see, because 28 of the 64 leg files carried an
-# `# unmeasured` placeholder and several CI-era rows had rotted (test_index_cli
-# read 29.2s for 338.0s of work). This is #6137's lesson repeating through a
-# different cause: the packer was right, its input wrong.
+# WHY THIS BLOCK EXISTS. `test-slow (b)` was reported as the CI critical path
+# (median 23.8 min) while `test-slow (a)` finished far earlier, so merges queued
+# behind one shard. The hypothesis was that the WEIGHTS the legs are packed from
+# were wrong — 28 of the 64 leg files carried an `# unmeasured` placeholder, and
+# several CI-era rows had rotted. Half of that hypothesis held: the map WAS stale
+# (see the measurement below). The other half did not. On the CI-measured weights
+# the two legs were 17.98m / 19.82m — a 1.10:1 split, not a 1.76:1 one — so the
+# packer was not the problem the reported median implied, and the shard's wall
+# time is dominated by the POOL, not by how it is cut. This is #6137's lesson
+# arriving from the other side: the packer was fine, part of its input was stale,
+# and the reported symptom named a cause it could not distinguish from the pool's
+# own size.
 #
-# The two clauses are worth separating, because they recompute from different
-# things: the 23.42m/1.76:1 pair is the PRE-FIX reading above, measured on the
-# tree before this change; on the map this change COMMITS, those same two leg
-# SETS weigh 21.36m / 13.30m (1.61:1), and the split then takes them to
-# 17.41m / 17.45m. Both clauses are recomputed from the same map, so a reader can
-# reproduce either one; the 23.42m is the MEASUREMENT, not a recomputation.
+# An earlier revision of THIS BLOCK carried the opposite reading — 23.42m / 13.30m,
+# a 1.76:1 imbalance — because it was computed from local per-file CPU. That
+# instrument was invalid (contended host; see below), and the cut it justified
+# made the critical leg WORSE (20.82m). Both halves are recorded rather than
+# quietly deleted: the first because a stale map is a real defect that this
+# change fixes, the second because it is the reason to trust the junit column.
 #
-# WHAT WAS MEASURED, HOW, AND WHEN. Every file of both committed legs, one file
-# at a time, 2026-10-18 on the `ci-critical-path` worktree host: one private
-# FalkorDB lane (`tools/test_lane.py uri`), pytest with the legs' own marker
-# selection (`-m 'not track_b and not live and not integration'`). The harness
-# differs between the two legs and that is stated rather than smoothed over: leg
-# (a) ran four files at a time (`xargs -P 4`), leg (b) ran one at a time, and the
-# per-test timeout was the leg's own 300s on (b) and 900s on (a). The risk that
-# creates — a killed test read as a cheap one — MATERIALISED once, twice over,
-# and is handled by retention rather than by a claim. Two ATTEMPTS at
-# `eval/write_path/test_write_path_runner`, both abandoned: a standalone 900s run
-# blocked and never returned, and the leg-(b) run then killed it at its own 300s
-# limit. So it carries its CI weight (135.8) and no `#9017` marker.
-# CPU is unaffected by the parallelism (that is why it is the column used), but
-# the WALL column of (a) is inflated relative to (b) and is not quoted.
-# Per-file CPU = user+sys including children, recorded per test by a plugin.
-# Wall was recorded and NOT used: this box runs the fleet at a 1-minute load
-# average of 70-130, where wall is a scheduling artifact (one file measured 312s
-# and 375s wall across two runs whose CPU differed by 3%). CPU is additive and
-# load-robust, which is what a packer needs.
+# WHAT WAS MEASURED, HOW, AND WHEN — the SECOND measurement, and why the first
+# one was thrown away. This block originally carried per-file CPU seconds taken
+# locally on 2026-10-18. That instrument is INVALID here and the numbers derived
+# from it were wrong, non-uniformly: this host runs a fleet at a 1-minute load
+# average of 70-160, and CPU seconds inflate under cache/contention pressure by
+# a factor that differs per file. The clearest case is `test_index_cli.py`:
+# 338.0s of local CPU for 25.0s of CI test time (13.5x). A 13.5x over-estimate on
+# one file moved it to the head of the LPT queue and produced a split that was
+# WORSE than the one it replaced (CI-measured 20.82m vs the original 19.82m).
 #
-# THE CALIBRATION — UNVERIFIED, and read this before trusting an absolute number.
-# A local CPU second is NOT asserted to be a CI wall second. The only 1:1
-# evidence is circumstantial: measured leg (b) 23.42m against the `test-slow (b)`
-# median of 23.8m this work started from. It could not be confirmed from CI —
-# the leg artifacts are selections, not full runs — so treat every absolute value
-# below as a LOCAL reading and the ordering as the finding. The change does not
-# depend on the scale: LPT packing and the 2.0x watchdog headroom both act on
-# RATIOS, and a uniform scale error cancels in both. What would break it is a
-# PER-FILE scale error, which is why each row keeps its previous value in a
-# `#9017: was <old>` marker and the rows that moved by more than 3x were
-# re-read rather than trusted (see the test_index_cli row).
+# The authoritative instrument was already in the repo: the junit artifacts the
+# slow legs upload (that is what `tools/ci_timing.py` exists for, #5050). Every
+# number below is now the sum of per-test `time` from the junit of ONE CI run of
+# this branch's own legs — run 39165691659, 2026-10-18 — which covers all 65
+# pool files (4,575 tests, 37.88m of test time). Local CPU is not quoted
+# anywhere in this block, and the per-file `durations` rows for the pool were
+# rewritten from that junit, each with `# #9017 CI-junit` and, where it moved,
+# `; was <the value the map carried before>`.
 #
-# ONE FILE IS NOT RE-MEASURED. `eval/write_path/test_write_path_runner` blocked
-# past 900s in its `run_benchmark` test on this host (a redis read under load);
-# the leg-(b) pass then killed it at that leg's own 300s limit. Both attempts are
-# the same finding — it does not finish here — so its CI weight is RETAINED and
-# its row carries no `#9017` marker. It is 6.5% of the pool and the retained
-# value is the one a CI run measured.
+# THE MEASUREMENT ITSELF, largest first (the row's previous value in brackets):
+#   test_surface_manifest      199.1  [132.2]   — 1.5x understated
+#   test_ci_selection          184.1  [ 39.9]   — 4.6x understated
+#   test_battery_setup         177.7  [ 98.8]   — 1.8x
+#   test_hosted_api            174.5  [114.6]   — 1.5x
+#   eval/write_path/test_write_path_runner 146.2 [135.8] — 1.1x, and note it RAN:
+#                                               the local pass could not finish it
+#   test_capture_session        90.6  [ 53.9]   — 1.7x
+#   test_platform_seams         85.8  [ 74.5]   — 1.2x
+#   test_source_inheritance_own 68.9  [ 29.8]   — 2.3x
+#   eval/why_suite/test_why_suite_benchmark 65.0 [73.3] — 0.9x
+#   eval/retrieval/test_run     63.6  [ 25.9]   — 2.5x
+# The single largest correction is `eval/harness/test_harness_benchmark` 9.7 -> 59.1
+# (6.1x); the largest the OTHER way is `test_index_cli` 29.2 -> 25.0 — the row was
+# near-right, and it was the LOCAL re-measurement that was wrong.
 #
-# WHAT THE MEASUREMENT SAYS, largest first (previous value in brackets):
-#   test_index_cli            338.0  [29.2]    — 11.6x understated
-#   test_ci_selection         191.6  [39.9]
-#   test_surface_manifest     180.7  [132.2]   — AFTER the #9017 parse cache:
-#           tools/surface_manifest.py now memoizes the caller scan for the life of
-#           the process (measured 18.7s CPU -> 2.2s on a repeat derivation), and
-#           this file asks for six real derivations
-#   eval/write_path/test_write_path_runner 135.8 [135.8] — retained, see above
-#   test_hosted_api           113.5  [114.6]   — the one big row that held
-#   test_battery_setup        106.8  [98.8]
-#   test_index_directory       66.0  [8.4]     — 7.9x understated
-#
-# THE SPLIT is the LPT pack of that map into two legs of 17.41m / 17.45m (it was
-# 23.42m / 13.30m). `test_slow_leg_bounds_clear_the_committed_work` re-derives
-# the 40m watchdog's headroom from it (2.29x the heavier leg, against the 2.0x
-# floor) and the workflow's drift guard pins the union to
-# `slow_files - carve_out`. NOTHING was deleted, moved off the pre-merge gate, or
-# re-marked: all 65 files still run on a PR, with the same nodeids. (The pool was
-# 64 when this was measured; main added `test_expand_relationships_6976` while
-# the change was in review, and the re-cut above packs it like any other row.)
-# #2008 review: the epic-1976 capstone report's claim guard (`core` above) — doc-text
-# and section scans plus three source-file reads, no DB, so a docs-only PR must run it
-# here.
+# THE SPLIT is the LPT pack of that map into two legs of 18.945m / 18.933m — and
+# the honest framing of what that buys: the legs it REPLACES measure 17.98m /
+# 19.82m on the same junit (a 1.10:1 split, not the 1.76:1 this block originally
+# claimed from the invalid instrument), so the re-cut is worth 19.82 -> 18.94m on
+# the critical leg, -4.4%. The ceiling is arithmetic and is the real answer to
+# "why not 25%": a perfectly balanced split of a 37.88m pool is 18.94m, and the
+# original split was already within 0.9m of it. Re-balancing cannot cut the
+# critical path much further; only removing WORK from the pool can — which is why
+# the two tooling fixes in this change (a memoized AST parse in
+# `tools/surface_manifest.py`, two pre-filtered whole-tree scans in
+# `tests/test_markers.py`) are the part with the durable effect, and why the
+# re-cut is the part that measures whether the map is right.
+# `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
+# headroom from the map (2.11x the heavier leg, against the 2.0x floor) and the
+# workflow's drift guard pins the union to `slow_files - carve_out`. NOTHING was
+# deleted, moved off the pre-merge gate, or re-marked: all 65 files still run on
+# a PR, with the same nodeids.
 - test_capstone_1976_report_claims.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
@@ -4857,7 +4849,7 @@ durations:
   # `test_source_currency_5581.py` above already carries that shared cost, and
   # charging it twice would over-weight whichever shard happens to hold both.
   test_evidence_currency_2352.py: 0.2
-  test_embedded_evidence.py: 42.6  # #9017: was 17.2 (measured 2026-10-18)
+  test_embedded_evidence.py: 35.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 42.6
   # #3892 (B6): new file in this pool — it has no CI junit measurement yet (a file that
   # never ran cannot appear in an artifact), so it takes the flat 2.0s default under the
   # #3400 policy above, same as `test_embedded_evidence.py` did at #3827 (that row is
@@ -4928,9 +4920,9 @@ durations:
   test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 275.9
   test_tortoise_client.py: 1.7
-  eval/retrieval/test_run.py: 20.3  # #9017: was 25.9 (measured 2026-10-18)
+  eval/retrieval/test_run.py: 63.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 20.3
   test_4314_inert_hooks.py: 20.1
-  test_platform_seams.py: 27.6  # #9017: was 74.5 (measured 2026-10-18)
+  test_platform_seams.py: 85.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.6
   # #2125: NEW file — no CI junit measurement exists yet, so it carried the local
   # embedded-lane reading for that turn under the `# unmeasured` convention above
   # (37.0s for the whole module, the real-reflex leg dominating; the CI reading is
@@ -4942,7 +4934,7 @@ durations:
   # the first post-merge run that includes it. Do NOT
   # drop the row: an unregistered new test file reds `integrity_problems`, which is
   # how this row was found (#4348 trap).
-  test_framework_middleware.py: 5.2  # #9017: was 37.0 (measured 2026-10-18)
+  test_framework_middleware.py: 2.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.2
   test_2952_degraded_read.py: 0.4
   test_quota.py: 11.8
   test_no_legacy_token_path.py: 0.5
@@ -4973,30 +4965,30 @@ durations:
   test_finding_provenance.py: 1.7
   test_onboarding_false_completion_repair.py: 3.6
   test_onboarding_telemetry_w11.py: 0.8
-  test_graph_diagnostics.py: 7.6  # #9017: was 12.1 (measured 2026-10-18)
-  eval/write_path/test_write_path_runner.py: 135.8
-  test_unjournaled_mutation_class.py: 7.0  # #9017: re-measured 2026-10-18 on a private FalkorDB lane. Supersedes the 100.0 this row carried under the `# unmeasured` convention for #4743: that value was a WALL reading for a file that builds a projection per row and therefore waits on the server, and its wall/CPU ratio is the largest in the pool. 7.0 is the attributable column, not a claim that the file got 14x cheaper.
+  test_graph_diagnostics.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.6
+  eval/write_path/test_write_path_runner.py: 146.2  # #9017 CI-junit 2026-10-18 (run 39165691659); was 135.8
+  test_unjournaled_mutation_class.py: 4.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.0
   test_2296_document_created_journal.py: 27.0  # unmeasured by the refresher — #2296: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only). Measured on this host 2026-10-14 on a private `tools/test_lane.py` docker container reached via TORTOISE_DB_URI: pytest session total 26.49s (that reading was the file's original 7 tests; the file now collects 8 and a later re-measure on a loaded host read 24.9s). WHAT THE NUMBER IS: the pytest session total, NOT what the refresher computes — it reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
-  test_3311_multilabel_status_vocab.py: 5.3  #3311: locally re-measured 2026-10-10 on this host (load ~80-84, 10 CPUs), 14 tests as the file collects now. HOW: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_3311_multilabel_status_vocab.py -q --durations=0` — live FalkorDB on the shared docker lane, reached through the projection's TEST_MODE redirect (under pytest an explicit db_path is rewritten onto TORTOISE_DB_URI; the `env` fixture's tmp_path .db is only the redirect key). Verified this turn: the per-path graph `test_ml3311_<hash12>` is on the shared container WHILE the file runs (polled `redis-cli GRAPH.LIST` mid-run) — and do NOT use the container's `total_commands_processed` delta as evidence for this, the container is shared with other lanes and that number is not reproducible. WHAT THE NUMBER IS: pytest's own session total, "14 passed in 15.31s". It is NOT what this map's own refresher computes: `tools/ci_timing.py --refresh-durations` reads the TEXTUAL `--durations=` block out of the CI log (python-ci.yml runs `--durations=15`, so only those printed lines are summed, per `parse_log`) and never reads junit — so a CI reading is a LOWER bound on this figure (measured while correcting this note: 11.57 s parsed vs 12.14 s session, and 9.92 s vs 10.41 s). Session totals across runs were 13.6 / 15.3 / 17.1 s and the enclosing process wall was 17.2-20.7 s including uv startup; 15.3 s was committed at the map's one-decimal precision — and #9017 has REPLACED it with 5.3s of CPU measured 2026-10-18. Both readings are of the same file on comparable hosts, so read the pair as a WALL-vs-CPU difference in a file that waits on the server, not as a 3x speed-up of anything: 5.3 is the attributable column. THE 188.0 THIS ROW USED TO CARRY IS CORRECTED, not merely updated: it was a two-run local reading, and it is not reproducible here — 188.0 s is 12x the measured cost, and the same measurement at the pre-fix projection (9dd52f717, which collected 11 tests) was still only 17.5 s wall, so the drop is not the #3311 projection fix. The old note's "10 tests" was wrong even for that state (11 collected before the three rebuild tests, 14 now). Kept in this map rather than left to the sweep because `--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time. Refresh from the first post-merge run that includes it, via `tools/ci_timing.py --refresh-durations`.  # #9017: was 15.3 (measured 2026-10-18)
+  test_3311_multilabel_status_vocab.py: 2.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.3
   test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_e2e_wrangler_prewarm.py: 15.9  # #8743/#8816: locally measured on this host. WHAT THE FILE IS NOW (24 test functions, 25 executions): 23 in-memory plus ONE function parametrized over both `from_repo_root` values, which EXECUTES `website/apps/dashboard/deploy.sh` against a scratch tree with stubbed npm/npx (no DB, no fixture). Of the 23 in-memory arms, 5 exercise the guard's own helpers on literal text or hand-built documents (so "each reads the workflow files" was not true of them); the other 18 read a repo file — of the 15 that read the workflow/action files, 11 parse them by `yaml.safe_load` and 4 scan their text, 2 read `website/README.md`, and 2 read `deploy.sh`, one of which also scans a workflow. WHERE THE TIME GOES: the parsing arms, NOT the shared conftest import — nearly every arm re-globs and re-parses all 36 files (32 workflows + the 4 composite actions) (ci.yml and deploy-pages.yml are large). MEASURED at the #8874 head: session totals 11.4 s on an idle host, 18.9 s cold, and 15.9 s on a loaded one where `--durations=0` attributes call 12.8 s / setup 4.3 s / slowest single call 1.2 s. 15.9 is committed as the weight; the 4.0 this row used to carry was about a third of the measured session, and its "the conftest import dominates" sentence was wrong in the other direction. PR #8852 review: the note said 11 before that, which was wrong even for the 12-arm file it described. Hand-added for the same reason the test_8474_ontology_record.py entry below gives: `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from the first post-merge run that includes it.
   test_8474_ontology_record.py: 4.0  # #8474/#8736: locally measured (1 hermetic doc-read test — reads docs/ONTOLOGY.md only, no DB, no fixture; pytest session total 1.1s on an idle host, 3.1-4.2s on a loaded one, 2026-10-16 re-measure — the earlier 16.0 was taken on a private tools/test_lane.py container and included container lifecycle, not the pytest session). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
-  test_write_verb.py: 4.3  # #9017: was 34.6 (measured 2026-10-18)
+  test_write_verb.py: 5.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 4.3
   test_index_restore.py: 2.7
   test_7846_restore_is_not_silent.py: 14.0  # unmeasured — #7846 criterion 5: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so the >=90% coverage floor (#2876) would fail by construction for this test-adding PR. Measured on this host 2026-10-17: `uv run pytest tests/test_7846_restore_is_not_silent.py -q` → "10 passed in 4.32s"; re-measured after the #8827 review added eight guards and two hermetic probe arms → "20 passed in 7.15s"; re-measured again after the #8827 cycle-9 review added three behavioural guards (a refused port outranking the caller-stall inference, an answered-but-slow overrun, and the caller-held-time tail) → "23 passed in 10.50s", then re-measured again after the #8827 cycle-10 review added two guards (the completed-vs-overrun account arm and the module's caller-held ceiling) → "25 passed in 13.94s", URI-less as well (`TORTOISE_TEST_CARVE_OUT=1`). The file needs no server and takes no skip, and its cost is dominated by deliberate sub-second windows (a 0.3 s simulated block, a 0.1 s caller bound, a sample the witness never records, an abandoned worker), which is why the row is 14.0 rather than 5.0, so the reading is a function of the assertions rather than of host load. WHAT THE NUMBER IS: pytest's session total, NOT what the refresher computes — `--refresh-durations` reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
-  test_capture_session.py: 43.7  # #9017: was 53.9 (measured 2026-10-18)
+  test_capture_session.py: 90.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 43.7
   test_write_session_and_turns_3551.py: 2.1  # #3551 (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — NOW CI-MEASURED from run 39040632415 (was 70.8 locally measured; the local figure counted container lifecycle, not the pytest session)
   test_session_schema_3554.py: 3.9  # #3554 (42 hermetic tests, no graph lane) — NOW CI-MEASURED from run 39040632415 (was 6.6 locally measured)
-  test_battery_setup.py: 106.8  # #9017: was 98.8 (measured 2026-10-18)
+  test_battery_setup.py: 177.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 106.8
   test_graph_write_loop_responsiveness.py: 4.4
   test_read_routes_loop_responsiveness.py: 2.2
   test_cli_serve.py: 5.5
   test_redirect_seam.py: 3.3
-  eval/retrieval/test_gate_1349.py: 26.7  # #9017: was 25.7 (measured 2026-10-18)
-  eval/why_suite/test_why_suite_benchmark.py: 24.3  # #9017: was 73.3 (measured 2026-10-18)
+  eval/retrieval/test_gate_1349.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 26.7
+  eval/why_suite/test_why_suite_benchmark.py: 65.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 24.3
   test_commit_schema.py: 3.3
   test_onboarding_seed_endpoint.py: 3.0
-  test_battery_r1_seed.py: 28.2  # #9017: was 27.5 (measured 2026-10-18)
+  test_battery_r1_seed.py: 38.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 28.2
   test_onboarding_w6_member_authz.py: 3.0
   test_selfhost.py: 5.1
   # #8544: measured locally with `pytest --durations` on the embedded lane
@@ -5004,43 +4996,43 @@ durations:
   # junit re-derivation, because the file is new in this change. Replace it in
   # the next sweep.
   test_selfhost_backup.py: 8.0
-  test_epic903_warmstart.py: 26.4  # #9017: was 32.0 (measured 2026-10-18)
-  test_epic903_modes.py: 14.9  # #9017: was 15.1 (measured 2026-10-18)
-  test_import_endpoint.py: 18.5  # #9017: was 19.7 (measured 2026-10-18)
-  test_client_surface.py: 25.7  # #9017: was 11.9 (measured 2026-10-18)
-  test_ingest_v2_consolidation.py: 10.0  # #9017: was 15.0 (measured 2026-10-18)
+  test_epic903_warmstart.py: 52.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 26.4
+  test_epic903_modes.py: 30.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 14.9
+  test_import_endpoint.py: 25.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 18.5
+  test_client_surface.py: 17.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 25.7
+  test_ingest_v2_consolidation.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.0
   test_metering.py: 6.8
-  eval/harness/test_harness_benchmark.py: 22.8  # #9017: was 9.7 (measured 2026-10-18)
-  test_epic903_scheduler.py: 15.7  # #9017: was 12.6 (measured 2026-10-18)
-  test_hosted_volunteer_context.py: 8.2  # #9017: was 9.6 (measured 2026-10-18)
+  eval/harness/test_harness_benchmark.py: 59.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 22.8
+  test_epic903_scheduler.py: 34.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 15.7
+  test_hosted_volunteer_context.py: 16.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.2
   test_tripwire.py: 6.1
   test_battery_corpus.py: 7.4
-  test_commit_endpoint.py: 33.9  # #9017: was 21.4 (measured 2026-10-18)
+  test_commit_endpoint.py: 51.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 33.9
   test_invites_http.py: 13.6
   # #9017: ONE ROW PER KEY. A merge earlier in this change kept BOTH this row and
   # main's predecessor, and that is not harmless — PyYAML silently last-wins, but
   # `tools/ci_timing.py::_locate_durations_block` REFUSES a duplicated key, and
   # that tool is the map's only writer, so the duplicate would have redded the
   # next `ci-timing` refresh while every local check stayed green.
-  test_relationships_bounded.py: 16.8  # #9017: was 17.6 (#4729 junit sweep, 2026-09-25)
-  test_expand_relationships_6976.py: 12.0  # unmeasured estimate (#6976); re-measure from the next junit sweep
-  test_extractor_v2.py: 10.1  # #9017: was 17.2 (#4729 junit sweep, 2026-09-25)
+  test_relationships_bounded.py: 40.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 16.8
+  test_expand_relationships_6976.py: 5.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.0
+  test_extractor_v2.py: 18.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.1
   test_prior_bound_4509.py: 22.0
   test_fly_machines_guard.py: 4.6
   test_fly_machine_env.py: 28.2
   test_ask_sdk.py: 3.9
   test_battery_seed_ingest.py: 3.9
   test_delivery_tenancy.py: 9.7
-  test_ep_selector.py: 10.9  # #9017: was 14.3 (measured 2026-10-18)
+  test_ep_selector.py: 23.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.9
   test_longmem_reader_prompting.py: 11.2
   test_pages_bindings.py: 7.3
-  test_abuse_integration.py: 13.1  # #9017: was 14.5 (measured 2026-10-18)
+  test_abuse_integration.py: 17.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 13.1
   test_github_index_lifecycle.py: 11.1
   test_main_guards.py: 13.5
-  test_epic903_fixtures.py: 12.0  # #9017: was 16.1 (measured 2026-10-18)
+  test_epic903_fixtures.py: 25.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.0
   test_index_docs_api.py: 2.2
   longmem_eval/test_vector_arm.py: 8.9
-  test_dr_endpoints.py: 16.1  # #9017: was 19.5 (measured 2026-10-18)
+  test_dr_endpoints.py: 33.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 16.1
   test_retrieval.py: 19.8
   test_consolidation_4way.py: 9.0
   test_invite_fusion_http.py: 12.2
@@ -5144,19 +5136,19 @@ durations:
   test_status_folds_2729.py: 2.0
   test_pack_state.py: 5.1
   test_pack_selection_by_graph.py: 2.0  # unmeasured — new in #2728; no sweep has collected it, so it carries the flat default exactly as an absent key would. Do NOT substitute a local timing here: the weight is a SHARD-LAYOUT input, and the #3419 venture-pack precedent (a local 67.2 that re-grouped unrelated files and exposed a pre-existing embedded-lane isolation leak) is why an unmeasured new file stays at the flat default until a junit sweep measures it.
-  test_skip_guard.py: 52.4  # #9017: was 16.0 (measured 2026-10-18)
+  test_skip_guard.py: 38.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 52.4
   test_admin_return_to.py: 3.1
   test_admin_origin_redirect.py: 3.1
   test_longmem_usage_e2e.py: 5.6
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 5.9
-  test_oauth_mcp.py: 12.4  # #9017: was 16.1 (measured 2026-10-18)
+  test_oauth_mcp.py: 14.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.4
   test_oauth_consent_pkce.py: 3.3
   test_mcp_server.py: 0.9
   test_dashboard_client_paths_resolve.py: 3.6
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 2.3
-  test_ci_selection.py: 191.6  # #9017: was 39.9 (measured 2026-10-18)
+  test_ci_selection.py: 184.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 191.6
   # #6144: measured floor over 3 runs on the dev box (19.0 / 21.2 / 23.4s); the
   # spread is fleet I/O contention, not the guard (user+sys ~4s). The YAML parses
   # are memoized on (path, mtime, size) so the 2.2k-line python-ci.yml is read
@@ -5336,7 +5328,7 @@ durations:
   test_assembly_fixtures.py: 2.2
   test_epic903_hosted.py: 2.5
   test_operator_dedup_parity.py: 1.4
-  test_operator_idempotency_4971.py: 5.8  # #9017: re-measured 2026-10-18 on a private FalkorDB lane at load ~75. The 95.0 this row carried came from a local embedded/carve-out run whose note read `~79s` for 8 tests; the same 8 tests cost 5.8s of CPU here (wall 20.4s with the box loaded, which is how a wall reading reaches 5x the CPU in a file that opens an SDK per test). 5.8 is the attributable column; refresh from CI junit when a sweep collects it.
+  test_operator_idempotency_4971.py: 2.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.8
   test_search_promoted_fields.py: 1.5
   test_selfhost_rest.py: 1.4
   test_volunteer_reflex_harness_seam.py: 1.5
@@ -5454,7 +5446,7 @@ durations:
   test_issue94_annotate_ep_batch.py: 0.7
   test_longmem_reader_aggregation.py: 0.5
   test_lookup_hash.py: 0.4
-  test_markers.py: 9.0  # #9017: was 24.1 (measured 2026-10-18)
+  test_markers.py: 6.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 9.0
   test_migration_append_only.py: 0.9
   test_notify.py: 0.4
   test_pack_kinds.py: 1.2
@@ -5476,7 +5468,7 @@ durations:
   test_invites.py: 0.3
   test_joint_index_ingest.py: 0.5
   test_mcp_telemetry.py: 0.4
-  test_monitoring.py: 5.1  # #9017: was 24.3 (measured 2026-10-18)
+  test_monitoring.py: 40.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.1
   test_cost_allocation.py: 20.3
   test_operator_source_search.py: 0.6
   test_pack_shipping.py: 0.7
@@ -5701,7 +5693,7 @@ durations:
   test_render.py: 0.2
   test_rebuild_recreate_content_parity.py: 2.5
   test_rebuild_graph_only_derived_parity.py: 2.2
-  test_rebuild_parity_fail_loud_3585.py: 8.0  # #3585: 76 tests driving real FalkorDB graphs (rebuild_all / rebuild / recover_from_log / check_consistency; cycle-3 adds a second name-only supersede, a rename-materialized forward reference, a forward-reference-by-name guard, an incarnation-reuse case, an early-ambiguity-then-zero-carrier refusal, and two backup.restore fail-loud cases; cycle-4 pins the single trailing supersede sweep and the name-MERGE id collapse; cycle-5 gives the state-op arm the same name-MERGE parity and makes `_object_target` linear; cycle-6 keys the carrier index on the graph's MERGE key — never the display `name or title` fallback — and mirrors a falsy `state["name"]` rename, removing the two false refusals that guard introduced; cycle-7 models the ids whose creation makes NO graph node (a state op on them is a 0-row miss) and PRESERVES a merge key through an unusable-name re-creation, closing the fail-OPEN class cycle-6 opened). STILL IN `slow_files`, but NOT for the reason the original note gave — that reason was a measurement artifact. The previous lane committed a 520.0 PLACEHOLDER (explicitly labelled not a measurement) and then 709.0, the upper of two readings taken 2026-10-07 while THIS HOST was at a 1-minute load average of ~97 (the fleet's own overload); on a healthy docker lane the file runs in ~36s (measured here 2026-10-08, when the file collected 47 tests: 47 passed in 35.62s; five further independent runs land in 35.6-48.0s, and 109s only with HF online). 709 was therefore ~15-20x the real cost, and the real cost is far under the 360s bound `test_watchdog_is_per_shard_and_scales_with_the_shard` derives from 900/2.5 — so the #6133 invariant does NOT exclude this file at its real cost. (It DID exclude it at the 520.0 and 709.0 weights this map committed, and at the 469.2s reading that note recorded — 469.2 was measured, never committed — because that test reads the COMMITTED map and never a runtime measurement. So the two notes disagree about the file's COST, not about what the invariant does.) The placement in `slow_files` is retained deliberately rather than reverted in the same diff: it cost ~36s on the 14.19m leg of that re-cut, which ran on every full push anyway (the leg weights since moved: #9017's re-cut packs 17.33m), and the LOADED cost is the uncertain quantity a fast shard's 15m watchdog would have to absorb. 45.0 was the weight this note argued for, and #9017 has REPLACED it: re-measured 2026-10-18 at 8.0s of CPU on a fleet-loaded host, against the 35.6-48.0s readings above. The note is kept because its ARGUMENT still governs the next reader — do not inflate a weight to make a sentence true — not because its number stands. Why the drop is not a contradiction: those readings are WALL on a box whose load average swung between 97 and ~40, and this file's graph work is mostly waiting on the server, so wall/CPU on it has been measured as high as 3.4x (see any of the #9017 rows). 8.0 is the attributable column. Revisit the placement with `tools/ci_timing.py --refresh-durations`, whose CI measurement settles it.  # #9017: was 45.0 (measured 2026-10-18)
+  test_rebuild_parity_fail_loud_3585.py: 9.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.0
   test_restore_container_recovery.py: 0.1
   test_sdk_adapter_cap.py: 0.1
   test_sentry.py: 0.1
@@ -5809,7 +5801,7 @@ durations:
   test_session_bridge_fragment_retention.py: 0.3
   test_session_verify.py: 90.8
   test_ship_test_onboarding.py: 1.4
-  test_surface_manifest.py: 180.7  # #9017: was 132.2 (measured 2026-10-18)
+  test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7
   test_surface_resolution.py: 0.9
   test_telemetry_registration.py: 1.6
   test_temporal_leg_2976.py: 0.4
@@ -5856,7 +5848,7 @@ durations:
   # measured range while the comment called it "a loose middle", which is the
   # shape #3620 flagged in test_pages_bindings.py. Cold-CI runners are slower than
   # this box, so the value errs high without leaving the band.
-  test_consistency_divergence_5011.py: 6.6  # #9017: was 15.0 (measured 2026-10-18)
+  test_consistency_divergence_5011.py: 7.2  # #9017 CI-junit 2026-10-18 (run 39165691659); was 6.6
   test_oauth_redemption_state.py: 3.2  # unmeasured
   test_3036_oauth_retention.py: 0.2  # unmeasured
   test_reader_4107_advice_shape.py: 1.4  # unmeasured
@@ -5866,49 +5858,49 @@ durations:
   test_operator_alert.py: 2.3
   test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
   bench/test_smoke_embedded.py: 38.6
-  test_about_edges.py: 6.2  # #9017: was 8.3 (measured 2026-10-18)
-  test_backfill_sources.py: 27.3  # #9017: was 1.0 (measured 2026-10-18)
-  test_billing.py: 27.8  # #9017: was 15.6 (measured 2026-10-18)
-  test_cli_context.py: 6.5  # #9017: was 9.3 (measured 2026-10-18)
+  test_about_edges.py: 3.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 6.2
+  test_backfill_sources.py: 1.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.3
+  test_billing.py: 35.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.8
+  test_cli_context.py: 6.6  # #9017 CI-junit 2026-10-18 (run 39165691659)
   test_config.py: 4.0
-  test_control_plane.py: 8.1  # #9017: was 5.1 (measured 2026-10-18)
+  test_control_plane.py: 5.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.1
   test_cross_tenant_read_isolation.py: 1.9
-  test_dream.py: 7.9  # #9017: was 3.5 (measured 2026-10-18)
+  test_dream.py: 6.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.9
   test_embedded_concurrency.py: 131.0
   test_embedded_durability_claim.py: 0.5  # unmeasured
   test_embedded_lifecycle.py: 79.0
-  test_enumeration_surfaces.py: 5.9  # #9017: was 1.2 (measured 2026-10-18)
-  test_ep_sources.py: 9.5  # #9017: was 5.3 (measured 2026-10-18)
+  test_enumeration_surfaces.py: 3.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.9
+  test_ep_sources.py: 10.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 9.5
   test_eval_extraction_health.py: 0.1  # unmeasured
   test_eval_ingest_retry.py: 7.1
   test_eval_resume_retry_failed.py: 2.2
-  test_event_provenance.py: 6.9  # #9017: was 2.3 (measured 2026-10-18)
+  test_event_provenance.py: 7.0  # #9017 CI-junit 2026-10-18 (run 39165691659)
   test_flip_gate.py: 6.7  # unmeasured
   test_fork_safety_3845.py: 11.3
   test_fork_slot_wedge_3845.py: 2.1  # unmeasured
   test_graph_integrity_gate.py: 9.2  # unmeasured
-  test_graphcopy_boolean_index_3154.py: 4.4  # #9017: was 0.6 (measured 2026-10-18)
+  test_graphcopy_boolean_index_3154.py: 0.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 4.4
   test_guard.py: 32.0
   test_hard_reject.py: 0.7  # unmeasured
-  test_hosted_api.py: 113.5  # #9017: was 114.6 (measured 2026-10-18)
+  test_hosted_api.py: 174.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 113.5
   test_hosted_backup.py: 14.4  # unmeasured
-  test_index_cli.py: 338.0  # #9017: was 29.2 (measured 2026-10-18)
-  test_index_directory.py: 66.0  # #9017: was 8.4 (measured 2026-10-18)
-  test_indexes.py: 5.7  # #9017: was 0.9 (measured 2026-10-18)
-  test_ingest.py: 30.4  # #9017: was 1.2 (measured 2026-10-18)
-  test_ingest_bundle.py: 13.0  # #9017: was 8.7 (measured 2026-10-18)
-  test_ingest_mode.py: 7.5  # #9017: was 4.4 (measured 2026-10-18)
-  test_ingest_validation.py: 7.6  # #9017: was 1.4 (measured 2026-10-18)
+  test_index_cli.py: 25.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 338.0
+  test_index_directory.py: 17.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 66.0
+  test_indexes.py: 1.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.7
+  test_ingest.py: 5.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 30.4
+  test_ingest_bundle.py: 16.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 13.0
+  test_ingest_mode.py: 7.6  # #9017 CI-junit 2026-10-18 (run 39165691659)
+  test_ingest_validation.py: 4.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.6
   test_8499_point_mediated_routing.py: 1.4  # unmeasured
   test_longmem_runner.py: 15.3
-  test_mcp_http.py: 22.0  # #9017: was 16.5 (measured 2026-10-18)
-  test_mcp_route_challenge.py: 5.5  # #9017: was 0.8 (measured 2026-10-18)
+  test_mcp_http.py: 31.2  # #9017 CI-junit 2026-10-18 (run 39165691659); was 22.0
+  test_mcp_route_challenge.py: 2.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.5
   test_migrate_db.py: 21.1
-  test_pack_shipping_wheel.py: 58.1  # #9017: was 24.1 (measured 2026-10-18)
+  test_pack_shipping_wheel.py: 42.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 58.1
   test_per_session_census.py: 2.0  # unmeasured
   test_pre_migration_safety.py: 2.3  # unmeasured
   test_precision_leak_4028.py: 3.1  # unmeasured
-  test_projection.py: 9.7  # #9017: was 8.9 (measured 2026-10-18)
+  test_projection.py: 15.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 9.7
   test_projection_embedded_socket_timeout.py: 1.9  # unmeasured
   test_projection_lifecycle.py: 8.6
   test_reaper.py: 40.5
@@ -5917,10 +5909,10 @@ durations:
   test_rest_surface_inventory.py: 4.8  # unmeasured (new file, #3875 — no CI junit yet)
   test_retention_indicator.py: 3.0  # unmeasured (new file, #3839 — no CI junit yet; hermetic: pure fold + a fake control plane, one embedded TestClient boot)
   test_resume_gate_parity.py: 0.1  # unmeasured
-  test_sdk.py: 16.1  # #9017: was 7.9 (measured 2026-10-18)
-  test_sdk_group3.py: 30.8  # #9017: was 2.7 (measured 2026-10-18)
-  test_search_engine_gaps.py: 6.0  # #9017: was 3.0 (measured 2026-10-18)
-  test_source_inheritance_own.py: 27.2  # #9017: was 29.8 (measured 2026-10-18)
+  test_sdk.py: 20.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 16.1
+  test_sdk_group3.py: 3.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 30.8
+  test_search_engine_gaps.py: 2.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 6.0
+  test_source_inheritance_own.py: 68.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.2
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
   test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
