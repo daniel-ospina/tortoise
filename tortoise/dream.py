@@ -153,6 +153,14 @@ class Dreamer:
         # The SDK adapters read this to refuse a success-shaped pass that
         # wrote zero belief state (the silent no-op).
         self._last_belief_write_count: int = 0
+        # #6211: what the operator SELECTION of the last local pass actually
+        # did — ``{truncated, operators_seen, operators_used, op_cap}`` from
+        # ``_bfs_select_operators``' opt-in stats. ``_last_operator_count`` is
+        # the POST-cap size, so a capped pass and a complete one were
+        # indistinguishable to every caller; the SDK adapter reads this to
+        # report the cap on the no-arg compute_confidence result, whose priors
+        # come from this pass.
+        self._last_selection_stats: dict = {}
         # #3139: the full pass's reachable-affected set. ``dream_all`` returns
         # a COUNT (``total_affected``) to keep the pinned I1 key-set, so the
         # set is stashed here for the caller's dirty-root sweep — without it
@@ -210,12 +218,17 @@ class Dreamer:
         this pass. ``budget=None`` on the SDK surface resolves to the
         existing 200-op selector default (I1); an explicit budget overrides
         it. ``_last_operator_count`` is set to the selected operator-set
-        size (after cap truncation) — the SDK adapter reads it to report
-        ``budget_used`` in the I1 local key-set.
+        size (after cap truncation) and ``_last_selection_stats`` to the
+        selector's own report (``truncated`` / ``operators_seen`` /
+        ``operators_used``, #6211) — read by ``compute_confidence``'s no-arg
+        fold and by nothing else. It is NOT part of the pinned I1 result
+        key-set: ``budget_used`` is the separate ``_last_operator_count``,
+        and the local result carries no ``truncated`` of its own.
         """
         if not anchors:
             self._last_operator_count = 0
             self._last_belief_write_count = 0
+            self._last_selection_stats = {}
             return {"iterations": 0, "converged": True, "affected_claims": []}
         with self._lock:
             self._snapshot_ep_epoch()
@@ -224,6 +237,7 @@ class Dreamer:
             operator_ids, factor_anchors = _bfs_select_operators(
                 proj, anchors, max_hops=max_hops, rel_filter="IMPL|NAND",
                 direction=direction, op_cap=op_cap,
+                stats=self._last_selection_stats,
             )
             self._last_operator_count = len(operator_ids)
             # A9 (epic #902 §5.6): the selection set ALSO carries direct-edge

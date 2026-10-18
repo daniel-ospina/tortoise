@@ -20523,6 +20523,11 @@ class TortoiseSDK:
             # #3139 (review P2): no beliefs written by THIS pass — see the
             # note in _dream_noop; a stale count would misdescribe the pass.
             self._dream_metrics["last_belief_write_count"] = 0
+            # #6211: same hazard for the selection report — no pass ran, so a
+            # report left over from an EARLIER pass must not describe this
+            # one (a stale ``truncated: True`` would tell a caller to distrust
+            # a topology nothing capped).
+            dreamer._last_selection_stats = {}
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
         result = dreamer.dream(
@@ -20559,6 +20564,15 @@ class TortoiseSDK:
         result["coverage"] = coverage
         result["budget_used"] = getattr(
             dreamer, "_last_operator_count", 0) or 0
+        # #6211: the pass's operator selection can be CAPPED (the 200 default),
+        # and ``budget_used`` alone cannot say so — it is the post-cap size.
+        # The selector's own report therefore travels on the DREAMER
+        # (``_last_selection_stats``, filled by ``_bfs_select_operators`` in
+        # dream.py), NOT as extra keys on this result: the I1 local key-set is
+        # pinned exact — ``tests/test_epic903_modes.py`` asserts the set — and
+        # a cap report is not worth loosening a documented I1 contract over.
+        # The one consumer that needs it, ``compute_confidence``'s no-arg
+        # dirty-root path, reads the attribute off the same cached Dreamer.
         result["mode"] = "local"
         self._record_dream_metrics(result, "local")
         return result
@@ -20890,7 +20904,9 @@ class TortoiseSDK:
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
                          direction: str = "both",
-                         include_draft: bool = False) -> tuple[list[str], set[tuple[str, str, str]]]:
+                         include_draft: bool = False,
+                         stats: dict | None = None
+                         ) -> tuple[list[str], set[tuple[str, str, str]]]:
         """BFS subgraph selection from anchor Points — A9 return contract.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
@@ -20901,12 +20917,19 @@ class TortoiseSDK:
         selection; the ≥2-live-endpoints derived-liveness predicate applies
         to operator nodes, GATE-2 Q3). With include_draft=False (default,
         #780) draft anchors, operators and frontier points are excluded.
+
+        ``stats`` (#6211): OPTIONAL out-parameter, filled by the selector with
+        ``truncated`` / ``operators_seen`` / ``operators_used`` / ``op_cap``.
+        The return tuple is unchanged, so every existing caller (the dreamer,
+        the calibration scope probe) is unaffected; only a caller that does not
+        own the operator cap passes it — ``compute_confidence`` — which needs
+        the cap in its RESULT, not on stderr.
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()
-        ops, anchors_out = _bfs_select_operators(proj, anchors, max_hops=max_hops,
-                                                 rel_filter=rel_filter, direction=direction,
-                                                 include_draft=include_draft)
+        ops, anchors_out = _bfs_select_operators(
+            proj, anchors, max_hops=max_hops, rel_filter=rel_filter,
+            direction=direction, include_draft=include_draft, stats=stats)
         return list(ops), anchors_out
 
     def compute_confidence(self, factors=None, evidence=None,
@@ -20918,11 +20941,58 @@ class TortoiseSDK:
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
+        FACTOR-SELECTION REPORT (#6211) — on every result THIS method builds:
+        ``truncated``, ``operators_seen``, ``operators_used``.
+
+          * ``truncated`` — True when this result was computed over a REDUCED
+            topology: the BFS operator selection hit its cap (``operators_used``
+            < ``operators_seen``) OR the affected-claim expansion was cut short
+            by the #395 degeneration guard (the same condition that sets
+            ``diagnostic: "truncated"``). False means neither bound bit — the
+            selection was NOT capped. It is not a claim that every wired factor
+            voted: ``skipped_factors`` is the SEPARATE, additive record of
+            factors EP dropped before consuming them (#6105).
+            A caller that must not rank on a partial topology reads THIS, not
+            ``converged``: before #6211 a capped pass returned ``converged:
+            true`` and nothing in the result said a cap had been hit, so a
+            confident number computed over a truncated factor set was
+            indistinguishable from a full-graph ranking.
+          * ``operators_seen`` — operators the BFS selection COLLECTED. On the
+            explicit-``factors`` path no selection runs at all, so it equals
+            the caller's factor count (see below).
+          * ``operators_used`` — operators the BFS selection RETURNED (what
+            ``truncated`` is computed from). It is NOT the size of the run's
+            seed set: the anchors path additionally seeds the direct-edge
+            factor-anchor endpoints, which are CLAIMS, not operators, so the
+            run can be seeded with ids this count excludes. And it is not the
+            number of factors that voted — ``skipped_factors`` (#6105) records
+            the factors EP dropped before consuming them.
+
+        ``operators_seen > operators_used`` names the operator cap specifically
+        (the default cap is 200 — the value is not re-stated here because a
+        caller that owns a budget passes its own). The explicit-``factors``
+        path runs NO BFS selection, so the cap cannot bind there:
+        ``operators_seen == operators_used == len(factors)`` and ``truncated``
+        is False. Only the early returns (nothing to run) report 0 / 0 — they
+        are the paths with no factor set to count. The NO-ARG dirty-root path
+        does NOT select operators itself —
+        it runs ``ep.run`` over the roots — but its fail-safe ``dream`` pass
+        does, over the same 200 default, and that pass's posteriors become this
+        result's priors; the three fields therefore carry the DREAM's selection
+        there, and ``truncated`` is true when the dream's selection was capped.
+        Before #6211's review round 3 that path reported ``False`` while a
+        capped 200-of-260 selection had shaped the answer.
+
+        The report is on every RESULT this method builds. One transport sibling
+        builds its own dict and is therefore NOT covered: the MCP handler's
+        HTTP no-dirty-state short-circuit (``mcp_server``), which returns
+        ``diagnostic: "no_dirty_state_http"`` without the three keys — a caller
+        on the hosted surface must read that diagnostic first.
+
         Two diagnostics can accompany the result, both ABSENT when they do not
-        apply (so the key-set above is the ordinary shape): ``diagnostic`` —
-        one of ``truncated`` (#395 degeneration guard), ``no_factors`` /
-        ``no_dirty_roots`` (nothing to run), ``factors_skipped``; and
-        ``skipped_factors`` — one structured record per factor EP DROPPED
+        apply: ``diagnostic`` — one of ``truncated`` (#395 degeneration guard),
+        ``no_factors`` / ``no_dirty_roots`` (nothing to run), ``factors_skipped``;
+        and ``skipped_factors`` — one structured record per factor EP DROPPED
         before it could be consumed (#6105: a draft/terminal endpoint stripped
         the operator below 2 participating inputs, or a directional operator
         lost its idx-0 source). ``converged`` speaks only for the factors the
@@ -20961,6 +21031,22 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         ep = self._get_ep()
+        # #6211: the FACTOR-SELECTION REPORT this call returns. `truncated` is
+        # True when the result was computed over a reduced topology — the BFS
+        # operator selection hit its cap, or the #395 affected-claim guard cut
+        # the expansion short. Both are reported because both make the same
+        # number untrustworthy, and a caller that must not rank on a partial
+        # topology should not have to know which one happened to fire.
+        selection: dict = {"operators_seen": 0, "operators_used": 0,
+                           "truncated": False}
+
+        def _report(result: dict, *, guard_truncated: bool = False) -> dict:
+            """Attach the #6211 factor-selection report to a result dict."""
+            result["truncated"] = bool(selection["truncated"] or guard_truncated)
+            result["operators_seen"] = selection["operators_seen"]
+            result["operators_used"] = selection["operators_used"]
+            return result
+
         # Hydrate evidence from graph-persisted baselines (survives SDK restarts)
         self._hydrate_evidence()
         # Apply source-based credibility inheritance (with recency modulation #122)
@@ -20983,7 +21069,13 @@ class TortoiseSDK:
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
             if not operator_ids:
-                return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
+                return _report({"iterations": 0, "converged": True,
+                                "confidences": {}, "diagnostic": "no_factors"})
+            # No BFS selection ran: the caller supplied the factor set, so the
+            # 200-operator cap does not apply to it. seen == used, truncated
+            # False — reported rather than omitted so the shape is uniform.
+            selection["operators_seen"] = len(operator_ids)
+            selection["operators_used"] = len(operator_ids)
             if require_calibration:
                 self._ensure_calibrated(
                     "compute_confidence",
@@ -21000,14 +21092,14 @@ class TortoiseSDK:
             # through BOTH the selector and ep.run.
             operator_ids, _factor_anchors = self._select_subgraph(
                 anchors, max_hops=max_hops, rel_filter=rel_filter,
-                direction=direction)
+                direction=direction, stats=selection)
             for (src, tgt, _t) in _factor_anchors:
                 operator_ids.append(src)
                 operator_ids.append(tgt)
             operator_ids = list(dict.fromkeys(operator_ids))
             if not operator_ids:
-                return {"iterations": 0, "converged": True, "confidences": {},
-                        "diagnostic": "no_factors"}
+                return _report({"iterations": 0, "converged": True,
+                                "confidences": {}, "diagnostic": "no_factors"})
             if require_calibration:
                 # #7739: scope = the run's consumed set for the selection just
                 # computed. Anchors the run consumes are already in it (they
@@ -21039,8 +21131,8 @@ class TortoiseSDK:
             self._hydrate_dirty_roots()
             roots = list(self._dirty_roots)
             if not roots:
-                return {"iterations": 0, "converged": True, "confidences": {},
-                        "diagnostic": "no_dirty_roots"}
+                return _report({"iterations": 0, "converged": True,
+                                "confidences": {}, "diagnostic": "no_dirty_roots"})
             # Bounded fail-safe pass (dream, max_hops=2) FIRST — preserves the
             # dirty-clear/retry lifecycle (#85); then the exact local pass
             # (max_hops=None). Roots are captured BEFORE the dream so the
@@ -21057,14 +21149,43 @@ class TortoiseSDK:
             # #1315/#1314: propagate the caller's calibration posture — the
             # epic903 refactor re-added an unpropagated dream here (same
             # class as the #1315 fix; line 7050/7202 already propagate).
+            # #6211: the Dreamer is bound BEFORE the call, so the selection
+            # report read after it is provably the instance that ran THIS pass
+            # (``self._dreamer`` is non-None from here on, so a second caller
+            # cannot hand us a fresh, still-empty one).
+            dreamer = self._get_dreamer()
+            # The RESULT of this pass is deliberately not used here: the
+            # deterministic pass below owns the answer, and the dream's only
+            # contribution to it is its selection report, which lands on the
+            # bound ``dreamer``.
             self.dream(dirty_only=True, stamp_dreamed_at=False,
                        warm_start=False,
                        require_calibration=require_calibration)
+            # #6211: the fail-safe dream runs its OWN operator selection (the
+            # same 200 default) and flushes its posteriors, which the exact
+            # pass below loads as priors — so a capped dream shapes THIS
+            # result. Folding its report in is what keeps `truncated` from
+            # certifying a capped derivation as complete on the very path the
+            # issue measured (the no-arg dirty-root pass). Read from the
+            # DREAMER's own report (``_last_selection_stats``), not from keys
+            # on the dream result: the I1 local key-set is pinned exact and
+            # does not carry them (#6211 — see ``_dream_local``).
+            _dream_stats = getattr(
+                dreamer, "_last_selection_stats", None) or {}
+            if _dream_stats.get("truncated"):
+                selection["truncated"] = True
+            selection["operators_seen"] = max(
+                selection["operators_seen"],
+                int(_dream_stats.get("operators_seen") or 0))
+            selection["operators_used"] = max(
+                selection["operators_used"],
+                int(_dream_stats.get("operators_used") or 0))
             iterations, converged = ep.run(roots, max_hops=None,
                                            evidence=run_evidence)
             if not ep._last_affected and not ep._last_truncated:
-                return {"iterations": iterations, "converged": converged,
-                        "confidences": {}, "diagnostic": "no_factors"}
+                return _report({"iterations": iterations, "converged": converged,
+                                "confidences": {}, "diagnostic": "no_factors"},
+                               guard_truncated=ep._last_truncated)
         confidences = {}
         proj = self._get_proj()
         # #395 (delta C): the write-back set == the run set — consume
@@ -21111,8 +21232,9 @@ class TortoiseSDK:
                         self._emit_event(
                             "ConfidenceChanged", id=cid,
                             confidence=confidences[cid]["mean"])
-        result = {"iterations": iterations, "converged": converged,
-                  "confidences": confidences}
+        result = _report({"iterations": iterations, "converged": converged,
+                          "confidences": confidences},
+                         guard_truncated=ep._last_truncated)
         # #395: the degeneration guard never aborts the interactive path — it
         # proceeds with the capped set and reports the diagnostic.
         if ep._last_truncated:

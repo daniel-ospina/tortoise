@@ -284,9 +284,18 @@ class Defect(RuntimeError):
 def connect(port: int):
     import falkordb
 
+    from tortoise.projection import _bounded_server_socket_kwargs
+
     # Pin the loopback address, never `localhost` (#6666) -- the same HOST the per-DB scan
     # dials, so a repair and its diagnosis cannot disagree about which server they mean.
-    return falkordb.FalkorDB(host=HOST, port=port)
+    #
+    # #8118: bounded on the product's ONE resolver. This client was the file's outlier —
+    # `_raw_client` above already carried 3s/3s — and `falkordb.FalkorDB` defaults
+    # `socket_timeout=None`, which it hands to redis-py explicitly. A repair run against the
+    # very wedged server it exists to repair would otherwise park in `recv()` forever at 0%
+    # CPU with no error: alive, and indistinguishable from slow work.
+    return falkordb.FalkorDB(host=HOST, port=port,
+                             **_bounded_server_socket_kwargs())
 
 
 def node_count(graph) -> int:
