@@ -461,6 +461,11 @@ The full per-property table (216 rows, with the writer clause and the journal ca
 | `tags` | P | create_point builds the node from a `CREATE (n:Point {…})` property map; update_point `SET n += $props`; `_upsert_point_props` (`n.tags=$tags`, presence-and-store gated) + pass-2 `_sync_tags` (`projection/entities.py`); `_revise_point` (`n.tags = $tags`, `n.tags = NULL` for a clear, `projection/__init__.py`) | PointAdded.point.tags; PointRevised.tags (the clear rides as an explicit null) | #2897 — CARRIED: the property plus the snapshot-derivable `:Tag`/`TAGGED` half, re-derived in pass 2 from the node's own final value |
 | `span_start` | P | `_POINT_DECLARED_PROPS` (#5007 E4) | PointAdded.point.span_start | verbatim span pointer |
 | `span_end` | P | `_POINT_DECLARED_PROPS` (#5007 E4) | PointAdded.point.span_end | verbatim span pointer |
+| `amountMinor` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.amountMinor (open-set passthrough) | money value, integer minor units — never a float (#2782 WS-C) |
+| `currency` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.currency (open-set passthrough) | ISO 4217 alpha-3, explicit PER AMOUNT — never a graph default |
+| `minorUnitExponent` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.minorUnitExponent (open-set passthrough) | exponent travels with the amount so a reader never assumes a table |
+| `verbatim` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.verbatim (open-set passthrough) | the exact source text the value was read from (drop, never round) |
+| `asOf` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.asOf (open-set passthrough) | ISO `YYYY-MM-DD` assertion/validity date, distinct from `when` |
 | `annotator_bias` | P | `_POINT_DECLARED_PROPS` (#3689); OperatorAnnotated.bias | PointAdded.point.annotator_bias; OperatorAnnotated |  |
 | `annotator_precision` | P | `_POINT_DECLARED_PROPS` (#3689) | PointAdded.point.annotator_precision; OperatorAnnotated.precision |  |
 | `annotator_consistency` | P | `_POINT_DECLARED_PROPS` (#3689) | PointAdded.point.annotator_consistency; OperatorAnnotated.consistency |  |

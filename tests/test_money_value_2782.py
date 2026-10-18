@@ -74,6 +74,17 @@ def _node_props(sdk: TortoiseSDK, label: str, key: str, value: str) -> dict:
     return rows[0][0]
 
 
+def _point_row(sdk: TortoiseSDK, content_prefix: str) -> dict:
+    """The single :Point whose content starts with ``content_prefix``."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content STARTS WITH $p "
+        "RETURN properties(n)",
+        params={"p": content_prefix},
+    ).result_set
+    assert len(rows) == 1, f"expected one :Point starting {content_prefix!r}"
+    return rows[0][0]
+
+
 # ── representation: the five flat sibling fields ───────────────────────────
 
 class TestIso4217Table:
@@ -406,6 +417,78 @@ class TestEntityRoundTrip:
         ev = _node_props(sdk, "Event", "name", "Disbursement R")
         assert (obj[AMOUNT_MINOR], obj[CURRENCY]) == (COMMITTED_MINOR, "BRL")
         assert (ev[AMOUNT_MINOR], ev[CURRENCY]) == (RELEASED_MINOR, "BRL")
+
+
+# ── the Point lane: a number asserted in prose carries the same flat value ──
+
+class TestPointLane:
+    """A Point asserts a claim rather than owning state, so it carries the SAME
+    flat value — and the Point replay lane is the one that reports undeclared
+    props. WS-C §7.1 requires the declaration ("declaration, not permission")
+    so the shared live+replay writer does not log a false drift warning for a
+    documented money prop on every rebuild (#2782)."""
+
+    def test_the_five_fields_are_declared_for_point_replay(self):
+        from tortoise.projection.entities import _EntityHandlers
+        declared = _EntityHandlers._POINT_DECLARED_PROPS
+        for field in MONEY_VALUE_FIELDS:
+            assert field in declared, (
+                f"money field {field!r} is not declared on the Point lane — a "
+                "rebuild then logs a false 'not declared' drift warning")
+
+    def test_the_declaration_is_derived_from_the_money_shape(self):
+        """Single-sourced, so a field ADDED to `money_props` cannot silently
+        stay undeclared here — the two would drift and the drift would show up
+        only as rebuild noise."""
+        from tortoise.projection.entities import _EntityHandlers
+        assert set(MONEY_VALUE_FIELDS) <= _EntityHandlers._POINT_DECLARED_PROPS
+        assert set(MONEY_VALUE_FIELDS) == set(money_props(
+            COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
+            verbatim="R$ 250.000,00", as_of="2026-06-30"))
+
+    def test_point_carries_the_money_value_and_survives_rebuild(
+            self, journaled_sdk, caplog):
+        import logging
+
+        sdk, events = journaled_sdk
+        sdk.create_point(
+            "statement", "tranche one is R$ 250.000,00",
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
+                          verbatim="R$ 250.000,00", as_of="2026-06-30"))
+        live = _point_row(sdk, "tranche one is")
+        assert (live[AMOUNT_MINOR], live[CURRENCY], live[AS_OF]) == (
+            COMMITTED_MINOR, "BRL", "2026-06-30")
+
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+        after = _point_row(sdk, "tranche one is")
+        assert (after[AMOUNT_MINOR], after[CURRENCY],
+                after[MINOR_UNIT_EXPONENT], after[VERBATIM],
+                after[AS_OF]) == (
+            COMMITTED_MINOR, "BRL", 2, "R$ 250.000,00", "2026-06-30")
+        undeclared = [r.getMessage() for r in caplog.records
+                      if "is not declared" in r.getMessage()
+                      and any(f"{f!r}" in r.getMessage()
+                              for f in MONEY_VALUE_FIELDS)]
+        assert undeclared == []
+
+    def test_an_undeclared_point_prop_still_warns(self, journaled_sdk, caplog):
+        """The discriminating control: the declaration suppresses the warning
+        for the DECLARED shape only, so a genuinely undeclared prop still
+        reports — the drift signal is not muted wholesale."""
+        import logging
+
+        sdk, events = journaled_sdk
+        sdk.create_point("statement", "a claim with a stray prop",
+                         frobnicator_level=7)
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        assert any("'frobnicator_level' is not declared" in r.getMessage()
+                   for r in caplog.records)
+        assert _point_row(sdk, "a claim with a stray")["frobnicator_level"] == 7
 
 
 # ── the grounded requirement end to end: released/tranche ratio ────────────
