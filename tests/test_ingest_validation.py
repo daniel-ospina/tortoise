@@ -5,10 +5,10 @@ Tests the plan §5.2 checks 1-8 as consumed by BOTH `_validate_bundle` (Phase
 defense-in-depth raises. The key indicator: **every violation class the shared
 checks own is caught by Phase 1 too** (the parity test) — no Phase-2-only class
 among THEM. It is not a universal: the `_sanitize_props` reject set beyond the
-keys the ingest gate owns (a caller-supplied `id`, the belief props
-`credibility`/`ep_alpha`/`ep_beta`/`baseline_*`) passes Phase 1 and raises
-mid-write — that is #8755, and it is why the wording above is "the classes these
-checks own" rather than "every class".
+keys the ingest gate owns (an ENTITY item's caller-supplied `id`, the belief
+props `credibility`/`ep_alpha`/`ep_beta`/`baseline_set`/`baseline_source`)
+passes Phase 1 and raises mid-write — that is #8755, and it is why the wording
+above is "the classes these checks own" rather than "every class".
 
 CYCLE-25 amendments covered: pointKind vocabulary (statement canonical, legacy
 write-compat, `event` REJECTED, kind-absent → statement), quote ≤200 permitted,
@@ -854,9 +854,12 @@ def test_server_managed_key_is_refused_when_double_wrapped_on_a_point(
 def test_entity_type_vocabulary_is_derived_from_one_map(sdk):
     """Phase 1, Phase 2 and the writer dispatch on the SAME vocabulary.
 
-    `_ENTITY_ITEM_LABELS` is the declaration; the messages are built from it.
-    A type added to the map without a writer branch would be accepted by Phase 1
-    and raise a raw ValueError in step 3, after steps 2's items committed.
+    `_ENTITY_ITEM_LABELS` is the declaration, the messages are built from it, and
+    every key it declares must have a step-3 writer branch — a key without one
+    would be accepted by Phase 1 and raise a raw ValueError in step 3, after
+    step 2's items committed. That second half is asserted directly (each key is
+    handed to `create_entity`), because a message-only check passes on a map
+    entry the writer cannot handle (measured).
     """
     from tortoise.sdk import _ENTITY_ITEM_LABELS
 
@@ -870,3 +873,10 @@ def test_entity_type_vocabulary_is_derived_from_one_map(sdk):
         sdk.create_entity("bogus", "X")
     for key in keys:
         assert key in str(exc.value), str(exc.value)
+        # every declared key must reach a writer branch: the "unknown type"
+        # messages are the only place a missing branch surfaces, so assert the
+        # call does not produce one
+        try:
+            sdk.create_entity(key, f"probe-{key}")
+        except ValueError as err:  # a writer refusal is fine; an unknown type is not
+            assert "unknown type" not in str(err), (key, str(err))

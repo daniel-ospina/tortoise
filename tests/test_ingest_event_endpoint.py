@@ -1293,8 +1293,8 @@ def test_direct_route_name_merged_self_edge_rejected_phase1(sdk):
     }
     viols = sdk._validate_bundle(bundle)
     msgs = [v["message"] for v in viols]
-    assert any("'s1' and 's2' both address the Subject 'Gamma'" in m
-               for m in msgs), msgs
+    assert any("'s1' and 's2' both resolve to the Subject" in m
+               and "address the same endpoint" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="from and to address the same endpoint"):
         sdk.ingest(bundle)
@@ -1377,8 +1377,10 @@ def test_direct_route_external_id_self_edge_rejected_phase1(sdk):
     the (label, name) identity, and `create_direct_edge` refuses the pair with a
     raw ValueError after steps 2-3 committed (measured: point left behind).
 
-    Identity is therefore compared on `(label, name)` for BOTH sides of the
-    bundle/external boundary, not on ref strings.
+    Identity is therefore compared on the LANDING ID for BOTH sides of the
+    bundle/external boundary, not on ref strings and not on the name: a bundle
+    entity ref lands on `entity_name_id(label, name)` and an external ref on the
+    id it names, so the pair is one node here.
     """
     sub = sdk.create_subject("Gamma")["id"]
     bundle = {
@@ -1389,7 +1391,8 @@ def test_direct_route_external_id_self_edge_rejected_phase1(sdk):
     }
     viols = sdk._validate_bundle(bundle)
     msgs = [v["message"] for v in viols]
-    assert any("both address the Subject 'Gamma'" in m for m in msgs), msgs
+    assert any("both resolve to the Subject" in m and "address the same endpoint" in m
+               for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="from and to address the same endpoint"):
         sdk.ingest(bundle)
@@ -2128,12 +2131,7 @@ def test_shared_name_canonical_carrier_declared_terminal_is_dropped(sdk):
 
 
 def test_shared_name_distinct_nodes_are_not_a_self_edge(sdk):
-    """Two refs to a name that MINTS are two different nodes, not one endpoint.
-
-    The merged-name self-edge guard keys on `(label, name)`; with 2+ carriers and
-    no canonical carrier both items mint their own node, so the edge between them
-    is a real edge (`create_direct_edge` writes it). The guard over-rejected it.
-    """
+    """Two carrier IDS sharing a name are two nodes, so the edge is legal."""
     sdk._get_proj().g.query(
         "CREATE (:Subject {id:'carrier-1', name:'Gamma', status:'live'})")
     sdk._get_proj().g.query(
@@ -2147,22 +2145,17 @@ def test_shared_name_distinct_nodes_are_not_a_self_edge(sdk):
     assert sdk.ingest(bundle)["created"]["connections"] == 1
 
 
-def test_second_same_name_item_declaring_array_is_refused(sdk):
-    """A shared name mints PER ITEM, so the second item's array is stored too.
-
-    The mint check used to be keyed per NAME (`_seen_mints`), so only the first
-    same-name item was examined and a second one declaring an array slipped past
-    Phase 1 into the mid-write `TypeError`.
-    """
+def test_first_same_name_item_declaring_array_is_refused(sdk):
+    """The FIRST item naming a name CREATES the node, so its array is stored."""
     for i in (1, 2):
         sdk._get_proj().g.query(
             f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
     bundle = {
         "points": [{"kind": "statement", "content": "must-not-commit"}],
         "entities": [
-            {"ref": "a", "type": "object", "name": "Acme"},
-            {"ref": "b", "type": "object", "name": "Acme",
+            {"ref": "a", "type": "object", "name": "Acme",
              "status": ["retracted"]},
+            {"ref": "b", "type": "object", "name": "Acme"},
         ],
         "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
     }
@@ -2172,6 +2165,81 @@ def test_second_same_name_item_declaring_array_is_refused(sdk):
         sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
+
+
+def test_second_same_name_item_declaring_array_is_dropped(sdk):
+    """A LATER same-name item does not create a node, so its status is dropped.
+
+    Every ingest entity item's id is `entity_name_id(label, name)`, so the second
+    item lands on the node the first one created and `status` is written
+    `ON CREATE` only. Refusing the declaration rejected a bundle the writer
+    performs (measured at the writer: one node, status `live`, array not stored).
+    """
+    for i in (1, 2):
+        sdk._get_proj().g.query(
+            f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
+    bundle = {
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Acme"},
+            {"ref": "b", "type": "object", "name": "Acme",
+             "status": ["retracted"]},
+            {"ref": "c", "type": "object", "name": "Other"},
+        ],
+        "connections": [{"from": "a", "to": "c", "operator": "IMPL"}],
+    }
+    assert sdk._validate_bundle(bundle) == []
+    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 3
+    assert sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status",
+        params={"id": _canonical("Object", "Acme")},
+    ).result_set == [["live"]]
+
+
+def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):
+    """Under a shared name two bundle refs are STILL one node — a self-edge.
+
+    Every ingest entity item writes `entity_name_id(label, name)`, so the first
+    item creates that node (even when 2+ carriers hold the name, because the fold
+    then keys on the id) and the second lands on it. Comparing names says nothing
+    here; comparing LANDING IDs does. Skipping the check on the carrier count
+    failed open: Phase 1 returned `[]` and step 4 raised
+    `source_id and target_id must differ` with the earlier point committed.
+    """
+    for i in (1, 2):
+        sdk._get_proj().g.query(
+            f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Acme"},
+            {"ref": "b", "type": "object", "name": "Acme"},
+        ],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("address the same endpoint" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (o:Object {id:$id}) RETURN count(o)",
+                  {"id": _canonical("Object", "Acme")}) == 0
+
+
+def test_two_carrier_ids_are_not_a_self_edge(sdk):
+    """Two carriers sharing a NAME are two nodes: the edge between them is legal."""
+    sdk._get_proj().g.query(
+        "CREATE (:Subject {id:'carrier-1', name:'Gamma', status:'live'})")
+    sdk._get_proj().g.query(
+        "CREATE (:Subject {id:'carrier-2', name:'Gamma', status:'live'})")
+    bundle = {
+        "connections": [
+            {"from": "carrier-2", "to": "carrier-1", "operator": "IMPL"},
+        ],
+    }
+    assert sdk._validate_bundle(bundle) == []
+    assert sdk.ingest(bundle)["created"]["connections"] == 1
 
 
 def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
@@ -2192,8 +2260,9 @@ def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
     with pytest.raises(ValueError, match="terminal"):
         sdk.create_direct_edge("IMPL", term, live)
     # A reified pair takes `create_operator`, which tolerates the terminal node —
-    # so neither surface refuses it, and Phase 1 must not either.
+    # so Phase 1 must not refuse it, and the primitive must actually write it.
     assert sdk._validate_bundle({
         "connections": [{"from": live, "to": term, "operator": "IMPL",
                          "reify": True}],
     }) == []
+    assert sdk.create_operator("IMPL", live, [term]) is not None

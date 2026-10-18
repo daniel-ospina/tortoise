@@ -14648,10 +14648,11 @@ class TortoiseSDK:
     # message in both phases, so the classes these helpers own are covered in
     # BOTH phases by construction (asserted by the parity unit test). It is a
     # coverage statement about the helpers, NOT a universal: `_sanitize_props`
-    # refuses more than this gate owns (a caller-supplied `id`, the belief props
-    # `credibility`/`ep_alpha`/`ep_beta`/`baseline_*`), so those still pass
-    # Phase 1 and raise in step 2/3 with the earlier items committed — the
-    # #8755 residual named in `_check_endpoints`.
+    # refuses more than this gate owns (an ENTITY item's caller-supplied `id`,
+    # and the belief props it rejects: `credibility`/`ep_alpha`/`ep_beta`/
+    # `baseline_set`/`baseline_source`), so such an item still passes Phase 1 and
+    # raises in step 3 with the earlier items committed — the #8755 residual
+    # named in `_check_endpoints`.
     #
     # CYCLE-25 (ontology v3.8): pointKind `statement` is THE write kind;
     # legacy kinds are write-compat-only; `event` is REJECTED (episodic
@@ -15783,10 +15784,15 @@ class TortoiseSDK:
         #     canonical id no carrier holds) is NOT skipped: #8864/#8902 key that
         #     merge on the item's own id, so its declared array IS stored.
         #
-        # Scoped PER ITEM, not per name: with 2+ carriers every item mints its
-        # own node, so a second same-name item's array is stored too and a
-        # per-name `seen` set would skip it (that second item is exactly the one
-        # a per-name pre-scan cannot speak for).
+        # Scoped by the ORDERED simulation the fold performs: an item's declared
+        # status is stored only when its write CREATES the node, and only the
+        # FIRST bundle item naming a `(label, name)` can — its id
+        # (`entity_name_id`) is deterministic, so every later same-name item
+        # lands on the node the first one created (or on the canonical carrier)
+        # and `status` is written `ON CREATE` only. Checking every item
+        # over-rejected a writer-accepted bundle (measured), and checking only
+        # the first-per-name via a `seen` set skipped a genuine create.
+        _minted_names: set[tuple[str, str]] = set()
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
@@ -15808,12 +15814,13 @@ class TortoiseSDK:
                     continue
                 _existing, _hit, _op, _bad, _carriers, _merges = _name_holders(
                     _elabel, _name)
-                if _merges:
+                _key = (_elabel, _name)
+                # MERGES (a carrier holds the canonical id) or not the first
+                # naming item (the first one creates it) ⇒ this write does not
+                # store the status.
+                if _merges or _key in _minted_names:
                     continue
-                # The item mints on its OWN id, so the status it carries is the
-                # one stored: read it from the item, not from a per-name
-                # pre-scan (which is the FIRST item's status and would both miss
-                # a later item's array and charge an earlier item for it).
+                _minted_names.add(_key)
                 _mint = _item_effective_status(
                     item, _item_flatten_depth(item, "entities"))
             if not _status_is_stored_unhashable(_mint):
@@ -16033,7 +16040,7 @@ class TortoiseSDK:
             # by its id share it. Only the direct route is affected — a reified
             # pair goes through `create_operator`, which tolerates the shared
             # node (measured).
-            merged: dict[tuple[str, str], str] = {}
+            merged: dict[str, str] = {}
             for v in vals:
                 if not isinstance(v, str):
                     continue
@@ -16051,24 +16058,34 @@ class TortoiseSDK:
                 if ep_label not in ("Subject", "Object") \
                         or not isinstance(ep_name, str) or not ep_name:
                     continue
-                # A shared name whose canonical id NO carrier holds makes every
-                # item naming it mint its own node (#8864/#8902 key that merge on
-                # the record's own id), so two such refs are DISTINCT endpoints,
-                # not a self-edge. Measured over-rejection: the same edge written
-                # directly by `create_direct_edge` was refused here. `merges` is
-                # the same answer `_entity_name_holders` gives the other arms.
-                _h = _name_holders(ep_label, ep_name)
-                if _h[4] >= 2 and not _h[5]:
+                # Compare the NODE each endpoint will land on, never the NAME.
+                # The landing id is what `create_direct_edge` sees, and it
+                # differs by ref kind:
+                #   * a bundle-local entity item writes the deterministic
+                #     `entity_name_id(label, name)` — the SAME id for every item
+                #     naming that name, so two such refs are one node whether the
+                #     first one created it or landed on a carrier (#8864/#8902
+                #     key the fold on the record's own id, which IS that id);
+                #   * an external ref lands on the node its id names, so two
+                #     carriers that share a NAME are two different endpoints and
+                #     the edge between them is legal (measured over-rejection:
+                #     `create_direct_edge` wrote the edge this guard refused).
+                # Comparing (label, name) got both of these backwards.
+                if v in local:
+                    lid = _entity_name_id(ep_label, ep_name)
+                else:
+                    lid = (node_info.get(v) or {}).get("id")
+                if not isinstance(lid, str) or not lid:
                     continue
-                first_ref = merged.setdefault((ep_label, ep_name), v)
+                first_ref = merged.setdefault(lid, v)
                 if first_ref != v:
                     violations.append({
                         "section": "connections", "index": i,
                         "message": f"ingest: connections[{i}] endpoints "
-                                   f"{first_ref!r} and {v!r} both address "
-                                   f"the {ep_label} {ep_name!r} (merged by "
-                                   f"name) — from and to address the same "
-                                   f"endpoint (EP cavity risk)",
+                                   f"{first_ref!r} and {v!r} both resolve to "
+                                   f"the {ep_label} {lid!r} — from and to "
+                                   f"address the same endpoint (EP cavity "
+                                   f"risk)",
                     })
                     break
             for v in vals:
@@ -16222,8 +16239,9 @@ class TortoiseSDK:
                                 f"{elabel} declares status {declared!r}, and "
                                 + ("the name merge applies status at MINT, so "
                                    if name_merge or not exists else
-                                   "the item mints its own node on its id "
-                                   "(shared name, #8864), so ")
+                                   "the bundle mints that node on its "
+                                   "(label, name) id (shared name, #8864) "
+                                   "and applies status at MINT, so ")
                                 + "new direct edges to terminal endpoints "
                                   "are rejected (#2422/#7925)")
                         else:
@@ -16477,10 +16495,11 @@ class TortoiseSDK:
         'granular'. Consumes the same shared check helpers as ingest()'s
         Phase-2 defense-in-depth raises, so every class those helpers own is
         caught here too (asserted by the parity unit test). It does NOT cover
-        the `_sanitize_props` reject set beyond the keys this gate owns — a
-        caller-supplied `id` or the belief props pass Phase 1 and raise in step
-        2/3 after earlier items committed (#8755, named in
-        `_check_endpoints`).
+        the `_sanitize_props` reject set beyond the keys this gate owns — an
+        ENTITY item's caller-supplied `id`, or a belief prop it rejects
+        (`credibility`/`ep_alpha`/`ep_beta`/`baseline_set`/`baseline_source`),
+        passes Phase 1 and raises in step 3 after earlier items committed
+        (#8755, named in `_check_endpoints`).
         """
         violations: list[dict] = []
         for section in ("sources", "points", "entities"):

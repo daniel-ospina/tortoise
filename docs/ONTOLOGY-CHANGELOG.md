@@ -252,7 +252,9 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   holder": one carrier ⇒ the name merge lands on it (`ON MATCH`), while a name with 2+
 >   carriers folds on the record's own `id` (#8864/#8902), so the item lands on the carrier that
 >   already holds the deterministic `(label, name)` id, and MINTS its own node when none does —
->   the case where no holder axis applies and the item's own declared status is what is stored;
+>   the case where no holder axis applies. Within one bundle only the FIRST item naming a
+>   `(label, name)` can mint, because every entity item writes that same deterministic id: a
+>   later same-name item lands on it, so its declared status is dropped;
 > - the `gated` row-9 status read and Phase 2's draft default now read at the WRITE DOOR's fold
 >   depth, so a double-wrapped `props: {props: {status: …}}` is refused / kept draft respectively —
 >   previously the point could be born LIVE under `gated` (a fail-open, not an over-rejection).
