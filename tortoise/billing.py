@@ -144,15 +144,18 @@ def _select_current_subscription(subs):
     ⛔⛔⛔ BOTH directions of that rule, and the ending sub's own rank is the one
     that can revoke. ``_best_ranked`` SKIPS unrankable entries, so a customer
     whose only ENDING subscription is unrankable (a price rotated out of
-    ``STRIPE_PRICE_IDS``, an unreadable ladder) yields ``(None, None)`` — and a
-    guard written as ``if kept is not None`` then skips the comparison
-    entirely and hands the newer, cheaper candidate the entitlement. That is
-    the same silent revocation one branch over, so the unrankable-ending case
-    keeps the still-in-force entry (``ending[0]``). Keeping it is not a
-    no-op dressed as a decision: mirroring an unrankable subscription raises
-    before ANY write (``subscription_plan`` on a rotated price,
-    ``apply_limits`` on an unreadable ladder), so the org lands in a FAILED
-    row with its stored tier untouched and the run reds — loud and
+    ``STRIPE_PRICE_IDS``, a ladder missing a required limit key) yields
+    ``(None, None)`` — and a guard written as ``if kept is not None`` then skips
+    the comparison entirely and hands the newer, cheaper candidate the
+    entitlement. That is the same silent revocation one branch over, so ANY
+    unrankable entry in the ending set makes the comparison unprovable and the
+    unrankable one is kept (``unrankable[0]``) — including an unrankable
+    SIBLING of a rankable ending sub, which would otherwise lose silently to
+    its sibling and let a newer sub at that sibling's cap be taken as "at or
+    above". Keeping it is not a no-op dressed as a decision: mirroring an
+    unrankable subscription raises before ANY write (``subscription_plan`` on a
+    rotated price, ``apply_limits`` on an unreadable ladder), so the org lands
+    in a FAILED row with its stored tier untouched and the run reds — loud and
     fail-closed, and never a downgrade recorded as a clean repair.
     """
     live = [s for s in subs if s.get("status") in _POINTER_CURRENT_STATUSES]
@@ -161,17 +164,21 @@ def _select_current_subscription(subs):
     if live_now:
         candidate = live_now[0]
         if ending:
+            unrankable = [s for s in ending if _subscription_rank(s) is None]
+            if unrankable:
+                # ⛔ ONE unrankable still-in-force entry makes the comparison
+                # unprovable for the WHOLE ending set, not just when every
+                # entry is unrankable. ``_best_ranked`` SKIPS what it cannot
+                # price, so a rankable SIBLING would win the comparison and a
+                # newer sub at that sibling's cap would then be taken as
+                # "provably at or above" — revoking the period the
+                # unpriceable sibling is still paying for, and recording it as
+                # a clean repair. Keep the unrankable one instead: its mirror
+                # raises before any write, so the org lands in a FAILED row
+                # (stored tier untouched, run reds) rather than being
+                # downgraded silently on a green run.
+                return unrankable[0]
             kept, kept_rank = _best_ranked(ending)
-            if kept is None:
-                # ⛔ No ENDING subscription could be RANKED, so "the candidate
-                # is at or above it" is not PROVED — and unproved is not a
-                # reason to replace a subscription the customer has paid
-                # through ``current_period_end``. Keep the still-in-force one
-                # instead of falling through to the candidate: the mirror of
-                # an unrankable sub raises before any write, so the org lands
-                # in a FAILED row (stored tier untouched, run reds) rather
-                # than being downgraded silently on a green run.
-                return ending[0]
             cand_rank = _subscription_rank(candidate)
             if cand_rank is None or cand_rank < kept_rank:
                 return kept
@@ -902,21 +909,33 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       the higher tier until that period ends; replacing it there would revoke
       an entitlement already paid for, silently (only drift UP notifies).
       ⛔ That guard holds when the rank CANNOT be read too (a price rotated out
-      of ``STRIPE_PRICE_IDS``, an unreadable ladder), and WHERE the row lands
-      depends on WHICH side is unreadable. When it is the STILL-IN-FORCE sub's
-      own cap, that sub is kept and cannot be mirrored — the raise happens
-      inside ``mirror_subscription`` before any write — so the org is a FAILED
-      row with its stored tier intact and the run reds: loud, never a
-      downgrade. When only the NEWER candidate's cap cannot be read, the
-      still-in-force one is kept and mirrors normally: nothing changed, so the
-      row is ``unchanged`` on a GREEN run, and the unpriceable candidate is
-      held for a later pass rather than applied or reported.
+      of ``STRIPE_PRICE_IDS``, a ladder missing a required limit key), and
+      WHERE the row lands depends on WHICH side is unreadable. When ANY
+      still-in-force entry cannot be ranked — the one the comparison would
+      keep, or a SIBLING in the same ending set, which ``_best_ranked`` skips
+      and would otherwise lose silently — that entry is kept and cannot be
+      mirrored, because the raise happens inside ``mirror_subscription``
+      before any write: the org is a FAILED row with its stored tier intact
+      and the run reds. That is the fail-closed answer, and the only one that
+      never revokes a period already paid for. When instead it is the NEWER
+      candidate's cap that cannot be read, the still-in-force one is kept and
+      mirrors normally: ``unchanged`` when the store already held that tier
+      (the usual case), an ordinary ``repaired`` when it had drifted — an UP
+      drift still pages and reds as always. The unpriceable candidate is NOT
+      applied and nothing is logged about it, and it does not self-heal: when
+      it later becomes the only live subscription the pass reds for it until
+      the catalog is fixed.
+      ⛔ ``None`` from an unreadable ladder is not the only shape a cap can go
+      missing in: a tier whose required keys are PRESENT but whose
+      ``max_graph_nodes`` is ``null`` is returned as-is by ``tier_limits``, so
+      it ranks as unreadable AND mirrors without raising — a case this arm
+      does not fail closed on (#8943).
       ⛔ This is the CADENCE's guarantee, not the whole system's. The
       ``customer.subscription.updated`` webhook writes provider truth for the
       subscription its event NAMES — a new, cheaper one included, and the
-      stored pointer with it — before this comparison ever runs, so an already
-      delivered event can still revoke a paid-through period (#8942 tracks the
-      rank guard that path lacks).
+      stored pointer with it — at any time, before or after a pass; only the
+      next pass re-mirroring the still-in-force sub undoes it, and that path
+      does not carry this rank guard yet (#8942).
       ⛔ If the LIST itself FAILS, none of that applies: the org is returned as
       ``action: "noop"`` and left alone (a provider error is not a verdict —
       mirroring the stored one there would re-cap a paying org, which is the

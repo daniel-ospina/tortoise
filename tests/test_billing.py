@@ -671,11 +671,76 @@ class TestApplyLimitsAndReconcile:
         assert len(summary["failed"]) == 1, (
             "an unreadable ladder cannot be mirrored, so the org is a FAILED "
             f"row and the run reds — got {summary}")
+        assert summary["failed"][0]["org_id"] == team["id"], (
+            "the FAILED row must be THIS org's — ``len(failed) == 1`` is "
+            "fleet-wide and a sibling Team with an identity could own it — "
+            f"got {summary['failed']}")
+        assert "KeyError" in summary["failed"][0]["error"], (
+            "the row must carry the LADDER's own fault class (the raise comes "
+            "from ``apply_limits`` -> ``tier_limits``, after "
+            "``subscription_plan`` succeeded) — a price fault would read "
+            f"``BillingError`` instead — got {summary['failed']}")
         assert "unreadable" in summary["failed"][0]["error"], (
-            "the row must name the LADDER, not a price — got "
-            f"{summary['failed']}")
-        assert "unknown price" not in summary["failed"][0]["error"], (
-            f"the ladder leg must not be reported as a price fault — got {summary}")
+            f"the row must name the ladder — got {summary['failed']}")
+
+    def test_reconcile_an_unpriceable_ENDING_SIBLING_is_not_revoked_by_a_newer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """The guard is about the WHOLE ending set, not a set of one.
+
+        A customer can hold TWO ending subscriptions at once (a cancelled Team
+        plus a cancelled Solo from an earlier plan). ``_best_ranked`` skips the
+        one it cannot price, so before this pin the RANKABLE sibling won the
+        comparison and a newer Solo at that sibling's cap counted as "provably
+        at or above" — the pass mirrored Solo, rewrote ``subscription_id`` to
+        it, and recorded a clean ``repaired``/``direction: down``, which never
+        pages (only drift UP notifies). Team was paid through
+        ``current_period_end`` and nothing about it was ever read.
+
+        The unrankable sibling is kept instead and cannot be mirrored, so the
+        row is FAILED with the stored tier and pointer intact: loud and
+        fail-closed, never a silent downgrade.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-unpriceable-sibling")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team_rotated', "
+            "t.stripe_customer_id='cus_1', t.tier='team', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending_team = {"id": "sub_team_rotated", "status": "active",
+                       "cancel_at_period_end": True,
+                       "current_period_end": 19999,
+                       "items": {"data": [{"price": {"id": "price_rotatedOut"}}]}}
+        ending_solo = {"id": "sub_solo_old", "status": "active",
+                       "cancel_at_period_end": True,
+                       "current_period_end": 18999,
+                       "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        cheaper = {"id": "sub_solo_new", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending_team))
+        # The rankable sibling and the newer sub both sit at Solo's cap, so the
+        # pre-fix comparison was satisfied by the SIBLING — the newer Solo won.
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending_solo, ending_team])
+        summary = billing.reconcile_subscriptions(sdk, notifier=False)
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "team", (
+            "Team is paid through current_period_end and the ending set holds "
+            "a sub nobody can price, so a newer Solo must not revoke it "
+            f"— got {t['tier']!r} ({summary})")
+        assert t["subscription_id"] == "sub_team_rotated", (
+            f"the pointer must not be rewritten to the newer Solo — got {t}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            "no write is justified, so nothing may be reported as repaired "
+            f"— got {summary}")
+        assert len(summary["failed"]) == 1, (
+            "an unpriceable still-in-force sub cannot be mirrored, so the org "
+            f"is a FAILED row and the run reds — got {summary}")
+        assert summary["failed"][0]["org_id"] == team["id"], (
+            f"the FAILED row must be this org's — got {summary['failed']}")
 
     def test_reconcile_customer_only_keeps_a_paid_ending_sub_over_a_cheaper_newer(
             self, monkeypatch, stripe_env, billing_sdk):
@@ -3195,6 +3260,21 @@ class TestReconcileSweep:
             is ending_rotated
         assert bl._select_current_subscription([ending_rotated, newer_solo]) \
             is ending_rotated
+
+        # ⛔⛔⛔ And the rule is about the WHOLE ending set, not just a set of
+        # one: an unrankable ending SIBLING makes the comparison unprovable
+        # too. ``_best_ranked`` skips what it cannot price, so the rankable
+        # sibling would win the comparison and a newer sub AT THAT SIBLING'S
+        # CAP would be taken as "provably at or above" — revoking the higher
+        # period the unpriceable sibling is still paying for, and recording it
+        # as a clean repair.
+        ending_solo_old = _sub("sub_solo_old", "price_100soloM", True)
+        for order in ([newer_solo, ending_solo_old, ending_rotated],
+                      [ending_rotated, newer_solo, ending_solo_old],
+                      [ending_solo_old, ending_rotated, newer_solo]):
+            assert bl._select_current_subscription(order) is ending_rotated, (
+                "an unrankable ending sibling must not let a newer sub at its "
+                f"rankable sibling's cap win — got {order}")
 
     def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
         """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.
