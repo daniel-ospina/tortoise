@@ -1641,6 +1641,68 @@ class TestBillingReconcileDriverVerdicts:
             "correlate a row across runs"
         )
 
+    def test_a_body_cannot_forge_a_workflow_annotation(self):
+        """#8904 review P2: a PAYLOAD line must not become a workflow command.
+
+        ``show_body`` printed the response body line by line, so a body
+        containing a newline followed by ``::error::`` emitted a real GitHub
+        annotation from this arm — the payload writing the run's diagnostics.
+        The text must still be shown (it is the operator's only evidence on a
+        non-200), so the fix indents every line instead of stripping it; the
+        test asserts the forged line is inert rather than absent.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        forged = "::error::FORGED-BY-PAYLOAD billing is fine"
+        # A RAW newline, NOT json.dumps: the encoder escapes a newline to the two
+        # characters ``\n``, so an encoded payload cannot forge anything and this
+        # test passed with AND without the fix (measured). The body is what the
+        # driver prints, so it is passed through byte-faithfully here.
+        payload = b"reconcile_stuck\n" + forged.encode() + b"\n"
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "schedule",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        emitted = proc.stdout + proc.stderr
+        assert "FORGED-BY-PAYLOAD" in emitted, (
+            "the body text is the operator's evidence and must still be shown:\n"
+            f"{emitted}")
+        for line in emitted.splitlines():
+            assert not line.startswith("::error::FORGED-BY-PAYLOAD"), (
+                "a payload line was emitted as a workflow annotation:\n"
+                f"{emitted}")
+
     def test_a_wedged_reconcile_is_named_stuck_not_enumeration_incomplete(self):
         """#8904 round 4: the two named 503 statuses want OPPOSITE responses.
 

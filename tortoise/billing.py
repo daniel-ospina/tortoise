@@ -981,26 +981,35 @@ def _paid_tier_floor(tier: str | None) -> int | None:
 
 
 def _is_paid_tier(tier: str | None) -> bool:
-    """Whether a stored ``tier`` claims MORE entitlement than Free — from the
-    ladder, never from the presence of an identity.
+    """Whether a stored ``tier`` PROVABLY claims more entitlement than Free.
 
-    The distinction decides ``unverified`` vs ``skipped`` in
-    ``reconcile_subscriptions``: a Stripe customer binding with no active
-    subscription is a routine state (``hosted_api`` persists
-    ``stripe_customer_id`` BEFORE the checkout session, so every abandoned
-    checkout leaves one) and holds no entitlement to verify, while a PAID tier
-    in that state is the thing a person must look at.
+    ``False`` is NOT the same claim as "unpaid": it also covers "the ladder
+    could not be read". It must never decide a bucket on its own — use
+    ``_tier_claim`` wherever the difference between *unpaid* and *unknown*
+    matters. It does in ``reconcile_subscriptions``, where reading unknown as
+    unpaid files a possibly-paying org under "nothing to verify".
+    """
+    return _tier_claim(tier) == "paid"
 
-    Uses ``_paid_tier_floor``, so an unrecognised tier (which resolves to
-    Free's cap) is not paid, and an UNRANKABLE ladder (``None``) is not treated
-    as paid either — the same "never claim what cannot be proved" direction
-    ``_drift_direction`` takes.
+
+def _tier_claim(tier: str | None) -> str:
+    """What a stored ``tier`` CLAIMS — ``"paid"``, ``"unpaid"`` or ``"unknown"``.
+
+    The third answer is the point. ``_paid_tier_floor`` returns ``None`` when
+    the pricing ladder could not be READ (``tier_limits`` raised on a malformed
+    ``pricing.json`` — #750.8, a documented reachable config fault), and for
+    ``None`` no tier compares above Free's floor. Collapsing that into
+    ``"unpaid"`` takes an UNREADABLE ladder as evidence that a stored ``pro``
+    org pays nothing: it lands in ``skipped``, is logged as "stored at the
+    unpaid tier 'pro'", and passes a pass that exists to catch exactly that.
+    An unread signal is not a zero, so the answer is ``"unknown"`` and the
+    caller must treat it as something a person looks at.
     """
     floor = _paid_tier_floor(tier)
     free_floor = _paid_tier_floor("free")
     if floor is None or free_floor is None:
-        return False
-    return floor > free_floor
+        return "unknown"
+    return "paid" if floor > free_floor else "unpaid"
 
 
 def _drift_direction(from_tier: str | None, to_tier: str | None) -> str | None:
@@ -1260,7 +1269,8 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
             # Stripe NAMED no active subscription AND when the customer LIST
             # failed and the org was deliberately left alone, so neither the
             # counter nor its log line may assert that Stripe answered.
-            if not _is_paid_tier(before_tier):
+            claim = _tier_claim(before_tier)
+            if claim == "unpaid":
                 summary["skipped"] += 1
                 _logger.info(
                     "billing reconcile: %s has a Stripe binding but no active "
@@ -1270,6 +1280,19 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
                     org_id, before_tier)
                 continue
             summary["unverified"] += 1
+            if claim == "unknown":
+                # The ladder itself could not be read, so "does this org pay?" is
+                # UNKNOWN, never "no". Filing a stored `pro` org under
+                # nothing-to-verify on the strength of an unread config file (#750.8)
+                # is a paid org passing the pass that exists to catch one.
+                _logger.warning(
+                    "billing reconcile: %s is stored at tier %r but no active "
+                    "Stripe subscription could be established AND the pricing "
+                    "ladder could not be read, so whether it claims paid "
+                    "entitlement is UNKNOWN — not verified, not downgraded, "
+                    "not counted as nothing-to-verify",
+                    org_id, before_tier)
+                continue
             _logger.warning(
                 "billing reconcile: %s is stored as billed (tier=%r) but no "
                 "active Stripe subscription could be established — not "

@@ -177,7 +177,11 @@ jobs:
             # The REAL id shapes this fleet mints: hosted orgs are
             # ``uuid4().hex[:26]`` (26 hex, no dashes) and registry orgs are
             # ``ulid()`` = <hex-ts>-<12hex>. A bare UUID pattern matches NEITHER.
-            redact_stream < "$1" | head -c 2000 || true
+            # Indent every line: a body may contain a newline followed by a
+            # workflow command (`::error::`, `::warning::`), and printing it raw
+            # would let the PAYLOAD forge an annotation in this arm. Leading
+            # whitespace makes such a line inert without hiding the text.
+            redact_stream < "$1" | sed 's/^/    /' | head -c 2000 || true
           }
           # `-m 600` is required, not decoration. `/v1/internal/` is
           # PREFIX-EXEMPT from the 10 s transport wait bound and has no

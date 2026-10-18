@@ -593,9 +593,10 @@ class TestApplyLimitsAndReconcile:
         assert "could be established" in text, (
             "the line must report that no subscription could be ESTABLISHED "
             f"(true for both causes) — got {text!r}")
-        assert "Stripe named no active" not in text, (
-            "the line may not claim Stripe ANSWERED when the lookup itself "
-            f"failed — got {text!r}")
+        assert "usual cause is an abandoned checkout" in text, (
+            "the line must HEDGE the cause (the other state that reaches "
+            "'skipped' is a failed lookup, which proves nothing about why) — "
+            f"deleting the hedge must fail this test — got {text!r}")
 
     def test_failed_customer_list_at_paid_tier_is_unverified_not_downgraded(
             self, monkeypatch, stripe_env, billing_sdk, caplog):
@@ -630,6 +631,51 @@ class TestApplyLimitsAndReconcile:
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "could be established" in text, (
             f"the warning must not assert Stripe ANSWERED — got {text!r}")
+
+    def test_an_unreadable_ladder_is_unverified_never_nothing_to_verify(
+            self, monkeypatch, stripe_env, billing_sdk, caplog):
+        """#8904 review P2: "the ladder could not be read" is NOT "unpaid".
+
+        ``_paid_tier_floor`` returns ``None`` when ``pricing.json`` cannot be
+        read (#750.8 — a documented reachable config fault), and no tier
+        compares above Free's floor in that state. Reading that as "not paid"
+        files a stored ``pro`` org under ``skipped`` and logs it as "stored at
+        the unpaid tier 'pro'" — a paid org passing the pass that exists to
+        catch one, on the strength of an unread file. An unread signal is not a
+        zero, so the org must be counted as SOMETHING TO LOOK AT and the log may
+        not claim which side of the cap it sits on.
+        """
+        import logging  # noqa: I001
+        import tortoise.pricing as pr
+        from tortoise import billing as bl
+        sdk = billing_sdk
+        team = sdk.org_create("customer-list-failure-unreadable-ladder")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895unk', "
+            "t.tier='pro', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        # The REAL #750.8 fault: a loaded tier missing a required limit key
+        # raises KeyError at lookup, which `_paid_tier_floor` turns into None.
+        def _unreadable(tier):
+            raise KeyError(f"pricing.json tier {tier!r} missing limit keys")
+
+        monkeypatch.setattr(pr, "tier_limits", _unreadable)
+        with caplog.at_level(logging.INFO):
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["skipped"] == 0, (
+            "an unreadable ladder must never be evidence that a stored 'pro' "
+            f"org has nothing to verify — got {summary}")
+        assert summary["unverified"] == 1, summary
+        assert summary["failed"] == [] and summary["repaired"] == 0
+        assert sdk.org_get(team["id"])["tier"] == "pro", (
+            "an unread config file is not a licence to downgrade")
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "unpaid tier" not in text, (
+            "the log must not assert which side of the cap this org is on — "
+            f"got {text!r}")
+        assert "UNKNOWN" in text, (
+            f"the operator must be told the answer is unknown — got {text!r}")
 
     def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
             self, monkeypatch, stripe_env, billing_sdk):
