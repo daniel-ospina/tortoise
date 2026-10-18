@@ -1308,6 +1308,11 @@ def test_an_exhausted_swap_surfaces_the_legible_diagnosis_with_the_same_type(
         assert "retrying is safe" in text
         assert proxy.matching >= 3, (
             "the diagnosis belongs to the EXHAUSTED arm, after re-issues")
+        # The suffix must not move the error's CLASS: `_classify_db_failure`
+        # buckets by TYPE, and an exhausted write is still a db failure.
+        from tortoise.sdk import _classify_db_failure
+        assert _classify_db_failure(caught.value) == "db", (
+            "the appended diagnosis must not re-bucket an exhausted write")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -1332,6 +1337,110 @@ def test_a_deletion_abort_is_never_given_the_retry_safety_note(tmp_path):
         assert str(caught.value) == _DELETED_OR_REPLACED, (
             "a deletion must surface the engine sentence untouched")
         assert proxy.applied == 0, "a deleted graph must not be re-issued into"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_not_landed_sentinel_documents_the_message_may_change():
+    """The sentinel's OWN docstring must not promise an untouched message.
+
+    ``_WriteNotLanded``'s docstring is the first place a lane looks when
+    reasoning about what an exhausted re-raise carries, and it said the
+    ORIGINAL abort is "re-raised unchanged" — which the suffixed graph-swap
+    message above contradicts. A test written from that promise
+    (``assert str(exc) == _DELETED_OR_REPLACED``) is exactly what the SDK-path
+    test asserts against, so the two records must agree: TYPE is what
+    exhaustion preserves, the MESSAGE may gain the #7357 diagnosis.
+    """
+    from tortoise.sdk import _WriteNotLanded
+
+    doc = _WriteNotLanded.__doc__ or ""
+    assert "re-raised unchanged" not in doc, (
+        "the sentinel must not promise an unchanged message; the graph-swap "
+        "family's re-raise gains the #7357 suffix")
+    assert "TYPE unchanged" in doc, (
+        "the TYPE guarantee is the one exhaustion actually keeps — state it")
+    assert "MESSAGE is NOT guaranteed untouched" in doc
+    assert "explain_graph_abort" in doc, (
+        "name the builder that appends the suffix, so a reader can follow it")
+
+
+_WRITE_SLOT_ABORT = "another write is in progress, retry the query"
+
+
+class _SlotAbortGraph:
+    """Refuse every matching statement with the STATE-INDEPENDENT write-slot abort.
+
+    Ordinary multi-writer contention says nothing about whether the graph key
+    exists, so nothing on this path has a use for ``EXISTS``. ``exists_calls``
+    counts the probes the SDK actually pays, and the probe RAISES so a caller
+    that pays it anyway is caught twice: by the count, and by the
+    ``graph-existence probe failed`` warning it logs.
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+        self.exists_calls = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            raise redis_exc.ResponseError(_WRITE_SLOT_ABORT)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            self.exists_calls += 1
+            raise RuntimeError("EXISTS probe paid on a state-independent path")
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_write_slot_exhaustion_pays_no_graph_presence_probe(
+        tmp_path, monkeypatch, caplog):
+    """A state-independent exhaustion must not spend an ``EXISTS`` round trip.
+
+    The presence probe answers a question only the graph-swap family asks
+    ("deleted, or swapped?"). Evaluating it EAGERLY as an argument made every
+    exhausted write pay one round trip on the error path and discard the
+    answer — and if the instance happens to be unresponsive at that moment, it
+    logged a ``graph-existence probe failed`` warning for a datum nothing on
+    this path consumes. The probe is now gated on the family, so contention
+    exhaustion stays exactly as cheap as it was before #7357.
+    """
+    import logging
+    import types
+
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "slotexhaust")
+    try:
+        pid = sdk.create_point("evidence", "a claim to delete")["id"]
+        proj = sdk._get_proj()
+        proxy = _SlotAbortGraph(proj.g, _DELETE_POINT_NEEDLE)
+        proj.g = proxy
+        try:
+            with (caplog.at_level(logging.WARNING),
+                  pytest.raises(redis_exc.ResponseError) as caught):
+                sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+        assert proxy.matching >= 3, (
+            "the write-slot abort is state-independent and must still be "
+            "re-issued until the budget is spent")
+        assert str(caught.value) == _WRITE_SLOT_ABORT, (
+            "a state-independent exhaustion surfaces the bare engine refusal — "
+            "no diagnosis is written for an arm that has nothing to diagnose")
+        assert proxy.exists_calls == 0, (
+            "the presence probe must not be paid for by a write-slot "
+            "exhaustion: its answer is discarded")
+        assert "graph-existence probe failed" not in caplog.text, (
+            "a probe nothing consumes must not emit a failure warning")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

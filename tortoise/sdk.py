@@ -3184,8 +3184,14 @@ class _WriteNotLanded(Exception):
     an attempt that was only reached BECAUSE a previous one aborted raises
     this sentinel instead of returning. It is retryable (nothing applied, so
     re-issuing cannot duplicate), and on budget exhaustion the ORIGINAL abort
-    is re-raised unchanged, so the caller's error type is what it was before
-    the retry existed.
+    is re-raised with its TYPE unchanged, so the caller's ``except`` clause
+    still catches it and ``_classify_db_failure`` still buckets it as ``db``.
+    Its MESSAGE is NOT guaranteed untouched: the graph-swap family gains the
+    #7357 legibility suffix (``retry.explain_graph_abort``) when the probe
+    finds the graph key still present, so an assertion on ``str(exc)`` must
+    allow for that suffix. A test that pins the engine's BARE sentence belongs
+    to the deletion arm instead, which the predicate refuses before this arm is
+    reached.
 
     A zero-row FIRST attempt is untouched: it never reaches this class, so
     ``update_point``'s historical ``{}``-for-a-missing-id contract is safe.
@@ -6236,11 +6242,18 @@ class TortoiseSDK:
             # still present — so append a legible diagnosis of the same type,
             # never a wrapper (see the TYPE note above). Only this family is
             # rewritten, and only once.
-            legible = explain_graph_abort(
-                inner,
-                graph_present=self._graph_presence(self._proj),
-                attempts=attempts,
-            )
+            # Pay the presence probe ONLY for the family that reads it:
+            # write-slot and MISCONF exhaustion are state-INdependent, so
+            # ``explain_graph_abort`` returns None for them and an eager
+            # ``EXISTS`` round trip (plus the `_graph_presence` warning if it
+            # raises) would be spent on an answer nothing consumes (#8954).
+            legible = None
+            if graph_abort_family(inner):
+                legible = explain_graph_abort(
+                    inner,
+                    graph_present=self._graph_presence(self._proj),
+                    attempts=attempts,
+                )
             if legible is not None:
                 inner.args = (legible,)
             raise inner from None
