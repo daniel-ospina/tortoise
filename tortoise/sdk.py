@@ -15773,6 +15773,32 @@ class TortoiseSDK:
             if key not in holders:
                 holders[key] = self._entity_name_holders(elabel, name)
             return holders[key]
+        # ADOPTION / RENAME map (#7925 review round 5). Step 3 writes every
+        # entity item, and a bundle item naming a holder MERGEs onto it: when
+        # that holder's stored id is NOT the deterministic
+        # `entity_name_id(label, name)` (a legacy/foreign id — `create_event`'s
+        # `aboutSubject` mints `:Subject {id:'Gamma'}`, `_upsert_*`'s `ON MATCH
+        # id=coalesce($id, s.id)` rewrites it), the SAME write re-addresses the
+        # node to the canonical id. Every connection endpoint still naming the
+        # PRE-write id is then dead by step 4 — `create_operator`/
+        # `create_direct_edge` key on `id`, so the bundle aborts with the earlier
+        # items committed (measured: one connection whose endpoint is that id,
+        # any route, either side → `Phase2Error … does not exist`, point
+        # committed, carrier already renamed). Phase 1 refuses it here, which is
+        # this route's stated posture for a shape whose failure mode is a
+        # partial mutation.
+        _renamed: dict[tuple[str, str], str] = {}
+        for _item in bundle.get("entities") or []:
+            if not isinstance(_item, dict):
+                continue
+            _rl = _ENTITY_ITEM_LABELS.get(
+                str(_item.get("type") or "").strip().lower())
+            _rn = _item.get("name")
+            if _rl not in ("Subject", "Object") or not isinstance(_rn, str):
+                continue
+            _rh = _name_holders(_rl, _rn)
+            if _rh[5] and _rh[6] and _rh[6] != _entity_name_id(_rl, _rn):
+                _renamed[(_rl, _rh[6])] = _entity_name_id(_rl, _rn)
         # (#7925 review P2; scope corrected in review round 4) A status the
         # direct-edge terminal check cannot EVALUATE must be refused at the
         # ITEM, not only on the graph-read legs: the `:Object`/`:Event` writers
@@ -15949,7 +15975,21 @@ class TortoiseSDK:
                         and name_outcomes.get(
                             (info["label"], info["name"]),
                             (None, False, False, None))[1])
-                    if info is None:
+                    if info is not None and \
+                            (info["label"], v) in _renamed:
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] external "
+                                       f"endpoint {v!r} names a {info['label']} "
+                                       f"node this bundle re-addresses to "
+                                       f"{_renamed[(info['label'], v)]!r} (the "
+                                       f"entity item naming it adopts the "
+                                       f"holder and rewrites its id), so the "
+                                       f"endpoint would vanish mid-write — "
+                                       f"address that node through the bundle "
+                                       f"ref (#7925)",
+                        })
+                    elif info is None:
                         violations.append({
                             "section": "connections", "index": i,
                             "message": f"ingest: connections[{i}] external "
@@ -16050,7 +16090,7 @@ class TortoiseSDK:
             # by its id share it. Only the direct route is affected — a reified
             # pair goes through `create_operator`, which tolerates the shared
             # node (measured).
-            merged: dict[str, str] = {}
+            merged: dict[tuple[str, str], str] = {}
             for v in vals:
                 if not isinstance(v, str):
                     continue
@@ -16093,7 +16133,7 @@ class TortoiseSDK:
                     lid = (node_info.get(v) or {}).get("id")
                 if not isinstance(lid, str) or not lid:
                     continue
-                first_ref = merged.setdefault(lid, v)
+                first_ref = merged.setdefault((ep_label, lid), v)
                 if first_ref != v:
                     violations.append({
                         "section": "connections", "index": i,

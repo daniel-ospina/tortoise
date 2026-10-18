@@ -2308,3 +2308,53 @@ def test_bare_name_subject_stub_is_the_same_endpoint_as_the_bundle_ref(sdk):
         sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
+
+
+def test_endpoint_naming_a_renamed_carrier_is_refused(sdk):
+    """An endpoint that names the PRE-write id of an adopted carrier is dead by step 4.
+
+    The bundle item naming the holder merges onto it and the fold rewrites its id to
+    `entity_name_id(label, name)`, so a connection endpoint still carrying the old id
+    raises `Phase2Error … does not exist` after the earlier items committed. One
+    connection is enough — no self-edge pair is required.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (:Object {id:'legacy-ulid-1', name:'Acme', status:'live'})")
+    for route in ({"operator": "IMPL"}, {"operator": "IMPL", "reify": True}):
+        for frm, to in (("legacy-ulid-1", "p2"), ("p2", "legacy-ulid-1")):
+            bundle = {
+                "points": [{"ref": "p1", "kind": "statement",
+                            "content": "must-not-commit"},
+                           {"ref": "p2", "kind": "statement",
+                            "content": "anchor"}],
+                "entities": [{"ref": "a", "type": "object", "name": "Acme"}],
+                "connections": [{"from": frm, "to": to, **route}],
+            }
+            msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+            assert any("re-addresses to" in m for m in msgs), (route, frm, msgs)
+            with pytest.raises(BundleValidationError):
+                sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+    # the carrier was never renamed and no edge was written
+    assert _count(sdk, "MATCH (o:Object {id:'legacy-ulid-1'}) "
+                       "RETURN count(o)") == 1
+
+
+def test_same_id_string_on_two_labels_is_not_a_self_edge(sdk):
+    """A `:Subject` stub (`id=name`) and a legacy `:Object` can share an id STRING.
+
+    They are two nodes, so the edge between them is legal — the collision map has to
+    carry the label as well as the landing id.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (:Subject {id:'Gamma', name:'Gamma', status:'live'})")
+    sdk._get_proj().g.query(
+        "CREATE (:Object {id:'Gamma', name:'Gamma', status:'live'})")
+    bundle = {
+        "entities": [{"ref": "s", "type": "subject", "name": "Gamma"},
+                     {"ref": "o", "type": "object", "name": "Gamma"}],
+        "connections": [{"from": "s", "to": "o", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert not any("address the same endpoint" in m for m in msgs), msgs
