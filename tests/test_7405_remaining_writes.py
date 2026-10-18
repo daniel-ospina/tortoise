@@ -1207,15 +1207,13 @@ def test_a_delete_whose_record_cannot_be_committed_is_refused_before_the_detach_
 # that count.
 #
 # Each residual is pinned as a PAIR, the way 6b-bis pins the exemption: a plain
-# test that pins TODAY's observed behaviour, and a ``strict=True`` xfail test
-# that asserts only the DESIRED end state. (The journal-less pair's plain half
-# is inside its own test — it asserts the landed ``delete_point(...) is True``
-# before the replay — so only the probe residual needs a separate one.) The
-# plain half is what keeps the pin
-# honest — a strict xfail converts any exception in the body into ``xfailed``,
-# so a single test doing both jobs would silently absorb a NEW regression in this
-# path (a door that started refusing, a rebuild that started raising, a
-# `_assert_test_graph` rejection) as "the known #7405 residual".
+# test that pins TODAY's observed behaviour INCLUDING the replay (so a rebuild
+# that starts raising reds there), and a ``strict=True`` xfail test that asserts
+# only the DESIRED end state. An assertion inside the xfail body cannot be that
+# plain half — a ``strict`` xfail converts any exception in the body into
+# ``xfailed``, so a single test doing both jobs would silently absorb a NEW
+# regression in this path (a door that started refusing, a rebuild that started
+# raising, a `_assert_test_graph` rejection) as "the known #7405 residual".
 
 _EXISTENCE_PROBE_RESIDUAL = (
     "#7405 indicator (c) — a delete during a rebuild window is answered 'not "
@@ -1246,8 +1244,9 @@ def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
     began raising on this path, or the rebuild began refusing, or the graph name
     began failing ``_assert_test_graph``, that sibling alone would still report
     the residual as "open" and the new regression would be invisible. Pinning
-    today's answers HERE means a crash or a behaviour change reds loudly, and the
-    xfail below fails only for the residual it names.
+    today's answers HERE — including the replay that undoes the delete — means a
+    crash or a behaviour change reds loudly, and the xfail below fails only for
+    the residual it names.
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delprobetoday")
     try:
@@ -1274,6 +1273,16 @@ def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
             "the skipped delete must have recorded NOTHING — that absent "
             "carrier is the residual: the replay cannot know the destruction "
             "was asked for")
+
+        # The loss, end to end and OUTSIDE the xfail: the replay re-creates the
+        # Point the caller asked to destroy. It is asserted here so a
+        # ``rebuild_all`` that starts refusing or raising on this graph shape
+        # reds THIS test instead of being swallowed by the strict xfail below.
+        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+        assert sdk.get_point(pid) != {}, (
+            "today's loss, pinned plainly: the skipped delete leaves no carrier, "
+            "so the replay restores the Point — if this ever ends absent the "
+            "residual is closed and the issue's paragraph must be revisited")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -1315,44 +1324,112 @@ def test_a_rebuild_window_must_not_lose_a_delete_at_the_existence_probe(tmp_path
             sdk.close()
 
 
+def _journal_less_delete_scenario(tmp_path, tag: str):
+    """A journaled creator and a journal-less deleter, on ONE graph.
+
+    The two doors are opened in SEQUENCE — the creator is CLOSED before the
+    journal-less deleter opens — never concurrently. Two live SDKs on one
+    embedded path are not multi-connection-safe (``tests/conftest.py``, the #432
+    note: each opens its own server and last-close wins on the DB file), so a
+    concurrent shape would be measuring the harness on the embedded lane
+    instead of the residual. Sequencing costs nothing here: the residual is
+    about the DESTRUCTION RECORD, and a journal-less door writes none whether
+    the creator is live or not.
+
+    Returns ``(deleter, pid, log_dir)`` with the Point already DESTROYED by the
+    journal-less door: the graph holds nothing for it while the creator's
+    journal still holds its ``PointAdded``, so replaying that journal is what
+    can bring it back. Shared by the plain half and its strict-xfail sibling so
+    both run identical steps — a crash in here reds the plain half.
+    """
+    log_dir = tmp_path / f"{tag}_creator_journal"
+    log_dir.mkdir()
+    uri = os.environ.get("TORTOISE_DB_URI")
+    namespace = f"test_7405_{tag}_{uuid.uuid4().hex[:8]}"
+    db_path = None if uri else str(tmp_path / f"{tag}_creator.db")
+    creator = TortoiseSDK(
+        db_path, namespace=namespace,
+        event_log_path=str(log_dir / "events.jsonl"))
+    try:
+        pid = creator.create_point(
+            "statement", "a claim deleted mid-rebuild")["id"]
+    finally:
+        with contextlib.suppress(Exception):
+            creator.close()
+    return TortoiseSDK(db_path, namespace=namespace), pid, log_dir
+
+
+def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path):
+    """TODAY's observed behaviour, pinned WITHOUT xfail — the residual's floor.
+
+    The journal-less door DESTROYS the Point and answers ``True``; it appends no
+    destruction record (it has nowhere to put one), and replaying the creator's
+    journal puts the Point back LIVE. Asserted plainly, including the replay, so
+    a door that starts refusing, a ``delete_point`` that starts answering
+    ``False``, a divergence between the two doors' graphs, or a
+    ``rebuild_all`` that starts raising reds HERE rather than inside the strict
+    xfail below, which would report any of them as "the known #7405 residual".
+
+    The delete is genuinely LANDED — no abort, no retry, no witness — which is
+    what makes this a durability residual rather than a row-count one.
+    """
+    deleter, pid, log_dir = _journal_less_delete_scenario(tmp_path, "jltoday")
+    try:
+        assert deleter.get_point(pid) != {}, (
+            "fixture precondition: the journal-less door must be looking at the "
+            "graph the creator wrote to")
+        assert deleter.delete_point(pid) is True, (
+            "today the journal-less destruction LANDS and is reported as "
+            "landed — if this ever answers False the residual has changed "
+            "shape and both pins must be revisited")
+        assert deleter.get_point(pid) == {}, (
+            "the landed delete must remove the Point from the live graph")
+
+        assert not any(r.get("type") == "EntityMutated"
+                       and r.get("op") == "delete" and r.get("id") == pid
+                       for r in _journal_records(log_dir)), (
+            "the journal-less door recorded NOTHING — that absent carrier is "
+            "the residual, and it is why the replay below can undo the delete")
+
+        # The loss, end to end and OUTSIDE the xfail.
+        deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
+        assert deleter.get_point(pid) != {}, (
+            "today's loss, pinned plainly: replaying the creator's journal "
+            "restores a Point the journal-less door genuinely destroyed — if "
+            "this ever ends absent the residual is closed and the issue's "
+            "paragraph must be revisited")
+    finally:
+        with contextlib.suppress(Exception):
+            deleter.close()
+
+
 @pytest.mark.xfail(strict=True, reason=_JOURNALLESS_RESIDUAL)
 def test_a_journal_less_delete_must_survive_a_replay_of_the_creators_journal(tmp_path):
     """RESIDUAL: a journal-less destruction is undone even when it LANDS.
 
-    Two writers on ONE graph, which is the fleet's normal shape: a journaled
-    creator (so the Point's `PointAdded` is in the journal a rebuild replays) and
-    a journal-less deleter. The deleter's `DETACH DELETE` LANDS normally — no
-    abort, no retry, no witness involved — and the verb answers ``True``.
+    A journaled creator and a journal-less deleter on ONE graph, which is the
+    fleet's normal shape: the creator's journal holds the Point's ``PointAdded``
+    (so a rebuild replays it), and the deleter writes no destruction record at
+    all. The deleter's `DETACH DELETE` LANDS normally — no abort, no retry, no
+    witness involved — and the verb answers ``True``; the plain twin above pins
+    that, the absent carrier and the replay that undoes it.
 
     Measured today: replaying the creator's journal brings the Point back LIVE,
     because the deleter had no journal to record the destruction in. So the
     missing piece is the CARRIER, not the statement's row count: a witness would
-    leave this exactly as it is. The assertion below is the DESIRED end state.
+    leave this exactly as it is. THIS test asserts only the DESIRED end state —
+    keep it assertion-only, because anything that can raise is swallowed by the
+    strict xfail (the plain twin is what keeps a regression visible).
     """
-    log_dir = tmp_path / "creator_journal"
-    log_dir.mkdir()
-    uri = os.environ.get("TORTOISE_DB_URI")
-    namespace = f"test_7405_jl_{uuid.uuid4().hex[:8]}"
-    creator = TortoiseSDK(
-        None if uri else str(tmp_path / "creator.db"), namespace=namespace,
-        event_log_path=str(log_dir / "events.jsonl"))
-    deleter = TortoiseSDK(
-        None if uri else str(tmp_path / "creator.db"), namespace=namespace)
+    deleter, pid, log_dir = _journal_less_delete_scenario(tmp_path, "jl")
     try:
-        pid = creator.create_point("statement", "a claim deleted mid-rebuild")["id"]
-        proj = deleter._get_proj()
-        assert proj.graph_name == creator._get_proj().graph_name
-
-        assert deleter.delete_point(pid) is True
-
-        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+        deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
         assert deleter.get_point(pid) == {}, (
             "a destruction the door cannot record must not be reported as "
             "durable: replaying the creator's journal resurrects the Point")
     finally:
-        for s in (creator, deleter):
-            with contextlib.suppress(Exception):
-                s.close()
+        with contextlib.suppress(Exception):
+            deleter.close()
 
 
 # ── 6c. promote_point — the CAS promotion SET ────────────────────────────────
