@@ -1689,7 +1689,7 @@ def test_approved_menu_guards_fail_closed_on_a_parse_break(tmp_path, monkeypatch
 def test_approved_menu_guard_fails_closed_when_a_closure_is_dropped(tmp_path, monkeypatch):
     """A closure the doc DROPS must fail the build — the row bound cannot see it.
 
-    Deleting one of the doc's four `sit inside` statements leaves all 24 rows intact, so
+    Deleting one of the doc's four `sit inside` statements leaves all 23 rows intact, so
     `APPROVED_MIN_ROWS` stays green while every member that statement carried silently
     disappears. The count is a separate guard for exactly that blind spot (#8930, P2):
     a reflow the parse cannot read must fail, not narrow `members`.
@@ -1800,8 +1800,28 @@ def test_approved_menu_guards_fail_closed_when_a_closure_does_not_RESOLVE(
         "the statement still PARSES here — that is the point of this test"
     )
     errs = bt._approved_errors(menu, closures)
-    assert errs and "NO name the doc otherwise uses" in errs[0], (
+    assert errs and "member(s) the doc never uses" in errs[0], (
         f"a closure that parses to no known member did not fail the build: {errs}"
+    )
+
+    # ...and a PARTIAL loss is the same failure one name at a time: `zzz` beside a real
+    # member would otherwise narrow the row silently (resolution is all-or-nothing).
+    partial = re.sub(
+        r"`query_points_by_tag` sit\s+inside `query`",
+        "`zzz` sit inside `query`",
+        real,
+    )
+    assert partial != real, "the `query` closure sentence is not in the doc — test is stale"
+    path3 = tmp_path / "member-unresolved.md"
+    path3.write_text(partial, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path3)
+    menu3, closures3 = bt._approved_state()
+    assert "paginated_query" in menu3["list_knowledge"]["members"], (
+        "the real member resolved — so the failure below is about `zzz` alone"
+    )
+    errs = bt._approved_errors(menu3, closures3)
+    assert errs and "zzz" in errs[0], (
+        f"a PARTIALLY unresolved closure statement did not fail the build: {errs}"
     )
 
     renamed = real.replace(
@@ -1866,6 +1886,83 @@ def test_approved_menu_guard_fails_closed_when_the_split_clause_is_reworded(
     errs = bt._approved_errors(menu2, closures2)
     assert errs and "NO target name" in errs[0], (
         f"a split clause naming no target did not fail the build: {errs}"
+    )
+
+    # A PARTIAL loss is the same failure one name at a time: a successor renamed to a
+    # name the target surface does not have used to be DISCARDED silently — narrowing the
+    # row, flipping `tortoise_invalidate` from `successor` (support) to `rehomed` (a
+    # disagreement) and moving an owner-facing count, with a green build.
+    partial = real.replace(
+        "`update_knowledge` + `supersede_knowledge`",
+        "`update_knowledge` + `supersede_beliefs`",
+    )
+    assert partial != real, "the split clause is not in the doc — test is stale"
+    path3 = tmp_path / "split-partial.md"
+    path3.write_text(partial, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path3)
+    menu3, closures3 = bt._approved_state()
+    assert menu3["revise_knowledge"]["successors"] == ["update_knowledge"], (
+        "the surviving successor must still resolve — only the renamed one is lost"
+    )
+    assert menu3["revise_knowledge"]["split_unresolved"] == ["supersede_beliefs"], (
+        f"the clause's unresolved name was discarded, not recorded: "
+        f"{menu3['revise_knowledge']['split_unresolved']!r}"
+    )
+    errs = bt._approved_errors(menu3, closures3)
+    assert errs and "supersede_beliefs" in errs[0], (
+        f"a PARTIALLY unresolved split clause did not fail the build: {errs}"
+    )
+
+
+def test_approved_menu_expands_the_docs_wildcard_member_family() -> None:
+    """Row 23 states its members as a FAMILY (`onboarding_*`), and the parse must honour it.
+
+    The em-dash fix removed prose-minted members, and row 23's only member statement is
+    "the seven `onboarding_*`" — which parses to no identifier. Without expanding it, any of
+    the seven real tools read `refuted` and the artifact prints "no approved row absorbs
+    `onboarding_state`": the exact opposite of the row, which absorbs all seven (#8930
+    review). Latent (§D4 renders none of them today); the family is the doc's own words.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    menu = bt._approved_menu()
+    seven = {
+        "onboarding_state",
+        "onboarding_seed",
+        "onboarding_demo_create",
+        "onboarding_github_connect",
+        "onboarding_github_index",
+        "onboarding_github_status",
+        "onboarding_session_recording",
+    }
+    missing = seven - menu["run_onboarding"]["members"]
+    assert not missing, f"the `onboarding_*` family was not expanded: missing {sorted(missing)}"
+    assert bt._approved_verdict(menu, {"onboarding_state"}, "run_onboarding") == "row", (
+        "row 23 absorbs `onboarding_state`; a false `refuted` here would publish a "
+        "contradiction the approved doc does not contain"
+    )
+    # The replacement prose is still NOT membership: `check_connection` replaced the
+    # container, so it is not one of its members.
+    assert "check_connection" not in menu["run_onboarding"]["members"]
+
+
+def test_approved_evidence_line_never_renders_an_empty_method() -> None:
+    """A retired registry entry has no `sdk_method`; the evidence line must still read.
+
+    Seven retired onboarding entries carry `sdk_method == ""`, so the no-home branch
+    rendered "no approved row absorbs ``" — malformed markdown with the name missing
+    exactly where the reader is told no row absorbs it (#8930 review).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    lines = bt._approved_evidence_lines(
+        [{"tool": "tortoise_onboarding_state", "method": "", "homes": [], "homes_detail": []}]
+    )
+    assert "``" not in "\n".join(lines), f"an empty method rendered an empty code span: {lines!r}"
+    assert "tortoise_onboarding_state" in lines[0], (
+        f"the line names neither the method nor the tool: {lines!r}"
     )
 
 

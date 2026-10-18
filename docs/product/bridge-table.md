@@ -399,7 +399,9 @@ same rows, not a correction of it.
 - **`successor`** — the target is one the absorbing row's cell names as beta's own split
   of that row, so the row supports it (one of several successors).
 - **`refuted`** — an approved row (or a successor of one) covers this target and does
-  **not** absorb this method: the approved doc places the method elsewhere.
+  **not** absorb this method: the approved doc does not place the method there. (It
+  does not claim the doc places it SOMEWHERE ELSE — a method the doc never absorbs at
+  all reads `refuted` too, and its evidence line below says so.)
 - **`rehomed`** — the approved doc **does** absorb this method, but into a different row
   than this map's destination, and it never names the destination at all. Read with
   `refuted`: the two approved docs disagree. It is NOT `unstated` — the `Approved home`

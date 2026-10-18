@@ -405,6 +405,8 @@ _SPLIT_INTO = re.compile(r"splits this into([^;]*)")
 # An `Absorbs` cell is a member LIST, then an em dash, then prose (row 17's fields, row
 # 22's "OFF the MCP", row 23's replacement). Only the list is membership.
 _CELL_PROSE = "—"
+# `onboarding_*` — the doc's shorthand for a family of names (row 23).
+_WILDCARD = re.compile(r"`([a-z_][a-z0-9_]*)\*`")
 _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|")
 _IDENT = re.compile(r"[a-z_][a-z0-9_]*")
 
@@ -445,20 +447,29 @@ def _known_names() -> set[str]:
     return names
 
 
-def _split_successors(cell: str) -> list[str]:
-    """The TARGET names the cell names as beta's own split of the row.
+def _split_clauses(cell: str) -> list[dict]:
+    """Each `splits this into ...` clause: the targets it states, and any it cannot resolve.
 
-    Only the `splits this into ...` clause counts, and only the BACKTICKED names inside
-    it. The rest of the cell states OTHER relations — row 22 is "OFF the MCP", row 23 was
-    "dropped for `check_connection`" — so a scan of every TARGET name in the cell read that
-    REPLACEMENT as a beta successor of the very row it replaced.
+    Only a `splits this into` clause counts, and only its BACKTICKED names. The rest of the
+    cell states OTHER relations — row 22 is "OFF the MCP", row 23 was "dropped for
+    `check_connection`" — so a scan of every TARGET name in the cell read that REPLACEMENT
+    as a beta successor of the very row it replaced.
+
+    A name the clause states that the target surface does not have is kept as
+    `unresolved` rather than DISCARDED: dropping it narrows the row's successors with no
+    error, which flips a `successor` reading (support) to `rehomed` (a disagreement) and
+    moves a count in the owner-facing table. Resolution is the caller's fail-closed check.
     """
-    out: set[str] = set()
+    out: list[dict] = []
     for m in _SPLIT_INTO.finditer(cell):
-        out |= {
-            t for t in re.findall(r"`([a-z_][a-z0-9_]*)`", m.group(1)) if t in TARGET_MCP
-        }
-    return sorted(out)
+        named = re.findall(r"`([a-z_][a-z0-9_]*)`", m.group(1))
+        out.append(
+            {
+                "targets": sorted(t for t in named if t in TARGET_MCP),
+                "unresolved": sorted(t for t in named if t not in TARGET_MCP),
+            }
+        )
+    return out
 
 
 def _cell_members(cell: str, name: str, known: set[str]) -> set[str]:
@@ -470,14 +481,28 @@ def _cell_members(cell: str, name: str, known: set[str]) -> set[str]:
     known names minted all three as MEMBERSHIP, which made `check_connection` a member of
     `run_onboarding` — a row the doc says was dropped FOR it. `members` is what the
     verdicts call a row's approved HOME, so a prose-minted member is a false home.
+
+    A `prefix_*` token is a FAMILY, and row 23 states its members that way ("the seven
+    `onboarding_*`"). Expanding it is reading the doc, not inferring: without it the seven
+    real tools read as "no approved row absorbs" — the opposite of the row.
     """
     head = cell.split(_CELL_PROSE, 1)[0]
-    return {t for t in _IDENT.findall(head) if t in known and t != name}
+    members = {t for t in _IDENT.findall(head) if t in known and t != name}
+    for prefix in _WILDCARD.findall(head):
+        members |= {k for k in known if k.startswith(prefix) and k != name}
+    return members
 
 
 def _approved_closures(text: str) -> list[tuple[str, set[str]]]:
-    """`X, Y sit inside Z` — Z absorbs X and Y transitively, per the doc's own prose."""
-    return [(m.group(2), set(_IDENT.findall(m.group(1)))) for m in _SIT_INSIDE.finditer(text)]
+    """`X, Y sit inside Z` — Z absorbs X and Y transitively, per the doc's own prose.
+
+    Only the BACKTICKED names are members: the span also reads "and" in "X and Y sit
+    inside Z", and a member span that is not a name cannot be checked for resolution.
+    """
+    return [
+        (m.group(2), set(re.findall(r"`([a-z_][a-z0-9_]*)`", m.group(1))))
+        for m in _SIT_INSIDE.finditer(text)
+    ]
 
 
 def _parse_approved(text: str) -> tuple[dict[str, dict], list[tuple[str, set[str]]]]:
@@ -492,14 +517,17 @@ def _parse_approved(text: str) -> tuple[dict[str, dict], list[tuple[str, set[str
             continue
         name = row.group(2)
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        clauses = _split_clauses(cells[2])
         menu[name] = {
             "lineno": int(row.group(1)),
             "members": _cell_members(cells[2], name, known) | {name},
-            "successors": _split_successors(cells[2]),
-            # How many `splits this into` clauses the cell states, so a clause that parses
-            # to NO target name fails the build instead of reading as "this row has no
+            "successors": sorted({t for c in clauses for t in c["targets"]}),
+            # How many `splits this into` clauses the cell states, and any name they state
+            # that did not resolve — so a clause that parses to NO target, or to a
+            # PARTIAL one, fails the build instead of reading as "this row has fewer
             # successors" (the same fail-open direction as a dropped closure).
-            "split_clauses": len(_SPLIT_INTO.findall(cells[2])),
+            "split_clauses": len(clauses),
+            "split_unresolved": sorted({t for c in clauses for t in c["unresolved"]}),
             "quote": line.rstrip(),
             "closes": set(),
         }
@@ -527,8 +555,9 @@ def _parse_approved(text: str) -> tuple[dict[str, dict], list[tuple[str, set[str
 def _approved_menu() -> dict[str, dict]:
     """approved row name -> {members, successors, quote, closes, lineno}.
 
-    `members` is the closure of the row's `Absorbs` cell (its own name included, as the
-    cell states it) plus every name the doc's own `sit inside` sentence puts inside one of
+    `members` is the row's member LIST (the cell's comma list, expanded for a `prefix_*`
+    family) with the row's OWN name added unconditionally — the cell may or may not list it,
+    most do not — plus every name the doc's own `sit inside` sentence puts inside one of
     those members; `successors` are the TARGET names the cell names as beta's successors of
     the row, parsed from its `splits this into` clause ONLY (`revise_knowledge`'s cell
     states its own split into `update_knowledge` + `supersede_knowledge`) — not from any
@@ -559,21 +588,29 @@ def _approved_errors(
             f"least {APPROVED_MIN_ROWS} — the doc's own title claims 23); the table shape has "
             "changed and the parse is now silently dropping rows"
         ]
-    # A closure statement that RESOLVES nothing is a parse break, not a doc that states an
-    # empty closure. Resolution — not presence — is the test: the captured member span is
-    # raw identifiers (prose words included), and members are applied through a `known`
-    # filter, so `these sit inside `index_files`` would otherwise pass this guard while
-    # contributing no member at all.
+    # A closure statement that does not RESOLVE is a parse break, not a doc that states an
+    # empty closure. Resolution — not presence — is the test, and it is ALL-or-nothing:
+    # the applied membership is a `known` filter, so one unresolved name narrows the row
+    # silently, and a statement whose members are all unresolved narrows it to nothing.
+    # (`these sit inside `index_files`` is the second case; `zzz` beside a real name the
+    # first.)
     known = _known_names()
-    unresolved = sorted(
-        outer for outer, inners in closures if not {i for i in inners if i in known}
-    )
+    unresolved: dict[str, list[str]] = {}
+    for outer, inners in closures:
+        lost = sorted(i for i in inners if i not in known)
+        if not inners:
+            lost = ["(no backticked member name)"]
+        if lost:
+            unresolved[outer] = lost
     if unresolved:
+        detail = "; ".join(
+            f"`{o}` ← {', '.join(f'`{i}`' for i in lost)}"
+            for o, lost in sorted(unresolved.items())
+        )
         return [
-            f"transitive-closure statement(s) for {', '.join(f'`{o}`' for o in unresolved)} "
-            f"parsed out of {APPROVED_DOC.name} to NO name the doc otherwise uses; the "
-            "sentence shape has changed and those members are now silently missing from "
-            "every row that absorbs it"
+            f"transitive-closure statement(s) in {APPROVED_DOC.name} name member(s) the doc "
+            f"never uses: {detail}; those members are silently missing from every row that "
+            "absorbs the container"
         ]
     if len(closures) < APPROVED_MIN_CLOSURES:
         return [
@@ -585,8 +622,11 @@ def _approved_errors(
             "`refuted` — a false claim that the approved menu places it elsewhere"
         ]
     # The CONTAINER must be a name the doc actually uses (a row, or a member of one):
-    # renaming only the closure sentence's container otherwise parses cleanly and drops the
-    # closure, because the membership lookup then misses on every row.
+    # renaming only the closure sentence's container to a name the doc never mentions
+    # otherwise parses cleanly and drops the closure. This is a known-ness check, not a
+    # correctness one — a container renamed to ANOTHER name the doc uses relocates the
+    # closure silently, and nothing in the doc's shape can tell that from a legitimate
+    # re-statement.
     named = set(menu) | {m for r in menu.values() for m in r["members"]}
     stray = sorted(outer for outer, _ in closures if outer not in named)
     if stray:
@@ -596,7 +636,22 @@ def _approved_errors(
             "renaming the container in the sentence alone silently drops the whole closure"
         ]
     # ...and the same for the beta-split clause: a clause that parses to no TARGET name is
-    # a parse break, and a doc that states no split at all means the clause was reworded.
+    # a parse break, and a PARTIAL loss is the same failure one name at a time — the row's
+    # successors narrow with no error, which flips `successor` (support) to `rehomed` (a
+    # disagreement) in the owner-facing table. A doc that states no split at all means the
+    # clause was reworded, which is why the count is bounded too.
+    unresolved_split = sorted(
+        (n, names) for n, r in menu.items() if (names := r["split_unresolved"])
+    )
+    if unresolved_split:
+        detail = "; ".join(
+            f"`{n}` ← {', '.join(f'`{t}`' for t in names)}" for n, names in unresolved_split
+        )
+        return [
+            f"approved row(s) in {APPROVED_DOC.name} state a beta split naming something the "
+            f"target surface does not have: {detail}; a dropped successor reads as a "
+            "DISAGREEMENT (`rehomed`) in the rendered table"
+        ]
     empty_split = sorted(
         n for n, r in menu.items() if r["split_clauses"] and not r["successors"]
     )
@@ -625,7 +680,10 @@ def _approved_verdict(menu: dict[str, dict], aliases: set[str], target: str) -> 
     `successor` the target is a TARGET the absorbing row's cell names as beta's split
                 of that row, so the row does support it (one of several successors).
     `refuted`   an approved row (or a successor of one) covers this target and does NOT
-                absorb the method — the approved doc places the method elsewhere.
+                absorb the method: the approved doc does not place the method there. It
+                does NOT claim the doc places it SOMEWHERE ELSE — a method the doc never
+                absorbs at all reads `refuted` too, and the evidence line beside it says
+                so ("no approved row absorbs …").
     `rehomed`   the approved doc does absorb this method, but into a DIFFERENT row than
                 the map's destination (which the doc never names) — so the destination is
                 not the approved answer even though the method has one. Reached through a
@@ -636,6 +694,8 @@ def _approved_verdict(menu: dict[str, dict], aliases: set[str], target: str) -> 
     `rehomed` is not folded into `unstated`: `unstated` is silence, and a row whose
     Approved-home cell names the method is not silent — reporting it as "not named by the
     approved doc" told the owner the opposite of what the quoted row below it said.
+    `refuted` is not folded into `rehomed` for the mirror reason: `rehomed` asserts the
+    method HAS an approved home, which is false when no row absorbs it.
     """
     row = menu.get(target)
     if row is not None:
@@ -722,7 +782,10 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
             out += [f"  > {h['quote']}" for h in a["homes_detail"]]
             continue
         if not a["homes"]:
-            out.append(f"- **`{a['tool']}`** — no approved row absorbs `{a['method']}`.")
+            out.append(
+                f"- **`{a['tool']}`** — no approved row absorbs "
+                f"`{a['method'] or a['tool']}`."
+            )
             continue
         out.append(f"- **`{a['tool']}`** — `{a['method']}` is absorbed by `{a['home']}`:")
         out.append(f"  > {a['quote']}")
@@ -1447,7 +1510,9 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "- **`successor`** — the target is one the absorbing row's cell names as beta's own split",
         "  of that row, so the row supports it (one of several successors).",
         "- **`refuted`** — an approved row (or a successor of one) covers this target and does",
-        "  **not** absorb this method: the approved doc places the method elsewhere.",
+        "  **not** absorb this method: the approved doc does not place the method there. (It",
+        "  does not claim the doc places it SOMEWHERE ELSE — a method the doc never absorbs at",
+        "  all reads `refuted` too, and its evidence line below says so.)",
         "- **`rehomed`** — the approved doc **does** absorb this method, but into a different row",
         "  than this map's destination, and it never names the destination at all. Read with",
         "  `refuted`: the two approved docs disagree. It is NOT `unstated` — the `Approved home`",
