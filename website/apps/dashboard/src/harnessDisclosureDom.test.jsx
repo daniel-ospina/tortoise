@@ -87,12 +87,16 @@ const norm = (s) => s.replace(/\s+/g, ' ').trim()
 // `aria-labelledby` targets when present (HTML-AAM's first rule for name
 // computation), otherwise its own text content. Read here rather than asserted
 // against the DOM shape so the test states the USER-visible outcome.
-const accessibleName = (el) => {
+// The lookup is SCOPED to the caller's container: `vite.config.js` sets no
+// `test.globals`, so RTL's auto-`cleanup()` never registers and earlier renders
+// stay in `document.body` — a document-wide `getElementById` can resolve a
+// stale node from a previous test rather than this render's.
+const accessibleName = (el, container) => {
   const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
   if (!ids.length) return norm(el.textContent)
   return norm(ids.map((id) => {
-    const target = el.ownerDocument.getElementById(id)
-    assert.ok(target, `aria-labelledby="${id}" must resolve to a rendered element`)
+    const target = container.querySelector(`#${id}`)
+    assert.ok(target, `aria-labelledby="${id}" must resolve to an element rendered in THIS container`)
     return target.textContent
   }).join(' '))
 }
@@ -275,6 +279,15 @@ test('#3513 §2: each Settings summary NAMES its harness — four rows must not 
   // (HARNESS_CAPTURE_INSTALL[h]). #3700's whole point is that a row says WHICH
   // harness a claim belongs to. The summary therefore borrows the row's own name
   // group, and this asserts the USER-visible outcome, not the attribute.
+  //
+  // The ambiguity and the label are TWO claims, and only the join satisfies
+  // both: naming from author REPLACES name-from-content (HTML-AAM), so a
+  // `aria-labelledby` that references the row group ALONE makes the four
+  // controls distinct by silently dropping what they DO — the visible label is
+  // no longer in the name, which fails WCAG 2.5.3 (Label in Name) and leaves a
+  // speech-input user unable to activate the control by what they see. So the
+  // loop asserts BOTH halves per row; either fix-by-discarding the label or
+  // fix-by-dropping the identity fails here.
   const state = { session_recording: true }
   const { container } = render(
     <HarnessStatusCard state={state} sessionsOn={true} wizardHarness={null} surface="settings" />)
@@ -285,12 +298,18 @@ test('#3513 §2: each Settings summary NAMES its harness — four rows must not 
   const names = supported.map((h) => {
     const summary = rowOf(container, h).querySelector('details.manual-install summary')
     assert.ok(summary, `${h}: the Settings row renders its disclosure summary`)
-    return accessibleName(summary)
+    return accessibleName(summary, container)
   })
   supported.forEach((h, i) => {
     assert.equal(names[i].includes(HARNESS_NAMES[h]), true,
       `the ${h} summary must name ITS harness — announced "${names[i]}", which does not identify which ` +
       'row the disclosure installs')
+    // WCAG 2.5.3 (Label in Name): the name must CONTAIN the visible label, so a
+    // speech-input user can activate the control by what they see. Fails on an
+    // `aria-labelledby` that references the row's name group alone.
+    assert.equal(names[i].includes(CAPTURE_MANUAL_INSTALL_LABEL), true,
+      `the ${h} summary must announce its VISIBLE label too — announced "${names[i]}", which drops ` +
+      `"${CAPTURE_MANUAL_INSTALL_LABEL}": the control no longer says what it does`)
   })
   assert.equal(new Set(names).size, names.length,
     `the supported rows must have DISTINCT accessible names — got ${JSON.stringify(names)}`)

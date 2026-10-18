@@ -142,11 +142,20 @@ export function HarnessStatusCard({ state, sessionsOn, wizardHarness, surface = 
                     "Install manually" unless it names its OWN row. The label
                     is copy (captureStatus.js), not a literal, so the rendered
                     value keeps one home and the DOM lane asserts the constant.
-                    `aria-labelledby` reuses the name-group id the row already
-                    mints for the alert's `aria-describedby`, so the announced
-                    name carries the harness the disclosure installs. */}
-                <summary className="dim small" aria-labelledby={`harness-note-${h}`}>
-                  {CAPTURE_MANUAL_INSTALL_LABEL}
+                    `aria-labelledby` therefore lists BOTH ids: the LABEL
+                    first, then the name group the row already mints for the
+                    alert's `aria-describedby`. Name-from-author REPLACES
+                    name-from-content (HTML-AAM), so referencing the row group
+                    ALONE silently discards the visible text: the control stops
+                    saying what it does, and WCAG 2.5.3 (Label in Name) fails
+                    because the name no longer CONTAINS the label a speech-input
+                    user has to say. Joining them keeps the action ("Install
+                    manually") AND the identity (which harness it installs) —
+                    the shape the trash rows already use (`main.jsx`:
+                    `aria-label={`Trash, ${n} items`}`). */}
+                <summary className="dim small"
+                         aria-labelledby={`manual-install-label-${h} harness-note-${h}`}>
+                  <span id={`manual-install-label-${h}`}>{CAPTURE_MANUAL_INSTALL_LABEL}</span>
                 </summary>
                 <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
               </details>

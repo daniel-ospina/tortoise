@@ -127,10 +127,16 @@ test('#3513 §2: the Settings summary is named per row and its label comes from 
   // exists to remove), and an inline literal is a second copy home. The DOM lane
   // asserts the USER-visible name; this pins the SHAPE cheaply, so a later edit
   // that drops either cannot land without a source change here.
-  assert.match(cardCode, /<summary[^>]*\baria-labelledby=\{\s*`harness-note-\$\{h\}`\s*\}/,
-    'the Settings disclosure summary must borrow its ROW\'s name group, or all supported rows announce the same name')
-  assert.match(cardCode, /\{\s*CAPTURE_MANUAL_INSTALL_LABEL\s*\}/,
-    'the summary label must be rendered from the copy module constant — not a literal re-typed in the card')
+  //
+  // BOTH ids are pinned, in LABEL-FIRST order: name-from-author REPLACES
+  // name-from-content (HTML-AAM), so the row group ALONE would make the four
+  // controls distinct by discarding the visible label (WCAG 2.5.3 Label in
+  // Name). Dropping either id must fail HERE as well as in the DOM lane.
+  assert.match(cardCode, /<summary[^>]*\baria-labelledby=\{\s*`manual-install-label-\$\{h\} harness-note-\$\{h\}`\s*\}/,
+    'the Settings summary must announce its VISIBLE label AND its own row\'s name group — ' +
+    'the label group alone is four identical controls, the row group alone drops what the control does')
+  assert.match(cardCode, /<span id=\{\s*`manual-install-label-\$\{h\}`\s*\}>\s*\{\s*CAPTURE_MANUAL_INSTALL_LABEL\s*\}\s*<\/span>/,
+    'the summary label must be rendered from the copy module constant inside the id the name references — not a literal re-typed in the card')
   assert.doesNotMatch(cardCode, /Install manually/,
     'harnessStatusCard.jsx authors no copy: the label lives in captureStatus.js')
 })
