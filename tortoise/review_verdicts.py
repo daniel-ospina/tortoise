@@ -381,21 +381,31 @@ class VerdictLayer:
             review_key = "temporal_reviewed" if is_temporal else "dedup_reviewed"
             prior_review = props.get(review_key)
             prior_reviewed = props.get("reviewed")
-            self.sdk.approve_merge(candidate_id, action="merge")
-            applied = self.sdk.promote_point(candidate_id)
-            if applied.get("blocked"):
-                # Lost the read-then-CAS race (a quarantine landed between the
-                # check above and promote_point's own). Roll the review write
-                # back so the candidate is NOT left reviewed-but-unpromoted,
-                # then surface the refusal. The ``DedupeRecorded`` emit inside
-                # approve_merge cannot be unjournaled — it remains an audit
-                # record of an attempted merge.
+
+            def _roll_back_review_write() -> None:
+                # Roll the review write back so the candidate is NOT left
+                # reviewed-but-unpromoted (#2354), then surface the failure.
+                # The ``DedupeRecorded`` emit inside approve_merge cannot be
+                # unjournaled — it remains an audit record of an attempt.
+                # This must cover a RAISE as well as a ``blocked`` answer: an
+                # absent node (promote_point raises ``ValueError``) and a
+                # quarantine race are the same limbo if only one is rolled
+                # back.
                 self._proj.g.query(
                     f"MATCH (n:Point {{id:$id}}) "
                     f"SET n.{review_key} = $prior, n.reviewed = $reviewed",
                     params={"id": candidate_id, "prior": prior_review,
                             "reviewed": prior_reviewed},
                 )
+
+            self.sdk.approve_merge(candidate_id, action="merge")
+            try:
+                applied = self.sdk.promote_point(candidate_id)
+            except Exception:
+                _roll_back_review_write()
+                raise
+            if applied.get("blocked"):
+                _roll_back_review_write()
                 raise ValueError(
                     f"candidate {candidate_id!r} could not be promoted: "
                     f"{applied.get('reason') or 'blocked'}")

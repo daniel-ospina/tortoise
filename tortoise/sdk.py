@@ -5736,9 +5736,16 @@ class TortoiseSDK:
 
         Two consequences of the classification being the witness's job rather
         than a fixed row rule, both shipped and pinned:
-        - it may answer True on a ZERO row when the node's state already
-          satisfies the ask (the #1088 idempotent promote: a status-only
-          promote on an already-live node);
+        - it may answer True on a ZERO row. That covers THREE shipped forms,
+          and a zero row means different things in each: the state already
+          SATISFIES the ask (the #1088 idempotent status-only promote); the
+          state REFUSES the ask (the promote CAS's terminal or NULL status —
+          `null = 'draft'` is null, not true — where True hands the answer to
+          the caller's outcome branch instead of claiming a landing); or there
+          was nothing to verify (a vacuous request, ``_sync_witness`` on an
+          empty/None tag set). Returning False for the middle form is a DEFECT:
+          it spends the window and surfaces the graph abort for a node that is
+          present and simply unpromotable;
         - it may RAISE the caller's documented error instead of returning
           False to end the retry immediately (a predicate-FALSE exception
           abandons the window rather than spending it), which is how the
@@ -12272,9 +12279,9 @@ class TortoiseSDK:
         # The witness separates THOSE two from the third case — a re-issue that
         # lands nothing because the rebuild has not replayed the node yet —
         # which would otherwise be read as `not_draft` by that branch and
-        # consumed as a real refusal (THREE consumers agree the answer is a
-        # decision: `VerdictLayer.decide(..., VERDICT_KEEP)` rolls its review
-        # stamps back on `blocked`).
+        # consumed as a real refusal (the ONE consumer that reads the answer as
+        # a decision is `VerdictLayer.decide(..., VERDICT_KEEP)`, which rolls
+        # its review stamps back on `blocked`).
         def _cas_witness(result) -> bool:
             """A zero-row CAS re-issue, classified by the node's STATUS.
 

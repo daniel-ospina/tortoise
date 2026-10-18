@@ -2478,6 +2478,85 @@ def test_a_promote_point_that_races_a_concurrent_promote_reports_already_live(
             sdk.close()
 
 
+class _PromotePointCasSetsTheStatus(_PromotePointCasReturnsEmpty):
+    """Abort the CAS once, then move the node's status before the re-issue.
+
+    The re-issued CAS matches nothing because the node is no longer ``draft`` —
+    a state that DOES explain the zero row, so the witness answers True and the
+    ``raced`` branch reports the real status. Answering False instead (a
+    non-``draft`` but also non-``live`` status treated as "keep retrying") spends
+    the whole window and then raises "graph was deleted or replaced" for a node
+    that is present and unpromotable.
+
+    ``new_status=None`` STRIPS the property: `null = 'draft'` is null, not true,
+    so a statusless node cannot match the CAS either. This is the ONLY status
+    class where the pre-fix `status is not None and status != 'draft'` and the
+    shipped `status != 'draft'` disagree, which is exactly why it needs a test.
+    """
+
+    def __init__(self, real, needle: str, victim: str, new_status) -> None:
+        super().__init__(real, needle)
+        self._victim = victim
+        self._new_status = new_status
+        self.moved = False
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher and self.matching >= 1:
+            self.matching += 1
+            if not self.moved:
+                self.moved = True
+                if self._new_status is None:
+                    self._real.query(
+                        "MATCH (n:Point {id:$id}) REMOVE n.status",
+                        params={"id": self._victim})
+                else:
+                    self._real.query(
+                        "MATCH (n:Point {id:$id}) SET n.status = $s",
+                        params={"id": self._victim, "s": self._new_status})
+            return _EmptyResult()
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+@pytest.mark.parametrize("new_status", [None, "retracted"])
+def test_a_promote_point_that_refuses_the_cas_is_not_reported_as_a_graph_abort(
+        tmp_path, monkeypatch, new_status):
+    """Every status that EXPLAINS the zero row must NOT spend the retry budget.
+
+    The CAS matches only the literal ``'draft'``, so the classes that explain a
+    zero row are exactly `not draft` — a concurrent terminal transition, or a
+    statusless legacy node (`null = 'draft'` is null, not true). Read as "keep
+    retrying" they exhaust the 7-14 s window and then raise "graph was deleted
+    or replaced" for a node that is present and simply unpromotable; read
+    correctly they are answered at once by the documented `not_draft` branch.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=sleeps.append))
+    sdk = _sdk(tmp_path, f"promotepointrefuse{new_status}")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _PromotePointCasSetsTheStatus(
+            proj.g, _PROMOTE_POINT_CAS_NEEDLE, pid, new_status)
+        proj.g = proxy
+
+        out = sdk.promote_point(pid)  # must NOT raise
+
+        assert proxy.moved, "fixture precondition: the status must have moved"
+        assert out["blocked"] is True
+        assert out["reason"] == "not_draft", out
+        assert out["status"] == new_status, out
+        assert proxy.matching == 2, (
+            "the zero row is EXPLAINED by the node's state — it must not be "
+            f"re-issued, saw {proxy.matching} issue(s)")
+        assert len(sleeps) == 1, (
+            f"only the retry the abort authorised may be paid, saw {sleeps}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_a_promote_point_whose_node_vanishes_at_the_re_read_is_not_not_draft(
         tmp_path, monkeypatch):
     """The outcome read's ABSENCE is not a state verdict either.
@@ -2586,13 +2665,12 @@ def test_a_live_status_only_OBJECT_promote_writes_through_no_other_slot(
         # status-only :Object promote must NOT take the early return, or the
         # tail — and with it the #1240 / DE2E-4 dirty-root re-entry that keeps
         # a promoted claim in dreaming — is skipped for every real promote.
-        monkeypatch.undo()
         proj.g = proxy._real
         pid2 = sdk.create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid2})
         seen.clear()
-        monkeypatch.setattr(sdk, "_graph_write_with_retry", counting)
+        sdk._dirty_roots.clear()
 
         landed = sdk.update_point(pid2, status="live")
 
@@ -2604,6 +2682,10 @@ def test_a_live_status_only_OBJECT_promote_writes_through_no_other_slot(
         ], (
             "a LANDED status-only :Object promote must run `_mark_dirty` — "
             f"otherwise the branch boundary is measured from one side only: {seen}")
+        assert pid2 in sdk._dirty_roots, (
+            "the wrapper labels are not the observable: the point itself must "
+            "be a dirty root, or the promoted claim never re-enters dreaming "
+            f"(#1240/DE2E-4): saw {sorted(sdk._dirty_roots)}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

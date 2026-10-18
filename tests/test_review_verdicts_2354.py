@@ -462,3 +462,33 @@ class TestDeterministicDrainer:
         assert rep["applied"] == 0
         assert {e["candidate_id"] for e in rep["errors"]} == {"rv-a", "missing"}
         assert rep["remaining_queued"] == 1
+
+
+def test_keep_rolls_the_review_write_back_when_the_promote_RAISES(sdk, monkeypatch):
+    """A promote that RAISES must not leave the candidate reviewed-but-unpromoted.
+
+    ``VerdictLayer.decide(..., VERDICT_KEEP)`` calls ``approve_merge`` (a durable
+    ``DedupeRecorded`` emit plus the ``*_reviewed='merge'``/``reviewed`` stamps)
+    and only THEN ``promote_point``, which raises ``ValueError`` when the node is
+    gone — a delete, or a second graph replacement, between the layer's own read
+    and the SDK's. Only the ``blocked`` answer used to be rolled back, so that
+    raise escaped with the stamps already applied: the #2354 limbo
+    (reviewed, unpromoted, undecided, and out of ``list_*_candidates``).
+    """
+    _seed_candidate(sdk, "rv-a", "rv-prior")
+
+    def refuse(point_id):
+        raise ValueError(f"No point {point_id!r}")
+
+    monkeypatch.setattr(sdk, "promote_point", refuse)
+
+    with pytest.raises(ValueError, match="No point"):
+        VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    props = _props(sdk, "rv-a")
+    assert props, "fixture precondition: the candidate node must still exist"
+    assert props.get("temporal_reviewed") is None, (
+        "the review stamp must be rolled back when the promote raises: "
+        f"saw {props.get('temporal_reviewed')!r}")
+    assert props.get("reviewed") is None, (
+        f"the derived reviewer flag must be rolled back too: saw {props.get('reviewed')!r}")
