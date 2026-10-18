@@ -529,6 +529,34 @@ class TestApplyLimitsAndReconcile:
             "nothing was mirrored, so the stored status must be untouched "
             f"— got {t['subscription_status']!r}")
 
+    def test_reconcile_customer_only_binding_survives_a_lookup_failure(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P2: the customer-ONLY branch needs the same guard.
+
+        ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
+        session, so abandoned checkouts — the majority of this branch — carry a
+        customer id and no subscription id. With the LIST unguarded, one
+        transient 5xx/429 on one of them escaped as a ``failed`` row, and a
+        non-empty ``failed`` FAILS the pass and pages "a paying org may be
+        capped at the wrong tier" for an org with no entitlement at stake — the
+        mirror image of the stored-pointer asymmetry fixed above.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("customer-only-list-failure")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_gone' "
+            "RETURN t.id",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            billing.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                billing.StripeAPIError("upstream 503")))
+        outcome = reconcile_org(sdk, team["id"])  # must NOT raise
+        assert outcome["action"] == "noop", (
+            "a failed customer lookup is not a verdict, so this branch must "
+            f"leave the org alone instead of failing the pass — got {outcome}")
+
     def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
             self, monkeypatch, stripe_env, billing_sdk):
         """#8895 review P2: ``past_due`` keeps the TIER (enforcement) but is NOT

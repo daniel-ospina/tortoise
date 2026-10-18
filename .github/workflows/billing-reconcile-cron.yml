@@ -220,6 +220,12 @@ jobs:
             # fallback arm. They need opposite responses, so they must never be
             # collapsed into one message.
             cause="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$out" 2>/dev/null || true)"
+            # $cause is REMOTE data, and this step's rule is that no fragment of
+            # remote data reaches the (public) log unredacted. It is also
+            # single-line from here on: a value carrying a newline would be
+            # parsed by the runner as a SECOND workflow command, so `::error::`
+            # could be forged from a response body.
+            cause="$(printf '%s' "$cause" | redact_stream | tr -d '\n\r')"
             case "$cause" in
               reconcile_stuck)
                 echo "::error::billing reconcile is STUCK (HTTP 503 reconcile_stuck) — a previous pass has held the lock past the staleness bound and is presumed wedged. The fleet is NOT being reconciled, and the lock clears only when that pass ends or the process restarts; retrying will NOT help."
