@@ -2653,6 +2653,95 @@ def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
         ) from exc
 
 
+def _issue_view_rest(gh_bin: str, slug: str, issue: int, cwd: str,
+                     timeout: float) -> tuple[dict | None, str | None]:
+    """Read issue metadata over REST when the GraphQL budget is exhausted.
+
+    `gh issue view` is GraphQL-ONLY. When that budget runs out — which happens
+    routinely on this fleet, and is what made this tool report three unqueryable
+    surfaces for #3435 while `gh api` answered the identical question in the very
+    next call — EVERY pre-flight reports INCOMPLETE. That is the instrument
+    holding the datum and refusing to read it: it fails closed on a condition it
+    could have measured, rather than on one it could not.
+
+    REST has a SEPARATE budget, so one fallback turns that false INCOMPLETE back
+    into a real answer.
+
+    Returns ``(payload, None)`` on success and ``(None, reason)`` when REST could
+    not answer or answered with a body that fails the issue-payload contract, so
+    the caller's fail-closed classification is unchanged: this can only ever
+    convert a spurious failure into a reading, never a failure into a pass.
+
+    ⛔ THE CONTRACT IS ENFORCED HERE, NOT BY THE CALLER (#3435 review, P1). This
+    runs INSIDE the caller's `except SurfaceError` handler, so a raise from it is
+    caught by the handler it lives in — it escaped as a TRACEBACK with no
+    `VERDICT` line and exited 1, the code this module documents as COLLISION. A
+    malformed body must be a NAMED INCOMPLETE, and the only way to guarantee that
+    for every future caller is to return the reason rather than raise it.
+
+    The shape is normalised to what `gh issue view --json` returns, because the
+    downstream code reads exactly those keys and compares `state`
+    case-insensitively (REST says 'open', GraphQL says 'OPEN'). Every key is
+    carried through RAW — including a `null`/absent `assignees` — so the contract
+    check sees the body's real shape instead of a pre-digested copy.
+
+    ⛔ IT MUST ANSWER ABOUT THE ISSUE IT WAS ASKED ABOUT (#3435 review, P2).
+    `GET /repos/{slug}/issues/{N}` is the ISSUE-OR-PULL-REQUEST endpoint: for a
+    PR number it returns a PULL REQUEST object, which carries every key this
+    normaliser reads and therefore passes the payload contract — a PR read as an
+    issue, with the transport deciding the answer (`gh issue view` refuses that
+    input). A misrouted or differently-numbered body would likewise be read as
+    this issue's state and assignees, and an `OPEN` with no assignees reads FREE:
+    the fail-open direction. Both are refused here, for the same reason the
+    contract is: the reader must see the datum the question asked for.
+    """
+    where = f"gh api repos/{slug}/issues/{issue}"
+    try:
+        raw = _gh_json(gh_bin, ["api", f"repos/{slug}/issues/{issue}"], cwd, timeout)
+    except SurfaceError as exc:
+        return None, str(exc)
+    except ValueError as exc:
+        # ⛔ `_run` decodes with `text=True`, i.e. STRICT: one non-UTF-8 byte in
+        # the body raises `UnicodeDecodeError`, which is a ValueError — NOT a
+        # SurfaceError — so it passed this handler, the caller's `except
+        # SurfaceError`, and `main()`'s NotAWorkItem/RuntimeError pair, and
+        # escaped as a traceback with no VERDICT line and exit 1 (the code this
+        # module documents as COLLISION). Refusing rather than repairing is
+        # deliberate: replacement characters would compose a slug/payload that
+        # no endpoint sent. (The same hole exists on the pre-existing primary
+        # read; closing it in `_run` changes git-output handling globally and is
+        # tracked separately — tortoise#8881.)
+        return None, (
+            f"{where} returned output that is not decodable as text ({exc}) — "
+            "refusing (NOT clean)"
+        )
+    if not isinstance(raw, dict):
+        return None, f"{where} returned non-object JSON ({type(raw).__name__})"
+    if "pull_request" in raw:
+        return None, (
+            f"{where} is a PULL REQUEST, not an issue — refusing to read it as a "
+            "work item (NOT clean)"
+        )
+    if raw.get("number") != issue:
+        return None, (
+            f"{where} answered for #{raw.get('number')!r}, not #{issue} — refusing "
+            "a body that is not about the issue that was asked (NOT clean)"
+        )
+    payload = {
+        "number": raw.get("number"),
+        "title": raw.get("title"),
+        "state": raw.get("state"),
+        "stateReason": raw.get("state_reason"),
+        "assignees": raw.get("assignees"),
+        "url": raw.get("html_url"),
+    }
+    try:
+        _require_issue_payload(payload, where)
+    except SurfaceError as bad:
+        return None, str(bad)
+    return payload, None
+
+
 # An RFC-8288 link relation may be QUOTED or UNQUOTED (`rel="last"` / `rel=last`),
 # and a response may carry MORE THAN ONE `Link:` header line. Both forms are
 # matched here, and the caller joins every header line before parsing, because a
@@ -4437,17 +4526,52 @@ def run_preflight(
             else:
                 raise SurfaceError("gh issue view returned non-object JSON")
         except SurfaceError as exc:
-            kind = _classify_issue_error(exc)
-            if kind == "issue-absent":
-                msg = (
-                    f"issue-absent: #{issue} does not exist in {slug} — "
-                    "\"not found here\" is NOT \"no in-flight work\" (fail closed)"
+            # ONLY a budget exhaustion is eligible for the REST fallback. Any other
+            # failure is a genuine "could not read", and rescuing it from a second
+            # endpoint would turn a real refusal into a reading — the fail-open
+            # direction. Match the phenomenon, not the exception type.
+            # gh renders a non-2xx as `HTTP <code>: <status> (<url>)`, so a 429
+            # arrives as `HTTP 429: Too Many Requests` with NO prose at all — a
+            # bare "rate limit" substring test silently under-triggers on the
+            # canonical exhaust form.
+            _lower = str(exc).lower()
+            _exhausted = (
+                "rate limit" in _lower
+                or "too many requests" in _lower
+                or "http 429" in _lower
+            )
+            rescued: dict | None = None
+            rest_why: str | None = None
+            if _exhausted:
+                rescued, rest_why = _issue_view_rest(
+                    gh_bin, slug, issue, cwd, timeout
                 )
-            elif kind == "repo-unresolved":
-                msg = f"repo-unresolved: {slug} could not be resolved"
+            if rescued is not None:
+                issue_data = rescued
+                title = rescued.get("title") or None
             else:
-                msg = f"gh-unavailable: {exc}"
-            surfaces[SURFACE_ISSUE].incomplete(msg)
+                # The REST attempt ALREADY refused for its own reason (a
+                # transport failure, a 404, a non-object body, or a payload that
+                # breaks the issue contract — all returned as `rest_why`, never
+                # raised: a raise here would escape this handler as a traceback
+                # and exit 1, which this tool defines as "another lane is on it").
+                # Classify THAT, so an issue REST reports absent is named
+                # `issue-absent` rather than being blamed on the GraphQL budget,
+                # while the budget exhaustion stays visible in the reason.
+                detail = exc if rest_why is None else SurfaceError(
+                    f"{rest_why} (GraphQL read: {exc})"
+                )
+                kind = _classify_issue_error(detail)
+                if kind == "issue-absent":
+                    msg = (
+                        f"issue-absent: #{issue} does not exist in {slug} — "
+                        "\"not found here\" is NOT \"no in-flight work\" (fail closed)"
+                    )
+                elif kind == "repo-unresolved":
+                    msg = f"repo-unresolved: {slug} could not be resolved"
+                else:
+                    msg = f"gh-unavailable: {detail}"
+                surfaces[SURFACE_ISSUE].incomplete(msg)
     # 1.5 THE LANDED ANSWER (#8560) — the authoritative "is #N already done?".
     #     Scanned HERE, right after the issue metadata (whose `state` it reads)
     #     and BEFORE the in-flight surfaces, so its verdict is decided even if
