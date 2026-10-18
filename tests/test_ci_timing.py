@@ -274,12 +274,16 @@ CI_TIMING_WORKFLOW = WORKFLOW_DIR / "ci-timing.yml"
 # The inline form's closing quote is followed by whatever ends the command: `)`
 # (`$( … )`), `>>`/`|` (a redirect or a pipe), `}` — the closing brace of a bash
 # FUNCTION wrapping the call, which is how ai-review-gate.yml calls its diff
-# normalizer — or end-of-string. Omitting `}` (#5107) made the non-greedy body
-# backtrack past the real closing quote to a later one, swallowing the quote and
-# the brace into the "source" (`unterminated string literal`). The workflow ran
-# fine on every PR; only the extractor mis-read it.
+# normalizer — a double-quoted ARGUMENT (`python3 -c '…' "$out"`, which
+# billing-reconcile-cron.yml passes as `sys.argv[1]`), or end-of-string.
+# Omitting `}` (#5107) made the non-greedy body backtrack past the real closing
+# quote to a later one, swallowing the quote and the brace into the "source"
+# (`unterminated string literal`); a trailing quoted argument did the same thing
+# again (#8904), landing on the closing quote of a LATER `tr -d '\n\r'`. The
+# workflow ran fine both times; only the extractor mis-read it.
 _HEREDOC_RE = re.compile(r"python3?[^\n]*<<-?'?(\w+)'?\n(.*?)\n\s*\1\s*$", re.S | re.M)
-_INLINE_C_RE = re.compile(r"python3 -c '(.*?)'(?=\s*(?:\)|>>|\||\}|$))", re.S)
+_INLINE_C_RE = re.compile(
+    r"""python3 -c '(.*?)'(?=\s*(?:\)|>>|\||\}|$|"))""", re.S)
 
 
 def _run_blocks(workflow_path: Path) -> list[tuple[str, str]]:
@@ -422,6 +426,29 @@ def test_workflow_embedded_python_is_column_zero_after_yaml_dedent() -> None:
         "(use `python3 - <<'EOF'` at the block's own indent, or move the logic into "
         "tools/):\n" + "\n".join(failures)
     )
+
+
+def test_inline_c_extraction_ends_before_a_quoted_argument() -> None:
+    """#8904: a `python3 -c '…' "$file"` must stop at ITS closing quote.
+
+    `billing-reconcile-cron.yml` passes the response body path as
+    `sys.argv[1]`, so the closing quote is followed by `"$out"` rather than by
+    `)`, `>>`, `|` or `}`. The extractor backtracked from that quote to the
+    next one that WAS followed by a terminator — the closing quote of a later
+    `tr -d '\n\r'` — and compiled the shell in between as python, reporting
+    `unterminated string literal` against a workflow that runs correctly.
+    """
+    script = (
+        'cause="$(python3 -c \'import json,sys; print(json.load(open(\n'
+        '    sys.argv[1])).get("status", ""))\' "$out" 2>/dev/null || true)"\n'
+        "cause=\"$(printf '%s' \"$cause\" | tr -d '\\n\\r')\"\n"
+    )
+    sources = [source for kind, source in _embedded_python(script)
+               if kind == "inline -c"]
+    assert len(sources) == 1, sources
+    assert sources[0].startswith("import json,sys"), sources[0]
+    assert "tr -d" not in sources[0], sources[0]
+    compile(sources[0], "<extracted>", "exec")
 
 
 def test_inline_c_extraction_ends_at_the_shell_closing_quote() -> None:

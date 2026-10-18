@@ -23,7 +23,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.billing as billing
-from tests._verdict import verdict_client
+from tests._verdict import verdict_async_client, verdict_client
 from tortoise.billing import (
     BillingConfigError,
     BillingError,
@@ -3017,8 +3017,6 @@ def test_cancelling_the_request_does_not_cancel_a_writing_pass(
     import threading
     from contextlib import suppress
 
-    import httpx
-
     import tortoise.supabase_control as sc
     from tortoise import billing as bl
     from tortoise import hosted_api as ha
@@ -3053,9 +3051,7 @@ def test_cancelling_the_request_does_not_cancel_a_writing_pass(
     monkeypatch.setattr(ha, "_BILLING_RECONCILE_STARTED_AT", None)
 
     async def _scenario() -> None:
-        transport = httpx.ASGITransport(app=ha.app)
-        async with httpx.AsyncClient(
-                transport=transport, base_url="http://test") as client:
+        async with verdict_async_client(ha.app, base_url="http://test") as client:
             req = asyncio.ensure_future(client.post(
                 "/v1/internal/billing/reconcile",
                 headers={"Authorization": "Bearer internal-test-key"}))
