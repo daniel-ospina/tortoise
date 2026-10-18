@@ -4138,10 +4138,17 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # them. #2210: no @mcp.tool decorators here — the module-bottom register_all
 # registers each from its registry entry (annotations are registry-canonical).
 # See _HTTPToolFilter.list_tools.
+# #3540: `tortoise_onboarding_session_recording` and
+# `tortoise_onboarding_github_index` were RETIRED into
+# `tortoise_manage_sources` (#3883), so they are no longer advertised and must
+# not sit in this hide-after-onboarding set — a name that is never listed can
+# never be gated. `tortoise_manage_sources` is deliberately NOT added here:
+# it is the STEADY-STATE management surface, and the whole point of the set is
+# that its members disappear once onboarding completes.
 _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
-    "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
-    "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+    "tortoise_onboarding_github_connect",
+    "tortoise_onboarding_github_status",
     "tortoise_onboarding_seed",  # #1999 (W3)
 })
 
@@ -4371,6 +4378,577 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     state = _update_onboarding_state(org_id, session_recording=enabled,
                                      capture_revised=True)
     return {"onboarding": state}
+
+
+# ── #3540 ruling B — ONE consolidated source-management tool ─────────────
+# The roster is the product's MEMORY SOURCES (the places Tortoise reads from).
+# It is NOT the graph's `Source` nodes — those are provenance
+# (`tortoise_create_source`) and are a different concept that happens to share
+# the word. Retiring the wrong pair here would leave the real gap open.
+_SOURCE_ROSTER: dict[str, dict] = {
+    "github_issues": {
+        "label": "GitHub issues and pull requests",
+        # The PRODUCT default is ON: `DEFAULT_ONBOARDING_STATE` and
+        # `_ONBOARDING_DEFAULT_STATE` both carry `issues_enabled: True` (#1924,
+        # "Both default ON so a connected org keeps today's behavior"). This
+        # roster once said "off", so `list` reported `enabled: true` next to
+        # `default: "off"` in one payload — a default the product does not
+        # implement. Pinned against that dict by
+        # `tests/test_manage_sources_3540.py::test_defaults_match_the_products_own_default_state`.
+        "default": "on",
+        "connection": "github",
+        # #1924: the per-source OFF is an ENABLE-INTENT flag, NOT a disconnect.
+        # The connection is shared; the intent is per source.
+        "enable_flag": "issues_enabled",
+        # The flag is recorded but no server-side reader honours it yet — this
+        # tool must not claim a source stopped when nothing enforced it.
+        "enforcement": "intent-only",
+        "sibling": "github_documents",
+    },
+    "github_documents": {
+        "label": "GitHub documents",
+        "default": "on",  # `docs_enabled: True` in both default dicts (#1924)
+        "connection": "github",
+        "enable_flag": "docs_enabled",
+        "enforcement": "intent-only",
+        "sibling": "github_issues",
+    },
+    "agent_sessions": {
+        # #1927: the OPTIONAL OFF-SWITCH — default ON, ToS-covered. Recorded
+        # here because ruling B's "deny-by-default" would otherwise read as
+        # authority to reverse that decision. It is not: the permission rule
+        # governs what the ASSISTANT may do, not what the PRODUCT already does.
+        # Reversing #1927 is a separate owner decision.
+        "label": "Agent session recordings",
+        "default": "on",
+        "connection": None,
+        "enable_flag": "session_recording",
+        "enforcement": "enforced",
+        "sibling": None,
+    },
+}
+
+
+_UNAVAILABLE = object()
+
+
+def _state_get(state: dict, key: str):
+    """Read an onboarding key, tolerating the self-host NESTED shape (#3540).
+
+    The hosted projection is FLAT, but `read_selfhost_state` puts the
+    operational keys under `state["operational"]`, and reports that sub-read as
+    the STRING `"unavailable"` when the graph is down. Reading only the top
+    level made `list` report `agent_sessions.enabled: true` for a stored
+    `operational.session_recording: false`, and made `enable` answer
+    `already_on` while writing nothing — the pinned re-enable path
+    (`tortoise/onboarding/SKILL.md`, "re-sets the setting regardless") stranded
+    on the self-host leg.
+
+    `_UNAVAILABLE` is returned (not `None`) when the sub-read failed: an
+    unreadable projection must not be reported as the product default.
+    """
+    if key in state:
+        return state[key]
+    operational = state.get("operational")
+    if operational == "unavailable":
+        return _UNAVAILABLE
+    if isinstance(operational, dict):
+        return operational.get(key)
+    return None
+
+
+def _flag_on(state: dict, key: str, default: bool = True):
+    """True/False for an enable-intent flag, or None when it is UNKNOWN.
+
+    `None` is not a third opinion: it is what an unreadable projection must
+    produce, so `list` can emit `enabled: null` instead of fabricating the
+    product default.
+    """
+    value = _state_get(state, key)
+    if value is _UNAVAILABLE:
+        return None
+    return default if value is None else bool(value)
+
+
+def _log_source_change(org_id: str, source: str, action: str, outcome: str,
+                       scope: str = "source") -> None:
+    """Ruling B: "the change is attributable" — one line per attempt.
+
+    Logged BEFORE the effect is reported, and for refusals too, so an
+    unauthorised or not-connected attempt is visible after the fact rather than
+    only the successful ones.
+    """
+    _log.info(
+        "source-management org=%s source=%s action=%s outcome=%s scope=%s",
+        org_id, source, action, outcome, scope,
+    )
+
+
+def _sources_view() -> dict:
+    """Every source's state, in one call (ruling B: "lists").
+
+    `enabled` is the SOURCE's own enable intent (`issues_enabled` /
+    `docs_enabled` / `session_recording`), not the shared GitHub connection: a
+    team can keep the connection and have exactly one of the two GitHub sources
+    switched off (#1924). The connection rides alongside as
+    `connection_connected`, so the two facts are never conflated.
+    """
+    state = _onboarding_state()
+    if "error" in state:
+        return state
+    connected = _known_bool(state, "github_connected")
+
+    def _index_state(prefix: str) -> dict:
+        """`indexed` / `indexed_at` for ONE GitHub source.
+
+        The two GitHub sources share a key set on purpose: a caller iterating
+        `sources` must not need to know which of them happens to carry the
+        index state. Both onboarding tools are off the TARGET list yet STILL
+        SERVED today: `tortoise_onboarding_state` returns the raw projection and
+        is therefore a second reader of this state, while
+        `tortoise_onboarding_github_status` is served but reads no index state.
+        "Removed" here is a target-list status, never the served surface. The
+        issues walk stamps `github_indexed`, the docs walk `github_docs_indexed`.
+        """
+        raw = _state_get(state, f"{prefix}_at")
+        return {
+            "indexed": _known_bool(state, prefix),
+            "indexed_at": None if raw is _UNAVAILABLE else raw,
+        }
+
+    return {
+        "sources": {
+            "github_issues": {
+                **_SOURCE_ROSTER["github_issues"],
+                "enabled": _flag_on(state, "issues_enabled"),
+                "connection_connected": connected,
+                **_index_state("github_indexed"),
+                "scope": "source",
+            },
+            "github_documents": {
+                **_SOURCE_ROSTER["github_documents"],
+                "enabled": _flag_on(state, "docs_enabled"),
+                "connection_connected": connected,
+                **_index_state("github_docs_indexed"),
+                "scope": "source",
+            },
+            "agent_sessions": {
+                **_SOURCE_ROSTER["agent_sessions"],
+                "enabled": _flag_on(state, "session_recording"),
+                "scope": "source",
+            },
+        },
+        # The raw projection rides along, so nothing about the team's state is
+        # hidden behind this tool's interpretation of it.
+        "onboarding": state,
+    }
+
+
+def _known_bool(state: dict, key: str, default: bool = False):
+    """bool for a known value, False when unset, None when UNREADABLE.
+
+    `bool(_state_get(...))` made the `_UNAVAILABLE` sentinel truthy, so a
+    graph-down self-host read reported `connection_connected: true` and
+    `indexed: true` — and leaked `<object object at 0x…>` into `indexed_at`.
+    """
+    value = _state_get(state, key)
+    if value is _UNAVAILABLE:
+        return None
+    return default if value is None else bool(value)
+
+
+def _source_payload(spec: dict, status: str, **extra) -> dict:
+    """The fields EVERY state-change payload carries (#3540).
+
+    A caller branching on `enforcement` — the field that tells intent from
+    custody — must not hit KeyError on one of the documented `status` values,
+    and `default` must not appear on only some responses.
+    """
+    return {"status": status,
+            "enforcement": spec["enforcement"],
+            "default": spec["default"],
+            "enable_flag": spec["enable_flag"],
+            **extra}
+
+
+def _spawn_index_runner(runner, *args) -> bool:
+    """Start an async index walk WITHOUT assuming this thread has a loop.
+
+    FastMCP runs a SYNC tool on a worker thread, where
+    `asyncio.get_event_loop()` returns a loop that is not running and
+    `create_task` schedules nothing. A dedicated thread with its own loop is
+    safe because the runners hold no loop-bound state — the REST twin creates
+    the same coroutine on uvicorn's loop.
+
+    The runner's own one-hour eviction is scheduled with
+    `get_running_loop().call_later(...)` in its `finally`. That loop is OURS and
+    closes when the walk returns, so the callback would never fire and the
+    terminal `_INDEX_JOBS` entry would live forever (`GET /v1/index/{job_id}`
+    answering 200 for a finished job indefinitely). The eviction is therefore
+    re-armed on a wall clock before the loop closes.
+    """
+    import threading
+
+    job_id = str(args[0]) if args else "?"
+
+    def _target() -> None:
+        import asyncio as _a
+
+        from tortoise.hosted_api import (
+            _INDEX_JOB_EVICT_S,
+            _INDEX_JOB_OWNERS,
+            _INDEX_JOBS,
+        )
+
+        loop = _a.new_event_loop()
+        _a.set_event_loop(loop)
+        try:
+            loop.run_until_complete(runner(*args))
+        except Exception:
+            _log.warning("index run failed (job=%s)", job_id, exc_info=True)
+        finally:
+            def _evict() -> None:
+                _INDEX_JOBS.pop(job_id, None)
+                _INDEX_JOB_OWNERS.pop(job_id, None)
+
+            try:
+                threading.Timer(_INDEX_JOB_EVICT_S, _evict).start()
+            except Exception:
+                _log.warning("index eviction could not be armed (job=%s)",
+                             job_id, exc_info=True)
+            loop.close()
+
+    try:
+        threading.Thread(target=_target, name=f"index-{job_id}",
+                         daemon=True).start()
+    except Exception:
+        _log.warning("index runner could not be started (job=%s)", job_id,
+                     exc_info=True)
+        return False
+    return True
+
+
+def _heal_github_org_sync(org_id: str, encrypted: str,
+                          stored_org: str | None) -> str | None:
+    """The REST twins' own #1845 heal, awaited from a SYNC tool.
+
+    `_heal_github_org` is `async` and this handler is sync (FastMCP runs it on
+    a worker thread), so it is driven to completion on a loop of its own — the
+    same reason `_spawn_index_runner` does not borrow the caller's loop.
+
+    Both REST twins that own this shape heal BEFORE they walk
+    (`/v1/index/github/re-poll` and `/v1/index/docs` refuse only when the heal
+    returns falsy — plain `POST /v1/index/github` takes `org` from the caller),
+    and the heal is what makes the pre-#1845 shape — the internal org_id UUID
+    stored as `github_org` — work again WITHOUT a reconnect. A None/UUID org
+    read straight into the walk instead 404s every repo while the tool has
+    already answered `enabled`.
+    """
+    import asyncio as _a
+
+    from tortoise.hosted_api import _heal_github_org
+
+    loop = _a.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            _heal_github_org(org_id, encrypted, stored_org))
+    finally:
+        loop.close()
+
+
+def _set_source_state(source: str, enable: bool) -> dict:
+    """Switch one source on or off, within the caller's own permission.
+
+    Permission itself is enforced ABOVE this function, at the tool boundary:
+    `_enforce_mcp_tool_scope` requires ``graphs:write`` for a ``writes=True``
+    tool and denies an unresolvable name (#4170). Nothing here can widen that,
+    and nothing here accepts a credential.
+    """
+    org_id = _current_org_id.get()
+    if org_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    from tortoise.hosted_api import (
+        _INDEX_JOB_OWNERS,
+        _INDEX_JOBS,
+        _github_credentials,
+        _run_docs_indexing,
+        _run_indexing,
+        _start_index_job,
+        _update_onboarding_state,
+    )
+
+    spec = _SOURCE_ROSTER[source]
+    state = _onboarding_state()
+    if "error" in state:
+        return state
+
+    if spec["connection"] == "github":
+        # #1924: the two GitHub sources share ONE connection, but switching a
+        # source off is NOT a disconnect. The dashboard's own off-toggle writes
+        # the per-source ENABLE-INTENT flag (`issues_enabled` / `docs_enabled`)
+        # and never `github_connected` — a full disconnect would kill the
+        # sibling source and force a fresh OAuth round-trip just to hide one
+        # source. This tool writes the same key, so it cannot re-introduce the
+        # behaviour #1924 removed.
+        flag = spec["enable_flag"]
+        current_on = _flag_on(state, flag)
+        if current_on is None:
+            _log_source_change(org_id, source,
+                               "enable" if enable else "disable",
+                               "refused_state_unavailable")
+            return {"error": (
+                "The team's onboarding state could not be read (graph "
+                "unavailable), so nothing was changed.")}
+        if not enable:
+            if not current_on:
+                _log_source_change(org_id, source, "disable", "already_off")
+                return {"source": source, "scope": "source",
+                        **_source_payload(spec, "already_off")}
+            # Ruling B: "the change is attributable" — the ATTEMPT is logged
+            # before the write, so a crash inside the write still leaves it on
+            # the record (the outcome line follows).
+            _log_source_change(org_id, source, "disable", "attempt")
+            try:
+                _update_onboarding_state(org_id, _echo=False, **{flag: False})
+            except Exception:
+                # Same shape as the enable/agent-sessions writes: a plane
+                # failure must come back as the documented error payload, not
+                # as an exception escaping the tool.
+                _log.warning("source-management flag write failed",
+                             exc_info=True)
+                _log_source_change(org_id, source, "disable",
+                                   "error_flag_write")
+                return {"error": (
+                    "The source's enable flag could not be written; nothing "
+                    "changed. Retry.")}
+            _log_source_change(org_id, source, "disable", "ok")
+            return {
+                "source": source,
+                "scope": "source",
+                **_source_payload(spec, "disabled"),
+                "connection_untouched": True,
+                "sibling_untouched": spec["sibling"],
+                "note": (
+                    "Switched off by recording the per-source enable intent "
+                    f"({flag}=false, #1924) — the GitHub CONNECTION and the "
+                    f"sibling source ({spec['sibling']}) are untouched, so "
+                    "re-enabling needs no re-authorisation. This flag is "
+                    "INTENT ONLY today: nothing server-side reads it yet, so an "
+                    "in-flight index job is not cancelled. For a real GitHub "
+                    "revocation use POST /v1/onboarding/github/disconnect "
+                    "(it disconnects BOTH sources)."
+                ),
+            }
+        _log_source_change(org_id, source, "enable", "attempt")
+        try:
+            encrypted, gh_org = _github_credentials(org_id)
+        except Exception:
+            # The retired handler named the plane here; an escaping exception
+            # left the attempt unlogged and the caller with a bare traceback.
+            _log.warning("source-management credential read failed",
+                         exc_info=True)
+            _log_source_change(org_id, source, "enable",
+                               "error_credentials")
+            return {
+                "error": (
+                    "Could not read the stored GitHub credential (control "
+                    "plane unavailable). NOTHING was changed — retry, or "
+                    "re-authorise with tortoise_onboarding_github_connect."
+                )
+            }
+        if not encrypted:
+            _log_source_change(org_id, source, "enable",
+                               "refused_not_connected")
+            return {
+                "error": (
+                    "GitHub not connected. Authorise it first with "
+                    "tortoise_onboarding_github_connect — this tool never "
+                    "accepts credentials."
+                )
+            }
+        # #1845: HEAL before walking, exactly as both REST twins do. The two
+        # shapes this repairs — `github_org` missing, and the pre-#1845 connect
+        # flow having stored the internal org_id UUID in it — index fine after
+        # the heal, and the heal's own docstring is explicit that "a reconnect
+        # is NOT required". Reading the stored value straight into the walk
+        # instead 404s every repo while the tool answers `enabled`.
+        stored_org = gh_org
+        try:
+            healed = _heal_github_org_sync(org_id, encrypted, stored_org)
+        except Exception:
+            # The heal is best-effort by contract; an escaping exception must
+            # not skip the refusal below and hand the walk a value we never
+            # checked.
+            _log.warning("github org heal failed", exc_info=True)
+            healed = stored_org
+        if healed and healed != stored_org:
+            _log_source_change(org_id, source, "enable", "healed_github_org")
+            gh_org = healed
+        if not gh_org or gh_org == org_id:
+            # Fail CLOSED on the leftover: an unhealed `None` (or an unhealed
+            # pre-#1845 UUID — `_heal_github_org` returns the stored value when
+            # its `GET /user` fails) would reach the walk as `f"{org}/{repo}"`
+            # over a value that is not a login.
+            _log_source_change(org_id, source, "enable",
+                               "refused_no_github_org")
+            return {
+                "error": (
+                    "GitHub org unknown for this team's stored credential and "
+                    "it could not be derived from the stored token. Nothing "
+                    "was started. Re-connect with "
+                    "tortoise_onboarding_github_connect."
+                )
+            }
+        kind = "docs" if source == "github_documents" else "github"
+        runner = _run_docs_indexing if kind == "docs" else _run_indexing
+        job_id, is_new = _start_index_job(org_id, kind=kind)
+        if is_new and not _spawn_index_runner(runner, job_id, org_id, gh_org,
+                                             None):
+            # Evict the claim we just minted: leaving it makes the ORG's next
+            # start (this tool, or POST /v1/index/*) a silent 30-minute no-op.
+            _INDEX_JOBS.pop(job_id, None)
+            _INDEX_JOB_OWNERS.pop(job_id, None)
+            _log_source_change(org_id, source, "enable", "error_spawn")
+            return {"error": ("The index job could not be started; nothing "
+                              "was left claimed. Retry.")}
+        if not current_on:
+            try:
+                _update_onboarding_state(org_id, _echo=False, **{flag: True})
+            except Exception:
+                # The walk IS running; saying nothing here would leave a source
+                # reported off while it indexes, with no outcome line at all.
+                _log.warning("source-management flag write failed",
+                             exc_info=True)
+                _log_source_change(org_id, source, "enable",
+                                   "error_flag_write")
+                return {
+                    "error": (
+                        "The index job started but the source's enable flag "
+                        "could not be written, so it will still read as "
+                        "off. Retry the enable."
+                    ),
+                    "job_id": job_id,
+                    "state": "started" if is_new else "reused",
+                }
+        _log_source_change(org_id, source, "enable", "ok")
+        return {
+            "source": source,
+            "scope": "source",
+            **_source_payload(spec, "enabled"),
+            "job_id": job_id,
+            # `started: false` read as "nothing is running" when it actually
+            # meant "an in-flight job was reused". Say which.
+            "state": "started" if is_new else "reused",
+        }
+
+    # agent_sessions — the #1927 optional off-switch (ENFORCED, unlike the
+    # GitHub intent flags: capture honours `session_recording`).
+    current_on = _flag_on(state, "session_recording")
+    if current_on is None:
+        _log_source_change(org_id, source,
+                           "enable" if enable else "disable",
+                           "refused_state_unavailable")
+        return {"error": (
+            "The team's onboarding state could not be read (graph "
+            "unavailable), so nothing was changed.")}
+    # `session_recording` defaults ON (#1927), so `current_on` alone does not say
+    # whether a session-recording WRITE has ever landed — `capture_revised` is
+    # that marker (both directions write it; there is no separate consent record
+    # and none should be invented, SKILL §5). Short-circuiting on `current_on`
+    # alone skipped the write on a fresh install, where the default is already
+    # on: the SKILL's yes-branch ("both write session_recording +
+    # capture_revised") silently became a no-op.
+    write_recorded = _state_get(state, "capture_revised") is True
+    if enable and current_on and write_recorded:
+        _log_source_change(org_id, source, "enable", "already_on")
+        return {
+            "source": source,
+            "scope": "source",
+            **_source_payload(spec, "already_on"),
+            "note": (
+                "Agent session recording is ON (#1927: an optional off-switch, "
+                "ToS-covered) and a recording-state write is already on record, "
+                "so nothing changed. Use action=\"disable\" to stop it."
+            ),
+        }
+    if not enable and not current_on:
+        # Symmetry with the GitHub branch: repeating a switch that is already
+        # off does not write (and does not pay the projection round trip).
+        _log_source_change(org_id, source, "disable", "already_off")
+        return {"source": source, "scope": "source",
+                **_source_payload(spec, "already_off")}
+    _log_source_change(org_id, source,
+                       "enable" if enable else "disable", "attempt")
+    try:
+        _update_onboarding_state(org_id, _echo=False, session_recording=enable,
+                                 capture_revised=True)
+    except Exception:
+        _log.warning("source-management flag write failed", exc_info=True)
+        _log_source_change(org_id, source,
+                           "enable" if enable else "disable",
+                           "error_flag_write")
+        return {"error": (
+            "The source's recording flag could not be written; nothing "
+            "changed. Retry.")}
+    _log_source_change(org_id, source,
+                       "enable" if enable else "disable", "ok")
+    return {"source": source, "scope": "source",
+            **_source_payload(spec, "enabled" if enable else "disabled")}
+
+
+def tortoise_manage_sources(action: str,
+                            source: str | None = None) -> dict:
+    """One consolidated operation over the team's memory sources (#3540).
+
+    Ruling B: the assistant may configure the system itself, assuming it has
+    permission. `action`: list | enable | disable. `source`: github_issues |
+    github_documents | agent_sessions (required for enable/disable).
+
+    - list      → every source with its state and its default, one call.
+    - enable    → start the source (GitHub: start that source's index job).
+    - disable   → switch that ONE source off. GitHub: records the per-source
+                  enable intent (`issues_enabled` / `docs_enabled`, #1924) and
+                  leaves the shared CONNECTION and the sibling source intact;
+                  the payload reports `enforcement: "intent-only"` because
+                  nothing server-side honours the flag yet. Agent sessions:
+                  the #1927 off-switch.
+
+    This REPLACES `tortoise_onboarding_github_index` and
+    `tortoise_onboarding_session_recording`, which are retired (#3883): they
+    still resolve and name this call. Retirement hides and redirects the NAME —
+    it does not rewrite the call, so those two names still serve their LEGACY
+    bodies for this release. With the GitHub flag being intent-only (nothing
+    server-side reads it yet) that residual cannot be closed from here; the
+    honest statement is that a `disable` records intent and does not cancel an
+    index run, whether it arrives through this tool or an old name.
+    `tortoise_onboarding_github_connect` is deliberately NOT folded in — it is
+    the OAuth handshake, and credentials must never pass through the model.
+    """
+    # C5 #2114 parity: this writes ORG-level state, so a graph-bound key is
+    # rejected rather than allowed to reconfigure the org from inside a graph.
+    _reject_graph_bound_mcp_org_surface("manage sources")
+    org_id = _current_org_id.get()
+    if org_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+
+    act = (action or "").strip().lower()
+    if act == "list":
+        return _sources_view()
+    if act not in ("enable", "disable"):
+        # A refusal is an ATTEMPT too (attributability): it is logged, not just
+        # returned, so a caller probing for a write path leaves a record.
+        _log_source_change(org_id, source or "?", str(action), "refused_action")
+        return {
+            "error": f"action must be one of list|enable|disable; got {action!r}"
+        }
+    if source not in _SOURCE_ROSTER:
+        _log_source_change(org_id, str(source), act, "refused_source")
+        return {
+            "error": (
+                f"source must be one of {sorted(_SOURCE_ROSTER)}; got {source!r}"
+            )
+        }
+    return _set_source_state(source, act == "enable")
 
 
 def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
@@ -4860,7 +5438,6 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     org_id = _current_org_id.get()
     if org_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    import asyncio as _asyncio
 
     from tortoise.hosted_api import (
         _github_token_enc,
@@ -4882,19 +5459,22 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     # the org is reused AND the run is spawned ONLY when the job was
     # freshly minted (never two concurrent walks on one job).
     job_id, is_new = _start_index_job(org_id)
-    if is_new:
-        try:
-            # #1845: _run_indexing now takes a repo LIST (None = all). The
-            # MCP tool's single optional repo is wrapped into a one-item
-            # list through the same allowlist validator as the REST
-            # re-poll — a bare str would be iterated character-by-character
-            # by the new list contract (regression caught in review).
-            _asyncio.get_event_loop().create_task(
-                _run_indexing(job_id, org_id, org,
-                              _validate_repo_scope([repo] if repo else None)))
-        except RuntimeError:
-            return {"error": "No running event loop"}
-    return {"job_id": job_id, "status": "started"}
+    if is_new and not _spawn_index_runner(
+            # #1845: `_run_indexing` takes a repo LIST (None = all); the single
+            # optional repo is wrapped into a one-item list through the same
+            # allowlist validator as the REST re-poll — a bare str would be
+            # iterated character-by-character by the list contract.
+            _run_indexing, job_id, org_id, org,
+            _validate_repo_scope([repo] if repo else None)):
+        # Never leave the minted claim behind: it would make the org's next
+        # start a silent 30-minute no-op.
+        from tortoise.hosted_api import _INDEX_JOB_OWNERS, _INDEX_JOBS
+        _INDEX_JOBS.pop(job_id, None)
+        _INDEX_JOB_OWNERS.pop(job_id, None)
+        return {"error": ("The index job could not be started; nothing was "
+                          "left claimed. Retry.")}
+    return {"job_id": job_id, "status": "started",
+            "state": "started" if is_new else "reused"}
 
 
 # ── HTTP Streamable transport (#236) ─────────────────────────────

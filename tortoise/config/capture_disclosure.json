@@ -18,7 +18,7 @@
     "companion_key": "capture_revised",
     "default_on": true,
     "off_switch_effect": "while it is off the server refuses new files with a 409, so nothing new is recorded",
-    "mcp_tool": "tortoise_onboarding_session_recording",
+    "mcp_tool": "tortoise_manage_sources(action=\"enable\" or \"disable\", source=\"agent_sessions\")",
     "rest": "PATCH /v1/onboarding/state",
     "install_probe_key_template": "install_probe_{harness}"
   },
