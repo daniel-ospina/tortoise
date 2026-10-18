@@ -1187,3 +1187,151 @@ def test_a_rebuild_abort_on_the_create_document_link_source_is_retried(tmp_path)
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+# ── 7. #7357 — an exhausted graph swap must not READ as data loss ────────────
+#
+# The engine's sentence for the graph-abort family is one string for several
+# realities ("graph was deleted or replaced while the query was running"), and
+# on the measured outages (#7357) the common reality was a SWAP the retry could
+# not outlast — a restart/reload, a rebuild, or the engine evicting the graph
+# from its 25-entry cache — while the graph key was still present and the data
+# intact. Read raw, that sentence sends a caller hunting a rebuild on a healthy
+# graph (measured: a lane asked the owner to authorise a destructive rebuild on
+# the strength of it). These tests pin the appended diagnosis, its allow-list,
+# and — the safety half — that a DELETION is never told a retry is safe.
+
+
+def _explain(exc, present):
+    from tortoise.retry import explain_graph_abort
+    return explain_graph_abort(exc, graph_present=present, attempts=4)
+
+
+def test_the_swap_diagnosis_keeps_the_engine_sentence_first_and_classifiable():
+    """The suffix is APPENDED, so the ``\\A``-anchored classifier still fires.
+
+    The retry predicate, ``graph_abort_family`` and the SDK's own re-issue gate
+    all read the message through ``_abort_arm``, whose patterns are anchored at
+    position 0. A prefix (or a rewrite) would silently un-classify the error —
+    and a caller that re-raises an explained error through another retry layer
+    would then re-issue a bare ``CREATE`` it may not re-issue.
+    """
+    from tortoise.retry import graph_abort_family, retryable_aborted_write
+
+    explained = _explain(redis_exc.ResponseError(_DELETED_OR_REPLACED), True)
+    assert explained is not None, "the graph-swap family must be explained"
+    assert explained.startswith(_DELETED_OR_REPLACED), (
+        "the engine's own sentence must stay at position 0")
+    assert "graph key is still present" in explained, (
+        "the note must say the graph was not deleted")
+    assert "retrying is safe" in explained
+
+    again = redis_exc.ResponseError(explained)
+    assert graph_abort_family(again) is True, (
+        "an explained abort must still classify into its own family")
+    assert retryable_aborted_write(again, graph_exists=lambda: True) is True
+
+
+def test_the_swap_diagnosis_is_an_allow_list_and_is_applied_once():
+    """Only the graph-swap family is rewritten, and only once.
+
+    ``WRONGTYPE`` and a transport timeout are DIFFERENT realities (a
+    deterministic bug; a lost reply) whose own text is already accurate, and two
+    nested retry layers must not grow two suffixes.
+    """
+    assert _explain(
+        redis_exc.ResponseError(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"),
+        True) is None
+    assert _explain(
+        redis_exc.TimeoutError("Timeout reading from socket"), True) is None
+    assert _explain(OSError("boom"), True) is None
+
+    once = _explain(redis_exc.ResponseError(_DELETED_OR_REPLACED), True)
+    assert once is not None
+    assert _explain(redis_exc.ResponseError(once), True) is None, (
+        "an already-explained abort must never be explained again")
+
+
+def test_the_swap_diagnosis_never_promises_a_safe_retry_on_a_gone_or_unknown_graph():
+    """The two branches where "your data is intact — retry" would be a LIE.
+
+    An ABSENT key is a deletion: a re-issued bare ``CREATE`` lands in a graph
+    FalkorDB auto-creates EMPTY, which is the #6666 silent-success class — so
+    the note must refuse the retry. An UNANSWERABLE probe is an unresponsive
+    instance: claiming either outcome would be a guess.
+    """
+    absent = _explain(redis_exc.ResponseError(_DELETED_OR_REPLACED), False)
+    assert absent is not None
+    assert "ABSENT" in absent and "deletion" in absent
+    assert "retrying is safe" not in absent, (
+        "a deleted graph must never be advertised as safe to retry")
+    assert "Restore the graph" in absent
+
+    unknown = _explain(redis_exc.ResponseError(_DELETED_OR_REPLACED), None)
+    assert unknown is not None
+    assert "UNKNOWN" in unknown and "not answering" in unknown
+    assert "retrying is safe" not in unknown
+    assert "restore" not in unknown.lower()
+
+
+def test_an_exhausted_swap_surfaces_the_legible_diagnosis_with_the_same_type(
+        tmp_path, monkeypatch):
+    """End to end through the SDK write funnel, with the graph still PRESENT.
+
+    This is the measured shape: the graph exists, its data is intact, and the
+    write refuses repeatedly. The caller must receive the engine's own error
+    TYPE (``_classify_db_failure`` buckets by type) carrying a message that
+    names the swap and says a retry is safe.
+    """
+    import types
+
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "legible")
+    try:
+        pid = sdk.create_point("evidence", "a claim to delete")["id"]
+        proj, proxy = _abort_once(sdk, _DELETE_POINT_NEEDLE)
+        proxy._aborts = 99  # never heals — the exhaustion arm
+        try:
+            with pytest.raises(redis_exc.ResponseError) as caught:
+                sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+        text = str(caught.value)
+        from tortoise.retry import _LEGIBLE_OPENER
+        assert text.startswith(_DELETED_OR_REPLACED), (
+            "the surfaced error must still BE the engine's abort, not a wrapper")
+        assert _LEGIBLE_OPENER in text, (
+            "an exhausted graph swap must not surface the bare engine sentence")
+        assert "graph key is still present" in text
+        assert "retrying is safe" in text
+        assert proxy.matching >= 3, (
+            "the diagnosis belongs to the EXHAUSTED arm, after re-issues")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_deletion_abort_is_never_given_the_retry_safety_note(tmp_path):
+    """The loud arm's message is untouched: it is ALREADY accurate.
+
+    A key that is absent is a real deletion, the one case where the engine's
+    sentence is literally true, and the predicate refuses on the FIRST abort —
+    so no diagnosis may be appended and nothing may claim a retry is safe.
+    """
+    sdk = _sdk(tmp_path, "legibledeleted")
+    try:
+        pid = sdk.create_point("evidence", "a claim to delete")["id"]
+        proj, proxy = _abort_once(sdk, _DELETE_POINT_NEEDLE, present=False)
+        try:
+            with pytest.raises(redis_exc.ResponseError) as caught:
+                sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+        assert str(caught.value) == _DELETED_OR_REPLACED, (
+            "a deletion must surface the engine sentence untouched")
+        assert proxy.applied == 0, "a deleted graph must not be re-issued into"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
