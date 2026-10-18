@@ -33,6 +33,10 @@
 //                the card the user just read.
 //   complete?  — `setupGuide`'s collapse verdict (server-owned node `status`,
 //                or the grandfathered wire flag) → the done step.
+//   graph?     — (#4628) main.jsx's `overviewGraphMissing`: `graph_ready ===
+//                false` with no points. A FLOW verdict cannot speak for the
+//                graph, so a collapsed/connected Organization with no graph
+//                resumes at CONNECT, never at DONE — see the block in the body.
 //
 // WHY THE CARD CAN SAY "next: Connect your agent" WHILE THIS LANDS ON THE FORK
 // CARD: `setupGuide` treats a never-chosen fork as the read-time 'self'
@@ -67,17 +71,53 @@ export const RESUME_STEP_DONE = 4
  *
  * @param {object|null|undefined} state the MERGED onboarding projection
  *   (GET /v1/onboarding/state — jsonb operational keys + graph FLOW keys).
- * @param {{hasOrg?: boolean}} [opts] `hasOrg` is the caller's client fact
- *   (main.jsx `welcomeHasOrg`): does the account hold an Organization?
+ * @param {{hasOrg?: boolean, graphMissing?: boolean}} [opts] `hasOrg` is the
+ *   caller's client fact (main.jsx `welcomeHasOrg`): does the account hold an
+ *   Organization? `graphMissing` is the OTHER server fact this derivation cannot
+ *   read from the projection — whether the Organization's graph exists at all
+ *   (main.jsx `overviewGraphMissing`: `graph_ready === false` with no points).
+ *   See "#4628" below for why it outranks the projection's complete verdict.
  * @returns {number} 0..4, always a real step (never null/NaN) so the caller can
  *   set `wizardStep` unconditionally.
  */
-export function resumeStep(state, { hasOrg = false } = {}) {
+export function resumeStep(state, { hasOrg = false, graphMissing = false } = {}) {
   // No Organization ⇒ nothing to resume. A first-timer's ONLY door is
   // org-create, and the projection is legitimately absent until it is called.
   if (!hasOrg) return RESUME_STEP_ORG_CREATE
 
   const g = setupGuide(state)
+
+  // #4628 — the GRAPH fact outranks the FLOW verdict.
+  //
+  // `collapsed` / `status === 'complete'` are verdicts about the FLOW: the
+  // server's `status` node, or the legacy jsonb `onboarding_complete` flag. They
+  // are satisfied by an Organization whose onboarding ran and whose GRAPH DOES
+  // NOT EXIST — a deleted graph, or a flag set without a graph ever being
+  // created — which is exactly the state the Overview's graph-missing card
+  // renders (`graph_ready === false`, no points). Landing such a user on DONE
+  // names no working next step: the done screen's only Back control reaches
+  // data-sources (index 3), never connect, and its body can only report that it
+  // cannot tell the connection happened. The remaining work is the CONNECT step
+  // — the step whose write creates the graph, whose key gate offers paste and
+  // the key-less connectors, and which is therefore the destination the API
+  // Keys tab's own copy names ("Paste an existing key into the setup step to
+  // connect an agent").
+  //
+  // Precedence, stated because it is the decision: (1) no Organization, then
+  // (2) the once-per-org fork question — it is what decides what the connect
+  // step OFFERS, and skipping it would leave `wizardFork` on its untouched
+  // default — then (3) the graph fact, which overrides both DONE verdicts
+  // (collapsed/complete AND 'connected'), because neither describes the graph.
+  // A degraded projection ('loading'/'unavailable') also lands here rather than
+  // on the fail-honest org-create step: unlike the projection, `graph_ready` IS
+  // a measurement of the thing the step is about.
+  if (graphMissing === true) {
+    if (state && !state.compact && forkStepState(state.fork) === 'ask') {
+      return RESUME_STEP_FORK
+    }
+    return RESUME_STEP_CONNECT
+  }
+
   // Collapsed: the flow is finished (node status 'complete', or a
   // grandfathered Organization whose jsonb flag closed it). The remaining
   // wizard step is the done screen.

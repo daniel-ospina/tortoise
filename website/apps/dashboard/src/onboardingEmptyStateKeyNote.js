@@ -256,9 +256,10 @@ export function ownerKeyLive(connectGateMode) {
 //     else is accepted as a live-key signal (not the in-memory `snippetKey`,
 //     which survives its own row being revoked or rotated).
 //
-//   keyTabAffordance({ snippetKey, connectGate }) — whether the re-entry card's
-//     API Keys button renders: `!snippetKey || !keyIsLive`, i.e. the gate decides
-//     it whenever the in-memory reveal is truthy. The owner MINT clause names
+//   keyTabAffordance({ snippetKey, connectGate, isOwnerAdmin }) — whether the
+//     re-entry card's API Keys button renders: `isOwnerAdmin === true &&
+//     (!snippetKey || !keyIsLive)`, i.e. the gate decides it whenever the
+//     in-memory reveal is truthy. The owner MINT clause names
 //     that tab, and the button must be there whenever the gate holds no usable
 //     key, INCLUDING the stale-reveal case (`snippetKey` truthy, the gate says
 //     'mint'), where the old inline `!snippetKey` gate withheld it in the same
@@ -270,6 +271,18 @@ export function ownerKeyLive(connectGateMode) {
 //     unresolved modes' clauses describe the read instead — so this is a
 //     superset: the affordance is the first-party surface there too, and the
 //     wizard is where the key state resolves.)
+//
+//     #4628: the ROLE conjunct. The API Keys tab is an owner/admin surface (the
+//     create/rotate form is `isOwnerAdmin`-only and `POST /v1/team/keys` is
+//     `_require_owner_admin`), and only the OWNER arms' copy ever names it — the
+//     member arms route to the setup step (`ASK_FOR_A_KEY` / the key-less
+//     clause). Handing a member a control whose destination's own copy says
+//     "Only owners and admins can create or rotate keys in this dashboard" is
+//     the dead end #4628 was filed for (there it was the graph-missing card's
+//     PRIMARY action; this is the same role-blind affordance on the sibling
+//     card). Strict `=== true`, this module's convention: a caller that omits
+//     the role withholds the owner-only control rather than promising it, and
+//     the card's primary action is a door that works for every role.
 //
 // main.jsx supplies the inputs and spreads/applies the result — it holds no
 // branch of its own for either fact, so there is no second decision site to
@@ -283,8 +296,8 @@ export function ownerCardProps({ variant, isBuildFork, connectGate }) {
   }
 }
 
-export function keyTabAffordance({ snippetKey, connectGate }) {
-  return !snippetKey || !ownerKeyLive(connectGate.mode)
+export function keyTabAffordance({ snippetKey, connectGate, isOwnerAdmin }) {
+  return isOwnerAdmin === true && (!snippetKey || !ownerKeyLive(connectGate.mode))
 }
 
 // The key-live lead-in, fork-aware the same way the shared lead-ins are: the

@@ -7902,6 +7902,13 @@ function claimIntentInFlight() {
   // When it shows, the legacy empty-state cards hide.
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
+  // #4628: ONE derivation of "this Organization has no graph yet" — the fact the
+  // Overview's graph-missing card renders from AND the fact the resume door needs
+  // (a collapsed/complete FLOW verdict cannot name a next step when there is no
+  // graph to connect to; see `resumeStep`'s #4628 block). Both read THIS value, so
+  // the card and the door cannot disagree about whether the graph exists.
+  const overviewGraphMissing =
+    !!team && team.graph_ready === false && (team.point_count ?? 0) === 0
   // The build-fork re-entry lead-in is used by BOTH re-entry arms (existing-key
   // and no-key) — one literal, so they cannot drift. #4637: it now lives in
   // `onboardingEmptyStateKeyNote.js` beside the notes (and the owner arms) that
@@ -7975,7 +7982,11 @@ function claimIntentInFlight() {
   // The step is computed from the SAME `onboarding` value the Setup-guide card
   // renders, so the landing always agrees with the N-of-4 the user just read —
   // no second store, no persisted client step (DM-1 keeps the completed-step
-  // edges canonical).
+  // edges canonical). #4628 adds ONE more input, and it is not a client step: the
+  // GRAPH fact (`overviewGraphMissing`), because a FLOW verdict cannot speak for
+  // the graph. An Organization whose onboarding ran but whose graph does not
+  // exist resumes at CONNECT rather than DONE — the step whose write creates the
+  // graph; see `resumeStep`'s #4628 block for the precedence.
   //
   // `onboardingRefreshedAtDoneRef` is reset on entry so the existing
   // step-3 landing refresh re-reads the server projection on this visit (its
@@ -7983,7 +7994,7 @@ function claimIntentInFlight() {
   function openResumeWizard() {
     setWizardPaused(false)
     onboardingRefreshedAtDoneRef.current = false
-    setWizardStep(resumeStep(onboarding, { hasOrg: welcomeHasOrg }))
+    setWizardStep(resumeStep(onboarding, { hasOrg: welcomeHasOrg, graphMissing: overviewGraphMissing }))
     setWelcomeMode(true)
   }
 
@@ -10143,7 +10154,7 @@ function claimIntentInFlight() {
               <button className="btn-primary" onClick={openResumeWizard}>
                 Continue setup →
               </button>
-              {keyTabAffordance({ snippetKey, connectGate }) && (
+              {keyTabAffordance({ snippetKey, connectGate, isOwnerAdmin }) && (
                 // #4637: the gate, not `snippetKey`, decides this affordance too
                 // — `keyTabAffordance` (note module) is the one derivation, and
                 // its verdict is executed by the note module's tests. The owner
@@ -10154,6 +10165,13 @@ function claimIntentInFlight() {
                 // render that told the owner to go there. The `!snippetKey` half is kept so the
                 // pre-existing affordance for a key-less organization is
                 // unchanged.
+                // #4628: the tab is an OWNER/ADMIN surface (POST /v1/team/keys
+                // is `_require_owner_admin`) and only the owner arms' copy
+                // names it — the member arms route to the setup step instead
+                // (`MemberEmptyStateKeyNote`). So the role is a conjunct: a
+                // member is never handed a control whose destination refuses
+                // them. The card's primary — `Continue setup →` above — is
+                // every role's working destination.
                 <button type="button" className="ghost" onClick={() => setTab('keys')}>
                   Go to API Keys →
                 </button>
@@ -10161,7 +10179,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && !showReentryCard && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && !showReentryCard && overviewGraphMissing && (
           // #1591 (UX design): a clear first-data card — plain copy, a
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
@@ -10237,8 +10255,23 @@ function claimIntentInFlight() {
                   BUILD fork renders no such route at all. The action set is a
                   component (overviewEmptyAction.js), derived from the same
                   `isBuildFork` the notes consume, so a build-fork organization
-                  is offered the SDK route its own step 2 offers. */}
-              <GraphMissingEmptyStateActions buildFork={isBuildFork} onGoToKeys={() => setTab('keys')} />
+                  is offered the SDK route its own step 2 offers.
+                  #4628: the PRIMARY action is role-derived. `Go to API Keys →`
+                  is owner/admin-only (POST /v1/team/keys is
+                  `_require_owner_admin`, and the tab's copy tells a key-less
+                  member to "paste an existing key into the setup step") — a
+                  member has no key to paste and cannot create one, so sending
+                  them there was a dead end. A member's primary opens THAT step
+                  (`openResumeWizard`, the #2005 resume door, which
+                  `resumeStep` resolves to CONNECT for this card's state —
+                  `overviewGraphMissing` — rather than DONE) and the previous
+                  API Keys button is not rendered at all. */}
+              <GraphMissingEmptyStateActions
+                buildFork={isBuildFork}
+                isOwnerAdmin={isOwnerAdmin}
+                onGoToKeys={() => setTab('keys')}
+                onContinueSetup={openResumeWizard}
+              />
             </div>
           </section>
         )}
