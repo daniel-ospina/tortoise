@@ -2,8 +2,13 @@
 
 Tests the plan §5.2 checks 1-8 as consumed by BOTH `_validate_bundle` (Phase
 1 — collecting ALL violations, zero mutation) and ingest()'s Phase-2
-defense-in-depth raises. The key indicator: **Phase 1 catches EVERY violation
-class Phase 2 can raise** (the parity test) — zero Phase-2-only raise classes.
+defense-in-depth raises. The key indicator: **every violation class the shared
+checks own is caught by Phase 1 too** (the parity test) — no Phase-2-only class
+among THEM. It is not a universal: the `_sanitize_props` reject set beyond the
+keys the ingest gate owns (an ENTITY item's caller-supplied `id`, the belief
+props `credibility`/`ep_alpha`/`ep_beta`/`baseline_set`/`baseline_source`)
+passes Phase 1 and raises mid-write — that is #8755, and it is why the wording
+above is "the classes these checks own" rather than "every class".
 
 CYCLE-25 amendments covered: pointKind vocabulary (statement canonical, legacy
 write-compat, `event` REJECTED, kind-absent → statement), quote ≤200 permitted,
@@ -76,12 +81,14 @@ def _points_pair(refs=("pA", "pB"), contents=("A implies B", "B")):
 # ── Phase-1/2 parity (issue #1047 indicator 2) ──────────────────────
 
 class TestPhase1Phase2Parity:
-    """Every violation class Phase 2 (mid-write raises) can raise must ALSO
-    be caught by Phase 1 (_validate_bundle) — zero Phase-2-only classes.
+    """Every violation class these shared checks own must ALSO be caught by
+    Phase 1 (_validate_bundle) — no Phase-2-only class among them.
 
     Parity holds by construction (both phases consume the same shared check
     helpers with the same message shapes); this test pins it against
-    regression by exercising each class through BOTH surfaces."""
+    regression by exercising each class through BOTH surfaces. The classes the
+    helpers do NOT own (#8755's `_sanitize_props` reject set) are outside this
+    claim by design, not by oversight."""
 
     def _assert_both_phases(self, sdk, bundle, *, promotion_policy="gated"):
         viols = sdk._validate_bundle(bundle, promotion_policy=promotion_policy)
@@ -417,7 +424,8 @@ class TestE2E1Matrix:
             joined = "\n".join(messages)
             assert any("does not exist" in m for m in messages), joined       # c1
             assert any("SUPPORTS" in m for m in messages), joined             # c2
-            assert any("must be a plain Point" in m for m in messages), joined  # c3/c4/c5
+            assert any("must be a Point/Subject/Object/Event endpoint — got a"
+                       in m for m in messages), joined  # c3/c4/c5
             assert any("multi-item 'to'" in m for m in messages), joined      # c7
             # zero mutations — only the pre-seeded Source exists
             assert _point_count(sdk) == 0
@@ -770,3 +778,117 @@ class TestTerminalStatusGuard:
         # both are hash-less; the guard stays on the safe side
         assert sdk._find_terminal_dedup_hit(
             "same content", "statement") == term["id"]
+
+
+# ── Server-managed keys are read at the write DOOR's fold depth (#7925 r5) ──
+#
+# `_coerce_props` folds one nested `props` map per application and a door may
+# apply it twice (points: `create_point` + the dedup relay into `update_point`;
+# subject/object/event: `create_*` + `create_entity`), while `document` folds
+# once. A reader pinned to the TOP LEVEL let a single-wrapped spelling reach
+# `_sanitize_props`, which raised in step 2/3 with the earlier items already
+# committed (measured). Reading at the door depth closes that without
+# over-reading a `document` (one fold).
+
+@pytest.mark.parametrize("key,value", [("is_episodic", True),
+                                       ("sourceVersion", "v1")])
+def test_server_managed_key_is_refused_when_single_wrapped(sdk, key, value):
+    bundle = {"points": [{"kind": "statement", "content": "p-one"},
+                         {"kind": "statement", "content": "p-two",
+                          "props": {key: value}}]}
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any(key in m and "server-managed" in m for m in msgs), msgs
+    from tortoise.exceptions import BundleValidationError
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _point_count(sdk) == 0
+
+
+def test_server_managed_key_is_refused_on_an_entity_item_too(sdk):
+    bundle = {"points": [{"kind": "statement", "content": "e-one"}],
+              "entities": [{"type": "subject", "name": "S1",
+                            "props": {"is_episodic": True}}]}
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("is_episodic" in m for m in msgs), msgs
+    assert _point_count(sdk) == 0
+
+
+def test_server_managed_key_beyond_the_document_door_depth_is_not_over_read(sdk):
+    """A `document` item folds ONCE, so a level-2 spelling is invisible to the
+    writer — refusing it would over-reject a bundle the writer performs."""
+    deep = {"sources": [{"url": "https://x.example/s", "sourceKind": "report",
+                         "props": {"props": {"sourceVersion": "v1"}}}]}
+    assert sdk._validate_bundle(deep) == []
+    shallow = {"sources": [{"url": "https://x.example/s", "sourceKind": "report",
+                            "props": {"sourceVersion": "v1"}}]}
+    assert any("sourceVersion" in v["message"]
+               for v in sdk._validate_bundle(shallow))
+
+
+@pytest.mark.parametrize("key,value", [
+    ("is_episodic", True),
+    ("sourceVersion", "v1"),
+    ("__runId", "R"),
+    ("_merge_run_id", "R"),
+])
+def test_server_managed_key_is_refused_when_double_wrapped_on_a_point(
+        sdk, key, value):
+    """Every server-managed key this gate reads is read at the WRITE DOOR's fold
+    depth, so a `props: {props: {...}}` spelling is refused too.
+
+    The contract doc claimed these four were "still one level deep" — a residual
+    that did not exist (the writer runs `_coerce_props` twice on this door), and
+    the direction that matters: a reader told it is closed has no reason to
+    re-open it.
+    """
+    bundle = {"points": [{"kind": "statement", "content": "p-one"},
+                         {"kind": "statement", "content": "p-two",
+                          "props": {"props": {key: value}}}]}
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any(key in m and "server-managed" in m for m in msgs), msgs
+    with pytest.raises(ValueError):
+        sdk.ingest(bundle)
+    assert _point_count(sdk) == 0
+
+
+def test_entity_type_vocabulary_is_derived_from_one_map(sdk):
+    """Phase 1, Phase 2 and the writer dispatch on the SAME vocabulary.
+
+    `_ENTITY_ITEM_LABELS` is the declaration, the messages are built from it, and
+    every key it declares must have a step-3 writer branch — a key without one
+    would be accepted by Phase 1 and raise a raw ValueError in step 3, after
+    step 2's items committed. That second half is asserted directly (each key is
+    handed to `create_entity`), because a message-only check passes on a map
+    entry the writer cannot handle (measured).
+    """
+    from tortoise.sdk import _ENTITY_ITEM_LABELS
+
+    keys = list(_ENTITY_ITEM_LABELS)
+    bundle = {"entities": [{"type": "bogus", "name": "X"}]}
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("|".join(keys) in m for m in msgs), msgs
+    with pytest.raises(ValueError, match="|".join(keys)):
+        sdk.ingest(bundle)
+    with pytest.raises(ValueError) as exc:
+        sdk.create_entity("bogus", "X")
+    for key in keys:
+        assert key in str(exc.value), str(exc.value)
+        # every declared key must reach a writer branch: the "unknown type"
+        # messages are the only place a missing branch surfaces, so assert the
+        # call does not produce one
+        try:
+            sdk.create_entity(key, f"probe-{key}")
+        except ValueError as err:  # a writer refusal is fine; an unknown type is not
+            assert "unknown type" not in str(err), (key, str(err))
+        # …and ingest's STEP-3 dispatch must handle it too: a generic-writer
+        # branch does not prove the bundle path knows the type, and a type that
+        # only the generic writer knows raises in step 3 with step 2 committed.
+        item = {"ref": f"v-{key}", "type": key, "name": f"probe-{key}"}
+        if key == "event":
+            item["eventKind"] = "meeting"
+        if key == "document":
+            item["documentKind"] = "report"
+        try:
+            sdk.ingest({"entities": [item]})
+        except ValueError as err:
+            assert "type must be" not in str(err), (key, str(err))

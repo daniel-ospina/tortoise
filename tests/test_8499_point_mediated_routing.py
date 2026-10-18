@@ -24,7 +24,10 @@ an operator-less edge silently.
 
 The public ``create_direct_edge`` API is deliberately NOT gated: it is the
 explicit "I want an operator-less edge" surface, it is what the pre-gate graph
-was built with, and it is the only way to write ``Object↔Object``.
+was built with, and it is the only way to write ``Object↔Object``. #7925 made
+``ingest`` agree with it on the endpoint-label contract (the four epistemic
+labels), so the ONLY structure the ingest route changes is the Point-bearing
+one — the ruling's intent, applied on both write surfaces.
 """
 
 from __future__ import annotations
@@ -136,29 +139,41 @@ class TestEndpointKindGate:
 
 class TestObjectCarveOut:
     """Object↔Object keeps the direct (operator-less) shape — the ruling's
-    explicit carve-out. But NOT through ``ingest``.
+    explicit carve-out, and since #7925 it is REACHABLE THROUGH ``ingest``.
 
-    ⛔ ``ingest``'s endpoint contract is POINT-ONLY: ``_check_connection``
-    rejects any non-Point endpoint ("must be a plain Point — got a Object"),
-    with one carve-out for an Event on the operator route. So the direct branch
-    in the ingest connection loop cannot be reached today, and the Object
-    carve-out lives where it is actually used — ``create_edge`` /
-    ``create_direct_edge``. The branch is retained rather than deleted because
-    it is what keeps a FUTURE widening of that contract (the ruling
-    contemplates Object↔Object bundles) automatically correct instead of
-    silently operator-less.
+    #7925 aligned ingest's endpoint contract with the write primitives it
+    dispatches to: a plain IMPL/NAND connection whose endpoints carry no plain
+    ``:Point`` — Object↔Object, or any Subject/Object/Event pair — now passes
+    validation and reaches the direct branch in the ingest connection loop.
+    Before #7925 ``_check_endpoints`` gated that route on plain ``:Point``
+    ("must be a plain Point — got a Object"), so the carve-out lived only in
+    ``create_edge`` / ``create_direct_edge`` and the retained direct branch was
+    unreachable from ``ingest``. The endpoint-kind gate above is now what keeps
+    the structure correct: it is False for these pairs (no Point-bearing
+    endpoint), so they are written operator-less rather than reified.
     """
 
-    def test_ingest_refuses_object_endpoints(self, sdk):
-        """Why the Object carve-out is unreachable via ingest."""
-        from tortoise.exceptions import BundleValidationError
-
+    def test_ingest_accepts_object_endpoints(self, sdk):
+        """The Object carve-out survives the ingest surface: one operator-less
+        (Object)-[:IMPL]->(Object) edge, NO operator, NO reroute warning."""
         bundle = _objects_pair() | {"connections": [
             {"from": "oA", "to": "oB", "operator": "IMPL"},
         ]}
-        with pytest.raises(BundleValidationError) as ei:
-            sdk.ingest(bundle)
-        assert "must be a plain Point" in str(ei.value)
+        assert sdk._validate_bundle(bundle) == []
+        res = sdk.ingest(bundle)
+
+        assert res["created"]["connections"] == 1
+        assert _operator_count(sdk, "IMPL") == 0
+        assert _count(
+            sdk,
+            "MATCH (a:Object)-[r:IMPL]->(b:Object) "
+            "WHERE coalesce(a.is_operator,false)=false "
+            "AND coalesce(b.is_operator,false)=false RETURN count(r)",
+        ) == 1
+        # the gate must not claim an Object↔Object pair — no reification, and
+        # therefore no warning about one (the caller's spelling was honoured)
+        assert not [w for w in res["warnings"] if "point_mediated_route" in w], \
+            res["warnings"]
 
     def test_object_pair_keeps_the_direct_edge(self, sdk):
         """Object↔Object claims no epistemic weighting, so the direct edge is

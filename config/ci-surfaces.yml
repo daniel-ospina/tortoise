@@ -1087,6 +1087,7 @@ surfaces:
   # narrower, and the hook it pins lives in the read funnel every surface uses.
   - test_read_ledger.py
   - test_5509_name_keyed_identity_reads.py
+  - test_7925_route_parity.py
   # #8864: the shared-name MERGE-key guard — the write-side twin of #5509/#3633.
   # `_upsert_object`/`_upsert_subject` (tortoise/projection/entities.py) key the
   # MERGE on the NAME, so a name held by 2+ carriers made `ON MATCH` stamp ONE

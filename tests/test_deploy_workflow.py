@@ -1503,6 +1503,407 @@ class TestBillingReconcileDriverVerdicts:
             f"{expected} — {why}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
 
+    def test_the_shell_and_python_redactors_agree_on_one_corpus(self):
+        """#8904 review round 7: two redactors, one rule — or they drift.
+
+        The driver redacts the body in shell; the endpoint redacts the summary in
+        python. A shell rule without the python one's trailing boundary guard
+        ate the prefix of ordinary prose (``cus_balance_units`` became
+        ``<stripe-id>_units``) inside the very text ``show_body`` exists to make
+        readable — and nothing noticed, because only the python side was tested.
+        """
+        import subprocess
+
+        from tortoise import billing as bl
+
+        corpus = [
+            # ordinary prose that only LOOKS like an id
+            "cus_balance_units sub_balance_reported",
+            # real ids, bare and inside provider prose
+            "x cus_abc123def y sub_xyz789ghi z",
+            "stripe GET customers/cus_9f8e7d6c5b4a/subscriptions -> 404",
+            "no such customer: 'cus_9f8e7d6c5b4a'",
+        ]
+        script = _billing_steps()["Run billing reconcile pass"]["run"]
+        redactor = script[script.index("redact_once() {"):script.index("show_body() {")]
+        harness = (redactor +
+                   '\nwhile IFS= read -r line; do printf "%s\\n" "$line" '
+                   '| redact_stream; done\n')
+        proc = subprocess.run(
+            ["bash", "-c", harness], input="\n".join(corpus) + "\n",
+            capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        shell_lines = proc.stdout.splitlines()
+        assert len(shell_lines) == len(corpus), (
+            f"the shell redactor changed the line count:\n{proc.stdout}")
+
+        for line, shell_out in zip(corpus, shell_lines, strict=True):
+            py_out = bl._scrub_secrets(line)
+            if "_balance_" in line:
+                # Both sides must leave ordinary prose ALONE.
+                assert py_out == line, (
+                    f"the python redactor mangled prose: {line!r} -> {py_out!r}")
+                assert shell_out == line, (
+                    "the shell redactor mangled ordinary prose the python one "
+                    f"leaves intact: {line!r} -> {shell_out!r}")
+                continue
+            # Both sides must remove every real id.
+            for fragment in ("cus_abc123def", "cus_9f8e7d6c5b4a",
+                             "sub_xyz789ghi"):
+                assert fragment not in py_out, (fragment, py_out)
+                assert fragment not in shell_out, (fragment, shell_out)
+
+    def test_an_unrecognised_503_cannot_forge_a_workflow_command(self):
+        """#8904 review round 4: ``status`` is REMOTE data in a PUBLIC log.
+
+        The unrecognised-cause arm prints the response body's ``status`` so an
+        operator can see the shape of an unknown 503. Interpolated raw, a value
+        carrying a newline emits a SECOND line, and a line beginning
+        ``::error::`` is parsed by the runner as a workflow command — an
+        injected annotation from a response body. The value is redacted and
+        flattened before it is printed; this pins both halves.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        payload = json.dumps({"status": "evil\n::error::FORGED"})
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "workflow_dispatch",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert proc.returncode == 1, (
+            "an unrecognised 503 is a failed pass\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+        lines = proc.stdout.splitlines()
+        assert not any(ln.startswith("::error::FORGED") for ln in lines), (
+            "a newline in the response body forged a workflow command:\n"
+            f"{proc.stdout}")
+        assert "UNRECOGNISED" in proc.stdout, (
+            "the arm must still name the cause it could not match"
+            f"\n{proc.stdout}")
+
+    def test_the_public_log_never_carries_a_customer_org_id(self):
+        """#8904 review round 3: this repository's Actions log is PUBLIC.
+
+        A bare UUID shape matches NEITHER id this fleet mints — hosted orgs are
+        ``uuid4().hex[:26]`` (26 hex, no dashes) and registry orgs are
+        ``ulid()`` = ``<hex-ts>-<12hex>``. The ids reach the log inside the
+        provider's own prose (``no organizations row matched id='<id>'``), not
+        only in the ``org_id`` key, so a key-only filter publishes them anyway.
+        Both real shapes are exercised, and the fingerprints must DIFFER —
+        hashing a value an earlier redaction already replaced collapses every
+        org onto one fingerprint and kills the correlation it exists for.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        hosted = "f69f0773cfa54c62b900c13c6a"
+        registry = "0006553f0ff-0123456789ab"
+        # A registry id that is NOT any row's own ``org_id``: only the SHAPE
+        # rules can catch this one, so it proves the net, not the by-value pass.
+        other_ulid = "0006559a1ff-aaaabbbbcccc"
+        payload = json.dumps(_billing_case(
+            unchanged=0,
+            failed=[
+                {"org_id": hosted,
+                 "error": "RuntimeError: update_org_billing: no organizations "
+                          f"row matched id='{hosted}' (also saw {other_ulid})"},
+                {"org_id": registry,
+                 "error": f"BillingError: reconcile_org: org '{registry}' "
+                          "not found"},
+            ],
+        ))
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "schedule",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        emitted = proc.stdout + proc.stderr
+        assert proc.returncode == 1, f"a failed row must red the run: {emitted}"
+        for label, raw in (("hosted", hosted), ("registry", registry),
+                           ("other registry", other_ulid)):
+            assert raw not in emitted, (
+                f"the {label} org id reached the PUBLIC log unredacted:\n{emitted}"
+            )
+        fingerprints = set(re.findall(r"org-[0-9a-f]{10}", emitted))
+        assert len(fingerprints) == 2, (
+            "the two orgs must keep DISTINCT fingerprints, or the log cannot "
+            "correlate a row across runs"
+        )
+
+    def test_a_body_cannot_forge_a_workflow_annotation(self):
+        """#8904 review P2: a PAYLOAD line must not become a workflow command.
+
+        ``show_body`` printed the response body line by line, so a body
+        containing a newline followed by ``::error::`` emitted a real GitHub
+        annotation from this arm — the payload writing the run's diagnostics.
+        The text must still be shown (it is the operator's only evidence on a
+        non-200), so the fix indents every line instead of stripping it; the
+        test asserts the forged line is inert rather than absent.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        forged = "::error::FORGED-BY-PAYLOAD billing is fine"
+        # A RAW newline, NOT json.dumps: the encoder escapes a newline to the two
+        # characters ``\n``, so an encoded payload cannot forge anything and this
+        # test passed with AND without the fix (measured). The body is what the
+        # driver prints, so it is passed through byte-faithfully here.
+        payload = b"reconcile_stuck\n" + forged.encode() + b"\n"
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "schedule",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        emitted = proc.stdout + proc.stderr
+        assert "FORGED-BY-PAYLOAD" in emitted, (
+            "the body text is the operator's evidence and must still be shown:\n"
+            f"{emitted}")
+        for line in emitted.splitlines():
+            assert not line.startswith("::error::FORGED-BY-PAYLOAD"), (
+                "a payload line was emitted as a workflow annotation:\n"
+                f"{emitted}")
+
+    def test_a_reshaped_summary_counter_fails_closed_and_cannot_forge(self):
+        """#8904 review P2: the 200 arm printed payload scalars RAW.
+
+        `checked` went into the summary and was compared with `== 0` without a
+        type check, so a string count printed as-is and skipped the empty-fleet
+        warning — a reshaped response passed as a clean pass. A value carrying a
+        newline could also emit a real workflow command from THIS printer, the
+        forgery `show_body` indents away. Counters are now required to be plain
+        integers, and anything else — non-numeric, float-shaped, negative — fails
+        closed rather than being reinterpreted.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        def _run(summary):
+            body = json.dumps(summary).encode()
+
+            class _Handler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    n = int(self.headers.get("Content-Length") or 0)
+                    if n:
+                        self.rfile.read(n)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *a):
+                    pass
+
+            srv = HTTPServer(("127.0.0.1", 0), _Handler)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                step = _billing_steps()["Run billing reconcile pass"]["run"]
+                proc = subprocess.run(
+                    ["bash", "-c", step],
+                    env={
+                        "PATH": "/usr/local/bin:/usr/bin:/bin",
+                        "INTERNAL_API_URL": f"http://127.0.0.1:{srv.server_port}",
+                        "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                        "HOME": "/tmp",
+                        "EVENT_NAME": "schedule",
+                    },
+                    capture_output=True, text=True, timeout=120,
+                )
+            finally:
+                srv.shutdown()
+                srv.server_close()
+            return proc, proc.stdout + proc.stderr
+
+        base = {"checked": 1, "repaired": 0, "unchanged": 0, "unverified": 0,
+                "skipped": 0, "drift": [], "failed": [], "unrepaired": [],
+                "alerted": 0}
+
+        # A non-numeric counter must fail the run, not pass as a clean one.
+        proc, out = _run({**base, "checked": "lots"})
+        assert proc.returncode == 1, f"a reshaped counter passed: {out}"
+        assert "checked" in out and "not an integer" in out, out
+
+        # A float/negative-shaped counter must NOT be reinterpreted: filtering
+        # digits would turn 2.0 into 20 and -3 into 3 (measured), a silent 10x
+        # on a green pass.
+        for bad in (2.0, -3):
+            proc, out = _run({**base, "checked": bad})
+            assert proc.returncode == 1, (
+                f"a non-integer counter {bad!r} passed as a clean count: {out}")
+            assert "checked=" not in out, out
+
+        # A newline inside a counter must not become a workflow command.
+        proc, out = _run({**base, "unverified": "1\n::error::FORGED-BY-PAYLOAD"})
+        for line in out.splitlines():
+            assert not line.startswith("::error::FORGED-BY-PAYLOAD"), out
+
+    def test_a_wedged_reconcile_is_named_stuck_not_enumeration_incomplete(self):
+        """#8904 round 4: the two named 503 statuses want OPPOSITE responses.
+
+        A wedged lock was paged as "the control plane is unreadable, retry once
+        it is readable" — a cause that clears itself — while the real cause (a
+        dead pass holding the lock until the process restarts) went unsaid, so
+        the operator retries forever. The body also carries ids on the non-200
+        path, through a shell redactor whose boundary classes consume their own
+        delimiter: two adjacent ids on one line used to leave the second raw.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        first = "f69f0773cfa54c62b900c13c6a"
+        second = "aaaabbbbccccddddeeeeffff11"
+        # A registry ULID on the NON-200 path, which only the shell shape rule
+        # can redact (no row is about it, so the by-value pass cannot help).
+        registry = "0006559a1ff-aaaabbbbcccc"
+        payload = json.dumps({
+            "status": "reconcile_stuck",
+            "detail": f"a previous pass is wedged (orgs {first},{second},{registry})",
+        })
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "schedule",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        emitted = proc.stdout + proc.stderr
+        assert proc.returncode == 1, emitted
+        # Assert on the MESSAGE, not the token: the body is printed by
+        # ``show_body`` in this same branch, so `reconcile_stuck` appears even
+        # when the naming branch is deleted. The misdiagnosis to kill is the
+        # ENUMERATION text — a cause that clears itself, sending the operator to
+        # retry forever — so its ABSENCE, and the STUCK wording, are the test.
+        assert "is STUCK" in emitted, (
+            f"a wedged pass must be NAMED as stuck, not reported as an "
+            f"unreadable control plane:\n{emitted}"
+        )
+        assert "enumeration_incomplete" not in emitted, (
+            f"a wedged pass was paged as an enumeration failure — the operator "
+            f"would retry a cause that never clears:\n{emitted}"
+        )
+        assert "retry once the control plane is readable" not in emitted, emitted
+        for raw in (first, second, registry):
+            assert raw not in emitted, (
+                f"{raw} reached the PUBLIC log through the non-200 body:\n{emitted}"
+            )
+
     def test_unset_secret_fails_before_calling_the_endpoint(self):
         """A missing INTERNAL_API_URL/FASTAPI_INTERNAL_KEY is a red run.
 
@@ -1553,6 +1954,173 @@ class TestBillingReconcileDriverVerdicts:
         assert "TELEGRAM_BOT_TOKEN" in env and "TELEGRAM_CHAT_ID" in env, (
             "the page step must bind both Telegram secrets in env: (#4361)"
         )
+
+
+#: The org-id shape this fleet ACTUALLY mints. ``_new_org_org_id`` and the
+#: Supabase control plane both use ``uuid.uuid4().hex[:26]``, and
+#: ``supabase/migrations/0006_teams.sql`` documents the column as
+#: ``ULID or 26-hex`` — never a hyphenated UUID. A redaction test written with a
+#: hyphenated UUID (or with ``"o1"``) exercises a shape no customer id has, and
+#: passes while every real id is published.
+_REAL_ORG_ID = "a1b2c3d4e5f6a7b8c9d0e1f2a3"
+_OTHER_ORG_ID = "41ed698615f8a7b6c5d4e3f2a1"
+_UUID_ORG_A = "550e8400-e29b-41d4-a716-446655440000"
+_UUID_ORG_B = "11111111-2222-3333-4444-555555555555"
+
+
+def _fingerprint(org_id: str) -> str:
+    import hashlib
+
+    return "org-" + hashlib.sha256(org_id.encode()).hexdigest()[:10]
+
+
+def _run_billing_driver(body, status: int = 200, trigger: str = "schedule"):
+    """Run the workflow's own reconcile step against a stub server."""
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = body if isinstance(body, str) else json.dumps(body)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        def log_message(self, *a):  # silence the default stderr trace
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_port
+        script = _billing_steps()["Run billing reconcile pass"]["run"]
+        return subprocess.run(
+            ["bash", "-c", script],
+            env={
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "INTERNAL_API_URL": f"http://127.0.0.1:{port}",
+                "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                "HOME": "/tmp",
+                "EVENT_NAME": trigger,
+            },
+            capture_output=True, text=True, timeout=120,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class TestBillingReconcileLogRedaction:
+    """#8895 review P2 (round 3): the PUBLIC log must not carry a customer id.
+
+    The summary prints ``failed[].error``/``unrepaired``/``drift_up`` rows, and
+    that error text embeds the org id in PROSE (``update_org_billing: no
+    organizations row matched id='<org_id>'``) as well as carrying Stripe
+    object ids (``stripe GET customers/<cus_…>/subscriptions``). The previous
+    round redacted by hyphenated-UUID shape, which no real org id matches, so
+    every real id reached the log intact while a UUID-shaped test would pass.
+
+    These run the step's own script, so they are anchored to the shipped text.
+    """
+
+    def _failing_body(self):
+        return _billing_case(
+            unchanged=0,
+            failed=[
+                {"org_id": _REAL_ORG_ID,
+                 "error": "RuntimeError: update_org_billing: no organizations row "
+                          f"matched id='{_REAL_ORG_ID}' — the billing write was "
+                          "dropped (fail-closed)"},
+                {"org_id": _UUID_ORG_A, "error": "StripeAPIError: boom"},
+                {"org_id": _UUID_ORG_B,
+                 "error": "StripeAPIError: stripe GET "
+                          "customers/cus_PqR3xyz9/subscriptions -> 404: {}"},
+            ],
+            unrepaired=[{"org_id": _OTHER_ORG_ID, "expected_tier": "pro"}],
+        )
+
+    def test_no_real_customer_id_reaches_the_log(self):
+        proc = _run_billing_driver(self._failing_body())
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 1, (
+            "a pass with failed rows must be red — the redaction test needs the "
+            f"::error:: path to run\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+        for raw in (_REAL_ORG_ID, _OTHER_ORG_ID, _UUID_ORG_A, _UUID_ORG_B,
+                    "cus_PqR3xyz9"):
+            assert raw not in out, (
+                f"the public Actions log published the customer id {raw!r}:\n{out}"
+            )
+
+    def test_the_id_is_redacted_where_it_appears_in_prose(self):
+        """Redaction must follow the id INTO the error sentence.
+
+        A key-based filter (or a shape list that skips 26-hex) leaves the id in
+        ``failed[].error``; the row then stays readable in the log. The prose
+        copy is replaced by the SAME fingerprint as the row's ``org_id``, so the
+        row is still correlatable across runs.
+        """
+        proc = _run_billing_driver(self._failing_body())
+        out = proc.stdout + proc.stderr
+        fingerprint = _fingerprint(_REAL_ORG_ID)
+        assert f"id='{fingerprint}'" in out, (
+            "the error prose no longer names the row by its fingerprint — either "
+            f"the id was redacted to something uncorrelatable, or not at all:\n{out}"
+        )
+        assert fingerprint in out
+
+    def test_fingerprints_stay_distinct_for_every_id_shape(self):
+        """A fingerprint that collapses ids cannot correlate anything.
+
+        Pre-fix, the id was shape-substituted BEFORE it was hashed, so every
+        UUID-shaped org hashed to one constant (``hash('<org-id>')``) and two
+        different customers were indistinguishable. The digest must come from the
+        ORIGINAL id, for every shape.
+        """
+        proc = _run_billing_driver(self._failing_body())
+        out = proc.stdout + proc.stderr
+        fingerprints = {
+            org: _fingerprint(org)
+            for org in (_REAL_ORG_ID, _OTHER_ORG_ID, _UUID_ORG_A, _UUID_ORG_B)
+        }
+        assert len(set(fingerprints.values())) == len(fingerprints)
+        for org, fp in fingerprints.items():
+            assert fp in out, (
+                f"{org} was not summarised under its own fingerprint {fp}\n{out}"
+            )
+
+    def test_a_subscription_id_is_redacted_too(self):
+        body = _billing_case(
+            unchanged=0,
+            failed=[{"org_id": _REAL_ORG_ID,
+                     "error": "StripeAPIError: stripe POST "
+                              "subscriptions/sub_1AbCdEfGh9 failed: 400"}],
+        )
+        out = _run_billing_driver(body).stdout
+        assert "sub_1AbCdEfGh9" not in out, out
+        assert "<stripe-id>" in out, out
+
+    def test_a_non_200_body_is_redacted_by_the_same_shapes(self):
+        """``show_body`` prints a failure body straight to the same public log.
+
+        It carried the same UUID-only assumption, so a 26-hex id or a Stripe
+        object id inside ``detail`` was published verbatim.
+        """
+        body = {"status": "boom",
+                "detail": f"could not enumerate org {_REAL_ORG_ID} "
+                          "(customer cus_PqR3xyz9)"}
+        proc = _run_billing_driver(body, status=500)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 1, out
+        assert _REAL_ORG_ID not in out, out
+        assert "cus_PqR3xyz9" not in out, out
 
 
 def _live_script_refs(job: dict) -> list[str]:

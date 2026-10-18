@@ -50,6 +50,163 @@ _logger = logging.getLogger(__name__)
 _STRIPE_API = "https://api.stripe.com/v1"
 _ACTIVE_STATUSES = ("active", "trialing", "past_due")
 
+#: Statuses that mean the STORED subscription pointer is still the customer's
+#: CURRENT one. Deliberately narrower than ``_ACTIVE_STATUSES``: ``past_due``
+#: counts for ENFORCEMENT (a failing card must not lose its tier, and
+#: ``mirror_subscription`` agrees) but NOT for pointer freshness — a failed-card
+#: org that re-subscribes gets a NEW active subscription while the old one sits
+#: at ``past_due``, which is exactly the stale pointer the fleet cadence exists
+#: to follow. Reusing one tuple for both questions left that org capped.
+#: ⛔ ``active`` alone is still not enough: a subscription cancelled AT PERIOD
+#: END stays ``active`` until the period runs out, so an org that cancels and
+#: resubscribes inside that window holds an ACTIVE pointer to the OLD (higher-
+#: priced, soon-dead) subscription. Pointer freshness is the tuple AND
+#: ``not cancel_at_period_end`` — see ``_stored_pointer_is_current``.
+_POINTER_CURRENT_STATUSES = ("active", "trialing")
+
+
+def _stored_pointer_is_current(sub: dict) -> bool:
+    """Is the STORED subscription still the customer's CURRENT entitlement?
+
+    A status check alone is not: ``active`` with ``cancel_at_period_end`` means
+    the subscription still runs but is already ENDING, and the customer may
+    hold a newer one that ``checkout.session.completed`` never told us about
+    (this whole cadence exists for the missed-event case). Such a pointer must
+    be checked against the customer, not trusted. When the customer holds no
+    newer subscription the LIST returns this same one, so the mirroring outcome
+    is unchanged — the cost is one extra call on a rare row.
+    """
+    return (sub.get("status") in _POINTER_CURRENT_STATUSES
+            and not sub.get("cancel_at_period_end"))
+
+
+def _subscription_rank(sub: dict) -> int | None:
+    """The node cap this subscription's price entitles, or ``None`` if unrankable.
+
+    ``None`` covers both "the price is not in the catalog" (``subscription_plan``
+    raises ``BillingError`` — the caller decides, see its docstring) and "the
+    pricing ladder could not be read" (``_paid_tier_floor``), because a
+    comparison this function cannot make must never be mistaken for "ranks low".
+    """
+    try:
+        tier, _interval = subscription_plan(sub)
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable price is not a rank
+        return None
+    return _paid_tier_floor(tier)
+
+
+def _best_ranked(subs):
+    """``(subscription, rank)`` for the highest-capped entry, else ``(None, None)``.
+
+    Entries whose rank cannot be read are skipped rather than treated as zero,
+    so an unrankable subscription never *wins* a comparison it did not prove.
+    """
+    best, best_rank = None, None
+    for sub in subs:
+        rank = _subscription_rank(sub)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = sub, rank
+    return best, best_rank
+
+
+def _select_current_subscription(subs):
+    """The subscription that represents the customer's CURRENT entitlement.
+
+    A customer can hold BOTH a live subscription and one that is only still
+    being enforced (``past_due``) — that is precisely the re-subscribe-with-a-
+    failed-card flow — and Stripe lists them in its own order. Taking the first
+    entry therefore mirrored whatever came first, which could be the ``past_due``
+    one and re-capped the org at the OLD tier. Prefer a live subscription, and
+    fall back to a ``past_due`` one only when no live one exists (enforcement
+    still applies to a failing card).
+
+    ⛔ And within the live ones, a subscription that is already ENDING
+    (``cancel_at_period_end``) normally LOSES to one that is not: the ending sub
+    is the old, soon-dead pointer, and taking it because Stripe listed it first
+    is the same ordering bug one level down. A customer whose ONLY live
+    subscriber is an ending one still gets it — that is a real cancellation, not
+    a gap.
+
+    ⛔⛔ But "newer" is NOT "better", and the ending sub is still IN FORCE.
+    ``cancel_at_period_end`` is not a refund: the customer has paid the ending
+    subscription THROUGH ``current_period_end``, so replacing it with a
+    merely-non-ending one revokes a paid entitlement before the period it was
+    paid for has run out — a downgrade, recorded as a clean ``repaired``, and
+    silent (only drift UP notifies). Ranked case: Team ending + an unprompted
+    Solo signup inside the window must stay Team until the period ends. A
+    non-ending subscription therefore replaces an ending one only when it is
+    PROVABLY ranked at or above it (same cap or higher); when either rank is
+    unreadable the still-in-force one is kept, because "cannot prove it is not
+    lower" is not a reason to take entitlement away. The lower-ranked newer
+    sub is not lost: once the ending one dies, the next pass sees no live
+    ending sub and mirrors the newer one then.
+
+    ⛔⛔⛔ BOTH directions of that rule, and the ending sub's own rank is the one
+    that can revoke. ``_best_ranked`` SKIPS unrankable entries, so a customer
+    whose only ENDING subscription is unrankable (a price rotated out of
+    ``STRIPE_PRICE_IDS``, a ladder missing a required limit key) yields
+    ``(None, None)`` — and a guard written as ``if kept is not None`` then skips
+    the comparison entirely and hands the newer, cheaper candidate the
+    entitlement. That is the same silent revocation one branch over, so ANY
+    unrankable entry in the ending set makes the comparison unprovable and the
+    unrankable one is kept (``unrankable[0]``) — including an unrankable
+    SIBLING of a rankable ending sub, which would otherwise lose silently to
+    its sibling and let a newer sub at that sibling's cap be taken as "at or
+    above". Keeping it is not a no-op dressed as a decision: mirroring an
+    unrankable subscription raises before ANY write (``subscription_plan`` on a
+    rotated price, ``apply_limits`` on an unreadable ladder), so the org lands
+    in a FAILED row with its stored tier untouched and the run reds — loud and
+    fail-closed, and never a downgrade recorded as a clean repair.
+    """
+    live = [s for s in subs if s.get("status") in _POINTER_CURRENT_STATUSES]
+    live_now = [s for s in live if not s.get("cancel_at_period_end")]
+    ending = [s for s in live if s.get("cancel_at_period_end")]
+    if live_now:
+        candidate = live_now[0]
+        if ending:
+            unrankable = [s for s in ending if _subscription_rank(s) is None]
+            if unrankable:
+                # ⛔ ONE unrankable still-in-force entry makes the comparison
+                # unprovable for the WHOLE ending set, not just when every
+                # entry is unrankable. ``_best_ranked`` SKIPS what it cannot
+                # price, so a rankable SIBLING would win the comparison and a
+                # newer sub at that sibling's cap would then be taken as
+                # "provably at or above" — revoking the period the
+                # unpriceable sibling is still paying for, and recording it as
+                # a clean repair. Keep the unrankable one instead: its mirror
+                # raises before any write, so the org lands in a FAILED row
+                # (stored tier untouched, run reds) rather than being
+                # downgraded silently on a green run.
+                return unrankable[0]
+            kept, kept_rank = _best_ranked(ending)
+            if kept is None or kept_rank is None:
+                # ⛔ The ladder flipped between the scan above and
+                # ``_best_ranked`` (``pricing._load`` caches only on SUCCESS,
+                # so an unreadable file is re-read on every call). Comparing
+                # against a ``None`` rank would raise ``TypeError`` and report
+                # a crash instead of the config fault — fail closed on the
+                # same rule as the scan.
+                return ending[0]
+            cand_rank = _subscription_rank(candidate)
+            if cand_rank is None or cand_rank < kept_rank:
+                return kept
+        return candidate
+    if ending:
+        # ⛔ With NO non-ending candidate the ending set must STILL be resolved
+        # by RANK, never by Stripe's listing order: mirroring the lower-ranked
+        # one there rewrites the pointer and records a clean
+        # ``repaired``/``down``, which is the same silent downgrade one line
+        # further down.
+        unrankable = [s for s in ending if _subscription_rank(s) is None]
+        if unrankable:
+            return unrankable[0]
+        kept, _rank = _best_ranked(ending)
+        return kept if kept is not None else ending[0]
+    for sub in subs:
+        if sub.get("status") in _ACTIVE_STATUSES:
+            return sub
+    return None
+
 
 class BillingError(Exception):
     """Base billing error — the caller decides how to surface it."""
@@ -90,12 +247,26 @@ _SECRET_PATTERNS = [
 
 
 def _scrub_secrets(text: str) -> str:
-    """Redact obvious secret values (Stripe keys, webhook secrets) from text."""
+    """Redact obvious secret values and Stripe customer identifiers from text.
+
+    Besides secrets, this redacts Stripe's customer-owned object ids
+    (``cus_…`` / ``sub_…``). They are not credentials, but they identify a
+    customer, and this text is what reaches the reconcile summary's
+    ``failed[].error`` — which the cron driver publishes to a PUBLIC Actions
+    log (#8895 review P2). ``StripeAPIError`` embeds the request path
+    (``stripe GET customers/<cus_…>/subscriptions -> 404``), so without this
+    the id would be republished verbatim.
+    """
     out = text
     for pattern in _SECRET_PATTERNS:
         out = pattern.sub("***", out)
     # P2 (Qwen review): catch keys with underscores/hyphens (e.g. re_test_...)
     out = re.sub(r"(?<![A-Za-z0-9])(?:sk|rk|whsec|re)_[A-Za-z0-9_-]{8,}", "***", out)
+    # Customer-owned Stripe object ids (customer, subscription). The trailing
+    # guard keeps ordinary prose (``sub_total``) intact: a Stripe id is the
+    # whole token, never a prefix of a longer snake_case word.
+    out = re.sub(r"(?<![A-Za-z0-9])(?:cus|sub)_[A-Za-z0-9]{6,}(?![A-Za-z0-9_])",
+                 "***", out)
     return out[:200]
 
 
@@ -734,9 +905,73 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
 def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     """Best-effort mirror repair from Stripe (boot reconcile, Task 8).
 
-    - Org has ``subscription_id`` → GET subscription → mirror.
-    - elif Org has ``stripe_customer_id`` (missed checkout event blind spot)
-      → LIST subscriptions → first active/trialing/past_due → mirror.
+    - Org has ``subscription_id`` and it is ACTIVE → GET subscription → mirror.
+      ⛔ "ACTIVE" means ``active``/``trialing`` AND not already ENDING: a
+      ``cancel_at_period_end`` subscription still runs, but the customer may
+      hold a newer one that a missed event never recorded, so it is checked
+      against the customer like the inactive case below. When no newer
+      subscription exists the LIST returns this same one, so the outcome is
+      unchanged — the cost is one extra call on a rare row.
+    - Org has ``subscription_id`` but it is INACTIVE or ENDING → LIST the
+      customer's subscriptions → prefer a LIVE one (``active``/``trialing``),
+      and within those prefer one that is NOT ending; fall back to a
+      ``past_due`` one only when no live one exists — never simply the first
+      match, which let ``past_due`` (or the ending pointer) win on Stripe's
+      ordering — → mirror (this also rewrites the stale pointer). With neither,
+      mirror the stored one — a real cancellation, which must still downgrade.
+      ⛔ An ENDING subscription is still IN FORCE: the customer paid it through
+      ``current_period_end``, so a newer non-ending subscription replaces it
+      only when it is ranked at or above it (``_select_current_subscription``).
+      An org that adds a CHEAPER subscription before its paid period ends keeps
+      the higher tier until that period ends; replacing it there would revoke
+      an entitlement already paid for, silently (only drift UP notifies).
+      ⛔ That guard holds when the rank CANNOT be read too (a price rotated out
+      of ``STRIPE_PRICE_IDS``, a ladder missing a required limit key), and
+      WHERE the row lands depends on WHICH side is unreadable. When ANY
+      still-in-force entry cannot be ranked — the one the comparison would
+      keep, or a SIBLING in the same ending set, which ``_best_ranked`` skips
+      and would otherwise lose silently — that entry is kept and cannot be
+      mirrored in EITHER shape named here (both raise inside
+      ``mirror_subscription`` before any write; the ``null`` cap below is the
+      shape that does not), so the org is a FAILED row with its stored tier
+      intact and the run reds. That is the fail-closed answer, and the only
+      one that never revokes a period already paid for. When instead it is the
+      NEWER candidate's cap that cannot be read, the still-in-force one is kept
+      and mirrors normally: ``unchanged`` when the store already held that tier
+      (the usual case), an ordinary ``repaired`` when it had drifted — an UP
+      drift still pages and reds as always. The unpriceable candidate is NOT
+      applied and nothing is logged about it, and it does not self-heal: when
+      it later becomes the only live subscription the pass reds for it until
+      the catalog is fixed.
+      ⛔ ``None`` from an unreadable ladder is not the only shape a cap can go
+      missing in: a tier whose required keys are PRESENT but whose
+      ``max_graph_nodes`` is ``null`` is returned as-is by ``tier_limits``, so
+      it ranks as unreadable AND mirrors without raising — the run can green,
+      and can even record a ``repaired`` tier change nobody proved (#8943).
+      ⛔ This is the CADENCE's guarantee, not the whole system's, and the
+      ``customer.subscription.updated`` webhook can defeat it BEFORE the next
+      pass: the handler writes provider truth for the subscription its event
+      NAMES — a new, cheaper one included, and the stored pointer with it — at
+      any time. Nothing in the cadence undoes that, because the rewritten
+      pointer reads as CURRENT (``_stored_pointer_is_current``), so the next
+      pass mirrors the cheaper subscription and reports ``unchanged``; the
+      ending subscription is never listed. Restoring the tier needs an
+      operator (``reconcile_org`` with the pointer back) or a later event
+      (#8942 tracks the rank guard that path lacks).
+      ⛔ If the LIST itself FAILS, none of that applies: the org is returned as
+      ``action: "noop"`` and left alone (a provider error is not a verdict —
+      mirroring the stored one there would re-cap a paying org, which is the
+      bug this branch exists to fix). An org with no ``stripe_customer_id``
+      cannot LIST at all, so the stored subscription is mirrored on its status
+      alone.
+    - elif Org has ``stripe_customer_id`` only (missed checkout event blind
+      spot) → LIST subscriptions → the same live-then-``past_due`` preference,
+      ending subs last (and the same still-in-force guard: a non-ending sub
+      replaces an ending one only at an equal-or-higher cap, and not at all
+      when either cap cannot be read) → mirror. A failed
+      LIST is a ``noop`` here too, for the same reason: the population is
+      dominated by abandoned checkouts, and one 5xx must not turn a routine row
+      into a FAILED pass that pages.
     - else no-op.
 
     #4726: the identifiers are read from the SAME store ``mirror_subscription``
@@ -775,13 +1010,71 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     client = StripeClient()
     if sub_id:
         sub = client.get_subscription(sub_id)
-        summary = mirror_subscription(sdk, org_id, sub)  # gates tier on status
+        # A stored ``subscription_id`` is authoritative for IDENTITY, not for the
+        # org's CURRENT entitlement. A cancel-and-resubscribe whose
+        # ``checkout.session.completed`` was missed leaves the OLD (canceled) id
+        # stored forever, so mirroring it on sight would cap a paying org at the
+        # lower tier again — the exact bug this cadence exists to repair — and
+        # would report the row as a clean ``unchanged``. An INACTIVE stored
+        # subscription is therefore a pointer to repair, not the truth: prefer
+        # the active subscription the customer actually holds (mirroring it also
+        # rewrites ``subscription_id``, so the pointer heals), and fall back to
+        # the stored one only when there is none — a real cancellation, which
+        # must still downgrade.
+        if _stored_pointer_is_current(sub) or not customer_id:
+            summary = mirror_subscription(sdk, org_id, sub)  # gates tier on status
+            return {"org_id": org_id, "action": "mirror_subscription", **summary}
+        try:
+            subs = client.list_subscriptions(customer_id)
+        except Exception:  # noqa: BLE001, RUF100 — a provider error is not a verdict
+            # ⛔ The LIST is NOT a prerequisite for a DOWNGRADE — but it is the
+            # ONLY leg that can prove a newer ACTIVE subscription exists, and a
+            # provider error is exactly when that cannot be proven. Mirroring
+            # the stored (inactive) subscription here would re-create the bug
+            # this repair exists to fix: one transient 5xx/429 on one call would
+            # revert a PAYING org to ``free``, and a downgrade is recorded as a
+            # clean ``repaired`` with no alert (only drift UP notifies), so the
+            # customer would be capped on a GREEN run. Report the org as neither
+            # verified nor downgraded instead — a paid tier lands in
+            # ``unverified`` (logged, warned, never auto-downgraded: the
+            # documented outage policy), an unpaid one in ``skipped``.
+            _logger.warning(
+                "billing reconcile: %s has a stored subscription that is not "
+                "PROVEN current and the customer lookup failed - not verified, "
+                "not downgraded",
+                org_id)
+            return {"org_id": org_id, "action": "noop",
+                    "status": sub.get("status")}
+        current = _select_current_subscription(subs)
+        if current is not None:
+            summary = mirror_subscription(sdk, org_id, current)
+            return {
+                "org_id": org_id,
+                "action": "mirror_customer_first_active",
+                **summary,
+            }
+        summary = mirror_subscription(sdk, org_id, sub)
         return {"org_id": org_id, "action": "mirror_subscription", **summary}
-    subs = client.list_subscriptions(customer_id)
-    for sub in subs:
-        if sub.get("status") in _ACTIVE_STATUSES:
-            summary = mirror_subscription(sdk, org_id, sub)
-            return {"org_id": org_id, "action": "mirror_customer_first_active", **summary}
+    try:
+        subs = client.list_subscriptions(customer_id)
+    except Exception:  # noqa: BLE001, RUF100 — a provider error is not a verdict
+        # The SAME rule as the stored-pointer branch above, and the same
+        # population problem if it is missing: ``hosted_api`` persists
+        # ``stripe_customer_id`` BEFORE the checkout session, so abandoned
+        # checkouts — the majority of this branch — carry a customer id and no
+        # subscription id. One transient 5xx/429 on one of them would become a
+        # ``failed`` row, and a non-empty ``failed`` FAILS the pass and pages
+        # "a paying org may be capped at the wrong tier" for an org with no
+        # entitlement at stake. Report it as unverified instead: the ladder
+        # decides (paid tier → ``unverified``, unpaid → ``skipped``).
+        _logger.warning(
+            "billing reconcile: %s has a Stripe customer binding but the "
+            "customer lookup failed — not verified, not downgraded", org_id)
+        return {"org_id": org_id, "action": "noop"}
+    current = _select_current_subscription(subs)
+    if current is not None:
+        summary = mirror_subscription(sdk, org_id, current)
+        return {"org_id": org_id, "action": "mirror_customer_first_active", **summary}
     return {"org_id": org_id, "action": "noop"}
 
 
@@ -864,31 +1157,40 @@ def _paid_tier_floor(tier: str | None) -> int | None:
     from tortoise.pricing import tier_limits
     try:
         return tier_limits(tier or "free")["max_graph_nodes"]
-    except (KeyError, TypeError):
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable ladder is not a verdict
+        # ⛔ EVERY way an unreadable ladder can present itself, deliberately
+        # broad. The shapes are not one exception family: a LOADED tier missing
+        # a limit key raises ``KeyError``; a malformed file ``JSONDecodeError``
+        # (a ``ValueError``); a missing one ``FileNotFoundError`` (an
+        # ``OSError``); and a valid-JSON file whose ROOT (or ``tiers`` value) is
+        # not an object raises ``AttributeError`` at ``data.get(...)``. The last
+        # is the one a hand-written tuple always misses, and any escape here is
+        # not a per-org failure: ``_tier_claim`` runs OUTSIDE the per-org
+        # ``try``, so it aborts the WHOLE pass as an unnamed 500 — the partial
+        # pass this cadence exists to prevent — which the driver then reports as
+        # a control-plane outage. The documented behaviour is ``None`` →
+        # ``unverified``.
         return None
 
 
-def _is_paid_tier(tier: str | None) -> bool:
-    """Whether a stored ``tier`` claims MORE entitlement than Free — from the
-    ladder, never from the presence of an identity.
+def _tier_claim(tier: str | None) -> str:
+    """What a stored ``tier`` CLAIMS — ``"paid"``, ``"unpaid"`` or ``"unknown"``.
 
-    The distinction decides ``unverified`` vs ``skipped`` in
-    ``reconcile_subscriptions``: a Stripe customer binding with no active
-    subscription is a routine state (``hosted_api`` persists
-    ``stripe_customer_id`` BEFORE the checkout session, so every abandoned
-    checkout leaves one) and holds no entitlement to verify, while a PAID tier
-    in that state is the thing a person must look at.
-
-    Uses ``_paid_tier_floor``, so an unrecognised tier (which resolves to
-    Free's cap) is not paid, and an UNRANKABLE ladder (``None``) is not treated
-    as paid either — the same "never claim what cannot be proved" direction
-    ``_drift_direction`` takes.
+    The third answer is the point. ``_paid_tier_floor`` returns ``None`` when
+    the pricing ladder could not be READ (``tier_limits`` raised on a malformed
+    ``pricing.json`` — #750.8, a documented reachable config fault), and for
+    ``None`` no tier compares above Free's floor. Collapsing that into
+    ``"unpaid"`` takes an UNREADABLE ladder as evidence that a stored ``pro``
+    org pays nothing: it lands in ``skipped``, is logged as "stored at the
+    unpaid tier 'pro'", and passes a pass that exists to catch exactly that.
+    An unread signal is not a zero, so the answer is ``"unknown"`` and the
+    caller must treat it as something a person looks at.
     """
     floor = _paid_tier_floor(tier)
     free_floor = _paid_tier_floor("free")
     if floor is None or free_floor is None:
-        return False
-    return floor > free_floor
+        return "unknown"
+    return "paid" if floor > free_floor else "unpaid"
 
 
 def _drift_direction(from_tier: str | None, to_tier: str | None) -> str | None:
@@ -1032,23 +1334,36 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
     - ``checked`` — orgs with a billing identity this pass attempted
     - ``skipped`` — orgs with nothing to reconcile: no ``subscription_id`` /
       ``stripe_customer_id`` (a free org that never checked out), or a Stripe
-      binding that never became a paid subscription (an abandoned checkout —
-      ``tier`` at or below Free's cap, so there is no entitlement to verify).
+      binding whose stored ``tier`` is at or below Free's cap — nothing to
+      verify. The USUAL cause is an abandoned checkout (``hosted_api`` persists
+      ``stripe_customer_id`` before the checkout session), but it is not the
+      only one: an unpaid-tier org whose active subscription could not be
+      checked at all (the customer LIST failed) also lands here, and that is
+      routine only because it costs nothing to leave alone — a provider error
+      is not a verdict.
       The second kind DID cost an attempt, so it is counted in ``checked`` as
       well: ``checked`` is how many identity-bearing orgs the pass attempted,
       and ``skipped`` says how many of them (plus the never-checked-out ones)
       had nothing to verify. Counted so a silent enumeration shrink is visible
     - ``repaired`` / ``unchanged`` — stored tier changed / did not
-    - ``unverified`` — Stripe answered but named NO active subscription for an
-      org whose stored tier is PAID — i.e. one that claims more entitlement
-      than Free (``_is_paid_tier``; ``reconcile_org`` reports ``action:
-      "noop"``). Counted SEPARATELY from ``unchanged`` because nothing was
-      verified against a subscription: folding it into ``unchanged`` would
+    - ``unverified`` — no active Stripe subscription could be established for
+      an org whose stored tier claims PAID — more entitlement than Free — or
+      whose claim could not be decided at all (``_tier_claim``; ``reconcile_org``
+      reports ``action: "noop"``). THREE causes land here and the counter does
+      not distinguish them: Stripe ANSWERED and named no active subscription,
+      the customer LIST failed and the org was deliberately left alone (a
+      provider error is not a verdict), or the pricing ladder itself could not
+      be READ (#750.8) so whether the tier is paid is UNKNOWN. The last is
+      counted here rather than in ``skipped`` on purpose: an unreadable ladder
+      is not evidence that a stored ``pro`` org pays nothing. Counting it SEPARATELY from ``unchanged`` because nothing
+      was verified against a subscription: folding it into ``unchanged`` would
       report an unexamined org as verified-clean, which is exactly the
       read-only-reconciler failure the ``unrepaired`` guard exists to catch.
       Decided from the LADDER, not from the presence of an identity: a customer
-      binding at the unpaid tier is an abandoned checkout, not a symptom, and
-      lands in ``skipped``.
+      binding at the unpaid tier USUALLY means an abandoned checkout, but not
+      always — the customer LIST may have failed, in which case the org was left
+      alone rather than proven clean. So the bucket name states what was
+      ESTABLISHED (nothing to verify), never why.
       Deliberately NOT auto-downgraded — deciding that a stored-paid org with
       no active Stripe subscription loses its tier is a billing decision, not
       a reconcile detail.
@@ -1122,29 +1437,51 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
                           f"{e.__class__.__name__}: {_scrub_secrets(str(e))}")
             continue
         if outcome.get("action") == "noop":
-            # Stripe answered and named no ACTIVE subscription. Whether that is a
-            # symptom depends on what the STORE CLAIMS, so it is decided from
-            # the ladder and not from the presence of an identity:
+            # Either Stripe answered and named no ACTIVE subscription, or the
+            # customer LIST failed and the org was deliberately left alone (a
+            # provider error is not a verdict — mirroring an inactive stored
+            # subscription on it would silently cap a paying org). Whether that
+            # is a symptom depends on what the STORE CLAIMS, so it is decided
+            # from the ladder and not from the presence of an identity:
             # ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
             # session, so EVERY abandoned checkout leaves a customer binding at
             # ``tier=free``. That is a routine state with no entitlement to
             # verify — counting it as ``unverified`` put healthy orgs in the
             # operator's queue forever (and emitted a daily ``::warning::`` in
             # the driver). ``unverified`` is kept for the case it names: a PAID
-            # tier with no active subscription.
-            if not _is_paid_tier(before_tier):
+            # tier with no active subscription. ⛔ Both arms are reached when
+            # Stripe NAMED no active subscription AND when the customer LIST
+            # failed and the org was deliberately left alone, so neither the
+            # counter nor its log line may assert that Stripe answered.
+            claim = _tier_claim(before_tier)
+            if claim == "unpaid":
                 summary["skipped"] += 1
                 _logger.info(
                     "billing reconcile: %s has a Stripe binding but no active "
-                    "subscription and is stored at the unpaid tier %r — "
-                    "nothing to verify (abandoned checkout)",
+                    "subscription could be established and is stored at the "
+                    "unpaid tier %r — nothing to verify (the usual cause is "
+                    "an abandoned checkout)",
                     org_id, before_tier)
                 continue
             summary["unverified"] += 1
+            if claim == "unknown":
+                # The ladder itself could not be read, so "does this org pay?" is
+                # UNKNOWN, never "no". Filing a stored `pro` org under
+                # nothing-to-verify on the strength of an unread config file (#750.8)
+                # is a paid org passing the pass that exists to catch one.
+                _logger.warning(
+                    "billing reconcile: %s is stored at tier %r but no active "
+                    "Stripe subscription could be established AND the pricing "
+                    "ladder could not be read, so whether it claims paid "
+                    "entitlement is UNKNOWN — not verified, not downgraded, "
+                    "not counted as nothing-to-verify",
+                    org_id, before_tier)
+                continue
             _logger.warning(
-                "billing reconcile: %s is stored as billed (tier=%r) but "
-                "Stripe names no active subscription — not verified, not "
-                "downgraded", org_id, before_tier)
+                "billing reconcile: %s is stored as billed (tier=%r) but no "
+                "active Stripe subscription could be established — not "
+                "verified, not downgraded (Stripe named none, or the customer "
+                "lookup failed)", org_id, before_tier)
             continue
         expected_tier = outcome.get("tier")
         after_tier = after.get("tier")

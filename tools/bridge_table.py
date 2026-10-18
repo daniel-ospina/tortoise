@@ -40,6 +40,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import ast
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -361,6 +362,1013 @@ CONTESTED_DESTINATION: dict[str, tuple[str, str]] = {
         "a FIELD on `update_knowledge`, not a separate verb.",
     ),
 }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# THE OWNER-APPROVED MENU — the SECOND authority, read from a doc (#4513).
+#
+# Part D reads `beta-sdk-surface.md`. `canonical-mcp-tools.md` is the other
+# owner-approved doc (`approval_status: approved`, approvedBy daniel-ospina,
+# approval_pr 4120) and its `Absorbs` cell is the owner's OWN record of which
+# current name folds into which target — a binding this file never consulted, so
+# a row could contradict it and the build stayed green (#4513 §1/§2). Where the
+# two approved docs disagree there is no ruling to apply, and picking one here
+# would silently reverse an owner decision: the disagreement is DISCLOSED (§D4)
+# with both citations, and the map is NOT edited.
+#
+# What this section CAN decide is narrower and fully mechanical: whether a target
+# the row's citation names is one the approved menu actually absorbs this method
+# into. That is what turns `belief_timeline`'s "`poll_events` where they are a
+# timeline" from an open question into a REFUTED reading — `poll_events`'s
+# approved row absorbs `events_poll` and nothing else.
+# ─────────────────────────────────────────────────────────────────────
+APPROVED_DOC = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+
+# The doc states, in its own prose, that some members are absorbed only
+# TRANSITIVELY ("`paginated_query` and `query_points_by_tag` sit inside `query`").
+# Reading that is not an inference — it is the doc's own closure, so it is parsed
+# rather than hand-copied: a copy would be a second answer that can drift.
+#
+# `sit\s+inside`, NOT the literal phrase: the doc line-wraps one of its four
+# statements mid-phrase — "`index_sessions` and `ingest_corpus` sit\ninside
+# `index_files`" — so a literal match parsed only three of the four and left
+# `index_files` without the two members the doc gives it. Nothing failed: the row
+# bound below cannot see a closure, so a closure the doc STATES and the parse DROPS was
+# indistinguishable from one the doc never stated (#8930 review).
+_SIT_INSIDE = re.compile(r"([`\w,\s]+?)\s+sit\s+inside\s+`([a-z_][a-z0-9_]*)`")
+# The beta-successor sentence — the ONLY place the doc states a successor relation:
+# row 17's "the beta target **splits this into `update_knowledge` +
+# `supersede_knowledge`**". Parsed rather than token-scanned, because scanning any
+# TARGET name in the cell mints membership out of prose: row 23 says `run_onboarding`
+# was "dropped for `check_connection`" — a REPLACEMENT, the OPPOSITE relation — and a
+# scan made `check_connection` a member of row 23 and its only beta successor (#8930).
+_SPLIT_INTO = re.compile(r"splits this into([^;]*)")
+# An `Absorbs` cell is a member LIST, then an em dash, then prose (row 17's fields, row
+# 22's "OFF the MCP", row 23's replacement). Only the list is membership.
+_CELL_PROSE = "—"
+# `onboarding_*` — the doc's shorthand for a family of names (row 23).
+_WILDCARD = re.compile(r"`([a-z_][a-z0-9_]*)\*`")
+# A numbered table row. The trailing `|` is a SYNTACTIC requirement of the table shape, not
+# a completeness test (completeness is decided by the table BODY — see `_APPROVED_HEADER`
+# below). `cells` is split out of ONE line, so a row whose `Absorbs` cell REFLOWED onto a
+# second line parsed as a row with a SHORTER member list: measured, adding a newline inside
+# row 21's cell still parsed 23 rows with no guard firing, `mitigate_operator` silently left
+# the row, and the regenerated artifact reported
+# `tortoise_mitigate_operator` as "*(no approved row names it)*" / **refuted**, shifting
+# the partition from 5/7/0 to 4/7/1 — a false claim about the owner-approved doc, in the
+# artifact #4513 exists to make trustworthy (#8930 review, P1).
+# Deliberately NOT a widening that joins continuation lines: a wrapped row must be
+# DETECTED (`_APPROVED_ROW_START` + the diagnostics in `_parse_approved`), never accepted.
+_APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|.*\|\s*$")
+# ⛔ `_APPROVED_ROW` only proves the line ENDS in `|` — it is NOT a completeness test, and
+# reading it as one left the guard above bypassable. When a wrap leaves a `|` at the END of
+# the first physical line (`…annotate_operator, |` ⏎ `| mitigate_operator |`) the prefix
+# matches and `cells` is split from line 1 alone; the continuation matches no row pattern
+# and was never inspected. Measured on the real doc, row 21, BOTH shapes built GREEN and
+# wrote the artifact (`rows=23`, `row_errors=[]`, `main()` → 0) while `mitigate_operator`
+# left the row — the same false `refuted` claim, on a green build with no diagnostic, and
+# the NATURAL way a person or agent repairs a wrapped row (keep each line looking like
+# table syntax) (#8930 review, round 2).
+#
+# So completeness is decided by the TABLE BODY, not by the row regex: from the
+# `| # | Tool | Absorbs |` header to the next blank line, the ONLY legal lines are the
+# header's own separator (before any row) and `_APPROVED_ROW_START` rows — anything else
+# is a REFLOWED continuation and fails the build (`_body_error`).
+#
+# ⛔ Round 3: that test was STILL bypassable, three ways, all measured green on the real
+# doc at row 21 (`rows=23`, `row_errors=[]`, `main()` → 0, artifact WRITTEN, partition
+# 5/7/0 → 4/7/1) — the same false `refuted` (#8930 review, round 3):
+#   * the continuation is ROW-SHAPED (`| 21 | `adjust_relationship` | mitigate_operator |`)
+#     so the body saw a legal row, and the row loop — keyed by NAME with an unconditional
+#     assign — REPLACED row 21 with the one-member remainder. Nothing bounded duplicates:
+#     the count guard checks only for MISSING numbers, and a duplicate number under a
+#     DIFFERENT name built green with 24 rows. Fixed in the row loop, not here: a repeated
+#     number OR a repeated name is a row error (`_row_identity_error`).
+#   * the wrap straddled a BLANK line, so the orphan fell outside every body — fixed here:
+#     a first non-blank line after the body closes that is table-fragment-shaped is a
+#     fragment of the row it followed.
+#   * the continuation was SEPARATOR-SHAPED (`|---|---|---|`), which was skipped as table
+#     syntax — fixed here: a separator AFTER a row has started is not the header's.
+#
+# ⛔ Round 4: the blank-straddling rule left TWO residuals, both measured green on the real
+# doc at row 21 (`rows=23`, `row_errors=[]`, `main()` → 0, artifact WRITTEN, partition
+# 5/7/0 → 4/7/1, `mitigate_operator` quoted from the TRUNCATED row as though it were the
+# whole thing) — the same false `refuted` (#8930 review, round 4):
+#   * the fragment was spelled with NO PIPE (`… annotate_operator, |` ⏎ blank ⏎
+#     `mitigate_operator`), which a PIPE-BOUND test passes straight through. The test is
+#     therefore a FRAGMENT test, not a pipe test: an `Absorbs` remainder is a name list, so
+#     the line — with its decoration stripped — is a fragment when it is a comma-separated
+#     list of names (`_is_member_list`).
+#   * the fragment was not the FIRST non-blank line after the close (a prose line landing
+#     between the blank and the fragment), and the row was consumed on first use, so the
+#     fragment was never inspected. The scan now runs to the next TABLE instead
+#     (`_starts_a_table`), so any number of intervening prose lines is fine.
+#
+# ⛔ Round 5: round 4's predicate stripped only trailing commas/whitespace before demanding
+# every token be a known name — i.e. it enumerated SPELLINGS, which is unbounded. A leading
+# comma, a trailing period, `**emphasis**`, an inline `*(…)` annotation and a break landing
+# INSIDE a name each defeated it. Measured on the real doc at row 21, over every single
+# break position in that cell (52 of them): 48 built GREEN, wrote the artifact, and asserted
+# `mitigate_operator` was "*(no approved row names it)*" / refuted — partition 5/7/0 →
+# 4/7/1; only the 4 whitespace-boundary breaks were caught. The predicate now NORMALISES
+# rather than enumerates (`_normalise_member_token`): per-token separators, trailing
+# punctuation and emphasis are stripped, a trailing `*(…)` / `**…**` annotation is dropped,
+# empty tokens are discarded — and the NORMALISED tokens are what is tested. A member list
+# is certain when every token is a name this doc absorbs; it fails CLOSED when every token is
+# a bare identifier, because a name broken across the wrap is exactly that (`ate_operator`,
+# `perator`, `action`). Re-measured on the same 52 positions: 52 fail closed, 0 written.
+#
+# What is caught, stated exactly, because an over-claim here is what let round 3 read as
+# complete: every wrap whose remainder stays TABLE SYNTAX (pipe-bounded, separator-shaped, or
+# row-shaped while REUSING the row's number or name — `_row_identity_error`) or is a MEMBER
+# LIST, in any decoration, fails the build. TWO shapes it does NOT catch, both recorded gaps
+# and not closed ones:
+#   * a remainder that reflowed into an ORDINARY SENTENCE (`… and the duplicate name is
+#     dropped`). Its commas separate words, not names, so it is indistinguishable from the
+#     doc's own post-table prose and reporting it would refuse real paragraphs.
+#   * a ROW-SHAPED remainder that states a NEW number AND a NEW name (`| 24 | `totally_new`
+#     | mitigate_operator |`). Nothing marks it as a phantom: the row loop sees a first
+#     sighting of both identity fields and the count guard is a floor, so it builds green
+#     with 24 rows and fabricates `totally_new` as the approved home. Closing it needs a way
+#     to tell a real row from a fragment after the table has CLOSED, which this parse does
+#     not have — so it is stated here rather than claimed as caught.
+# A row whose cell continued is therefore not "unrepresentable however it is spelled": it
+# cannot be expressed by WIDENING the row parse, because the orphan is the datum.
+# The header is what ARMS the body-integrity pass below (`in_table`), so its own match count
+# is bounded too (`APPROVED_MIN_BODIES`): a guard that never arms cannot fail.
+_APPROVED_HEADER = re.compile(r"^\|\s*#\s*\|\s*Tool\s*\|\s*Absorbs\s*\|\s*$")
+_APPROVED_SEPARATOR = re.compile(r"^\|[\s:|-]+\|\s*$")
+# The same prefix on its own, so an INCOMPLETE row is REPORTED instead of skipped: a line
+# that starts like a row and does not end in `|` is a reflow, and a two-cell row (`| 3 |
+# `recall_beliefs` |`) has no `Absorbs` cell to read at all.
+_APPROVED_ROW_START = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|")
+_IDENT = re.compile(r"[a-z_][a-z0-9_]*")
+
+# The doc's title claims 23 rows, and every row it states is numbered. The bound is the
+# doc's own count, not a loose floor: at 20, THREE rows could vanish from the parse with a
+# green build, and a lost row 3 turns `belief_timeline`/`provenance`/`session_context` into
+# "no approved row absorbs it" — the exact false claim §D4 exists to prevent. Adding a row
+# keeps the build green; losing one (or renumbering) needs a human to update this.
+APPROVED_MIN_ROWS = 23
+
+# The doc states FOUR transitive-closure statements, over four containers (`get`,
+# `overview`, `query`, `index_files`). Counted separately from the rows because dropping
+# one leaves every ROW intact and the build green, while the members it carried are gone:
+# the container's absorbing row loses them from `members`, and the next disputed row naming
+# them renders "no approved row absorbs it" — a row the doc absorbs it in. A reflow, not a
+# doc edit, is the likely cause, which is exactly what this bound must catch.
+APPROVED_MIN_CLOSURES = 4
+
+# The doc states exactly ONE beta split (row 17's "splits this into `update_knowledge` +
+# `supersede_knowledge`"). Bounded for the same reason as the closures: rewording the
+# clause drops the successors silently, which flips `tortoise_invalidate` from
+# `successor` (support) to `rehomed` and changes an owner-facing count with a green build.
+APPROVED_MIN_SPLITS = 1
+
+# The doc states TWO approved tables (two `| # | Tool | Absorbs |` headers, ~line 142 and
+# ~line 156). The body-integrity pass — the row-reflow/orphan/separator test, the ONLY
+# detector for a wrap whose first physical line still ends in `|` — is entered from a
+# header match, and nothing else in the guard set notices a table body it never scanned.
+# So a benign header edit (a fourth column, the third column reworded) silently disarms
+# the whole family while every row still parses: 23 rows, gapless numbering, closures and
+# split green, build green, and the truncated row regenerates the artifact with a false
+# 'no approved row absorbs it'. Bounding the count makes that edit loud (#8930 review, P1).
+APPROVED_MIN_BODIES = 2
+
+
+def _known_names() -> set[str]:
+    """Every identifier an `Absorbs` cell can legitimately name.
+
+    Prose sits in the SAME cell as the members (row 17 explains beta's split in a
+    sentence), so a bare token scan would mint `fields`/`become`/`into` as absorbed
+    names. Restricting to the known universe is what keeps the parse honest without
+    needing the cell to be machine-formatted.
+    """
+    names = set(TARGET_MCP)
+    for r in _registry_rows():
+        if r["sdk_method"]:
+            names.add(r["sdk_method"])
+        names.add(r["name"].removeprefix("tortoise_"))
+    return names
+
+
+def _split_clauses(cell: str) -> list[dict]:
+    """Each `splits this into ...` clause: the targets it states, and any it cannot resolve.
+
+    Only a `splits this into` clause counts, and only its BACKTICKED names. The rest of the
+    cell states OTHER relations — row 22 is "OFF the MCP", row 23 was "dropped for
+    `check_connection`" — so a scan of every TARGET name in the cell read that REPLACEMENT
+    as a beta successor of the very row it replaced.
+
+    A name the clause states that the target surface does not have is kept as
+    `unresolved` rather than DISCARDED: dropping it narrows the row's successors with no
+    error, which flips a `successor` reading (support) to `rehomed` (a disagreement) and
+    moves a count in the owner-facing table. Resolution is the caller's fail-closed check.
+    """
+    out: list[dict] = []
+    for m in _SPLIT_INTO.finditer(cell):
+        named = re.findall(r"`([a-z_][a-z0-9_]*)`", m.group(1))
+        out.append(
+            {
+                "targets": sorted(t for t in named if t in TARGET_MCP),
+                "unresolved": sorted(t for t in named if t not in TARGET_MCP),
+            }
+        )
+    return out
+
+
+def _cell_members(cell: str, name: str, known: set[str]) -> set[str]:
+    """The names the cell's member LIST states — the prose after the em dash is not one.
+
+    An `Absorbs` cell is a comma list, then an em dash, then prose. The prose states OTHER
+    relations: row 17's "promote/baseline become fields on `update_knowledge`", row 22's
+    "OFF the MCP", row 23's "dropped for `check_connection`". Scanning the whole cell for
+    known names minted all three as MEMBERSHIP, which made `check_connection` a member of
+    `run_onboarding` — a row the doc says was dropped FOR it. `members` is what the
+    verdicts call a row's approved HOME, so a prose-minted member is a false home.
+
+    The rule cuts both ways, so `_prose_names` reports the mirror risk: a CURRENT name
+    stated after the dash is either prose ABOUT a tool or a member list the em dash
+    misplaced. Only the first is legitimate for a target-surface name (row 17's "fields on
+    `update_knowledge`", row 23's "dropped for `check_connection`"), which is what the
+    guard keys on.
+
+    A `prefix_*` token is a FAMILY, and row 23 states its members that way ("the seven
+    `onboarding_*`"). Expanding it is reading the doc, not inferring: without it the seven
+    real tools read as "no approved row absorbs" — the opposite of the row.
+    """
+    head = cell.split(_CELL_PROSE, 1)[0]
+    members = {t for t in _IDENT.findall(head) if t in known and t != name}
+    for prefix in _WILDCARD.findall(head):
+        members |= {k for k in known if k.startswith(prefix) and k != name}
+    return members
+
+
+def _prose_names(cell: str) -> list[str]:
+    """Known names stated in a cell's PROSE that are not target-surface names.
+
+    A target name in the prose is a sentence about a tool (row 23's "dropped for
+    `check_connection`"); a CURRENT tool name there is a member list the em dash was
+    misplaced into — which silently strips that member, and for a disputed row prints "no
+    approved row absorbs it" about the row the doc absorbs it in.
+    """
+    if _CELL_PROSE not in cell:
+        return []
+    known = _known_names()
+    post = cell.split(_CELL_PROSE, 1)[1]
+    # NOT backtick-only: a misplaced list can arrive bare ("… mitigate_operator —
+    # annotate_operator also"), and a bare name is just as lost as a quoted one.
+    return sorted(
+        {n for n in _IDENT.findall(post) if n in known and n not in TARGET_MCP}
+    )
+
+
+def _approved_closures(text: str) -> list[tuple[str, set[str]]]:
+    """`X, Y sit inside Z` — Z absorbs X and Y transitively, per the doc's own prose.
+
+    Only the BACKTICKED names are members: the span also reads "and" in "X and Y sit
+    inside Z", and a member span that is not a name cannot be checked for resolution.
+    """
+    return [
+        (m.group(2), set(re.findall(r"`([a-z_][a-z0-9_]*)`", m.group(1))))
+        for m in _SIT_INSIDE.finditer(text)
+    ]
+
+
+def _row_identity_error(
+    name: str,
+    lineno: int,
+    seen_numbers: dict[int, str],
+    seen_names: dict[str, int],
+) -> str | None:
+    """The diagnostic for a row that REPEATS another row's number or name, else `None`.
+
+    Two physical rows cannot both be row N, and two rows cannot share one name: `menu` is
+    keyed by NAME with an unconditional assign, so a repeat does not merely add a row — the
+    later one REPLACES the earlier one, and the replaced row's `Absorbs` cell silently
+    leaves the parse. Measured on the real doc (row 21): a row-shaped continuation of a
+    wrap replaced the complete row with its one-member remainder and built GREEN with the
+    artifact written; a repeated number under a DIFFERENT name built green with 24 rows.
+    Neither is visible to the count guard, which is a floor and checks only for MISSING
+    numbers (#8930 review, round 3, P1).
+
+    A repeated NUMBER and a repeated NAME are separate claims, so both are reported — the
+    earlier row is named in each, because "which occurrence is the real one" is exactly
+    what a reader needs and what the parse cannot decide.
+    """
+    earlier_number = seen_numbers.get(lineno)
+    earlier_name = seen_names.get(name)
+    if earlier_number is not None and earlier_name is not None:
+        return (
+            f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} REUSES both the "
+            f"number {lineno} and the name `{name}` of the row above it; two physical rows "
+            "cannot be one row, so the later one is DISCARDED and every member that is "
+            "only on it silently leaves the row — which renders as a false 'no approved "
+            "row absorbs it' for each of them"
+        )
+    if earlier_number is not None:
+        return (
+            f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} REUSES row number "
+            f"{lineno}, already stated for row {lineno} (`{earlier_number}`); two physical "
+            "rows cannot be one row, and the menu is keyed by name, so the number tells "
+            "the reader which row vanished while the parse cannot — a same-named repeat "
+            "silently REPLACES the earlier row, and a differently-named one adds a row "
+            "the doc does not state. Either way the discarded row renders as a false "
+            "'no approved row absorbs it'"
+        )
+    if earlier_name is None:
+        return None  # a first sighting: this row claims no identity another row holds
+    return (
+        f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} REUSES the name "
+        f"`{name}` of row {earlier_name}; the menu is keyed by NAME with an unconditional "
+        f"assign, so this row silently REPLACES row {earlier_name} and its whole `Absorbs` "
+        "cell leaves the parse — every member only on it renders as a false 'no approved "
+        "row absorbs it'"
+    )
+
+
+# One token of a member list, after NORMALISATION: a bare lower-case name and nothing
+# else. This is the shape a member list has and a sentence does not, and it is what makes
+# the fail-closed branch of `_is_member_list` safe — a line whose every comma-token is one
+# of these is a name list, however its names are spelled, because a sentence's tokens carry
+# spaces and sentence punctuation.
+_MEMBER_TOKEN = re.compile(r"[a-z_][a-z0-9_]*")
+# The cell's own separator. `,` is what the `Absorbs` cell uses; `;` is the same relation
+# spelled differently, and a reflow can leave either at the edge of a line.
+_MEMBER_SEP = re.compile(r"[,;]")
+# A trailing INLINE ANNOTATION attached to the last name — row 12's real cell qualifies its
+# names exactly this way (`… *(operator-only)*`), so a remainder carrying one is still the
+# cell's own text. The `(?<=\S)` is load-bearing: without it the `**…**` arm would swallow a
+# token that is ENTIRELY emphasis (`**mitigate_operator**`) and leave nothing behind, which
+# would turn the very spelling this is meant to catch into `False`.
+_TRAILING_ANNOTATION = re.compile(r"(?<=\S)\s*(?:\*\([^)]*\)\*|\*\*[^*]+\*\*)\s*$")
+# Trailing punctuation and emphasis a reflow can leave on a name: a cell's separator kept at
+# the end of a line, a sentence period, markdown emphasis, a code backtick.
+_TOKEN_TRAILING = ".,;*_`"
+
+
+def _normalise_member_token(token: str) -> str:
+    """One member-list token with the DECORATION a reflow can leave on it removed.
+
+    Written as a NORMALISATION because enumerating the ways a wrap can be spelled is
+    unbounded, and four rounds of doing that left the predicate answering `False` for shapes
+    a paste or a soft reflow produces routinely: a leading separator, a trailing period,
+    `**emphasis**`, an inline `*(…)` annotation, a break landing INSIDE a name. Measured on
+    the real doc, row 21 — 48 of the 52 single-break positions built GREEN with the false
+    refutation in the artifact (#8930 review, round 5, P2).
+    """
+    token = token.strip()
+    token = token.strip("`*").strip()  # markdown quotes/emphasis around the whole token
+    # Drop a trailing annotation BEFORE the trailing-punctuation pass, so the `*` and `)`
+    # that end `*(operator-only)*` cannot be half-stripped into an unreadable token.
+    token = _TRAILING_ANNOTATION.sub("", token)
+    return token.rstrip(_TOKEN_TRAILING).strip()
+
+
+def _is_member_list(stripped: str, known: set[str]) -> bool:
+    """Whether `stripped` is a bare `Absorbs` MEMBER LIST — the pipe-less fragment shape.
+
+    An `Absorbs` cell is a comma-separated list of names, so the remainder of a cell that
+    reflowed onto its own line is that list too: `mitigate_operator`, or
+    `` `mitigate_operator`, `annotate_operator` ``. The tokens are NORMALISED first
+    (`_normalise_member_token`) — leading separators, a trailing period, emphasis, an inline
+    `*(…)` annotation and a token that normalises to nothing are all just decoration a wrap
+    can carry — and the normalised tokens are what get tested.
+
+    Then TWO tests, and the second is what makes the guard survive a break landing inside a
+    NAME (46 of the 52 positions in row 21's cell, the largest green slice):
+
+      * every normalised token is a name this doc can absorb — a certain member list;
+      * else every normalised token is a bare identifier (`_MEMBER_TOKEN`) — a name list by
+        SHAPE, carrying at least one name this doc does not have. A name broken across the
+        wrap is exactly that (`ate_operator`, `perator`, `action`), so it fails CLOSED.
+
+    What keeps genuine prose green is the SHAPE, not a word list: a sentence's tokens carry
+    spaces and sentence punctuation, so they are never bare identifiers. Measured on the
+    real doc — every line of both post-table gaps (9 after the WRITE table, 1 after the READ
+    table), and every heading, bullet and blockquote there, answers `False`
+    (`test_the_real_approved_doc_parses_every_row_with_no_row_error`,
+    `test_the_normalised_member_list_test_still_leaves_real_prose_green`).
+    """
+    body = _TRAILING_ANNOTATION.sub("", stripped.strip())
+    tokens = [t for t in (_normalise_member_token(x) for x in _MEMBER_SEP.split(body)) if t]
+    if not tokens:
+        return False
+    if all(t in known for t in tokens):
+        return True
+    return all(_MEMBER_TOKEN.fullmatch(t) for t in tokens)
+
+
+def _is_table_fragment(stripped: str, known: set[str]) -> bool:
+    """Whether a line after a CLOSED body is a reflowed fragment of the row it followed.
+
+    Two spellings, and the round-3 rule was only the first: PIPE-BOUNDED (it starts or ends
+    with `|`, i.e. table syntax), or a bare MEMBER LIST (`_is_member_list`). A paste or a
+    soft reflow produces either. Anything else is prose, which is not reported — see
+    `_is_member_list` for why that is a measurement and not a convenience.
+    """
+    if stripped.startswith("|") or stripped.endswith("|"):
+        return True
+    return _is_member_list(stripped, known)
+
+
+def _starts_a_table(lines: Sequence[str], i: int) -> bool:
+    """Whether `lines[i]` is the HEADER of a table, so the post-close scan must stop there.
+
+    The scan after a closed body runs past intervening prose, and the doc has an UNRELATED
+    table further down (`| Name | Why |`) whose rows are pipe-bounded too — scanning into it
+    would refuse the document the owner approved. A markdown table always states its header
+    and its `|---|` separator together, while an orphaned continuation is a single line, so
+    "a pipe-bounded line whose next non-blank line is a separator" separates the two
+    structurally rather than by distance (#8930 review, round 4).
+
+    The approved header is matched earlier in the loop, so this covers every OTHER table.
+    The residual is a fragment that is itself immediately followed by a new table's
+    separator; that spelling is contrived and is not claimed to be caught.
+    """
+    line = lines[i].strip()
+    if not (line.startswith("|") or line.endswith("|")):
+        return False
+    for following in lines[i + 1 :]:
+        following = following.strip()
+        if following:
+            return bool(_APPROVED_SEPARATOR.match(following))
+    return False
+
+
+def _body_error(
+    stripped: str,
+    owner: tuple[int, str] | None,
+    *,
+    closed_by_blank: bool,
+    known: set[str] | None = None,
+) -> str | None:
+    """The approved-table body test: `None` when `stripped` is legitimate table syntax.
+
+    Three ways a line inside the table is NOT legitimate, each measured green on the real
+    doc with the artifact written and `mitigate_operator` falsely refuted (#8930 review,
+    rounds 3-5, P2):
+
+      * a non-blank line after the body closes on a BLANK line, when it is
+        table-fragment-shaped: PIPE-BOUNDED (starts OR ends with `|`), or a MEMBER LIST —
+        a comma-separated run whose every token is a bare NAME once the cell's own
+        decoration is normalised away (separators, a trailing period, emphasis, an inline
+        `*(…)`), INCLUDING one carrying a name this doc does not have, which is what a break
+        landing inside a name produces. The wrap straddles the blank that ends the table, so
+        the orphan belongs to no body at all and no in-body rule can see it. Prose is NOT
+        reported: real paragraphs follow both of the doc's tables, and a sentence's tokens
+        carry spaces and sentence punctuation, so no sentence can take a name list's shape
+        (`_is_member_list`).
+      * a SEPARATOR after any row has started. The header's own separator comes BEFORE every
+        row (`owner is None`), so a later one is a row's continuation reflowed into a
+        `|---|` line — table syntax that silently swallowed the member.
+      * anything else that is neither a row prefix nor the header separator: the original
+        orphan, the row's remainder left on its own line.
+
+    `owner` is the row the line continues — the one above it inside a body, or the one the
+    body closed on. The diagnostic names it, because the failure it causes is stated in
+    terms of that row's membership. `known` is the absorbed-name universe the member-list
+    test needs; it is required for `closed_by_blank` and is not read otherwise.
+    """
+    if closed_by_blank:
+        if not _is_table_fragment(stripped, known if known is not None else _known_names()):
+            return None
+        return (
+            f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
+            f"after row {owner[0]} (`{owner[1]}`), on the far side of a BLANK line: "
+            f"{stripped!r} is table-fragment-shaped — it is pipe-bounded, or its every "
+            "comma-separated token is a bare name once the cell's own decoration "
+            "(separators, a trailing period, emphasis, an inline `*(…)`) is normalised "
+            "away, including a name this doc does not have, which is what a break landing "
+            "inside a name leaves — and it "
+            "appears between the blank that ends the table and the next table, so a row's "
+            "cells have REFLOWED across that blank — the row still parses with the members "
+            "on this fragment missing, which renders as a false 'no approved row absorbs "
+            "it' for each of them"
+        )
+    if _APPROVED_SEPARATOR.match(stripped):
+        if owner is None:  # the header's own separator — real table syntax
+            return None
+        return (
+            f"approved table in {APPROVED_DOC.name} has a SEPARATOR-shaped line after row "
+            f"{owner[0]} (`{owner[1]}`): {stripped!r} is a `|---|` line in the middle of the "
+            "body, where no table syntax allows one (the header's separator comes before "
+            "every row) — so it is a row's continuation that reflowed into a separator, and "
+            "the members it carried have silently left the row, which renders as a false "
+            "'no approved row absorbs it' for each of them"
+        )
+    if owner is None:
+        owner_text = "the header (before any row)"
+    else:
+        owner_text = f"row {owner[0]} (`{owner[1]}`)"
+    return (
+        f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
+        f"after {owner_text}: {stripped!r} is neither a `| N | name | … |` row nor a "
+        "separator, so a row's cells have REFLOWED onto a second physical line — the "
+        "row still parses, but every member on the wrapped remainder silently leaves "
+        "it, which renders as a false 'no approved row absorbs it' for each of them"
+    )
+
+
+def _cell_count_error(lineno: int, name: str, cells: list[str]) -> str | None:
+    """The `| N | name | Absorbs |` shape test, in BOTH directions — both TRUNCATE.
+
+    Too FEW cells indexes `cells[2]` blind: that raised `IndexError` on a two-cell row,
+    which escaped `main()`'s build-failure path entirely — a traceback where the diagnostic
+    belonged (#8930 review, P2a).
+
+    Too MANY is the same truncation from the other side: an extra pipe — inside the
+    `Absorbs` cell, or inside any other cell, which shifts what `cells[2]` holds (the
+    markdown-ESCAPED pipe splits too) — leaves `cells[2]` a SHORTER member list while the
+    physical line still ends in `|`, so the row reads as complete and every other guard
+    stays green — 23 rows, gapless numbering, closures and split untouched. The members
+    past that pipe leave the row, flipping the destination they support from
+    `successor`/`row` to `rehomed`/`refuted` with no diagnostic (#8930 review, P2b). A
+    markdown cell that needs a pipe has to say it in words; the table has exactly three
+    columns.
+    """
+    if len(cells) == 3:
+        return None
+    if len(cells) < 3:
+        return (
+            f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} parses to "
+            f"{len(cells)} cell(s); the table shape is `| N | name | Absorbs |`, so "
+            "there is no `Absorbs` cell to read — the row is dropped and every method "
+            "it absorbs renders as 'no approved row absorbs it'"
+        )
+    return (
+        f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} parses to "
+        f"{len(cells)} cell(s); the table shape is `| N | name | Absorbs |`, so a pipe "
+        "has been written inside one of the row's cells and SPLIT the row — `cells[2]` "
+        "is then a TRUNCATED `Absorbs` list, so every member past that pipe silently "
+        "leaves the row, which renders as a false 'no approved row absorbs it' for each "
+        "of them"
+    )
+
+
+def _parse_approved(
+    text: str,
+) -> tuple[dict[str, dict], list[tuple[str, set[str]]], list[str]]:
+    """One parse of the approved doc: (approved row name -> row, closures, row errors).
+
+    `row_errors` is a row the parse could not read COMPLETELY — a row that reflowed onto a
+    second line (detected by its cell prefix not ending in `|`, by the orphaned
+    continuation line that the wrap leaves in the table body, through a blank line, or
+    behind a separator-shaped fragment), one with too few cells, or a row that REPEATS
+    another row's number or name.
+    It is an ERROR, never a silent skip: dropping or replacing the row narrows what the doc
+    says the row absorbs, and the verdicts treat that set as the row's approved home
+    (#8930 review, P1/P2a, round 3).
+    """
+    known = _known_names()
+    closures = _approved_closures(text)
+
+    menu: dict[str, dict] = {}
+    row_errors: list[str] = []
+    # Two physical rows claiming ONE identity is unrepresentable in a menu keyed by name,
+    # and BOTH ways it happens were measured green: a repeated number under the SAME name
+    # made the later assign REPLACE the row, and a repeated number under a DIFFERENT name
+    # added a 24th row (the count guard is a floor, so it cannot see either). A repeated
+    # NAME reaches the same overwrite from the other side (#8930 review, round 3).
+    seen_numbers: dict[int, str] = {}
+    seen_names: dict[str, int] = {}
+    for line in text.splitlines():
+        start = _APPROVED_ROW_START.match(line)
+        if not start:
+            continue
+        name = start.group(2)
+        lineno = int(start.group(1))
+        repeat = _row_identity_error(name, lineno, seen_numbers, seen_names)
+        if repeat:
+            row_errors.append(repeat)
+            # The later row is DISCARDED, never merged: keeping it is what let a one-member
+            # remainder replace a complete row's member list.
+            continue
+        seen_numbers[lineno], seen_names[name] = name, lineno
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # `cells[2]` is the `Absorbs` cell — see `_cell_count_error` for why the count is
+        # bounded in both directions rather than only from below.
+        shape = _cell_count_error(lineno, name, cells)
+        if shape:
+            row_errors.append(shape)
+            continue
+        # A complete row ends in `|` on this line. If it does not, the cell reflowed and
+        # its continuation was never read: the row would parse with a TRUNCATED member
+        # list — a false refutation of the owner-approved doc, on a green build.
+        if not _APPROVED_ROW.match(line):
+            row_errors.append(
+                f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} is not a "
+                "complete physical row — it does not end in `|` on the same line, so its "
+                "`Absorbs` cell has REFLOWED and the continuation is not read; the members "
+                "on the wrapped remainder silently leave the row, which renders as a false "
+                "'no approved row absorbs it' for each of them"
+            )
+            continue
+        clauses = _split_clauses(cells[2])
+        menu[name] = {
+            "lineno": lineno,
+            "members": _cell_members(cells[2], name, known) | {name},
+            "successors": sorted({t for c in clauses for t in c["targets"]}),
+            "prose_names": _prose_names(cells[2]),
+            # How many `splits this into` clauses the cell states, and any name they state
+            # that did not resolve — so a clause that parses to NO target, or to a PARTIAL
+            # one, fails the build instead of reading as "this row has fewer successors"
+            # (the same fail-open direction as a dropped closure).
+            "split_clauses": len(clauses),
+            "split_unresolved": sorted({t for c in clauses for t in c["unresolved"]}),
+            "quote": line.rstrip(),
+            "closes": set(),
+        }
+
+    # BODY INTEGRITY — the completeness test `_APPROVED_ROW` is NOT. A separate pass, because
+    # it answers a different question: not "is this line a row" but "is the table the rows
+    # sit in intact". From the `| # | Tool | Absorbs |` header until the next blank line,
+    # the only legal lines are the header's own separator and row prefixes; anything else is
+    # a REFLOWED CONTINUATION — the continuation of the row above it, which has ALREADY
+    # parsed with the members on this line missing. Appended before any cell was read from
+    # it, so the build fails and no artifact carries the truncated membership (#8930 review,
+    # round 2, P1).
+    last_row: tuple[int, str] | None = None
+    # A body that ended on a BLANK line leaves its row OPEN to a reflow that straddles that
+    # blank: the remainder belongs to no body, so no in-body rule can see it. The scan runs
+    # past the blank and past ANY prose that lands in between, until the next table — the
+    # approved header (which resets it) or a foreign table's header+separator
+    # (`_starts_a_table`). Consuming it on the first non-blank line hid a fragment behind a
+    # single intervening paragraph (#8930 review, rounds 3-4, P2).
+    closed_row: tuple[int, str] | None = None
+    in_table = False
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not in_table and closed_row is not None and stripped:
+            if _starts_a_table(lines, index):
+                closed_row = None  # a table of its own: the gap is over
+            elif not _APPROVED_ROW_START.match(stripped):
+                # Only a line the ROW PARSE could not place is evidence of the wrap. A row
+                # sitting here is one the row loop already read — rows 22-23 land "in the
+                # gap" merely because the wrap broke the body above them — so reporting it
+                # would blame an intact row for another row's reflow.
+                err = _body_error(
+                    stripped, closed_row, closed_by_blank=True, known=known
+                )
+                if err:
+                    row_errors.append(err)
+        if _APPROVED_HEADER.match(stripped):
+            in_table, last_row, closed_row = True, None, None
+            continue
+        if not in_table:
+            continue
+        if not stripped:  # a blank line ends the table body (the doc has TWO such tables)
+            in_table = False
+            last_row, closed_row = None, last_row
+            continue
+        start = _APPROVED_ROW_START.match(stripped)
+        if start:
+            last_row = (int(start.group(1)), start.group(2))
+            continue
+        err = _body_error(stripped, last_row, closed_by_blank=False)
+        if err:
+            row_errors.append(err)
+
+    # Apply the closure the doc states, one hop at a time until it settles: a member
+    # that `sit inside`s another member is a member too.
+    by_outer: dict[str, set[str]] = {}
+    for outer, inners in closures:
+        by_outer.setdefault(outer, set()).update(inners)
+    for name, r in menu.items():
+        members = set(r["members"])
+        changed = True
+        while changed:
+            changed = False
+            for outer in list(members):
+                for inner in by_outer.get(outer, ()):
+                    if inner in known and inner not in members:
+                        members.add(inner)
+                        changed = True
+        r["members"] = members
+        r["closes"] = by_outer.get(name, set())
+    return menu, closures, row_errors
+
+
+def _approved_menu() -> dict[str, dict]:
+    """approved row name -> {members, successors, quote, closes, lineno}.
+
+    `members` is the row's member LIST (the cell's comma list, expanded for a `prefix_*`
+    family) with the row's OWN name added unconditionally — the cell may or may not list it,
+    most do not — plus every name the doc's own `sit inside` sentence puts inside one of
+    those members; `successors` are the TARGET names the cell names as beta's successors of
+    the row, parsed from its `splits this into` clause ONLY (`revise_knowledge`'s cell
+    states its own split into `update_knowledge` + `supersede_knowledge`) — not from any
+    target token in the cell, because the cell's prose states other relations too; `quote`
+    is the WHOLE table row, by construction, so it cannot be a truncation of what the doc
+    says — and that is enforced, not assumed: a row that lost cells to a reflow is a
+    `row_errors` entry, so the build fails and no artifact quotes it (the body test and
+    `_row_identity_error` are what make the sentence true).
+    """
+    return _parse_approved(APPROVED_DOC.read_text(encoding="utf-8"))[0]
+
+
+def _approved_state() -> tuple[dict[str, dict], list[tuple[str, set[str]]], list[str]]:
+    """The menu, the closure statements AND any unreadable row — from ONE read."""
+    return _parse_approved(APPROVED_DOC.read_text(encoding="utf-8"))
+
+
+def _approved_header_count(text: str) -> int:
+    """How many approved table BODIES the doc states (`| # | Tool | Absorbs |` headers).
+
+    Counted from the text rather than threaded through the parse so the body-integrity
+    guard cannot be disarmed by a caller that drops it: `APPROVED_MIN_BODIES` is checked
+    against the document itself, the way `_known_names()` is read here rather than
+    supplied.
+    """
+    return sum(1 for line in text.splitlines() if _APPROVED_HEADER.match(line.strip()))
+
+
+def _approved_errors(
+    menu: dict[str, dict],
+    closures: list[tuple[str, set[str]]],
+    row_errors: Sequence[str] = (),
+) -> list[str]:
+    """Row-level parse errors FIRST, then the structural guards.
+
+    A row the parse could not read completely is the ROOT of the structural failure it
+    causes (the row count drops below the doc's own title), so it is reported ahead of the
+    count's diagnostic: `only 22 approved rows parsed` does not say WHICH row, or why.
+    """
+    return [*row_errors, *_approved_structure_errors(menu, closures)]
+
+
+def _approved_structure_errors(
+    menu: dict[str, dict], closures: list[tuple[str, set[str]]]
+) -> list[str]:
+    """Structural failures only — a DISAGREEMENT is a finding, not an error."""
+    if not menu:
+        return [
+            f"NO owner-approved menu parsed out of {APPROVED_DOC.name} — the approved-list "
+            "cross-check is UNARMED, so every disputed row would read as 'not stated'"
+        ]
+    if len(menu) < APPROVED_MIN_ROWS:
+        return [
+            f"only {len(menu)} approved rows parsed out of {APPROVED_DOC.name} (expected at "
+            f"least {APPROVED_MIN_ROWS} — the doc's own title claims 23); the table shape has "
+            "changed and the parse is now silently dropping rows"
+        ]
+    # Every row the doc states is numbered, so a NaN in the sequence is a row the parse
+    # dropped — which the count alone cannot see when a reflow BLENDS with a doc edit.
+    linenos = sorted(r["lineno"] for r in menu.values())
+    missing = sorted(set(range(1, linenos[-1] + 1)) - set(linenos))
+    if missing:
+        return [
+            f"approved row number(s) {', '.join(str(n) for n in missing)} are missing from the "
+            f"parse of {APPROVED_DOC.name} (parsed {len(menu)} rows, numbered "
+            f"{linenos[0]}-{linenos[-1]}); a row the doc states is being dropped, so every "
+            "method it absorbs would render as 'no approved row absorbs it'"
+        ]
+    # The body-integrity pass is ARMED by the header, so the header must be found: a
+    # reworded or re-columned header leaves every row parsing while the pass that catches
+    # a wrap ending in `|` never runs. Placed after the row-count/numbering guards (a doc
+    # that lost ROWS is reported as that, not as a header break) and before the content
+    # guards, because a body that was never scanned makes each of them a narrower reading
+    # of the doc than they claim.
+    bodies = _approved_header_count(APPROVED_DOC.read_text(encoding="utf-8"))
+    if bodies < APPROVED_MIN_BODIES:
+        return [
+            f"only {bodies} `| # | Tool | Absorbs |` header(s) matched in "
+            f"{APPROVED_DOC.name} (expected {APPROVED_MIN_BODIES} — the doc states two "
+            "approved tables); the row-reflow guard is decided by the table BODY, so with "
+            "no body entered it is UNARMED — a row whose cells wrapped with the first "
+            "line still ending in `|` parses with the members on the remainder silently "
+            "missing, which renders as a false 'no approved row absorbs it' for each of "
+            "them"
+        ]
+    # A CURRENT tool name in a cell's PROSE is a member list the em dash was misplaced
+    # into — which silently strips that member from its row.
+    prose = sorted(
+        (n, names) for n, r in menu.items() if (names := r["prose_names"])
+    )
+    if prose:
+        detail = "; ".join(
+            f"`{n}` ← {', '.join(f'`{t}`' for t in names)}" for n, names in prose
+        )
+        return [
+            f"approved row(s) in {APPROVED_DOC.name} name a CURRENT tool in the prose AFTER "
+            f"the em dash: {detail}; prose is not a member list, so that name loses its "
+            "approved home and renders as 'no approved row absorbs it'"
+        ]
+    # A closure statement that does not RESOLVE is a parse break, not a doc that states an
+    # empty closure. Resolution — not presence — is the test, and it is ALL-or-nothing:
+    # the applied membership is a `known` filter, so one unresolved name narrows the row
+    # silently, and a statement whose members are all unresolved narrows it to nothing.
+    # (`these sit inside `index_files`` is the second case; `zzz` beside a real name the
+    # first.)
+    known = _known_names()
+    unresolved: dict[str, list[str]] = {}
+    for outer, inners in closures:
+        lost = sorted(i for i in inners if i not in known)
+        if not inners:
+            lost = ["(no backticked member name)"]
+        if lost:
+            unresolved[outer] = lost
+    if unresolved:
+        detail = "; ".join(
+            f"`{o}` ← {', '.join(f'`{i}`' for i in lost)}"
+            for o, lost in sorted(unresolved.items())
+        )
+        return [
+            f"transitive-closure statement(s) in {APPROVED_DOC.name} name member(s) the doc "
+            f"never uses: {detail}; those members are silently missing from every row that "
+            "absorbs the container"
+        ]
+    if len(closures) < APPROVED_MIN_CLOSURES:
+        return [
+            f"only {len(closures)} transitive-closure statement(s) parsed out of "
+            f"{APPROVED_DOC.name} (expected at least {APPROVED_MIN_CLOSURES} — the doc states "
+            "that `index_sessions` and `ingest_corpus` sit inside `index_files`, alongside the "
+            "`get`/`overview`/`query` closures); a reflow the parse cannot read shrinks every "
+            "row's membership silently, and the next disputed row naming those members renders "
+            "'no approved row absorbs it' — a row the doc absorbs it in"
+        ]
+    # The CONTAINER must be a name the doc actually uses (a row, or a member of one):
+    # renaming only the closure sentence's container to a name the doc never mentions
+    # otherwise parses cleanly and drops the closure. This is a known-ness check, not a
+    # correctness one — a container renamed to ANOTHER name the doc uses relocates the
+    # closure silently, and nothing in the doc's shape can tell that from a legitimate
+    # re-statement.
+    named = set(menu) | {m for r in menu.values() for m in r["members"]}
+    stray = sorted(outer for outer, _ in closures if outer not in named)
+    if stray:
+        return [
+            f"transitive-closure container(s) {', '.join(f'`{o}`' for o in stray)} parsed out "
+            f"of {APPROVED_DOC.name} are neither a row the doc names nor a member of one; "
+            "renaming the container in the sentence alone silently drops the whole closure"
+        ]
+    # ...and the same for the beta-split clause: a clause that parses to no TARGET name is
+    # a parse break, and a PARTIAL loss is the same failure one name at a time — the row's
+    # successors narrow with no error, which flips `successor` (support) to `rehomed` (a
+    # disagreement) in the owner-facing table. A doc that states no split at all means the
+    # clause was reworded, which is why the count is bounded too.
+    unresolved_split = sorted(
+        (n, names) for n, r in menu.items() if (names := r["split_unresolved"])
+    )
+    if unresolved_split:
+        detail = "; ".join(
+            f"`{n}` ← {', '.join(f'`{t}`' for t in names)}" for n, names in unresolved_split
+        )
+        return [
+            f"approved row(s) in {APPROVED_DOC.name} state a beta split naming something the "
+            f"target surface does not have: {detail}; a dropped successor reads as a "
+            "DISAGREEMENT (`rehomed`) in the rendered table"
+        ]
+    empty_split = sorted(
+        n for n, r in menu.items() if r["split_clauses"] and not r["successors"]
+    )
+    if empty_split:
+        return [
+            f"approved row(s) {', '.join(f'`{n}`' for n in empty_split)} state a beta split "
+            f"in {APPROVED_DOC.name} but NO target name parsed out of it; the clause shape "
+            "has changed, and a row whose successors silently empty flips from `successor` "
+            "(support) to `rehomed` (a disagreement) in the rendered table"
+        ]
+    if sum(1 for r in menu.values() if r["split_clauses"]) < APPROVED_MIN_SPLITS:
+        return [
+            f"only {sum(1 for r in menu.values() if r['split_clauses'])} beta-split "
+            f"statement(s) parsed out of {APPROVED_DOC.name} (expected at least "
+            f"{APPROVED_MIN_SPLITS} — row 17 states `splits this into `update_knowledge` + "
+            "`supersede_knowledge``); a reworded clause drops those successors silently"
+        ]
+    return []
+
+
+def _approved_verdict(menu: dict[str, dict], aliases: set[str], target: str) -> str:
+    """How the approved menu reads `target` for a method — five mechanical verdicts.
+
+    `row`       the target is an approved row that absorbs this method — the strongest
+                reading available: the approved doc ITSELF places the method there.
+    `successor` the target is a TARGET the absorbing row's cell names as beta's split
+                of that row, so the row does support it (one of several successors).
+    `refuted`   an approved row (or a successor of one) covers this target and does NOT
+                absorb the method: the approved doc does not place the method there. It
+                does NOT claim the doc places it SOMEWHERE ELSE — a method the doc never
+                absorbs at all reads `refuted` too, and the evidence line beside it says
+                so ("no approved row absorbs …").
+    `rehomed`   the approved doc does absorb this method, but into a DIFFERENT row than
+                the map's destination (which the doc never names) — so the destination is
+                not the approved answer even though the method has one. Reached through a
+                different door than `refuted` and counted with it: the two docs disagree.
+    `unstated`  the approved doc names neither this target nor any row that absorbs the
+                method, so it neither supports nor refutes it.
+
+    `rehomed` is not folded into `unstated`: `unstated` is silence, and a row whose
+    Approved-home cell names the method is not silent — reporting it as "not named by the
+    approved doc" told the owner the opposite of what the quoted row below it said.
+    `refuted` is not folded into `rehomed` for the mirror reason: `rehomed` asserts the
+    method HAS an approved home, which is false when no row absorbs it.
+    """
+    row = menu.get(target)
+    if row is not None:
+        return "row" if aliases & row["members"] else "refuted"
+    hosts = [r for r in menu.values() if target in r["successors"]]
+    if hosts:
+        return "successor" if any(aliases & h["members"] for h in hosts) else "refuted"
+    if any(aliases & r["members"] for r in menu.values()):
+        return "rehomed"
+    return "unstated"
+
+
+def _approved_readings(
+    menu: dict[str, dict], findings: tuple[list[dict], list[dict], list[dict]]
+) -> list[dict]:
+    """One reading per DISPUTED row, from the approved menu.
+
+    Disputed = every row a downstream section already flags (D2 disagreeing with its
+    citation, D2b supported only beyond the first clause, D3 under a multi-target
+    citation). The reading covers the map's own destination AND every rival target the
+    citation names, because the rival is what the ambiguity is about.
+    """
+    methods = {r["name"]: r["sdk_method"] for r in _registry_rows()}
+    disputed: dict[str, dict] = {}
+    for group in findings:
+        for f in group:
+            disputed.setdefault(f["tool"], f)
+
+    out: list[dict] = []
+    for tool, f in sorted(disputed.items()):
+        method = methods.get(tool, "")
+        aliases = {a for a in (method, tool.removeprefix("tortoise_")) if a}
+        homes = sorted(n for n, r in menu.items() if aliases & r["members"])
+        home = homes[0] if len(homes) == 1 else None
+        dest = DESTINATION[tool]
+        rivals = [t for t in f["named"] if t != dest]
+        out.append(
+            {
+                "tool": tool,
+                "method": method,
+                "dest": dest,
+                "homes": homes,
+                "home": home,
+                "row_no": menu[home]["lineno"] if home else 0,
+                "quote": menu[home]["quote"] if home else "",
+                # A method absorbed by MORE THAN ONE approved row still has every home's
+                # evidence: `home`/`row_no`/`quote` are the single-home convenience, and
+                # the renderer reads `homes_detail` so the multi-home case never prints
+                # "no approved row absorbs" beside a table cell naming several.
+                "homes_detail": [
+                    {
+                        "name": h,
+                        "row_no": menu[h]["lineno"],
+                        "quote": menu[h]["quote"],
+                        "successors": menu[h]["successors"],
+                        # The alias the MATCH was made on: the doc names `invalidate`, not
+                        # the SDK method `invalidate_point`, and the evidence line quotes
+                        # the row — so it must name the token that row actually contains.
+                        "matched": sorted(aliases & menu[h]["members"]),
+                    }
+                    for h in homes
+                ],
+                "successors": sorted({s for h in homes for s in menu[h]["successors"]}),
+                "dest_verdict": _approved_verdict(menu, aliases, dest),
+                "rivals": [(t, _approved_verdict(menu, aliases, t)) for t in rivals],
+            }
+        )
+    return out
+
+
+def _approved_evidence_lines(approved: list[dict]) -> list[str]:
+    """The `-> quoted approved row(s)` list under §D4's table.
+
+    Branched on `homes`, NEVER on whether a single quote exists: a method absorbed by
+    MORE THAN ONE approved row has `home is None`/`quote == ''` by construction, and an
+    empty-quote branch printed "no approved row absorbs `x`" a few lines under a table
+    cell that named several rows absorbing it — two cells of one generated section
+    asserting opposite things, in the artifact the owner reads for the evidence (#8930).
+
+    The absorbed name is the one the MATCH was made on (`invalidate`), not necessarily the
+    SDK method (`invalidate_point`): the quoted row beneath it has to contain the token the
+    line claims it absorbs, or the owner cannot check the claim against the doc.
+    """
+    out: list[str] = []
+    for a in approved:
+        if len(a["homes"]) > 1:
+            out.append(
+                f"- **`{a['tool']}`** — `{a['method'] or a['tool']}` is absorbed by SEVERAL "
+                "approved rows: "
+                + ", ".join(f"`{h['name']}` (row {h['row_no']})" for h in a["homes_detail"])
+                + ":"
+            )
+            out += [f"  > {h['quote']}" for h in a["homes_detail"]]
+            continue
+        if not a["homes"]:
+            out.append(
+                f"- **`{a['tool']}`** — no approved row absorbs "
+                f"`{a['method'] or a['tool']}`."
+            )
+            continue
+        matched = a["homes_detail"][0]["matched"]
+        named = ", ".join(f"`{m}`" for m in matched) if matched else f"`{a['method']}`"
+        sdk = f" (SDK `{a['method']}`)" if a["method"] and a["method"] not in matched else ""
+        out.append(f"- **`{a['tool']}`** — {named}{sdk} is absorbed by `{a['home']}`:")
+        out.append(f"  > {a['quote']}")
+    return out
 
 
 def _registry_rows() -> list[dict]:
@@ -770,7 +1778,31 @@ def _blockers(rows: list[dict], sdk_defs: dict[str, int]) -> tuple[list[dict], l
     return no_method, unresolved
 
 
-def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -> str:
+def _closure_sentences(closures: list[tuple[str, set[str]]]) -> list[str]:
+    """The `X/Y `sit inside` Z` lines of §D4's membership paragraph — from the PARSE.
+
+    Hand-typed here, this list was a SECOND answer that could drift from the closure the
+    membership actually uses: removing `list_topics` from the doc's `overview` statement
+    left the build green and the artifact still asserting that `list_topics` `sits inside`
+    `overview` (#8930 review, P2b). Emitting it from `closures` makes disagreement
+    impossible — the sentence and the applied membership are one value.
+
+    Members are sorted: the parse yields a set, and the sentence is prose, so a stable
+    order is all it needs.
+    """
+    return [
+        f"{'/'.join(f'`{m}`' for m in sorted(inners))} `sit inside` `{outer}`"
+        for outer, inners in closures
+    ]
+
+
+def render(
+    rows: list[dict],
+    sdk_defs: dict[str, int],
+    cites: dict[str, dict],
+    menu: dict[str, dict],
+    closures: list[tuple[str, set[str]]],
+) -> str:
     by_dest: dict[str, list[str]] = {}
     for r in rows:
         by_dest.setdefault(DESTINATION[r["name"]], []).append(r["name"])
@@ -925,6 +1957,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
     # ── Part D — the destination citations ──────────────────────────
     n_cited = len(cites)
     unsupported, clause_only, ambiguous = _citation_findings(cites)
+    approved = _approved_readings(menu, (unsupported, clause_only, ambiguous))
     by_quote: dict[tuple[str, str], list[str]] = {}
     for tool, c in sorted(cites.items()):
         by_quote.setdefault((c["doc"], c["quote"]), []).append(tool)
@@ -1059,6 +2092,149 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         out.append("| *(none)* | | | |")
     out += [
         "",
+        "### D4 — what the OWNER-APPROVED menu says about every disputed row (#4513)",
+        "",
+        "Part D above reads `beta-sdk-surface.md`. This section reads the OTHER owner-approved",
+        "doc — `canonical-mcp-tools.md` (`approval_status: approved`, PR #4120) — whose `Absorbs`",
+        "cell is the owner's own record of **which current name folds into which target**. That",
+        "binding was never consulted here, so a row could contradict the approved menu and the",
+        "build stayed green (#4513 §1/§2).",
+        "",
+        "**Nothing is decided here.** Where the two approved docs disagree, the ruling is the",
+        "owner's and the map is NOT edited — the disagreement is shown with BOTH citations so it",
+        "is visible at the row. What the approved menu *can* settle mechanically is narrower:",
+        "does a target the row's citation names actually absorb this method?",
+        "",
+        "**Scope, stated exactly:** these are the rows Part D above already flags (D2/D2b/D3).",
+        "A row Part D does not flag is NOT here even when the approved menu disagrees with it —",
+        "covering every cited row is the whole-`Destination` derivation in #4518/#5063, which",
+        "this section deliberately does not pre-empt. The sibling",
+        "`docs/product/sdk-rename-table.md` (§C3b) reads these rows from beta's prose ALONE and",
+        "states a winner on several of them; this section is the other approved doc's side of the",
+        "same rows, not a correction of it.",
+        "",
+        "- **`row`** — the target is an approved row that absorbs this method: the approved doc",
+        "  itself places the method there.",
+        "- **`successor`** — the target is one the absorbing row's cell names as beta's own split",
+        "  of that row, so the row supports it (one of several successors).",
+        "- **`refuted`** — an approved row (or a successor of one) covers this target and does",
+        "  **not** absorb this method: the approved doc does not place the method there. (It",
+        "  does not claim the doc places it SOMEWHERE ELSE — a method the doc never absorbs at",
+        "  all reads `refuted` too, and its evidence line below says so.)",
+        "- **`rehomed`** — the approved doc **does** absorb this method, but into a different row",
+        "  than this map's destination, and the destination is neither an approved row nor a",
+        "  name any row's beta split states. Read with `refuted`: the two approved docs",
+        "  disagree. It is NOT `unstated` — the `Approved home` cell and the quoted row below",
+        "  name the method, so the approved menu does answer it.",
+        "- **`unstated`** — the approved doc names neither this target nor any row that absorbs",
+        "  this method, so it neither supports nor refutes it. A row resting only on `unstated` is",
+        "  genuinely owner-open.",
+        "",
+        "The membership set is the doc's OWN closure, parsed from its prose:",
+        *_closure_sentences(closures),
+        "",
+        "A name it collapses without listing still resolves, and a closure the parse drops",
+        "fails the build. The lines above are emitted from that parse — not typed — so this",
+        "paragraph cannot describe a closure the membership does not use.",
+        "",
+        "| Row | Map destination | Approved home | Home's beta successors | Map destination reads | Citation rivals read |",
+        "|---|---|---|---|---|---|",
+    ]
+    if approved:
+        for a in approved:
+            home = (
+                f"`{a['home']}` (row {a['row_no']})"
+                if a["home"]
+                else (
+                    "*(several: " + ", ".join(f"`{h}`" for h in a["homes"]) + ")*"
+                    if a["homes"]
+                    else "*(no approved row names it)*"
+                )
+            )
+            succ = ", ".join(f"`{s}`" for s in a["successors"]) or "*(none)*"
+            rivals = ", ".join(f"`{t}` — **{v}**" for t, v in a["rivals"]) or "*(none)*"
+            out.append(
+                f"| `{a['tool']}` | `{a['dest']}` | {home} | {succ} | "
+                f"**{a['dest_verdict']}** | {rivals} |"
+            )
+    else:
+        out.append("| *(none)* | | | | | |")
+
+    # The summary is a PARTITION of the rows, and each bucket's claim is exactly what the
+    # verdict establishes: `refuted` no longer means "the doc places it elsewhere" (a method
+    # the doc never absorbs reads `refuted` too), so "placed ELSEWHERE" is reserved for rows
+    # that HAVE a home, and a home-less `refuted` row belongs with `unstated` — neither is
+    # placed by the approved menu.
+    agrees = sum(1 for a in approved if a["dest_verdict"] in ("row", "successor"))
+    placed_elsewhere = [
+        a["tool"]
+        for a in approved
+        if a["homes"] and a["dest_verdict"] in ("refuted", "rehomed")
+    ]
+    refuted_with_home = [
+        a["tool"] for a in approved if a["dest_verdict"] == "refuted" and a["homes"]
+    ]
+    refuted_no_home = [
+        a["tool"] for a in approved if a["dest_verdict"] == "refuted" and not a["homes"]
+    ]
+    rehomed = [a["tool"] for a in approved if a["dest_verdict"] == "rehomed"]
+    unstated = [a["tool"] for a in approved if a["dest_verdict"] == "unstated"]
+    uncovered = len(refuted_no_home) + len(unstated)
+    out += [
+        "",
+        f"**{agrees} of {len(approved)} disputed rows are placed by the approved menu where this",
+        f"map places them; {len(placed_elsewhere)} are placed ELSEWHERE by it; {uncovered} have",
+        "no place in it at all.** Every count is computed from the doc, not typed.",
+        "",
+    ]
+    if refuted_with_home:
+        out.append(
+            "- **The approved menu contradicts the map on**: "
+            + ", ".join(f"`{t}`" for t in refuted_with_home)
+            + " — an approved row (or a successor of one) covers the map's destination and does"
+            " **not** absorb the method, while another row does. Two owner-approved docs"
+            " disagreeing is an owner ruling, not a build step, so the destinations stand and"
+            " the conflict is recorded here."
+        )
+    if rehomed:
+        out.append(
+            "- **The approved menu absorbs the method in a DIFFERENT row than the map's"
+            " destination** (and the destination is neither an approved row nor one any beta"
+            " split names): "
+            + ", ".join(f"`{t}`" for t in rehomed)
+            + " — the same disagreement as the sentence above, reached through a different"
+            " door: the method is NOT unnamed, its approved home is in the table and the"
+            " whole approved row is quoted below."
+        )
+    if refuted_no_home:
+        out.append(
+            "- **The approved menu covers the map's destination and does not absorb the method "
+            "ANYWHERE**: "
+            + ", ".join(f"`{t}`" for t in refuted_no_home)
+            + " — the destination row exists and excludes the method, and no other approved row"
+            " takes it, so the map's destination has no approved answer."
+        )
+    if unstated:
+        out.append(
+            "- **The approved menu names neither the map's destination nor any row that absorbs"
+            + " the method, for: "
+            + ", ".join(f"`{t}`" for t in unstated)
+            + " — the row is not refuted either; it rests on beta alone and is genuinely"
+            " owner-open."
+        )
+    out += [
+        "",
+        "**The approved row itself, for each disputed row that has one** (whole table row, by",
+        "construction, so it cannot be a truncation of what the doc says):",
+        "",
+    ]
+    if approved:
+        out += _approved_evidence_lines(approved)
+    else:
+        out.append("None.")
+
+    out += [
+        "",
         "---",
         "",
         "## Reproduce",
@@ -1080,15 +2256,23 @@ def main() -> int:
     rows = _registry_rows()
     sdk_defs = _sdk_targets()
     cites = _doc_citations()
+    # ONE read of the approved doc, for the guards AND the section that renders it: the
+    # membership sentence and the membership applied are then the same parse, by
+    # construction (#8930 review, P2b).
+    menu, closures, row_errors = _approved_state()
 
-    errs = [*_validate(rows), *_citation_errors(cites)]
+    errs = [
+        *_validate(rows),
+        *_citation_errors(cites),
+        *_approved_errors(menu, closures, row_errors),
+    ]
     if errs:
         print("BRIDGE TABLE BUILD FAILURE — the map and the registry disagree:", file=sys.stderr)
         for e in errs:
             print(f"  • {e}", file=sys.stderr)
         return 1
 
-    doc = render(rows, sdk_defs, cites)
+    doc = render(rows, sdk_defs, cites, menu, closures)
 
     if args.check:
         current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
