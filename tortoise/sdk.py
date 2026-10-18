@@ -12182,13 +12182,35 @@ class TortoiseSDK:
         # emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER, §4.4) so a
         # transfer×emission crash cannot leave the stale descriptor in the
         # JSONL while the live edge moves.
+        # #8622: the OTHER endpoint may carry ANY of the four epistemic
+        # labels (#7902 / owner ruling #7813 — a direct IMPL/NAND is explicitly
+        # allowed to connect any two of :Point/:Subject/:Object/:Event). The
+        # transfer legs therefore anchor each endpoint on the label that
+        # actually resolved it; a hardcoded ``:Point`` on the far endpoint
+        # matched NOTHING, so the MERGE was a constrained no-op and the
+        # delete-leg below removed the ORIGINAL edge — the transfer silently
+        # DESTROYED the edge live, and the replay (which received the same
+        # endpoint contract) dropped it too. ``labels(t)`` rides the same
+        # traversal, so no extra round trip is spent resolving the far node.
+        def _epistemic_label(node_id: str) -> str | None:
+            """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
+            for _label in EPISTEMIC_LABELS:
+                found_row = proj.g.query(
+                    f"MATCH (n:{_label} {{id:$id}}) RETURN ID(n) LIMIT 1",
+                    params={"id": node_id},
+                ).result_set
+                if found_row:
+                    return _label
+            return None
+
+        new_label = _epistemic_label(new_id) if new_id else None
         for direction in ("out", "in"):
             if direction == "out":
                 dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             else:
                 dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             rows = proj.g.query(dq, params={"old_id": old_id}).result_set
             # Filter: exclude edges whose OTHER endpoint is an operator Point
             # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
@@ -12209,6 +12231,14 @@ class TortoiseSDK:
             rows = plain
             for row in rows:
                 rtype, r, tid, rid = row[0], row[1], row[2], row[3]
+                # #8622: the label that ACTUALLY carries the far endpoint, in
+                # EPISTEMIC_LABELS order (Point-first) — the same first-wins
+                # order ``create_direct_edge``'s probe uses, so the write and
+                # the transfer can never disagree about a multi-labelled node.
+                _row_labels = set(row[4] or ()) if len(row) > 4 else set()
+                tid_label = next(
+                    (lbl for lbl in EPISTEMIC_LABELS if lbl in _row_labels),
+                    None)
                 # FalkorDB returns an Edge object — read its properties.
                 rdict = dict(r.properties) if hasattr(r, "properties") else {}
                 if tid == new_id:
@@ -12256,25 +12286,36 @@ class TortoiseSDK:
                 # Two-step MERGE (FalkorDB quirk — same as create_direct_edge):
                 # MATCH the existing nodes, then MERGE the edge between them
                 # (never creates duplicate nodes; collapses to one edge).
-                if direction == "out":
-                    mq = (f"MATCH (new:Point {{id:$new_id}}), "
-                          f"(t:Point {{id:$tid}}) "
-                          f"MERGE (new)-[nr:{rtype}]->(t)")
-                else:
-                    mq = (f"MATCH (t:Point {{id:$tid}}), "
-                          f"(new:Point {{id:$new_id}}) "
-                          f"MERGE (t)-[nr:{rtype}]->(new)")
-                proj.g.query(mq, params={"new_id": new_id, "tid": tid})
-                _keep = {k: v for k, v in rdict.items()
-                         if k in ("direction", "confidence", "weight",
-                                  "label", "batch_id")}
-                proj.g.query(
-                    f"MATCH (a:Point {{id:$a}})-[r:{rtype}]->"
-                    f"(b:Point {{id:$b}}) SET r += $attrs",
-                    params={"a": (tid if direction == "in" else new_id),
-                            "b": (new_id if direction == "in" else tid),
-                            "attrs": _keep},
-                )
+                # #8622: anchor BOTH endpoints on their resolved labels. An
+                # unresolvable label means the endpoint is not an epistemic
+                # node (a raw/legacy edge the write path itself refuses), so
+                # the transfer cannot be performed — the delete-leg below still
+                # runs, mirroring the pre-#7902 "no such endpoint" outcome
+                # WITHOUT the silent hope that a :Point match existed.
+                if new_label is not None and tid_label is not None:
+                    if direction == "out":
+                        mq = (f"MATCH (new:{new_label} {{id:$new_id}}), "
+                              f"(t:{tid_label} {{id:$tid}}) "
+                              f"MERGE (new)-[nr:{rtype}]->(t)")
+                    else:
+                        mq = (f"MATCH (t:{tid_label} {{id:$tid}}), "
+                              f"(new:{new_label} {{id:$new_id}}) "
+                              f"MERGE (t)-[nr:{rtype}]->(new)")
+                    proj.g.query(mq, params={"new_id": new_id, "tid": tid})
+                    _keep = {k: v for k, v in rdict.items()
+                             if k in ("direction", "confidence", "weight",
+                                      "label", "batch_id")}
+                    if direction == "out":
+                        _a_label, _b_label = new_label, tid_label
+                    else:
+                        _a_label, _b_label = tid_label, new_label
+                    proj.g.query(
+                        f"MATCH (a:{_a_label} {{id:$a}})-[r:{rtype}]->"
+                        f"(b:{_b_label} {{id:$b}}) SET r += $attrs",
+                        params={"a": (tid if direction == "in" else new_id),
+                                "b": (new_id if direction == "in" else tid),
+                                "attrs": _keep},
+                    )
                 # Delete the OLD edge by its internal id (precision),
                 # constrained to the old point's incident edges (REVIEW-FIX
                 # P2: never graph-wide — internal ids may be reused).
