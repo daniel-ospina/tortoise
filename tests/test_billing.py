@@ -551,6 +551,64 @@ class TestApplyLimitsAndReconcile:
         assert t["subscription_id"] == "sub_team", (
             f"the still-in-force pointer is the current one — got {t}")
 
+    def test_reconcile_an_unpriceable_ENDING_sub_is_not_revoked_by_a_cheaper_newer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P2: the still-in-force guard must hold when ITS rank is unreadable.
+
+        ``_best_ranked`` SKIPS entries it cannot price, so a customer whose only
+        ENDING subscription carries a rotated-out price yields ``(None, None)``.
+        A guard written as ``if kept is not None`` then skipped the comparison
+        entirely and fell through to the newer, cheaper candidate — mirroring
+        Solo, rewriting ``subscription_id`` to it, and recording a clean
+        ``repaired``/``direction: down`` (which never pages) while Team was paid
+        through ``current_period_end``. That is the silent-revocation class this
+        branch exists to close, one arm over: only the direction that cannot
+        revoke was implemented.
+
+        Keeping the still-in-force sub cannot be mirrored either (its price is
+        not in the catalog), and that IS the intended answer: the row is FAILED
+        with the stored tier and pointer intact, so the run reds and an operator
+        looks — ``subscription_plan``'s contract ("log + ops-notify + KEEP
+        stored tier"), never a downgrade on a green pass.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-unpriceable-team")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team_rotated', "
+            "t.stripe_customer_id='cus_1', t.tier='team', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team_rotated", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_rotatedOut"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        # The newer, cheaper sub is listed FIRST: the pre-fix arm took it from
+        # any position, because the comparison never ran at all.
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending])
+        summary = billing.reconcile_subscriptions(sdk, notifier=False)
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "team", (
+            "Team is paid through current_period_end and the ending sub could "
+            "not be PRICED, so the newer cheaper Solo one must not revoke it "
+            f"— got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team_rotated", (
+            f"the still-in-force pointer is the current one — got {t}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            "no write is justified, so nothing may be reported as repaired "
+            f"— got {summary}")
+        assert len(summary["failed"]) == 1, (
+            "an unpriceable still-in-force sub cannot be mirrored, so the org "
+            "must be FAILED and the run must red — a green pass here is the "
+            f"silent outcome — got {summary}")
+        assert "unknown price" in summary["failed"][0]["error"], (
+            f"the row must name the real cause — got {summary['failed']}")
+
     def test_reconcile_customer_only_keeps_a_paid_ending_sub_over_a_cheaper_newer(
             self, monkeypatch, stripe_env, billing_sdk):
         """The SAME rank guard on the customer-only LIST site.
@@ -3012,7 +3070,7 @@ class TestReconcileSweep:
 
     def test_an_unreadable_rank_never_awards_a_replacement(
             self, stripe_env):
-        """The rank guard's SAFE direction, unit-pinned.
+        """The rank guard's SAFE direction, unit-pinned — on both sides.
 
         ``_subscription_rank`` returns ``None`` for a price the catalog does not
         know and for an unreadable pricing ladder (``_paid_tier_floor``). Both
@@ -3022,6 +3080,11 @@ class TestReconcileSweep:
         of it: a provably equal-or-higher newer sub does replace it (the
         upgrade case, also pinned end-to-end by
         ``test_reconcile_an_active_but_ENDING_pointer_follows_the_newer_sub``).
+
+        ⛔ Both SIDES of that rule are pinned below: the unrankable entry may be
+        the newer candidate (cannot prove it is higher) or the ENDING one (cannot
+        prove it is not) — and the second only ever revokes entitlement, so a
+        guard that covers just the first is half a rule.
         """
         from tortoise import billing as bl
 
@@ -3051,6 +3114,19 @@ class TestReconcileSweep:
         newer_solo = _sub("sub_solo2", "price_100soloM", False)
         assert bl._select_current_subscription([ending_solo, newer_solo]) \
             is newer_solo
+
+        # ⛔⛔ And the guard must hold when the unrankable one is the ENDING
+        # (still-in-force) sub — that is the direction that REVOKES, and it is
+        # the one the selector used to hand to the candidate. ``_best_ranked``
+        # skips unrankable entries, so a guard written as ``if kept is not
+        # None`` skipped the comparison entirely and mirrored the newer, cheaper
+        # sub, capping a paying org on a green pass.
+        ending_rotated = _sub("sub_team_old", "price_rotatedOut", True)
+        assert bl._subscription_rank(ending_rotated) is None
+        assert bl._select_current_subscription([newer_solo, ending_rotated]) \
+            is ending_rotated
+        assert bl._select_current_subscription([ending_rotated, newer_solo]) \
+            is ending_rotated
 
     def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
         """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.

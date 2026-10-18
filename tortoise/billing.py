@@ -140,6 +140,20 @@ def _select_current_subscription(subs):
     lower" is not a reason to take entitlement away. The lower-ranked newer
     sub is not lost: once the ending one dies, the next pass sees no live
     ending sub and mirrors the newer one then.
+
+    ⛔⛔⛔ BOTH directions of that rule, and the ending sub's own rank is the one
+    that can revoke. ``_best_ranked`` SKIPS unrankable entries, so a customer
+    whose only ENDING subscription is unrankable (a price rotated out of
+    ``STRIPE_PRICE_IDS``, an unreadable ladder) yields ``(None, None)`` — and a
+    guard written as ``if kept is not None`` then skips the comparison
+    entirely and hands the newer, cheaper candidate the entitlement. That is
+    the same silent revocation one branch over, so the unrankable-ending case
+    keeps the still-in-force entry (``ending[0]``). Keeping it is not a
+    no-op dressed as a decision: mirroring an unrankable subscription raises
+    before ANY write (``subscription_plan`` on a rotated price,
+    ``apply_limits`` on an unreadable ladder), so the org lands in a FAILED
+    row with its stored tier untouched and the run reds — loud and
+    fail-closed, and never a downgrade recorded as a clean repair.
     """
     live = [s for s in subs if s.get("status") in _POINTER_CURRENT_STATUSES]
     live_now = [s for s in live if not s.get("cancel_at_period_end")]
@@ -148,10 +162,19 @@ def _select_current_subscription(subs):
         candidate = live_now[0]
         if ending:
             kept, kept_rank = _best_ranked(ending)
-            if kept is not None:
-                cand_rank = _subscription_rank(candidate)
-                if cand_rank is None or cand_rank < kept_rank:
-                    return kept
+            if kept is None:
+                # ⛔ No ENDING subscription could be RANKED, so "the candidate
+                # is at or above it" is not PROVED — and unproved is not a
+                # reason to replace a subscription the customer has paid
+                # through ``current_period_end``. Keep the still-in-force one
+                # instead of falling through to the candidate: the mirror of
+                # an unrankable sub raises before any write, so the org lands
+                # in a FAILED row (stored tier untouched, run reds) rather
+                # than being downgraded silently on a green run.
+                return ending[0]
+            cand_rank = _subscription_rank(candidate)
+            if cand_rank is None or cand_rank < kept_rank:
+                return kept
         return candidate
     if ending:
         return ending[0]
@@ -878,6 +901,11 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       An org that adds a CHEAPER subscription before its paid period ends keeps
       the higher tier until that period ends; replacing it there would revoke
       an entitlement already paid for, silently (only drift UP notifies).
+      ⛔ That guard holds when the rank CANNOT be read too (a price rotated out
+      of ``STRIPE_PRICE_IDS``, an unreadable ladder): the still-in-force one is
+      kept, and because an unrankable subscription raises inside
+      ``mirror_subscription`` before any write, the org is a FAILED row with
+      its stored tier intact and the run reds — never a downgrade.
       ⛔ If the LIST itself FAILS, none of that applies: the org is returned as
       ``action: "noop"`` and left alone (a provider error is not a verdict —
       mirroring the stored one there would re-cap a paying org, which is the
@@ -887,7 +915,8 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     - elif Org has ``stripe_customer_id`` only (missed checkout event blind
       spot) → LIST subscriptions → the same live-then-``past_due`` preference,
       ending subs last (and the same still-in-force guard: a non-ending sub
-      replaces an ending one only at an equal-or-higher cap) → mirror. A failed
+      replaces an ending one only at an equal-or-higher cap, and not at all
+      when either cap cannot be read) → mirror. A failed
       LIST is a ``noop`` here too, for the same reason: the population is
       dominated by abandoned checkouts, and one 5xx must not turn a routine row
       into a FAILED pass that pages.

@@ -478,7 +478,12 @@ within the live ones a newer, not-ending subscription replaces an ENDING one
 row reports. A subscription with `cancel_at_period_end` is still **in force** —
 the customer has paid it through `current_period_end`, and cancelling is not a
 refund — so an org that adds a cheaper subscription inside that window keeps
-the higher tier until the period ends, and only then drops. A **genuine**
+the higher tier until the period ends, and only then drops. When either cap
+**cannot be read** (a price rotated out of `STRIPE_PRICE_IDS`, an unreadable
+ladder) the still-in-force one is kept for the same reason — and because an
+unpriceable subscription cannot be mirrored at all, that org lands in `failed`
+with its stored tier untouched and the run reds: loud, never a silent
+downgrade. A **genuine**
 cancellation still downgrades the moment Stripe says so: with no live
 subscription at the customer there is nothing to prefer and the stored one is
 mirrored. A customer lookup that **fails** is neither — the org is left alone
