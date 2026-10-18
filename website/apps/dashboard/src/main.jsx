@@ -7047,8 +7047,22 @@ function claimIntentInFlight() {
   // by writing the refusal last; latching it on the record moved the write, so
   // the precedence has to live here. An empty refusal leaves the `error` slot
   // authoritative (and an empty error leaves the refusal to render alone).
+  //
+  // #4721 (review P2): "outranks" may not mean "discards". A NEWER definite
+  // 4xx detail arrives in the transient slot while a refusal can still be
+  // latched from an earlier rotate for the same team — and the #8249 refusal's
+  // own remedy text invites exactly that next request ("Refresh the list,
+  // revoke the unused replacement row, and create a new key" — retrying the
+  // rotate against the dead row answers the non-occupying 409). Dropping that
+  // detail made the branch's whole promise ("the server's precise detail is
+  // the disclosure") false whenever a refusal was latched. Both are true and
+  // answer different questions, so both render: the retained destruction
+  // record FIRST (never dropped, the #8249 precedence), the fresh detail after
+  // it. An empty side keeps the other authoritative, as before.
   function errorBannerText(error, refusalText) {
-    return refusalText || errorMessage(error)
+    const transient = errorMessage(error)
+    if (refusalText && transient) return `${refusalText} ${transient}`
+    return refusalText || transient
   }
 
   // #4370: the GRAPH reveal's key (the create-graph envelope + the per-graph
@@ -7315,6 +7329,39 @@ function claimIntentInFlight() {
       if (e.status === 402) {
         setCapNotice(rotateCapNoticeFrom(e.message, team, teamHasUpgrade(team)))
         setError('')
+      } else if (typeof e.status === 'number' && e.status >= 400 && e.status < 500) {
+        // #4721: a DEFINITE 4xx refusal is not a lost response — the reply is
+        // in hand, and it is the server's OWN account of what happened to this
+        // request. Both rotate 409s are known, deterministic outcomes: the
+        // lost-claim race says the replacement was ROLLED BACK, and the
+        // non-occupying refusal says nothing was minted at all. Running the
+        // ambiguous branch on either one is a lie in the page: the re-read
+        // finds the target row `revoked_at` set (the row really is dead — a
+        // concurrent revoke or rotate killed it), so the completed-rotate copy
+        // fires and tells the user a replacement exists whose value cannot be
+        // shown. None does. Before #4355's single call this branch was
+        // `setError(e.message)`, and that is exactly what a definite refusal
+        // should keep: the server's precise detail.
+        //
+        // The refresh still belongs here (#4721 review). BOTH 409s say this
+        // row's state changed server-side — the lost claim revoked it, and the
+        // non-occupying refusal describes a row that is not live — so a branch
+        // that only sets the message leaves the table rendering the row as
+        // live directly above a banner that says otherwise. Refresh FIRST, then
+        // set the message: the same ordering the ambiguous branch below uses,
+        // and the reason the `error`-slot hazard does not bite here — `loadAll`
+        // touches that slot only on ITS OWN failure, so the last write is the
+        // server's detail. (`loadAll` does not rethrow today — the wrap is
+        // defence for the invariant above: a future throw inside the refresh
+        // must degrade to "no refresh", never to "the banner lost the reason".)
+        // Statuses that are NOT a 4xx reply — no status at all
+        // (a network failure: fetch never produced a response) or a 5xx — stay
+        // genuinely ambiguous and keep the disclosure below.
+        try {
+          await loadAll('')
+        } catch { /* keep the server detail last — see above */ }
+        if (orgIdRef.current !== _teamAtCall) return
+        setError(e.message)
       } else {
         // #4355: any other failure may be a LOST RESPONSE, not a lost
         // request. The server creates the replacement and then revokes the

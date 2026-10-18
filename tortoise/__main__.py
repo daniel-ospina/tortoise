@@ -83,6 +83,25 @@ def _cmd_rebuild(args):
         # rebuild_all() elsewhere cannot wipe a graph by forgetting it.
         counts = proj.rebuild_all(args.dir, confirm_destructive=True)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
+        # #5612: the rebuild SALVAGES a damaged mid-file line (so one bad line
+        # cannot make this tool refuse forever), which means the graph it just
+        # produced may be missing records the journal held. Say so — the count
+        # is read from the same result the numbers above came from, never
+        # inferred from silence.
+        _corrupt = int(counts.get("corrupt_lines") or 0)
+        _torn = int(counts.get("torn_lines") or 0)
+        if _corrupt or _torn:
+            # Both classes, one line each, so this surface reports the same
+            # shape as the in-memory fallback (`skipped_line_count` = torn +
+            # corrupt) instead of naming only one of them.
+            if _corrupt:
+                print(f"Warning: {_corrupt} corrupt mid-file journal line(s) "
+                      f"SKIPPED — the records they carried are NOT in this "
+                      f"graph (#5612)", file=sys.stderr)
+            if _torn:
+                print(f"Warning: {_torn} torn journal line(s) skipped "
+                      f"(crash damage) — those records are NOT in this graph "
+                      f"(#5612)", file=sys.stderr)
         # #2814: the operator surface for the config third state. Without this a
         # SUCCESSFUL rebuild that staged the `config_reset` marker would print
         # `Done:` and say nothing — the marker would be written and never
@@ -252,15 +271,21 @@ def _cmd_rebuild(args):
         return 1
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)
-        from tortoise.log import EventLog, refuse_torn_tail_revival  # noqa: I001
+        from tortoise.log import (  # noqa: I001
+            EventLog, read_for_replay, refuse_torn_tail_revival)
         from tortoise.projection import fold
         import os
         events = []
+        skipped = 0
         try:
             for f in sorted(os.listdir(args.dir)):
                 if f.endswith('.jsonl'):
                     file_log = EventLog(os.path.join(args.dir, f))
-                    chunk = file_log.read_all()
+                    # #5612: salvage — one damaged mid-file line must not make
+                    # the rebuild refuse forever; the #3316 refusal below still
+                    # fires when the skipped loss could revive removed state.
+                    chunk = read_for_replay(file_log)
+                    skipped += file_log.skipped_line_count
                     # #3316: the in-memory fallback is a replay engine too — a
                     # dropped torn trailing removal record must not be folded
                     # into an in-memory "success".
@@ -270,6 +295,10 @@ def _cmd_rebuild(args):
         except TornTailResurrectionError as refusal:
             print(f"Refused: {refusal}", file=sys.stderr)
             return 1
+        if skipped:
+            print(f"Warning: {skipped} damaged journal line(s) skipped during "
+                  f"this rebuild — the records they carried are NOT in the "
+                  f"result (#5612)", file=sys.stderr)
         points = fold(events)
         statements, ops = 0, 0
         for p in points.values():
@@ -507,7 +536,9 @@ def _cmd_reconcile(args):
         return 1
 
     try:
-        from tortoise.log import EventLog, TornTailResurrectionError, refuse_torn_tail_revival  # noqa: I001
+        from tortoise.log import (  # noqa: I001
+            EventLog, TornTailResurrectionError, read_for_replay,
+            refuse_torn_tail_revival)
         from tortoise.projection import FalkorProjection
         # #7951 §17.1: `reconcile` replays records ALREADY in the journal, so
         # its folds are authorized by the replay scope.
@@ -523,7 +554,10 @@ def _cmd_reconcile(args):
     # Refused before the projection is even opened.
     log = EventLog(log_path)
     try:
-        events = log.read_all()
+        # #5612: salvage — `reconcile` is a recovery path, so a damaged line is
+        # skipped and counted rather than making it refuse forever. The #3316
+        # refusal below still fires when the skipped loss could revive state.
+        events = read_for_replay(log)
         refuse_torn_tail_revival(log.torn_tail_revival_records())
     except TornTailResurrectionError as refusal:
         # Same operator contract as ``tortoise rebuild``: the refusal is the
@@ -531,6 +565,13 @@ def _cmd_reconcile(args):
         # exit, never a traceback. Nothing has been applied.
         print(f"Refused: {refusal}", file=sys.stderr)
         return 1
+
+    if getattr(log, "skipped_line_count", 0):
+        # #5612: never silent — this reconcile SUCCEEDED over a journal it
+        # could only partly read, so the count goes to the operator.
+        print(f"Warning: {log.skipped_line_count} damaged journal line(s) "
+              f"skipped — the records they carried are NOT reconciled "
+              f"(#5612)", file=sys.stderr)
 
     proj = None
     try:

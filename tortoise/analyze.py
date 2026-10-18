@@ -416,7 +416,9 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                           rel_filter: str = "IMPL|NAND",
                           direction: str = "both",
                           include_draft: bool = False,
-                          op_cap: int = 200) -> tuple[set[str], set[tuple[str, str, str]]]:
+                          op_cap: int = 200,
+                          stats: dict[str, Any] | None = None
+                          ) -> tuple[set[str], set[tuple[str, str, str]]]:
     """BFS subgraph selection from anchor Points — A9 return contract.
 
     Returns ``(operator_ids, factor_anchors)``:
@@ -465,11 +467,37 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
     With include_draft=False (default, #780): draft anchors, draft operators
     and draft frontier points are excluded — the shared live-only filter at
     the analyze-path call site of the four-factor-extraction set.
+
+    ``stats`` (#6211): OPTIONAL out-parameter. When a dict is passed it is
+    FILLED with what the selection actually did:
+
+      ``truncated``      — True iff ``op_cap`` bit (the operator set this
+                           returns is a strict subset of what the BFS found)
+      ``operators_seen`` — operators the traversal COLLECTED before any cap
+      ``operators_used`` — operators this selection RETURNS
+      ``op_cap``         — the bound in force (None when lifted)
+
+    The return value stays a 2-tuple: every existing caller is unchanged, and
+    the signal is opt-in because most existing callers already own their bound
+    (the Dreamer passes ``op_cap=budget`` and publishes ``budget_used``). It
+    exists for the callers that do NOT own the cap — ``sdk.compute_confidence``
+    — which otherwise cannot tell a full-graph ranking from a capped one: the
+    stderr line is invisible to a programmatic caller, and a capped EP ranking
+    is a confident number computed over a truncated topology (#6211).
+
+    The dict is OVERWRITTEN for THIS call on every return path, never merged:
+    a caller may safely reuse one dict across calls (a stale ``truncated`` must
+    not leak into a later uncapped selection — #6211 review round 1).
     """
     import logging
     _log = logging.getLogger(__name__)
     collected: set[str] = set()
     factor_anchors: set[tuple[str, str, str]] = set()
+    # #6211 review round 1: truncation is tracked LOCALLY, never read back out
+    # of the caller-owned `stats` dict — a reused dict carrying an earlier
+    # call's `truncated: True` would otherwise skip the final write below and
+    # report the previous call's numbers as this one's.
+    truncated = False
     frontier: set[str] = set(anchors)
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
@@ -654,6 +682,15 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                 "BFS selector: collected %d operators, truncating to %d.",
                 len(collected), op_cap,
             )
+            if stats is not None:
+                # #6211: the machine-readable half of the warning above. The
+                # log line stays (an operator reading stderr still sees it);
+                # the dict is what a programmatic caller can act on.
+                truncated = True
+                stats["truncated"] = True
+                stats["operators_seen"] = len(collected)
+                stats["operators_used"] = op_cap
+                stats["op_cap"] = op_cap
             # Deterministic truncation — set iteration order is non-deterministic
             # (hash randomization); sort by ID for reproducible selection.
             collected = set(sorted(collected)[:op_cap])
@@ -675,6 +712,16 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         frontier = new_points - visited
         visited |= new_points
         hop += 1
+
+    if stats is not None and not truncated:
+        # Un-capped (or cap never reached): seen == used. Written on the normal
+        # return too, so a caller always gets both numbers instead of having to
+        # treat an absent key as "no cap" (#6211). OVERWRITES any values a
+        # reused dict carried in, so the report always describes THIS call.
+        stats["truncated"] = False
+        stats["operators_seen"] = len(collected)
+        stats["operators_used"] = len(collected)
+        stats["op_cap"] = op_cap if max_hops is not None else None
 
     return collected, factor_anchors
 

@@ -550,12 +550,22 @@ def test_ac2_noarg_runs_local_ep_no_global_extract(monkeypatch):
 
 
 def test_ac2_noarg_clean_no_dirty_roots():
-    """AC2 — no-arg on a clean graph → {0, True, {}, diagnostic:no_dirty_roots}."""
+    """AC2 — no-arg on a clean graph → {0, True, {}, diagnostic:no_dirty_roots}.
+
+    Also carries the #6211 factor-selection report: this path selects NO
+    operators (the run set is the dirty roots), so it reports the empty
+    selection EXPLICITLY — ``operators_seen``/``operators_used`` 0 and
+    ``truncated`` False — rather than leaving a caller to read an absent key as
+    "nothing was capped". The pre-#6211 key-set is a SUBSET of the result.
+    """
     with _fresh_sdk() as sdk:
         result = sdk.compute_confidence()
         assert result == {"iterations": 0, "converged": True,
                           "confidences": {},
-                          "diagnostic": "no_dirty_roots"}, result
+                          "diagnostic": "no_dirty_roots",
+                          "truncated": False,
+                          "operators_seen": 0,
+                          "operators_used": 0}, result
 
 
 def test_ac2_noarg_draft_only_no_factors():

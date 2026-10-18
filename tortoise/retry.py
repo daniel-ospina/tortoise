@@ -81,6 +81,17 @@ That is what ``retryable_aborted_write`` proves and what makes it admissible
 on a bare ``CREATE``; the transport-class ``retryable_transient`` does NOT
 prove it (a lost reply is not a lost write) and must never be pointed at a
 non-idempotent statement — see that predicate's docstring.
+
+LEGIBILITY (#7357): the graph-abort family's engine sentence
+(``graph was deleted or replaced …``) reads as corruption, and the measured
+outages behind it are usually a graph SWAP the retry could not outlast. On
+exhaustion the SDK appends :func:`explain_graph_abort`'s diagnosis to the SAME
+exception (type and the anchored engine sentence both preserved), branched on
+the same ``EXISTS`` presence the retry trusts — a present key says the
+statement did not land (though a rebuild may have REPLACED the contents, and
+presence is not writability), so a re-issue cannot duplicate; an absent key is
+a deletion OR a rebuild still inside its delete window, and is never told
+"retry".
 """
 from __future__ import annotations
 
@@ -341,6 +352,122 @@ def graph_abort_family(exc: BaseException) -> bool:
     fallback for a message that merely mentions persistence.
     """
     return _abort_arm(exc) == _ARM_GRAPH_ABORT
+
+
+#: The stable opener of the legibility suffix :func:`explain_graph_abort`
+#: appends. It doubles as the IDEMPOTENCY marker: a message that already
+#: carries it has been explained once and is never explained again (two nested
+#: retry layers must not grow two suffixes).
+_LEGIBLE_OPENER = " — what this means: "
+
+
+def explain_graph_abort(
+    exc: BaseException,
+    *,
+    graph_present: bool | None,
+    attempts: int = 1,
+) -> str | None:
+    """Return *exc*'s message with a caller-legible explanation appended (#7357).
+
+    **The defect.** The engine reports a graph SWAP with
+    ``graph was deleted or replaced while the query was running, aborting`` —
+    the ``#7685`` family, whose three measured literals are in
+    ``_GRAPH_ABORT_RE``. Read raw, that sentence names two causes (deletion,
+    replacement), asserts the graph was destroyed, and offers no next action,
+    so an ordinary failed write reads as CORRUPTION or DATA LOSS. Measured
+    cost (#7357, 2026-10-15 comment): a lane asked the owner to authorise a
+    graph REBUILD on the strength of "the graph is write-broken", on a graph
+    whose data was intact and whose write path worked.
+
+    **What this adds, and what it deliberately does not.** The wording states
+    the mechanism's CLASS (the instance swapped the graph under the running
+    query: a restart/reload, a rebuild, or the engine evicting the graph from
+    its cache), the outcome of THIS statement (it did not land; the engine
+    aborts before mutating), and the next action — and it branches on the same
+    ``EXISTS`` discriminator the retry itself trusts, because the sentence
+    alone cannot tell a replacement from a deletion:
+
+    - ``graph_present is True`` — the key is still there, so the graph was
+      not left DELETED and a retry reaches the caller's graph rather than a
+      freshly auto-created EMPTY one; a re-issue is therefore safe from
+      DUPLICATION. It does NOT say the contents survived: a rebuild REPLACES
+      them, which is one of the mechanisms the same sentence names, so the
+      note tells the caller to verify rather than assume. Nor does presence
+      imply WRITABILITY: a graph that refuses every write (the measured
+      write-locked state ``tools/graph_write_repair.py`` documents — key
+      present, reads fine, every write refused) still refuses the retry.
+      This is the case the raw sentence misdescribes, and the one the measured
+      outages hit.
+    - ``graph_present is False`` — the key is gone. Never told "retry": a
+      re-issue lands in a graph FalkorDB auto-creates EMPTY, the #6666
+      silent-success class. The note does NOT settle WHY it is gone: an
+      absence is a plain deletion OR a rebuild still inside its delete window
+      (``retryable_aborted_write``'s own wording), and the probe cannot tell
+      those apart — so it names both and gives an action that fits both,
+      instead of asserting a deletion the evidence does not establish.
+    - ``graph_present is None`` — the presence probe could not answer, so the
+      message says the state is UNKNOWN rather than guessing either way. It
+      names ALL THREE reasons the answer can be missing — an unresponsive
+      instance, an unresolved graph name and a missing projection
+      (``_graph_presence``) — instead of picking one, because naming only the
+      instance sends the reader to check a healthy server for a wiring gap it
+      cannot see.
+
+    It does NOT say which of restart / rebuild / eviction happened: the engine
+    exposes no identity token for the graph, the same limitation ``#7685``
+    escalated. It also cannot make the write succeed — it makes the refusal
+    legible. **Every clause is scoped to what ``EXISTS`` proves**: presence is
+    not identity (see ``_graph_presence``) and it is not integrity either, so
+    the note never reassures a caller about its DATA — that overclaim is the
+    mirror of the defect this function exists to fix (#7357).
+
+    **Contract preserved.** The returned message KEEPS the engine sentence at
+    position 0, so the ``\\A``-anchored ``_GRAPH_ABORT_RE`` still classifies it
+    (a caller that re-classifies the explained error — the SDK does on every
+    retry — sees the same arm) and no caller's ``match=`` breaks. Returns
+    ``None`` when *exc* is not in this family or was already explained, so this
+    is also the allow-list check: a deterministic ``ResponseError``
+    (``WRONGTYPE``), a transport ``TimeoutError`` and a bare ``OSError`` are
+    never rewritten.
+    """
+    if not graph_abort_family(exc):
+        return None
+    text = str(exc)
+    if _LEGIBLE_OPENER in text:
+        return None
+    calls = max(1, int(attempts))
+    if graph_present is True:
+        explains = (
+            "the graph key is still present, so the graph was not left "
+            "deleted: the instance swapped the graph under the running "
+            "query (a restart/reload, a rebuild, or the engine evicting it "
+            "from its cache). A rebuild REPLACES the graph's contents, so "
+            "data written before the swap may be gone — verify, do not "
+            "assume. This statement did not land, and the engine aborts "
+            "before mutating, so retrying is safe — though presence is not "
+            "writability, so a graph that refuses every write still refuses "
+            f"it. {calls} attempt(s) were made in this call."
+        )
+    elif graph_present is False:
+        explains = (
+            "the graph key is ABSENT — either a deletion, or a rebuild still "
+            "inside its delete window; the probe cannot tell those apart — "
+            "so a retry would write into a fresh EMPTY graph, which is why "
+            f"it is refused. {calls} attempt(s) were made in this call. "
+            "Restore the graph, or wait for a rebuild to finish replaying, "
+            "before writing."
+        )
+    else:
+        explains = (
+            "the graph key could not be probed, so whether the graph "
+            f"survived is UNKNOWN — {calls} attempt(s) were made in this "
+            "call. A probe answers nothing for three different reasons (the "
+            "connection did not answer, the graph name did not resolve, or no "
+            "projection was available), and the answer does not say which — "
+            "check the connection, the graph name and the projection before "
+            "concluding anything about the data."
+        )
+    return text + _LEGIBLE_OPENER + explains
 
 
 class WriteStageRetriesExhausted(Exception):
