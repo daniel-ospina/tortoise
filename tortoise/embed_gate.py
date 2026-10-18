@@ -134,7 +134,7 @@ def embedding_verdict(text: object) -> dict | None:
     """
     try:
         rule_id = value_gate.identifier_only(text)
-    except Exception:  # fail-open is the contract, not hygiene (BLE001 not enabled)
+    except Exception:  # fail-open is the contract, not hygiene
         return None
     if rule_id is None:
         return None
