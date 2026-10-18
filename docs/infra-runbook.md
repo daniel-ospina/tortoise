@@ -490,13 +490,23 @@ customer's writes) and a `direction`:
   pricing ladder could not be READ (#750.8), which makes "is this tier paid?"
   UNKNOWN rather than "no" — an unread file is not evidence that a stored `pro`
   org pays nothing, so it is counted here instead of `skipped`. In that third
-  case there are TWO signatures and neither is "every org": orgs whose repair
-  path also reads the ladder land in `failed`, reddening the run with rows
-  naming the error; orgs with only a customer binding never mirror, so a
-  fleet of those sends ALL of them here and produces NO `failed` rows —
-  a clean sweep into `unverified` that still exits 0. So a jump in
-  `unverified` alone, or together with `failed` rows, is
-  `product/pricing.json` — not a mass cancellation, and not nothing.
+  case the counter does not decide the cause, and the Actions warning cannot
+  either — it deliberately enumerates all three. The DISCRIMINATOR IS THE
+  PER-ORG SERVER LOG LINE ("the customer lookup failed" / "the pricing ladder
+  could not be read" / "(Stripe named none, or the customer lookup failed)").
+  Two shapes, and only ONE of them reaches a RED run:
+    * orgs whose repair path reads the ladder raise inside `mirror_subscription`
+      (`KeyError: pricing.json tier … missing required limit keys`), land in
+      `failed`, and redden the run with rows naming the error — so a broken
+      pricing file is NOT a silent no-op;
+    * orgs with no resolvable ACTIVE subscription take the `noop` arm, land in
+      `unverified`, and never fail the run — that much is true of all three
+      causes, which is why `unverified` alone is three-way: ladder, fleet-wide
+      customer-LIST failure, or a Stripe key pointed at the wrong account.
+  A fleet of only the second kind shows a jump in `unverified`, no `failed`
+  rows, and exit 0 — read the per-org line before touching
+  `product/pricing.json`. All three mean "nothing was verified", never a mass
+  cancellation.
   Nothing was verified against a subscription, so this is NOT `unchanged` —
   and it is deliberately not auto-downgraded either. Counted and logged
   loudly; a non-zero number is a person to look at.

@@ -355,7 +355,10 @@ jobs:
           # pass, so anything that is not plain digits fails closed.
           def _count(value, name):
               text = str(value).strip()
-              if not text.isdecimal():
+              # A bounded length too: isdecimal() still admits a 5 000-digit
+              # string, and int() refuses past 4300 (int_max_str_digits), which
+              # would exit 1 as a traceback instead of this annotation.
+              if not text.isdecimal() or len(text) > 18:
                   print(f"::error::reconcile summary field {name} is not an integer "
                         "- the response contract changed; failing closed")
                   sys.exit(1)
