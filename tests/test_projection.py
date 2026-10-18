@@ -760,6 +760,18 @@ def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
         assert any("undeclared list props" in r.getMessage()
                    and "custom_list" in r.getMessage()
                    for r in caplog.records), caplog.text
+        # #8018: the report must name the POLICY as the cause. This payload DOES
+        # carry `custom_list`, so blaming the payload sends the next reader
+        # hunting a journalling gap that does not exist (#3817 lost a detour to
+        # exactly that). Pin both halves: the true cause is present AND the false
+        # one is gone.
+        denied = [r.getMessage() for r in caplog.records
+                  if "custom_list" in r.getMessage()
+                  and "dropped" in r.getMessage()]
+        assert denied, caplog.text
+        for msg in denied:
+            assert "policy drop, not a journal gap" in msg, msg
+            assert "not restorable from the payload" not in msg, msg
     finally:
         pass  # shared session projection — module helper owns close
 
@@ -780,6 +792,15 @@ def test_falkor_point_deny_list_drop_is_reported(caplog):
             proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
                    for r in caplog.records), caplog.text
+        # #8018: `reason` IS in the payload (api.add_point(..., reason=...)), so
+        # the old "not restorable from the payload" clause was false here too.
+        denied = [r.getMessage() for r in caplog.records
+                  if "deny-listed" in r.getMessage()
+                  and "reason" in r.getMessage()]
+        assert denied, caplog.text
+        for msg in denied:
+            assert "policy drop, not a journal gap" in msg, msg
+            assert "not restorable from the payload" not in msg, msg
     finally:
         pass  # shared session projection — module helper owns close
 

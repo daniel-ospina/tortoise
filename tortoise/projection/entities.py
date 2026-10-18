@@ -2198,15 +2198,20 @@ class _EntityHandlers:
             warned.add(key)
             logger.warning(
                 "Point prop %r dropped — deny-listed (recompute/EP-owned, "
-                "#2795); not restorable from the payload", key)
+                "#2795): the payload DOES carry it and the replay writer "
+                "refuses it by policy, so this is a policy drop, not a "
+                "journal gap. Keys that are never journaled by design (EP "
+                "state, #2884) do not reach this report — every key here "
+                "was just read out of the payload (#8018)", key)
         # (b) a policy-denied list is also reported: the live SDK writer stores
         # raw lists, but replay refuses an UNDECLARED one, so the drop MUST be
         # visible (#2795 indicator 4 / D7). `tags` was this branch's exemplar
         # until #2897 landed — it is `_POINT_HANDLED` now and replayed by its
         # own clause, so a `custom_list`-shaped prop is what the branch
-        # actually covers. The message below ("not restorable from the
-        # payload") carries the same stale attribution class for a key the
-        # journal DOES carry; #8018 owns that wording.
+        # actually covers. The message below names the POLICY as the cause, because
+        # the journal DOES carry such a key and the drop is the replay writer's
+        # refusal — not missing data (#2897 states the mechanism; #8018 fixed the
+        # attribution here, which had misled a real reader of #3817).
         # #2958 review: tuples count as arrays here too (engine parity).
         for key, val in p.items():
             if not (isinstance(val, (list, tuple)) and val):
@@ -2216,7 +2221,9 @@ class _EntityHandlers:
                 continue
             logger.warning(
                 "Point list prop %r dropped — undeclared list props are never "
-                "written raw (#2795); not restorable from the payload", key)
+                "written raw (#2795): the payload DOES carry it and replay "
+                "refuses it by policy (`_POINT_LIST_PROPS` is empty), so this "
+                "is a policy drop, not a journal gap (#2897, #8018)", key)
         # #4042: report which conditional derived writes actually landed (see
         # the docstring). `embedding`/`point_content_hash` are exactly the
         # values the `CASE`/`coalesce` clauses above gate on, plus the open-set
