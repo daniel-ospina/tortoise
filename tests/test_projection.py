@@ -2138,7 +2138,14 @@ def test_drop_test_graph_refuses_a_non_test_owned_name():
     must not be able to destroy it."""
     snapshot = _live_utils.graph_delete_events()
     try:
-        for name in ("tortoise", "org_acme", "team_x", "proj125_x", None, 42):
+        # The `org_`/`team_` twins carry `_short_id()`'s 26 hex, which the
+        # MINT-SHAPE arm ADMITS (`_<8+ hex>`) — so only the PREFIX arm can
+        # refuse them. Without these two the loop proves nothing about the arm
+        # it claims to pin: every other name here is also refused by shape
+        # (review r7 P2, measured).
+        tenant = "deadbeef" * 3 + "ab"
+        for name in ("tortoise", "org_acme", "team_x", "proj125_x", None, 42,
+                     "org_" + tenant, "team_" + tenant):
             proj = _FakeProj(name)
             assert _live_utils.drop_test_graph(proj) is False, name
             assert proj.db.calls == [], (name, proj.db.calls)
@@ -2203,6 +2210,27 @@ def test_drop_test_graph_refuses_the_shared_uri_default_graph(monkeypatch):
         assert fresh.db.calls, (
             "a per-run name was refused on the URI-less lane too — the shape "
             "arm is over-broad and the shared-graph refusal above is vacuous")
+        # ARM 2 DISCRIMINATOR (review r7 P2): make the URI's OWN default graph
+        # a per-run-shaped name, which the MINT-SHAPE arm admits. Only the
+        # default-graph arm can refuse it — otherwise that arm could be deleted,
+        # or reordered behind the shape arm, with the whole suite still green.
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           _live_utils.docker_uri("test_proj125_ab12cd34"))
+        the_default = _FakeProj("test_proj125_ab12cd34")
+        assert _live_utils.drop_test_graph(the_default) is False
+        assert the_default.db.calls == [], (
+            "a mint-shaped URI DEFAULT reached the guard — arm 2 did not fire, "
+            "so nothing here distinguishes it from the shape arm")
+        # …and the SAME name is deleted-through-the-guard once it is no longer
+        # the default, which is what makes the refusal above attributable.
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           _live_utils.docker_uri("test_proj125_cafebabe"))
+        not_default = _FakeProj("test_proj125_ab12cd34")
+        assert _live_utils.drop_test_graph(not_default) is False
+        assert not_default.db.calls, (
+            "the same mint-shaped name was refused when it was NOT the URI "
+            "default — the refusal above cannot be attributed to arm 2")
+
         # The width is a FLOOR, not the 8 this file happens to mint: the site
         # tortoise#8936 adopts next mints TEN hex (`uuid4().hex[:10]`), and a
         # refusal there would be a silent leak — the exact defect #8746 exists
