@@ -32,7 +32,11 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import require_answered, transport_wait_bound_s
+from tests._verdict import (
+    require_answered,
+    transport_wait_bound_s,
+    verdict_client,
+)
 from tortoise.activation_scorecard import (
     assert_no_activation_claim,
     roll_up_cohort,
@@ -151,8 +155,8 @@ def _stub_graph(monkeypatch, *, created_at="2026-09-16T01:00:00+00:00",
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """Authed TestClient over a temp embedded graph, with the analytics store
-    UNSET by default (so stage 4 is deterministically ``unavailable``).
+    """Authed verdict TestClient over a temp embedded graph, with the analytics
+    store UNSET by default (so stage 4 is deterministically ``unavailable``).
 
     Uses pytest's ``tmp_path`` + ``monkeypatch.setenv`` — the
     ``test_action_endpoints_dual_auth`` idiom — rather than a manual
@@ -160,6 +164,20 @@ def client(tmp_path, monkeypatch):
     redislite's atexit shutdown runs, which emits ``AttributeError: 'Redis'
     object has no attribute 'connection_pool'`` teardown noise and
     intermittently an OSError under load.
+
+    The client is ``verdict_client``, not a bare ``TestClient`` (#5049/#8582):
+    ``GET /v1/activation/scorecard`` is NOT in
+    ``_TRANSPORT_WAIT_BOUND_EXEMPT``, so under xdist load the route can outlive
+    the product's 10 s transport wait bound and the middleware answers with the
+    legible REFUSAL instead of a scorecard. A bare client reads that non-answer
+    as a verdict and the file's ~40 ``client.get(...).json()[...]`` reads die on
+    a ``KeyError`` — measured red on ``50daec577``: shard ``test (i)``,
+    ``test_unavailable_is_reserved_for_the_recoverable_failures``,
+    ``KeyError: 'stages'`` (the request took 10.00 s). Converting the FIXTURE's
+    client converts every caller behind it in one place — the repo's
+    "convert the seam, not the leaf" rule for exactly this residual class — and
+    only the refusal ENVELOPE is converted, so a genuine 4xx/5xx (the 403/422
+    guards below) still reaches its own assertion.
     """
     db_path = str(tmp_path / "b7.db")
     app.dependency_overrides[get_current_org_session_ungated] = lambda: dict(ORG)
@@ -169,7 +187,7 @@ def client(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     with patched_tortoise_sdk(db_path):
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 yield tc
         finally:
             app.dependency_overrides.clear()
@@ -1438,6 +1456,47 @@ def test_default_window_is_inconclusive_when_the_bound_refuses():
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert f"{transport_wait_bound_s():g}" in message
+
+
+def test_the_client_fixture_turns_a_wait_bound_refusal_into_inconclusive(
+        client, monkeypatch):
+    """#5049/#8582: the FIXTURE's client is the seam, so no read in this file
+    can read a bound refusal as a scorecard verdict.
+
+    The refusal is forced, not waited for: the bound is set to a nanosecond, so
+    the product's own ``WaitBoundMiddleware`` answers the real route with the
+    legible refusal (`504` + the refusal body) and the verdict is deterministic
+    on any host.
+
+    The must-fail leg is the BARE client below — it is what `50daec577`'s CI
+    ran (`test (i)`: `KeyError: 'stages'`, request took 10.00 s under xdist
+    load). With the fixture reverted to a plain ``TestClient`` this test reds
+    with `DID NOT RAISE`, which is the regression this pin exists to catch.
+    """
+    from tortoise import mcp_auth
+
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 1e-9)
+    # The pre-fix shape: a bare client, whose ``.json()`` is the REFUSAL body.
+    # Plain (not entered): the fixture's client already runs the app lifespan,
+    # and a second startup/shutdown pair would race that one's teardown. The
+    # middleware ABANDONS the handler at the bound (never cancels it, #3834), so
+    # the loop can close with that task still pending — the run's warnings
+    # summary carries its `never awaited` notice. That is the bound's documented
+    # cost, not a leak: with a nanosecond bound the handler is suspended at its
+    # first await, so it has touched no graph and no analytics store.
+    bare = TestClient(app)
+    try:
+        refused = bare.get("/v1/activation/scorecard", params=WINDOW)
+    finally:
+        bare.close()
+    assert refused.status_code == 504, refused.text
+    assert "stages" not in refused.json(), refused.text
+    # The fixture's client converts exactly that non-answer into INCONCLUSIVE.
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        client.get("/v1/activation/scorecard", params=WINDOW)
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message, message
+    assert "GET /v1/activation/scorecard answered" in message, message
 
 
 # ── The analytics write-path repair ───────────────────────────────────────
