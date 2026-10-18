@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 493e800148118c62f12a933f657cbc2fb0847e72
+cut_at_commit: ab1f3e8584d27b88934d84f841878a6e6f85fc83
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1461,7 +1461,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_ingest
-  served_from: tortoise/mcp_server.py:6c29f64c0b80b4f3
+  served_from: tortoise/mcp_server.py:c79b3979099be184
   served_attributes: c0ea3c28d0df1685
   family: graph
   family_rank: 2
@@ -1475,16 +1475,17 @@ rows:
   job: 'Heterogeneous bulk write (epic #888 W4) — one call writes points + entities + sources + connections coherently
     (nodes first, then connections). Connections carrying ''operator'' (IMPL/NAND) create operator Points per the
     reification rule (v3.5 §8); connections carrying ''relation'' stay plain structural edges. Local refs address
-    bundle items. Endpoint typing (#2062): operator-routed connections (reify:true / mitigation / part-whole) accept
-    plain-Point or Event endpoints (by node id; eventId-only Events stay violations); direct-edge connections (plain
-    IMPL/NAND) are plain-Point-only. granularity=''bulk'' (default) returns aggregated counts; granularity=''granular''
-    returns per-item results. promotion_policy=''gated'' (default) keeps points draft and never promotes connections
-    (operator path: promote_source=False via #780); under gated ANY effective status other than ''draft'' on a point
-    item is REJECTED (INGEST_CONTRACT row 9 — case variants, nested props={...}, and terminal statuses included)
-    — use promotion_policy=''auto'' or promote after ingest via update_point(status=''live''). promotion_policy=''auto''
-    preserves the #131 promote-on-wire lifecycle (null-status sources only — an explicit draft is never retro-promoted,
-    #1088; terminal sources are never resurrected; deduped connections never retro-promote). Idempotent-ish: points
-    dedup by content hash + kind, sources by url, operators by input set.'
+    bundle items. Endpoint typing (#7925): connections on BOTH routes — operator-routed (reify:true / mitigation
+    / part-whole) and direct-edge (plain IMPL/NAND) — accept the four epistemic endpoints Point/Subject/Object/Event
+    (by node id; Sources, operator-shaped Points or entity items, and eventId-only Events stay violations). granularity=''bulk''
+    (default) returns aggregated counts; granularity=''granular'' returns per-item results. promotion_policy=''gated''
+    (default) keeps points draft and never promotes connections (operator path: promote_source=False via #780);
+    under gated ANY effective status other than ''draft'' on a point item is REJECTED (INGEST_CONTRACT row 9 — case
+    variants, nested props={...}, and terminal statuses included) — use promotion_policy=''auto'' or promote after
+    ingest via update_point(status=''live''). promotion_policy=''auto'' preserves the #131 promote-on-wire lifecycle
+    (null-status sources only — an explicit draft is never retro-promoted, #1088; terminal sources are never resurrected;
+    deduped connections never retro-promote). Idempotent-ish: points dedup by content hash + kind, sources by url,
+    operators by input set.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
   used_by: agents, tooling, skill-docs, docs

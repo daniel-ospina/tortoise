@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### `ingest()` and the SDK agree on which endpoints a connection may carry (#7925)
+
+`create_direct_edge('IMPL', <Subject>, <Object>)` wrote the edge while
+`ingest()` refused the same connection with
+`BundleValidationError: ... must be a plain Point — got a Subject endpoint`.
+Earlier, #7902 had widened both write primitives (`create_operator`,
+`create_direct_edge`) to the four epistemic labels, but ingest carried its own
+hand-rolled endpoint gate and the DIRECT route still demanded plain
+`:Point`s. Both validation phases now read ONE declaration — the four
+epistemic labels, addressed by the node's `id` — which is exactly what the
+primitives accept.
+
+- **What still refuses:** a `:Source` (a document IS a `:Source`), an
+  operator-shaped Point, and an endpoint that resolves by something other than
+  its node `id` (an Event known only by `eventId`) — the last because both
+  primitives key on `id`, so accepting it would pass validation and then crash
+  mid-write.
+- **The structure does not change.** The endpoint-KIND gate (#8499) still
+  reifies any pair with a plain `:Point` endpoint, so a Point-bearing plain
+  IMPL becomes an operator (with its `point_mediated_route` warning) and the
+  non-Point pairs — Object↔Object, Subject/Object, Event↔Object — keep the
+  operator-less direct edge. That is the Object↔Object carve-out the #8499
+  comment recorded as unreachable through `ingest`; it is reachable now.
+- **The terminal guard followed the widening.** A bundle-local
+  `type:"subject"`/`"object"` ref is merged BY NAME, so it can land on an
+  existing terminal node — or mint one from a declared terminal `status`.
+  `create_direct_edge` refuses a terminal endpoint, so both shapes would have
+  become a raise after earlier bundle items had already committed. Phase 1 now
+  rejects them, with zero mutation. The guard resolves the declared value the
+  way the WRITER does — a nested `props={"status": …}`/`props={"outdated": …}`
+  spelling counts, not just the top-level key — and covers an append-only
+  `type:"event"` item too, whose `status`/`outdated` would otherwise be stored
+  verbatim and refused only mid-write. It resolves the node the WRITER actually
+  reaches: on a SHARED name (#8864) the fold keys on the canonical id, which
+  still MATCHES the carrier holding it — so that node's axes decide and a
+  declared status is dropped, and only an item that mints inherits its own
+  declaration.
+
 ### A url-keyed `:Source` is a visible neighbour, identified by its url (#8538)
 
 `tortoise_entity_profile` and `tortoise_traverse` dropped every url-keyed

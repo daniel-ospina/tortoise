@@ -3652,10 +3652,11 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     the connections between them; connections carrying 'operator' (IMPL/NAND)
     create operator Points (reification rule v3.5 §8), connections carrying
     'relation' stay plain structural edges. Local refs address bundle items.
-    Endpoint typing (#2062): operator-routed connections (reify:true /
-    mitigation / part-whole) accept plain-Point or Event endpoints (by node
-    id; eventId-only Events stay violations); direct-edge connections (plain
-    IMPL/NAND) are plain-Point-only.
+    Endpoint typing (#7925): connections on BOTH routes — operator-routed
+    (reify:true / mitigation / part-whole) and direct-edge (plain IMPL/NAND)
+    — accept the four epistemic endpoints Point/Subject/Object/Event (by node
+    id; Sources, operator-shaped Points or entity items, and eventId-only
+    Events stay violations).
 
     granularity='bulk' (default): aggregated {created, ids, nudges}.
     granularity='granular': per-item results for agent step-by-step control.
@@ -3689,9 +3690,10 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     if promotion_policy not in INGEST_PROMOTION_POLICIES:
         return {"error": f"promotion_policy must be 'gated' or 'auto', got "
                           f"{promotion_policy!r}", "code": ERR_INVALID}
-    # Row-9 guard (shared helper — identical to the SDK's): under gated,
-    # points must stay draft — ANY effective status other than the exact
-    # canonical "draft" (top-level or nested props={...}) is a violation.
+    # Row-9 guard — the same reader and per-door depth as the SDK's
+    # `_check_gated_status` (#7925): under gated, points must stay draft — ANY
+    # effective status other than the exact canonical "draft" (top-level or
+    # nested `props={...}`) is a violation.
     if promotion_policy == "gated":
         bad = _first_non_draft_status(bundle.get("points"))
         if bad is not None:
