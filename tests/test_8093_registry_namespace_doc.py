@@ -131,9 +131,21 @@ def test_custom_namespace_cell_matches_the_acl_and_provisioning_derivation():
     # the ACL pattern has to match). Pin them by symbol from their own source, or
     # a change to what those two mint re-stales the cell with this pin green.
     sdk_src = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8")
-    assert 'ns = namespace or f"org_{org_id}_{gid}"' in sdk_src, (
-        "`sdk._graph_create` must keep minting `org_{org_id}_{gid}` for a custom "
-        "graph — the cell states that shape as the derived custom namespace")
+    # Two branches, two sites: the supabase one and the registry one (the only
+    # live custom-graph path when no `namespace=` is passed). A bare substring
+    # test is satisfied by EITHER site, so renaming one branch alone stayed green
+    # — count the template, and bind the registry branch by its neighbour gid
+    # line, so neither branch can be changed on its own.
+    template = 'ns = namespace or f"org_{org_id}_{gid}"'
+    assert sdk_src.count(template) >= 2, (
+        "`sdk._graph_create` must keep minting `org_{org_id}_{gid}` in BOTH of "
+        "its branches (supabase and registry) — one renamed branch means the "
+        "ACL key pattern no longer names the graph that branch created, while "
+        "the cell keeps stating the shape")
+    assert ('gid = f"g_{_uuid.uuid4().hex[:16]}"\n        ' + template) in sdk_src, (
+        "`sdk._graph_create`'s REGISTRY branch (the random gid, unlike the "
+        "supabase branch's deterministic one) must keep minting "
+        "`org_{org_id}_{gid}` — it is the live custom-graph path")
     hosted_src = (REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
     assert '''ns = f"org_{org['id']}_{gid}"''' in hosted_src, (
         "`hosted_api._provision_graph`'s Supabase branch must keep minting "
@@ -164,7 +176,12 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         export/open paths use, and its no-stored-name fallback is asserted to
         be `org_{org_id}`; the registry-lane `org_{name}` half is anchored to
         `sdk.org_create`'s derivation, which no exported function returns —
-        without that anchor the assertion would be the doc against itself.
+        without that anchor the assertion would be the doc against itself. The
+        ATTRIBUTION is pinned too, not just the presence of both shapes: the
+        clause is split at its `org_{name}` marker, and each half must name the
+        lane it belongs to. Both shapes present is not enough — swapping which
+        lane derives which leaves the shapes intact, and the lane split is the
+        substance of this correction.
     """
     from tortoise.hosted_api import _org_graph_name
 
@@ -181,6 +198,20 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
             "whole-cell substring test cannot see this: `org_{org_id}` is also "
             f"a substring of the custom shape `{CUSTOM_SHAPE}` stated later in "
             "the same cell, so the hosted clause can vanish green")
+
+    # The ATTRIBUTION, not just the presence of both shapes: the clause states
+    # `org_{org_id}` for one lane and `org_{name}` for the other, and the whole
+    # point of this correction is WHICH. Swapping the two leaves both shapes in
+    # the clause and both code anchors intact, so presence alone cannot see it.
+    supabase_half, registry_half = clause.split("`org_{name}`", 1)
+    assert "org_{org_id}" in supabase_half, (
+        "the DEFAULT-graph clause must attribute `org_{org_id}` to the "
+        "Supabase-lane provision paths — it is stated BEFORE the `org_{name}` "
+        "marker, and `hosted_api._org_graph_name`'s fallback is that shape")
+    assert "sdk.org_create" in registry_half, (
+        "the clause's `org_{name}` half must name the registry lane's "
+        "`sdk.org_create` as the deriver — 'hosted' does not decide the shape "
+        "(that method IS reached through the hosted API), the lane does")
     # The `org_{name}` half's code side: the registry lane's stored org
     # `graph_name` — `sdk.org_create` derives it from the org name (spaces →
     # `_`) and the registry `kind='default'` node takes it as its namespace. The
@@ -253,12 +284,18 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
         back-compat: the reverse direction of the same drift.
     (2) *Does the test reach it?*  Yes — each acceptance is read from the
         committed source that has to contain it, so removing one reds the doc's
-        claim. The hosted two are pinned as a CO-OCCURRENCE (the probe's
-        `(f"org_{org_id}", f"team_{org_id}")` pair) and as the legacy open's own
-        argument (`graph_name=f"team_{org_id}"`), so deleting the branch reds
-        rather than merely losing one mention of a string the file uses
-        elsewhere. The purge pair is pinned as the two literals of the
-        `gid_namespaces` set, so neither arm can be dropped alone.
+        claim. Every DECISION line is pinned with the literal that feeds it,
+        because a literal on its own is inert: the guard can be re-prefixed, an
+        `any()` inverted to `all()`, or a filter expression neutered while the
+        string it reads survives elsewhere in the file. So the pins are
+        - the purge's artifact guard as `ns_trusted = bool(namespace) and
+          namespace in gid_namespaces` (a set can be built and never consulted),
+        - the MCP filter as its `return [g for g in graphs if g in own]` line,
+        - the hosted legacy open as the `if`/`return` pair,
+        - the hosted probe as its `any(... for name in (…))` expression.
+        The pin still cannot see an ADDITION of a further acceptance — only a
+        removal or a weakened decision — which is why the docstring names the
+        sites and does not claim a closed count.
     """
     source = (REPO / "tortoise" / "backup_sweep.py").read_text(encoding="utf-8")
     assert 'f"team_{org_id}_{gid}"' in source, (
@@ -278,6 +315,9 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
     assert 'f"org_{org_id}_{graph_id}"' in source, (
         "and the current namespace alongside it, or every post-#3543 graph's "
         "archive becomes ambiguous")
+    assert "ns_trusted = bool(namespace) and namespace in gid_namespaces" in source, (
+        "the artifact guard's DECISION must keep consulting `gid_namespaces` — "
+        "the set existing proves nothing if the trust test stops reading it")
 
     mcp = (REPO / "tortoise" / "mcp_server.py").read_text(encoding="utf-8")
     assert 'f"team_{org_id}"' in mcp, (
@@ -285,6 +325,10 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
         "`team_{org_id}` org namespace")
     assert 'f"org_{org_id}"' in mcp, (
         "and the current org namespace alongside it")
+    assert "return [g for g in graphs if g in own]" in mcp, (
+        "the MCP listing must keep FILTERING by the resolved set — an "
+        "unfiltered return would list every org's graphs, which is the "
+        "cross-tenant exposure the surrounding comment warns about")
 
     hosted = (REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
     assert '(f"org_{org_id}", f"team_{org_id}")' in hosted, (
@@ -292,10 +336,16 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
         "only `org_` reported 'node absent' for every pre-rename org, which "
         "sent the onboarding projection down the no-write FLOW-defaults path "
         "(#3543)")
-    assert 'graph_name=f"team_{org_id}"' in hosted, (
+    assert ("return any(name in listed\n"
+            "               for name in (f\"org_{org_id}\", f\"team_{org_id}\"))") in hosted, (
+        "the probe's DECISION must stay an `any` over both names — `all` would "
+        "require both spellings to exist, so a healthy org would read as "
+        "absent (and an org with both would read as the only present one)")
+    assert 'if f"team_{org_id}" in listed:\n        return _make_sdk(graph_name=f"team_{org_id}")' in hosted, (
         "`_open_org_graph_sdk` must keep OPENING a legacy org by its pre-#3543 "
-        "name — re-deriving `org_{org_id}` there would mint a name the probe "
-        "never observed")
+        "name: the GUARD and the argument together — a re-prefixed guard leaves "
+        "the argument present but the branch dead, which reads as back-compat "
+        "while opening nothing")
 
 
 # ── 3. the pin itself cannot rot the way the cell did ──────────────────────
@@ -349,10 +399,19 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
         from the row (leaving the DDL comment to imply the legacy shape is
         current), or citing a migration path that does not exist.
     (2) *Does the test reach it?*  Yes — every cited `supabase/migrations/*.sql`
-        path is resolved on disk, and the tenancy migration's own text is
-        asserted to state that earlier migrations keep the historical spelling.
+        path is resolved on disk, the tenancy migration's own text is asserted to
+        state that earlier migrations keep the historical spelling, and the row's
+        SHAPE claim is pinned to the same two namespace shapes the §Graph cell
+        states — the two docs describe one fact, so a row reverting to a single
+        lane's shape while the cell states both reds here instead of passing as
+        two independent prose statements.
     """
     row = _coarse_isolation_row()
+    for shape in DEFAULT_SHAPES:
+        assert shape in row, (
+            f"the §2.1 coarse-isolation row must state {shape!r} too — it is the "
+            "second description of the same fact, and a row that keeps only one "
+            "lane's shape contradicts the §Graph cell this pin also reads")
     cited = re.findall(r"supabase/migrations/[\w.\-]+\.sql", row)
     assert cited, (
         "the coarse-isolation row must keep citing the `graphs` table's own "

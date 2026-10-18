@@ -6089,7 +6089,19 @@ durations:
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
   test_orchestrator_harness.py: 23.3
-  test_8093_registry_namespace_doc.py: 2.0  # unmeasured — new in #8093; no sweep has collected it, so it carries the flat default exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file. Refresh from the first post-merge main run that includes it. Do NOT read the row as "load-bearing for the 90% floor": on the #9026 head's manifest, dropping it moves 825/915 = 90.16% to 824/915 = 90.05% — still above `DURATION_COVERAGE_MIN` (0.90), and 824 is the LAST passing count (823/915 = 89.95% fires). It buys the pool its remaining one-file margin, not the floor itself; re-measure the ratio instead of trusting these figures, which move with every main merge.
+  # #8093: unmeasured — a file ADDED BY A PR has no CI junit measurement (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a
+  # local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit
+  # value models the leg that carries the file.
+  #
+  # Do NOT restate a floor figure here. This row is registered for the SURFACE (a
+  # docs-only diff runs `tier1` only) and for the shard layout; the durations
+  # coverage ratio it also nudges is a property of the whole fast pool, which every
+  # origin/main merge changes — the same trap the #4387 row above records, where a
+  # restated figure re-staled for three review rounds. If you need the number, run
+  # `ci_selection.duration_coverage_issues()` at YOUR head; do not quote this file.
+  test_8093_registry_namespace_doc.py: 2.0
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py
