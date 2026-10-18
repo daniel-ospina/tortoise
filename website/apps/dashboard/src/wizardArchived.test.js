@@ -66,9 +66,10 @@ function hasClass(cls, name) {
  *
  * RESIDUAL, stated rather than hidden: a `className` that is NOT statically
  * resolvable (a template with EXPRESSIONS, a spread, a `cn()` helper) is not
- * enumerated, so an in-card label spelled
- * `className={`wizard-title ${wizardStep}`}` evades the negative pin. Measured:
- * planting exactly that inside the live card leaves this file green.
+ * enumerated, so a label whose class is dynamic AND whose TEXT is a static string —
+ * `<p className={`wizard-title ${wizardStep}`}>Memory sources</p>` — evades BOTH
+ * arms of the negative pin (measured green). The `{wizardSteps[…]}` spelling of the
+ * same label IS caught, by the read-anchored arm rather than by this one.
  *
  * #3726 cycle 4 (P2): the previous wording claimed the mitigation lived "there", in
  * `wizardRenderedCopy.js::staticClassName`. It does not — that census enumerates
@@ -150,7 +151,8 @@ function hasWizardStepsRead(element) {
 }
 
 /**
- * A read of the legacy array: `wizardSteps[i]`, `wizardSteps?.[i]`, `wizardSteps?.at(i)`.
+ * An ELEMENT read of the legacy array: `wizardSteps[i]`, `wizardSteps?.[i]`,
+ * `wizardSteps.at(i)`, `wizardSteps?.at(i)` — the shape that produces a stage label.
  *
  * #3726 cycle 5 (P2): the predicate used to test `node.type === 'MemberExpression'`
  * only. Optional chaining is a DIFFERENT node type (`OptionalMemberExpression`), so
@@ -158,10 +160,17 @@ function hasWizardStepsRead(element) {
  * in-card `{wizardSteps?.[wizardStep]}` rendered the duplicate stage label with the
  * negative pin GREEN, and re-spelling the ARCHIVED title as `wizardSteps?.[…]` — a
  * no-op — redded the positive pin.
+ *
+ * #3726 cycle 6 (P3): it then matched ANY member access, so `{wizardSteps.length}` or
+ * `wizardSteps.map(…)` in the live card redded the negative pin with a message naming
+ * a stage label that was not there (measured) — a false red with a wrong diagnosis.
+ * Only element access counts; a non-element member read is not a label.
  */
 function isWizardStepsRead(node) {
-  return (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
-    && node.object?.type === 'Identifier' && node.object.name === 'wizardSteps'
+  if (!(node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')) return false
+  if (!(node.object?.type === 'Identifier' && node.object.name === 'wizardSteps')) return false
+  if (node.computed) return true
+  return node.property?.type === 'Identifier' && node.property.name === 'at'
 }
 
 // #3726 cycle 2: the two #3913 pins below were still written as source regexes,
@@ -311,6 +320,13 @@ function archivedSubtree(ast) {
     if (parent.type === 'LogicalExpression' && parent.operator === '&&'
       && parent.left === gate && jsxish(parent.right)) {
       span = { start: parent.right.start, end: parent.right.end }
+    }
+    // #3726 cycle 6 (P3): `gateRendersArchivedBlock` documents the ternary spelling as
+    // a supported shape, so the EXCLUSION has to recognise it too — otherwise the
+    // behavior-preserving `{(A && B) ? (<jsx/>) : null}` rewrite made the archived
+    // block's own label look like an in-card one (measured, with a wrong message).
+    if (parent.type === 'ConditionalExpression' && parent.test === gate && jsxish(parent.consequent)) {
+      span = { start: parent.consequent.start, end: parent.consequent.end }
     }
   })
   return span
@@ -520,8 +536,8 @@ function readyCopyOrgFallbacks(ast) {
   // `title={shownOrgName || '…'}` is a tooltip, not the copy the pin names (measured:
   // the attribute form satisfied the pin while the visible copy rendered
   // "You're set up in .").
-  const reachableFrom = (f, carrier) => {
-    let n = parents.get(f.node)
+  const reachableFrom = (node, carrier) => {
+    let n = parents.get(node)
     while (n && n !== carrier.node) {
       if (n.type === 'LogicalExpression' || n.type === 'ConditionalExpression') return false
       if (n.type === 'JSXAttribute') return false
@@ -531,18 +547,24 @@ function readyCopyOrgFallbacks(ast) {
   }
   const inline = orFallbacks(ast)
     .filter((f) => f.left === 'shownOrgName'
-      && minimal.some((e) => f.start > e.start && f.start < e.end && reachableFrom(f, e)))
+      && minimal.some((e) => f.start > e.start && f.start < e.end && reachableFrom(f.node, e)))
     .map((f) => f.value)
   // #3726 cycle 5 (P2): a HOIST is a value, not a position — extracting the fallback
   // to `const orgLabel = shownOrgName || '…'` and rendering `{orgLabel}` changes no
   // rendered character, so requiring the inline shape made that refactor a FALSE RED
   // (measured). One hop is resolved, the same way `inCardStageReads` resolves the
   // legacy-array read.
+  //
+  // #3726 cycle 6 (P2): the hop resolves the VALUE, so the render site it resolved
+  // through has to pass the SAME reachability test as the inline form — otherwise
+  // `{false && <span>{orgLabel}</span>}` or `<span title={orgLabel} />` satisfied the
+  // pin while the visible copy rendered "You're set up in ." (measured).
   const bindings = bindingsByName(ast)
   const hoisted = []
   for (const e of minimal) {
     walkNodes(e.node, (node) => {
       if (node.type !== 'JSXExpressionContainer' || node.expression.type !== 'Identifier') return
+      if (!reachableFrom(node, e)) return
       const init = uniqueInit(bindings, node.expression.name)
       if (!init || init.type !== 'LogicalExpression' || init.operator !== '||') return
       if (init.left.type !== 'Identifier' || init.left.name !== 'shownOrgName') return
@@ -670,7 +692,7 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   const archivedSpan = archivedSubtree(SRC_AST)
   const inCardStepReads = inCardStageReads(SRC_AST, card, archivedSpan)
   assert.deepEqual(inCardStepReads, [],
-    'no in-card stage label may return — anchored to the `wizardSteps[…]` READ, so a classless or `class=` copy, or one below the archived block, cannot evade it')
+    'no in-card stage label may return — anchored to an ELEMENT READ of the legacy `wizardSteps` array, so a classless copy, the `class=` alias, optional chaining or a read below the archived block cannot evade it')
   // The archived block's title still READS wizardSteps (kept for rollback): the
   // element's own subtree must contain the `wizardSteps[...]` member read, which a
   // nearby comment or an unrelated 400-character slice cannot satisfy.
@@ -945,6 +967,24 @@ test('#3726 falsifiability: the in-card pin is anchored to the wizardSteps READ,
   ].join('\n')
   assert.equal(read(hoisted).length, 1,
     'a stage label HOISTED through a binding is still an in-card stage label')
+  // #3726 cycle 6 (P3): the TERNARY spelling of the gate is a shape the file already
+  // recognises (`gateRendersArchivedBlock`), so the EXCLUSION must recognise it too —
+  // otherwise a behavior-preserving `(A && B) ? (<jsx/>) : null` rewrite makes the
+  // archived block's own label look like an in-card one (measured, with a message
+  // naming a label that was not there).
+  const ternaryGate = (op) => [
+    '<div className="welcome-card">',
+    '  <div className="welcome-head"><h1 className="welcome-title">ready</h1></div>',
+    `  ${op}`,
+    '</div>',
+  ].join('\n')
+  for (const [shape, op] of [
+    ['&&', '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (<p className="wizard-title">{wizardSteps[wizardStep]}</p>)}'],
+    ['ternary', '{(LEGACY_WIZARD_ARCHIVED && welcomeOriented) ? (<p className="wizard-title">{wizardSteps[wizardStep]}</p>) : null}'],
+  ]) {
+    assert.deepEqual(read(ternaryGate(op)), [],
+      `the archived block's own label is excluded in its ${shape} spelling — it is never an in-card label`)
+  }
   // …and a copy BELOW the archived block is still inside the card, where the
   // window-to-the-gate pin cannot see it.
   const below = [
@@ -956,6 +996,14 @@ test('#3726 falsifiability: the in-card pin is anchored to the wizardSteps READ,
   ].join('\n')
   assert.equal(read(below).length, 1,
     'a stage label BELOW the archived block is still in the live card — the window-to-the-gate pin never reaches it')
+  // #3726 cycle 6 (P3): the read pin is about the LABEL, so a non-element read of the
+  // array — a progress line, a map — is not one. Matching any member access redded
+  // this with a message naming a stage label that was not there (measured).
+  for (const notALabel of ['    <p>Step {wizardStep + 1} of {wizardSteps.length}</p>',
+    '    <p>{wizardSteps.map((s) => s).length}</p>']) {
+    assert.deepEqual(read(build(notALabel)), [],
+      `a non-element read of the array is not a stage label: ${notALabel.trim()}`)
+  }
 })
 
 test('#3726 falsifiability: the in-card title pin fires on EVERY className spelling', () => {
@@ -1088,6 +1136,18 @@ test('#3726 falsifiability: the ready-copy pin is anchored to the welcome card, 
     + card('{orgLabel}')
   assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${hoistedFallback}\n${archived}`)), ['your organization'],
     'hoisting the fallback into a binding is a refactor, not a missing fallback')
+  // …but resolving the VALUE does not exempt the RENDER SITE: a hoisted binding that
+  // is only rendered in a dead branch or in an attribute is not the copy (#3726
+  // cycle 6 — both measured green while the visible copy rendered
+  // "You're set up in .").
+  const hoistedDeadDecoy = `const orgLabel = shownOrgName || 'your organization'\n`
+    + card('{shownOrgName}').replace('</strong></p>', '</strong>. {false && <span>{orgLabel}</span>}</p>')
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${hoistedDeadDecoy}\n${archived}`)), [],
+    'a hoisted fallback rendered only in a DEAD branch is not the rendered copy')
+  const hoistedAttributeDecoy = `const orgLabel = shownOrgName || 'your organization'\n`
+    + card('{shownOrgName}').replace('</strong></p>', '</strong>. <span title={orgLabel} /></p>')
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${hoistedAttributeDecoy}\n${archived}`)), [],
+    'a hoisted fallback rendered only in an ATTRIBUTE is not the rendered copy')
 })
 
 test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan T7)', () => {
