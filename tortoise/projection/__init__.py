@@ -5527,8 +5527,27 @@ def journal_epistemic_existence(events) -> dict:
                     # the SET re-ids ALL of them; with no match it creates ONE
                     # node. Modelling that 1:many is the whole point (see
                     # `nodes`).
-                    matches = list(by_name.get((label, name), ()))
-                    if matches:
+                    #
+                    # #8864: that is the SINGLE-carrier shape only. Once a
+                    # name is carried by 2+ nodes the graph stops keying on it
+                    # at all (`_name_holder_count` in `projection/entities.py`
+                    # picks the record's own ``id`` instead), because a
+                    # name-MERGE over several carriers stamped ONE id onto ALL
+                    # of them. The id-keyed MERGE matches at most the node
+                    # already carrying ``eid``, and its `ON MATCH` writes only
+                    # the id (the name is `ON CREATE`), so NOTHING moves.
+                    name_matches = list(by_name.get((label, name), ()))
+                    if len(name_matches) > 1:
+                        # #8864: the record's own id IS the key, so this
+                        # registration neither re-ids nor renames an existing
+                        # carrier — it folds into the node that already
+                        # carries ``eid``, or creates ONE new node.
+                        if not by_id.get((label, eid)):
+                            was_live = _id_live(label, eid)
+                            _track(label, _Node(eid, eid, name))
+                            _note_presence(label, eid, seq, was_live)
+                    elif name_matches:
+                        matches = name_matches
                         affected = {n.id for n in matches
                                     if isinstance(n.id, str)}
                         affected.add(eid)
@@ -5769,14 +5788,31 @@ def journal_object_surviving_keys(
     the Point/Operator leg of `journal_first_materialization`; it additionally
     accounts for the sweep's position after the deletes.
 
-    The Object graph MERGEs by NAME (`_upsert_object`), so a later registration
-    of one name under a fresh id REPLACES the earlier carrier — the model maps
-    each name to its current id, not to a set. A delete removes the id that
-    actually carries the node (`_delete_entity_by_id`), so a delete naming a
-    superseded-away id is a no-op here too.
+    The Object graph MERGEs by NAME (`_upsert_object`) while that name has ONE
+    carrier, and by the record's own `id` once it has TWO OR MORE (#8864,
+    `_name_holder_count`): a name-MERGE over several carriers stamped one id
+    onto all of them, so a shared name stopped being a key at all. The model
+    therefore maps each name to the SET of ids carrying it, and a registration
+    of a shared name ADDS a carrier instead of replacing the earlier one — a
+    1:1 carrier would report the surviving ids as dead and refuse a supersede
+    `rebuild_all` folds (the fail-CLOSED direction, which is the one error this
+    guard must never make). A delete removes the id that actually carries the
+    node (`_delete_entity_by_id`), so a delete naming a superseded-away id is a
+    no-op here too.
     """
-    name_to_id: dict[str, str] = {}
+    name_to_ids: dict[str, set[str]] = {}
     id_to_name: dict[str, str] = {}
+
+    def _drop_carrier(name: str | None, rid: str) -> None:
+        """`rid` stops carrying `name` (a rename away, or a delete)."""
+        if name is None:
+            return
+        bucket = name_to_ids.get(name)
+        if bucket is not None:
+            bucket.discard(rid)
+            if not bucket:
+                name_to_ids.pop(name, None)
+
     for ev in events:
         if not isinstance(ev, dict):
             continue
@@ -5787,10 +5823,21 @@ def journal_object_surviving_keys(
             if not (isinstance(oid, str) and oid
                     and isinstance(name, str) and name):
                 continue
-            old = name_to_id.get(name)
+            carriers = name_to_ids.setdefault(name, set())
+            if len(carriers) > 1:
+                # #8864: the name is SHARED, so this registration keys on the
+                # record's own id — it folds into the node already carrying
+                # `oid` (whose `ON MATCH` writes only the id) or opens ONE new
+                # carrier. No existing carrier is re-id'd away.
+                if oid not in id_to_name:
+                    carriers.add(oid)
+                    id_to_name[oid] = name
+                continue
+            old = next(iter(carriers), None)
             if old is not None and old != oid:
                 id_to_name.pop(old, None)
-            name_to_id[name] = oid
+                carriers.discard(old)
+            carriers.add(oid)
             id_to_name[oid] = name
         elif t == "EntityMutated":
             rid, label = ev.get("id"), ev.get("label")
@@ -5806,8 +5853,7 @@ def journal_object_surviving_keys(
                 continue
             if ev.get("op") == "delete":
                 nm = id_to_name.pop(rid, None)
-                if nm is not None and name_to_id.get(nm) == rid:
-                    name_to_id.pop(nm, None)
+                _drop_carrier(nm, rid)
             elif ev.get("op") in _ENTITY_MUTATION_STATE_OPS:
                 # `state` carries the full APPLIED map, so a rename moves the
                 # MERGE key the supersede sweep matches on
@@ -5820,11 +5866,13 @@ def journal_object_surviving_keys(
                 if isinstance(newname, str) and newname:
                     old = id_to_name.get(rid)
                     if old is not None:
-                        if name_to_id.get(old) == rid:
-                            name_to_id.pop(old, None)
+                        _drop_carrier(old, rid)
                         id_to_name[rid] = newname
-                        name_to_id[newname] = rid
-    return frozenset(id_to_name), frozenset(name_to_id)
+                        # #8864: a rename ADDS a carrier — `SET n.name` does
+                        # not MERGE, so a rename ONTO a name other nodes
+                        # already hold leaves every one of them standing.
+                        name_to_ids.setdefault(newname, set()).add(rid)
+    return frozenset(id_to_name), frozenset(name_to_ids)
 
 
 def journal_object_hard_deleted_ids(events) -> frozenset[str]:

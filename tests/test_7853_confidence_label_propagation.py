@@ -1024,30 +1024,34 @@ _BOUNDARY_MATRIX = [
     ("rename-into-a-reused-name-buries-the-earlier-id",
      [_m_object(), _m_rename(new_name="matrix-renamed"),
       _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], True),
-    # #7936 round-5 P1: `_upsert_object` MERGEs by NAME, so when MORE THAN ONE
-    # node already carries the MERGE key the MERGE matches EVERY one of them and
-    # `ON MATCH SET o.id=$id` re-ids them ALL. A 1:1 `(label,name) -> id`
-    # carrier modelled the graph as a bijection, answered EXISTS for the ids the
-    # graph had already re-id'd away, and exempted a belief `rebuild_all`
-    # refuses — the reported fail-open. The node table below must instead leave
-    # duplicated nodes as SEPARATE records and bury EVERY id that stops being
-    # carried. (Two ids here are re-id'd to `matrix-third`; the belief targets
-    # the first of them, which must be buried.)
+    # #7936 round-5 P1 → FLIPPED by #8864. When MORE THAN ONE node already
+    # carries the name-MERGE key, `_upsert_object` USED to match EVERY one of
+    # them and `ON MATCH SET o.id=$id` re-id'd them ALL, so a 1:1
+    # `(label,name) -> id` carrier answered EXISTS for the ids the graph had
+    # already re-id'd away — the reported fail-open. That collapse is FIXED
+    # (#8864): `_name_holder_count` makes a name held by 2+ carriers stop being
+    # the MERGE key, so this registration keys on its OWN id and `matrix-third`
+    # becomes a THIRD carrier instead of stamping its id onto the other two.
+    # `_MATRIX_ID` therefore SURVIVES and the belief folds — on the graph and
+    # on both reference folds, which is why this row is now ACCEPTED. The node
+    # table still leaves duplicated nodes as SEPARATE records; that half is
+    # unchanged and still pinned by `name-reuse-buries-the-earlier-id`, whose
+    # name has exactly ONE carrier at the registration.
     ("rename-collision-buries-every-dup-named-id",
      [_m_object(_MATRIX_ID, "matrix-collide"),
       _m_object("matrix-other", "matrix-other-name"),
       _m_rename("matrix-other", new_name="matrix-collide"),
       _m_object("matrix-third", "matrix-collide"),
-      _m_belief(_MATRIX_ID)], True),
-    # The :Subject twin: `_upsert_subject` MERGEs by name too, so the same
-    # multi-node collapse applies.
+      _m_belief(_MATRIX_ID)], False),
+    # The :Subject twin: `_upsert_subject` follows the same #8864 rule, so the
+    # multi-node name no longer collapses either.
     ("subject-rename-collision-buries-every-dup-named-id",
      [_m_subject(_MATRIX_ID, "matrix-sub-collide"),
       _m_subject("matrix-sub-other", "matrix-sub-other-name"),
       _m_rename("matrix-sub-other", new_name="matrix-sub-collide",
                 label="Subject"),
       _m_subject("matrix-sub-third", "matrix-sub-collide"),
-      _m_belief(_MATRIX_ID)], True),
+      _m_belief(_MATRIX_ID)], False),
     # A state op's `SET n += $state` lands the WHOLE map, so a `state.id` moves
     # IDENTITY: the node keeps existing as `(matrix-moved, name)` and the OLD
     # id is gone. The boundary must record that burial at the op's seq or it

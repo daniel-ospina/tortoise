@@ -998,16 +998,6 @@ _ALLOWED_KEYED = {
 }
 
 _ALLOWED_FSTRING = {
-    'tortoise/projection/entities.py': {
-        # #8864: the name-keyed CARRIER COUNT that decides the MERGE key for the
-        # two name-keyed labels (`_name_holder_count`). It is a count, not an
-        # identity resolve: it returns how many carriers hold the name (ANY
-        # status — the MERGE matches terminal twins too), and it never returns
-        # or picks an id. The number's only job is "can the name be the key at
-        # all" — at >1 the fold keys on the record's own id, which is the
-        # identity of record (#3590 R1) and needs no name resolution.
-        'rows = g.query( f"MATCH (n:{label} {{name:$name}}) RETURN count(n)", params={"name": name}).result_set': 1,
-    },
     'tortoise/projection/edges.py': {
         # #5509 A: the non-stubbable labels' (Object/Event/Point) replay target
         # — `LIMIT 2` + `_refuse_ambiguous_target` on >1.

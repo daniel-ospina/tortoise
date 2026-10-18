@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 # registers, or a node's IDENTITY is not a pure function of the journal (a
 # random stub id moved on every replay) and the reference fold cannot model
 # the stub at all.
-from tortoise.entity_identity import _IDENTITY_LABELS as _NAME_KEYED_LABELS
+from tortoise.entity_identity import all_name_holder_ids
 from tortoise.ids import content_hash as _content_hash
 from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
@@ -60,13 +60,14 @@ from tortoise.vector_write import (
 logger = logging.getLogger(__name__)
 
 
-#: The two labels whose ``name`` is a NATURAL KEY rather than an identity, and
-#: therefore their MERGE key too (#7369). ONE declaration, borrowed from
-#: ``entity_identity``: that module owns the vocabulary (it is what its
-#: ``_require_identity_label`` refuses on), and a second hand-written tuple here
-#: is how a label gets silently omitted from one of the two sets — the exact
-#: drift ``tortoise/live.py``'s #2901 lesson records. ``projection/edges.py``
-#: already imports that module at scope, so this cannot cycle.
+#: ``_name_holder_count`` DELEGATES to ``entity_identity.all_name_holder_ids``
+#: — that module owns both the label vocabulary (it is what
+#: ``_require_identity_label`` refuses on) and the name-holder predicate
+#: (``_name_predicate``). A second hand-written query here is how the fold's
+#: MERGE-key decision silently stops following the shared predicate — if
+#: ``_name_predicate`` ever gains case-folding or a second name spelling, the
+#: count and the identity probes would disagree. The same #2901 drift lesson
+#: that keeps the label tuple shared applies to the count itself.
 #:
 #: See :func:`_name_holder_count` for why the count matters.
 def _name_holder_count(g, label: str, name: str) -> int:
@@ -86,18 +87,12 @@ def _name_holder_count(g, label: str, name: str) -> int:
     read-side predicate (``live._terminal_excluded``, as used by
     ``entity_identity.resolve_entity_id``) is the WRONG count here precisely
     because it excludes the terminal twin that participates in the corruption.
+    ``all_name_holder_ids`` is the ANY-status probe for exactly that reason.
 
     Cost: one index seek — ``Object.name`` / ``Subject.name`` are range-indexed
     (``_RANGE_INDEX_LABEL_PROPS``).
     """
-    if label not in _NAME_KEYED_LABELS:  # pragma: no cover - closed call set
-        raise RuntimeError(
-            f"projection: unsafe name-keyed label {label!r} "
-            f"({'/'.join(_NAME_KEYED_LABELS)} only)")
-    rows = g.query(
-        f"MATCH (n:{label} {{name:$name}}) RETURN count(n)",
-        params={"name": name}).result_set
-    return int(rows[0][0]) if rows else 0
+    return len(all_name_holder_ids(g, label, name))
 
 
 # #6239: live's TWO ``PointPromoted`` emitters are both gated on the Point's
