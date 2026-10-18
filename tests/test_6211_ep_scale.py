@@ -73,11 +73,6 @@ _FILLERS = [f"f{i}" for i in range(HUB_OPS)]
 _BACKGROUND = [f"b{i}" for i in range(SCALE_CLAIMS - 1 - len(_FILLERS))]
 
 
-def _scale_sdk(prefix: str = "tt6211s_") -> TortoiseSDK:
-    td = tempfile.mkdtemp(prefix=prefix)
-    return TortoiseSDK(os.path.join(td, "t.db"))
-
-
 def _build_scale_graph(sdk: TortoiseSDK) -> None:
     """3,353 claims + a dense operator zone + a background operator field.
 
@@ -133,12 +128,17 @@ def _build_scale_graph(sdk: TortoiseSDK) -> None:
 
 @pytest.fixture(scope="module")
 def scale_graph():
-    sdk = _scale_sdk()
-    try:
-        _build_scale_graph(sdk)
-        yield sdk
-    finally:
-        sdk.close()
+    # ``TemporaryDirectory`` rather than ``mkdtemp``: the embedded store lives in
+    # this tree, and a bare ``mkdtemp`` left it behind for the process's lifetime
+    # — which ``test_tmpdir_hygiene_4096`` flags as a leaking fixture (#4096),
+    # reddening `test (f)` for every lane that inherits this file.
+    with tempfile.TemporaryDirectory(prefix="tt6211s_") as td:
+        sdk = TortoiseSDK(os.path.join(td, "t.db"))
+        try:
+            _build_scale_graph(sdk)
+            yield sdk
+        finally:
+            sdk.close()
 
 
 def test_the_fixture_is_at_the_size_the_issue_measured(scale_graph):
