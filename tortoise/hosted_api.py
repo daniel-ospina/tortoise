@@ -35903,12 +35903,15 @@ def _billing_owner_email(org_id: str) -> str | None:
     it builds the same org dict (``oauth._owner_email_or``).
 
     Two calls, both inside the threaded checkout body that is already talking
-    to Stripe: a control-plane membership read plus a GoTrue admin GET. The
-    guard here is LOAD-BEARING, not defensive padding — ``owner_email``
-    swallows the admin-API transport error but its ``owner_user_id`` control-
-    plane read is outside that guard, so a control-plane failure would
-    otherwise escape as a 500 on an upgrade the member is entitled to. Caught
-    here, the chain simply degrades to the #4504 session fallback.
+    to Stripe: a control-plane membership read plus a GoTrue admin GET — a
+    revenue-path latency cost, so ``_billing_checkout_sync`` calls this ONLY
+    when step 1 of the chain cannot answer (``organizations.email`` is not
+    email-shaped). The guard here is LOAD-BEARING, not defensive padding —
+    ``owner_email`` swallows the admin-API transport error but its
+    ``owner_user_id`` control-plane read is outside that guard, so a
+    control-plane failure would otherwise escape as a 500 on an upgrade the
+    member is entitled to. Caught here, the chain simply degrades to the
+    #4504 session fallback.
     """
     from tortoise.supabase_control import get_control_plane, owner_email
     try:
@@ -35929,9 +35932,11 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict,
     1b. The ACTIVE OWNER's verified user email (#4508) — the Supabase-lane
        twin of 1, resolved by ``_billing_owner_email`` and only for the orgs
        whose ``organizations.email`` is NULL (every session-lane create: see
-       that helper). Inserted AFTER 1 so the landed precedence keeps holding,
-       and BEFORE 2/3 so a non-owner member clicking **Upgrade** can never
-       bind their own personal address as the org's Stripe customer.
+       that helper — the caller gates the read on exactly that condition, so
+       an org whose step 1 answers never pays for it). Inserted AFTER 1 so
+       the landed precedence keeps holding, and BEFORE 2/3 so a non-owner
+       member clicking **Upgrade** can never bind their own personal address
+       as the org's Stripe customer.
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
@@ -36077,7 +36082,26 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     # per-member session fallback is never preferred over the owner's. Only
     # the Supabase lane can answer it (a control-plane read); the registry
     # lane's ``t.email`` is step 1 of the chain itself.
-    owner_addr = _billing_owner_email(org_id) if supabase_mode else None
+    #
+    # #8931 review (P2): gate the read on the condition that makes it USABLE.
+    # Step 1 of the chain returns on ``org["email"]`` (the ``organizations.email``
+    # column, which ``_session_user_org`` stamps), so for the majority lane —
+    # ``/v1/register`` and Edge-Function orgs — resolving it first bought a
+    # control-plane ``org_memberships`` read plus a synchronous GoTrue admin
+    # GET (``timeout=10.0``, supabase_control.py) whose value was discarded.
+    # This is a pure short-circuit: step 1 is re-checked inside
+    # ``_billing_customer_email``, so precedence and outcomes are unchanged.
+    # Every case that CONSUMES the value still resolves it — an org whose
+    # column is NULL, including the backfill case (a stored
+    # ``stripe_customer_id`` with an empty ``customer_email``) — so nothing
+    # depends on the gate. The review's alternative shape (a lazy zero-arg
+    # resolver threaded into the chain) is equivalent; this one keeps the
+    # precedence decision in the single place that already owns it.
+    owner_addr = (
+        _billing_owner_email(org_id)
+        if supabase_mode and not _billing_email_like(org.get("email"))
+        else None
+    )
     email = _billing_customer_email(sdk, org, owner_email=owner_addr)
     try:
         client = StripeClient()

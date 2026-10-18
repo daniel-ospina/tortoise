@@ -1329,6 +1329,56 @@ class TestBillingSupabaseStore:
         assert row["stripe_customer_id"] == "cus_ow_1"
         assert row["customer_email"] == "owner@example.com"
 
+    def test_owner_read_runs_when_the_org_email_is_not_an_address(
+            self, monkeypatch, sb):
+        """The gate on the owner read is a SHAPE test, not a truthiness test
+        (#8931 review).
+
+        ``organizations.email`` is a stale-prone contact field (#1765), so a
+        non-NULL value that is not an address (``""``, ``"api"``, a user
+        UUID, a legacy token) can sit in the column on the very lane where a
+        session member clicks Upgrade. Such a value cannot answer step 1
+        (``_billing_email_like`` rejects it and the chain falls through), so
+        the owner read MUST still run — otherwise the #4508 fix silently
+        disappears for exactly those orgs and the member's own session email
+        is bound as the org's billing contact again.
+
+        Mutation that makes this fail: weaken the gate to
+        ``not org.get("email")`` (or to a plain truthiness check). The
+        precedence test still passes under that mutation — only this one reds.
+        """
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        org = {"org_id": self.ORG_ID, "tier": "solo",
+               "email": "api",
+               "session_user_email": "member@example.com"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = (
+            lambda: dict(org))
+        asked: list[str] = []
+
+        def _owner(cp, org_id):
+            asked.append(org_id)
+            return "owner@example.com"
+
+        monkeypatch.setattr(sc, "owner_email", _owner)
+        created: list[str] = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: created.append(e) or "cus_ow_4")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
+                            lambda self, *a: "https://checkout.stripe.com/pay/ow4")
+
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 200, r.text
+        assert asked == [self.ORG_ID], (
+            "a non-address value in organizations.email must not suppress the "
+            "owner read — it cannot answer step 1")
+        assert created == ["owner@example.com"], (
+            "an unusable column value must never fall through to the clicking "
+            "member's session email")
+
     def test_owner_email_failure_degrades_to_the_session_email(
             self, monkeypatch, sb):
         """The owner read is a control-plane + GoTrue admin call ON the
@@ -1365,22 +1415,40 @@ class TestBillingSupabaseStore:
 
     def test_org_email_still_outranks_the_owner_email(self, monkeypatch, sb):
         """#4508 is ADDITIVE, not a re-order: the links already landing keep
-        their precedence, so the owner read must sit AFTER ``org["email"]``
+        their precedence — so the owner link must sit AFTER ``org["email"]``
         (#4640) and must not resurrect a Stripe customer email for an org that
         already carries its own registered address.
 
-        Mutation that makes this fail: place the owner link before the
-        ``org["email"]`` read.
+        The spy sits on ``hosted_api._billing_owner_email`` (the call-site
+        seam) with a COUNTER, because the precedence assertion alone is blind
+        to the read: the value is discarded either way, so the test passed
+        whether the Supabase read happened or not (#8931 review). The read is
+        two network round-trips on a revenue path — one control-plane
+        ``org_memberships`` membership read plus a synchronous GoTrue admin
+        ``GET`` (``timeout=10.0``) — and step 1 of the chain makes it
+        unusable whenever ``organizations.email`` is set, which
+        ``_session_user_org`` always stamps (``hosted_api.py``: the resolved
+        org dict's ``email``).
+
+        Mutations that make this fail: (a) place the owner link before the
+        ``org["email"]`` read → ``created == ["owner@example.com"]``; (b)
+        delete the ``not _billing_email_like(org.get("email"))`` gate → the
+        ``asked`` list is non-empty for an org that already has an address.
         """
         tc, _fake = sb
         import tortoise.hosted_api as ha
-        import tortoise.supabase_control as sc
         org = {"org_id": self.ORG_ID, "tier": "solo",
                "email": "org@example.com",
                "session_user_email": "member@example.com"}
         ha.app.dependency_overrides[ha.get_current_org_session] = (
             lambda: dict(org))
-        monkeypatch.setattr(sc, "owner_email", lambda cp, org_id: "owner@example.com")
+        asked: list[str] = []
+
+        def _owner(org_id):
+            asked.append(org_id)
+            return "owner@example.com"
+
+        monkeypatch.setattr(ha, "_billing_owner_email", _owner)
         created: list[str] = []
         monkeypatch.setattr(billing.StripeClient, "create_customer",
                             lambda self, e: created.append(e) or "cus_ow_3")
@@ -1392,6 +1460,9 @@ class TestBillingSupabaseStore:
         r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
         assert r.status_code == 200, r.text
         assert created == ["org@example.com"]
+        assert asked == [], (
+            "the owner-email read (control-plane + GoTrue admin GET) must be "
+            "skipped when ``organizations.email`` already answers step 1")
 
     def test_checkout_409_when_row_already_active(self, monkeypatch, sb):
         """The stored-mirror guard reads subscription_status from the row and
