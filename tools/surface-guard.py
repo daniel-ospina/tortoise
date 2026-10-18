@@ -89,6 +89,24 @@ import ast as _ast
 import types
 from pathlib import Path
 
+# #4828: the served-identity helpers below — `_code_digest`, `_attribute_digest`,
+# `_served_attributes` AND `_component_fingerprint` — are DELIBERATE duplicates of the same
+# helpers in `tools/surface_manifest.py`. This gate is PINNED TO THE BASE REF, so it must be
+# self-contained: a module it imported would be PR-authored, and the PR it measures could
+# then hand it a digest returning the baseline's recorded values. In
+# `tests/test_surface_manifest.py` the net is
+# `test_the_two_drivers_agree_on_the_served_identity_helpers` (code parity over all four),
+# `test_both_drivers_fingerprint_the_same_component_identically`,
+# `test_the_attribute_encoding_is_pinned_to_measured_values` and
+# `test_the_pinned_gate_imports_only_its_allow_listed_modules`: a change to ONE copy reds
+# there. FOUR is the whole inventory — `_frontmatter` is legitimately divergent (different
+# exception types per side) and `main()` is not shared. Keep the copies in step; do not
+# unify them. That net is ARMED for a `tools/`-only diff by the
+# `tools/ci_selection.py::CORE_ALSO` entries for both driver paths (pinned by
+# `tests/test_ci_selection.py::test_surface_tools_change_selects_core_not_tier1`) — without
+# them `tools/` is swallowed by `NON_PYTHON_PREFIXES`, a driver-only diff selects NO
+# surface, and this file's whole test file is a `slow_files` member that would never run.
+
 
 def _code_digest(code) -> str:
     """Move-invariant, implementation-complete digest of a code object.
@@ -258,6 +276,42 @@ def _canonical_approval(path: Path | None = None) -> dict:
         "pr": str(pr) if pr else None,
         "date": str(approved) if approved is not None else None,
     }
+
+
+def _component_fingerprint(fn) -> str | None:
+    """Code-object identity — see the note in tools/surface_manifest.py.
+
+    Built from `co_filename` and a digest of the bytecode, names and constants
+    (`_code_digest`) rather than from `__module__`/`__qualname__`, because those
+    are writable strings a shadow can simply copy from the tool it is replacing.
+    `co_firstlineno` is deliberately NOT part of the identity: a pure code move
+    (an edit elsewhere in the file) is not a change to the served implementation,
+    yet it shifts every handler below it and reddened the gate on an unchanged
+    surface.
+
+    The half of a served tool that is NOT a code object — its defaults and
+    annotations — is fingerprinted separately, by `_served_attributes` and the
+    `served_attributes` cell (#4192).
+
+    MODULE LEVEL, not nested in `main()` (#4828 review P2): the nested copy could not
+    be seen by `tests/test_surface_manifest.py::_helper_code`, which compares
+    module-level definitions by the same NAME in both drivers — so the fourth and
+    last duplicate in the served-identity chain (`_served_attributes` ->
+    `_attribute_digest` -> `_code_digest` -> this) was the one link nothing compared.
+    Hoisting and sharing the manifest side's name makes it addressable by the same
+    lockstep contract as the other three; the body is unchanged.
+    """
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return None
+    # REPO-RELATIVE, never absolute: the baseline is checked in and CI checks out to a
+    # different path, so an absolute `co_filename` would differ there and red the gate
+    # on an unchanged tree.
+    try:
+        rel = Path(code.co_filename).resolve().relative_to(ROOT.resolve())
+    except Exception:
+        rel = Path(code.co_filename).name
+    return f"{rel}:{_code_digest(code)}"
 
 
 def die(message: str) -> int:
@@ -528,33 +582,6 @@ def main(argv: list[str]) -> int:
     # leaving the name set and the entry count identical, so it passed every check above
     # (verified: a live client then invoked the shadow function). Comparing the identity of
     # the component behind each name catches a count-preserving substitution.
-    def _fingerprint(fn) -> str | None:
-        """Code-object identity — see the note in tools/surface_manifest.py.
-
-        Built from `co_filename` and a digest of the bytecode, names and constants
-        (`_code_digest`) rather than from `__module__`/`__qualname__`, because those
-        are writable strings a shadow can simply copy from the tool it is replacing.
-        `co_firstlineno` is deliberately NOT part of the identity: a pure code move
-        (an edit elsewhere in the file) is not a change to the served implementation,
-        yet it shifts every handler below it and reddened the gate on an unchanged
-        surface.
-
-        The half of a served tool that is NOT a code object — its defaults and
-        annotations — is fingerprinted separately, by `_served_attributes` and the
-        `served_attributes` cell below (#4192).
-        """
-        code = getattr(fn, "__code__", None)
-        if code is None:
-            return None
-        # REPO-RELATIVE, never absolute: the baseline is checked in and CI checks out to a
-        # different path, so an absolute `co_filename` would differ there and red the gate
-        # on an unchanged tree.
-        try:
-            rel = Path(code.co_filename).resolve().relative_to(ROOT.resolve())
-        except Exception:
-            rel = Path(code.co_filename).name
-        return f"{rel}:{_code_digest(code)}"
-
     live_components: dict[str, str] = {}
     live_attributes: dict[str, str | None] = {}
     for _key, _tool in mcp_server.mcp._local_provider._components.items():
@@ -562,7 +589,7 @@ def main(argv: list[str]) -> int:
             continue
         _name = getattr(_tool, "name", None) or _key.split(":", 1)[1].split("@")[0]
         _fn = getattr(_tool, "fn", None)
-        live_components[_name] = _fingerprint(_fn)
+        live_components[_name] = _component_fingerprint(_fn)
         live_attributes[_name] = (
             _served_attributes(_fn) if getattr(_fn, "__code__", None) is not None else None
         )

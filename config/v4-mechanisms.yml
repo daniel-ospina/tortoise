@@ -108,14 +108,24 @@ mechanisms:
     declared_in:
       - packs/dev/manifest.yaml  # ontology.memory_granularity — the POLICY source
       - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.2a — where the gate is specified
-    state: not-implemented
-    tracking_issue: 5008
+    state: implemented
+    code:
+      - tortoise/embed_gate.py       # the predicate — its rule set IS value_gate.RULES
+      - tortoise/embeddings.py       # `encode_for_row` — the submission seam
+      - tortoise/projection/entities.py  # the entity/Event/Document/Point writers
+    tests:
+      - tests/test_embed_gate_5008.py
     note: >-
       Two gates on one policy: the SELECTION sibling is the identifier-only
-      DISCARD predicate (`tortoise/value_gate.py`, #4899, implemented); the
-      EMBEDDING gate (EMBED / NO-EMBED on a written row) does not exist. A
-      vector, once written, is paid for permanently — FalkorDB Cloud bills
-      provisioned RAM, no eviction.
+      DISCARD predicate (`tortoise/value_gate.py`, #4899); this is the
+      EMBEDDING gate (EMBED / NO-EMBED on a written row), which reuses that same
+      rule set rather than deriving a second one (§12.2a). Flag-gated
+      (`TORTOISE_EMBED_GATE`), off by default — the graph is unchanged until the
+      rate effect is measured, which is what #5008 asks for. A vector, once
+      written, is paid for permanently — FalkorDB Cloud bills provisioned RAM,
+      no eviction. NOT implemented here and named as such: §12.2a's per-kind
+      override block (no pack slot; no caller at the submission step holds the
+      brief) and reaping vectors already written (#4997).
 
   - id: sufficiency_router
     name: "sufficiency router + escalation write-back"
