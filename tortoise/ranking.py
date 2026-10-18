@@ -37,25 +37,43 @@ from .search_engine import (  # noqa: E402, RUF100
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
 )
 from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
+    EPISTEMIC_LABELS,
     epistemic_disjunction,  # #7927: traversal-position widening
     epistemic_label_queries,  # #7927: id-anchored widening
+    epistemic_labels_of,  # #7927: present-label resolution
     is_draft_status,
     is_terminal_status,
 )
 
 
 def _query_label_sweep(projection, template: str, params: dict) -> list:
-    """Run an ID-ANCHORED template once per epistemic label, merge rows.
+    """Run an ID-ANCHORED template once per PRESENT epistemic label.
 
     #7927: every ranker signal read below is anchored on a RESULT id
     (``n.id IN $ids``), and a result may be a :Subject/:Object/:Event belief
     (§7813). The anchored node keeps its LABEL — the per-(label, property)
-    index — and the four-label sweep comes from
-    ``live.epistemic_label_queries``; a hand-spelled label list or a bare
-    ``MATCH (n {id:$x})`` (no label → full scan) is the bug this replaces.
+    index — and the sweep comes from ``live.epistemic_label_queries``; a
+    hand-spelled label list or a bare ``MATCH (n {id:$x})`` (no label → full
+    scan) is the bug this replaces.
+
+    The labels actually present are resolved first (``live.
+    epistemic_labels_of``): a Point-only result set — the overwhelming
+    majority — costs ONE anchored read, not four, which is what keeps the
+    recall/rerank path inside its latency budget. An id matching no epistemic
+    label still gets the Point read (the pre-widening shape, which found
+    nothing for it).
+
+    DEDUPE CONTRACT: rows are PER LABEL, so a multi-labelled node
+    (``:Point:Object``) can be returned by more than one sweep. Every caller
+    here keys its output by node id, so a repeat is idempotent; a LIST-shaped
+    caller must dedupe itself.
     """
     rows: list = []
-    for _q in epistemic_label_queries(template):
+    labels = epistemic_labels_of(projection.g, list(params.get("ids") or []))
+    for _label, _q in zip(
+            EPISTEMIC_LABELS, epistemic_label_queries(template), strict=True):
+        if _label not in labels:
+            continue
         rows.extend(projection.g.query(_q, params=params).result_set)
     return rows
 
@@ -191,8 +209,16 @@ def resolve_contested_relevance(
     persisted EP mean >= 0.6 is a strong dispute) then id-ordered, and
     budget-capped at why.py's W4_MAX_CONFLICTS — the SAME subset the
     canonical why-layer would surface (a boost never fires on a conflict
-    the why-layer wouldn't show, and never misses one it would).  The
-    whole read + row-processing is fail-open — ranking must never break
+    the why-layer wouldn't show, and never misses one it would).
+
+    #7927 KNOWN DIVERGENCE, deliberate: this read admits all four epistemic
+    labels (§7813) while ``why._CONFLICTS_CYPHER`` is still ``:Point``-only, so
+    a non-Point conflict CAN fire the boost without the why-layer rendering it.
+    The subset agreement above therefore holds for ``:Point`` conflicts only;
+    widening the why-layer is the residual recorded on #7927 (it is a separate
+    read surface, not one of this issue's six).
+
+    The whole read + row-processing is fail-open — ranking must never break
     from enrichment (non-str raw-graph content is coerced, never raised)."""
     if not contested_ids or not query:
         return {}
@@ -222,7 +248,14 @@ def resolve_contested_relevance(
             f"AND {epistemic_disjunction('c')} "
             "AND " + _exclude_status_clause("c") + " "
             "RETURN n.id, coalesce(src.id, c.id), "
-            "  coalesce(src.content, c.label, c.content, ''), "
+            # #7927: the counter-claim TEXT must come from the node that
+            # actually carries it. A :Subject/:Object stores ``name``/``title``
+            # (never ``content``), so the old chain fell through to
+            # ``c.label`` — the NANDer's own type token — and the relevance
+            # test could never match: the boost silently never fired for
+            # exactly the labels this widening added.
+            "  coalesce(src.content, src.name, src.title, c.label, "
+            "           c.content, c.name, c.title, ''), "
             "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
             "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)",
             {"ids": contested_ids},

@@ -1817,34 +1817,65 @@ class TortoiseEP:
         # sibling scan that ALSO requires measurement.
         from .search_engine import ep_prior_only_cypher
         # #7927: ``n`` is the SUBJECT of this scan — contested claims are
-        # enumerated GRAPH-WIDE (no id anchor to index), so the four-label
-        # sweep comes from ``live.epistemic_label_queries``: one label-anchored
-        # scan per label (each label keeps its own scan instead of degenerating
-        # into a bare all-node walk), never a hand-spelled label literal.
+        # enumerated GRAPH-WIDE (no id anchor to index), so the labels come
+        # from the shared ``live.EPISTEMIC_LABELS`` declaration and one
+        # label-anchored scan runs per label (each label keeps its own scan
+        # instead of degenerating into a bare all-node walk). Never a
+        # hand-spelled label literal.
+        #
         # ``is_operator`` must admit UNSET as well as false — a
-        # :Subject/:Object/:Event carries no ``is_operator`` at all, so the old
-        # ``= false`` dropped every non-Point belief by NULL rather than by the
+        # :Subject/:Object/:Event carries no ``is_operator`` at all, so a bare
+        # ``= false`` drops every non-Point belief by NULL rather than by the
         # predicate it states.
-        template = (
-            "MATCH (n:{label}) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-            f"  AND {_terminal_excluded('n.status')} "
-            f"  AND NOT {ep_prior_only_cypher('n')} "
-            "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
-            "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
-            "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
-            "WHERE v > $t RETURN n.id, n.content, a, b, v"
-        )
+        #
+        # PER-LABEL MEASURED GATE (review, P1). The "unmeasured live claim MUST
+        # list" rule (the :169 pin) is the CLAIM rule and stays exactly as it
+        # was for ``:Point``. Entity labels are different: ``create_entity``
+        # rejects belief props, so an entity has NO persisted prior unless EP
+        # measured it through a factor, and its Beta(1,1) fallback sits at the
+        # MAXIMUM possible variance (1/12 = 0.0833). Listing those would make
+        # every Subject/Object/Event on the graph permanently "contested" at
+        # the top of the ordering — the report would stop discriminating — and
+        # nothing would ever measure them (`_stale_first_claims` and
+        # ``_affected_claims`` reach claims, not structurally-only entities).
+        # So an entity lists only once EP has ACTUALLY measured it.
         rows: list = []
-        for _q in epistemic_label_queries(template):
+        for _label in EPISTEMIC_LABELS:
+            conds = [
+                "(n.is_operator IS NULL OR n.is_operator = false)",
+                _terminal_excluded("n.status"),
+                f"NOT {ep_prior_only_cypher('n')}",
+            ]
+            if _label != EPISTEMIC_LABELS[0]:
+                conds.append(
+                    "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)")
             rows.extend(self.g.query(
-                _q, params={"t": variance_threshold}).result_set)
+                f"MATCH (n:{_label}) "
+                "WHERE " + " AND ".join(conds) + " "
+                "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
+                "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
+                "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
+                # Entity labels store their text in name/title — a Point's
+                # ``content``-only read returned None for them.
+                "WHERE v > $t "
+                "RETURN n.id, coalesce(n.content, n.name, n.title, "
+                "                        n.label, ''), a, b, v",
+                params={"t": variance_threshold},
+            ).result_set)
+        # A multi-labelled node (``:Point:Object`` — ``update_point``'s promote
+        # arm mints one) is returned by MORE THAN ONE sweep: collapse on id,
+        # first-wins, so it is listed once (the Point leg runs first and is the
+        # label the claim rule applies to).
+        by_id: dict[str, list] = {}
+        for row in rows:
+            by_id.setdefault(row[0], row)
         # A per-label ``ORDER BY`` cannot order the MERGED set, and Cypher row
         # order across four queries never decides an order — sort here,
         # variance-descending with an id tiebreak for determinism.
-        rows.sort(key=lambda r: (-float(r[4]), str(r[0])))
+        ordered = sorted(by_id.values(),
+                         key=lambda r: (-float(r[4]), str(r[0])))
         return [{"id": r[0], "content": r[1], "alpha": r[2],
-                 "beta": r[3], "variance": r[4]} for r in rows]
+                 "beta": r[3], "variance": r[4]} for r in ordered]
 
     def invalidate_messages(self, point_ids: list[str] | None = None) -> int:
         """Drop graph-persisted EP message state (epic 903-C4, #1242).

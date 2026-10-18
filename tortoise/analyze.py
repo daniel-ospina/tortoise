@@ -15,6 +15,7 @@ from .live import (
     _terminal_excluded,
     epistemic_disjunction,
     epistemic_label_queries,
+    epistemic_labels_of,
 )
 
 
@@ -530,35 +531,6 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
             rows.extend(proj.g.query(_q, params=params).result_set)
         return rows
 
-    def _labels_of(ids: list[str]) -> list[str]:
-        """Epistemic labels PRESENT among ``ids`` (one batched query per label).
-
-        A node carries exactly one epistemic label, so the first label in
-        ``EPISTEMIC_LABELS`` order that resolves wins; the scan stops as soon
-        as every id is accounted for, so a Point-only frontier costs ONE
-        query and never four.
-        """
-        queries = dict(zip(
-            EPISTEMIC_LABELS,
-            epistemic_label_queries(
-                "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"),
-            strict=True))
-        unresolved = list(dict.fromkeys(ids))
-        present: list[str] = []
-        for _label in EPISTEMIC_LABELS:
-            if not unresolved:
-                break
-            rows = proj.g.query(
-                queries[_label], params={"ids": unresolved}).result_set
-            if rows:
-                present.append(_label)
-                found = {r[0] for r in rows}
-                unresolved = [i for i in unresolved if i not in found]
-        # An id matching no epistemic label contributes nothing (the
-        # pre-widening Point probe's behaviour), but the Point leg still runs
-        # so an empty/garbage frontier behaves exactly as before.
-        return present or [EPISTEMIC_LABELS[0]]
-
     collected: set[str] = set()
     factor_anchors: set[tuple[str, str, str]] = set()
     # #6211 review round 1: truncation is tracked LOCALLY, never read back out
@@ -629,7 +601,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
             "MATCH (n:{label}) WHERE n.id IN $ids AND n.status = 'draft' "
             "RETURN n.id",
             {"ids": list(frontier)},
-            _labels_of(list(frontier)),
+            epistemic_labels_of(proj.g, list(frontier)),
         )
         draft_anchors = {r[0] for r in rows}
         if draft_anchors:
@@ -645,7 +617,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         frontier_list = list(frontier)
         # #7927: resolve this hop's labels ONCE (one query on a Point-only
         # frontier) and reuse them for every id-anchored leg below.
-        frontier_labels = _labels_of(frontier_list)
+        frontier_labels = epistemic_labels_of(proj.g, frontier_list)
 
         for rel in rel_types:
             if rel not in ("IMPL", "NAND"):
