@@ -1110,7 +1110,9 @@ surfaces:
   # `if not found:` branch; `CORE_ALSO` is the separate post-match addition and
   # lists neither file), and `tortoise/sdk.py` is a SHARED_MODULE → full
   # matrix. Those diffs reach this pin through `tier1`, never through `core`.
-  # The rule is stated the same way ~900 lines above, in the #2969 entry.
+  # The rule is stated the same way near the top of `core`, in the #2969 entry
+  # (`test_socket_bound_not_multiplied_2969.py`) — cite it by name, not by
+  # offset: a line count here rots with every insertion between the two.
   - test_8093_registry_namespace_doc.py
   # #5612: concurrent journal appends are serialised and the recovery read
   # salvages a damaged mid-file line. `tortoise/log.py` matches no

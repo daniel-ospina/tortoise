@@ -21,17 +21,20 @@ Class-B test doctrine:
   (2) *Does the test reach it?*  Yes — the shapes are read from the committed
       doc cell AND from the code that derives them, so the assertion is
       doc-against-code, never the doc against itself. That code side is a
-      derivation call for the custom shape and the hosted default
-      (``_graph_namespace`` / ``_org_graph_name``), and ``sdk.py``'s own source
-      line for the registry-lane default (``org_{name}``), which no exported
-      function returns.
+      derivation call where one exists (``acl_graph_users._graph_namespace`` for
+      the ACL key pattern, ``hosted_api._org_graph_name`` for the hosted
+      default) and the deriver's own source line where the shape is written by a
+      function no test can call without a DB (``sdk._graph_create``,
+      ``hosted_api._provision_graph``, ``sdk.org_create``).
 
-Hermetic: six file reads (the two docs, plus ``backup_sweep.py``,
-``mcp_server.py`` and ``hosted_api.py`` for the "still recognised" anchors and
-``sdk.py`` for the registry-lane ``org_{name}`` derivation) and three pure
-derivations — no fixture, no DB. ``tier1`` is the load-bearing registration, not ``core``: a
-``docs/``-only diff takes ``select()``'s early return and runs ``tier1`` alone,
-so a docs-only edit is exactly the change class this pin exists for.
+Hermetic: reads committed files only — the two docs, ``sdk.py``,
+``hosted_api.py``, ``backup_sweep.py``, ``mcp_server.py`` and the #3543 tenancy
+migration — and calls pure derivations. No fixture, no DB. The read set is named
+rather than counted: a count here re-stales the moment a test is added, which is
+the failure class this file exists to catch. ``tier1`` is the load-bearing
+registration, not ``core``: a ``docs/``-only diff takes ``select()``'s early
+return and runs ``tier1`` alone, so a docs-only edit is exactly the change class
+this pin exists for.
 """
 from __future__ import annotations
 
@@ -105,9 +108,14 @@ def test_custom_namespace_cell_matches_the_acl_and_provisioning_derivation():
     (1) *What value makes this test fail?*  The pre-fix ``team_<org_id>_<gid>``
         restated as the custom shape, or the cell losing the derived shape.
     (2) *Does the test reach it?*  Yes — the committed cell is compared to a
-        FIXED literal that `acl_graph_users._graph_namespace` is asserted to
-        derive on a sample (org, gid), so a code change to the derivation reds
-        the doc pin too (the literal is the pin's target, not its source).
+        FIXED literal, and the same literal is asserted at each deriver the cell
+        cites: `acl_graph_users._graph_namespace` (called on a sample org/gid —
+        the mirror the ACL pattern is built from), `sdk._graph_create` and
+        `hosted_api._provision_graph` (read by symbol from their own source, since
+        each needs a DB to call and `_provision_graph`'s branch writes the
+        `graphs.namespace` row the ACL pattern must match). A change to any of
+        the three reds the doc pin; the literal is the pin's target, not its
+        source.
     """
     from tortoise.acl_graph_users import _graph_namespace
 
@@ -115,6 +123,22 @@ def test_custom_namespace_cell_matches_the_acl_and_provisioning_derivation():
     assert derived == "org_team_a_g_0123abcd", (
         "the ACL key pattern is the graph's exact namespace "
         f"(got {derived!r}); the doc cell is pinned to this derivation")
+
+    # `_graph_namespace` is a MIRROR of the derivers, not the only one: the cell
+    # names `_graph_create` / `_provision_graph` as the sites that mint a custom
+    # graph, and neither is reachable from a hermetic test (both need a DB;
+    # `_provision_graph`'s Supabase branch is the one that writes the namespace
+    # the ACL pattern has to match). Pin them by symbol from their own source, or
+    # a change to what those two mint re-stales the cell with this pin green.
+    sdk_src = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    assert 'ns = namespace or f"org_{org_id}_{gid}"' in sdk_src, (
+        "`sdk._graph_create` must keep minting `org_{org_id}_{gid}` for a custom "
+        "graph — the cell states that shape as the derived custom namespace")
+    hosted_src = (REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+    assert '''ns = f"org_{org['id']}_{gid}"''' in hosted_src, (
+        "`hosted_api._provision_graph`'s Supabase branch must keep minting "
+        "`org_{org_id}_{gid}` — it writes the `graphs.namespace` row the ACL "
+        "key pattern is built from, and no other test reaches that branch")
 
     cell = _namespace_cell()
     assert CUSTOM_SHAPE in cell, (
@@ -207,19 +231,23 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
     """The doc's "still recognised" claim is anchored to EVERY live acceptance.
 
     The cell promises the pre-rename ``team_*`` name is "still recognised by the
-    tombstone purge and the legacy graph-name resolution". Four live sites
-    implement that, and all four are pinned here — the purge guard and the MCP
-    list filter *and* the two hosted-path acceptances (the existence PROBE and
-    the legacy OPEN). The hosted pair is the one with the operator-visible
-    consequence: probing only ``org_`` made every pre-rename org read "node
-    absent" and sent the onboarding projection down the no-write path (#3543 on
-    the probe), and the MCP comment records that the two list filters "must
-    agree or a legacy org's graphs become invisible here alone". A pin covering
-    only two of the four leaves the other two removable greenside while the doc
-    keeps claiming back-compat.
+    tombstone purge and the legacy graph-name resolution". That sentence covers
+    two subsystems, and every acceptance inside them is pinned here — the purge's
+    namespace drop AND its artifact-ownership guard (separate acceptances in the
+    same purge path: one decides whether to drop the graph, the other whether the
+    archive it is about to delete is provably this org's), the MCP list filter,
+    and the two hosted-path acceptances (the existence PROBE and the legacy
+    OPEN). The set is enumerated by SITE, not counted: a number here re-stales the
+    moment a sixth acceptance is added, and the pin cannot see an addition — only
+    a removal. The hosted pair is the one with the operator-visible consequence:
+    probing only ``org_`` made every pre-rename org read "node absent" and sent
+    the onboarding projection down the no-write path (#3543 on the probe), and the
+    MCP comment records that the two list filters "must agree or a legacy org's
+    graphs become invisible here alone".
 
-    (1) *What value makes this test fail?*  Any of the four acceptances dropping
-        the pre-rename shape — the purge guard's `team_{org_id}_{gid}`, the MCP
+    (1) *What value makes this test fail?*  Any listed acceptance dropping the
+        pre-rename shape — the purge's `team_{org_id}_{gid}` namespace drop, the
+        purge's `team_{org_id}_{graph_id}` artifact-ownership guard, the MCP
         resolution's `team_{org_id}`, the hosted probe's `team_{org_id}`
         alternative, or the hosted legacy open — while the doc keeps claiming
         back-compat: the reverse direction of the same drift.
@@ -229,7 +257,8 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
         `(f"org_{org_id}", f"team_{org_id}")` pair) and as the legacy open's own
         argument (`graph_name=f"team_{org_id}"`), so deleting the branch reds
         rather than merely losing one mention of a string the file uses
-        elsewhere.
+        elsewhere. The purge pair is pinned as the two literals of the
+        `gid_namespaces` set, so neither arm can be dropped alone.
     """
     source = (REPO / "tortoise" / "backup_sweep.py").read_text(encoding="utf-8")
     assert 'f"team_{org_id}_{gid}"' in source, (
@@ -237,6 +266,18 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
         "`team_{org_id}_{gid}` namespace (no migration rewrites it)")
     assert 'f"org_{org_id}_{gid}"' in source, (
         "and the current derivation must stay alongside it")
+    # The ARTIFACT half of the same purge: `_purge_graph_storage` decides whether
+    # the archive it is about to delete is provably this org's by testing the
+    # namespace against both spellings. Dropping the legacy arm alone would let a
+    # pre-rename graph's archive be deleted on a name that proves nothing, while
+    # the cell keeps claiming the purge recognises `team_*`.
+    assert 'f"team_{org_id}_{graph_id}"' in source, (
+        "the purge's artifact-ownership guard must keep trusting the pre-#3543 "
+        "`team_{org_id}_{graph_id}` namespace — it is the artifact half of the "
+        "same back-compat the cell claims")
+    assert 'f"org_{org_id}_{graph_id}"' in source, (
+        "and the current namespace alongside it, or every post-#3543 graph's "
+        "archive becomes ambiguous")
 
     mcp = (REPO / "tortoise" / "mcp_server.py").read_text(encoding="utf-8")
     assert 'f"team_{org_id}"' in mcp, (
