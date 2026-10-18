@@ -2454,10 +2454,12 @@ surfaces:
   # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
   # cross-head licence must be the test-file check it can actually prove (it is not),
   # the shared-hub tree state at measurement time must be recorded as un-recorded,
-  # indicator 2 must carry the anchor limit, and every `test_*` symbol the report
-  # cites must resolve. Dual-registered (`core` + `tier1`) for the same docs-only
-  # reason as the doc guards above: a `docs/`-only diff takes `select()`'s early
-  # return, so `tier1` is where it must live.
+  # indicator 2 must carry the anchor limit, the report's stated size for batches A/B
+  # must equal its own batch table's rows, and every `test_*` CITATION must resolve —
+  # bare symbol, `module.py`, `module.py::Class::test`, path, glob or brace set (the
+  # pre-fix extractor saw only the bare form: 15 of 55 citations). Dual-registered
+  # (`core` + `tier1`) for the same docs-only reason as the doc guards above: a
+  # `docs/`-only diff takes `select()`'s early return, so `tier1` is where it must live.
   - test_capstone_1976_report_claims.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
@@ -5350,7 +5352,7 @@ durations:
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
-  test_capstone_1976_report_claims.py: 1.0  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def-index scan for the citation resolver; no DB
+  test_capstone_1976_report_claims.py: 1.0  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def/class index for the citation resolver (now covering module/path/glob citations, not only bare symbols) and one batch-table parse; no DB
   test_doc_affiliation_frontmatter.py: 0.1  # #8738 review P2: six frontmatter-block reads + one directory glob; same no-DB shape as the doc guards above
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3

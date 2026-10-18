@@ -22,9 +22,9 @@ capstone-report.md`, both of which let the report's evidence outrun its evidence
    main ("hub") worktree, which is the tree the repo's worktree-isolation rule exists to
    keep other lanes out of — and the report itself proves the hub is not a clean
    checkout: D3 is exactly a stale *ignored* `dist/` living there. No
-   `git status --porcelain` accompanied the attribution, so those 201 executions could
-   not be shown to have measured `fbc1d96d5` rather than `fbc1d96d5` plus another lane's
-   leftovers.
+   `git status --porcelain` accompanied the attribution, so those 324 executions
+   (batch A's 201 over 8 files + batch B's 123 over 6) could not be shown to have
+   measured `fbc1d96d5` rather than `fbc1d96d5` plus another lane's leftovers.
 
 WHAT THIS PINS
 --------------
@@ -37,16 +37,22 @@ WHAT THIS PINS
 4. The mechanism the report states is TRUE in the tree — the import path it names really
    is the path those suites take. If that ever stops being true, the report's caveat is
    overstated and this check names it.
-5. Every `test_*` symbol the report cites resolves to a real module stem or a real
-   `def`. The pre-fix defect this class already produced once: an earlier revision cited
-   `test_fork_card_is_shown_once_per_org`, which exists nowhere — a dangling pointer in
-   the one document whose value is that every pointer resolves. That name is used below
-   as the resolver's non-vacuity case.
+5. Every `test_*` **citation** the report makes resolves — not only the bare-symbol form.
+   A citation is a bare symbol (`test_decide`), a module (`test_decide.py`), a node id
+   (`test_x.py::Class::test_y`), a path (`tests/e2e/test_x.py:1314`) or a glob
+   (`test_onboarding_state*.py`). The pre-fix defect this class already produced once: an
+   earlier revision cited `test_fork_card_is_shown_once_per_org`, which exists nowhere — a
+   dangling pointer in the one document whose value is that every pointer resolves. That
+   name is used below as the resolver's non-vacuity case.
+6. The report's own batch arithmetic holds: the size it states for batches A/B equals the
+   sum of the batch table's own A and B rows. The defect this pins: the artefact called
+   A/B "the same 8 files, 201 tests" while its table shows 14 files / 324 executions, so the
+   remedy sentence scoped the one measurement that would remove the limit to batch A alone.
 
 Non-vacuity: on the pre-fix document, checks 1–3 fail (it said "which is what licenses
 the cross-head comparison — checked per file", carried no tree-state line, and its
-indicator-2 row had no anchor caveat). Check 5's resolver rejects the dangling name that
-the earlier revision actually shipped.
+indicator-2 row had no anchor caveat); check 5's extractor surfaces the dangling name from
+synthetic doc text and the resolver rejects it; check 6 fails on "8 files, 201 tests".
 
 Static: doc-text scans plus file reads. No network, DB or graph.
 """
@@ -216,21 +222,44 @@ def test_the_anchor_head_suites_really_import_the_modules_the_commit_changed():
 
 
 # --------------------------------------------------------------------------- #
-# 5 — every cited test symbol resolves (the dangling-pointer class)
+# 5 — every cited test reference resolves (the dangling-pointer class)
 # --------------------------------------------------------------------------- #
 
 #: A name an earlier revision of this report shipped as surface 4's evidence. It
-#: exists nowhere in the repo — the resolver below must reject it.
+#: exists nowhere in the repo — the extractor must surface it and the resolver must
+#: reject it.
 _DANGLING_NAME = "test_fork_card_is_shown_once_per_org"
+
+#: ``test_*`` citations in inline code. Whitespace is excluded so fenced command lines
+#: (`RUN_DASHBOARD_E2E=1 pytest tests/e2e/...`) are not read as citations.
+_CITATION_RE = re.compile(r"`([^`\s]+)`")
+
+#: A `:line`, `:1-3` or `::Class::method` suffix, stripped before resolution.
+_LINE_SUFFIX_RE = re.compile(r"::?[A-Za-z0-9_][A-Za-z0-9_\-–]*$")
+
+
+@lru_cache(maxsize=1)
+def _test_tree_texts() -> tuple[tuple[Path, str], ...]:
+    return tuple(
+        (path, path.read_text(encoding="utf-8", errors="ignore"))
+        for path in sorted((ROOT / "tests").rglob("*.py"))
+    )
 
 
 @lru_cache(maxsize=1)
 def _test_defs() -> frozenset[str]:
-    names: set[str] = set()
     pattern = re.compile(r"^[ \t]*def (test_\w+)", re.MULTILINE)
-    for path in sorted((ROOT / "tests").rglob("*.py")):
-        names.update(pattern.findall(path.read_text(encoding="utf-8", errors="ignore")))
-    return frozenset(names)
+    return frozenset(
+        name for _path, text in _test_tree_texts() for name in pattern.findall(text)
+    )
+
+
+@lru_cache(maxsize=1)
+def _test_classes() -> frozenset[str]:
+    pattern = re.compile(r"^[ \t]*class (\w+)", re.MULTILINE)
+    return frozenset(
+        name for _path, text in _test_tree_texts() for name in pattern.findall(text)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -238,21 +267,197 @@ def _test_module_stems() -> frozenset[str]:
     return frozenset(path.stem for path in (ROOT / "tests").rglob("*.py"))
 
 
-def _resolves(name: str) -> bool:
-    return name in _test_module_stems() or name in _test_defs()
+def _expand_braces(pattern: str) -> list[str]:
+    """`tests/e2e/{a,b}.py` -> [`tests/e2e/a.py`, `tests/e2e/b.py`]."""
+    match = re.search(r"\{([^{}]*)\}", pattern)
+    if not match:
+        return [pattern]
+    expanded: list[str] = []
+    for part in match.group(1).split(","):
+        expanded.extend(
+            _expand_braces(pattern[: match.start()] + part.strip() + pattern[match.end() :])
+        )
+    return expanded
 
 
-def _cited_test_symbols() -> list[str]:
-    """Bare ``test_*`` tokens in inline code — a module stem or a test function."""
-    return sorted(set(re.findall(r"`(test_[A-Za-z0-9_]+)`", _doc_text())))
+def _glob_ref_resolves(ref: str) -> bool:
+    for pattern in _expand_braces(ref):
+        rooted = pattern if "/" in pattern else f"tests/{pattern}"
+        if not any(ROOT.glob(rooted)):
+            return False
+    return True
 
 
-def test_every_test_symbol_the_report_cites_resolves():
-    dangling = [name for name in _cited_test_symbols() if not _resolves(name)]
+def _resolves(ref: str) -> bool:
+    """A citation resolves as a node id, a glob, a path, a module stem or a `def`."""
+    if "::" in ref:
+        head, *parts = ref.split("::")
+        if not _resolves(head):
+            return False
+        known = _test_defs() | _test_classes() | _test_module_stems()
+        return all(part in known for part in parts)
+    if any(ch in ref for ch in "*?[{"):
+        return _glob_ref_resolves(ref)
+    if "/" in ref:
+        return any(ROOT.glob(ref))
+    if ref.endswith(".py"):
+        return ref[:-3] in _test_module_stems()
+    return ref in _test_module_stems() or ref in _test_defs()
+
+
+def _normalise(token: str) -> str | None:
+    """A cited `test_*` reference in the form the resolver takes, or None."""
+    if "test_" not in token:
+        return None
+    head, sep, tail = token.partition("::")
+    head = _LINE_SUFFIX_RE.sub("", head).strip()
+    if not head or "test_" not in head:
+        return None
+    if any(ch in head for ch in "<>$()"):
+        return None
+    return head + sep + tail
+
+
+def _cited_test_refs(text: str | None = None) -> list[str]:
+    """Every ``test_*`` citation in the document — bare, module, node id, path or glob.
+
+    The pre-fix version of this extractor required the closing backtick immediately
+    after the identifier, so it saw 15 of the report's 62 ``test_*`` tokens and was
+    blind to the module/path form the report mostly uses.
+    """
+    raw = _doc_text() if text is None else text
+    refs = {_normalise(token) for token in _CITATION_RE.findall(raw)}
+    return sorted(ref for ref in refs if ref)
+
+
+def test_every_test_citation_the_report_makes_resolves():
+    dangling = [ref for ref in _cited_test_refs() if not _resolves(ref)]
     assert not dangling, (
-        "the report cites test symbols that exist neither as a module under `tests/` "
-        f"nor as a `def`: {dangling}. A reader cannot detect a dangling test name by "
-        "reading, which is why this is a guard."
+        "the report cites test references that do not resolve — neither as a module "
+        f"under `tests/`, a `def`, a class, a path nor a glob: {dangling}. A reader "
+        "cannot detect a dangling pointer by reading, which is why this is a guard."
+    )
+
+
+def test_the_extractor_sees_the_module_and_path_citations_not_only_bare_symbols():
+    """The gap the pre-fix extractor had: it only matched `` `test_foo` ``.
+
+    Non-vacuity for the extractor itself — a regex regression that stops matching the
+    `.py` / path / node-id forms must fail here, not pass silently.
+    """
+    refs = set(_cited_test_refs())
+    for expected in (
+        # a `:line` suffix is stripped, the module citation survives
+        "test_dashboard_onboarding.py",
+        # a path citation with a line number
+        "tests/e2e/hosted/test_14_onboarding_journey.py",
+        # a glob citation
+        "test_onboarding_state*.py",
+        # a node-id citation (`module.py::Class::test`)
+        "test_onboarding_w6_capture_disclosure.py::TestDeleteDuringCapture::"
+        "test_no_orphaned_receipt_under_concurrent_delete",
+        # a brace-set citation
+        "tests/e2e/{test_welcome_page,test_ship_test_onboarding,test_dashboard_gate,"
+        "test_dashboard_identity,test_session_login_flow}.py",
+    ):
+        assert expected in refs, (
+            f"the extractor no longer surfaces the citation {expected!r}; it is in the "
+            f"report. Refs found: {sorted(refs)}"
+        )
+    assert _normalise("test_dashboard_onboarding.py:1314") == (
+        "test_dashboard_onboarding.py"
+    ), "a `:line` suffix must be stripped, not skipped, or the module goes unchecked"
+    assert _normalise("tests/test_onboarding_seed_endpoint.py:34") == (
+        "tests/test_onboarding_seed_endpoint.py"
+    )
+    module_refs = [
+        ref
+        for ref in refs
+        if ref.endswith(".py") or "/" in ref or "::" in ref or "*" in ref
+    ]
+    assert len(module_refs) >= 20, (
+        "the report cites dozens of test modules/paths; the extractor surfaced only "
+        f"{len(module_refs)}: {sorted(module_refs)}"
+    )
+
+
+def test_the_extractor_surfaces_the_dangling_name_from_a_synthetic_document():
+    """Non-vacuity: check 5 must be able to FAIL on a real dangling citation.
+
+    This exercises the *extractor*, not just the resolver — the pre-fix guard called
+    `_resolves()` directly, so it proved the resolver rejects a name the extractor
+    would have had to hand it, never that the extractor sees the citation at all.
+    """
+    synthetic = (
+        "surface 4 (fork card) — asserted by `test_fork_card_is_shown_once_per_org` "
+        "and its companions"
+    )
+    assert _DANGLING_NAME in _cited_test_refs(synthetic), (
+        "the extractor did not surface the dangling citation from doc text, so the "
+        "resolution guard cannot see this class of defect at all"
+    )
+    assert not _resolves(_DANGLING_NAME), (
+        f"{_DANGLING_NAME!r} now exists. It was the dangling citation this guard was "
+        "written for; if it has been added, pick another known-absent name so the "
+        "extractor keeps a non-vacuity case."
+    )
+
+
+def test_a_missing_module_citation_is_rejected():
+    """The class the pre-fix extractor could not see: a ``.py`` citation that is absent."""
+    absent = "test_module_that_does_not_exist_8997.py"
+    assert _normalise(absent) == absent
+    assert absent in _cited_test_refs(f"see `{absent}` for the evidence")
+    assert not _resolves(absent)
+    assert not _resolves(f"tests/e2e/{absent}:1314")
+
+
+# --------------------------------------------------------------------------- #
+# 6 — the report's own batch arithmetic holds
+# --------------------------------------------------------------------------- #
+
+
+def _batch_rows() -> dict[str, tuple[int, int]]:
+    """passed/failed per batch, parsed from the report's own ```text batch block."""
+    text = _doc_text()
+    block = text[text.index("```text") : text.index("```", text.index("```text") + 7)]
+    rows = re.findall(r"^([A-F])\s+(\d+) passed, (\d+) failed", block, re.MULTILINE)
+    assert rows, f"the batch table no longer parses: {block!r}"
+    return {letter: (int(passed), int(failed)) for letter, passed, failed in rows}
+
+
+def test_the_cross_head_bullet_states_the_size_of_batches_a_and_b():
+    """The remedy sentence must scope the re-run to both batches, at the true size.
+
+    Pre-fix the artefact said "the same 8 files, 201 tests" — batch A's size — while
+    batches A and B together are 14 files and 324 executions (its own table's rows).
+    Following that sentence literally would have left batch B's 123 anchor-measured
+    executions un-asserted at the verified head while reading as if the limit were gone.
+    """
+    a_passed, a_failed = _batch_rows()["A"]
+    b_passed, b_failed = _batch_rows()["B"]
+    executions = a_passed + a_failed + b_passed + b_failed
+    bullet = _bullet("- **Which sha:**")
+    assert executions == 324, (
+        "the batch table no longer sums to 324 for A+B (A "
+        f"{a_passed}+{a_failed}, B {b_passed}+{b_failed}) — re-derive the report's "
+        "figures before trusting this guard"
+    )
+    assert "**14 files, 324 executions**" in bullet, (
+        "the cross-head remedy must state batches A/B at the size the report's own "
+        f"table shows ({executions} executions; batch A {a_passed + a_failed} over 8 "
+        "files, batch B "
+        f"{b_passed + b_failed} over 6). Bullet: " + bullet
+    )
+    assert "the same 8 files, 201 tests" not in bullet, (
+        "the bullet still sizes batches A/B as batch A alone, which scopes the one "
+        "measurement that would remove the anchor limit to the wrong set. Bullet: "
+        + bullet
+    )
+    lane = _section("## Lane conditions (measurement caveats)")
+    assert f"**{executions}** executions" in lane, (
+        "Lane conditions must carry the same A/B execution count as the batch table "
+        f"({executions}). Lane conditions: " + lane
     )
 
 
