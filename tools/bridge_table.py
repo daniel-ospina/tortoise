@@ -402,6 +402,9 @@ _SIT_INSIDE = re.compile(r"([`\w,\s]+?)\s+sit\s+inside\s+`([a-z_][a-z0-9_]*)`")
 # was "dropped for `check_connection`" — a REPLACEMENT, the OPPOSITE relation — and a
 # scan made `check_connection` a member of row 23 and its only beta successor (#8930).
 _SPLIT_INTO = re.compile(r"splits this into([^;]*)")
+# An `Absorbs` cell is a member LIST, then an em dash, then prose (row 17's fields, row
+# 22's "OFF the MCP", row 23's replacement). Only the list is membership.
+_CELL_PROSE = "—"
 _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|")
 _IDENT = re.compile(r"[a-z_][a-z0-9_]*")
 
@@ -418,6 +421,12 @@ APPROVED_MIN_ROWS = 20
 # that the approved menu places it elsewhere. A reflow, not a doc edit, is the likely
 # cause, which is exactly what this bound must catch.
 APPROVED_MIN_CLOSURES = 4
+
+# The doc states exactly ONE beta split (row 17's "splits this into `update_knowledge` +
+# `supersede_knowledge`"). Bounded for the same reason as the closures: rewording the
+# clause drops the successors silently, which flips `tortoise_invalidate` from
+# `successor` (support) to `rehomed` and changes an owner-facing count with a green build.
+APPROVED_MIN_SPLITS = 1
 
 
 def _known_names() -> set[str]:
@@ -440,10 +449,9 @@ def _split_successors(cell: str) -> list[str]:
     """The TARGET names the cell names as beta's own split of the row.
 
     Only the `splits this into ...` clause counts, and only the BACKTICKED names inside
-    it. The rest of the cell states other relations — row 22 is "OFF the MCP", row 23 was
-    "dropped for `check_connection`" — and a scan of every TARGET name in the cell read
-    that replacement as an absorption, giving `check_connection` membership (and sole
-    beta-successor status) of a row the doc says it replaced.
+    it. The rest of the cell states OTHER relations — row 22 is "OFF the MCP", row 23 was
+    "dropped for `check_connection`" — so a scan of every TARGET name in the cell read that
+    REPLACEMENT as a beta successor of the very row it replaced.
     """
     out: set[str] = set()
     for m in _SPLIT_INTO.finditer(cell):
@@ -451,6 +459,20 @@ def _split_successors(cell: str) -> list[str]:
             t for t in re.findall(r"`([a-z_][a-z0-9_]*)`", m.group(1)) if t in TARGET_MCP
         }
     return sorted(out)
+
+
+def _cell_members(cell: str, name: str, known: set[str]) -> set[str]:
+    """The names the cell's member LIST states — the prose after the em dash is not one.
+
+    An `Absorbs` cell is a comma list, then an em dash, then prose. The prose states OTHER
+    relations: row 17's "promote/baseline become fields on `update_knowledge`", row 22's
+    "OFF the MCP", row 23's "dropped for `check_connection`". Scanning the whole cell for
+    known names minted all three as MEMBERSHIP, which made `check_connection` a member of
+    `run_onboarding` — a row the doc says was dropped FOR it. `members` is what the
+    verdicts call a row's approved HOME, so a prose-minted member is a false home.
+    """
+    head = cell.split(_CELL_PROSE, 1)[0]
+    return {t for t in _IDENT.findall(head) if t in known and t != name}
 
 
 def _approved_closures(text: str) -> list[tuple[str, set[str]]]:
@@ -470,11 +492,14 @@ def _parse_approved(text: str) -> tuple[dict[str, dict], list[tuple[str, set[str
             continue
         name = row.group(2)
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        toks = {t for t in _IDENT.findall(cells[2]) if t in known and t != name}
         menu[name] = {
             "lineno": int(row.group(1)),
-            "members": toks | {name},
+            "members": _cell_members(cells[2], name, known) | {name},
             "successors": _split_successors(cells[2]),
+            # How many `splits this into` clauses the cell states, so a clause that parses
+            # to NO target name fails the build instead of reading as "this row has no
+            # successors" (the same fail-open direction as a dropped closure).
+            "split_clauses": len(_SPLIT_INTO.findall(cells[2])),
             "quote": line.rstrip(),
             "closes": set(),
         }
@@ -534,14 +559,21 @@ def _approved_errors(
             f"least {APPROVED_MIN_ROWS} — the doc's own title claims 23); the table shape has "
             "changed and the parse is now silently dropping rows"
         ]
-    # A closure statement that names no member resolves nothing — it is a parse break,
-    # not a doc that states an empty closure.
-    empty = sorted(outer for outer, inners in closures if not inners)
-    if empty:
+    # A closure statement that RESOLVES nothing is a parse break, not a doc that states an
+    # empty closure. Resolution — not presence — is the test: the captured member span is
+    # raw identifiers (prose words included), and members are applied through a `known`
+    # filter, so `these sit inside `index_files`` would otherwise pass this guard while
+    # contributing no member at all.
+    known = _known_names()
+    unresolved = sorted(
+        outer for outer, inners in closures if not {i for i in inners if i in known}
+    )
+    if unresolved:
         return [
-            f"transitive-closure statement(s) for {', '.join(f'`{o}`' for o in empty)} "
-            f"parsed out of {APPROVED_DOC.name} to NO member names; the sentence shape has "
-            "changed and those members are now silently missing from every row that absorbs it"
+            f"transitive-closure statement(s) for {', '.join(f'`{o}`' for o in unresolved)} "
+            f"parsed out of {APPROVED_DOC.name} to NO name the doc otherwise uses; the "
+            "sentence shape has changed and those members are now silently missing from "
+            "every row that absorbs it"
         ]
     if len(closures) < APPROVED_MIN_CLOSURES:
         return [
@@ -551,6 +583,36 @@ def _approved_errors(
             "`get`/`overview`/`query` closures); a reflow the parse cannot read shrinks every "
             "row's membership silently, and the next disputed row naming those members reads "
             "`refuted` — a false claim that the approved menu places it elsewhere"
+        ]
+    # The CONTAINER must be a name the doc actually uses (a row, or a member of one):
+    # renaming only the closure sentence's container otherwise parses cleanly and drops the
+    # closure, because the membership lookup then misses on every row.
+    named = set(menu) | {m for r in menu.values() for m in r["members"]}
+    stray = sorted(outer for outer, _ in closures if outer not in named)
+    if stray:
+        return [
+            f"transitive-closure container(s) {', '.join(f'`{o}`' for o in stray)} parsed out "
+            f"of {APPROVED_DOC.name} are neither a row the doc names nor a member of one; "
+            "renaming the container in the sentence alone silently drops the whole closure"
+        ]
+    # ...and the same for the beta-split clause: a clause that parses to no TARGET name is
+    # a parse break, and a doc that states no split at all means the clause was reworded.
+    empty_split = sorted(
+        n for n, r in menu.items() if r["split_clauses"] and not r["successors"]
+    )
+    if empty_split:
+        return [
+            f"approved row(s) {', '.join(f'`{n}`' for n in empty_split)} state a beta split "
+            f"in {APPROVED_DOC.name} but NO target name parsed out of it; the clause shape "
+            "has changed, and a row whose successors silently empty flips from `successor` "
+            "(support) to `rehomed` (a disagreement) in the rendered table"
+        ]
+    if sum(1 for r in menu.values() if r["split_clauses"]) < APPROVED_MIN_SPLITS:
+        return [
+            f"only {sum(1 for r in menu.values() if r['split_clauses'])} beta-split "
+            f"statement(s) parsed out of {APPROVED_DOC.name} (expected at least "
+            f"{APPROVED_MIN_SPLITS} — row 17 states `splits this into `update_knowledge` + "
+            "`supersede_knowledge``); a reworded clause drops those successors silently"
         ]
     return []
 

@@ -1564,11 +1564,16 @@ def test_d4_never_calls_a_row_unnamed_while_naming_its_home() -> None:
     homed = {a["tool"] for a in approved if a["homes"]}
     assert homed, "no disputed row has an approved home — this test would be vacuous"
 
-    # Every row with a home renders that home in the table.
+    # Every row with a home renders that home in the table. Not `startswith("`")`: the
+    # multi-home form renders `*(several: `a`, `b`)*`, so the assertion is "every home the
+    # derivation found is NAMED in the cell", which holds for one home and for several.
     for tool in homed:
-        assert rows[tool][1].startswith("`"), (
-            f"§D4's `Approved home` cell for {tool} names no row: {rows[tool][1]!r}"
-        )
+        row = next(a for a in approved if a["tool"] == tool)
+        for home in row["homes"]:
+            assert f"`{home}`" in rows[tool][1], (
+                f"§D4's `Approved home` cell for {tool} omits its home `{home}`: "
+                f"{rows[tool][1]!r}"
+            )
 
     unnamed_sentences = [
         line
@@ -1730,11 +1735,137 @@ def test_approved_menu_successors_come_from_the_split_sentence_not_prose() -> No
         bt._approved_verdict(menu, {"run_onboarding"}, "check_connection") != "successor"
     ), "prose minted a successor relation the doc does not state"
 
-    # ...while the sentence that DOES state a split still yields its successors, and the
-    # closure still supplies row 12's members.
-    assert menu["revise_knowledge"]["successors"] == ["supersede_knowledge", "update_knowledge"], (
-        "the `splits this into` clause is the one place a successor is stated: "
-        f"{menu['revise_knowledge']['successors']!r}"
+    # ...while the sentence that DOES state a split still yields its successors. The
+    # assertion is the RULE (successors are exactly the clause's target names), plus the
+    # fact the doc currently states — pinning only the exact list would fail on a
+    # legitimate owner amendment that adds a third successor, and blame the clause.
+    quote = menu["revise_knowledge"]["quote"]
+    clause = re.search(r"splits this into([^;]*)", quote)
+    assert clause, f"row 17 no longer states its split: {quote!r}"
+    clause_targets = {
+        t for t in re.findall(r"`([a-z_][a-z0-9_]*)`", clause.group(1)) if t in bt.TARGET_MCP
+    }
+    assert menu["revise_knowledge"]["successors"] == sorted(clause_targets), (
+        "`successors` must be the split clause's target names and nothing else: "
+        f"{menu['revise_knowledge']['successors']!r} vs {sorted(clause_targets)!r}"
+    )
+    assert {"update_knowledge", "supersede_knowledge"} <= clause_targets, (
+        "row 17 no longer names the beta split the doc records — update this test with "
+        f"the doc: {sorted(clause_targets)!r}"
+    )
+
+    # A cell's PROSE must not mint MEMBERSHIP either — `members` is what the verdicts call
+    # a row's approved HOME, so a prose-minted member is a false home in the artifact.
+    homes_of = {t: [n for n, r in menu.items() if t in r["members"]] for t in
+                ("check_connection", "update_knowledge", "supersede_knowledge")}
+    assert homes_of["check_connection"] == [], (
+        "`check_connection` was read as a MEMBER of "
+        f"{homes_of['check_connection']} — the doc says `run_onboarding` was dropped FOR "
+        "it (row 23), the opposite relation"
+    )
+    assert "update_knowledge" not in menu["revise_knowledge"]["members"], (
+        "row 17's `fields on \u0060update_knowledge\u0060` prose minted a membership: "
+        f"{sorted(menu['revise_knowledge']['members'])!r}"
+    )
+
+
+def test_approved_menu_guards_fail_closed_when_a_closure_does_not_RESOLVE(
+    tmp_path, monkeypatch
+):
+    """Presence is not resolution: a clause that parses, and resolves nothing, must fail.
+
+    The captured member span is raw identifiers (prose words included) and members are
+    applied through a `known` filter, so a mangled member list — "these sit inside
+    `index_files`" — passes any presence-only check while contributing NO member. The
+    container is the other half: renaming only the closure sentence's container parses
+    cleanly and drops the whole closure. Both are the "a guard that resolves nothing
+    cannot fail" class this build exists to close (#8930 review).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+
+    detached = re.sub(
+        r"`index_sessions` and `ingest_corpus` sit\s+inside `index_files`",
+        "these sit inside `index_files`",
+        real,
+    )
+    assert detached != real, "the wrapped closure sentence is not in the doc — test is stale"
+    path = tmp_path / "members-detached.md"
+    path.write_text(detached, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+    menu, closures = bt._approved_state()
+    assert len(closures) >= bt.APPROVED_MIN_CLOSURES, (
+        "the statement still PARSES here — that is the point of this test"
+    )
+    errs = bt._approved_errors(menu, closures)
+    assert errs and "NO name the doc otherwise uses" in errs[0], (
+        f"a closure that parses to no known member did not fail the build: {errs}"
+    )
+
+    renamed = real.replace(
+        "`index_sessions` and `ingest_corpus` sit\ninside `index_files`",
+        "`index_sessions` and `ingest_corpus` sit\ninside `some_other_container`",
+    )
+    assert renamed != real, "the wrapped closure sentence is not in the doc — test is stale"
+    path2 = tmp_path / "container-renamed.md"
+    path2.write_text(renamed, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path2)
+    menu2, closures2 = bt._approved_state()
+    errs = bt._approved_errors(menu2, closures2)
+    assert errs and "container" in errs[0], (
+        f"a closure whose CONTAINER the doc never names did not fail the build: {errs}"
+    )
+
+
+def test_approved_menu_guard_fails_closed_when_the_split_clause_is_reworded(
+    tmp_path, monkeypatch
+):
+    """The successor parse is bounded like the closure parse, not just content-pinned.
+
+    Row 17's "splits this into `update_knowledge` + `supersede_knowledge`" is the only
+    place a successor is stated. Rewording the clause (a benign-looking doc edit) emptied
+    `revise_knowledge.successors`, which flipped `tortoise_invalidate` from `successor`
+    (support) to `rehomed` (a disagreement) and changed an owner-facing count — with a
+    green build, because only the TEST pinned the list (#8930 review, P3).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+
+    reworded = real.replace("splits this into", "splits into")
+    assert reworded != real, "the doc no longer states a split — test is stale"
+    path = tmp_path / "split-reworded.md"
+    path.write_text(reworded, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+    menu, closures = bt._approved_state()
+    assert len(menu) >= bt.APPROVED_MIN_ROWS, "the doc must still parse its rows"
+    assert menu["revise_knowledge"]["successors"] == [], (
+        "the reword is what this test is about — it does empty the successors"
+    )
+    errs = bt._approved_errors(menu, closures)
+    assert errs and "beta-split" in errs[0], (
+        f"a reworded split clause did not fail the build: {errs}"
+    )
+
+    # ...and a clause that still parses but names no target is the second half.
+    emptied = real.replace(
+        "splits this into `update_knowledge` + `supersede_knowledge`",
+        "splits this into two new tools",
+    )
+    assert emptied != real, "the split clause is not in the doc — test is stale"
+    path2 = tmp_path / "split-unresolved.md"
+    path2.write_text(emptied, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path2)
+    menu2, closures2 = bt._approved_state()
+    assert menu2["revise_knowledge"]["split_clauses"] == 1, (
+        "the clause still parses here — that is the point of this half"
+    )
+    errs = bt._approved_errors(menu2, closures2)
+    assert errs and "NO target name" in errs[0], (
+        f"a split clause naming no target did not fail the build: {errs}"
     )
 
 
