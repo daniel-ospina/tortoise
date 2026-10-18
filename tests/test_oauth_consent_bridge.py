@@ -256,7 +256,7 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
 #: §7's deletion set: (row marker, the token that IS the item) for each anchor the table cites, so
 #: the row's `oauth.py:<n>` can be RECOMPUTED from the source instead of trusted. The marker names
 #: the ROW the citation must appear in: a number that happens to be cited elsewhere in §7 (the
-#: prose above the table cites `oauth.py:2263-2492`, for instance) must not be able to satisfy a
+#: prose above the table cites `oauth.py:2268-2497`, for instance) must not be able to satisfy a
 #: row it does not belong to. Each token must also occur on exactly one line (see `_only_line`), so
 #: a duplicated or renamed site reds here rather than silently re-pointing.
 _DELETION_SET = {
@@ -320,6 +320,47 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
         "§7's deletion set cites line numbers that do not name the item: " + "; ".join(stale) +
         " — re-derive them from tortoise/oauth.py AFTER the last source edit (a remap done before "
         "a later comment edit shifts them again, which is how this table went stale twice)."
+    )
+
+
+# ── The spec's `hosted_api.py` anchors, recomputed the same way ──────────────
+
+#: `hosted_api.py` anchors the spec cites as EVIDENCE. The provenance note's QUOTATIONS of #3524's
+#: stale issue body (`hosted_api.py:23409`, `:23284-23292`) are deliberately not here: a quotation
+#: of the issue cannot be remapped when the source moves. These can, and did — the §5/§8 §10 rows
+#: were off by ~3,300 lines (`:34756` naming backup-restore code) while `_oauth_base` alone had been
+#: corrected, so each table mixed one live anchor with a dead one and read as authoritative. An
+#: anchor is satisfied when the item's line STARTS a citation, for the same reason as §7's: a
+#: broad range that merely contains the site is what let the round-2 singletons go stale.
+_HOSTED_ANCHORS = {
+    "the well-known authorization-server routes":
+        '@app.get("/.well-known/oauth-authorization-server")',
+    "the authorize handler": '@app.get("/oauth/authorize")',
+    "the consent handler": '@app.post("/oauth/consent")',
+    "`_oauth_base`": "def _oauth_base(request: Request) -> str:",
+}
+
+
+def test_the_spec_cites_live_hosted_api_sites() -> None:
+    """EVERY `hosted_api.py:<n>` anchor in the spec must name one of the live sites.
+
+    Checked in the inverse direction on purpose: a dead anchor is dead even when the SAME line is
+    also cited correctly somewhere else, and the §5/§8 §10 rows did exactly that (one corrected
+    `_oauth_base` beside three anchors ~3,300 lines off). So the rule is "no citation may point
+    anywhere but a derived site", not "each site must be cited somewhere".
+    """
+    spec = SPEC.read_text()
+    # The provenance note QUOTES #3524's stale issue-body anchors; a quotation cannot be remapped
+    # when the source moves, so it is excluded rather than "fixed".
+    body = "\n".join(line for line in spec.splitlines() if not line.startswith(">"))
+    live = {_only_line(HOSTED, token) for token in _HOSTED_ANCHORS.values()}
+    cited = {int(m.group(1)) for m in re.finditer(r"hosted_api\.py:(\d+)", body)}
+    assert cited, "the spec cites no `hosted_api.py` line anchors at all"
+    dead = sorted(cited - live)
+    assert not dead, (
+        f"the spec cites hosted_api.py line(s) {dead} that are not one of the live sites "
+        f"{sorted(live)} ({sorted(_HOSTED_ANCHORS)}) — re-derive them from tortoise/hosted_api.py "
+        "after the last source edit, or cite the route string instead of a line number."
     )
 
 
