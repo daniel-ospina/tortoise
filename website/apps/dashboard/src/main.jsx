@@ -121,15 +121,14 @@ import {
   PACK_CONSEQUENCE,
   PACK_SETTINGS_SECTION_ID,
   addToDraft,
-  addablePacks,
+  addableFromDraft,
   defaultPacksGraphId,
   draftFromBody,
   draftIsDirty,
-  draftStatus,
+  draftRows,
   graphLabel,
   packCountLine,
   packErrorState,
-  packRows,
   packSaveBody,
   removeFromDraft,
   revisionMovedAfterSave,
@@ -953,7 +952,7 @@ function SettingsTab(props) {
               <p className="dim small" aria-live="polite">{packCountLine(packs.body)}</p>
             ) : null}
             {!packs.canManage && (
-              <p className="dim small">Only owners and admins can change a graph\u2019s packs.</p>
+              <p className="dim small">Only owners and admins can change a graph’s packs.</p>
             )}
           </>
         )}
@@ -2707,6 +2706,23 @@ function claimIntentInFlight() {
   const [packsAddNs, setPacksAddNs] = React.useState('') // chosen namespace in the Add picker
   const packsReqRef = React.useRef(0) // a slow load must not clobber a NEWER graph's read
   const packsTriggerRef = React.useRef(null) // dialogFocus.js: the control that opened the dialog
+  // #2577 (a11y): the Configured-packs dialog is a FOURTH aria-modal surface, so
+  // it owes the same two containment obligations the other three carry — Tab
+  // wrapped (containTabFocus) and the background inert (applyBackgroundInert,
+  // the half a keydown handler cannot do: `inert` also removes the page behind
+  // the backdrop from the accessibility tree). Held in a ref because the close
+  // path must release inert BEFORE restoreFocus — an element inside an inert
+  // subtree is not focusable, so a synchronous restore would silently no-op.
+  const packsDialogRef = React.useRef(null)
+  const packsInertRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!packsGraphId || typeof document === 'undefined') return undefined
+    const el = packsDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    packsInertRef.current = release
+    return () => { packsInertRef.current = null; release() }
+  }, [packsGraphId])
   // The Settings home's own summary read (graph selector + count line). Kept
   // separate from the modal's state: the home must show a live count WITHOUT
   // the dialog being open, and the dialog always re-reads on open (a stale
@@ -6595,7 +6611,32 @@ function claimIntentInFlight() {
     setPacksError(null)
     setPacksNotice('')
     setPacksAddNs('')
+    // #2577: release the background inert BEFORE restoring focus — a trigger
+    // inside a still-inert subtree cannot take focus (the effect cleanup
+    // re-runs the same one-shot release harmlessly).
+    if (packsInertRef.current) packsInertRef.current()
     requestAnimationFrame(() => restoreFocus(packsTriggerRef))
+  }
+
+  // After a successful save the PUT response's revision is THIS write's own
+  // bump, so it can never tell us whether an out-of-band writer also moved the
+  // set (the marker does not move for `POST /v1/packs/manifests` or an import
+  // restore). Only a FRESH read can, so the success path re-reads and compares
+  // the revision it saved against the revision it now sees. Reusing the PUT
+  // response here instead would fire the "changed again since" branch on every
+  // save a user can perform — Save is only enabled when the draft is dirty,
+  // which is exactly the case the server bumps (expected -> expected + 1).
+  async function recheckPacksAfterSave(graphId, savedRevision, seq, teamAtCall) {
+    try {
+      const q = teamAtCall ? `?org_id=${encodeURIComponent(teamAtCall)}` : ''
+      const fresh = await api(`/v1/graphs/${encodeURIComponent(graphId)}/packs${q}`, { useSession: true })
+      if (seq !== packsReqRef.current || orgIdRef.current !== teamAtCall) return
+      if (!revisionMovedAfterSave(savedRevision, fresh)) return
+      setPacksNotice(`Saved — but this graph's packs have changed again since (now at revision ${fresh.revision}). Reload to see the current set.`)
+    } catch {
+      // The SAVE succeeded; a failed re-read must never turn it into an error
+      // state or retract the success notice.
+    }
   }
 
   // Save the whole draft. On a 409 the dialog keeps the user's edits and
@@ -6606,6 +6647,7 @@ function claimIntentInFlight() {
     const _teamAtCall = currentOrgId
     const graphId = packsGraphId
     const expected = packsBody.revision
+    const seq = packsReqRef.current
     setPacksSaving(true)
     setPacksError(null)
     setPacksNotice('')
@@ -6621,9 +6663,17 @@ function claimIntentInFlight() {
       setPacksBody(saved)
       setPacksDraft(draftFromBody(saved))
       setPacksAddNs('')
-      setPacksNotice(revisionMovedAfterSave(expected, saved)
-        ? `Saved — but this graph's packs have changed again since (now at revision ${saved.revision}). Reload to see the current set.`
-        : 'Saved — new extraction on this graph uses the set above.')
+      setPacksNotice('Saved — new extraction on this graph uses the set above.')
+      // The Settings home keeps its OWN read of this graph (the count line must
+      // render without the dialog open), so the save has to feed it too — or the
+      // home keeps describing the PRE-save set until a tab switch re-reads it.
+      // The PUT response is the same payload shape as the GET, so no second hop.
+      if (graphId === packsHomeGraphId) {
+        setPacksHomeBody(saved)
+        setPacksHomeStatus('ok')
+        setPacksHomeError(null)
+      }
+      void recheckPacksAfterSave(graphId, saved.revision, seq, _teamAtCall)
     } catch (e) {
       if (orgIdRef.current !== _teamAtCall) return
       setPacksError(packErrorState(e))
@@ -11747,6 +11797,7 @@ function claimIntentInFlight() {
             points open it and a tab switch must not unmount an open dialog. */}
         <PacksModal
           graphId={packsGraphId}
+          dialogRef={packsDialogRef}
           graphName={graphLabel(graphs.find((g) => g.graph_id === packsGraphId))}
           status={packsStatus}
           body={packsBody}
@@ -11792,13 +11843,16 @@ function PacksModal(props) {
   const {
     graphId, graphName, status, body, draft, error, notice, saving, addNs,
     canManage, onClose, onReload, onSave, onToggle, onRemove,
-    onAddNsChange, onAdd,
+    onAddNsChange, onAdd, dialogRef,
   } = props
   if (!graphId) return null
-  const rows = packRows(body || { packs: [] })
-  const offered = addablePacks(body)
+  // Both derivations read the DRAFT, not `body`: the table is the set the save
+  // will apply (so Remove/Add are visible the moment they are clicked) and the
+  // add-list is diffed against the same set (so a removed pack is offered back
+  // without discarding the whole draft). `body` supplies display-only fields.
+  const rows = draftRows(body || { packs: [] }, draft)
+  const offered = addableFromDraft(body, draft)
   const dirty = body ? draftIsDirty(body, draft) : false
-  const statusOf = (ns) => draftStatus(draft, ns)
   return (
     <div
       className="modal-backdrop"
@@ -11809,8 +11863,16 @@ function PacksModal(props) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="packs-modal-title"
+        ref={dialogRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => { if (e.key === 'Escape' && !saving) onClose() }}
+        onKeyDown={(e) => {
+          // #2577: APG modal containment — wrap Tab/Shift+Tab at the dialog
+          // boundary. The background is inert too (applyBackgroundInert, held
+          // by the App's effect), so focus cannot reach the page behind the
+          // backdrop by Tab or by a screen reader's virtual cursor.
+          if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() } else if (e.key === 'Escape' && !saving) onClose()
+        }}
       >
         <h3 id="packs-modal-title">Configured packs — {graphName}</h3>
         <p className="dim small">
@@ -11853,7 +11915,10 @@ function PacksModal(props) {
                 </thead>
                 <tbody>
                   {rows.map((r) => {
-                    const pending = statusOf(r.namespace) || r.status
+                    // `r.status` IS the draft's status (draftRows reads the draft,
+                    // not the last server read), so a toggle or a removal shows
+                    // up on the very next render.
+                    const pending = r.status
                     return (
                       <tr key={r.namespace} className={pending === 'disabled' ? 'pack-row-off' : undefined}>
                         <td>{r.name}</td>
@@ -11950,7 +12015,7 @@ function PacksModal(props) {
               >{saving ? 'Saving…' : 'Save changes'}</button>
             </div>
             {!canManage && (
-              <p className="dim small">Read-only — only owners and admins can change a graph\u2019s packs.</p>
+              <p className="dim small">Read-only — only owners and admins can change a graph’s packs.</p>
             )}
           </>
         )}

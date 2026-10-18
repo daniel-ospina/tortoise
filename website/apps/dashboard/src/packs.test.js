@@ -9,10 +9,12 @@ import {
   PACK_SETTINGS_SECTION_ID,
   PACK_STATUS_LABEL,
   addToDraft,
+  addableFromDraft,
   addablePacks,
   defaultPacksGraphId,
   draftFromBody,
   draftIsDirty,
+  draftRows,
   draftStatus,
   graphLabel,
   kindCountLabel,
@@ -116,6 +118,73 @@ test('addablePacks: a tombstoned namespace is offered back, marked as removed', 
 test('addablePacks: tolerates a payload with no available list (degraded catalog)', () => {
   assert.deepEqual(addablePacks({ packs: [] }), [])
   assert.deepEqual(addablePacks(null), [])
+})
+
+test('draftRows: the table is the DRAFT — an added pack appears, a removed one does not', () => {
+  const body = BODY()
+  const draft = draftFromBody(body)
+  // The ADD direction: `venture` is only in `available`, so the row's
+  // display-only fields come from the label index, never from `body.packs`.
+  const withAdded = addToDraft(draft, 'venture')
+  const added = draftRows(body, withAdded)
+  // active-first, then namespace: the added row is ACTIVE, the disabled one sorts last
+  assert.deepEqual(added.map((r) => r.namespace), ['dev', 'venture', 'marketing'])
+  const venture = added.find((r) => r.namespace === 'venture')
+  assert.equal(venture.status, 'active')
+  assert.equal(venture.name, 'Venture', 'a draft-added row still shows the real pack name')
+  assert.equal(venture.kindCountLabel, '7 kinds')
+  // FAIL-ON: pre-fix the table came from `packRows(body)`, so the added pack
+  // was never rendered — Add produced no visible row at all.
+  assert.ok(!packRows(body).some((r) => r.namespace === 'venture'))
+  // The REMOVE direction: the row is gone from the table the moment it leaves
+  // the draft (pre-fix it kept rendering, reading "Active", with a live
+  // Remove button — the click appeared to do nothing).
+  const withRemoved = removeFromDraft(draft, 'marketing')
+  assert.deepEqual(draftRows(body, withRemoved).map((r) => r.namespace), ['dev'])
+  assert.ok(packRows(body).some((r) => r.namespace === 'marketing'),
+    'the server read still lists it — the draft is what decides')
+})
+
+test('draftRows: a status toggle is visible before the save', () => {
+  const body = BODY()
+  const off = toggleDraftStatus(draftFromBody(body), 'dev')
+  const rows = draftRows(body, off)
+  assert.equal(rows.find((r) => r.namespace === 'dev').status, 'disabled')
+  assert.equal(rows.find((r) => r.namespace === 'dev').statusLabel, 'Off')
+})
+
+test('draftRows: sorts active-first and tolerates an empty draft', () => {
+  assert.deepEqual(draftRows(BODY(), []), [])
+  assert.deepEqual(draftRows(null, [{ namespace: 'z', status: 'active' }]).map((r) => r.namespace),
+    ['z'])
+  const rows = draftRows(BODY(), [
+    { namespace: 'marketing', status: 'disabled' },
+    { namespace: 'dev', status: 'active' },
+  ])
+  assert.deepEqual(rows.map((r) => r.namespace), ['dev', 'marketing'])
+})
+
+test('addableFromDraft: a pack the draft just removed is offered back (undo without reload)', () => {
+  const body = BODY()
+  const draft = removeFromDraft(draftFromBody(body), 'marketing')
+  // FAIL-ON: `addablePacks(body)` diffs against the LAST READ, so MARKETING is
+  // still "listed" and is NOT offered — the only recovery was Reload, which
+  // discards every other edit (the one-way door this surface exists to close).
+  assert.ok(!addablePacks(body).some((p) => p.namespace === 'marketing'))
+  const offered = addableFromDraft(body, draft)
+  assert.ok(offered.some((p) => p.namespace === 'marketing'),
+    'a removed-but-unsaved pack must be re-addable')
+  // …and a namespace already in the draft is never offered again (a duplicate
+  // is a 422 at the server).
+  assert.ok(!offered.some((p) => p.namespace === 'dev'))
+  const added = addToDraft(draft, 'venture')
+  assert.ok(!addableFromDraft(body, added).some((p) => p.namespace === 'venture'),
+    'a pack just added must leave the picker, or Add silently no-ops')
+})
+
+test('addablePacks: the read-only form is the draft form of the server set', () => {
+  const body = BODY()
+  assert.deepEqual(addablePacks(body), addableFromDraft(body, draftFromBody(body)))
 })
 
 test('packCountLine: counts active, shows the off count, and names the unconfigured caveat', () => {
@@ -232,6 +301,12 @@ test('revisionMovedAfterSave: an out-of-band write is surfaced, not swallowed', 
   assert.equal(revisionMovedAfterSave(3, { revision: 3 }), false)
   assert.equal(revisionMovedAfterSave(3, { revision: 4 }), true)
   assert.equal(revisionMovedAfterSave(3, null), false)
+  // The predicate's input is a FRESH read taken after the save. The PUT
+  // response's own revision is one ahead by construction (the server bumps on
+  // every effective write), so feeding it here reports a false conflict on
+  // every save — the modal, not this predicate, owns that distinction
+  // (packsModalTripwire pins it).
+  assert.equal(revisionMovedAfterSave(1, { revision: 2 }), true)
 })
 
 test('consequence copy: one vocabulary, each verb names what happens to existing data', () => {

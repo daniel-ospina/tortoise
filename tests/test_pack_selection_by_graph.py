@@ -490,6 +490,66 @@ class TestGraphPacksRest:
         assert {p["namespace"]: p["status"]
                 for p in back.json()["packs"]}[MARKETING] == "active"
 
+    def test_a_tenant_authored_tombstone_is_offered_back(self, sel_client,
+                                                         monkeypatch):
+        """The add-list's TOMBSTONE arm — the reason ``available`` exists.
+
+        ``available`` is justified by the tenant-authored case ("removal would
+        have been a one-way door — a tenant-authored pack appears in no shared
+        catalog"), which is the ``for row in sorted(removed, ...)`` arm of
+        ``_packs_payload``. The sibling test above cannot reach it: it removes
+        MARKETING, which IS in the shared catalog, so the CATALOG arm offers it
+        and the tombstone arm ``continue``s — the two shapes are
+        interchangeable there. Reachable in production: a tenant-manifest
+        install (``POST /v1/packs/manifests``) mints ``:PackInstall`` records
+        for namespaces outside the catalog, and ``set_graph_packs`` permits
+        re-adding them because ``existing`` still carries the tombstone.
+
+        FAIL-ON: drop the tombstone arm (back to "catalog only") and the
+        namespace disappears from ``available`` entirely — a removed
+        tenant-authored pack could never be added back, which is the one-way
+        door this surface exists to open. Every other test in the file stays
+        green without it, which is why it is pinned here.
+        """
+        tc, db_path = sel_client
+        org = "t-sel-tenant-pack"
+        tenant = "acme-ops"
+        _seed_org(db_path, org)
+        _auth(tc, org)
+        # The state: a namespace the WRITE side knows (as a manifest install
+        # makes it — the record is what permits re-adding) but that NO shipped
+        # pack carries. Only ``ps._resolve_catalog`` is widened; the VIEW's
+        # catalog (``hosted_api._pack_catalog_rows``, read off the domain
+        # registry) never sees it, so the catalog arm cannot offer it.
+        real_catalog = ps._resolve_catalog
+        monkeypatch.setattr(
+            ps, "_resolve_catalog",
+            lambda: dict(real_catalog(), **{tenant: {"namespace": tenant}}))
+        first = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": tenant}], "expected_revision": 0})
+        assert first.status_code == 200, first.text
+        assert [p["namespace"] for p in first.json()["packs"]] == [tenant]
+
+        removed = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [], "expected_revision": 1})
+        assert removed.status_code == 200, removed.text
+        body = removed.json()
+        assert body["packs"] == [], "a removed pack leaves the visible set"
+        offered = [p for p in body["available"] if p["namespace"] == tenant]
+        assert len(offered) == 1, (
+            "the tenant-authored tombstone must be offered back exactly once "
+            f"(available={[p['namespace'] for p in body['available']]})")
+        assert offered[0]["status"] == "removed", (
+            "the row must say it WAS removed — 'available' would pretend the "
+            "namespace is new to this graph")
+
+        # …and the door really opens both ways: re-adding restores it.
+        back = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": tenant}], "expected_revision": 2})
+        assert back.status_code == 200, back.text
+        assert {p["namespace"]: p["status"]
+                for p in back.json()["packs"]}[tenant] == "active"
+
     def test_put_then_get_round_trips_and_version_stays_monotonic(
             self, sel_client):
         tc, db_path = sel_client

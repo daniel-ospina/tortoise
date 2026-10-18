@@ -103,6 +103,58 @@ test('#2728: the read and write use the per-graph route with the org pin', () =>
     'the optimistic-concurrency token must come from the LAST READ, not from a guess')
 })
 
+test('#2728: the table and the add-list are derived from the DRAFT, not the last read', () => {
+  // FAIL-ON: deriving the table from `body` renders the SERVER set, so Remove
+  // deletes from the draft and the row stays on screen (reading "Active", with
+  // a live Remove button), and Add appends a namespace that is never rendered —
+  // the user cannot review what the save will apply. Same for the add-list:
+  // diffed against `body`, a namespace the user just removed is still "listed",
+  // so it is not offered back and the removal is a one-way door inside the
+  // dialog (exactly what the server's tombstone arm exists to prevent).
+  const modal = sliceBetween('function PacksModal(', '// #2784: per-graph "last backup"')
+  assert.match(modal, /const rows = draftRows\(body \|\| \{ packs: \[\] \}, draft\)/,
+    'the table must be the DRAFT (membership AND status)')
+  assert.match(modal, /const offered = addableFromDraft\(body, draft\)/,
+    'the add-list must be diffed against the DRAFT')
+  assert.doesNotMatch(modal, /packRows\(body/,
+    'the server-derived rows are the defect this pins against')
+  assert.doesNotMatch(modal, /addablePacks\(body\)/,
+    'diffing the add-list against the last read re-closes the one-way door')
+})
+
+test('#2728: a successful save reports on the POST-save revision, never the pre-save one', () => {
+  // FAIL-ON: the server bumps by exactly one on every effective write and
+  // Save is only enabled when the draft is dirty, so comparing the PUT
+  // response with `packsBody.revision` (the pre-save token) reports an
+  // out-of-band change on EVERY save the user can perform, and the honest
+  // success copy is unreachable.
+  const save = fnBody('saveGraphPacks')
+  assert.doesNotMatch(save, /revisionMovedAfterSave\(expected, saved\)/,
+    'the save response IS this write — it cannot answer "did anyone else change it"')
+  assert.match(save, /recheckPacksAfterSave\(graphId, saved\.revision, seq, _teamAtCall\)/,
+    'the out-of-band check must re-read and compare against the revision this save produced')
+  assert.match(save, /setPacksNotice\('Saved — new extraction on this graph uses the set above.'\)/,
+    'the honest success notice must be unconditional on a 200')
+  const recheck = fnBody('recheckPacksAfterSave')
+  assert.match(recheck, /revisionMovedAfterSave\(savedRevision, fresh\)/,
+    'the predicate takes a FRESH read, not the PUT response')
+  assert.match(recheck, /catch \{/,
+    'a failed re-read must not turn a successful save into an error')
+})
+
+test('#2728: a save refreshes the Settings home when it is the selected graph', () => {
+  // FAIL-ON: the home keeps its OWN read (`packsHomeBody`); without this the
+  // count line behind the dialog keeps describing the PRE-save set until the
+  // tab is switched away and back — two surfaces disagreeing about one graph.
+  const save = fnBody('saveGraphPacks')
+  assert.match(save, /if \(graphId === packsHomeGraphId\) \{/,
+    'the save must update the home read when the saved graph is the selected one')
+  assert.match(save, /setPacksHomeBody\(saved\)/,
+    'the PUT response is the same payload shape as the home read — reuse it')
+  assert.match(save, /setPacksHomeStatus\('ok'\)/,
+    'the home read must stay in its ok state, never blank out')
+})
+
 test('#2728: a save conflict keeps the draft and offers a reload (never a silent overwrite)', () => {
   const save = fnBody('saveGraphPacks')
   assert.match(save, /setPacksError\(packErrorState\(e\)\)/,
@@ -123,15 +175,31 @@ test('#2728: the dialog is a real modal and every write control is role-gated', 
   assert.match(modal, /role="dialog"/)
   assert.match(modal, /aria-modal="true"/)
   assert.match(modal, /aria-labelledby="packs-modal-title"/)
-  assert.match(modal, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Escape' && !saving\) onClose\(\) \}\}/,
+  assert.match(modal, /onKeyDown=\{\(e\) => \{[\s\S]{0,900}?else if \(e\.key === 'Escape' && !saving\) onClose\(\)/,
     'Escape must close the dialog while idle (never mid-save)')
+  // #2577: the dialog declares aria-modal, so it owes the containment pair —
+  // a fourth modal that announces modality without them is the #2577 defect.
+  assert.match(modal, /if \(e\.key === 'Tab'\) \{ if \(containTabFocus\(e\.currentTarget, \{ shiftKey: e\.shiftKey \}\)\) e\.preventDefault\(\) \}/,
+    'Tab must be wrapped inside the dialog (containTabFocus)')
+  assert.match(modal, /ref=\{dialogRef\}/,
+    'the dialog needs its own ref so the background can be made inert')
+  assert.match(modal, /tabIndex=\{-1\}/,
+    'the container must be focusable for the all-controls-disabled state')
   // Every mutating control carries the role gate. Count them: Turn off/Turn on,
   // Remove, Add, Save — a new control added without the gate reds here.
   const gate = modal.match(/disabled=\{!canManage \|\| saving/g) || []
   assert.ok(gate.length >= 4,
     `expected >=4 role-gated controls, found ${gate.length} — one control is not role-gated`)
-  assert.match(modal, /Read-only — only owners and admins can change a graph\\u2019s packs\./,
+  assert.match(modal, /Read-only — only owners and admins can change a graph’s packs\./,
     'the read-only state must SAY why it is read-only')
+  // FAIL-ON: the string above is JSX TEXT, where escape sequences are NOT
+  // decoded (only HTML entities are) — `\u2019` would render as a literal
+  // backslash-u-2019. Assert the escape is gone, so the pin cannot pass over
+  // the broken form again.
+  // (the `title=` copy on the Save button is a real JS string literal, where
+  // the escape DOES decode — only the JSX TEXT children are affected)
+  assert.doesNotMatch(modal, /change a graph\\u2019s packs\.<\/p>/,
+    'a JS string escape inside JSX text renders literally — use the character')
 })
 
 test('#2728: the dialog renders each honest state, including an EMPTY configured set', () => {

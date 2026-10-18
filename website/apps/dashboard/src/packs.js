@@ -75,37 +75,80 @@ export function sourceLabel(source) {
 
 // Rows for the table: status-first (a pack that is OFF must not hide below the
 // fold), then namespace. Name is display-only.
-export function packRows(body) {
+function sortRows(rows) {
   const rank = { active: 0, disabled: 1 }
-  return asRows(body)
-    .slice()
-    .sort((a, b) => {
-      const ra = rank[a && a.status] != null ? rank[a.status] : 2
-      const rb = rank[b && b.status] != null ? rank[b.status] : 2
-      if (ra !== rb) return ra - rb
-      return String(a.namespace).localeCompare(String(b.namespace))
-    })
-    .map((p) => ({
-      namespace: p.namespace,
-      name: p.name || p.namespace,
-      version: p.version == null ? '—' : String(p.version),
-      status: p.status === 'disabled' ? 'disabled' : 'active',
-      statusLabel: PACK_STATUS_LABEL[p.status === 'disabled' ? 'disabled' : 'active'],
-      source: p.source || 'starter',
-      sourceLabel: sourceLabel(p.source),
-      kindCount: p.kind_count == null ? null : Number(p.kind_count),
-      kindCountLabel: kindCountLabel(p.kind_count),
-      description: p.description || '',
-    }))
+  return rows.slice().sort((a, b) => {
+    const ra = rank[a && a.status] != null ? rank[a.status] : 2
+    const rb = rank[b && b.status] != null ? rank[b.status] : 2
+    if (ra !== rb) return ra - rb
+    return String(a.namespace).localeCompare(String(b.namespace))
+  })
 }
 
-// Add-list: what the user may add. A namespace already listed is never
-// offered (the PUT is a full replace, so a duplicate would be a no-op at best
-// and a 422 duplicate-namespace at worst). A tombstone keeps its 'removed'
-// marker so the row can say "was removed" instead of pretending it is new.
-export function addablePacks(body) {
-  const listed = new Set(asRows(body).map((p) => p.namespace))
-  return asAvailable(body)
+// One table row. `status` comes from the caller (the DRAFT), never from the
+// server row — membership and state are the draft's, the display-only fields
+// (name, version, kind count, source) are the server's.
+function toRow(index, namespace, status) {
+  const meta = index.get(namespace) || {}
+  const st = status === 'disabled' ? 'disabled' : 'active'
+  return {
+    namespace,
+    name: meta.name || namespace,
+    version: meta.version == null ? '—' : String(meta.version),
+    status: st,
+    statusLabel: PACK_STATUS_LABEL[st],
+    source: meta.source || 'starter',
+    sourceLabel: sourceLabel(meta.source),
+    kindCount: meta.kind_count == null ? null : Number(meta.kind_count),
+    kindCountLabel: kindCountLabel(meta.kind_count),
+    description: meta.description || '',
+  }
+}
+
+// Everything the surface knows about a namespace: the graph's own rows first
+// (a listed pack is 'active'/'disabled'), then the add-list rows (catalog +
+// tombstones). Used as the DISPLAY index for the draft-derived table and as
+// the candidate universe for the add-list.
+function labelIndex(body) {
+  const index = new Map()
+  for (const p of asAvailable(body)) if (p && p.namespace) index.set(p.namespace, p)
+  for (const p of asRows(body)) if (p && p.namespace) index.set(p.namespace, p)
+  return index
+}
+
+export function packRows(body) {
+  const index = labelIndex(body)
+  return sortRows(asRows(body).map((p) => toRow(index, p.namespace, p.status)))
+}
+
+// The table the modal renders: membership AND status come from the DRAFT, so
+// the user reviews exactly the set the save will apply. A namespace the draft
+// omits disappears (that IS the removal); one the draft adds appears as a new
+// row. Deriving the table from the last READ instead makes Remove and Add
+// invisible — the click changes `dirty` and nothing else — which is the defect
+// this function exists to close.
+export function draftRows(body, draft) {
+  const index = labelIndex(body)
+  return sortRows((draft || [])
+    .filter((d) => d && d.namespace)
+    .map((d) => toRow(index, d.namespace, d.status)))
+}
+
+// Add-list: what the user may add. The universe is every namespace the surface
+// knows about (the graph's own rows + `available`), minus everything in the
+// DRAFT — because the draft is the desired set, and a namespace the user just
+// removed is still 'listed' server-side until the save lands. Diffing against
+// the last READ instead leaves a removed pack un-restorable without discarding
+// the whole draft, which reintroduces the one-way door the server's tombstone
+// arm exists to eliminate.
+//
+// A namespace already listed is never offered (the PUT is a full replace, so a
+// duplicate would be a no-op at best and a 422 duplicate-namespace at worst).
+// A tombstone keeps its 'removed' marker so the row can say "was removed"
+// instead of pretending it is new.
+export function addableFromDraft(body, draft) {
+  const listed = new Set((draft || []).map((d) => d && d.namespace).filter(Boolean))
+  return [...labelIndex(body).values()]
     .filter((p) => p && p.namespace && !listed.has(p.namespace))
     .slice()
     .sort((a, b) => String(a.namespace).localeCompare(String(b.namespace)))
@@ -117,6 +160,13 @@ export function addablePacks(body) {
       wasRemoved: p.status === 'removed',
       label: `${p.name || p.namespace} (${p.namespace})${p.status === 'removed' ? ' — was removed' : ''}`,
     }))
+}
+
+// The add-list against the LAST READ — i.e. against the set the server holds.
+// The convenience form for a caller with no draft in hand (the read-only view):
+// exactly `addableFromDraft(body, draftFromBody(body))`.
+export function addablePacks(body) {
+  return addableFromDraft(body, draftFromBody(body))
 }
 
 // "2 of 6 packs on this graph" — the count line. `configured === false` is
@@ -265,9 +315,13 @@ export function packErrorState(err) {
 
 // A retained-revision save can succeed while the graph's set was ALREADY
 // changed by an out-of-band writer (see docs/EXPANSION_PACKS.md: the marker
-// does not move for `POST /v1/packs/manifests` or import restore). The modal
-// therefore re-reads after a save and says so when the revision it saved is
-// not the revision it now sees.
+// does not move for `POST /v1/packs/manifests` or import restore).
+//
+// `body` MUST be a FRESH read taken AFTER the save — never the PUT response
+// itself. The server bumps the revision by exactly one on every effective
+// write, and Save is only reachable when the draft is dirty, so passing this
+// save's own response compares `expected` with `expected + 1` and reports an
+// out-of-band change on EVERY save a user can perform.
 export function revisionMovedAfterSave(savedRevision, body) {
   if (!body || body.revision == null) return false
   return Number(body.revision) !== Number(savedRevision)

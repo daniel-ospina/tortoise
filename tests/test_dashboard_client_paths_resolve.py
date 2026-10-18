@@ -154,7 +154,12 @@ TRAILING_HOLE_SITES = {
     # first hole). Deliberate counts, not a new route: GET and PUT
     # /v1/graphs/{graph_id}/packs both exist in the live table, which is what the
     # shape assertions above prove — a broken site would fail THERE instead.
-    ("api", "/v1/graphs", "GET"): 2,
+    #
+    # The GET count is 3, re-measured after the review: the save path needs a
+    # THIRD read (`recheckPacksAfterSave`) because the PUT response's revision
+    # is this write's own bump and cannot answer "did an out-of-band writer also
+    # move the set" — see packs.js `revisionMovedAfterSave`.
+    ("api", "/v1/graphs", "GET"): 3,
     ("api", "/v1/graphs", "PUT"): 1,
     ("api", "/v1/index/docs", "POST"): 1,
     ("api", "/v1/index/github/re-poll", "POST"): 1,
