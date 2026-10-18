@@ -225,10 +225,10 @@ function orFallbacks(ast) {
 }
 
 /**
- * The live welcome card's span in `source`: from its `div.welcome-head` element to
- * the archived block that follows it. BOTH bounds are asserted here, once — an
- * unresolved END is what turns a window into the rest of the file, and an
- * unresolved START what turns it into an empty slice, and either way every pin
+ * The live welcome card's span, read from the AST: from its `div.welcome-head`
+ * element to the archived block that follows it. BOTH bounds are asserted here,
+ * once — an unresolved END is what turns a window into the rest of the file, and
+ * an unresolved START what turns it into an empty slice, and either way every pin
  * that uses the window certifies a region it does not name.
  *
  * #3726 cycle 6: existence is not CONTAINMENT, and the END used to be a TEXT
@@ -238,8 +238,9 @@ function orFallbacks(ast) {
  * (` && …`) would resolve the END EARLY, shrink the window past the copy it
  * watches, and leave `deepEqual(inCardTitles, [])` passing over the shrunken
  * region — the same false-green shape as the `indexOf`-returns-`-1` defect this PR
- * closes. The boundary is therefore read from the AST as the archived GATE's
- * shape (`archivedGateStart`), and its ORDER relative to the card is asserted.
+ * closes. The boundary is therefore read from the AST as the archived GATE
+ * (`archivedGates`), its UNIQUENESS is asserted, and its ORDER relative to the card
+ * is asserted.
  */
 function welcomeCardWindow(ast) {
   const heads = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
@@ -255,36 +256,47 @@ function welcomeCardWindow(ast) {
 }
 
 /**
- * Source offset of the A0 archived GATE that ends the live welcome card:
- * `LEGACY_WIZARD_ARCHIVED && welcomeOriented`, the same shape the gate pin in the
- * first test asserts. `-1` when there is none.
+ * Every A0 archived GATE in `ast`, in file order: a `&&` LogicalExpression whose
+ * LEFT is `LEGACY_WIZARD_ARCHIVED` and whose RIGHT is `welcomeOriented`.
  *
  * #3726 cycle 6: the boundary must be anchored to the gate's SHAPE, not to the
  * flag's NAME. It was `source.indexOf('LEGACY_WIZARD_ARCHIVED &&', start)` —
- * prose-forgeable, because `main.jsx`'s own card carries a note that names the
- * flag (L9262). Reading "the first identifier named LEGACY_WIZARD_ARCHIVED" traded
- * that for a CODE-forgeable sentinel, which is WORSE: a
+ * prose-forgeable, because `main.jsx`'s own card carries a note that names the flag
+ * (L9262). Reading "the first identifier named LEGACY_WIZARD_ARCHIVED" traded that
+ * for a CODE-forgeable sentinel, which is WORSE: a
  * `{LEGACY_WIZARD_ARCHIVED ? <p className="wizard-title">…</p> : null}` inside the
  * card — the most plausible way the forbidden in-card label comes back, guarded by
  * the flag itself — resolved the boundary early and left the in-card pin GREEN with
- * the label present (measured). Requiring the `&&` with `welcomeOriented` on the
- * right is the gate's actual shape: a ternary, a comparison, an object key and a
- * member property cannot forge it, and a gate that loses this shape fails LOUD here
- * instead of silently shrinking the window.
+ * the label present (measured).
  *
- * The FIRST gate in the file, not the first after `start`, so the ordering check in
- * `welcomeCardWindow` is live: a gate that moves ABOVE the card reddens instead of
- * quietly becoming the window's start.
+ * Shape alone is not enough either (cycle 2 measured it): the forbidden label is
+ * most plausibly reintroduced by COPYING the archived block's own gated line into
+ * the card, which reproduces the gate's shape exactly — a SECOND candidate, first in
+ * the file, resolving the boundary 750 lines early while both window consumers
+ * stayed green. `archivedGateStart` therefore requires EXACTLY ONE gate: a second
+ * one fails LOUD instead of silently deciding which region the pins watch. This is
+ * also why the reader returns the whole file's gates rather than the first after
+ * the card — the count is the invariant, and a gate that moves ABOVE the card then
+ * reddens on the ordering check instead of quietly becoming the window's start.
  */
-function archivedGateStart(ast) {
-  let found = -1
+function archivedGates(ast) {
+  const gates = []
   walkNodes(ast, (node) => {
     if (node.type !== 'LogicalExpression' || node.operator !== '&&') return
     if (node.left.type !== 'Identifier' || node.left.name !== 'LEGACY_WIZARD_ARCHIVED') return
     if (node.right.type !== 'Identifier' || node.right.name !== 'welcomeOriented') return
-    if (found === -1 || node.start < found) found = node.start
+    gates.push(node)
   })
-  return found
+  return gates.sort((a, b) => a.start - b.start)
+}
+
+/** Offset of the ONE archived gate; `-1` when there is none. A second gate throws. */
+function archivedGateStart(ast) {
+  const gates = archivedGates(ast)
+  assert.ok(gates.length <= 1,
+    `exactly one archived gate may exist — found ${gates.length} \`LEGACY_WIZARD_ARCHIVED && welcomeOriented\` expressions, ` +
+    'so the card-window boundary would resolve at whichever comes FIRST and certify a region it does not name')
+  return gates.length ? gates[0].start : -1
 }
 
 /**
@@ -332,9 +344,17 @@ function onboardingCompleteWrites(ast) {
 }
 
 test('legacy #1643 wizard render is gated behind the ARCHIVED flag (never rendered)', () => {
-  // The legacy wizard's gate must be the archived flag, not the live path.
-  assert.ok(/LEGACY_WIZARD_ARCHIVED\s*&&\s*welcomeOriented\s*&&/.test(src),
-    'legacy wizard gated by LEGACY_WIZARD_ARCHIVED && welcomeOriented')
+  // The legacy wizard's gate must be the archived flag, not the live path. Read from
+  // the AST (#3726 cycle 6): this used to be a raw-source regex
+  // (`/LEGACY_WIZARD_ARCHIVED\s*&&\s*welcomeOriented\s*&&/`), which is a SECOND,
+  // disagreeing derivation of the same fact — it false-redded on a pure reformat
+  // (`{(LEGACY_WIZARD_ARCHIVED) && (welcomeOriented) && (`) while staying green when
+  // a third conjunct was pushed in front. One derivation, one answer.
+  const gates = archivedGates(SRC_AST)
+  assert.equal(gates.length, 1,
+    'the legacy wizard is gated by exactly ONE `LEGACY_WIZARD_ARCHIVED && welcomeOriented` expression (a second makes the card-window boundary ambiguous)')
+  assert.match(src.slice(gates[0].end), /^[\s)]*&&\s*\(/,
+    'that gate RENDERS the archived block (`&& (`) — it is not a bare comparison')
   assert.ok(/const LEGACY_WIZARD_ARCHIVED\s*=\s*false/.test(src),
     'LEGACY_WIZARD_ARCHIVED is false (never rendered)')
 })
@@ -539,8 +559,18 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate
   const ternaryAst = parseModule(ternaryInCard)
   const ternaryHead = jsxElements(ternaryAst).find((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
   const ternaryWindow = welcomeCardWindow(ternaryAst)
-  assert.ok(ternaryWindow.end > ternaryHead.start,
-    'the ternary is not the gate — the boundary resolves at the real `&& welcomeOriented` gate below the card')
+  // Independent of `end > start` (which the helper already asserts): the TERNARY's
+  // own flag read must sit BEFORE the boundary, i.e. the boundary is the archived
+  // `&& welcomeOriented` gate below the card and not the conditional the label hangs
+  // off.
+  let ternaryFlag = -1
+  walkNodes(ternaryAst, (n) => {
+    if (n.type === 'ConditionalExpression' && n.test.type === 'Identifier'
+      && n.test.name === 'LEGACY_WIZARD_ARCHIVED') ternaryFlag = n.test.start
+  })
+  assert.ok(ternaryFlag > -1, 'the synthetic really plants a flag-guarded ternary inside the card')
+  assert.ok(ternaryWindow.end > ternaryFlag,
+    'the ternary is NOT the gate: the boundary resolves at the archived gate below the card, past the label it guards')
   assert.deepEqual(
     jsxElements(ternaryAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > ternaryWindow.start && e.start < ternaryWindow.end).length,
     1,
@@ -552,6 +582,24 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate
     '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (', '{someOtherFlag && (')
   assert.throws(() => welcomeCardWindow(parseModule(ternaryOnly)), /must resolve/,
     'a ternary, an object key or a member property must not resolve the archived gate')
+  // 4. The SHAPE-PRESERVING attack (measured against the shape-only anchor): the
+  //    forbidden label comes back by COPYING the archived block's own gated line into
+  //    the card. That reproduces the gate's shape exactly, so it is a SECOND candidate
+  //    boundary — and if the reader took the first, the window would shrink past the
+  //    label and the in-card pin would pass. Uniqueness is the invariant that makes
+  //    this loud.
+  const duplicateGate = card([
+    '  {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (<p className="wizard-title">{wizardSteps[wizardStep]}</p>)}',
+  ])
+  assert.throws(() => welcomeCardWindow(parseModule(duplicateGate)), /exactly one archived gate/,
+    'a SECOND gate inside the card must fail LOUD, not silently become the window end')
+  // …and the negative-bang spelling of the same attack (`!(A && B)`) is the same
+  // second gate, because the inner `&&` is a node in its own right.
+  const bangGate = card([
+    '  {!(LEGACY_WIZARD_ARCHIVED && welcomeOriented) && (<p className="wizard-title">{wizardSteps[wizardStep]}</p>)}',
+  ])
+  assert.throws(() => welcomeCardWindow(parseModule(bangGate)), /exactly one archived gate/,
+    'a negated copy of the gate is still a second gate node')
 })
 
 test('#3726 falsifiability: the <h1> pin is selected by class and names every override', () => {
