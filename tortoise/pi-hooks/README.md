@@ -81,7 +81,7 @@ second, independent extension whose only handler is the `session_shutdown`
 `~/.tortoise/session-events/` and POSTs the same `/v1/sessions` endpoint.
 
 **Its egress gate changed under this record.** Until agent-infra `7e77470e4`
-(2026-10-16, agent-infra #803 / #848) `reflect-hook` uploaded whenever the API
+(2026-10-16 UTC, agent-infra #803 / #848) `reflect-hook` uploaded whenever the API
 key was present; it now shares `extensions/shared/capture-gate.ts` with the
 other recorder — an explicit `"cloud": true` in the operator config *and* a
 key, with env (`TORTOISE_CAPTURE_CLOUD=0`) and a repo-local
@@ -149,9 +149,9 @@ The product half is already landed: the extension here is the artifact
 `capture_install._install_pi` writes, it ships in the wheel, and
 `tests/test_pi_capture_disposition.py` pins the **README** half of the record
 (`#3512`) against this tree, so a `tortoise/pi-hooks/` edit cannot name a home
-that does not exist. (The plan's own copy of the record is covered by review of
-the `.md`: `docs/` selects no Python surface, so a plan-only edit runs no
-assertion — `config/ci-surfaces.yml` says so at the arm.)
+that does not exist. (The plan's own copy of the record is covered by the
+#3554 carve-out in `tools/ci_selection.py`: a plan-only edit selects `core` and
+runs `test_pi_capture_disposition.py`, which pins the plan's copy too.)
 
 ## Verification — what is executable, what is manual-only
 

@@ -3528,12 +3528,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
     4, "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498")
 
-#: One digest per generation that has ever shipped, so "bytes changed, generation
-#: left alone" cannot be certified by editing the pair above by itself: a pair is
-#: self-consistent whatever bytes it names, and the shape #3512 shipped (a
-#: comment-only header edit at generation 3) is exactly the one that must be seen.
-#: A new byte set therefore needs a NEW generation and a NEW entry here; an
-#: existing entry is never rewritten.
+#: One digest per generation from generation 3 forward, so "bytes changed,
+#: generation left alone" cannot be certified by editing the pair above by itself:
+#: a pair is self-consistent whatever bytes it names, and the shape #3512 shipped
+#: (a comment-only header edit at generation 3) is exactly the one that must be
+#: seen.  A new byte set therefore needs a NEW generation and a NEW entry here;
+#: an existing entry is never rewritten.
 _GENERATION_DIGESTS = {
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
@@ -3563,8 +3563,9 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
     Mutation: revert the header to the pre-#3512 text (``1f653d9b…0580``,
     generation 3) with this pair left alone — this REDs on the digest; update the
     pair's digest for a prose edit and leave the generation alone — this REDs on
-    ``_GENERATION_DIGESTS``, because a byte set cannot be certified by rewriting a
-    digest that is supposed to belong to the generation it is filed under.
+    ``_GENERATION_DIGESTS``.  Rewriting BOTH is not caught here: what one commit
+    can enforce is that the pair alone does not certify a byte set, not that a
+    past entry was never rewritten.
     """
     generation, digest = _PINNED_PI_SEAM_INSTALL_CONTRACT
     shipped = hook_install.read_hook_version(_PI_SRC)
