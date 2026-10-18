@@ -1090,50 +1090,66 @@ def test_uri_mutations_restored():
         + "\n".join(violations))
 
 
-def test_a_bracket_inside_a_string_does_not_freeze_the_scope_map():
-    """A bracket in a STRING or COMMENT is not a continuation line.
+def test_a_def_inside_a_docstring_is_not_a_function_start():
+    """A `def`-looking line inside a STRING is copy, not a function start.
 
-    Measured defect (#8937 / #8487): `assert "(as of" in text` inside a test
-    body left the paren counter at 1 for the rest of the file, so every later
-    `def` — guarded on `paren == 0` — was skipped and its body was attributed
-    to the LAST function that opened. `tests/test_time_aware_sdk_2520.py`'s
-    compliant `@contextmanager` helper was then reported as an unrestored
-    mutation inside an unrelated test, i.e. a false RED on a correct file.
+    `_code_only` blanks string/comment spans before a line is matched, so a
+    docstring body cannot open a scope. Without that blanking the line below is
+    matched as a real `def`, and the scope map then contains a function that
+    exists only as text — statements up to the next dedent are attributed to
+    `fake` rather than to `test_first`, so any report about them names a scope
+    the file does not have (the wrong-name class #8487 produced).
+
+    Discriminating by construction: `_scope_map` routed through the raw line
+    (`_code_bracket_deltas` makes only BRACKETS code-only — it does not blank
+    strings for the `def` match) maps line 3 to ``("fn", "fake")``.
     """
     src = (
         "def test_first():\n"
-        "    assert not any('(as of' in t for t in xs)\n"
-        "    assert True\n"
+        "    \"\"\"Doc.\n"
         "\n"
-        "\n"
-        "@contextmanager\n"
-        "def _helper():\n"
-        "    old = os.environ.get(\"TORTOISE_DB_URI\")\n"
+        "    def fake():\n"
+        "    \"\"\"\n"
         "    os.environ[\"TORTOISE_DB_URI\"] = 'docker://x/y'\n"
-        "    try:\n"
-        "        yield\n"
-        "    finally:\n"
-        "        os.environ[\"TORTOISE_DB_URI\"] = old\n"
     )
     scopes = _scope_map(src)
-    assert scopes[8][0] != "fn" or scopes[8][1] != "test_first", (
-        "the mutation line was attributed to the PREVIOUS function — a bracket "
-        "inside a string literal froze the scope map")
-    assert scopes[8] == ("fn", "_helper"), scopes[8]
+    assert scopes[3] == ("fn", "test_first"), scopes[3]
+    assert ("fn", "fake") not in scopes, scopes
 
 
-def test_a_bracket_inside_a_comment_does_not_freeze_the_scope_map():
-    """Same class, comment arm: `# (see #8487)` must not count as an opener."""
+def test_a_fixture_decorator_inside_a_docstring_is_not_a_fixture():
+    """`@pytest.fixture` quoted in a docstring must not arm the decorator state.
+
+    `_code_only` gates the decorator test too (`stripped.startswith("@")`), so a
+    docstring that MENTIONS the decorator cannot set ``pending_fixture``. When
+    it does, the NEXT real function is classified ``fixture``, and the guard's
+    fixture arm then demands a ``.undo()`` from a function that is not a
+    fixture — a false RED on correct code.
+
+    Discriminating by construction: routed through the raw line, the guard
+    reports ``synthetic_quoted_decorator.py:10: fixture 'helper' creates
+    pytest.MonkeyPatch() but never calls .undo()``; through `_code_only` the
+    file is clean.
+    """
     src = (
         "def test_first():\n"
-        "    x = 1  # (see #8487\n"
+        "    \"\"\"Doc.\n"
+        "\n"
+        "    @pytest.fixture\n"
+        "    \"\"\"\n"
+        "    pass\n"
         "\n"
         "\n"
-        "def second():\n"
-        "    os.environ[\"TORTOISE_DB_URI\"] = 'docker://x/y'\n"
+        "def helper():\n"
+        "    mp = pytest.MonkeyPatch()\n"
+        "    mp.setenv(\"TORTOISE_DB_URI\", 'docker://x/y')\n"
     )
     scopes = _scope_map(src)
-    assert scopes[5] == ("fn", "second"), scopes[5]
+    assert scopes[8] == ("fn", "helper"), (
+        f"a quoted decorator must not reclassify the next def — got {scopes[8]}")
+    assert _restoration_violations([("synthetic_quoted_decorator.py", src)]) == [], (
+        "a helper preceded by a QUOTED decorator was policed as a fixture — "
+        "the docstring armed pending_fixture")
 
 
 def test_code_only_stays_column_aligned_after_a_mid_line_triple_close():

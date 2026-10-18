@@ -379,25 +379,46 @@ def drop_test_graph(proj, *, name: str | None = None) -> bool:
     minted per-run name, not a shared one — and
     ``test_add_document_journals_the_anchor_and_replays_identically``).
     """
-    from tests._embedded import _SERVER_WIPE_PREFIXES, _uri_default_graph_name
-
     gname = name if name is not None else getattr(proj, "graph_name", None)
-    reason = None
-    if not isinstance(gname, str) or not gname.startswith(_SERVER_WIPE_PREFIXES):
-        reason = (f"not a test-owned graph name (prefix gate: "
-                  f"{_SERVER_WIPE_PREFIXES})")
-    elif gname == _uri_default_graph_name():
-        reason = ("the SHARED URI-default graph — the whole job writes to it; "
-                  "only the session-end sweep may drop it")
-    elif not _PER_RUN_GRAPH_NAME_RE.match(gname):
-        reason = ("not a per-run mint shape (_<8+ hex> suffix) — the family "
-                  "also holds SHARED fixed-name fixture graphs, and this helper "
-                  "may delete only the graph its own run minted")
-    if reason is not None:
+    # The gate is inside a try of its OWN, because the "never raises" contract
+    # on this helper covers the gate too: every caller reaches here from a
+    # fixture ``finally:``, so a raise would convert a PASSING test into a
+    # teardown ERROR. The gate has a real raise vector —
+    # ``_uri_default_graph_name()`` parses ``TORTOISE_DB_URI`` with ``urlparse``,
+    # which raises ``ValueError`` on a malformed value (a bracketed host such as
+    # ``docker://[::1``) — and the answer decides whether an irreversible
+    # GRAPH.DELETE runs. A gate failure establishes no reason to delete, so it
+    # fails CLOSED: nothing is transmitted, and the refusal is RECORDED (not
+    # only logged) so a systematic gate failure cannot hide in a passing
+    # test's discarded teardown output.
+    try:
+        from tests._embedded import (
+            _SERVER_WIPE_PREFIXES,
+            _uri_default_graph_name,
+        )
+
+        reason = None
+        if not isinstance(gname, str) or not gname.startswith(_SERVER_WIPE_PREFIXES):
+            reason = (f"not a test-owned graph name (prefix gate: "
+                      f"{_SERVER_WIPE_PREFIXES})")
+        elif gname == _uri_default_graph_name():
+            reason = ("the SHARED URI-default graph — the whole job writes to it; "
+                      "only the session-end sweep may drop it")
+        elif not _PER_RUN_GRAPH_NAME_RE.match(gname):
+            reason = ("not a per-run mint shape (_<8+ hex> suffix) — the family "
+                      "also holds SHARED fixed-name fixture graphs, and this helper "
+                      "may delete only the graph its own run minted")
+        if reason is not None:
+            logger.warning(
+                "[#8746] refusing to GRAPH.DELETE %r — %s; left untouched",
+                gname, reason)
+            _record_delete_event(gname, "refused", reason)
+            return False
+    except Exception as exc:  # the gate must not raise either
         logger.warning(
-            "[#8746] refusing to GRAPH.DELETE %r — %s; left untouched",
-            gname, reason)
-        _record_delete_event(gname, "refused", reason)
+            "[#8746] the delete gate itself raised (%r) on %r — nothing was "
+            "transmitted; left for the session sweep", exc, gname)
+        _record_delete_event(gname, "failed", f"gate: {exc!r}")
         return False
     try:
         from tortoise.graph_delete_guard import graph_exists, safe_graph_delete
