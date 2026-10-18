@@ -229,6 +229,27 @@ test('#2728: the modal is rendered at the App root, not inside a tab', () => {
     "'removed' is not an input status (the server 422s it)")
 })
 
+test('#2728: the dialog takes focus on open in EVERY state, so Escape is live before the read lands', () => {
+  // FAIL-ON: the only autoFocus in PacksModal is the `ok` state's Close. In
+  // `loading` and `error` nothing moved focus INTO the dialog, and the inert
+  // marking had just dropped it to <body> — while the Tab/Escape handler sits
+  // on the CONTAINER, which only receives keys when focus is inside it. So a
+  // slow or failed read had NO keyboard dismissal: Escape dead, and while
+  // loading not even a control to Tab to.
+  const effect = sliceBetween('const packsInertRef = React.useRef(null)', '}, [packsGraphId])')
+  assert.match(effect, /applyBackgroundInert\(el, document\)/,
+    'non-vacuity: this is the packs dialog inert effect')
+  assert.match(effect, /el\.focus\(\)/,
+    'the dialog container must take focus on open — loading/error have no autofocusable control')
+  assert.match(effect, /document\.activeElement/,
+    'focus must not be stolen from a control that already owns it (the ok state autoFocuses Close)')
+  // …and the loading state carries its own Close, so a slow read has a control
+  // to press rather than only the backdrop.
+  const loading = sliceBetween("{status === 'loading' && (", "{status === 'error' && (")
+  assert.match(loading, /onClick=\{onClose\}/,
+    'the loading state must render a dismissable control, not just a line of text')
+})
+
 test('#2728: a team switch clears the whole packs surface on both sides', () => {
   // The home's selected graph id would 404 on the new team, and an open dialog
   // would keep editing the OLD team's graph.

@@ -96,9 +96,11 @@ function toRow(index, namespace, status) {
   const st = status === 'disabled' ? 'disabled' : 'active'
   // One value, two renderings: the badge and the label must never disagree
   // (`source: 'starter'` beside `sourceLabel: 'Manual'` was that defect).
-  // The server sends `source` on BOTH row lists (a catalog row carries the
-  // value `set_graph_packs` will write — starter vs manual), and only a
-  // legacy row without one falls back, to the same value the label would say.
+  // The server sends `source` on BOTH row lists, and it is the value
+  // `set_graph_packs` will store — an existing install record's source
+  // (`starter`/`manual`/`custom`) wins, else the starter/manual derivation for
+  // a new install. Only a legacy row without one falls back, to the same value
+  // the label would say.
   const source = String(meta.source || 'manual').toLowerCase()
   return {
     namespace,

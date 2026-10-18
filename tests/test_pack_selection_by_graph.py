@@ -612,6 +612,78 @@ class TestGraphPacksRest:
             "the add-list is empty precisely BECAUSE the catalog was unread — "
             "the bit, not the emptiness, is what the client must render")
 
+    def test_an_unavailable_registry_is_not_reported_as_a_readable_catalog(
+            self, monkeypatch):
+        """``catalog_ok`` must be FALSE when the pack registry is UNAVAILABLE.
+
+        ``_get_registry()`` RETURNS ``None`` on its documented degradation path
+        (``domain_loader``: "None if packs are unavailable") — it does not
+        raise. Dereferencing that with ``getattr(reg, "packs", None) or {}``
+        yields an EMPTY dict with no exception, so the reader reported
+        ``catalog_ok=True`` over a catalog it never read: the modal then
+        rendered "Every pack in the catalog is already on this graph" (the
+        confident claim about an unread catalog) and withheld the Reload that
+        only the degraded copy carries. Both sibling readers of the same
+        function guard the None (``pack_state._resolve_catalog``,
+        ``domain_loader._pack_kinds_by_bucket``).
+
+        FAIL-ON: pre-fix this returns ``({}, True)``. ``None`` — not an
+        exception — is the failure mode the ``except`` cannot catch, and no
+        other test reaches it (the sibling degradation test monkeypatches
+        ``_pack_catalog_rows`` itself, so it pins the plumbing of the bit and
+        never the classification inside it).
+        """
+        import tortoise.domain_loader as dl
+        import tortoise.hosted_api as ha
+
+        monkeypatch.setattr(dl, "_get_registry", lambda: None)
+        assert ha._pack_catalog_rows() == ({}, False), (
+            "an unavailable registry is not a readable catalog")
+
+    def test_a_tombstoned_record_keeps_its_recorded_source(
+            self, sel_client, monkeypatch):
+        """The add-list's ``source`` must be the value the SAVE will store.
+
+        ``set_graph_packs`` writes ``rec.get("source") or ("starter" if ns in
+        starter else "manual")`` — an EXISTING record's source always wins. The
+        catalog arm derived from the CURRENT starter set instead, so a
+        namespace whose record disagreed with that derivation flipped its
+        Source column under the user the moment they added it back (the
+        "column flipped after a Save" defect the Source column exists to
+        prevent).
+
+        The disagreement is reachable: a namespace seeded as ``starter`` and
+        later dropped from ``TORTOISE_STARTER_PACKS`` keeps ``source='starter'``
+        on its record (the additive-only-removal case ``pack_state``'s module
+        docstring contemplates), while the derivation now says ``manual``.
+
+        FAIL-ON: pre-fix the offer carries the derivation (``manual`` under the
+        narrowed starter set) while the record — and therefore the re-add —
+        says ``starter``.
+        """
+        tc, db_path = sel_client
+        org = "t-sel-source-record"
+        _seed_org(db_path, org)
+        _auth(tc, org)
+        # MARKETING is a starter, so the write mints its record with
+        # source='starter' (the starter set is still the default here).
+        first = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": MARKETING}], "expected_revision": 0})
+        assert first.status_code == 200, first.text
+        # …and now the DERIVATION disagrees with that record.
+        monkeypatch.setattr(ps, "_starter_namespaces", lambda: [])
+        removed = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [], "expected_revision": 1})
+        assert removed.status_code == 200, removed.text
+        body = removed.json()
+        offered = [p for p in body["available"] if p["namespace"] == MARKETING]
+        assert len(offered) == 1, (
+            "MARKETING is in the shared catalog, so the catalog arm offers it "
+            "exactly once")
+        assert offered[0]["source"] == "starter", (
+            "the offer must carry the RECORD's source — the value the re-add "
+            "will store — not a fresh starter-set derivation that says manual")
+
     def test_put_then_get_round_trips_and_version_stays_monotonic(
             self, sel_client):
         tc, db_path = sel_client

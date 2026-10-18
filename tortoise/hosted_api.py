@@ -18940,21 +18940,36 @@ def _pack_catalog_rows() -> tuple[dict[str, dict], bool]:
     confident claim about a catalog that was never read (the same fail-open
     class `packCountLine` exists to avoid on the count line).
 
-    ``source`` mirrors the value `set_graph_packs` writes for a NEW install
-    (``"starter"`` for a starter namespace, else ``"manual"``), so a pack
-    offered by the add-list shows the same Source it will carry once saved
-    instead of a client-side guess.
+    ``source`` is the value `set_graph_packs` writes: for a namespace this
+    graph has no install record for, the derivation it would use on a NEW
+    install (``"starter"`` for a starter namespace, else ``"manual"``) — so a
+    pack offered by the add-list shows the same Source it will carry once
+    saved instead of a client-side guess. `_packs_payload` then lets an
+    EXISTING record's ``source`` win over this one, which is what the write
+    does too (`rec.get("source") or <derivation>`).
     """
     try:
         from tortoise.domain_loader import _get_registry
         reg = _get_registry()
+        # #2728 review P1: `_get_registry()` RETURNS None on its documented
+        # degradation path ("None if packs are unavailable") — it does not
+        # raise. `getattr(None, "packs", None) or {}` therefore turned an
+        # unavailable registry into an EMPTY, SUCCESSFUL read and returned
+        # `catalog_ok=True`, which is the exact fail-open this bit exists to
+        # prevent (`addListEmptyLine` then reports "every pack is already on
+        # this graph" about a catalog that was never read). Both sibling
+        # readers (`pack_state._resolve_catalog`,
+        # `domain_loader._pack_kinds_by_bucket`) guard the same None.
+        if reg is None:
+            return {}, False
         packs = getattr(reg, "packs", None) or {}
     except Exception:
         return {}, False
     try:
         from tortoise.pack_state import _starter_namespaces
         starter = set(_starter_namespaces())
-    except Exception:  # noqa: BLE001 — a missing starter set must not blank the catalog
+    except Exception:
+        # a missing starter set must not blank the catalog
         starter = set()
     out: dict[str, dict] = {}
     for ns, p in packs.items():
@@ -18970,7 +18985,8 @@ def _pack_catalog_rows() -> tuple[dict[str, dict], bool]:
                                + len(getattr(p, "event_kinds", ()) or ())
                                + len(getattr(p, "point_kinds", ()) or ())),
             }
-        except Exception:  # noqa: BLE001 — one odd pack must not blank the list
+        except Exception:
+            # one odd pack must not blank the list
             continue
     return out, True
 
@@ -19031,11 +19047,27 @@ def _packs_payload(graph_id: str, resolved: dict,
         p["kind_count"] = meta.get("kind_count")
         if not p.get("description"):
             p["description"] = meta.get("description", "")
+    # The SOURCE a namespace will carry if it is (re-)added is the RECORD's,
+    # not the catalog derivation's: `set_graph_packs` writes
+    # `rec.get("source") or ("starter" if ns in starter else "manual")`, so an
+    # existing record's source always wins. A catalog arm that reported the
+    # derivation instead would label a tombstoned shipped namespace with a
+    # Source that FLIPS under the user when they add it back (the defect the
+    # Source column exists to avoid). Keyed off the tombstones, because a
+    # namespace still listed already shows its own record's row.
+    recorded_source = {r["namespace"]: r.get("source")
+                       for r in removed if r.get("source")}
     # Add-list: catalog rows first (the shipped vocabulary), then the graph's
     # own tombstones so a tenant-authored pack is re-addable too. A tombstone
     # that IS in the catalog is already offered by the catalog arm.
-    available = [dict(row, status="available")
-                 for ns, row in sorted(catalog.items()) if ns not in listed]
+    available: list[dict] = []
+    for ns, row in sorted(catalog.items()):
+        if ns in listed:
+            continue
+        offered = dict(row, status="available")
+        if ns in recorded_source:
+            offered["source"] = recorded_source[ns]
+        available.append(offered)
     seen = {row["namespace"] for row in available}
     for row in sorted(removed, key=lambda r: r["namespace"]):
         if row["namespace"] in listed or row["namespace"] in seen:

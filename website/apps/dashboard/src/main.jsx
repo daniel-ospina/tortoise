@@ -2714,6 +2714,16 @@ function claimIntentInFlight() {
   // the backdrop from the accessibility tree). Held in a ref because the close
   // path must release inert BEFORE restoreFocus — an element inside an inert
   // subtree is not focusable, so a synchronous restore would silently no-op.
+  //
+  // The third obligation is focus INTO the dialog, and it must hold in EVERY
+  // state, not only once the read lands. Marking the background inert removes
+  // the opener's subtree from the tab order, so the browser drops focus to
+  // <body> — and the dialog's Tab/Escape handler sits on the CONTAINER, which
+  // only receives keys when focus is inside it. The `ok` state autoFocuses
+  // Close, but `loading` and `error` have no autofocusable control: without the
+  // explicit focus below, a slow or failed read left Escape dead (and, while
+  // loading, not even a control to Tab to) until it resolved. tabIndex={-1} is
+  // on the container for exactly this; a control that already owns focus wins.
   const packsDialogRef = React.useRef(null)
   const packsInertRef = React.useRef(null)
   React.useEffect(() => {
@@ -2722,6 +2732,8 @@ function claimIntentInFlight() {
     if (!el) return undefined
     const release = applyBackgroundInert(el, document)
     packsInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
     return () => { packsInertRef.current = null; release() }
   }, [packsGraphId])
   // The Settings home's own summary read (graph selector + count line). Kept
@@ -11932,7 +11944,16 @@ function PacksModal(props) {
           deleted — turning a pack off stops new classification into its kinds.
         </p>
 
-        {status === 'loading' && <p className="dim">Loading packs…</p>}
+        {status === 'loading' && (
+          <>
+            <p className="dim">Loading packs…</p>
+            {/* A state with no dismissable control is a trap: the read may be
+                slow (the graph's pack read is O(nodes)), so Close is offered
+                while it is in flight — the same control, and the same
+                never-mid-save gate, as the ok state's. */}
+            <button type="button" className="ghost small" disabled={saving} onClick={onClose}>Close</button>
+          </>
+        )}
 
         {status === 'error' && (
           <div className="error" role="alert" style={{ marginTop: '0.5rem' }}>
