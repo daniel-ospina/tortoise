@@ -4182,6 +4182,16 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
+            # ⛔ `_searchText` is written BEFORE `s.title` (#8870): its
+            # last-resort fallback READS `s.title`, and on the server engine a
+            # same-clause read observes the value an earlier item just wrote.
+            # With this item below the title write, a text-less re-emit fell
+            # back to the title THAT SAME WRITE had just installed
+            # (`'https://example.test/doc-title2'`) on the server engine while
+            # the embedded engine fell back to the stored `'stub title'` — one
+            # clause, two answers, decided by the backend. Above the title
+            # write, both engines use the stored title.
+            "    s._searchText=coalesce($st, s._searchText, s.title), "
             "    s.title=coalesce($title, s.title), "
             # #5082 (ONTOLOGY §4.6 + #5013 Q2): a document IS a `:Source`, and
             # §4.6 marks `sourceKind` REQUIRED (✅) on every `:Source` — it is
@@ -4272,7 +4282,6 @@ class _EntityHandlers:
             "    s.needs_extraction=coalesce($nx, s.needs_extraction, false), "
             "    s.sourcePath=coalesce($sp, s.sourcePath), "
             "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
-            "    s._searchText=coalesce($st, s._searchText, s.title), "
             "    " + set_embedding_clause("s") + ", "
             "    s.updatedAt=$now "
             # D10 B6 (fourth door, review round 3): the retired fields must be

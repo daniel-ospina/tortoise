@@ -18,8 +18,9 @@ the failure is not evidence.
 
 So this file does two things, and BOTH are load-bearing:
 
-1. **It uses the endpoint the lane configured** (`TORTOISE_DB_URI`) and never
-   decides to run by probing a DIFFERENT port.
+1. **It runs where the lane points it** — `TORTOISE_DB_URI` as-is, else the
+   passworded docker TEST lane, never the canonical fleet store — and never
+   decides to run by probing a DIFFERENT port than the one it connects to.
 2. **It MEASURES the engine's `SET`-order semantics** with a one-clause probe
    (`_probe_set_order`) and SKIPS — visibly, naming the property — on an engine
    that reads pre-write values. A green from this file therefore means the two
@@ -149,29 +150,36 @@ def _probe_set_order(proj) -> str:
 
 
 def _live_uri() -> str:
-    """The endpoint this pin runs against: the lane's configured URI, or a skip.
+    """The endpoint this pin runs against — never the canonical fleet store.
 
-    `TORTOISE_DB_URI` is REQUIRED, and the legacy-port fallback is GONE. Two
-    reasons, both measured:
+    Resolution, in this order:
 
-    * the fail-open skip (#8939 review): the pre-fix gate probed the LEGACY port
-      and then CONNECTED to `TORTOISE_DB_URI`, so a lane with a live configured
-      engine and nothing on the legacy port skipped with a perfectly good graph
-      sitting right there — `tests/_live_utils.py`'s whole reason for existing
-      is that a live pin must skip only when the graph it would use is absent.
-    * the fallback's default target (`localhost:16379`) is the CANONICAL fleet
-      store, and `tests/conftest.py` refuses the suite against it because test
-      graphs on that instance cause cache-eviction churn that aborts fleet
-      writes (#7357). A fallback that dials it behind that guard's back is worse
-      than a visible skip.
-
-    The skip routes through `_live_utils._skip_unless_live_uri`, i.e. through
-    `LIVE_URI_SKIP_REASON` — the ONE reason the repo's skip-guard keys the
-    URI-gate family on, and the reason a hand-spelled skip in this file would
-    stop being recognised.
+    1. `TORTOISE_DB_URI` — the lane's own endpoint, used AS-IS. The pre-fix gate
+       probed the LEGACY port and then CONNECTED to `TORTOISE_DB_URI`, so a lane
+       with a live configured engine and nothing on the legacy port skipped with
+       a perfectly good graph sitting right there (the fail-open skip of the
+       #8939 review), and on a lane declaring `TORTOISE_TEST_EXPECT_URI=1` that
+       skip is a VIOLATION per `tools/skip-guard.py`. Gating on the endpoint we
+       are ABOUT to use is the only correct signal.
+    2. The passworded docker TEST lane (`docker_uri`, 6379) when it answers and
+       no URI is configured — NOT `legacy_uri`: the legacy default resolves to
+       the canonical fleet store, and minting a graph there is exactly what the
+       #7357 guard exists to stop (that store holds ~374 graphs against
+       FalkorDB's default `CACHE_SIZE=25`, so each extra graph raises the
+       eviction churn that aborts fleet writes with "graph was deleted or
+       replaced").
+    3. Otherwise SKIP, through `_live_utils.LIVE_URI_SKIP_REASON` — the ONE
+       reason `tools/skip-guard` keys the URI-gate family on, and the reason a
+       hand-spelled skip here would stop being recognised (a hand-written reason
+       that mentions the backend is also the guard's AVAILABILITY-regression
+       trigger, which is not what a missing test lane is).
     """
-    _live_utils._skip_unless_live_uri()
-    return os.environ["TORTOISE_DB_URI"]
+    uri = os.environ.get("TORTOISE_DB_URI")
+    if uri:
+        return uri
+    if _live_utils.docker_reachable():
+        return _live_utils.docker_uri("tortoise_test_8870")
+    pytest.skip(_live_utils.LIVE_URI_SKIP_REASON)
 
 
 def _live_proj() -> FalkorProjection:
@@ -189,12 +197,13 @@ def _live_proj() -> FalkorProjection:
 def _props(proj: FalkorProjection, url: str) -> dict:
     rows = proj.g.query(
         f"MATCH (s:Source {{url:'{url}'}}) "
-        "RETURN s.contentHash, s.version, s.title, s.updatedAt, s.validFrom"
+        "RETURN s.contentHash, s.version, s.title, s.updatedAt, s.validFrom, "
+        "       s._searchText"
     ).result_set
     assert rows, f"no :Source at {url}"
     return dict(zip(
-        ("contentHash", "version", "title", "updatedAt", "validFrom"), rows[0],
-        strict=False))
+        ("contentHash", "version", "title", "updatedAt", "validFrom",
+         "_searchText"), rows[0], strict=False))
 
 
 def test_the_connector_writer_advances_the_ordinal_on_the_server_engine():
@@ -225,12 +234,14 @@ def test_the_connector_writer_advances_the_ordinal_on_the_server_engine():
 
 def test_upsert_source_advances_every_guarded_field_on_the_server_engine():
     """`_upsert_source`'s ON MATCH: EVERY field guarded on the hash diff must
-    move with it — the ordinal, the title, and both recorded instants.
+    move with it — the ordinal, the title, both recorded instants, and
+    `_searchText`.
 
     FAILS IF `s.contentHash` is written anywhere before the fields that test it:
     the hash lands, each guard reads "unchanged", and the whole version-anchor
-    block is skipped while the hash silently moves on. The `_searchText` field
-    shares that guard and is covered by the same clause.
+    block is skipped while the hash silently moves on. `_searchText` is the LAST
+    guard in the clause and therefore the one a partial re-ordering leaves
+    behind, which is why it gets its own assertion rather than a mention.
     """
     proj = _live_proj()
     v1 = {
@@ -257,6 +268,14 @@ def test_upsert_source_advances_every_guarded_field_on_the_server_engine():
         "updatedAt must move with the hash")
     assert second["validFrom"] == "2026-02-02T00:00:00Z", (
         "validFrom must move with the hash")
+    # `_searchText` is the LAST hash guard in the clause, so a partial
+    # re-ordering that moves the hash write to just before it leaves this one
+    # guard poisoned while every other assertion above still passes (#8870
+    # review). `$st` derives from the title, so v2 must read `title-v2`.
+    assert second["_searchText"] == "title-v2", (
+        f"_searchText must move with the hash and derive from the NEW title, "
+        f"got {second['_searchText']!r}")
+
 
 
 # ── The gate itself. No engine, so these run in EVERY lane ────────────────
@@ -354,20 +373,37 @@ def _legacy_must_not_be_probed(**_kwargs):
 
 
 def test_a_configured_uri_is_used_without_probing_another_endpoint(monkeypatch):
-    """ISSUE 2 of the #8939 review, pinned: the gate must follow the URI."""
+    """ISSUE 2 of the #8939 review, pinned: the gate must follow the URI.
+
+    Neither fallback probe may run when a URI is configured — the pre-fix gate
+    probed the legacy port and then connected to the URI.
+    """
     monkeypatch.setenv(
         "TORTOISE_DB_URI", "docker://:@localhost:6379/tortoise_test_8870_uri")
     monkeypatch.setattr(_live_utils, "legacy_reachable", _legacy_must_not_be_probed)
+    monkeypatch.setattr(_live_utils, "docker_reachable", _legacy_must_not_be_probed)
     assert _live_uri() == "docker://:@localhost:6379/tortoise_test_8870_uri"
 
 
-def test_no_uri_skips_with_the_canonical_reason(monkeypatch):
-    """Two properties in one: the URI-less skip goes through
-    `LIVE_URI_SKIP_REASON` (a hand-written reason is how the URI-gate family
-    stops being recognised by skip-guard), and a REACHABLE legacy port does not
-    turn a URI-less lane into a run — that port is the canonical fleet store,
-    which `tests/conftest.py` refuses the suite against (#7357)."""
+def test_no_uri_falls_back_to_the_docker_test_lane_not_the_legacy_store(
+        monkeypatch):
+    """No URI + a reachable docker test lane ⇒ run there. The legacy port is
+    NEVER consulted: it resolves to the canonical fleet store (#7357)."""
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setattr(_live_utils, "docker_reachable", lambda **_kw: True)
+    monkeypatch.setattr(_live_utils, "legacy_reachable", _legacy_must_not_be_probed)
+    monkeypatch.setattr(_live_utils, "legacy_uri", _legacy_must_not_be_probed)
+    assert _live_uri() == _live_utils.docker_uri("tortoise_test_8870")
+
+
+def test_no_endpoint_at_all_skips_with_the_canonical_reason(monkeypatch):
+    """Two properties in one: the skip goes through `LIVE_URI_SKIP_REASON`
+    (a hand-written reason is how the URI-gate family stops being recognised by
+    skip-guard), and a REACHABLE legacy port does not turn a URI-less lane into
+    a run — that port is the canonical fleet store, which `tests/conftest.py`
+    refuses the suite against (#7357)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setattr(_live_utils, "docker_reachable", lambda **_kw: False)
     monkeypatch.setattr(_live_utils, "legacy_reachable", lambda **_kw: True)
     with pytest.raises(pytest.skip.Exception) as exc:
         _live_uri()
