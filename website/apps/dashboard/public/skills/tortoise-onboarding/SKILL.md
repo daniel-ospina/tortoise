@@ -635,7 +635,7 @@ setting, even after an earlier decline (see the re-enable pin below).
 3. **Write the setting through the EXISTING tool.** The answer is wired to the
    tool the dashboard's own toggle writes through — there is exactly ONE state
    path, and a parallel setter is a defect:
-   - MCP-connected agent: `tortoise_onboarding_session_recording(enabled=true)`
+   - MCP-connected agent: `tortoise_manage_sources(action="enable", source="agent_sessions")`
    - CLI agent (no MCP tool listed yet): `PATCH /v1/onboarding/state` with
      `{"session_recording": true}`
    Both write `session_recording` + `capture_revised`, and nothing else.
@@ -663,7 +663,7 @@ setting, even after an earlier decline (see the re-enable pin below).
 1. **Install nothing.** No seam, no extension, no config write.
 2. **Write the same keys the dashboard's decline writes** — the no-branch
    mirrors the wizard/panel toggle so the two surfaces cannot diverge:
-   `tortoise_onboarding_session_recording(enabled=false)` (CLI:
+   `tortoise_manage_sources(action="disable", source="agent_sessions")` (CLI:
    `PATCH /v1/onboarding/state` with `{"session_recording": false}`). That is
    `session_recording=false` + `capture_revised=true`, exactly the yes-branch
    key set with the opposite value — never a different set of keys.
@@ -678,7 +678,7 @@ setting, even after an earlier decline (see the re-enable pin below).
 
 ### The re-enable path is pinned
 
-`tortoise_onboarding_session_recording(enabled=true)` **re-sets the setting
+`tortoise_manage_sources(action="enable", source="agent_sessions")` **re-sets the setting
 regardless of `capture_revised`** — a user who declined can re-enable at any
 time through the tool, through the dashboard toggle, or by answering this ask
 yes. An implementation that short-circuits on `capture_revised` would strand
@@ -712,10 +712,15 @@ change it any time from `Settings → Memory sources`.
 > self-hosted install — the write lands, and the state read reports the stored
 > operational keys under `operational` (`tortoise_onboarding_state` /
 > `GET /v1/onboarding/state`), so reversibility **may** be promised for that
-> tile (#8686). Self-hosted the OTHER tiles still have no write path: their
-> only writer is the dashboard `PATCH /v1/onboarding/state`, which the daemon
-> does not mount, and `tortoise_onboarding_github_connect` has no self-hosted
-> team context — so do not promise changes to those.
+> tile (#8686). Self-hosted, the two GitHub tiles are writable through
+> `tortoise_manage_sources` as well (the flag write lands on the deployment's
+> own `:OnboardingState` node via the self-host branch of
+> `_update_onboarding_state`) — both directions, but only the OFF one is
+> unconditionally writable: `disable` writes the flag with no credential read,
+> while `enable` needs a CONNECTED GitHub credential that a deployment may not
+> have, and `tortoise_onboarding_github_connect` has no self-hosted team context
+> — so never promise a GitHub ENABLE on a deployment that has never connected
+> one.
 
 The pinned order and the per-source state keys are the dashboard's tile
 inventory (`website/apps/dashboard/src/integrationsGrid.js`, one declaration
@@ -731,13 +736,26 @@ GitHub's two sources are **separately enable-able** and share **one OAuth
 connect** — turning issues off never disconnects GitHub for documents (the
 `github_connected` key is the connection, never a per-source toggle).
 
-- **Ask, then honour the answer.** A "no" writes nothing (a source absent from
-  the projection is off, not enabled); a "yes" writes the per-source enable
-  intent through the same tool surface the hosted wizard uses
-  (`tortoise_onboarding_session_recording` / the onboarding-state path) — one state path,
-  never a second copy of the flag. **Self-hosted: this tile's write lands
-  (#8686)** — the agent-session-recording toggle writes through the owned
-  onboarding-state node, so you may report the answer as applied.
+- **Ask, then honour the answer — per TILE, never one call for the section.**
+  Each tile in the table above has its own source, and writing one source never
+  writes another: `session_recording` → `source="agent_sessions"`,
+  `issues_enabled` → `source="github_issues"`, `docs_enabled` →
+  `source="github_documents"`. A "no" writes the OFF intent for THAT tile
+  (`tortoise_manage_sources(action="disable", source="<the tile's source>")`) —
+  an UNSET key is not off: it means the product default, which for these flags
+  is **on** (the tool's `enabled` and `default` fields say which), so writing
+  nothing on a "no" would leave the source ON. A "yes" writes the per-source
+  enable intent the same way:
+  `tortoise_manage_sources(action="enable", source="<the tile's source>")`,
+  through the same tool surface the hosted wizard uses — one state path, never a
+  second copy of the flag. **Self-hosted: the `agent_sessions` write lands (#8686)** — it goes
+  through the owned onboarding-state node, so you may report the answer as
+  applied. The two GitHub tiles are writable self-hosted too, but only in the OFF
+  direction: their `disable` intent write lands, while `enable` needs a connected
+  GitHub credential that a self-hosted team may not have — so never promise a
+  GitHub ENABLE on a deployment that has never connected one (the OFF
+  direction does land: the `disable` intent write is the one that works
+  without a credential).
 - **An unbuilt integration is never faked.** Anything not in the inventory
   above is **coming soon**: say so plainly, honour a "yes" as interest rather
   than as a setup step, and **never** present it as available or connect it.
@@ -772,20 +790,30 @@ serve the onboarding FLOW: read it with `tortoise_onboarding_state`, and file
 the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
 
 - **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
-  `tortoise_onboarding_github_index`; read `tortoise_onboarding_github_status`
-  (or `tortoise_onboarding_state`).
-- **Agent-session recording** — `tortoise_onboarding_session_recording`
-  (`enabled`); read it back from `tortoise_onboarding_state`, which reports the
+  `tortoise_manage_sources(action="enable", source="github_issues")`; read `tortoise_onboarding_github_status`
+  (or `tortoise_onboarding_state`). ⏺ **No per-repo scope:** the call takes no
+  `repo` argument, so it indexes EVERY connected repo. Never tell a user it
+  indexed one named repository — for a scoped walk use the REST twin
+  `POST /v1/index/github` with `repo`. ⏺ **`disable` here is INTENT, not custody:**
+  it writes `issues_enabled=false`, which no server-side reader honours yet, so
+  an in-flight index run is not cancelled and the connection (with the docs
+  source) stays. The tool's own payload reports `enforcement: "intent-only"` —
+  repeat that rather than telling a user the source has stopped.
+- **Agent-session recording** — `tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")`
+  (`enabled` in the tool's `list` payload, `session_recording` in
+  `tortoise_onboarding_state`); read it back from `tortoise_onboarding_state`, which reports the
   stored operational keys under `operational` (#8686). **Self-hosted this is the
   ONE connect-style leg that works** — both the write and the read-back land on
   the deployment's own node. Both were fixed by #8686; before it, the write
   no-opped and reported success anyway.
-- **GitHub documents** — the enable route (`POST /v1/index/docs`) and its job
-  status have **no MCP tool yet**; adding one expands the agent-facing surface
-  and needs owner approval plus a `config/surface-manifest.yml` re-cut
-  (#4282). Until then this source is dashboard-only — do **not** invent a tool
-  name for it. Pinned by `tests/test_tool_registry.py`
-  (`TestAgentAddressableIntegrations`).
+- **GitHub documents** — `tortoise_manage_sources(action="enable",
+  source="github_documents")`; it starts the docs index job and reports the
+  `job_id` and `state` — `started` when a new walk was minted,
+  `reused` when an in-flight one was adopted. The REST twins stay for the dashboard
+  (`POST /v1/index/docs`, status `GET /v1/index/docs/{job_id}`). This source now
+  HAS a tool: the surface approval and the manifest re-cut are recorded in
+  `docs/product/canonical-mcp-tools.md` (#3540, under the #4282 rule). Pinned by
+  `tests/test_tool_registry.py` (`TestAgentAddressableIntegrations`).
   **Extracting claims FROM those documents is a self-hosted CLI verb, not a
   tool** (#1724): `tortoise mine-docs --dir <corpus> --db <graph>` walks the
   staged corpus and writes **draft** `statement` Points with

@@ -127,6 +127,10 @@ each docstring rather than implied.
   first: `_POINT_DENY` drops the `#2199` baseline fields on replay).
 - **4** — the remaining raw-handle doors (`_sync_tags`, `_link_source`, deletes, `onboarding/state.py`,
   `onboarding/seed.py`, `hosted_api.py`, `__main__.py`, connectors), then gate the handle.
+  **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
+  `docs/plans/2026-10-18-7951-delete-point-outbox.md`: the append is the commit point of the hard
+  delete, so a delete the journal never recorded cannot be performed. **STILL OPEN:** `delete_entity`
+  (needs a per-label pre-read) and the rest of this list.
 - **5** — wire `reconcile` as the S2 backstop (observed, not merely checkable).
 
 ## 8. Rejected alternatives

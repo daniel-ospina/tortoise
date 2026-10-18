@@ -18,12 +18,14 @@ approvedBy: daniel-ospina
 they do — not pruned from the existing 150.
 
 > **Scope of this approval.** The owner settled the **target surface** on 2026-09-21, including the
-> ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26**. The
+> ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26** (26 at
+> that ruling; amended to **27** by #3540 on 2026-10-17 — see `canonical-mcp-tools.md`). The
 > **four** placement questions that were left open in `canonical-mcp-tools.md` (`packs_list`,
 > `pack_install`, `run_onboarding`, `manage_deployment`) were **settled on 2026-09-22** (recorded on
 > **#4282**) — see
 > §"The four open placements — settled". None of the four changes the count: they are all **off the
-> MCP target**, which is why the MCP stays at **26**. See `vision-mcp-sdk-surface.md`
+> MCP target**, which is why the MCP **stayed at 26** for that ruling (it is **27** since #3540,
+> 2026-10-17 — see the current-target note below). See `vision-mcp-sdk-surface.md`
 > §"Cross-artifact tensions".
 
 **Canonical terms:** an **organisation account** (the customer's account — the billing and
@@ -100,13 +102,16 @@ person managing their own account).
 | | **PLATFORM** | | | |
 | 40 | `check_connection` | **What does this credential reach?** Omit `key_id` to check your own connection; pass one to inspect a specific credential. Makes the isolation promise verifiable. **Programmatic, returns a result — not a wizard** | `check_connection` | builder |
 
-**40 methods** against **150** today. **MCP: 26 tools** — every row except the tenancy block (28–39), `write_knowledge_batch`
+**40 methods** against **150** today. **MCP: 27 tools** (26 at the 2026-09-21 ruling; 27 since #3540) — every row except the tenancy block (28–39), `write_knowledge_batch`
 (builder-only, 13) and the constructor/`close` (1–2) — **plus row 30**, `update_memory_graph`,
 which is inside the tenancy block but is the one tenancy method with an MCP twin, because the
-owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26.
+owner's 2026-09-21 ruling kept the `graph_set_recording` tool. 40 − 12 − 1 − 2 + 1 = 26. That
+arithmetic is the 2026-09-21 derivation and stays as written; the CURRENT target is **27**,
+because #3540 (2026-10-17) added `tortoise_manage_sources`, which was never on this list — the two
+switches it retires were not target tools. The **served** surface moved the other way, **82 → 81**.
 
 > **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the
-> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the 26 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **4** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`) have a prefixed equivalent. So it is **26 of 26 by name**, or **22 of 26** if you normalise the prefix.
+> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim.
 > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it.
 Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every
 *current* tool to its destination but does not name the target's replacing name.
@@ -177,6 +182,31 @@ onboarding-progress state is wizard state, so folding it there would contradict 
 description of the row. Both reads remain reachable at the REST endpoints above (their `rest_spec`
 is unchanged in `tortoise/tool_registry.py`), so no capability is deleted; what changes is *which
 surface* serves it.
+
+### Ruling B (2026-10-12) re-admits ONE consolidated source-management tool
+
+`tortoise_manage_sources(action="list"|"enable"|"disable", source=…)` puts team source
+configuration back on the MCP: it lists the three memory sources, and switches each on or off
+within the caller's own permission.
+
+> **OVERRIDES:** the general rule above (*"account tenancy is not on the MCP"*) and the read/write
+> principle that dropped `run_onboarding` — the owner ruled that agents should be able to configure
+> the system themselves *"assuming they have permission"* and chose **one** consolidated operation
+> over per-source tools (2026-10-12, on #3540). Approval is recorded in
+> `canonical-mcp-tools.md`.
+
+Three things keep this narrower than the dropped container, and the ruling does not change any of
+them: it is **`writes=True`**, so a read-only key is refused even for `action="list"`; it
+**never accepts a credential** (GitHub authorisation stays the separate
+`tortoise_onboarding_github_connect` handshake); and it **reverses no recorded default**
+(`agent_sessions` stays ON — the `#1927` optional off-switch).
+
+This tool has **no SDK twin** (`sdk_method=""`), so it is declared here rather than as a row in the
+method table. `tests/test_bridge_table.py` reads this table, so the two declarations cannot drift.
+
+| MCP-only addition (no SDK twin) | Authority |
+|---|---|
+| `manage_sources` | owner ruling B on #3540 (2026-10-12) |
 
 ## Provisioning: primitives, and the credential carries the tenant
 
@@ -262,8 +292,8 @@ Cognee's config-supplied ontology. Pack curation is a **user/builder** concern, 
   per-graph pack operation. Nothing about the frozen target precludes adding one post-beta; the
   surface is frozen for beta, not permanently closed.
 - **The SDK/REST surface is the natural home.** The pack catalog is *content*, not agent memory, so
-  a per-graph pack operation belongs with the tenancy/pack operations (SDK + REST), not the 26 MCP
-  tools.
+  a per-graph pack operation belongs with the tenancy/pack operations (SDK + REST), not the MCP
+  tool list (27 targets as of #3540).
 
 **Where a post-beta per-graph pack operation would slot in:** an SDK/REST operation addressed to
 **one memory graph** — list / install / remove on that graph, plus authoring a user-supplied pack
