@@ -25545,19 +25545,25 @@ class TortoiseSDK:
         related_ids = [e.get("related_id") for e in entries if e.get("related_id")]
         statuses: dict[str, str] = {}
         if related_ids:
-            try:
-                rows: list = []
-                for _q in epistemic_label_queries(
-                        "MATCH (n:{label}) WHERE n.id IN $ids "
-                        "RETURN n.id, n.status"):
+            rows: list = []
+            for _q in epistemic_label_queries(
+                    "MATCH (n:{label}) WHERE n.id IN $ids "
+                    "RETURN n.id, n.status"):
+                try:
                     rows.extend(proj.g.query(
                         _q,
                         params={"ids": related_ids},
                         timeout=200,
                     ).result_set)
-                statuses = {row[0]: row[1] or "" for row in rows}
-            except Exception:
-                pass
+                except Exception:
+                    # ONE label failing must not blank every peer's status: the
+                    # sweep widens, so a leg that fails can only fail to add.
+                    _logger.warning(
+                        "related_status lookup failed for one epistemic "
+                        "label — the other labels' statuses are kept",
+                        exc_info=True)
+                    continue
+            statuses = {row[0]: row[1] or "" for row in rows}
         for e in entries:
             e["related_status"] = statuses.get(e.get("related_id"), "")
         return entries

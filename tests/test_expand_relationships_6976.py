@@ -89,11 +89,13 @@ def _event(sdk, name):
 def _raw_relationships(graph, node_id):
     """The SAME relation `get_relationships` promises, written raw.
 
-    Two legs, mirroring the two blind spots this module pins: the
-    operator-mediated view (with no label narrowing on the anchor, the operator
-    or the peer) and the operator-less direct edges. This is the ground truth
-    the method must reproduce; it deliberately does not call into the reader
-    under test.
+    NOTE ON ITS STRENGTH: this is the implementation's relation re-spelled with
+    the label narrowing removed — deliberately, since the label question is what
+    the hub tests ask. It is therefore NOT independent of the peer/operator
+    predicates (a wrong predicate shared by both would be invisible here), which
+    is why the direct-edge tests below compare against a one-hop raw query with
+    no analogue of the reader's structure, and `test_hub_matches_raw_cypher`
+    adds an operator-anchored cross-check.
     """
     rows = graph.query(
         "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point)-[r2:IMPL|NAND|hasPart]-(other) "
@@ -292,20 +294,36 @@ def test_non_point_peer_carries_its_own_layer_name(sdk):
 
 
 def test_operator_without_is_operator_flag_is_visible(sdk):
-    """#943 parity: an operator identified by ``op_type`` alone still counts."""
-    hub = _point(sdk, "INCIDENT-44 with a flagless operator")
+    """#943 parity: an operator identified by ``op_type`` alone still counts.
+
+    Two shapes, because the predicate has two arms: the flag EXPLICITLY false,
+    and — the one legacy/replayed operators actually have — the property ABSENT.
+    """
+    hub = _point(sdk, "INCIDENT-44 with flagless operators")
     a = _point(sdk, "peer A of incident 44")
     b = _point(sdk, "peer B of incident 44")
-    op = sdk.create_operator("IMPL", hub, [a, b])
+    c = _point(sdk, "peer C of incident 44")
+    d = _point(sdk, "peer D of incident 44")
+    explicit_false = sdk.create_operator("IMPL", hub, [a, b])
+    absent = sdk.create_operator("IMPL", hub, [c, d])
     _graph(sdk).query(
         "MATCH (op:Point) WHERE op.id = $oid SET op.is_operator = false",
-        params={"oid": op["id"]},
+        params={"oid": explicit_false["id"]},
+    )
+    _graph(sdk).query(
+        "MATCH (op:Point) WHERE op.id = $oid REMOVE op.is_operator",
+        params={"oid": absent["id"]},
     )
 
-    entries = sdk.expand_relationships(hub)
-    assert {a, b} <= {e["related_id"] for e in entries}, (
-        "an operator carrying op_type but not the is_operator flag made its "
+    related = {e["related_id"] for e in sdk.expand_relationships(hub)}
+    assert {a, b} <= related, (
+        "an operator carrying op_type with is_operator=false made its "
         "endpoints invisible (#943 parity is what every other reader uses)"
+    )
+    assert {c, d} <= related, (
+        "an operator carrying op_type with NO is_operator property at all made "
+        "its endpoints invisible — the ABSENT arm is the one legacy/replayed "
+        "operators have"
     )
 
 
@@ -372,6 +390,80 @@ class _RecordingGraph:
         return self._inner.query(cypher, params=params, timeout=timeout)
 
 
+class _FlakyLabelGraph:
+    """Pass-through graph whose query RAISES for one epistemic label."""
+
+    def __init__(self, inner, fail_on: str):
+        self._inner = inner
+        self._fail_on = f"MATCH (n:{fail_on})"
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._fail_on in cypher:
+            raise RuntimeError(f"simulated {self._fail_on} leg failure")
+        return self._inner.query(cypher, params=params, timeout=timeout)
+
+
+def test_one_failing_label_does_not_discard_the_other_labels(sdk):
+    """The sweep is monotone: a leg that fails can only fail to ADD.
+
+    Four id-anchored statements now back one read. If they share one handler, a
+    raise on ANY label throws away the rows the others already returned and the
+    answer is the empty seed again — a failure surface this widening CREATED,
+    landing on the mandated read path.
+
+    Two anchors on two layers, requested in ONE batch: whichever leg fails, the
+    other anchor's rows must survive.
+    """
+    point_hub = _point(sdk, "INCIDENT-54 the Point-side hub")
+    point_peer = _point(sdk, "the Point hub's peer")
+    sdk.create_operator("IMPL", point_hub, [point_peer])
+
+    object_hub = _object(sdk, "the Object-side hub")
+    object_peer = _point(sdk, "the Object hub's peer")
+    sdk.create_operator("IMPL", object_hub, [object_peer])
+
+    anchors = {"Point": (point_hub, point_peer), "Object": (object_hub, object_peer)}
+    for failing in EPISTEMIC_LABELS:
+        out = get_relationships(
+            _FlakyLabelGraph(_graph(sdk), failing),
+            [point_hub, object_hub])
+        for label, (anchor, peer) in anchors.items():
+            if label == failing:
+                continue
+            assert out[anchor], (
+                f"a raise on the :{failing} leg emptied the read for a "
+                f":{label} anchor whose own leg succeeded"
+            )
+            assert peer in {e["related_id"] for e in out[anchor]}
+
+
+def test_one_failing_label_does_not_blank_every_related_status(sdk):
+    """Same isolation for the ``related_status`` sweep in the SDK."""
+    hub = _point(sdk, "INCIDENT-55 statuses through a flaky engine")
+    peer = _point(sdk, "a peer whose status must survive")
+    sdk.create_operator("IMPL", hub, [peer])
+
+    real_g = _graph(sdk)
+    flaky = _FlakyLabelGraph(real_g, "Object")
+
+    class _Proj:
+        g = flaky
+
+    real_get_proj = sdk._get_proj
+    sdk._get_proj = lambda: _Proj()
+    try:
+        entries = sdk.expand_relationships(hub)
+    finally:
+        sdk._get_proj = real_get_proj
+
+    by_related = {e["related_id"]: e for e in entries}
+    assert peer in by_related, f"the read itself was lost: {entries!r}"
+    assert by_related[peer]["related_status"] == "live", (
+        "a raise on the :Object status leg blanked the status of a :Point "
+        f"peer: {by_related[peer]!r}"
+    )
+
+
 def test_emitted_query_keeps_the_id_predicate_and_the_widening(sdk):
     hub, _ = _hub_with_non_point_peers(sdk)
     recorder = _RecordingGraph(_graph(sdk))
@@ -409,27 +501,52 @@ def test_emitted_query_keeps_the_id_predicate_and_the_widening(sdk):
 
 
 def test_unhashable_peer_text_does_not_empty_the_batch(sdk):
-    """A malformed peer property must not turn the whole read into `[]`.
+    """A malformed graph property must not turn the whole read into `[]`.
 
-    The per-label rows are deduplicated; keying that on the WHOLE row makes a
-    list-valued `content`/`name` raise TypeError, which the enclosing handler
-    converts into the untouched empty seed for every point in the batch — the
-    failure-reads-as-emptiness class this very reader had to be fixed for
-    (#6971/#6976).
+    The per-label rows are deduplicated, and the key rides graph-authored
+    free-form properties (``op.op_type``, ``*.label``, the idx columns) — not
+    only the row's identity. Any of them arriving as a list (the replayed-JSONL
+    diagnostic class the repo already declares for `content`, #2958) must be
+    rendered, not raise: an unhashable key raises into the enclosing handler and
+    empties the batch for EVERY point — the failure-reads-as-emptiness class this
+    very reader had to be fixed for (#6971/#6976).
     """
-    hub = _point(sdk, "INCIDENT-53 with one malformed peer")
+    hub = _point(sdk, "INCIDENT-53 with malformed neighbours")
     good = _point(sdk, "a well-formed peer of incident 53")
-    odd = _point(sdk, "a peer whose text is a list")
-    sdk.create_operator("IMPL", hub, [good, odd])
+    list_content = _point(sdk, "a peer whose text is a list")
+    op = sdk.create_operator("IMPL", hub, [good, list_content], label="addresses")
     _graph(sdk).query(
         "MATCH (n:Point) WHERE n.id = $id SET n.content = ['a', 'b']",
-        params={"id": odd},
+        params={"id": list_content},
+    )
+    _graph(sdk).query(
+        "MATCH (op:Point) WHERE op.id = $oid SET op.label = ['x', 'y']",
+        params={"oid": op["id"]},
     )
 
     entries = sdk.expand_relationships(hub)
     related = {e["related_id"] for e in entries}
-    assert good in related, (
-        "a list-valued peer text emptied the whole relationship read — "
-        f"got {entries!r}"
+    assert {good, list_content} <= related, (
+        "a list-valued peer text / operator label emptied the relationship "
+        f"read — got {entries!r}"
     )
-    assert odd in related
+
+
+def test_operator_anchor_does_not_report_its_own_typed_edges_as_direct(sdk):
+    """Leg 2 is OPERATOR-LESS edges only — an operator anchor has none.
+
+    Asked about an operator, ``(n)-[d:IMPL|NAND]-(other)`` is the operator's own
+    typed edge to each input; reporting it as a *direct* edge would claim
+    ``operator_id: ''`` for a relationship whose operator is the anchor itself.
+    Both halves of the "is a claim" predicate therefore apply to the anchor too.
+    """
+    hub = _point(sdk, "a claim with two operator inputs")
+    peer_a = _point(sdk, "input A")
+    peer_b = _point(sdk, "input B")
+    op = sdk.create_operator("IMPL", hub, [peer_a, peer_b], label="addresses")
+
+    entries = sdk.expand_relationships(op["id"])
+    assert not [e for e in entries if e["operator_id"] == ""], (
+        "the operator's own typed edges were reported as operator-less direct "
+        f"edges of the operator itself: {entries!r}"
+    )
