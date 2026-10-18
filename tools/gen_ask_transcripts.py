@@ -136,9 +136,24 @@ def _render_user_message(sdk: TortoiseSDK, question: str,
     # once the lane's defaults moved.
     from tortoise.retrieval import resolve_ask_retrieval_caps
     caps = resolve_ask_retrieval_caps()
+    # #8487: NO ``_valid_time_rerank`` opt-out — on purpose. This generator's
+    # contract is that a committed transcript is byte-reproducible by the lane it
+    # replays (see the comment above, and the #4155 note below), so it must run
+    # the reader exactly as the ask lane runs it, and the ask lane applies the
+    # pre-truncation valid-time selection by default. A transcript generated
+    # before #8487 can therefore differ from one regenerated now on a
+    # PREFER-LATEST question; regenerate rather than "fixing" it with an opt-out
+    # (that would stop mirroring the lane).
     hits = sdk.tortoise_fts_query(question, limit=caps["limit"],
                                   pool_size=caps["pool_size"],
-                                  include_terminal=True)
+                                  include_terminal=True,
+                                  # #8487 (review round 7, P2): the same instant
+                                  # the assembled context and the rendered user
+                                  # message below are stamped with — the
+                                  # committed transcript must replay the
+                                  # selection as of the question's date, not as
+                                  # of the day it is regenerated.
+                                  query_date=question_date)
     annotated = sdk.annotate_ask_hits(hits)
     from tortoise.retrieval import ask_session_key, dedup_pool
     # The lane's OWN key. Using the default (``session_key_of``) would re-derive
