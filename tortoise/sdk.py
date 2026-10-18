@@ -20531,8 +20531,8 @@ class TortoiseSDK:
         self._dream_metrics["last_pass_no_op_reason"] = "no_ep_factors"
 
     def _dream_local(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
-                     budget: int | None, warm_start: bool = True,
-                     require_calibration: bool = False) -> dict:
+                     budget: int | None, warm_start: bool = True, *,
+                     require_calibration: bool) -> dict:
         """Local mode (W1): EP over the dirty roots. I1 local key-set.
 
         ``require_calibration`` (#7739) installs the shared calibration gate as
@@ -21579,14 +21579,16 @@ class TortoiseSDK:
         if require_calibration is None:
             require_calibration = _ep_require_calibration_default()
         if require_calibration:
-            # #7739: the read consumes THIS claim (plus, when it is a dirty
-            # root, its own factor neighbourhood on the lazy dream below), so
-            # the gate is scoped to that — a foreign uncalibrated point no
-            # longer freezes a per-claim read. An uncalibrated CLAIM still
-            # raises: narrowing the scope never excuses the thing asked for.
-            self._ensure_calibrated(
-                "get_confidence",
-                scope=lambda: {claim_id} | self._ep_run_scope([claim_id], None))
+            # #7739: the read itself consumes exactly ONE claim —
+            # ``ep.compute_confidence`` just reads that node's params — so the
+            # gate is scoped to the claim. Scoping it to the claim's NEIGHBOUR
+            # HOOD would over-block: a connected point the read never puts in
+            # a natural parameter would freeze a per-claim read. When the claim
+            # is a dirty root, the lazy dream below runs EP over the dirty
+            # roots and gates ITSELF on the seeds it will consume (fail-closed
+            # where it matters). An uncalibrated CLAIM still raises: narrowing
+            # the scope never excuses the thing asked for.
+            self._ensure_calibrated("get_confidence", scope={claim_id})
         if claim_id in self._dirty_roots:
             self.dream(dirty_only=True,
                        require_calibration=require_calibration,
@@ -22314,10 +22316,12 @@ class TortoiseSDK:
                 only when the graph already has at least one uncalibrated
                 evidence point — so a fully calibrated graph (the common
                 case) pays NOTHING for scoping. ``None`` (default) keeps the
-                whole-graph posture, for the surfaces that genuinely consume
-                the whole graph: a ``full`` dream and a ``stale-first``
-                window (its window is selected inside the pass). Every other
-                EP surface passes a scope — anchored/factor
+                whole-graph posture where that is the honest answer: a
+                ``full`` dream consumes the whole graph by contract, and a
+                ``stale-first`` window is chosen INSIDE the pass, so a
+                gate-side copy of its selection would be a second derivation
+                of the same window (the gate/run drift #7739 removes).
+                Every other EP surface passes a scope — anchored/factor
                 ``compute_confidence``, the no-arg dirty-roots path,
                 ``dream(mode="local")``, and ``get_confidence``.
                 An EMPTY set is a real scope (nothing reachable → nothing to

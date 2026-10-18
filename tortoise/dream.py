@@ -225,9 +225,11 @@ class Dreamer:
         legacy behavior.
 
         #1157 calibration: this is an EP WRITE surface (persists
-        n.confidence). Callers must gate on calibration state BEFORE calling
-        (the SDK surface does via require_calibration → CalibrationError);
-        do not invoke Dreamer directly with uncalibrated graphs.
+        n.confidence). Callers must ensure the graph is gated before an EP
+        write happens: the SDK passes ``before_run`` (gate evaluated on the
+        seeds this pass will run, still fail-closed before any write), and
+        the whole-graph modes are gated by the SDK before the call. Do not
+        invoke Dreamer directly with uncalibrated graphs and no ``before_run``.
 
         ``op_cap`` (epic 903-C6, #1244): the BFS operator-selection cap for
         this pass. ``budget=None`` on the SDK surface resolves to the
@@ -249,12 +251,12 @@ class Dreamer:
             self._snapshot_ep_epoch()
             proj = self._sdk._get_proj()
             from .analyze import _bfs_select_operators
+            stats: dict = {}
             operator_ids, factor_anchors = _bfs_select_operators(
                 proj, anchors, max_hops=max_hops, rel_filter="IMPL|NAND",
                 direction=direction, op_cap=op_cap,
-                stats=self._last_selection_stats,
+                stats=stats,
             )
-            self._last_operator_count = len(operator_ids)
             # A9 (epic #902 §5.6): the selection set ALSO carries direct-edge
             # factor anchors — a direct-edge-only subgraph yields ZERO
             # operator ids but a non-empty direct-factor selection. ep.run
@@ -278,6 +280,12 @@ class Dreamer:
             # even though the empty-seed branch below only trivially stamps.
             if before_run is not None:
                 before_run(seed_ids)
+            # Only a pass that got PAST the gate publishes its selection
+            # report (#7739 review, #6211's hazard in reverse): a refused pass
+            # runs no EP and writes no metrics, so leaving a count/stats here
+            # would describe a pass that never ran.
+            self._last_operator_count = len(operator_ids)
+            self._last_selection_stats = stats
             if not seed_ids:
                 # Epic 903-C2 (#1240): operator-less anchors (isolated claims
                 # with no operators AND no direct edges). There is no EP to

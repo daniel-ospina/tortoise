@@ -621,18 +621,26 @@ def test_dream_whole_graph_modes_keep_whole_graph_scope(sdk):
 
 
 def test_get_confidence_scopes_to_the_claim(sdk):
-    """#7739: a per-claim read is gated on the claim it reads.
+    """#7739: a per-claim read is gated on the claim it reads — and ONLY on it.
 
-    ``get_confidence`` consumes one claim's params (plus, on the lazy dream
-    path, that claim's own factor neighbourhood), so a foreign uncalibrated
-    point must not freeze it — while an uncalibrated claim still raises (the
-    guard is kept; only its scope narrows).
+    ``get_confidence`` puts exactly one claim in a natural parameter
+    (``ep.compute_confidence`` reads that node), so a foreign point must not
+    freeze the read even when it is CONNECTED to the claim through a factor
+    the read never evaluates. That connected case is the discriminating one:
+    an isolated foreign point is outside every closure, so it would pass even
+    with a neighbourhood-wide scope. An uncalibrated CLAIM still raises (the
+    guard is kept; only its scope narrows), and a dirty claim still gets its
+    lazy dream gated on the pass's own seeds.
     """
     mine = sdk.create_point("statement", "Mine calibrated",
                             credibility="gold", status="live")
     foreign = sdk.create_point("statement", "Foreign uncalibrated",
                                status="live")
+    sdk.create_operator("IMPL", mine["id"], [foreign["id"]])
+    # The claim is clean (no lazy dream) and the foreign point is not a dirty
+    # root: the read must answer from the claim's own params.
     _make_foreign(sdk, foreign["id"])
+    _make_foreign(sdk, mine["id"])
 
     result = sdk.get_confidence(mine["id"], require_calibration=True)
     assert "mean" in result
@@ -642,3 +650,22 @@ def test_get_confidence_scopes_to_the_claim(sdk):
     with pytest.raises(CalibrationError,
                        match=r"get_confidence.*uncalibrated"):
         sdk.get_confidence(uncal["id"], require_calibration=True)
+
+
+def test_get_confidence_dirty_claim_still_gates_its_dream(sdk):
+    """#7739: a DIRTY claim's lazy dream is still gated on what it consumes.
+
+    Narrowing the read's own scope must not become a hole in the write path:
+    when the claim is a dirty root, ``get_confidence`` dreams, and that pass
+    consumes the connected uncalibrated point — so it must refuse, naming it.
+    """
+    mine = sdk.create_point("statement", "Mine calibrated",
+                            credibility="gold", status="live")
+    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+                               status="live")
+    sdk.create_operator("IMPL", mine["id"], [foreign["id"]])
+    assert mine["id"] in sdk._dirty_roots
+
+    with pytest.raises(CalibrationError, match="dream") as exc:
+        sdk.get_confidence(mine["id"], require_calibration=True)
+    assert foreign["id"] in str(exc.value)
