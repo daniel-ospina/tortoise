@@ -53,7 +53,8 @@ ontology:
   # Map keyed by pack-local kind name. Keys must be declared in one of this
   # pack's *Kinds lists (or be a core kind this pack's chains reference, e.g.
   # `workflow`). All fields optional. Allowed keys: description, synonyms,
-  # examples, nearMisses, extractable, storeAs, enforcement, statuses, folds.
+  # examples, nearMisses, extractable, storeAs, enforcement, statuses, folds,
+  # pipeline, values.
   #   - description:  one line of what the kind IS (this is prompt material)
   #   - synonyms:     normalized aliases — deterministic near-miss catch
   #   - examples:     concrete instance examples for the classifier
@@ -70,6 +71,32 @@ ontology:
   #                   → decision; objectKinds/subjectKinds/documentKinds →
   #                   entity; eventKinds → event) — review P2, PR #978
   #   - enforcement:  warn|retry|block — overrides the pack-wide default
+  #   - values:       #2818 — which VALUE properties this kind carries.
+  #                   A closed, VALIDATED declaration (not an open props bag):
+  #                   a list of entries, each
+  #                     name:        the BARE property name — a bare
+  #                                  identifier (letters, digits, underscores,
+  #                                  not starting with a digit). A colon is an
+  #                                  error (kinds are namespaced, property
+  #                                  names are not: WS-B OD2), and so are
+  #                                  whitespace and punctuation, because the
+  #                                  name is rendered raw into the prompt.
+  #                     valueKind:   money | percent | multiple | duration
+  #                                  | quantity (WS-C's value SHAPE, never a
+  #                                  storage type — `money` is a shape over
+  #                                  amountMinor + currency + minorUnitExponent)
+  #                     required:    bool, default false
+  #                     cardinality: one | many, default one
+  #                   An unknown entry key, an unknown `valueKind`, a
+  #                   namespaced name, or a duplicate name is a validation
+  #                   ERROR (the vocabulary and shape rules live in
+  #                   `tortoise/pack_values.py`). A declared kind renders in
+  #                   the S2/S4 prompt as `- kind — description [values:
+  #                   committedAmountMinor(money, required)]`; the declaration
+  #                   is deliberately NOT part of the classification index text
+  #                   (so the npz cache key never rotates on install). The
+  #                   declaration does not store anything yet: the write path
+  #                   for these fields is the value model (#2782).
   # Example:
   #     kindDefs:
   #       concept:
@@ -80,6 +107,13 @@ ontology:
   #         extractable: true
   #         storeAs: entity
   #         enforcement: retry
+  #         # #2818 per-kind value fields (see the `values` note above):
+  #         values:
+  #           - name: committedAmountMinor
+  #             valueKind: money
+  #             required: true
+  #           - name: trancheLabel
+  #             valueKind: quantity
   #         # #2729 per-kind state lifecycle: the kind's closed status
   #         # vocabulary, plus the event kinds THAT THIS PACK declares which
   #         # fold the status. Only a kind listed in this pack's

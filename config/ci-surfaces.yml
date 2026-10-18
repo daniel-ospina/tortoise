@@ -66,6 +66,18 @@ surfaces:
   # `test_7809_hosted_prewarm_warmup_flag.py <- tortoise/hosted_api.py`). The
   # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #2728 review P2: DUAL-REGISTERED with `core` (line ~2688) for the same
+  # reason as #7809. `tests/test_pack_selection_by_graph.py` pins
+  # `hosted_api._packs_payload` / `_pack_catalog_rows` / `_graph_packs_view` —
+  # and `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERN match that
+  # REPLACES the `core` fallback. Measured before this arm:
+  # `--changed-files tortoise/hosted_api.py` → surfaces=['api','onboarding']
+  # with `test_pack_selection_by_graph.py` ABSENT, so the five tests pinning the
+  # add-list / `catalog_ok` / `source` shaping — the code a follow-up edit is
+  # most likely to touch — would not run at all. Keep the `core` entry too: the
+  # state-model half lives in `tortoise/pack_state.py`, which does select `core`
+  # today, and `--integrity` requires every file to carry a classification.
+  - test_pack_selection_by_graph.py
   # #7951 (remaining doors) / review P1: the write-door INVENTORY is
   # DUAL-REGISTERED with `core` (below) AND with every surface whose exact
   # SOURCE_PATTERN match can REPLACE the `core` fallback for a file the
@@ -614,6 +626,14 @@ surfaces:
   # the `core` fallback (#2938), so a core-only registration would never run on
   # an api-only PR. Same shape as the #4241 entry above.
   - test_1890_invite_ghost_sweep_schedule.py
+  # #8089: the Supabase lane's clock-expiry sweep and its live caller. Registered
+  # with `api` for the SAME reason as the #1890 row above: the step
+  # (`_sweep_expired_invitations`) and both call sites (`_run_boot_sweeps` +
+  # `_event_retention_loop`) live in tortoise/hosted_api.py, which SELECTS `api`
+  # — a named-surface match REPLACES the `core` fallback (#2938), so a core-only
+  # registration would never run on an api-only PR. The seam it calls
+  # (`expire_stale_invitations`) is tortoise/supabase_control.py, also `api`.
+  - test_8089_expired_invitation_sweep.py
   # #5388: org-enumeration completeness as a SERVER-READ property. Registered on
   # `api` and NOT dual-registered: the file pins tortoise/hosted_api.py (the
   # page-walk and its `order="id"` contract) and tortoise/supabase_control.py
@@ -2721,6 +2741,12 @@ surfaces:
   - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  # #2818: the per-kind VALUE-FIELD declaration surface — `values` in
+  # `pack_registry.VALID_KINDDEF_KEYS` with its closed vocabulary and
+  # shape rules (`tortoise/pack_values.py`), threaded to the S2/S4 prompt
+  # (brief → master → `_render_master*` / `_s2s4_rules`) and kept OUT of
+  # the classification index text so the npz cache key never rotates.
+  - test_pack_value_declarations_2818.py
   # #2728: the per-graph pack SELECTION state model + management surface
   # (`tortoise/pack_state.py`'s `:PackSelection` marker / `resolved_pack_set`
   # / `set_graph_packs`, and `GET`+`PUT /v1/graphs/{graph_id}/packs`).
@@ -5359,6 +5385,7 @@ durations:
   test_migration_append_only.py: 0.9
   test_notify.py: 0.4
   test_pack_kinds.py: 1.2
+  test_pack_value_declarations_2818.py: 2.0  # unmeasured — new in #2818; no sweep has collected it, so it carries the flat default exactly as an absent key would (#3419/#2788 rule). Do NOT substitute a local timing (a measured-on-this-box 4.9 was written here first and is deliberately gone: the map is a SHARD-LAYOUT input, so a number that does not model CI decides which files run together). The row also buys the coverage floor its margin — duration_coverage_issues() passes without it too (90.01% vs 90.12%), so the row is margin, not the floor. The refresher (tools/ci_timing.py) replaces this value from the first post-merge CI run that includes the file and clears the `unmeasured` tail.
   test_session_index_lock.py: 0.5
   eval/write_path/test_write_path_corpus.py: 0.5
   test_analyze_scoped.py: 0.6
@@ -6066,6 +6093,12 @@ durations:
   # a test is added, which is the failure this file exists to catch.
   # Refresh from the next sweep that collects it.
   test_1890_invite_ghost_sweep_schedule.py: 4.9  # unmeasured — local wall reading, no source leg collected it; refresh from the next sweep
+  # #8089: unmeasured at PR time — a file ADDED by this PR cannot appear in a
+  # junit artifact, so it has no swept duration (the #8849/#5275 trap). 11.0 is
+  # the local wall reading on this host for the whole file. The test count is
+  # deliberately NOT stated: a hand-written count here goes stale the moment a
+  # test is added. Refresh from the first post-merge sweep that collects it.
+  test_8089_expired_invitation_sweep.py: 11.0  # unmeasured — local wall reading, added by #8089; refresh from the next sweep
   test_5142_ontology_record.py: 3.7
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0

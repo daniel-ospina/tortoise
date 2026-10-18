@@ -161,8 +161,8 @@ def quiesce_testclient_background_work(monkeypatch) -> None:
        therefore quiesced here.
 
        The COMPLETE membership is the two entry points in `hosted_api.py` —
-       `_run_boot_sweeps`'s six-step `for label, fn in (...)` tuple and
-       `_event_retention_loop`'s seven `_guarded_step` awaits (the same six
+       `_run_boot_sweeps`'s seven-step `for label, fn in (...)` tuple and
+       `_event_retention_loop`'s eight `_guarded_step` awaits (the same seven
        plus `_refresh_cost_allocation`) — and this list exists so the next
        addition is visible, not to be re-derived here. It was INCOMPLETE until
        #4816: it named three of the six and omitted
@@ -179,9 +179,10 @@ def quiesce_testclient_background_work(monkeypatch) -> None:
 
        Enumerated for reference: `_sweep_events`, `_purge_deleted_orgs`,
        `_purge_deleted_accounts`, `_sweep_oauth_retention`,
-       `_sweep_invite_ghosts`, `_reconcile_metering_periods` (boot + loop), and
-       `_refresh_cost_allocation` (loop only). A new sweep reachable from
-       either entry point belongs here.
+       `_sweep_invite_ghosts`, `_sweep_expired_invitations` (#8089 — the
+       Supabase-lane clock-expiry sweep), `_reconcile_metering_periods`
+       (boot + loop), and `_refresh_cost_allocation` (loop only). A new sweep
+       reachable from either entry point belongs here.
 
        The CALLEE is deliberately not stubbed: `tests/test_export_delete.py`
        calls `ha_mod._purge_deleted_orgs()` directly and resolves it off the

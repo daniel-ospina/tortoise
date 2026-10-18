@@ -30,6 +30,7 @@ from tortoise.supabase_control import (
     count_graph_keys,
     delete_graph_row,
     expired_bootstrap_keys,
+    expire_stale_invitations,
     get_control_plane,
     github_credentials,
     graph_key_ids,
@@ -1412,6 +1413,196 @@ class TestInvitationSeam:
             invitation_accept(cp, "some-token", _U2)
         with pytest.raises(RuntimeError):
             invitation_rescind(cp, "inv-1", "team-1", _U3)
+
+
+# ── #8089: clock-expiry must stop blocking a re-invite ─────────────────────
+
+class TestExpiredInvitationRemint:
+    """#8089: an invitation that expires BY THE CLOCK must not hold the dedup.
+
+    The 0008 partial unique index is ``(org_id, email) WHERE status='pending'``
+    and a partial-index predicate must be IMMUTABLE, so ``expires_at > now()``
+    can never be part of it. Nothing flipped a clock-expired row out of
+    ``pending`` either (``invitation_expire`` is an admin action, this table had
+    no sweep), so the row held its index entry forever and every re-mint for
+    that address was a 409 — the #1890 defect in the registry lane, reached
+    here by a mechanism no predicate edit can close.
+
+    These are the O/I/T indicators: (1) a re-invite after ``expires_at`` passed
+    mints (200, not 409) and (2) the stale row leaves ``pending``, so an
+    unprompted sweep of the backlog reports/zeroes it.
+    """
+
+    def _mint_expired(self, fake, *, ahead: bool = False):
+        """Mint an invite, then move its expiry into the past by the clock.
+
+        The row is left ``status='pending'`` on purpose — that IS the defect
+        state (no writer ever moved it to 'expired').
+        """
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                             "owner-1")
+        delta = timedelta(days=1) if ahead else timedelta(minutes=1)
+        fake.tables["invitations"][0]["expires_at"] = (
+            datetime.now(UTC) + (delta if ahead else -delta)).isoformat()
+        return inv
+
+    def test_reinvite_after_clock_expiry_mints(self, fake):
+        """Indicator 1: expired-by-the-clock → re-mint succeeds (was 409)."""
+        first = self._mint_expired(fake)
+        second = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                                 "owner-1")
+
+        assert second["token"] and second["token"] != first["token"]
+        assert second["status"] == "pending"
+        rows = fake.tables["invitations"]
+        assert len(rows) == 2
+        # The stale row is MATERIALISED as terminal, not merely ignored: it
+        # leaves 'pending' so the partial unique index no longer holds it.
+        stale = next(r for r in rows if r["id"] == first["id"])
+        assert stale["status"] == "expired"
+        assert stale["expires_at"] < second["expires_at"]
+
+    def test_live_pending_still_409s(self, fake):
+        """The dedup must NOT weaken: an UNEXPIRED pending invite blocks."""
+        self._mint_expired(fake, ahead=True)
+        with pytest.raises(InvitationError) as ei:
+            invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        assert ei.value.status == 409
+        assert len(fake.tables["invitations"]) == 1
+        assert fake.tables["invitations"][0]["status"] == "pending"
+
+    def test_never_expiring_pending_still_409s(self, fake):
+        """A NULL ``expires_at`` never expires — the flip must not touch it."""
+        invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        fake.tables["invitations"][0]["expires_at"] = None
+        with pytest.raises(InvitationError) as ei:
+            invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        assert ei.value.status == 409
+        assert fake.tables["invitations"][0]["status"] == "pending"
+
+    def test_expiry_flip_is_scoped_to_the_minted_address(self, fake):
+        """The mint-path flip is scoped: another org's stale row is untouched.
+
+        A global sweep belongs to the scheduled caller, never to a request
+        path — a request must not pay for the fleet's backlog.
+        """
+        other = invitation_mint(fake, "team-2", "bob@example.com", "member",
+                                "u1")
+        fake.tables["invitations"][0]["expires_at"] = (
+            datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+
+        invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+
+        other_row = next(r for r in fake.tables["invitations"]
+                         if r["id"] == other["id"])
+        assert other_row["status"] == "pending"
+
+    def test_sweep_flips_the_terminal_state_backlog(self, fake):
+        """Indicator 2: the backlog is zeroed by a sweep and the count reported.
+
+        Nothing else in the lane ever wrote 'expired' for a clock expiry, so
+        this count IS the operator-visible indicator.
+        """
+        stale = self._mint_expired(fake)
+        live = invitation_mint(fake, "team-2", "carol@example.com", "member",
+                               "u1")
+        stale_expiry = fake.tables["invitations"][0]["expires_at"]
+
+        swept = expire_stale_invitations(fake)
+
+        assert swept == 1
+        rows = {r["id"]: r for r in fake.tables["invitations"]}
+        assert rows[stale["id"]]["status"] == "expired"
+        assert rows[live["id"]]["status"] == "pending"
+        # The expiry instant is the TRUTH of when it died — a clock expiry does
+        # not rewrite it (only an admin expire-now stamps expires_at=now).
+        assert rows[stale["id"]]["expires_at"] == stale_expiry
+
+    def test_sweep_is_idempotent(self, fake):
+        """Hourly cadence: a second run finds nothing (a real 0, not silence)."""
+        self._mint_expired(fake)
+        assert expire_stale_invitations(fake) == 1
+        assert expire_stale_invitations(fake) == 0
+        assert fake.tables["invitations"][0]["status"] == "expired"
+
+    def test_sweep_leaves_terminal_and_null_expiry_rows_alone(self, fake):
+        """Only PENDING rows are swept, and only those with a real deadline."""
+        accepted = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                                   "u1")
+        invitation_accept(fake, accepted["token"], _U2)
+        forever = invitation_mint(fake, "team-1", "carol@example.com", "member",
+                                 "u1")
+        fake.tables["invitations"][-1]["expires_at"] = None
+
+        assert expire_stale_invitations(fake) == 0
+        by_id = {r["id"]: r for r in fake.tables["invitations"]}
+        assert by_id[accepted["id"]]["status"] == "accepted"
+        assert by_id[forever["id"]]["status"] == "pending"
+
+    def test_sweep_honours_the_supplied_clock(self, fake):
+        """``now`` is injectable, so the sweep is testable without waiting."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        cutoff = (datetime.now(UTC) + timedelta(days=30)).isoformat()
+        assert expire_stale_invitations(fake, now=cutoff) == 1
+        assert fake.tables["invitations"][0]["status"] == "expired"
+        assert inv["status"] == "pending"  # the mint's own return is historical
+
+    def test_a_materialised_expired_row_reads_as_expired_on_both_accept_paths(
+            self, fake):
+        """A row the SWEEP retired must still tell the invitee it expired.
+
+        'expired' used to be reachable only via the admin expire-now action, so
+        both accept paths lumped it into "Invitation is not pending" — a 400
+        with nothing actionable in it. The sweep makes it the COMMON shape for
+        a dead link, and the answer must not depend on WHICH mechanism retired
+        the row: the derived-expiry branch and the materialised-status branch
+        say the same thing.
+        """
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        # The sweep-won order (a background sweep landing before the accept).
+        expire_stale_invitations(
+            fake, now=(datetime.now(UTC) + timedelta(days=30)).isoformat())
+        assert fake.tables["invitations"][0]["status"] == "expired"
+
+        with pytest.raises(InvitationError, match="expired") as ei:
+            invitation_accept(fake, inv["token"], _U2)
+        assert ei.value.status == 400
+        with pytest.raises(InvitationError, match="expired") as ei:
+            invitation_accept_by_id(fake, inv["id"], _U2,
+                                    user_email="bob@example.com")
+        assert ei.value.status == 400
+        assert fake.tables["org_memberships"] == []
+
+    def test_rescind_of_a_materialised_expired_row_is_idempotent(self, fake):
+        """The THIRD reader of this status must not 409 on a retired row.
+
+        ``DELETE /v1/invites/{id}`` → ``invitation_rescind`` is the admin
+        surface for exactly the rows the dashboard lists, and
+        ``pending_invitations`` (``GET /v1/invites``) filters ``status`` with no
+        expiry filter — so an admin can act on a row a sweep has just retired.
+        Before #8089 nothing wrote 'expired' for a clock expiry, so the
+        status-conditional PATCH matched and the call answered
+        ``{"revoked": True}``; materialising the terminal state must not turn
+        that same admin call (or a retried one) into a 409.
+        """
+        fake.seed("org_memberships", [{
+            "user_id": _U3, "org_id": "team-1", "role": "owner",
+            "status": "active",
+        }])
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        assert expire_stale_invitations(
+            fake, now=(datetime.now(UTC) + timedelta(days=30)).isoformat()) == 1
+        assert fake.tables["invitations"][0]["status"] == "expired"
+
+        result = invitation_rescind(fake, inv["id"], "team-1", _U3)
+        assert result == {"revoked": True, "already": True,
+                          "invitation_id": inv["id"]}
+        # Terminal means terminal: rescind answers, it does not re-classify —
+        # the expiry instant stays the truth of when the invite died.
+        assert fake.tables["invitations"][0]["status"] == "expired"
+        # Idempotent on the retry too (the dashboard double-click case).
+        assert invitation_rescind(fake, inv["id"], "team-1", _U3)["already"]
 # ── Onboarding / email / GitHub connect (plan Task 6, issue #764) ─────────
 
 class TestOnboardingState:

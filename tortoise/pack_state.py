@@ -472,7 +472,8 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
     return activated
 
 
-def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None) -> list[dict]:
+def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None,
+                     include_removed: bool = False) -> list[dict]:
     """Ensure-then-read introspection: the tenant's active packs.
 
     Reads ``PackInstall`` install-state from the tenant graph and joins the
@@ -493,6 +494,13 @@ def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None) -> list
     (that is what "removed" means on the user surface). ``status='disabled'``
     records ARE listed, with their status, because the user surface must show
     an approved-but-extraction-off pack in order to re-enable it.
+
+    ``include_removed`` is for the ONE caller that must not lose sight of a
+    tombstone: the Configured-packs view builds its add-list from the catalog
+    UNION the graph's own tombstones, because a tenant-authored pack is in no
+    catalog and would otherwise be un-addable once removed (removal is a
+    desired-state OMIT, not a re-insertable record). Its default keeps every
+    other reader's "removed means gone" contract.
     """
     g = _target_graph(sdk, graph_name)
     rows = _read_installs(g)
@@ -500,9 +508,18 @@ def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None) -> list
         ensure_tenant_packs(sdk, graph_name=graph_name)
         rows = _read_installs(g)
     catalog = _resolve_catalog()
+    # #2728 review P2-2: the read must report the SOURCE THE WRITE WOULD STORE.
+    # ``set_graph_packs`` writes ``rec.get("source")
+    # or ("starter" if ns in starter else "manual")``. This read defaulted a
+    # NULL ``source`` to ``starter`` unconditionally, so a record with no source
+    # (the import path MERGEs version/status/installed_at only — no source) for
+    # a NON-starter namespace read "Starter" and became "Manual" after the first
+    # Save: exactly the "column flipped after a Save" defect the Source column
+    # exists to prevent. Same derivation on both sides, one authority.
+    starter = set(_starter_namespaces())
     out: list[dict] = []
     for ns, version, status, source, installed_at in rows:
-        if (status or PACK_STATUS_ACTIVE) == PACK_STATUS_REMOVED:
+        if (status or PACK_STATUS_ACTIVE) == PACK_STATUS_REMOVED and not include_removed:
             continue  # #2728: a tombstone is absent from the list
         meta = catalog.get(ns, {})
         out.append({
@@ -512,7 +529,7 @@ def get_tenant_packs(sdk: TortoiseSDK, *, graph_name: str | None = None) -> list
             "tier": meta.get("tier", "free"),
             "description": meta.get("description", ""),
             "status": status or "active",
-            "source": source or "starter",
+            "source": source or ("starter" if ns in starter else "manual"),
             "installed_at": installed_at,
         })
     return sorted(out, key=lambda p: p["namespace"])
