@@ -5725,12 +5725,25 @@ class TortoiseSDK:
         that contract.
 
         A witness for a multi-statement ``fn`` whose own return value is not a
-        landing proof (the tag arm: ``_sync() -> None``) may instead CONSULT THE
-        GRAPH — the only requirement is that it answers that question and
-        mutates nothing. A witness reading the STATEMENT's result needs one to
+        landing proof (the tag arm: ``_sync() -> None``), or a witness that
+        READS THE GRAPH to classify a zero row (``_promote_witness``,
+        ``_retract_witness``, ``_cas_witness``), may answer that way — the only
+        requirement is that it answers the question and mutates nothing. A
+        witness reading the STATEMENT's result needs one to
         exist: such statements must RETURN something observable
         (``RETURN count(n)`` / ``RETURN r``), since a bare ``SET`` has no row to
         testify with.
+
+        Two consequences of the classification being the witness's job rather
+        than a fixed row rule, both shipped and pinned:
+        - it may answer True on a ZERO row when the node's state already
+          satisfies the ask (the #1088 idempotent promote: a status-only
+          promote on an already-live node);
+        - it may RAISE the caller's documented error instead of returning
+          False to end the retry immediately (a predicate-FALSE exception
+          abandons the window rather than spending it), which is how the
+          promote and retract witnesses keep their documented ``ValueError``
+          instead of surfacing the graph abort.
 
         Retry budget (#7405 P2-2). This inner loop owns the write refusals
         (graph-replaced / write-lock / MISCONF) with ``retries=3`` (~7-14 s) and
@@ -10868,8 +10881,10 @@ class TortoiseSDK:
         # way — one record shape, one commit point per call.
         # A promote that applies NOTHING never reaches here: a status-only
         # promote on a live node leaves before this emit on BOTH of its routes —
-        # the PRE-write probe (no PROMOTE WRITE issued; the door's status /
-        # label / validity READS still run) and the POST-write early return
+        # the PRE-write probe (no PROMOTE WRITE issued, and the `:Object` label
+        # probe is not reached either: the route returns on its status read at
+        # the top of the door, having issued only `RETURN n.status` + `get_point`)
+        # and the POST-write early return
         # (statement issued, matched nothing) — and every other zero-row
         # promote raises in the diagnostic above. So this emit is reached only
         # by a promote that landed, and the `res.result_set` conjunct that used
@@ -12257,20 +12272,26 @@ class TortoiseSDK:
         # The witness separates THOSE two from the third case — a re-issue that
         # lands nothing because the rebuild has not replayed the node yet —
         # which would otherwise be read as `not_draft` by that branch and
-        # consumed as a real refusal (`review_verdicts.keep()` rolls its review
+        # consumed as a real refusal (THREE consumers agree the answer is a
+        # decision: `VerdictLayer.decide(..., VERDICT_KEEP)` rolls its review
         # stamps back on `blocked`).
         def _cas_witness(result) -> bool:
             """A zero-row CAS re-issue, classified by the node's STATUS.
 
+            The CAS matches ONLY the literal ``'draft'`` (no ``IS NULL`` arm,
+            unlike ``update_point``'s promote arms and unlike
+            ``_promote_witness``'s table), so "which statuses explain a zero
+            row" is exactly "not ``draft``":
+
             - absent → False: the rebuild has not replayed the node, so a
               re-issue cannot apply and the abort must surface on exhaustion.
               A `not_draft` verdict here would name a state nobody observed.
-            - present, status ``draft`` / ``None`` → False: that does NOT
-              explain a zero row (the CAS predicate would have matched it), so
-              the re-issue simply has not been replayed; keep retrying rather
-              than manufacture a refusal for a point that is still promotable.
-            - present, any other status → True: a concurrent promote (or a
-              terminal transition) genuinely won the CAS, and the `raced`
+            - present, status ``draft`` → False: that does NOT explain a zero
+              row, so the re-issue has not landed; keep retrying rather than
+              manufacture a refusal for a point that is still promotable.
+            - present, any other status (a concurrent promote, a terminal
+              transition, or a NULL status — `null = 'draft'` is null, not
+              true, so it too explains the zero row) → True: the `raced`
               branch below reads the real status and answers accurately.
             """
             if result.result_set:
@@ -12281,8 +12302,7 @@ class TortoiseSDK:
             ).result_set
             if not rows:
                 return False
-            status_now = rows[0][0]
-            return status_now is not None and status_now != 'draft'
+            return rows[0][0] != 'draft'
 
         r = self._graph_write_with_retry(
             lambda: proj.g.query(
@@ -12297,6 +12317,13 @@ class TortoiseSDK:
         if not r.result_set:
             # Raced with a concurrent promote — re-read and report the outcome.
             re = self.get_point(point_id)
+            if not re:
+                # The node is GONE (deleted, or a second replacement between
+                # this call's two reads). That is not a state verdict, and
+                # `{}` would otherwise read as `status: None` → `not_draft`,
+                # naming a state nobody observed. Report the absence the entry
+                # contract already reports for the same condition.
+                raise ValueError(f"No point {point_id!r}")
             if re.get("status") == "live":
                 return {"id": point_id, "status": "live", "promoted": False,
                         "blocked": False, "reason": "already_live"}
