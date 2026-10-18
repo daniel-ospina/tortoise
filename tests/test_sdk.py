@@ -1456,23 +1456,29 @@ class TestExplicitDraftIsHonoured1088:
     command may move it to live. Only an explicit promotion (``promote_point``
     or ``update_point(status="live")``) may do that.
 
-    Non-vacuous on the paths #1088 CHANGED — the create default and the three
-    promotion clauses. Two other families are deliberately NOT inversion
-    evidence, named rather than counted:
+    Non-vacuous on the paths #1088 CHANGED that this class pins — the create
+    default, the two #131 edge-promotion clauses (``create_operator``,
+    ``create_direct_edge``) and ``update_point``'s already-live clause. The
+    third clause #1088 narrowed, ``_reapply_operator_promotion``, is not
+    exercised here, so it is named and not counted. Two other families are
+    deliberately NOT inversion evidence, also named rather than counted:
 
     (i) the four decide-part parameters of ``test_create_point_defaults_to_live``
         were born live already (#2199) — a BIRTH-STATUS pin for the universal
         ruling (#6107's acceptance rail asks for them). ``statement`` is the
         only discriminating parameter: it is the kind the pre-#1088 code
         defaulted to 'draft'.
-    (ii) the over-narrowing pins pass on the pre-#1088 code as well, and red
-        only if the narrowed ``IS NULL``-only clauses are removed outright:
-        ``test_1088_null_status_is_still_filled_with_live`` (the old
-        ``IS NULL OR = 'draft'`` clause also filled a never-set status),
+    (ii) the guard pins pass on the pre-#1088 code as well, and none of them
+        discriminates #1088:
+        ``test_1088_null_status_is_still_filled_with_live`` reds only if the
+        narrowed ``IS NULL`` clause is deleted outright;
         ``test_1088_explicit_draft_still_promotable`` and
-        ``test_1088_explicit_draft_promotable_via_update_point`` (the
-        ``promote_point`` / ``update_point`` draft→live guards are untouched by
-        #1088), and ``test_1088_update_point_still_refuses_terminal_resurrection``.
+        ``test_1088_explicit_draft_promotable_via_update_point`` red only if the
+        draft→live admission is NARROWED so a draft is refused (deleting the
+        guard outright leaves them GREEN — a wider guard still admits the
+        draft); ``test_1088_update_point_still_refuses_terminal_resurrection``
+        is the reverse: it reds when the already-live probe OVER-WIDENS to a
+        terminal status, or the terminal refusal is dropped.
     """
 
     @pytest.mark.parametrize("kind", [
