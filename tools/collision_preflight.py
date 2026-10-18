@@ -415,6 +415,14 @@ Env seams (tests point these at stubs; production defaults are the real tools)
     COLLISION_PREFLIGHT_REPO_ROOTS        ':'-separated roots scanned for
                                           sibling repos (default: parent of the
                                           current repo's main worktree)
+    COLLISION_PREFLIGHT_BOARD_CACHE       "1" enables the gate's PRIVATE board
+                                          cache (default: unset => inert,
+                                          behaviour byte-identical). It selects
+                                          no path: see the note below
+    COLLISION_PREFLIGHT_BOARD_CACHE_TTL   seconds a cached board stays servable
+                                          (default: 300, clamped to
+                                          fleet_state.STATE_FRESH_S; <= 0
+                                          disables the cache)
 The claim gate reads the fleet board at ``fleet_state.DEFAULT_OUT``, the user's
 state dir (``$HOME/.pi/agent/state/fleet-state.json``). The gate adds NO override
 of its own: no flag selects the board, no environment variable names it, and it
@@ -422,6 +430,20 @@ is never written from here. ``$HOME`` is simply where the OS keeps that
 directory — and how the tests place a board of their own — not a switch this
 gate offers; the read is pinned to the resolved constant and never re-derived
 (``test_the_board_is_read_from_default_out_not_from_a_redirected_home``).
+The gate does keep a PRIVATE copy of the PARTIAL board it rebuilds, for the
+duration of one refresh pass (``COLLISION_PREFLIGHT_BOARD_CACHE``, sources
+``rebuilt-cache``) — and that copy cannot be aimed either: the environment may
+only ENABLE it, while the directory is derived from ``DEFAULT_OUT``'s own parent,
+because a caller-selectable directory is a caller-selectable BOARD (a planted,
+answerable, holder-free one clears a live holder — the very thing the pin above
+forbids). Only a successful, answerable, correctly-stamped rebuild is ever
+stored, and it is never written back over the shared board.
+
+    OVERRIDES: the usual "the caller supplies the cache directory" convention —
+    the gate's private board-cache directory is DERIVED from
+    ``fleet_state.DEFAULT_OUT`` and is deliberately not settable; a
+    caller-named cache directory is a caller-named fleet board, which can clear
+    a live holder (#8948).
 """
 from __future__ import annotations
 
@@ -447,6 +469,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(3)  # EXIT_USAGE
 
 import argparse
+import contextlib
+import hashlib
 import json
 import math
 import os
@@ -1564,6 +1588,126 @@ def _worktree_liveness(
     except OSError:
         return True, "exists=yes gitdir=yes age=unreadable"
     return True, f"exists=yes gitdir=yes age={age_hours:.1f}h"
+
+
+# ── THE GATE'S PRIVATE BOARD CACHE (agent-infra #1985 follow-up) ────────────────────────────────
+# WHY. A refresh pass runs this tool once PER CANDIDATE (6 in a pass), and every run rebuilt the fleet
+# board: measured 15.9 s of a 19 s run (`gh_json` -> `open_issues` alone 11.2 s, plus ~3 s of
+# backoff). That is N x the same whole-repo read; it slows every pass into contention with the
+# controller's own sweep, and a CONTENDED GitHub read comes back as an UNQUERYABLE SURFACE — which is
+# not a verdict, so the backlog never filled and create activity stopped with no error anywhere.
+#
+# WHAT. OPT-IN, and ONE value only: the PARTIAL board this gate rebuilds (`build_state` with
+# `ci_verdict=None, live_diff=None`), stored for the duration of a pass and served to the NEXT
+# candidate in it. Only SUCCESSFUL, answerable, correctly-stamped rebuilds are stored — an unreadable
+# surface must never be cached as "empty", which would turn a probe failure into a clean verdict.
+# ⛔ The git enumerations (`for-each-ref refs/heads`, `refs/remotes`, `rev-list --first-parent`) are
+# deliberately NOT cached: they cost ~65 ms combined (~0.4% of the rebuild), and the branch set is
+# exactly the signal that a lane claimed an issue seconds ago — a snapshot that outlives a branch
+# creation hides the one blocker the branch surfaces supply (#4256). Zero staleness is affordable
+# there; it is not affordable here (the rebuild is the 84%).
+#
+# ⛔ THE CACHE DIRECTORY IS NOT SETTABLE, AND THAT IS THE POINT (review P1). A caller-selectable
+# directory is a caller-selectable BOARD: `_board_can_answer` / `_board_is_for_repo` / `state_freshness`
+# are all fields read OUT of that same file, so a crafted board — fresh, answerable, correctly stamped,
+# listing no holder — clears a live holder and sends a second lane into one checkout (#3061 / #4256).
+# So the module contract holds unchanged: no environment variable NAMES the board. The seam below only
+# ENABLES the gate's own copy, and the directory is DERIVED from `fleet_state.DEFAULT_OUT` — the same
+# directory the board itself is read from, i.e. exactly the trust boundary this tool has always
+# accepted (a same-user process can forge the shared board too; the gate never claimed to defend that,
+# and a signature would need a key it does not have). The KEY carries the slug AND repo_root, so two
+# repos — or two clones of one repo — can never answer each other's pre-flight.
+#
+# Env seams (both are rows in the module docstring's table):
+#   COLLISION_PREFLIGHT_BOARD_CACHE      "1" enables the cache (default: unset => inert, behaviour
+#                                        byte-identical; any other value => off)
+#   COLLISION_PREFLIGHT_BOARD_CACHE_TTL  seconds a cached board stays servable (default 300), clamped
+#                                        to `fleet_state.STATE_FRESH_S`; <= 0 disables the cache
+BOARD_CACHE_ENV = "COLLISION_PREFLIGHT_BOARD_CACHE"
+BOARD_CACHE_TTL_ENV = "COLLISION_PREFLIGHT_BOARD_CACHE_TTL"
+BOARD_CACHE_DIRNAME = ".preflight-board-cache"
+BOARD_CACHE_TTL_DEFAULT = 300.0
+_BOARD_CACHE_ON = frozenset({"1", "true", "yes", "on"})
+
+
+def _cache_dir() -> str | None:
+    """The gate's own cache directory — DERIVED, never named by the caller (see above)."""
+    if (os.environ.get(BOARD_CACHE_ENV) or "").strip().lower() not in _BOARD_CACHE_ON:
+        return None
+    return os.path.join(
+        os.path.dirname(os.fspath(fleet_state.DEFAULT_OUT)), BOARD_CACHE_DIRNAME,
+    )
+
+
+def _cache_path(key: str) -> str | None:
+    d = _cache_dir()
+    if not d:
+        return None
+    digest = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
+    return os.path.join(d, digest + ".json")
+
+
+def _cache_ttl() -> float:
+    """Seconds a cached board stays servable — bounded by the BOARD'S OWN window.
+
+    `nan` / `inf` are the trap values for a numeric env seam: `inf <= 0` and `x > nan` are both
+    False, so a single mistyped export would otherwise make an entry immortal — the same defect the
+    numeric seams' `nan`/`inf` tests exist to prevent. And a RAISED TTL must not outlive the window
+    `fleet_state` itself enforces, or the cache would serve a board the fleet already calls STALE;
+    the ceiling is therefore `STATE_FRESH_S`, not the caller's wish. A non-numeric value falls back
+    to the default (the tightest of the accepted bounds) rather than crashing a cache that is, at
+    worst, an optimisation.
+    """
+    try:
+        ttl = float(os.environ.get(BOARD_CACHE_TTL_ENV) or BOARD_CACHE_TTL_DEFAULT)
+    except ValueError:
+        ttl = BOARD_CACHE_TTL_DEFAULT
+    if not math.isfinite(ttl):
+        ttl = BOARD_CACHE_TTL_DEFAULT
+    if ttl <= 0:
+        return 0.0
+    return min(ttl, float(fleet_state.STATE_FRESH_S))
+
+
+def _cache_get(key: str):
+    path = _cache_path(key)
+    if not path:
+        return None
+    ttl = _cache_ttl()
+    if ttl <= 0:
+        return None
+    try:
+        if time.time() - os.path.getmtime(path) > ttl:
+            return None
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _cache_put(key: str, value) -> None:
+    path = _cache_path(key)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(value, fh)
+        os.replace(tmp, path)
+    except Exception as exc:
+        # ⛔ A FAILED PUT IS NOT SILENT. Dropping the cache is the safe direction; doing it invisibly is
+        # not — a non-serialisable board would quietly restore one rebuild per candidate, i.e. the
+        # pre-fix cost, with nothing anywhere saying so (review P2). One line on stderr, no crash: the
+        # rebuild already happened, so this run's verdict is unaffected.
+        print(
+            f"collision-preflight: board cache write failed ({type(exc).__name__}: {exc}) — "
+            "rebuilding the board on every run of this pass",
+            file=sys.stderr,
+        )
+        with contextlib.suppress(OSError):
+            os.unlink(f"{path}.{os.getpid()}.tmp")
+        return
 
 
 def _git_refs(
@@ -3385,9 +3529,21 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
     work after the last build is invisible in a stale board, which would then
     report "nobody is working this" about work that started minutes ago.
 
-    `why` is non-empty exactly when no board could be produced. A successful
-    rebuild is served from MEMORY and never written back — see the module
-    docstring's "The gate never writes the shared board".
+    `why` is non-empty exactly when no board could be produced.
+
+    `source` names WHICH of the four reads answered, and it is rendered into the
+    gate's own note, so a reader can see which one it was:
+
+    * ``cache``         — the shared board at `fleet_state.DEFAULT_OUT`, fresh and
+                          answerable;
+    * ``rebuilt-cache`` — the gate's PRIVATE copy of the partial board it rebuilt
+                          earlier in this pass (`COLLISION_PREFLIGHT_BOARD_CACHE`),
+                          served only while the BOARD'S OWN clock says it is fresh;
+    * ``rebuilt``       — a rebuild performed on this run. It is served from memory
+                          and written to that private cache, never back over the
+                          shared board — see the module docstring's "The gate never
+                          writes the shared board";
+    * ``unmeasured``    — no board could be produced (`why` says why, and it blocks).
 
     The rebuild uses the board's OWN tools (bare gh / cmux from PATH), not this
     tool's `--gh` / `--git`. That is safe in the fail-closed direction: a rebuild
@@ -3419,6 +3575,30 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
         # rebuild is a real measurement, and only if IT cannot answer is the
         # question unmeasured. A stale, other-repo, or unstamped board falls
         # through to the same rebuild, which is served from memory.
+    # ⛔ THE GATE'S OWN CACHE — NOT the shared board. `build_state` here is a PARTIAL board (no per-PR
+    # CI, no review `diff-match`), so writing it to `fleet_state.DEFAULT_OUT` would degrade it for every
+    # other consumer (see the note above `return rebuilt, "rebuilt", ""`). Caching it in the gate's
+    # PRIVATE cache degrades nothing: the only reader is this gate, and the value is the same partial
+    # board it would have computed anyway.
+    # WHY IT MATTERS: a refresh pass runs this tool once PER CANDIDATE, and the rebuild measured 15.9 s
+    # of a 19 s run (`fleet_state.open_issues` alone 11.2 s + 3 s of backoff). Six candidates paid it six
+    # times, which pushed a pass into contention with the controller's own sweep; a contended surface
+    # reads as UNQUERYABLE, which is not a verdict, so the backlog never filled and create activity
+    # stopped. Paying it once per pass is honest; paying it once per candidate is waste.
+    # ⛔ THE KEY CARRIES repo_root, not just the slug: two CLONES of one repo sharing a cache dir must
+    # not serve each other's board, whose holder attribution is computed against that clone's own
+    # local branches and worktrees (#4256 hazard).
+    board_key = f"partial_board|{slug}|{repo_root}"
+    cached_board = _cache_get(board_key)
+    if isinstance(cached_board, dict) and not _board_can_answer(cached_board) \
+            and _board_is_for_repo(cached_board, slug) \
+            and not fleet_state.state_freshness(cached_board)["stale"]:
+        # ⛔ AND THE BOARD'S OWN CLOCK BOUNDS THE HIT (review P2). A raised TTL would otherwise honour
+        # an aged board — a lane that began work after the cached build is invisible in it, which reads
+        # as "nobody is working this" about work that started minutes ago. `_cache_ttl` clamps the TTL
+        # to `STATE_FRESH_S`, so this is belt and braces; it also cancels a skew-dated `generated_at`
+        # that a clamped TTL alone would let through.
+        return cached_board, "rebuilt-cache", ""
     try:
         rebuilt = fleet_state.build_state(
             repo=slug,
@@ -3454,6 +3634,7 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
     # fallback as if it were the board. A read-only gate must not do that. Paying
     # the rebuild on every pre-flight while the cache is stale is the honest
     # price; the board's own writer repairs it.
+    _cache_put(board_key, rebuilt)
     return rebuilt, "rebuilt", ""
 
 
