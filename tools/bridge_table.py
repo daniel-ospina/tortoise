@@ -363,6 +363,186 @@ CONTESTED_DESTINATION: dict[str, tuple[str, str]] = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────
+# THE OWNER-APPROVED MENU — the SECOND authority, read from a doc (#4513).
+#
+# Part D reads `beta-sdk-surface.md`. `canonical-mcp-tools.md` is the other
+# owner-approved doc (`approval_status: approved`, approvedBy daniel-ospina,
+# approval_pr 4120) and its `Absorbs` cell is the owner's OWN record of which
+# current name folds into which target — a binding this file never consulted, so
+# a row could contradict it and the build stayed green (#4513 §1/§2). Where the
+# two approved docs disagree there is no ruling to apply, and picking one here
+# would silently reverse an owner decision: the disagreement is DISCLOSED (§D4)
+# with both citations, and the map is NOT edited.
+#
+# What this section CAN decide is narrower and fully mechanical: whether a target
+# the row's citation names is one the approved menu actually absorbs this method
+# into. That is what turns `belief_timeline`'s "`poll_events` where they are a
+# timeline" from an open question into a REFUTED reading — `poll_events`'s
+# approved row absorbs `events_poll` and nothing else.
+# ─────────────────────────────────────────────────────────────────────
+APPROVED_DOC = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+
+# The doc states, in its own prose, that some members are absorbed only
+# TRANSITIVELY ("`paginated_query` and `query_points_by_tag` sit inside `query`").
+# Reading that is not an inference — it is the doc's own closure, so it is parsed
+# rather than hand-copied: a copy would be a second answer that can drift.
+_SIT_INSIDE = re.compile(r"([`\w,\s]+?)\s+sit inside\s+`([a-z_][a-z0-9_]*)`")
+_APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|")
+_IDENT = re.compile(r"[a-z_][a-z0-9_]*")
+
+# The doc's title claims 23 rows. A bound, not a count: it exists so a parse break
+# (a table reflowed out of the `N | name | absorbs` shape) fails the build instead
+# of quietly resolving every disputed row to "no approved row" — a guard that
+# resolves nothing cannot fail, and would read as green.
+APPROVED_MIN_ROWS = 20
+
+
+def _known_names() -> set[str]:
+    """Every identifier an `Absorbs` cell can legitimately name.
+
+    Prose sits in the SAME cell as the members (row 17 explains beta's split in a
+    sentence), so a bare token scan would mint `fields`/`become`/`into` as absorbed
+    names. Restricting to the known universe is what keeps the parse honest without
+    needing the cell to be machine-formatted.
+    """
+    names = set(TARGET_MCP)
+    for r in _registry_rows():
+        if r["sdk_method"]:
+            names.add(r["sdk_method"])
+        names.add(r["name"].removeprefix("tortoise_"))
+    return names
+
+
+def _approved_menu() -> dict[str, dict]:
+    """approved row name -> {members, successors, quote, closes}.
+
+    `members` is the closure of the row's `Absorbs` cell (its own name included, as
+    the cell states it); `successors` are the TARGET names the cell names as beta's
+    successors of the row (`revise_knowledge`'s cell states its own split into
+    `update_knowledge` + `supersede_knowledge`); `quote` is the WHOLE table row, by
+    construction, so it cannot be a truncation of what the doc says.
+    """
+    text = APPROVED_DOC.read_text(encoding="utf-8")
+    known = _known_names()
+
+    # `X, Y sit inside Z` — Z absorbs X and Y transitively.
+    closes: dict[str, set[str]] = {}
+    for m in _SIT_INSIDE.finditer(text):
+        for inner in _IDENT.findall(m.group(1)):
+            closes.setdefault(m.group(2), set()).add(inner)
+
+    menu: dict[str, dict] = {}
+    for line in text.splitlines():
+        row = _APPROVED_ROW.match(line)
+        if not row:
+            continue
+        name = row.group(2)
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        toks = {t for t in _IDENT.findall(cells[2]) if t in known and t != name}
+        menu[name] = {
+            "lineno": int(row.group(1)),
+            "members": toks | {name},
+            "successors": sorted(toks & set(TARGET_MCP)),
+            "quote": line.rstrip(),
+            "closes": set(),
+        }
+
+    # Apply the closure the doc states, one hop at a time until it settles: a member
+    # that `sit inside`s another member is a member too.
+    for name, r in menu.items():
+        members = set(r["members"])
+        changed = True
+        while changed:
+            changed = False
+            for outer in list(members):
+                for inner in closes.get(outer, ()):
+                    if inner in known and inner not in members:
+                        members.add(inner)
+                        changed = True
+        r["members"] = members
+        r["closes"] = closes.get(name, set())
+    return menu
+
+
+def _approved_errors(menu: dict[str, dict]) -> list[str]:
+    """Structural failures only — a DISAGREEMENT is a finding, not an error."""
+    if not menu:
+        return [
+            f"NO owner-approved menu parsed out of {APPROVED_DOC.name} — the approved-list "
+            "cross-check is UNARMED, so every disputed row would read as 'not stated'"
+        ]
+    if len(menu) < APPROVED_MIN_ROWS:
+        return [
+            f"only {len(menu)} approved rows parsed out of {APPROVED_DOC.name} (expected at "
+            f"least {APPROVED_MIN_ROWS} — the doc's own title claims 23); the table shape has "
+            "changed and the parse is now silently dropping rows"
+        ]
+    return []
+
+
+def _approved_verdict(menu: dict[str, dict], aliases: set[str], target: str) -> str:
+    """How the approved menu reads `target` for a method — four mechanical verdicts.
+
+    `row`       the target is an approved row that absorbs this method — the strongest
+                reading available: the approved doc ITSELF places the method there.
+    `successor` the target is a TARGET the absorbing row's cell names as beta's split
+                of that row, so the row does support it (one of several successors).
+    `refuted`   an approved row (or a successor of one) covers this target and does NOT
+                absorb the method — the approved doc places the method elsewhere.
+    `unstated`  the approved doc names no row for this target at all, so it neither
+                supports nor refutes it.
+    """
+    row = menu.get(target)
+    if row is not None:
+        return "row" if aliases & row["members"] else "refuted"
+    hosts = [r for r in menu.values() if target in r["successors"]]
+    if hosts:
+        return "successor" if any(aliases & h["members"] for h in hosts) else "refuted"
+    return "unstated"
+
+
+def _approved_readings(
+    menu: dict[str, dict], findings: tuple[list[dict], list[dict], list[dict]]
+) -> list[dict]:
+    """One reading per DISPUTED row, from the approved menu.
+
+    Disputed = every row a downstream section already flags (D2 disagreeing with its
+    citation, D2b supported only beyond the first clause, D3 under a multi-target
+    citation). The reading covers the map's own destination AND every rival target the
+    citation names, because the rival is what the ambiguity is about.
+    """
+    methods = {r["name"]: r["sdk_method"] for r in _registry_rows()}
+    disputed: dict[str, dict] = {}
+    for group in findings:
+        for f in group:
+            disputed.setdefault(f["tool"], f)
+
+    out: list[dict] = []
+    for tool, f in sorted(disputed.items()):
+        method = methods.get(tool, "")
+        aliases = {a for a in (method, tool.removeprefix("tortoise_")) if a}
+        homes = sorted(n for n, r in menu.items() if aliases & r["members"])
+        home = homes[0] if len(homes) == 1 else None
+        dest = DESTINATION[tool]
+        rivals = [t for t in f["named"] if t != dest]
+        out.append(
+            {
+                "tool": tool,
+                "method": method,
+                "dest": dest,
+                "homes": homes,
+                "home": home,
+                "row_no": menu[home]["lineno"] if home else 0,
+                "quote": menu[home]["quote"] if home else "",
+                "successors": menu[home]["successors"] if home else [],
+                "dest_verdict": _approved_verdict(menu, aliases, dest),
+                "rivals": [(t, _approved_verdict(menu, aliases, t)) for t in rivals],
+            }
+        )
+    return out
+
+
 def _registry_rows() -> list[dict]:
     """Every ToolDefinition in the registry, with its SOURCE line number.
 
@@ -925,6 +1105,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
     # ── Part D — the destination citations ──────────────────────────
     n_cited = len(cites)
     unsupported, clause_only, ambiguous = _citation_findings(cites)
+    approved = _approved_readings(_approved_menu(), (unsupported, clause_only, ambiguous))
     by_quote: dict[tuple[str, str], list[str]] = {}
     for tool, c in sorted(cites.items()):
         by_quote.setdefault((c["doc"], c["quote"]), []).append(tool)
@@ -1059,6 +1240,100 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         out.append("| *(none)* | | | |")
     out += [
         "",
+        "### D4 — what the OWNER-APPROVED menu says about every disputed row (#4513)",
+        "",
+        "Part D above reads `beta-sdk-surface.md`. This section reads the OTHER owner-approved",
+        "doc — `canonical-mcp-tools.md` (`approval_status: approved`, PR #4120) — whose `Absorbs`",
+        "cell is the owner's own record of **which current name folds into which target**. That",
+        "binding was never consulted here, so a row could contradict the approved menu and the",
+        "build stayed green (#4513 §1/§2).",
+        "",
+        "**Nothing is decided here.** Where the two approved docs disagree, the ruling is the",
+        "owner's and the map is NOT edited — the disagreement is shown with BOTH citations so it",
+        "is visible at the row. What the approved menu *can* settle mechanically is narrower:",
+        "does a target the row's citation names actually absorb this method? The sibling",
+        "`docs/product/sdk-rename-table.md` (§C3b) reads these rows from beta's prose ALONE and",
+        "states a winner on several of them; this section is the other approved doc's side of the",
+        "same rows, not a correction of it.",
+        "",
+        "- **`row`** — the target is an approved row that absorbs this method: the approved doc",
+        "  itself places the method there.",
+        "- **`successor`** — the target is one the absorbing row's cell names as beta's own split",
+        "  of that row, so the row supports it (one of several successors).",
+        "- **`refuted`** — an approved row (or a successor of one) covers this target and does",
+        "  **not** absorb this method: the approved doc places the method elsewhere.",
+        "- **`unstated`** — the approved doc names no row for this target, so it neither supports",
+        "  nor refutes it. A row resting only on `unstated` is genuinely owner-open.",
+        "",
+        "The membership set is the doc's OWN closure, parsed from its statement that",
+        "`paginated_query` and `query_points_by_tag` `sit inside` `query` — a name it collapses",
+        "without listing still resolves.",
+        "",
+        "| Row | Map destination | Approved home | Home's beta successors | Map destination reads | Citation rivals read |",
+        "|---|---|---|---|---|---|",
+    ]
+    if approved:
+        for a in approved:
+            home = (
+                f"`{a['home']}` (row {a['row_no']})"
+                if a["home"]
+                else (
+                    "*(several: " + ", ".join(f"`{h}`" for h in a["homes"]) + ")*"
+                    if a["homes"]
+                    else "*(no approved row names it)*"
+                )
+            )
+            succ = ", ".join(f"`{s}`" for s in a["successors"]) or "*(none)*"
+            rivals = ", ".join(f"`{t}` — **{v}**" for t, v in a["rivals"]) or "*(none)*"
+            out.append(
+                f"| `{a['tool']}` | `{a['dest']}` | {home} | {succ} | "
+                f"**{a['dest_verdict']}** | {rivals} |"
+            )
+    else:
+        out.append("| *(none)* | | | | | |")
+
+    agrees = sum(1 for a in approved if a["dest_verdict"] in ("row", "successor"))
+    refuted = [a["tool"] for a in approved if a["dest_verdict"] == "refuted"]
+    unstated = [a["tool"] for a in approved if a["dest_verdict"] == "unstated"]
+    out += [
+        "",
+        f"**{agrees} of {len(approved)} disputed rows are placed by the approved menu where this",
+        f"map places them; {len(refuted)} are placed ELSEWHERE by it; {len(unstated)} are not",
+        "named by it at all.** Every count is computed from the doc, not typed.",
+        "",
+    ]
+    if refuted:
+        out.append(
+            "- **The approved menu contradicts the map on**: "
+            + ", ".join(f"`{t}`" for t in refuted)
+            + " — two owner-approved docs disagreeing is an owner ruling, not a build step,"
+            " so the destinations stand and the conflict is recorded here."
+        )
+    if unstated:
+        out.append(
+            "- **The approved menu does not name the map's destination for**: "
+            + ", ".join(f"`{t}`" for t in unstated)
+            + " — the row is not refuted either; it rests on beta alone and is genuinely"
+            " owner-open."
+        )
+    out += [
+        "",
+        "**The approved row itself, for each disputed row that has one** (whole table row, by",
+        "construction, so it cannot be a truncation of what the doc says):",
+        "",
+    ]
+    if approved:
+        for a in approved:
+            if not a["quote"]:
+                out.append(f"- **`{a['tool']}`** — no approved row absorbs `{a['method']}`.")
+                continue
+            out.append(f"- **`{a['tool']}`** — `{a['method']}` is absorbed by `{a['home']}`:")
+            out.append(f"  > {a['quote']}")
+    else:
+        out.append("None.")
+
+    out += [
+        "",
         "---",
         "",
         "## Reproduce",
@@ -1081,7 +1356,7 @@ def main() -> int:
     sdk_defs = _sdk_targets()
     cites = _doc_citations()
 
-    errs = [*_validate(rows), *_citation_errors(cites)]
+    errs = [*_validate(rows), *_citation_errors(cites), *_approved_errors(_approved_menu())]
     if errs:
         print("BRIDGE TABLE BUILD FAILURE — the map and the registry disagree:", file=sys.stderr)
         for e in errs:

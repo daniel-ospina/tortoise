@@ -1419,3 +1419,208 @@ def test_doc_citations_do_not_drop_a_shared_sdk_method(tmp_path, monkeypatch) ->
         f"the shared `get_point` binding dropped {missing} from the citations — the "
         "method->tool lookup is last-wins again"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# §D4 — the owner-approved MENU cross-check (#4513)
+#
+# #4513 was filed because the bridge table's destination map was never bound to the
+# OTHER owner-approved doc: `canonical-mcp-tools.md`, whose `Absorbs` cell is the
+# owner's own record of which current name folds into which target. Two artifacts
+# of the same epic disagreed and nothing could tell. §D4 reads that doc, so these
+# tests pin the derivation — not the wording.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _d4_rows(doc: str) -> dict[str, list[str]]:
+    """§D4's table, row -> cells. Parsed out of the GENERATED doc, not the source."""
+    section = _section(doc, "### D4 —")
+    rows: dict[str, list[str]] = {}
+    for line in section.splitlines():
+        m = re.match(r"^\| `(tortoise_[a-z0-9_]+)` \| (.+) \|$", line)
+        if m:
+            rows[m.group(1)] = [c.strip() for c in m.group(2).split("|")]
+    return rows
+
+
+def test_d4_covers_exactly_the_disputed_rows_and_recomputes_every_cell() -> None:
+    """§D4 must list every disputed row — and only those — with the recomputed verdicts.
+
+    Non-vacuity matters here more than elsewhere: the section's whole value is that a
+    row the approved menu CONTRADICTS is visible at the row. A section that silently
+    emptied (a parse break, a renamed helper) would read as "no disagreements".
+    """
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    cites = bt._doc_citations()
+    findings = bt._citation_findings(cites)
+    got = _d4_rows(doc)
+    assert got, "§D4 rendered no rows — the approved-menu cross-check is unarmed"
+
+    disputed = {f["tool"] for group in findings for f in group}
+    assert set(got) == disputed, (
+        f"§D4 rendered {sorted(got)} but the disputed set is {sorted(disputed)} — the "
+        "section must disclose the rows the other sections flag, and nothing else"
+    )
+
+    want = {a["tool"]: a for a in bt._approved_readings(bt._approved_menu(), findings)}
+    for tool, cells in got.items():
+        row = want[tool]
+        assert f"`{row['dest']}`" in cells[0], (
+            f"§D4 says {tool}'s map destination is {cells[0]!r}; the map says {row['dest']!r}"
+        )
+        assert cells[3].strip("*") == row["dest_verdict"], (
+            f"§D4 says the approved menu reads {tool}'s destination as {cells[3]!r}; "
+            f"recomputed {row['dest_verdict']!r}"
+        )
+        for rival, verdict in row["rivals"]:
+            assert f"`{rival}` — **{verdict}**" in cells[4], (
+                f"§D4 does not report rival `{rival}` as {verdict!r} for {tool}: {cells[4]!r}"
+            )
+
+
+def test_d4_records_the_two_4513_rows_that_were_open() -> None:
+    """#4513's own two open rows, pinned to the approved menu's answer.
+
+    §1 (`annotate_operator`) and §2 (`belief_timeline`) were both filed as needing a
+    ruling because beta's prose clause is ambiguous. The approved menu is NOT
+    ambiguous about either, and the artifact must say so — that is what stops the next
+    lane from re-litigating them from the clause alone:
+
+    * `annotate_operator` is named in `adjust_relationship`'s own Absorbs cell (row 21),
+      so the map's `adjust_relationship` is the approved reading and the citation's
+      `update_knowledge` is refuted — row 17's split absorbs it for `promote_point`
+      and `set_point_baseline`, NOT for annotation.
+    * `belief_timeline`'s `poll_events` reading ("where they are a timeline") is
+      refuted: row 8 `poll_events` absorbs `events_poll` and nothing else.
+    """
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    rows = _d4_rows(doc)
+    approved_doc = (ROOT / "docs" / "product" / "canonical-mcp-tools.md").read_text(
+        encoding="utf-8"
+    )
+
+    annotate = rows["tortoise_annotate_operator"]
+    assert "`adjust_relationship` (row 21)" in annotate[1], (
+        "§D4 does not name the approved row that absorbs `annotate_operator`: "
+        f"{annotate[1]!r} — the row the owner reviews must be visible"
+    )
+    assert annotate[3].strip("*") == "row", (
+        "the approved menu places `annotate_operator` in `adjust_relationship`, so its "
+        f"reading of the map's destination must be `row`, got {annotate[3]!r}"
+    )
+    assert "`update_knowledge` — **refuted**" in annotate[4], (
+        "§D4 must refute the citation's `update_knowledge` reading for "
+        f"`annotate_operator`: {annotate[4]!r}"
+    )
+
+    timeline = rows["tortoise_belief_timeline"]
+    assert "`poll_events` — **refuted**" in timeline[4], (
+        "§D4 must refute `poll_events` for `belief_timeline` — that is #4513 §2's "
+        f"open question, answered by the approved doc: {timeline[4]!r}"
+    )
+    assert "`recall_beliefs` (row 3)" in timeline[1], (
+        f"§D4 does not name `belief_timeline`'s approved home: {timeline[1]!r}"
+    )
+
+    # Both claims are about the doc, so they are re-checked against the doc itself.
+    assert (
+        "| 21 | `adjust_relationship` | operator_action, annotate_operator, "
+        "mitigate_operator |" in approved_doc
+    )
+    assert "| 8 | `poll_events` | events_poll |" in approved_doc
+
+
+def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypatch) -> None:
+    """The transitive members are PARSED from the doc's own sentence, not hand-copied.
+
+    `canonical-mcp-tools.md` does not list `query_points_by_tag` in row 2 — it says, in
+    prose, that it `sit inside` `query`. A copy of that closure in this file would be a
+    second answer that can drift from the doc, which is the defect class of the whole
+    issue. Removing the sentence must change the derivation; if it does not, the closure
+    is not being read.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    assert "sit inside" in real, (
+        "the approved doc no longer states its transitive members — the closure parse "
+        "below would be vacuous"
+    )
+    menu = bt._approved_menu()
+    assert "query_points_by_tag" in menu["list_knowledge"]["members"], (
+        "the doc says `query_points_by_tag` sits inside `query`, and row 2 absorbs "
+        "`query` — the closure is not being applied"
+    )
+
+    stripped = re.sub(r"[`\w,\s]+?sit inside `[a-z_]+`", "", real)
+    path = tmp_path / "approved-without-closure.md"
+    path.write_text(stripped, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+    closed = bt._approved_menu()
+    assert "query_points_by_tag" not in closed["list_knowledge"]["members"], (
+        "the closure survived deleting the doc's own sentence — so it is hard-coded "
+        "somewhere instead of parsed"
+    )
+
+
+def test_approved_menu_guards_fail_closed_on_a_parse_break(tmp_path, monkeypatch) -> None:
+    """A parse break must FAIL, not silently resolve every row to "no approved row".
+
+    A guard that resolves nothing cannot fail. If the approved doc is reflowed (or
+    renamed), `_approved_menu()` returns {} and every disputed row would read
+    `unstated`/`(no approved row names it)` — a green build claiming the owner never
+    spoke about any of them.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    empty = tmp_path / "empty.md"
+    empty.write_text("# nothing here\n", encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", empty)
+    errs = bt._approved_errors(bt._approved_menu())
+    assert errs and "UNARMED" in errs[0], f"an empty approved doc did not fail: {errs}"
+
+    thin = tmp_path / "thin.md"
+    thin.write_text(
+        "| 1 | `search_knowledge` | search |\n| 2 | `list_knowledge` | query |\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bt, "APPROVED_DOC", thin)
+    errs = bt._approved_errors(bt._approved_menu())
+    assert errs and "silently dropping rows" in errs[0], (
+        f"a truncated approved doc did not fail closed: {errs}"
+    )
+
+
+def test_approved_verdict_is_mechanical_in_all_four_directions() -> None:
+    """`row` / `successor` / `refuted` / `unstated`, on a synthetic menu.
+
+    The four verdicts are the entire ruling-free content of §D4: `row` and `successor`
+    are support, `refuted` is the approved doc placing the method elsewhere, and
+    `unstated` is silence. Collapsing `refuted` into `unstated` would turn #4513 §2 back
+    into an open question, so each direction is pinned separately.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import _approved_verdict
+
+    menu = {
+        "poll_events": {"members": {"poll_events", "events_poll"}, "successors": []},
+        "revise_knowledge": {
+            "members": {"revise_knowledge", "promote_point", "invalidate"},
+            "successors": ["update_knowledge"],
+        },
+        "adjust_relationship": {
+            "members": {"adjust_relationship", "annotate_operator"},
+            "successors": [],
+        },
+    }
+    assert _approved_verdict(menu, {"annotate_operator"}, "adjust_relationship") == "row"
+    assert _approved_verdict(menu, {"promote_point"}, "update_knowledge") == "successor"
+    assert _approved_verdict(menu, {"annotate_operator"}, "update_knowledge") == "refuted"
+    assert _approved_verdict(menu, {"belief_timeline"}, "poll_events") == "refuted"
+    assert _approved_verdict(menu, {"belief_timeline"}, "check_confidence") == "unstated"

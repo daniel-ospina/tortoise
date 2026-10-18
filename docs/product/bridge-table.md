@@ -378,6 +378,85 @@ rows in D1, where the clause a truncated read would have dropped is visible.
 | `tortoise_session_context` | `check_confidence` | `check_confidence`, `poll_events` | `check_confidence` |
 | `tortoise_set_source_tier` | `manage_source_trust` | `manage_source_trust`, `list_knowledge` | `manage_source_trust` |
 
+### D4 — what the OWNER-APPROVED menu says about every disputed row (#4513)
+
+Part D above reads `beta-sdk-surface.md`. This section reads the OTHER owner-approved
+doc — `canonical-mcp-tools.md` (`approval_status: approved`, PR #4120) — whose `Absorbs`
+cell is the owner's own record of **which current name folds into which target**. That
+binding was never consulted here, so a row could contradict the approved menu and the
+build stayed green (#4513 §1/§2).
+
+**Nothing is decided here.** Where the two approved docs disagree, the ruling is the
+owner's and the map is NOT edited — the disagreement is shown with BOTH citations so it
+is visible at the row. What the approved menu *can* settle mechanically is narrower:
+does a target the row's citation names actually absorb this method? The sibling
+`docs/product/sdk-rename-table.md` (§C3b) reads these rows from beta's prose ALONE and
+states a winner on several of them; this section is the other approved doc's side of the
+same rows, not a correction of it.
+
+- **`row`** — the target is an approved row that absorbs this method: the approved doc
+  itself places the method there.
+- **`successor`** — the target is one the absorbing row's cell names as beta's own split
+  of that row, so the row supports it (one of several successors).
+- **`refuted`** — an approved row (or a successor of one) covers this target and does
+  **not** absorb this method: the approved doc places the method elsewhere.
+- **`unstated`** — the approved doc names no row for this target, so it neither supports
+  nor refutes it. A row resting only on `unstated` is genuinely owner-open.
+
+The membership set is the doc's OWN closure, parsed from its statement that
+`paginated_query` and `query_points_by_tag` `sit inside` `query` — a name it collapses
+without listing still resolves.
+
+| Row | Map destination | Approved home | Home's beta successors | Map destination reads | Citation rivals read |
+|---|---|---|---|---|---|
+| `tortoise_annotate_operator` | `adjust_relationship` | `adjust_relationship` (row 21) | *(none)* | **row** | `update_knowledge` — **refuted** |
+| `tortoise_assess_source` | `manage_source_trust` | `manage_source_trust` (row 14) | *(none)* | **row** | `list_knowledge` — **refuted** |
+| `tortoise_belief_timeline` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **unstated** | `poll_events` — **refuted** |
+| `tortoise_get_source_reliability` | `list_knowledge` | `manage_source_trust` (row 14) | *(none)* | **refuted** | `manage_source_trust` — **row** |
+| `tortoise_invalidate` | `supersede_knowledge` | `revise_knowledge` (row 17) | `supersede_knowledge`, `update_knowledge` | **successor** | `update_knowledge` — **successor** |
+| `tortoise_mitigate_operator` | `adjust_relationship` | `adjust_relationship` (row 21) | *(none)* | **row** | `update_knowledge` — **refuted** |
+| `tortoise_paginated_query` | `search_knowledge` | `list_knowledge` (row 2) | *(none)* | **refuted** | `list_knowledge` — **row** |
+| `tortoise_provenance` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **unstated** | `poll_events` — **refuted** |
+| `tortoise_query` | `search_knowledge` | `list_knowledge` (row 2) | *(none)* | **refuted** | `list_knowledge` — **row** |
+| `tortoise_query_points_by_tag` | `search_knowledge` | `list_knowledge` (row 2) | *(none)* | **refuted** | `list_knowledge` — **row** |
+| `tortoise_session_context` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **unstated** | `poll_events` — **refuted** |
+| `tortoise_set_source_tier` | `manage_source_trust` | `manage_source_trust` (row 14) | *(none)* | **row** | `list_knowledge` — **refuted** |
+
+**5 of 12 disputed rows are placed by the approved menu where this
+map places them; 4 are placed ELSEWHERE by it; 3 are not
+named by it at all.** Every count is computed from the doc, not typed.
+
+- **The approved menu contradicts the map on**: `tortoise_get_source_reliability`, `tortoise_paginated_query`, `tortoise_query`, `tortoise_query_points_by_tag` — two owner-approved docs disagreeing is an owner ruling, not a build step, so the destinations stand and the conflict is recorded here.
+- **The approved menu does not name the map's destination for**: `tortoise_belief_timeline`, `tortoise_provenance`, `tortoise_session_context` — the row is not refuted either; it rests on beta alone and is genuinely owner-open.
+
+**The approved row itself, for each disputed row that has one** (whole table row, by
+construction, so it cannot be a truncation of what the doc says):
+
+- **`tortoise_annotate_operator`** — `annotate_operator` is absorbed by `adjust_relationship`:
+  > | 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |
+- **`tortoise_assess_source`** — `assess_source` is absorbed by `manage_source_trust`:
+  > | 14 | `manage_source_trust` | assess_source, get_source_reliability, set_source_tier |
+- **`tortoise_belief_timeline`** — `belief_timeline` is absorbed by `recall_beliefs`:
+  > | 3 | `recall_beliefs` | recall, belief_timeline, provenance, session_context, get_confidence, calibrate_summary |
+- **`tortoise_get_source_reliability`** — `get_source_reliability` is absorbed by `manage_source_trust`:
+  > | 14 | `manage_source_trust` | assess_source, get_source_reliability, set_source_tier |
+- **`tortoise_invalidate`** — `invalidate_point` is absorbed by `revise_knowledge`:
+  > | 17 | `revise_knowledge` | update, update_point, update_entity, supersede, invalidate, retract_point, promote_point, set_point_baseline — the beta target **splits this into `update_knowledge` + `supersede_knowledge`**; promote/baseline become **fields on `update_knowledge`** |
+- **`tortoise_mitigate_operator`** — `mitigate_operator` is absorbed by `adjust_relationship`:
+  > | 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |
+- **`tortoise_paginated_query`** — `paginated_query` is absorbed by `list_knowledge`:
+  > | 2 | `list_knowledge` | query |
+- **`tortoise_provenance`** — `provenance` is absorbed by `recall_beliefs`:
+  > | 3 | `recall_beliefs` | recall, belief_timeline, provenance, session_context, get_confidence, calibrate_summary |
+- **`tortoise_query`** — `query` is absorbed by `list_knowledge`:
+  > | 2 | `list_knowledge` | query |
+- **`tortoise_query_points_by_tag`** — `query_points_by_tag` is absorbed by `list_knowledge`:
+  > | 2 | `list_knowledge` | query |
+- **`tortoise_session_context`** — `session_context` is absorbed by `recall_beliefs`:
+  > | 3 | `recall_beliefs` | recall, belief_timeline, provenance, session_context, get_confidence, calibrate_summary |
+- **`tortoise_set_source_tier`** — `set_source_tier` is absorbed by `manage_source_trust`:
+  > | 14 | `manage_source_trust` | assess_source, get_source_reliability, set_source_tier |
+
 ---
 
 ## Reproduce
