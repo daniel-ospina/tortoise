@@ -1631,10 +1631,6 @@ def _git_refs(
     needs it per ref: asking per-ref (`git rev-parse`) would be one subprocess
     per branch, and this repo carries ~900 local and ~1,300 remote refs.
     """
-    ckey = f"git_refs|{repo}|{namespace}"
-    cached = _cache_get(ckey)
-    if isinstance(cached, list):
-        return [(str(a), str(b)) for a, b in cached]
     rc, out, err, timed_out = _run(
         [git_bin, "for-each-ref", "--format=%(refname)%09%(objectname)", namespace],
         repo, timeout,
@@ -1652,7 +1648,6 @@ def _git_refs(
         if not name or name.endswith("/HEAD"):
             continue
         refs.append((name, sha.strip()))
-    _cache_put(ckey, [[a, b] for a, b in refs])
     return refs
 
 
@@ -1689,18 +1684,12 @@ def _first_parent_shas(
     2" rather than as "nothing is merged" — an unreadable witness must never
     become a downgrade.
     """
-    fkey = f"first_parent|{repo}"
-    cached = _cache_get(fkey)
-    if isinstance(cached, list):
-        return {str(x) for x in cached}
     rc, out, _err, _to = _run(
         [git_bin, "rev-list", "--first-parent", "origin/main"], repo, timeout,
     )
     if rc != 0:
         return None
-    chain = {ln.strip() for ln in out.splitlines() if ln.strip()}
-    _cache_put(fkey, sorted(chain))
-    return chain
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
 
 
 def _ancestor_merged_refs(
