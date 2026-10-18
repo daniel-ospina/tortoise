@@ -142,9 +142,9 @@ jobs:
             echo '- a request to the MANUAL-embed beacon host `cloudflareinsights.com`'
             echo '  (which no policy admits since #8334 — the tag fell back to the'
             echo '  cross-origin default), or'
-            echo '- a beacon that LOADED under a policy that admits it but reported'
-            echo '  nowhere (no same-origin `POST /cdn-cgi/rum` observed: analytics'
-            echo '  lost with no console error).'
+            echo '- a beacon that LOADED and then reported nowhere (no same-origin'
+            echo '  `POST /cdn-cgi/rum` observed: analytics lost with no console'
+            echo '  error).'
             echo
             echo 'Run log (tail):'
             echo
@@ -186,4 +186,4 @@ jobs:
         run: |
           bash .github/scripts/auto-file-issue.sh resolve \
             --title "$PROD_CSP_MONITOR_TITLE" \
-            --why 'The scheduled deployed-CSP monitor ran green: every anonymous production surface loaded the edge-injected beacon, admitted it under its own policy, and reported its RUM payload same-origin (`POST /cdn-cgi/rum`).'
+            --why 'The scheduled deployed-CSP monitor ran green: every surface it MEASURED reported no CSP violation and no beacon-contract finding (no request to the MANUAL-embed apex, and no beacon that loaded and then reported nowhere). `no-tag` is green BY DESIGN — the edge injecting no beacon is a zone setting (#4706 is open) — so this close does NOT assert that every surface loaded the beacon: read the run log for the `no-tag` and `not-measured` counts.'
