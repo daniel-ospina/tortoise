@@ -1581,7 +1581,7 @@ def _worktree_liveness(
 # surface must never be cached as "empty", which would turn a probe failure into a clean verdict.
 # A stale cache cannot make a wrong verdict unsafe here: within a pass the branch set is stable, and
 # the TTL bounds anything longer.
-def _cache_path(key: str) -> "str | None":
+def _cache_path(key: str) -> str | None:
     d = os.environ.get("COLLISION_PREFLIGHT_CACHE") or ""
     if not d:
         return None
@@ -1602,7 +1602,7 @@ def _cache_get(key: str):
     try:
         if time.time() - os.path.getmtime(path) > ttl:
             return None
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
         return None
