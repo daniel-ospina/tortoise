@@ -238,13 +238,13 @@ surfaced it — the writes succeeded and the calibration could not run.
 **What #6211 changed (the reporting half).** Two of the three failure modes are
 now visible to a programmatic caller instead of to a human reading stderr:
 
-* The 200-operator cap travels in `compute_confidence`'s **result**
+- The 200-operator cap travels in `compute_confidence`'s **result**
   (`truncated`, `operators_seen`, `operators_used`). Before it, a capped pass
   and a full-graph pass both returned `{iterations, converged, confidences}` with
   `converged: true` — a published ranking with 0.0067 margins came from a capped
   pass and nothing in the result said so. The cap itself is deliberately NOT
   raised: the truncated topology is the honest problem, not the bound.
-* A query of the pass that the engine aborts on its own query timeout raises
+- A query of the pass that the engine aborts on its own query timeout raises
   `EPSubgraphHopError` (still a `redis.exceptions.ResponseError`, so existing
   handlers are unaffected), naming the hop index, the phase and the frontier
   size it was scoped to. Typed is the WHOLE pass, not only the two-hop
@@ -268,7 +268,7 @@ now visible to a programmatic caller instead of to a human reading stderr:
   Measured on a 3,353-claim / 160,000-edge graph with the engine's 1,000 ms
   timeout posture: the bridge query aborted after **1.00 s** over a
   **188–257-claim** frontier, and the pass failed after 1.1–2.9 s.
-* **Still open — the clearing path.** `ep_dirty` is cleared only by the dreaming
+- **Still open — the clearing path.** `ep_dirty` is cleared only by the dreaming
   adapters' `_sweep_dirty_roots` (epoch-guarded, convergence-gated, and scoped to
   the pass's `affected` set). The targeted fast path
   (`compute_confidence(factors=…)` / `compute_confidence(anchors=…)`) never runs
