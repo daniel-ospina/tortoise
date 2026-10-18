@@ -253,7 +253,9 @@ now visible to a programmatic caller instead of to a human reading stderr:
   (`operator_bridge` / `direct_edge`), and the pass-level queries that walk the
   finished affected set (`factor_extraction`, `draft_filter`, `cache_load`,
   `cache_flush`, `evidence_prewrite`, `claim_count`, `ep_epoch`) — those report
-  `hop: None`, because there is no hop to name. The cache phases are the
+  `hop: None`, because there is no hop to name (`draft_filter` is the one phase
+  that appears in BOTH shapes: hop-scoped when the loop asks it, `hop: None` on
+  the final fail-safe strip). The cache phases are the
   biggest statements a pass makes (16 load sweeps over the whole affected set,
   plus the write-back), so an untyped one would keep the issue's symptom
   reachable on the largest query of the pass; a `cache_flush` timeout is

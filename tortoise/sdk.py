@@ -20488,16 +20488,14 @@ class TortoiseSDK:
         result["budget_used"] = getattr(
             dreamer, "_last_operator_count", 0) or 0
         # #6211: the pass's operator selection can be CAPPED (the 200 default),
-        # and ``budget_used`` alone cannot say so — it is the post-cap size. A
-        # caller reading ``compute_confidence()``'s priors has to be able to
-        # tell a capped pass from a complete one, so the selector's own report
-        # travels on this result too. Additive keys; no existing key changes.
-        _stats = getattr(dreamer, "_last_selection_stats", None) or {}
-        result["truncated"] = bool(_stats.get("truncated", False))
-        result["operators_seen"] = int(
-            _stats.get("operators_seen", result["budget_used"]))
-        result["operators_used"] = int(
-            _stats.get("operators_used", result["budget_used"]))
+        # and ``budget_used`` alone cannot say so — it is the post-cap size.
+        # The selector's own report therefore travels on the DREAMER
+        # (``_last_selection_stats``, filled by ``_bfs_select_operators`` in
+        # dream.py), NOT as extra keys on this result: the I1 local key-set is
+        # pinned exact — ``tests/test_epic903_modes.py`` asserts the set — and
+        # a cap report is not worth loosening a documented I1 contract over.
+        # The one consumer that needs it, ``compute_confidence``'s no-arg
+        # dirty-root path, reads the attribute off the same cached Dreamer.
         result["mode"] = "local"
         self._record_dream_metrics(result, "local")
         return result
@@ -21077,13 +21075,20 @@ class TortoiseSDK:
             # pass below loads as priors — so a capped dream shapes THIS
             # result. Folding its report in is what keeps `truncated` from
             # certifying a capped derivation as complete on the very path the
-            # issue measured (the no-arg dirty-root pass).
-            if _dream.get("truncated"):
+            # issue measured (the no-arg dirty-root pass). Read from the
+            # DREAMER's own report (``_last_selection_stats``), not from keys
+            # on ``_dream``: the I1 local key-set is pinned exact and does not
+            # carry them (#6211 — see ``_dream_local``).
+            _dream_stats = getattr(
+                self._get_dreamer(), "_last_selection_stats", None) or {}
+            if _dream_stats.get("truncated"):
                 selection["truncated"] = True
             selection["operators_seen"] = max(
-                selection["operators_seen"], int(_dream.get("operators_seen") or 0))
+                selection["operators_seen"],
+                int(_dream_stats.get("operators_seen") or 0))
             selection["operators_used"] = max(
-                selection["operators_used"], int(_dream.get("operators_used") or 0))
+                selection["operators_used"],
+                int(_dream_stats.get("operators_used") or 0))
             iterations, converged = ep.run(roots, max_hops=None,
                                            evidence=run_evidence)
             if not ep._last_affected and not ep._last_truncated:

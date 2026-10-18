@@ -1423,7 +1423,7 @@ class TortoiseEP:
                           hop: int | None = None) -> set[str]:
         """Return the subset of ids whose nodes have status == 'draft' (#780).
 
-        #6211: typed. ``hon`` is the hop that asked (the loop's frontier) or
+        #6211: typed. ``hop`` is the hop that asked (the loop's frontier) or
         ``None`` for the pass-level strips (the seed phase and the final
         fail-safe sweep over the whole affected set).
         """

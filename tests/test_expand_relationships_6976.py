@@ -381,7 +381,8 @@ def test_emitted_query_keeps_the_id_predicate_and_the_widening(sdk):
         "the anchor is id-anchored: one query per epistemic label keeps each "
         f"(label, id) range index, got {len(recorder.cyphers)} queries"
     )
-    for label, cypher in zip(EPISTEMIC_LABELS, recorder.cyphers):
+    for label, cypher in zip(EPISTEMIC_LABELS, recorder.cyphers,
+                             strict=True):
         assert f"MATCH (n:{label})" in cypher
         # the load-bearing barrier: a WHERE on n.id directly followed by the
         # expanding MATCH is planned as a whole-graph read on FalkorDB 6.x and
