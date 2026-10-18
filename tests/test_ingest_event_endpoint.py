@@ -2266,3 +2266,45 @@ def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
                          "reify": True}],
     }) == []
     assert sdk.create_operator("IMPL", live, [term]) is not None
+
+
+def test_non_canonical_single_carrier_self_edge_is_refused(sdk):
+    """A single carrier with a LEGACY id is still the node the bundle ref lands on.
+
+    With ONE carrier the fold MERGEs by NAME onto it and its `ON MATCH` clause
+    rewrites the stored id to `entity_name_id(label, name)` — so an external ref to
+    the carrier's PRE-write id names the same node, and step 4 then finds no such
+    endpoint. Comparing the minted id against the carrier's id missed it: Phase 1
+    returned `[]` and ingest raised with the earlier point committed.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (:Object {id:'legacy-ulid-1', name:'Acme', status:'live'})")
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [{"ref": "a", "type": "object", "name": "Acme"}],
+        "connections": [{"from": "a", "to": "legacy-ulid-1", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("address the same endpoint" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+
+
+def test_bare_name_subject_stub_is_the_same_endpoint_as_the_bundle_ref(sdk):
+    """`aboutSubject="Gamma"` mints a `:Subject {id:'Gamma'}` stub — a third id
+    spelling. The bundle item adopts it (name merge) and re-registers it under the
+    canonical id, so an endpoint naming the stub's id is the same node."""
+    sdk.create_event("meeting", "other", aboutSubject="Gamma")
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [{"ref": "g", "type": "subject", "name": "Gamma"}],
+        "connections": [{"from": "g", "to": "Gamma", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("address the same endpoint" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0

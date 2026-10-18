@@ -14648,11 +14648,11 @@ class TortoiseSDK:
     # message in both phases, so the classes these helpers own are covered in
     # BOTH phases by construction (asserted by the parity unit test). It is a
     # coverage statement about the helpers, NOT a universal: `_sanitize_props`
-    # refuses more than this gate owns (an ENTITY item's caller-supplied `id`,
-    # and the belief props it rejects: `credibility`/`ep_alpha`/`ep_beta`/
+    # refuses more than this gate owns (examples: an ENTITY item's
+    # caller-supplied `id`, and belief props `credibility`/`ep_alpha`/`ep_beta`/
     # `baseline_set`/`baseline_source`), so such an item still passes Phase 1 and
-    # raises in step 3 with the earlier items committed — the #8755 residual
-    # named in `_check_endpoints`.
+    # raises in step 3 with the earlier items committed. That list is EXAMPLES,
+    # not the closed set: #8755 carries it.
     #
     # CYCLE-25 (ontology v3.8): pointKind `statement` is THE write kind;
     # legacy kinds are write-compat-only; `event` is REJECTED (episodic
@@ -15450,9 +15450,10 @@ class TortoiseSDK:
 
     def _entity_name_holders(
         self, label: str, name: str,
-    ) -> tuple[bool, str | None, str | None, str | None, int, bool]:
+    ) -> tuple[bool, str | None, str | None, str | None, int, bool,
+               str | None]:
         """``(exists_by_name, terminal_holder_id, operator_holder_id,
-        unevaluable_status_holder_id, carrier_count, merges)`` for a
+        unevaluable_status_holder_id, carrier_count, merges, target_id)`` for a
         bundle-local entity ref (#7925) — the entity sibling of
         :meth:`_find_terminal_dedup_hit`, and it exists for the same reason:
         the bundle-local endpoint guard has to resolve the endpoint the WRITER
@@ -15482,8 +15483,14 @@ class TortoiseSDK:
         ``[]``, then ``Phase2Error`` with the earlier point committed).
 
         So the axes returned here are the MERGE TARGET's, and are ``None`` when
-        the item mints; ``merges`` says which of the two happened. Callers must
-        branch on ``merges`` rather than on ``carrier_count``.
+        the item mints; ``merges`` says which of the two happened, and
+        ``target_id`` is that node's STORED id — which is NOT always
+        ``entity_name_id(label, name)``: with one carrier, and with a carrier
+        whose id a legacy/foreign writer left non-canonical, the fold MERGEs by
+        name onto the node that exists and its ``ON MATCH`` clause rewrites the
+        stored ``id`` to the canonical one. Anything predicting the endpoint the
+        write addresses must therefore use ``target_id`` when it is set. Callers
+        must branch on ``merges`` rather than on ``carrier_count``.
 
         ``operator_holder_id`` is the same test on the OTHER axis (#7925 review
         round 3): an operator-shaped merge target is not a connection endpoint
@@ -15512,7 +15519,7 @@ class TortoiseSDK:
             params={"name": name},
         ).result_set
         if not rows:
-            return False, None, None, None, 0, False
+            return False, None, None, None, 0, False, None
         # The node the item lands on: the sole carrier, or — once the name is
         # shared — the carrier that already holds the deterministic id the fold
         # merges on. No such carrier ⇒ the item MINTS and no holder axis applies.
@@ -15522,7 +15529,7 @@ class TortoiseSDK:
             else next((r for r in rows if r[0] == canonical), None)
         )
         if target is None:
-            return True, None, None, None, len(rows), False
+            return True, None, None, None, len(rows), False, None
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
         # e.g. an operator-shaped holder with an array status lost the operator
@@ -15537,6 +15544,7 @@ class TortoiseSDK:
             _holder_id if _status_is_stored_unhashable(_status) else None,
             len(rows),
             True,
+            _holder_id,
         )
 
     def _endpoint_not_id_addressed(self, index: int, v: str,
@@ -15754,11 +15762,13 @@ class TortoiseSDK:
         # probe is a graph read — resolve each (label, name) once.
         holders: dict[
             tuple[str, str],
-            tuple[bool, str | None, str | None, str | None, int, bool],
+            tuple[bool, str | None, str | None, str | None, int, bool,
+                  str | None],
         ] = {}
 
         def _name_holders(elabel: str, name: str) \
-                -> tuple[bool, str | None, str | None, str | None, int, bool]:
+                -> tuple[bool, str | None, str | None, str | None, int, bool,
+                         str | None]:
             key = (elabel, name)
             if key not in holders:
                 holders[key] = self._entity_name_holders(elabel, name)
@@ -15812,8 +15822,8 @@ class TortoiseSDK:
                     # (an unguarded `in set()` here raised TypeError straight
                     # out of `_validate_bundle` — review round 4).
                     continue
-                _existing, _hit, _op, _bad, _carriers, _merges = _name_holders(
-                    _elabel, _name)
+                (_existing, _hit, _op, _bad, _carriers, _merges,
+                 _target) = _name_holders(_elabel, _name)
                 _key = (_elabel, _name)
                 # MERGES (a carrier holds the canonical id) or not the first
                 # naming item (the first one creates it) ⇒ this write does not
@@ -16072,7 +16082,13 @@ class TortoiseSDK:
                 #     `create_direct_edge` wrote the edge this guard refused).
                 # Comparing (label, name) got both of these backwards.
                 if v in local:
-                    lid = _entity_name_id(ep_label, ep_name)
+                    # The node this item lands on: the merge target when it
+                    # merges (a name-keyed merge ADOPTS the existing node and
+                    # REWRITES its id to the canonical one, so the pre-write id
+                    # is what an external ref still names), else the canonical
+                    # id the item mints.
+                    _h = _name_holders(ep_label, ep_name)
+                    lid = _h[6] or _entity_name_id(ep_label, ep_name)
                 else:
                     lid = (node_info.get(v) or {}).get("id")
                 if not isinstance(lid, str) or not lid:
@@ -16159,8 +16175,8 @@ class TortoiseSDK:
                     name_merge = False
                     if elabel in ("Subject", "Object") \
                             and isinstance(name, str) and name:
-                        exists, hit, _, bad_status, _carriers, merges = _name_holders(
-                            elabel, name)
+                        (exists, hit, _, bad_status, _carriers, merges,
+                         _target) = _name_holders(elabel, name)
                         # #8864/#8902: the fold keys the merge on NAME while the
                         # name has ONE carrier, and on the record's own `id` once
                         # it has 2+. Every ingest entity item's id IS
@@ -16495,11 +16511,11 @@ class TortoiseSDK:
         'granular'. Consumes the same shared check helpers as ingest()'s
         Phase-2 defense-in-depth raises, so every class those helpers own is
         caught here too (asserted by the parity unit test). It does NOT cover
-        the `_sanitize_props` reject set beyond the keys this gate owns — an
+        the `_sanitize_props` reject set beyond the keys this gate owns — e.g. an
         ENTITY item's caller-supplied `id`, or a belief prop it rejects
         (`credibility`/`ep_alpha`/`ep_beta`/`baseline_set`/`baseline_source`),
-        passes Phase 1 and raises in step 3 after earlier items committed
-        (#8755, named in `_check_endpoints`).
+        passes Phase 1 and raises in step 3 after earlier items committed. Those
+        are examples, not the closed set: #8755 carries it.
         """
         violations: list[dict] = []
         for section in ("sources", "points", "entities"):

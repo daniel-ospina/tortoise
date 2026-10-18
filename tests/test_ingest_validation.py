@@ -880,3 +880,15 @@ def test_entity_type_vocabulary_is_derived_from_one_map(sdk):
             sdk.create_entity(key, f"probe-{key}")
         except ValueError as err:  # a writer refusal is fine; an unknown type is not
             assert "unknown type" not in str(err), (key, str(err))
+        # …and ingest's STEP-3 dispatch must handle it too: a generic-writer
+        # branch does not prove the bundle path knows the type, and a type that
+        # only the generic writer knows raises in step 3 with step 2 committed.
+        item = {"ref": f"v-{key}", "type": key, "name": f"probe-{key}"}
+        if key == "event":
+            item["eventKind"] = "meeting"
+        if key == "document":
+            item["documentKind"] = "report"
+        try:
+            sdk.ingest({"entities": [item]})
+        except ValueError as err:
+            assert "type must be" not in str(err), (key, str(err))

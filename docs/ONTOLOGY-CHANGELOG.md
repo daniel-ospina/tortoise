@@ -254,7 +254,9 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   already holds the deterministic `(label, name)` id, and MINTS its own node when none does —
 >   the case where no holder axis applies. Within one bundle only the FIRST item naming a
 >   `(label, name)` can mint, because every entity item writes that same deterministic id: a
->   later same-name item lands on it, so its declared status is dropped;
+>   later same-name item lands on it, so its declared status is dropped. A name-keyed merge also
+>   ADOPTS the node that exists (rewriting its stored id to the deterministic one), so a bundle
+>   ref and an external ref to that node's PRE-write id are the same endpoint;
 > - the `gated` row-9 status read and Phase 2's draft default now read at the WRITE DOOR's fold
 >   depth, so a double-wrapped `props: {props: {status: …}}` is refused / kept draft respectively —
 >   previously the point could be born LIVE under `gated` (a fail-open, not an over-rejection).
