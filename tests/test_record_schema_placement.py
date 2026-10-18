@@ -59,6 +59,11 @@ MIGRATIONS = [
         "20261012000002_record_semantic.sql",
         "20261012000003_record_epistemic.sql",
         "20261012000004_record_procedural.sql",
+        # A FORWARD migration adding COLUMNS (`ALTER TABLE public.point ADD
+        # COLUMN`, #2782's money value). Read here for the same reason
+        # `record_projection.RECORD_MIGRATIONS` reads it: append-only history
+        # means a landed `CREATE TABLE` can only ever gain a column this way.
+        "20261018000001_record_point_money_value_2782.sql",
     )
 ]
 
@@ -88,8 +93,9 @@ CONDITIONAL = {("Point", "baseline_source")}  # PRIMARY only when author-set
 
 # The resolved totals (02-identity-and-placement.md §2.7). Asserting them is what
 # catches a change to the TABLE as well as to the SQL.
-EXPECTED_TOTALS = {"P": 187, "D": 29, "U": 0}
-EXPECTED_TOTAL_NAMES = 216
+EXPECTED_TOTALS = {"P": 192, "D": 29, "U": 0}
+#: 216 from the `#7955` pass + the 5 `#2782` money rows (all PRIMARY).
+EXPECTED_TOTAL_NAMES = 221
 
 _SECTION_RE = re.compile(r"^## (Event|Source|Session|Object|Subject|Point) \(node\)")
 _EDGES_RE = re.compile(r"^## Edges / operators")
@@ -174,9 +180,29 @@ _COL_RE = re.compile(
 )
 _NON_COLUMN_HEADS = {"CONSTRAINT", "FOREIGN", "PRIMARY", "CHECK", "UNIQUE", "LIKE"}
 
+#: A FORWARD migration ADDS a column: `ALTER TABLE public.<t> ADD COLUMN [IF NOT
+#: EXISTS] <col> <type>, …`. Migrations are append-only history (the
+#: `check-migration-append-only` gate refuses an edit to a landed file), so the
+#: `2026101200000*` tables can only ever GAIN a column this way — #2782's five
+#: money columns did. A read that understands only `CREATE TABLE` reports every
+#: such PRIMARY property as MISSING COLUMN, which is exactly what
+#: `test_primary_properties_have_a_column` refused on the first cut of #2782.
+_ALTER_ADD_COLUMN_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.(\w+)\b([^;]*?);", re.S
+)
+_ADDED_COLUMN_RE = re.compile(
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?(\w+)\"?\s+"
+    r"(text|boolean|integer|bigint|double precision|jsonb|timestamptz|numeric)\b",
+    re.I,
+)
+
 
 def parse_sql_columns() -> dict[str, set[str]]:
-    """Every table's property columns, read from the migrations on disk."""
+    """Every table's property columns, read from the migrations on disk.
+
+    `CREATE TABLE` bodies first, then any forward `ALTER TABLE … ADD COLUMN`
+    unioned over them (append-only history — see `_ALTER_ADD_COLUMN_RE`).
+    """
     tables: dict[str, set[str]] = {}
     text = "\n".join(p.read_text(encoding="utf-8") for p in MIGRATIONS)
     for block in re.finditer(
@@ -190,6 +216,11 @@ def parse_sql_columns() -> dict[str, set[str]]:
                 continue
             cols.add(m.group(1).strip('"'))
         tables[name] = cols
+    for block in _ALTER_ADD_COLUMN_RE.finditer(text):
+        name, body = block.group(1), block.group(2)
+        if name not in tables:
+            continue  # an ALTER on a table this file does not pin (non-record)
+        tables[name] |= {m.group(1).strip('"') for m in _ADDED_COLUMN_RE.finditer(body)}
     return tables
 
 
@@ -335,6 +366,68 @@ def test_relation_is_never_a_bare_id():
         assert re.search(
             rf"chk_{table}_node_key_is_contract_key CHECK \({keycol} IS NOT NULL AND node_key = {keycol}\)", text
         ), f"{table} does not pin node_key to {keycol} (with the NULL guard)"
+
+
+MONEY_COLUMNS = ("amount_minor", "currency", "minor_unit_exponent", "verbatim", "as_of")
+MONEY_MIGRATION = "20261018000001_record_point_money_value_2782.sql"
+
+
+def test_a_forward_migration_adds_the_money_columns_and_the_read_sees_them():
+    """#2782's five money columns are PRIMARY, and they arrive by an ALTER.
+
+    `20261012000003_record_epistemic.sql` is append-only history (the
+    `check-migration-append-only` gate refuses an edit to a landed file), so the
+    money value reaches `public.point` as a FORWARD `ALTER TABLE … ADD COLUMN`.
+    The schema read must therefore understand that form: with the ALTER parse
+    removed, `parse_sql_columns()` reports none of the five and
+    `test_primary_properties_have_a_column` fails for all of them — which is how
+    this landed: the first cut of the PR added the five placement rows and left
+    the record without the columns.
+    """
+    forward = REPO_ROOT / "supabase" / "migrations" / MONEY_MIGRATION
+    assert forward.exists(), f"the forward migration is gone: {forward}"
+    assert forward in MIGRATIONS, (
+        "the forward migration must be READ, not merely on disk — an unread "
+        "ALTER is invisible to this pin"
+    )
+    # the columns are NOT in the base CREATE TABLE, so only the ALTER can supply them
+    base = (REPO_ROOT / "supabase" / "migrations" / "20261012000003_record_epistemic.sql").read_text(
+        encoding="utf-8"
+    )
+    body = re.search(r"CREATE TABLE IF NOT EXISTS public\.point\s*\((.*?)\n\);", base, re.S)
+    assert body, "public.point is no longer created by 20261012000003"
+    base_cols = {m.group(1).strip('"') for m in _COL_RE.finditer(body.group(1))}
+    columns = parse_sql_columns()["point"]
+    for col in MONEY_COLUMNS:
+        assert col not in base_cols, (
+            f"point.{col} is declared in the base CREATE TABLE — if the money "
+            "columns moved into 20261012000003 the ALTER parse proves nothing"
+        )
+        assert col in columns, (
+            f"point.{col} is missing from the schema read — the ALTER TABLE … ADD "
+            "COLUMN form is not parsed, so every money row reads MISSING COLUMN"
+        )
+
+
+def test_the_money_columns_are_the_integer_shape_not_floats():
+    """The column TYPE carries the money rule (`tortoise/money.py`, WS-C §1/D1).
+
+    A float cannot represent 0.10, so an `amount_minor`/`minor_unit_exponent`
+    declared `double precision`/`numeric` would be a silently lossy home for a
+    value the shape promises is exact — the record must not be weaker than the
+    graph.
+    """
+    sql = (REPO_ROOT / "supabase" / "migrations" / MONEY_MIGRATION).read_text(encoding="utf-8")
+    types = {
+        m.group(1): m.group(2).lower()
+        for m in re.finditer(
+            r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+(\w+)", sql, re.I
+        )
+    }
+    assert types, "no ADD COLUMN parsed from the forward money migration"
+    assert types.get("amount_minor") == "bigint", types
+    assert types.get("minor_unit_exponent") == "integer", types
+    assert set(types) == set(MONEY_COLUMNS), types
 
 
 def test_every_table_is_tenant_scoped_and_rls_enabled():

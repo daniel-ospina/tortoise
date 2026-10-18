@@ -1596,6 +1596,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # a change to this file alone — `test_record_projection.py` reads its
         # ALTER, `test_record_schema_placement.py` pins the record schema.
         "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
+        # #2782: the FORWARD migration that ADDS the five money COLUMNS to
+        # `public.point`. Both readers must run on a change to this file alone —
+        # `test_record_projection.py` reads its ALTER for the column set,
+        # `test_record_schema_placement.py` pins the record schema against the
+        # placement table.
+        "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
         "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
     ):
         r = _sel([changed])

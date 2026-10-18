@@ -1062,6 +1062,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class as the entry above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
+             # #2782: the FORWARD record migration that ADDS the five money
+             # COLUMNS to `public.point` (`ALTER TABLE … ADD COLUMN`). Same gap
+             # as the #8263 entry above and it sorts outside the
+             # `2026101200000` prefix: a forward-migration-only diff selects NO
+             # surface, so neither reader (`test_record_projection.py`,
+             # `test_record_schema_placement.py`) would run on the change that
+             # can drift them. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
              # #8469 review P1: the orchestrator harness's shipped shell scripts
              # (lane.sh, merged-not-closed.sh, refresh-candidates.sh, orch-loop.sh,

@@ -258,7 +258,7 @@ These are **findings, not this unit's work**; each is a §3 invariant violation 
 
 ## Appendix — the raw table, with every writer and carrier
 
-The full per-property table (216 rows, with the writer clause and the journal carrier for each) is reproduced below from the measurement pass (recorded durably in `#7955` comment `6097993997`; local copy `/tmp/w2-placement.md`), grouped by layer. The pass recorded **185 P · 23 D/V · 8 U**; **three classes are corrected in review — `Object.status` is a projection-owned cache (`ONTOLOGY.md` §2/§4.3), and `Object.embedding`/`Subject.embedding` are recomputed from the carried `name` (§2.1 rule 2), so they move P→D → 182 P · 26 D/V · 8 U** (see the `status` and `embedding` rows, §2.4 and §2.6).
+The full per-property table (**216 rows from the `#7955` pass, plus the 5 `#2782` rows below → 221 rows**, with the writer clause and the journal carrier for each) is reproduced below from the measurement pass (recorded durably in `#7955` comment `6097993997`; local copy `/tmp/w2-placement.md`), grouped by layer. The pass recorded **185 P · 23 D/V · 8 U**; **three classes are corrected in review — `Object.status` is a projection-owned cache (`ONTOLOGY.md` §2/§4.3), and `Object.embedding`/`Subject.embedding` are recomputed from the carried `name` (§2.1 rule 2), so they move P→D → 182 P · 26 D/V · 8 U**, plus the 5 P rows `#2782` adds (the money value) **→ 187 P · 26 D/V · 8 U** (see the `status` and `embedding` rows, §2.4 and §2.6). ⚠️ The `#7955` figures stay attributed to that pass — the later rows are annotated here rather than folded into its numbers.
 > ⚠️ **The classes below are the MEASURED (pre-resolution) classes** from the 2026-10-10 pass, and the writer column is cited as **`file → clause`** — never `file:line`, which drifts (see the header). The 8 `U` rows are resolved in §2.7 — read the resolution there, not the `U` here. Numbers are a **floor** (the open-set `SET n += $props` passthrough is unbounded).
 
 ### Episodic — `Event`
@@ -421,7 +421,7 @@ The full per-property table (216 rows, with the writer clause and the journal ca
 
 ### Epistemic — `Point`
 
-## Point (node) — 74 properties (PRIMARY 55 · DERIVED/VOLATILE 13 · UNRESOLVED 6)
+## Point (node) — 79 properties (PRIMARY 60 · DERIVED/VOLATILE 13 · UNRESOLVED 6)
 
 | property | class | evidence (writer) | journal carrier | notes |
 |---|---|---|---|---|
