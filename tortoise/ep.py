@@ -97,24 +97,34 @@ class EPSubgraphHopError(_ResponseError):
 
     Attributes:
         hop:           BFS hop index within this ``_affected_claims`` call:
-                       ``0`` is the SEED neighbourhood (the same two-hop
-                       pattern, run once over the seeds BEFORE the loop — so
-                       it is usually the first query that can die), and
-                       ``1..max_hops`` are the loop's hops.
-        phase:         which half of the hop failed — ``"seed_lookup"`` /
+                       ``0`` is the SEED phase (the same two-hop pattern and
+                       the seed-set sweeps, run BEFORE the loop — so they are
+                       usually the first queries that can die), and
+                       ``1..max_hops`` are the loop's hops. ``None`` for a
+                       PASS-LEVEL query: one that walks the finished affected
+                       set rather than a hop frontier (factor extraction, the
+                       epoch read, the degeneration guard's claim count), so
+                       no hop index exists to name.
+        phase:         which query failed — ``"seed_lookup"`` /
                        ``"seed_operators"`` / ``"seed_direct_edge"`` /
-                       ``"seed_neighbourhood"`` (all hop 0: the seed phase).
+                       ``"seed_neighbourhood"`` (hop 0: the seed phase);
                        ``"operator_bridge"`` (the operator-mediated two-hop
                        pattern) or ``"direct_edge"`` (the operator-less
-                       IMPL|NAND hop) for the BFS loop's hops.
-        frontier_size: how many claim ids the failed hop was expanding FROM.
-                       This is the quantity that drives the hop's cost, so it
-                       is the number an operator needs to bound the pass.
+                       IMPL|NAND hop) for the BFS loop's hops; and
+                       ``"factor_extraction"`` / ``"draft_filter"`` /
+                       ``"claim_count"`` / ``"ep_epoch"`` for pass-level
+                       queries.
+        frontier_size: how many claim ids the failed query was scoped to.
+                       For a hop this is the frontier being expanded FROM —
+                       the quantity that drives the hop's cost, so the number
+                       an operator needs to bound the pass. ``None`` for a
+                       query with no id set (the epoch read).
         elapsed_s:     wall time the failed query consumed before the engine
                        aborted it (``None`` when unknown).
     """
 
-    def __init__(self, *, hop: int, phase: str, frontier_size: int,
+    def __init__(self, *, hop: int | None, phase: str,
+                 frontier_size: int | None,
                  elapsed_s: float | None = None, detail: str = "") -> None:
         self.hop = hop
         self.phase = phase
@@ -122,12 +132,24 @@ class EPSubgraphHopError(_ResponseError):
         self.elapsed_s = elapsed_s
         self.detail = detail
         took = "" if elapsed_s is None else f" after {elapsed_s:.2f}s"
+        if hop is None:
+            if frontier_size is None:
+                subject = f"EP pass-level query ({phase}) could not complete{took}"
+            else:
+                subject = (
+                    f"EP pass-level query ({phase}) could not complete{took} "
+                    f"over the {frontier_size}-claim affected set"
+                )
+        else:
+            subject = (
+                f"EP affected-subgraph BFS: hop {hop} ({phase}) could not "
+                f"complete{took} over a {frontier_size}-claim frontier"
+            )
         message = (
-            f"EP affected-subgraph BFS: hop {hop} ({phase}) could not complete"
-            f"{took} over a {frontier_size}-claim frontier — the graph engine "
-            f"aborted the hop query (query timed out). The affected-claim "
-            f"expansion is incomplete: narrow the pass (fewer seeds or fewer "
-            f"max_hops) or raise the engine's query TIMEOUT."
+            f"{subject} — the graph engine aborted the query (query timed "
+            f"out). The affected-claim expansion is incomplete: narrow the "
+            f"pass (fewer seeds or fewer max_hops) or raise the engine's "
+            f"query TIMEOUT."
         )
         if detail:
             message = f"{message} [engine: {detail}]"
@@ -205,9 +227,9 @@ class TortoiseEP:
         self._run_ep_version: int = -1
         self._flush_skipped: bool = False
 
-    def _hop_query(self, cypher: str, params: dict, *, hop: int, phase: str,
-                   frontier_size: int) -> list:
-        """Run one affected-subgraph hop query, typing an engine timeout (#6211).
+    def _hop_query(self, cypher: str, params: dict, *, hop: int | None,
+                   phase: str, frontier_size: int | None) -> list:
+        """Run one EP pass query, typing an engine timeout (#6211).
 
         A hop that the engine ABORTS on its own timeout used to escape as a
         bare ``redis.exceptions.ResponseError: Query timed out`` — no hop, no
@@ -216,6 +238,13 @@ class TortoiseEP:
         large a frontier, while remaining a ``ResponseError`` subclass so every
         existing ``except`` clause (and ``tortoise/retry.py``'s classifier) is
         unaffected.
+
+        Used for every id-set query of a pass, not only the two-hop expansions:
+        the seed phase (hop 0), the loop's hops, and the PASS-LEVEL queries that
+        walk the finished affected set — factor extraction over thousands of ids
+        is the largest query of the whole pass, so leaving it bare would keep
+        the issue's exact symptom on one of the paths it measured (#6211 review
+        round 2). Those pass-level callers pass ``hop=None``.
 
         ONLY timeouts are wrapped, deliberately. A ``ResponseError`` that is not
         a timeout (WRONGTYPE, a malformed recipe, a permission refusal) is a
@@ -236,8 +265,14 @@ class TortoiseEP:
             ) from exc
 
     def _graph_ep_version(self) -> int:
-        rows = self.g.query(
-            "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+        """Current graph-wide EP epoch (the :EpMeta node's ep_version).
+
+        0 on a graph that has never dirtied EP (no EpMeta node yet).
+        """
+        rows = self._hop_query(
+            "MATCH (m:EpMeta) RETURN m.ep_version", {},
+            hop=None, phase="ep_epoch", frontier_size=None,
+        )
         if not rows:
             return 0
         try:
@@ -1169,7 +1204,7 @@ class TortoiseEP:
                 # Strip drafts from the frontier BEFORE expanding: a draft
                 # claim must never propagate to live claims (#780).
                 if not include_draft:
-                    draft_ids = self._filter_draft_ids(set(frontier))
+                    draft_ids = self._filter_draft_ids(set(frontier), hop=hops)
                     if draft_ids:
                         affected -= draft_ids
                         frontier = [n for n in frontier if n not in draft_ids]
@@ -1312,18 +1347,30 @@ class TortoiseEP:
         only form that counts distinct nodes without shipping every id back,
         and one whole-graph count per unbounded-regime hop is the accepted
         price of the widening.
+
+        #6211: typed like every other query of the pass. It counts the WHOLE
+        graph, so on a large graph it is not cheap and can be the query the
+        engine aborts — pass-level (``hop=None``): there is no hop frontier it
+        walks.
         """
-        rows = self.g.query(
+        rows = self._hop_query(
             "MATCH (n) "
             f"WHERE {epistemic_disjunction('n')} "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND n.op_type IS NULL "
-            "RETURN count(n)"
-        ).result_set
+            "RETURN count(n)",
+            {}, hop=None, phase="claim_count", frontier_size=None,
+        )
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
-    def _filter_draft_ids(self, ids: set[str]) -> set[str]:
-        """Return the subset of ids whose nodes have status == 'draft' (#780)."""
+    def _filter_draft_ids(self, ids: set[str],
+                          hop: int | None = None) -> set[str]:
+        """Return the subset of ids whose nodes have status == 'draft' (#780).
+
+        #6211: typed. ``hon`` is the hop that asked (the loop's frontier) or
+        ``None`` for the pass-level strips (the seed phase and the final
+        fail-safe sweep over the whole affected set).
+        """
         if not ids:
             return set()
         rows: list = []
@@ -1332,7 +1379,10 @@ class TortoiseEP:
             "MATCH (n:{label}) WHERE n.id IN $ids AND n.status = 'draft' "
             "RETURN n.id"
         ):
-            rows.extend(self.g.query(_q, params={"ids": list(ids)}).result_set)
+            rows.extend(self._hop_query(
+                _q, {"ids": list(ids)}, hop=hop, phase="draft_filter",
+                frontier_size=len(ids),
+            ))
         return {r[0] for r in rows}
 
     def _live_neighbors_many(self, node_ids: list[str], include_draft: bool,
@@ -1449,8 +1499,10 @@ class TortoiseEP:
             f"WHERE {where_b1} "
             "RETURN DISTINCT o.id, o.op_type, o.label, o.direction"
         ):
-            rows.extend(self.g.query(
-                _q, params={"ids": list(affected_claims)}).result_set)
+            rows.extend(self._hop_query(
+                _q, {"ids": list(affected_claims)}, hop=None,
+                phase="factor_extraction", frontier_size=len(affected_claims),
+            ))
         for op_id, op_type, label, direction in rows:
             if op_id not in op_info:
                 op_info[op_id] = (op_type, label, direction)
@@ -1470,7 +1522,7 @@ class TortoiseEP:
         # (NAND_BASE_WEIGHT — #855 — for NAND, 1.0 for IMPL). Parallel direct
         # edges between the same pair share one message slot (last-writer
         # wins) — unsupported; creation paths must not duplicate edges.
-        dir_rows = self.g.query(
+        dir_rows = self._hop_query(
             "MATCH (a)-[r:IMPL|NAND]->(b) "
             # #7902: both endpoints of a direct edge may carry any of the four
             # epistemic labels (the write path was widened with the same
@@ -1489,8 +1541,9 @@ class TortoiseEP:
             f"{('AND ' + live_a + ' AND ' + live_b + ' ') if live_a else ''}"
             "RETURN a.id, b.id, type(r), coalesce(r.direction, 'bidirectional'), "
             "       r.weight",
-            params={"ids": list(affected_claims)},
-        ).result_set
+            {"ids": list(affected_claims)}, hop=None,
+            phase="factor_extraction", frontier_size=len(affected_claims),
+        )
         for src_id, tgt_id, rel, direction, weight in dir_rows:
             if weight is None:
                 weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
@@ -1524,14 +1577,15 @@ class TortoiseEP:
         # is then NOT provably the source, so the directional source-slot
         # guard must not fire (it could check the wrong slot — #943 review).
         op_idx_known: dict[str, bool] = {op_id: True for op_id in op_info}
-        rows = self.g.query(
+        rows = self._hop_query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
             "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false) "
             "ORDER BY coalesce(r.idx, 0), c.id",
-            params={"ids": list(op_info.keys())},
-        ).result_set
+            {"ids": list(op_info.keys())}, hop=None,
+            phase="factor_extraction", frontier_size=len(op_info),
+        )
         for op_id, claim_id, idx, status, outdated in rows:
             op_inputs[op_id].append(claim_id)
             # Participation is UNCONDITIONAL on status (#2422): a terminal

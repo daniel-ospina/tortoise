@@ -20,9 +20,13 @@ The issue measured three failures at the graph's own scale (3,353 points,
    frontier size — and it still IS a ``ResponseError``, so existing ``except``
    clauses (and ``tortoise/retry.py``'s classifier) are unaffected.
 
-Both cases are asserted against the REAL default cap (200) — the tests never
-raise it. ``test_6211_ep_scale.py`` carries the scale fixture; this file is the
-fast contract.
+The two acceptance cases — "the cap must fire" and "the cap must NOT fire" —
+are both asserted against the REAL default (200) and never by raising it. Two
+tests below DO drive ``op_cap`` deliberately (``op_cap=2``, ``op_cap=default+100``),
+for the selector's own report semantics across a reused dict and an opt-in
+``stats`` argument — neither stands in for the acceptance case.
+``test_6211_ep_scale.py`` carries the scale fixture; this file is the fast
+contract.
 """
 
 from __future__ import annotations
@@ -368,6 +372,83 @@ def test_every_seed_phase_query_is_typed_as_hop_zero(seed, fragment, phase):
         assert excinfo.value.hop == 0
         assert excinfo.value.phase == phase
         assert excinfo.value.frontier_size == 1
+    finally:
+        sdk.close()
+
+
+@pytest.mark.parametrize(("fragment", "phase"), [
+    # Batch 1 of factor extraction (operator discovery over the affected set).
+    ("RETURN DISTINCT o.id, o.op_type, o.label, o.direction",
+     "factor_extraction"),
+    # Batch 3 (operator-less direct-edge factors).
+    ("RETURN a.id, b.id, type(r)", "factor_extraction"),
+    # Batch 2 (an operator's inputs, by idx).
+    ("RETURN o.id, c.id, r.idx", "factor_extraction"),
+    # The draft sweep: pass-level when asked with no hop.
+    ("AND n.status = 'draft'", "draft_filter"),
+    # The #395 degeneration guard's sizing query.
+    ("RETURN count(n)", "claim_count"),
+])
+def test_the_pass_level_queries_are_typed_too(fragment, phase):
+    """Every id-set query of the pass is typed, not just the expansions.
+
+    #6211 review round 2: factor extraction walks the FINISHED affected set
+    (thousands of ids on the issue's graph), so it is the largest query of the
+    pass and can be the one the engine aborts. Typing only the two-hop
+    expansions left the issue's own symptom (a bare ''Query timed out'')
+    reproducible on it. These are ``hop=None``: they walk a set, not a hop
+    frontier, so there is no hop index to name.
+    """
+    sdk = _fresh_sdk()
+    try:
+        _hub(sdk, 2)
+        faulty = _FaultyGraph(sdk._get_proj().g, fragment, "Query timed out")
+        ep = _ep_over(faulty)
+        with pytest.raises(EPSubgraphHopError) as excinfo:
+            if phase == "claim_count":
+                ep._graph_claim_count()
+            elif phase == "draft_filter":
+                ep._filter_draft_ids({"c0", "c1"})
+            else:
+                ep._affected_factors({"c0", "c1"})
+        assert excinfo.value.phase == phase
+        assert excinfo.value.hop is None, (
+            "a pass-level query has no hop index — reporting 0 would claim "
+            f"it failed in the seed phase; got hop={excinfo.value.hop!r}"
+        )
+        assert "pass-level" in str(excinfo.value)
+    finally:
+        sdk.close()
+
+
+def test_the_epoch_read_is_typed_and_has_no_frontier():
+    """The ``:EpMeta`` epoch read is a pass-level query with no id set."""
+    sdk = _fresh_sdk()
+    try:
+        _hub(sdk, 2)
+        faulty = _FaultyGraph(sdk._get_proj().g, "MATCH (m:EpMeta)",
+                              "Query timed out")
+        with pytest.raises(EPSubgraphHopError) as excinfo:
+            _ep_over(faulty)._graph_ep_version()
+        assert excinfo.value.phase == "ep_epoch"
+        assert excinfo.value.hop is None
+        assert excinfo.value.frontier_size is None
+    finally:
+        sdk.close()
+
+
+def test_a_draft_sweep_asked_by_a_hop_names_that_hop():
+    """The same query is hop-scoped when a hop asked it."""
+    sdk = _fresh_sdk()
+    try:
+        _hub(sdk, 2)
+        faulty = _FaultyGraph(sdk._get_proj().g, "AND n.status = 'draft'",
+                              "Query timed out")
+        with pytest.raises(EPSubgraphHopError) as excinfo:
+            _ep_over(faulty)._filter_draft_ids({"c0", "c1"}, hop=2)
+        assert excinfo.value.phase == "draft_filter"
+        assert excinfo.value.hop == 2
+        assert excinfo.value.frontier_size == 2
     finally:
         sdk.close()
 

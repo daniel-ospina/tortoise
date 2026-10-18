@@ -212,7 +212,7 @@ curve, and one of those guards has a **measured failure threshold**.
 |---|---|---|
 | EP affected-claim frontier guard (new **claims** per hop) | **200** (`_EP_GUARD_FRONTIER_CAP`) | `tortoise/ep.py` |
 | Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning — and reported in the caller's RESULT as `truncated` / `operators_seen` / `operators_used` since #6211 | `tortoise/analyze.py` |
-| EP affected-subgraph hop that the engine aborts on its own query timeout | raised as **`EPSubgraphHopError`** (a `ResponseError` subclass) carrying the hop index, phase and frontier size (#6211) | `tortoise/ep.py` |
+| EP pass query that the engine aborts on its own query timeout | raised as **`EPSubgraphHopError`** (a `ResponseError` subclass) carrying the hop index (or `None` for a pass-level query), phase and frontier size (#6211) | `tortoise/ep.py` |
 | EP degenerate-run guard | fires when the pass has collected **≥ 50%** of the graph's claims, on graphs of **≥ 500** claims | `tortoise/ep.py` |
 | Dreaming per-pass window budget (stale-first) | **200** operators (`TORTOISE_DREAM_WINDOW_BUDGET`) | `tortoise/dream.py` |
 | Dreaming full-mode operator cap (`dream_all`) | **200,000** (`max_total_operators`) | `tortoise/dream.py` |
@@ -244,10 +244,17 @@ now visible to a programmatic caller instead of to a human reading stderr:
   `converged: true` — a published ranking with 0.0067 margins came from a capped
   pass and nothing in the result said so. The cap itself is deliberately NOT
   raised: the truncated topology is the honest problem, not the bound.
-* A hop the engine aborts on its own query timeout raises `EPSubgraphHopError`
-  (still a `redis.exceptions.ResponseError`, so existing handlers are
-  unaffected), naming the hop index, the phase (`seed_neighbourhood` /
-  `operator_bridge` / `direct_edge`) and the frontier size it was expanding from.
+* A query of the pass that the engine aborts on its own query timeout raises
+  `EPSubgraphHopError` (still a `redis.exceptions.ResponseError`, so existing
+  handlers are unaffected), naming the hop index, the phase and the frontier
+  size it was scoped to. Typed is the WHOLE pass, not only the two-hop
+  expansion: the seed phase (`seed_lookup` / `seed_operators` /
+  `seed_direct_edge` / `seed_neighbourhood`, hop 0), the loop's hops
+  (`operator_bridge` / `direct_edge`), and the pass-level queries that walk the
+  finished affected set (`factor_extraction`, `draft_filter`, `claim_count`,
+  `ep_epoch`) — those report `hop: None`, because there is no hop to name. An
+  earlier revision typed only the expansions, which left the issue's own
+  symptom reproducible on the largest query of the pass.
   Measured on a 3,353-claim / 160,000-edge graph with the engine's 1,000 ms
   timeout posture: the bridge query aborted after **1.00 s** over a
   **188–257-claim** frontier, and the pass failed after 1.1–2.9 s.

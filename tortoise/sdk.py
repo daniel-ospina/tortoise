@@ -20872,10 +20872,13 @@ class TortoiseSDK:
             confident number computed over a truncated factor set was
             indistinguishable from a full-graph ranking.
           * ``operators_seen`` — operators the selection COLLECTED.
-          * ``operators_used`` — operators the selection RETURNED (the set the
-            run was seeded with). Two things can make the run consume fewer:
-            ``skipped_factors`` (#6105) and the direct-edge factor anchors the
-            anchors path adds as seeds.
+          * ``operators_used`` — operators the BFS selection RETURNED (what
+            ``truncated`` is computed from). It is NOT the size of the run's
+            seed set: the anchors path additionally seeds the direct-edge
+            factor-anchor endpoints, which are CLAIMS, not operators, so the
+            run can be seeded with ids this count excludes. And it is not the
+            number of factors that voted — ``skipped_factors`` (#6105) records
+            the factors EP dropped before consuming them.
 
         ``operators_seen > operators_used`` names the operator cap specifically
         (the default cap is 200 — the value is not re-stated here because a
