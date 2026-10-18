@@ -1582,7 +1582,7 @@ class TestBillingReconcileDriverVerdicts:
         )
 
     def test_a_wedged_reconcile_is_named_stuck_not_enumeration_incomplete(self):
-        """#8904 round 4: 503 is TWO causes and they want opposite responses.
+        """#8904 round 4: the two named 503 statuses want OPPOSITE responses.
 
         A wedged lock was paged as "the control plane is unreadable, retry once
         it is readable" — a cause that clears itself — while the real cause (a

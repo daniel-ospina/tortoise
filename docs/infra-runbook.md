@@ -504,9 +504,12 @@ lock past its staleness bound and is presumed wedged — the fleet is NOT being
 reconciled and retrying will not help; the lock clears when that pass ends or
 the process restarts), when the response cannot be read as a summary, when any
 org `failed` to reconcile, when any org is `unrepaired`, or when any `drift` row
-went `up`. The 503 body carries a `reason` naming which leg refused: an
-UNREADABLE control plane clears on retry, while a lower-bound page or a missing
-enumeration seam does not — read it before retrying.
+went `up`. The `enumeration_incomplete` body carries a `reason` naming which leg
+refused (a partial page, a lower-bound page, or a missing enumeration seam) —
+all three are structural, so retrying alone does not repair them; the
+`reconcile_stuck` body carries `status` + `detail` and NO `reason`. A control
+plane OUTAGE is a different path: `query_all` raises a bare `RuntimeError` the
+endpoint does not catch, so it arrives as an unnamed 500 with no reason at all.
 The page leg sources `.github/scripts/telegram-send.sh`, so the job starts with
 `actions/checkout` — a hosted runner's workspace is empty otherwise, and the
 source would fail before `tg_send` ran (a page step that can never deliver).
