@@ -335,6 +335,12 @@ def test_the_orphan_sweep_is_a_retry_only_cost(tmp_path):
     must issue it even though its own re-read of ``stale`` finds nothing — that
     second direction is the live-vs-replay divergence the parameter exists to
     prevent.
+
+    The third block pins the CONSEQUENCE the projection docstring states as the
+    limit of that saving: an orphan ``:Tag`` from an EARLIER call survives a
+    plain tagged update that removed no edge, and is collected by the next call
+    that does remove one. Without it that sentence would name a behaviour no
+    test measures.
     """
     sdk = _sdk(tmp_path, "sweep")
     try:
@@ -363,6 +369,36 @@ def test_the_orphan_sweep_is_a_retry_only_cost(tmp_path):
             "the RETRIED attempt skipped the orphan sweep — an orphan :Tag left "
             "by an earlier attempt survives, so list_tags() reports a count: 0 "
             "entry a rebuilt graph does not have (live != replay)")
+
+        # ── the documented LIMIT of the saving, both ways ───────────────────
+        pid3 = _pid(sdk)
+        sdk.update_point(pid3, tags=["7405held"])
+        # An orphan left by some EARLIER interrupted call: a :Tag with no
+        # incoming TAGGED edge.
+        proj.g.query("CREATE (:Tag {name: '7405orphan'})")
+
+        plain = _CountSweeps(proj.g, _TAGGED_NEEDLE, aborts=0)
+        proj.g = plain
+        sdk.update_point(pid3, tags=["7405held"])  # already held: no edge removed
+        proj.g = plain._real
+        assert plain.sweeps == 0, (
+            "a plain tagged update that removed no edge paid the graph-wide "
+            ":Tag scan — the saving is gone")
+        survived = proj.g.query(
+            "MATCH (t:Tag {name: '7405orphan'}) RETURN count(t)",
+        ).result_set[0][0]
+        assert survived == 1, (
+            "the documented limit is that an orphan from an EARLIER call "
+            f"survives a plain tagged update, but it was collected: {survived}")
+
+        # ...and a call that DOES remove an edge collects it.
+        sdk.update_point(pid3, tags=[])
+        collected = proj.g.query(
+            "MATCH (t:Tag {name: '7405orphan'}) RETURN count(t)",
+        ).result_set[0][0]
+        assert collected == 0, (
+            "a call that removed a TAGGED edge must sweep the orphan it left "
+            f"behind, but {collected} survived")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
