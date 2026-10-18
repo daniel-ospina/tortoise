@@ -803,8 +803,9 @@ def test_a_rebuild_abort_on_delete_point_is_retried(tmp_path):
     """``delete_point``'s DETACH DELETE is retried.
 
     A dropped hard delete leaves the claim LIVE on the map while the caller was
-    told the delete failed — but the event and journal halves below it have
-    already recorded a ``PointRetracted`` / ``EntityMutated(delete)``, so a
+    told the delete failed — but the journal half has ALREADY recorded an
+    ``EntityMutated(delete)`` record before the statement (the #7951 §17.1
+    outbox ordering), and the ``PointRetracted`` event is emitted after it. So a
     later replay hard-deletes a Point the live graph still answers for. The two
     stores disagree, and the live one is the stale half.
     """
@@ -890,6 +891,568 @@ def test_a_deterministic_error_on_delete_point_is_not_retried(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+# ── 6b-bis. delete_point's DETACH DELETE — EXEMPT, and the proof ─────────────
+#
+# OWNERSHIP — do not re-derive what a merged suite already guards:
+# `tests/test_7951_delete_point_outbox.py` OWNS the ordering, the refusal arm
+# and replay-healing for this door — T1
+# (`test_delete_point_appends_the_record_before_the_cache_delete`, the
+# record-precedes-the-cache ordering), T2
+# (`test_a_failed_append_does_not_delete_the_point`, the unconfirmed-append
+# refusal plus "the Point is still live"), T3
+# (`test_a_committed_delete_record_is_healed_by_replay`). The tests below do NOT
+# re-assert those invariants from scratch; they pin the one thing T1/T2/T3
+# cannot: that the ordering makes the statement EXEMPT from a row-count witness,
+# OBSERVED on disk at the abort and triangulated by stripping the record. The
+# only delta on the refusal arm (test 3 here) is the failure MECHANISM: T2
+# monkeypatches `log.append`, this one fails it for real at `EventLog.append`'s
+# own `mkdir`, so the whole `_emit_event` → `False` → door-refusal chain runs
+# end to end.
+#
+# The section above pins that the aborted `DETACH DELETE` is RE-ISSUED. It does
+# not ask what the re-issue DID, and #7405's own census disagreed with itself
+# about the answer: round 11 filed this statement as a genuinely-exempt
+# idempotent DELETE ("a zero-row DELETE IS the desired end state"), round 13
+# filed it as an unwitnessed false success ("`delete_point` returns `True` … for
+# a deletion the graph never made"). Measured at cdf30ed8e, WITH A JOURNAL
+# CONFIGURED, round 11 is right and round 13 is stale.
+#
+# WHY the statement is exempt there (measured — see the three tests):
+#
+#   1. The `EntityMutated` op=delete record is appended BEFORE the statement
+#      (the #7951 §17.1 outbox ordering) and it is the destruction's only
+#      durable carrier. A zero-row re-issue therefore cannot lose the deletion:
+#      the replay folds the record (`_delete_entity_by_id`) and the Point ends
+#      ABSENT whether or not the cache statement applied.
+#   2. So `count(n) == 0` on a re-issue does NOT mean "the destruction did not
+#      land". During a rebuild it usually means "the replay already applied our
+#      record". A row-count witness would raise a failure for a deletion that HAS
+#      landed — a false NEGATIVE, the same shape the census cites for the
+#      `IS NULL`-guarded stamps — after spending the whole 7-14 s retry budget
+#      re-issuing a statement whose answer cannot change.
+#   3. The one case where the destruction really is lost — the record does not
+#      confirm — is refused BEFORE the `DETACH DELETE` is issued, loudly, by the
+#      door's own `WriteNotLandedError` arm (pinned here).
+#
+# ⚠️ SCOPE, and it is load-bearing: this exemption is about the DOOR's carrier,
+# not about the statement's row count. It holds exactly while the door can
+# commit the destruction record. WITHOUT a journal configured there is no
+# carrier at all, and a destruction there is not durable even when the statement
+# LANDS — pinned as a residual in 6b-ter, because a witness would not close it
+# either (it draws a line at the statement, not at durability).
+#
+# A witness WAS drafted for this call site first, and was refuted by review plus
+# measurement: with it, the "the replay already applied our record" case raised
+# `WriteNotLandedError` while the graph was in the correct end state — and the
+# `record_committed=True` message it routes to says the cache still serves a
+# stale node (`extra_in_cache`), which is not true in that state. A witness on an
+# idempotent DELETE whose destruction is already committed is noise, and this is
+# the measurement that says so.
+
+
+def _sdk_with_journal(tmp_path, tag: str):
+    """The ``_sdk`` helper plus a JSONL journal in its OWN directory.
+
+    The journal directory matters: ``rebuild_all`` replays every ``.jsonl`` in
+    the directory it is handed, so a shared ``tmp_path`` would replay a sibling
+    test's records.
+    """
+    uri = os.environ.get("TORTOISE_DB_URI")
+    log_dir = tmp_path / f"{tag}_journal"
+    log_dir.mkdir()
+    return TortoiseSDK(
+        None if uri else str(tmp_path / f"{tag}.db"),
+        namespace=f"test_7405_{tag}_{uuid.uuid4().hex[:8]}",
+        event_log_path=str(log_dir / "events.jsonl"),
+    ), log_dir
+
+
+def _journal_records(log_dir):
+    """The journal's records, in append order."""
+    import json
+    path = log_dir / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()
+            if line.strip()]
+
+
+class _AbortThenUnreplayDelete(_AbortOnceGraph):
+    """Abort the first matching DELETE, then remove its target off-statement.
+
+    Models the rebuild window in the form that raises the question: the abort is
+    a rebuild's, the graph KEY is present (so the retry is authorised), and the
+    replacement graph's replay has not re-created the Point — so the re-issue
+    matches nothing. The victim is removed through the REAL graph, because the
+    point of the fixture is that the caller's own statement is not what removed
+    it.
+
+    ``records_at_abort`` snapshots the journal at the moment of the abort, which
+    is how the §17.1 ordering is OBSERVED rather than assumed: the destruction
+    record must already be there.
+    """
+
+    def __init__(self, real, needle: str, *, victim: str, log_dir=None) -> None:
+        super().__init__(real, needle, present=True)
+        self._victim = victim
+        self._log_dir = log_dir
+        self.vanished = False
+        self.records_at_abort = None
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle not in cypher:
+            # Only the aborted statement is turned into a non-landing, and only
+            # the abort of that statement mutates the fixture — a transient
+            # error from a read must not delete the victim before the door has
+            # even probed it.
+            return super().query(cypher, params=params, timeout=timeout)
+        try:
+            return super().query(cypher, params=params, timeout=timeout)
+        except redis_exc.ResponseError:
+            if self.records_at_abort is None and self._log_dir is not None:
+                self.records_at_abort = _journal_records(self._log_dir)
+            if not self.vanished:
+                self._real.query(
+                    "MATCH (p:Point {id:$id}) DETACH DELETE p",
+                    params={"id": self._victim})
+                self.vanished = True
+            raise
+
+
+def test_a_non_landed_detach_delete_converges_to_absence_on_replay(tmp_path):
+    """EXEMPT, proven: a re-issue that matches nothing cannot lose the delete.
+
+    The call runs inside a rebuild window: the Point exists when the door's
+    existence probe runs, the destruction record is appended, the engine aborts
+    the `DETACH DELETE` with the graph-replaced literal, and the re-issue matches
+    no rows because the fixture (standing in for the replacement graph's replay
+    not having re-created the Point) removed the node off-statement. The verb
+    answers ``True``, and the destruction is DURABLE: the committed record is
+    what destroys the Point, so the replay below folds it and the Point ends
+    absent.
+
+    ⚠️ Two things this test does NOT claim. (a) The cache may serve the Point
+    until the NEXT replay: ``rebuild_all`` parses the journal before its wipe, so
+    an in-flight rebuild that parsed before our append does not fold our record,
+    while its own `PointAdded` fold re-creates the node — that is the §17.1
+    replay-healable window the door already documents (and reports loudly as
+    `WriteNotLandedError(record_committed=True)` when the retry exhausts).
+    (b) It says nothing about a journal-less door — see 6b-ter.
+
+    This is why the statement carries no `witness`: a row-count witness would
+    raise here, and here the destruction HAS landed.
+    """
+    sdk, log_dir = _sdk_with_journal(tmp_path, "delexempt")
+    try:
+        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplayDelete(
+            proj.g, _DELETE_POINT_NEEDLE, victim=pid, log_dir=log_dir)
+        proj.g = proxy
+        try:
+            found = sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+
+        assert found is True
+        assert proxy.matching >= 2, (
+            "the aborted DELETE must have been re-issued — otherwise this test "
+            "never reaches the re-issue that matches nothing")
+        assert proxy.vanished, "fixture precondition: the re-issue matched no rows"
+        assert proxy.applied == 1, (
+            "the re-issue DID reach the real graph and matched no rows; it was "
+            "not skipped")
+        # The §17.1 ordering, OBSERVED at the abort: the destruction record was
+        # already durable when the statement was refused. The exemption rests on
+        # exactly this, so it is asserted rather than described.
+        records = proxy.records_at_abort or []
+        assert any(r.get("type") == "EntityMutated" and r.get("op") == "delete"
+                   and r.get("id") == pid for r in records), (
+            "the op=delete record must be in the journal BEFORE the DELETE is "
+            "issued — that record, not the statement, is the destruction")
+
+        # THE PROOF: replay the journal. The PointAdded fold re-creates the
+        # Point, and the op=delete fold then removes it — with a cache statement
+        # that matched no rows.
+        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+        assert sdk.get_point(pid) == {}, (
+            "a DETACH DELETE that matched nothing must still end ABSENT: the "
+            "committed record is the destruction (test 2 shows the dependency)")
+        assert proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n)",
+            params={"id": pid}).result_set[0][0] == 0
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_delete_exemption_rests_on_the_committed_record(tmp_path):
+    """Falsifiability for the test above: WITHOUT the record the Point RETURNS.
+
+    Same flow, then the journal is tampered with — the `EntityMutated` op=delete
+    record is stripped — and replayed. The PointAdded fold brings the Point back
+    LIVE, which is precisely what the record prevents and therefore what makes
+    ``test_a_non_landed_detach_delete_converges_to_absence_on_replay`` a
+    measurement rather than a tautology.
+
+    ⚠️ Stripping a record is NOT a supported flow: the door refuses to issue the
+    `DETACH DELETE` when the append does not confirm (the third test), so the only
+    real producer of this journal is a tamper. The test exists to keep the first
+    test honest — if the append ever moves back under the statement, that test
+    fails, and this one explains why.
+    """
+    sdk, log_dir = _sdk_with_journal(tmp_path, "deltamper")
+    try:
+        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplayDelete(proj.g, _DELETE_POINT_NEEDLE, victim=pid)
+        proj.g = proxy
+        try:
+            assert sdk.delete_point(pid) is True
+        finally:
+            proj.g = proxy._real
+
+        import json
+        path = log_dir / "events.jsonl"
+        kept = [line for line in path.read_text().splitlines()
+                if line.strip() and not (
+                    json.loads(line).get("type") == "EntityMutated"
+                    and json.loads(line).get("op") == "delete")]
+        assert kept, "fixture precondition: the creation record must survive"
+        path.write_text("\n".join(kept) + "\n")
+
+        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+        back = sdk.get_point(pid)
+        assert back, (
+            "without the destruction record the replay re-creates the Point — "
+            "so the record, not the row count, is what makes the delete durable")
+        assert back.get("status") == "live"
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_delete_whose_record_cannot_be_committed_is_refused_before_the_detach_delete(
+        tmp_path):
+    """The genuine loss is LOUD — and it is refused before the statement.
+
+    The one case in which the destruction really can be lost is the one the
+    exemption does NOT cover: no confirmed destruction record. The §17.1 ordering
+    then skips the `DETACH DELETE` entirely and the door raises
+    `WriteNotLandedError` (the unconfirmed arm). Pinned here because it is the
+    other half of the exemption argument: with the record the replay converges,
+    and without it this call never claims success.
+
+    The append is made to FAIL FOR REAL — the journal's DIRECTORY is replaced by
+    a regular file after the Point is created, so `EventLog.append` raises
+    (`FileExistsError` from its own `mkdir`) — rather than by stubbing
+    `_journal_entity_mutation`, so the whole §17.1 return-value chain
+    (`_emit_event` -> False -> the door's refusal) is exercised end to end. The
+    Point is created FIRST, while the journal still works, because a broken
+    journal also (correctly) refuses a create.
+    """
+    import shutil
+
+    from tortoise.exceptions import WriteNotLandedError
+
+    uri = os.environ.get("TORTOISE_DB_URI")
+    log_dir = tmp_path / "delrefused_journal"
+    log_dir.mkdir()
+    sdk = TortoiseSDK(
+        None if uri else str(tmp_path / "delrefused.db"),
+        namespace=f"test_7405_delrefused_{uuid.uuid4().hex[:8]}",
+        event_log_path=str(log_dir / "events.jsonl"),
+    )
+    try:
+        pid = sdk.create_point("statement", "a claim with a refusing journal")["id"]
+        # Break the journal under the SDK's feet: the directory becomes a file.
+        shutil.rmtree(log_dir)
+        log_dir.write_text("not a directory")
+        proj = sdk._get_proj()
+        proxy = _AbortOnceGraph(proj.g, _DELETE_POINT_NEEDLE, present=True)
+        proj.g = proxy
+        try:
+            with pytest.raises(WriteNotLandedError) as excinfo:
+                sdk.delete_point(pid)
+        finally:
+            proj.g = proxy._real
+        err = excinfo.value
+        assert err.record_committed is False, (
+            "the append did not confirm, so this is the UNCONFIRMED arm — the "
+            "committed arm would tell the caller the destruction is durable")
+        assert err.operation == "delete_point"
+        assert proxy.matching == 0, (
+            "the DETACH DELETE must NOT be issued when the record did not "
+            "confirm — the ordering is the whole reason the delete is durable")
+        assert proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN count(n)",
+            params={"id": pid}).result_set[0][0] == 1, (
+            "the Point must survive a refused delete")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── 6b-ter. the delete door's REMAINING losses (pinned, NOT fixed) ───────────
+#
+# The exemption above is about the STATEMENT and it is scoped to a door that can
+# commit the destruction record. Two ways a delete is still lost are pinned here,
+# each with a ``strict=True`` xfail on its DESIRED end state: closing either
+# XPASSes that test, which FAILS the suite on purpose so the pin cannot be
+# forgotten (the convention ``test_url_keyed_source_write_4649.py`` already uses
+# for its #5048 pins).
+#
+# Both are stated here rather than fixed because the fix is not a witness: a
+# witness would raise on the delete's own row count, and neither case is about
+# that count.
+#
+# Each residual is pinned as a PAIR, the way 6b-bis pins the exemption: a plain
+# test that pins TODAY's observed behaviour INCLUDING the replay (so a rebuild
+# that starts raising reds there), and a ``strict=True`` xfail test that asserts
+# only the DESIRED end state. An assertion inside the xfail body cannot be that
+# plain half — a ``strict`` xfail converts any exception in the body into
+# ``xfailed``, so a single test doing both jobs would silently absorb a NEW
+# regression in this path (a door that started refusing, a rebuild that started
+# raising, a `_assert_test_graph` rejection) as "the known #7405 residual".
+
+_EXISTENCE_PROBE_RESIDUAL = (
+    "#7405 indicator (c) — a delete during a rebuild window is answered 'not "
+    "found' by the pre-delete existence probe, so it is skipped and the replay "
+    "restores the Point. Telling 'absent' from 'not replayed yet' needs the "
+    "pre-write rebuild-in-progress signal, which the issue leaves as a product "
+    "decision.")
+
+_JOURNALLESS_RESIDUAL = (
+    "#7405 — a journal-less door has NO carrier for a destruction: the record "
+    "cannot be appended, so a rebuild that replays the creator's journal "
+    "restores the Point even when the DETACH DELETE landed. A witness does not "
+    "help; the missing piece is the record, not the row count.")
+
+
+def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
+    """TODAY's observed behaviour, pinned WITHOUT xfail — the residual's floor.
+
+    Same window as the test below (the replacement's WIPE, journal still holding
+    the Point's ``PointAdded``, replay not yet run), asserted on the two facts
+    that MAKE the loss: the pre-delete existence probe answers "no such Point"
+    (so the door returns ``False``), and the journal gains NO
+    ``EntityMutated`` op=delete record for the id (so the replay has no carrier
+    for the destruction).
+
+    This half is plain on purpose. Its sibling below is a ``strict`` xfail, which
+    turns ANY exception in its body into a green "expected failure"; if the door
+    began raising on this path, or the rebuild began refusing, or the graph name
+    began failing ``_assert_test_graph``, that sibling alone would still report
+    the residual as "open" and the new regression would be invisible. Pinning
+    today's answers HERE — including the replay that makes the loss a loss —
+    means a crash or a behaviour change reds loudly, and the xfail below fails
+    only for the residual it names.
+    """
+    sdk, log_dir = _sdk_with_journal(tmp_path, "delprobetoday")
+    try:
+        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        proj = sdk._get_proj()
+        # The replacement's wipe: the graph holds nothing, the journal still
+        # holds this Point's PointAdded, and the replay has not run.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+
+        # The residual, in one line: the door is told the Point is absent.
+        assert sdk.delete_point(pid) is False, (
+            "today the existence probe answers 'absent' during a rebuild "
+            "window, so the delete is reported as not-found — if this ever "
+            "answers True the residual is closed and both the xfail below and "
+            "the issue's residual paragraph must be revisited")
+
+        records = _journal_records(log_dir)
+        assert any(r.get("type") == "PointAdded" for r in records), (
+            "fixture precondition: the creation record must be in the journal "
+            "the replay will use")
+        assert not any(r.get("type") == "EntityMutated"
+                       and r.get("op") == "delete" and r.get("id") == pid
+                       for r in records), (
+            "the skipped delete must have recorded NOTHING — that absent "
+            "carrier is the residual: the replay cannot know the destruction "
+            "was asked for")
+
+        # The third fact, and the one that makes the loss a LOSS: the replay then
+        # re-creates the Point. Pinned here rather than left to the xfail below,
+        # so a rebuild that raised — or wiped without folding — reds in a plain
+        # test instead of reading as "the known residual".
+        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+        restored = sdk.get_point(pid)
+        assert restored and restored.get("status") == "live", (
+            "today the skipped delete is UNDONE by the replay and the Point "
+            "comes back LIVE — if this fails, the modelling in this file is "
+            "stale whether or not the residual is still open")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+@pytest.mark.xfail(strict=True, reason=_EXISTENCE_PROBE_RESIDUAL)
+def test_a_rebuild_window_must_not_lose_a_delete_at_the_existence_probe(tmp_path):
+    """RESIDUAL: deleting during a rebuild window is answered ``False``.
+
+    The window is modelled with the replacement's WIPE (not a per-Point delete):
+    the graph is emptied by the rebuild, whose replay has not run yet, while the
+    journal still holds the Point's creation record — so the truth says the Point
+    exists and the caller asked for it to be destroyed.
+
+    Measured today: ``delete_point`` answers ``False`` ("no such Point"), appends
+    no destruction record, and the replay then re-creates the Point LIVE — the
+    plain test above pins those three facts, including the replay. THIS test
+    asserts only the DESIRED end state, so it fails today with an
+    ``AssertionError`` on ``get_point`` and XPASSes the moment the residual is
+    closed, which is when the issue's residual paragraph must be revisited. Keep
+    it assertion-only: anything that can raise belongs in the plain half, or the
+    strict xfail swallows it.
+    """
+    sdk, log_dir = _sdk_with_journal(tmp_path, "delprobe")
+    try:
+        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        proj = sdk._get_proj()
+        # The replacement's wipe: the graph holds nothing, the journal still
+        # holds this Point's PointAdded, and the replay has not run.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+
+        sdk.delete_point(pid)          # today: False, and nothing is recorded
+        proj.rebuild_all(str(log_dir), confirm_destructive=True)
+
+        assert sdk.get_point(pid) == {}, (
+            "a delete issued during a rebuild window must not be silently "
+            "skipped: the Point the caller asked to destroy is LIVE again")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def _journal_less_delete_scenario(tmp_path, tag: str):
+    """A journaled creator and a journal-less deleter, on ONE graph.
+
+    The two doors are opened in SEQUENCE — the creator is CLOSED before the
+    journal-less deleter opens — never concurrently. Two live SDKs on one
+    embedded path are not multi-connection-safe (``tests/conftest.py``, the #432
+    note: each opens its own server and last-close wins on the DB file), so a
+    concurrent shape would be measuring the harness on the embedded lane
+    instead of the residual. Sequencing costs nothing here: the residual is
+    about the DESTRUCTION RECORD, and a journal-less door writes none whether
+    the creator is live or not.
+
+    Returns ``(deleter, pid, log_dir, deleted)`` with the Point already
+    DESTROYED by the journal-less door: ``deleted`` is what the door answered,
+    the graph holds nothing for the Point, and the creator's journal still holds
+    its ``PointAdded``, so replaying that journal is what can bring it back.
+    Performing the delete HERE, in the shared helper, is load-bearing: the two
+    halves must run identical steps, or the strict-xfail sibling would be
+    asserting something about a Point nobody ever destroyed — a pin whose XPASS
+    fires on a replay regression instead of on its own residual.
+    """
+    log_dir = tmp_path / f"{tag}_creator_journal"
+    log_dir.mkdir()
+    uri = os.environ.get("TORTOISE_DB_URI")
+    namespace = f"test_7405_{tag}_{uuid.uuid4().hex[:8]}"
+    db_path = None if uri else str(tmp_path / f"{tag}_creator.db")
+    creator = TortoiseSDK(
+        db_path, namespace=namespace,
+        event_log_path=str(log_dir / "events.jsonl"))
+    try:
+        pid = creator.create_point(
+            "statement", "a claim deleted mid-rebuild")["id"]
+    finally:
+        with contextlib.suppress(Exception):
+            creator.close()
+    deleter = TortoiseSDK(db_path, namespace=namespace)
+    try:
+        # Fixture precondition: the journal-less door is looking at the graph
+        # the creator wrote to (the #432 same-path close/reopen this scenario
+        # leans on). Evaluated BEFORE the delete, so it measures the door's
+        # view rather than an already-emptied graph.
+        assert deleter.get_point(pid) != {}, (
+            "the journal-less door cannot see the creator's graph, so nothing "
+            "below measures the residual")
+        deleted = deleter.delete_point(pid)
+    except BaseException:
+        # The callers' `finally` only starts once this returns; without this the
+        # opened door would leak on the precondition or on a raised write.
+        with contextlib.suppress(Exception):
+            deleter.close()
+        raise
+    return deleter, pid, log_dir, deleted
+
+
+def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path):
+    """TODAY's observed behaviour, pinned WITHOUT xfail — the residual's floor.
+
+    The journal-less door DESTROYS the Point and answers ``True``; it appends no
+    destruction record (it has nowhere to put one), and replaying the creator's
+    journal puts the Point back LIVE. Asserted plainly, including the replay, so
+    a door that starts refusing, a ``delete_point`` that starts answering
+    ``False``, a divergence between the two doors' graphs, or a
+    ``rebuild_all`` that starts raising reds HERE rather than inside the strict
+    xfail below, which would report any of them as "the known #7405 residual".
+
+    The delete is genuinely LANDED — no abort, no retry, no witness — which is
+    what makes this a durability residual rather than a row-count one.
+    """
+    deleter, pid, log_dir, deleted = _journal_less_delete_scenario(
+        tmp_path, "jltoday")
+    try:
+        assert deleted is True, (
+            "today the journal-less destruction LANDS and is reported as "
+            "landed — if this ever answers False the residual has changed "
+            "shape and both pins must be revisited")
+        assert deleter.get_point(pid) == {}, (
+            "the landed delete must remove the Point from the live graph")
+
+        assert not any(r.get("type") == "EntityMutated"
+                       and r.get("op") == "delete" and r.get("id") == pid
+                       for r in _journal_records(log_dir)), (
+            "the journal-less door recorded NOTHING — that absent carrier is "
+            "the residual, and it is why the replay below can undo the delete")
+
+        # The loss, end to end and OUTSIDE the xfail.
+        deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
+        restored = deleter.get_point(pid)
+        assert restored and restored.get("status") == "live", (
+            "today's loss, pinned plainly: replaying the creator's journal "
+            "restores the Point the journal-less door genuinely destroyed, and "
+            "it comes back LIVE — if this ever ends absent the residual is "
+            "closed and the issue's paragraph must be revisited")
+    finally:
+        with contextlib.suppress(Exception):
+            deleter.close()
+
+
+@pytest.mark.xfail(strict=True, reason=_JOURNALLESS_RESIDUAL)
+def test_a_journal_less_delete_must_survive_a_replay_of_the_creators_journal(tmp_path):
+    """RESIDUAL: a journal-less destruction is undone even when it LANDS.
+
+    A journaled creator and a journal-less deleter on ONE graph, which is the
+    fleet's normal shape: the creator's journal holds the Point's ``PointAdded``
+    (so a rebuild replays it), and the deleter writes no destruction record at
+    all. The deleter's `DETACH DELETE` LANDS normally — no abort, no retry, no
+    witness involved — and the verb answers ``True``; the plain twin above pins
+    that, the absent carrier and the replay that undoes it.
+
+    Measured today: replaying the creator's journal brings the Point back LIVE,
+    because the deleter had no journal to record the destruction in. So the
+    missing piece is the CARRIER, not the statement's row count: a witness would
+    leave this exactly as it is. THIS test asserts only the DESIRED end state —
+    keep it assertion-only, because anything that can raise is swallowed by the
+    strict xfail (the plain twin is what keeps a regression visible).
+    """
+    deleter, pid, log_dir, deleted = _journal_less_delete_scenario(tmp_path, "jl")
+    try:
+        assert deleted is True, "the journal-less delete must LAND for this pin"
+        deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
+        assert deleter.get_point(pid) == {}, (
+            "a destruction the door cannot record must not be reported as "
+            "durable: replaying the creator's journal resurrects the Point")
+    finally:
+        with contextlib.suppress(Exception):
+            deleter.close()
 
 
 # ── 6c. promote_point — the CAS promotion SET ────────────────────────────────

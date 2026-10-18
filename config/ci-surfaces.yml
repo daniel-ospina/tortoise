@@ -2748,6 +2748,12 @@ surfaces:
   - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  # #2818: the per-kind VALUE-FIELD declaration surface — `values` in
+  # `pack_registry.VALID_KINDDEF_KEYS` with its closed vocabulary and
+  # shape rules (`tortoise/pack_values.py`), threaded to the S2/S4 prompt
+  # (brief → master → `_render_master*` / `_s2s4_rules`) and kept OUT of
+  # the classification index text so the npz cache key never rotates.
+  - test_pack_value_declarations_2818.py
   # #2728: the per-graph pack SELECTION state model + management surface
   # (`tortoise/pack_state.py`'s `:PackSelection` marker / `resolved_pack_set`
   # / `set_graph_packs`, and `GET`+`PUT /v1/graphs/{graph_id}/packs`).
@@ -5387,6 +5393,7 @@ durations:
   test_migration_append_only.py: 0.9
   test_notify.py: 0.4
   test_pack_kinds.py: 1.2
+  test_pack_value_declarations_2818.py: 2.0  # unmeasured — new in #2818; no sweep has collected it, so it carries the flat default exactly as an absent key would (#3419/#2788 rule). Do NOT substitute a local timing (a measured-on-this-box 4.9 was written here first and is deliberately gone: the map is a SHARD-LAYOUT input, so a number that does not model CI decides which files run together). The row also buys the coverage floor its margin — duration_coverage_issues() passes without it too (90.01% vs 90.12%), so the row is margin, not the floor. The refresher (tools/ci_timing.py) replaces this value from the first post-merge CI run that includes the file and clears the `unmeasured` tail.
   test_session_index_lock.py: 0.5
   eval/write_path/test_write_path_corpus.py: 0.5
   test_analyze_scoped.py: 0.6
