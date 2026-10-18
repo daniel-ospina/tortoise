@@ -2846,6 +2846,346 @@ def test_a_fragment_that_is_not_the_first_line_after_the_close_still_fails_the_b
     out.unlink()
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Round 5 — the remaining shape is decided by NORMALISING the tokens, not
+# by enumerating the ways a wrap can be spelled.  Each test below is one
+# spelling that round 4's predicate answered `False` for, and each was
+# measured building GREEN with the false refutation in the artifact.
+# ─────────────────────────────────────────────────────────────────────
+def _restore_the_round_4_predicate(monkeypatch) -> None:
+    """MUTATION: put back round 4's `_is_member_list` — spelling by spelling.
+
+    The pre-fix predicate, verbatim: strip TRAILING commas/whitespace, split on `,`, strip
+    backticks, and demand every token be a known name. Restoring it is the sharpest mutation
+    available — the rest of the parse is untouched, so a document that builds green under it
+    and red under the current one differs in this predicate and nothing else. Measured: every
+    spelling below goes green with the false `refuted` claim written to the artifact.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    def round_4_predicate(stripped: str, known: set[str]) -> bool:
+        body = stripped.rstrip(", \t")
+        if not body:
+            return False
+        tokens = [t.strip().strip("`").strip() for t in body.split(",")]
+        return all(tokens) and all(t in known for t in tokens)
+
+    monkeypatch.setattr(bt, "_is_member_list", round_4_predicate)
+
+
+def _row_21_broken_at(real: str, line1_cell: str, remainder: str) -> str:
+    """Row 21's cell cut so `remainder` lands on its own line, past a BLANK line.
+
+    The row's trailing `|` stays on line 1, which is the shape that was measured: the row
+    still parses as a legal table row, with a TRUNCATED `Absorbs` cell.
+    """
+    row = "| 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |"
+    assert row in real, "row 21's row is not in the doc — this test is stale"
+    broken = f"| 21 | `adjust_relationship` | {line1_cell} |\n\n{remainder}\n"
+    edited = real.replace(row, broken, 1)
+    assert edited != real, "the break did not change the doc"
+    return edited
+
+
+def _the_break_fails_closed(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    *,
+    edited: str,
+    name: str,
+    remainder: str,
+    lost: set[str],
+) -> None:
+    """Shared body of the round-5 shape tests: red now, green-with-a-lie under round 4.
+
+    `lost` are the row-21 members this spelling truncates away, i.e. exactly the methods the
+    false "no approved row absorbs it" claim would be made about.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, name)
+
+    # ---- the guard ON: the remainder is reported, attributed to the row it truncated.
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, (
+        f"every row still parses here ({len(menu)}) — the remainder is the ONLY evidence, "
+        "which is why the body, not the row regex, has to decide"
+    )
+    members = menu["adjust_relationship"]["members"]
+    for member in sorted(lost):
+        assert member not in members, (
+            f"this spelling is supposed to TRUNCATE row 21 and drop `{member}` — if it no "
+            "longer does, the test no longer reproduces the defect"
+        )
+    assert len(row_errors) == 1, (
+        f"the remainder was not reported exactly once (the guard answers `False` for it): "
+        f"{row_errors}"
+    )
+    assert "ORPHANED continuation line after row 21 (`adjust_relationship`)" in row_errors[0], (
+        f"the diagnostic does not name the row the wrap truncated: {row_errors[0]!r}"
+    )
+    assert repr(remainder) in row_errors[0], (
+        f"the diagnostic does not quote this remainder, so it cannot be about it: "
+        f"{row_errors[0]!r}"
+    )
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
+        "the specific cause must print BEFORE the generic row-count diagnostic"
+    )
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])  # WRITE mode, not --check
+    assert bt.main() == 1, f"the remainder {remainder!r} did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert not out.exists(), (
+        "the build failed but still wrote the artifact — a false refutation of the "
+        "owner-approved doc is exactly what must not reach it"
+    )
+
+    # ---- MUTATION: round 4's predicate, nothing else changed. Same document, same row
+    # parse — and the defect comes straight back, green, in the artifact.
+    _restore_the_round_4_predicate(monkeypatch)
+    _, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not restore round 4's behaviour: {errs_off}"
+    assert bt.main() == 0, "with round 4's predicate this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert (
+        "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*"
+        in written
+    ), "the mutation did not reproduce the false refutation — the test proves nothing"
+    out.unlink()
+
+
+def test_a_leading_comma_remainder_fails_the_build(tmp_path, monkeypatch, capsys) -> None:
+    """Round 5, shape 1 — the remainder keeps the cell's separator at its HEAD.
+
+    `| 21 | `adjust_relationship` | operator_action |` ⏎ blank ⏎
+    `, annotate_operator, mitigate_operator`. This is the measured example from the review:
+    round 4 split on `,` and demanded `all(tokens)`, so the EMPTY first token defeated it and
+    the build went green with `row_errors=[]`, `rows=23`, partition 5/7/0 → 4/7/1 (#8930
+    review, round 5, P2). It is not a sentence by any reading — which is why round 4's "the
+    only miss is an ordinary sentence" claim was false.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    remainder = ", annotate_operator, mitigate_operator"
+    # NOT VACUOUS: the predicate is what changes, and it must say yes to this spelling.
+    assert bt._is_member_list(remainder, bt._known_names()), (
+        f"the member-list test still answers `False` for a leading comma: {remainder!r}"
+    )
+    _the_break_fails_closed(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        edited=_row_21_broken_at(real, "operator_action", remainder),
+        name="leading-comma",
+        remainder=remainder,
+        lost={"annotate_operator", "mitigate_operator"},
+    )
+
+
+def test_a_trailing_period_remainder_fails_the_build(tmp_path, monkeypatch, capsys) -> None:
+    """Round 5, shape 2 — the remainder ends in a sentence period.
+
+    `… annotate_operator |` ⏎ blank ⏎ `mitigate_operator.` — round 4 stripped trailing
+    commas/whitespace only, so the `.` made the token unknown and the build went green with
+    row 21 truncated (#8930 review, round 5, P2).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    remainder = "mitigate_operator."
+    assert bt._is_member_list(remainder, bt._known_names()), remainder
+    _the_break_fails_closed(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        edited=_row_21_broken_at(
+            real, "operator_action, annotate_operator", remainder
+        ),
+        name="trailing-period",
+        remainder=remainder,
+        lost={"mitigate_operator"},
+    )
+
+
+def test_an_emphasis_remainder_fails_the_build(tmp_path, monkeypatch, capsys) -> None:
+    """Round 5, shape 3 — the remainder arrives wrapped in markdown emphasis.
+
+    `… annotate_operator |` ⏎ blank ⏎ `**mitigate_operator**`: round 4 stripped backticks
+    only, so the asterisks survived into the token (#8930 review, round 5, P2).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    remainder = "**mitigate_operator**"
+    assert bt._is_member_list(remainder, bt._known_names()), remainder
+    _the_break_fails_closed(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        edited=_row_21_broken_at(
+            real, "operator_action, annotate_operator", remainder
+        ),
+        name="emphasis",
+        remainder=remainder,
+        lost={"mitigate_operator"},
+    )
+
+
+def test_an_inline_annotation_remainder_fails_the_build(tmp_path, monkeypatch, capsys) -> None:
+    """Round 5, shape 4 — the remainder keeps the cell's inline `*(…)` annotation.
+
+    `… annotate_operator |` ⏎ blank ⏎ `mitigate_operator *(operator-only)*`. Not a contrived
+    spelling: row 12's real `Absorbs` cell qualifies its names in exactly this style, so a
+    wrap through it produces exactly this remainder (#8930 review, round 5, P2).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    remainder = "mitigate_operator *(operator-only)*"
+    assert "*(operator-only)*" in real, (
+        "the doc no longer uses an inline `*(…)` annotation — this test is stale"
+    )
+    assert bt._is_member_list(remainder, bt._known_names()), remainder
+    _the_break_fails_closed(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        edited=_row_21_broken_at(
+            real, "operator_action, annotate_operator", remainder
+        ),
+        name="inline-annotation",
+        remainder=remainder,
+        lost={"mitigate_operator"},
+    )
+
+
+def test_a_mid_token_break_fails_the_build(tmp_path, monkeypatch, capsys) -> None:
+    """Round 5, shape 5 — the break lands INSIDE a name (the largest green slice, 46/52).
+
+    `| 21 | `adjust_relationship` | operator_action, annotate_operator, mitig |` ⏎ blank ⏎
+    `ate_operator`. No enumeration of spellings reaches this: the remainder is not a name,
+    not a known name and not decorated at all — it is a FRAGMENT of one, so the predicate has
+    to decide by SHAPE. The rule is that a line whose every comma-token is a bare identifier
+    is a name list, and a name list carrying a name this doc does not have fails CLOSED —
+    which is what distinguishes it from prose (a sentence's tokens carry spaces and sentence
+    punctuation, and the real doc's post-table paragraphs say so:
+    `test_the_normalised_member_list_test_still_leaves_real_prose_green`).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    remainder = "ate_operator"
+    assert remainder not in bt._known_names(), (
+        "this shape only proves anything if the truncated token is NOT a known name"
+    )
+    assert bt._is_member_list(remainder, bt._known_names()), remainder
+    _the_break_fails_closed(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        edited=_row_21_broken_at(
+            real, "operator_action, annotate_operator, mitig", remainder
+        ),
+        name="mid-token",
+        remainder=remainder,
+        lost={"mitigate_operator"},
+    )
+
+
+def test_the_normalised_member_list_test_still_leaves_real_prose_green(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """ANTI-FALSE-POSITIVE: normalising tokens must not turn a paragraph into a name list.
+
+    The predicate got strictly wider in round 5 (it now fails closed on a bare-identifier
+    line carrying an unknown name), so the pin has to be on what it must still answer `No`
+    to — and the discriminator has to be stated, not hoped for: a SENTENCE's comma-tokens
+    carry spaces and sentence punctuation, so they are never bare identifiers, and a member
+    list's always are.
+
+    The real doc is the sharpest case in the whole file: its post-table prose NAMES
+    `manage_deployment`, which is not in the known set at all. A rule that failed closed on
+    "a line containing an unknown identifier" would refuse the document the owner approved;
+    the shape-based rule does not, because that identifier sits inside a sentence.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    known = bt._known_names()
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    # The real doc's own post-table prose, including an identifier the known set does NOT
+    # have — the exact false positive a word-list rule would produce.
+    assert "manage_deployment" not in known, (
+        "this pin needs a real prose line carrying an UNKNOWN identifier — the doc's "
+        "`manage_deployment` is it; if it becomes known, choose another"
+    )
+    for line in (
+        "**Rows 22 and 23 are settled OFF the MCP (2026-09-22).** `manage_deployment` is account tenancy",
+        "(`org_create`) plus two tenant-served pack operations; `run_onboarding` mixed a write with two",
+        "listed as retired.",
+        "## Removed entirely",
+    ):
+        assert line in real, f"the post-table prose changed — this test is stale: {line!r}"
+        assert not bt._is_table_fragment(line.strip(), known), (
+            f"the real doc's own prose is now a 'fragment': {line!r}"
+        )
+
+    # Planted near-misses, in the gap both post-close rules look at.
+    prose = [
+        # a sentence whose LAST token carries an inline `*(…)` annotation — the annotation
+        # drop must not turn a sentence into a member list
+        "The operator half is grantable on its own *(operator-only)*",
+        # a comma list of PLAIN WORDS: no name, and no bare-identifier shape either
+        "writes, reads, tenancy, and the switch",
+        # a sentence naming two absorbed members and then continuing
+        "`mitigate_operator` and `annotate_operator` are the pair this row is about",
+    ]
+    for paragraph in prose:
+        assert " " in paragraph.split(",")[-1].strip(), (
+            f"this pin is vacuous unless a token carries a space: {paragraph!r}"
+        )
+        assert not bt._is_member_list(paragraph, known), paragraph
+
+    anchor = "\n**Rows 22 and 23 are settled OFF the MCP"
+    assert anchor in real, "the paragraph after the WRITE table is not in the doc — stale test"
+    edited = real.replace(anchor, "\n" + "\n\n".join(prose) + "\n" + anchor, 1)
+    assert edited != real, "the prose block was not planted in the gap"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "normalised-prose-in-the-gap")
+
+    menu, closures, row_errors = bt._approved_state()
+    assert row_errors == [], f"the planted prose tripped the widened guard: {row_errors}"
+    assert len(menu) == bt.APPROVED_MIN_ROWS == 23, len(menu)
+    assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
+    assert "mitigate_operator" in menu["adjust_relationship"]["members"], (
+        "the planted prose cost the parse a row or a member"
+    )
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 0, "ordinary post-table prose failed the build"
+    capsys.readouterr()
+    assert out.exists(), "the green build wrote no artifact"
+    out.unlink()
+
+    # ...and the REAL document still parses its own 23 rows with no row error, which is the
+    # measurement the widening has to leave untouched.
+    monkeypatch.setattr(bt, "APPROVED_DOC", ROOT / "docs" / "product" / "canonical-mcp-tools.md")
+    real_menu, real_closures, real_errors = bt._parse_approved(real)
+    assert real_errors == [], f"the real doc tripped the widened guard: {real_errors}"
+    assert len(real_menu) == 23, len(real_menu)
+    assert len(real_closures) == bt.APPROVED_MIN_CLOSURES, real_closures
+
+
 def test_ordinary_post_table_prose_stays_green(tmp_path, monkeypatch, capsys) -> None:
     """ANTI-FALSE-POSITIVE COMPANION: the fragment test must not refuse real prose.
 
@@ -2909,11 +3249,15 @@ def test_ordinary_post_table_prose_stays_green(tmp_path, monkeypatch, capsys) ->
 
 
 def test_the_fragment_predicate_is_a_member_list_test_not_a_pipe_or_comma_test() -> None:
-    """The round-4 predicate in isolation: what it reports, and what it must not.
+    """The fragment predicate in isolation: what it reports, and what it must not.
 
     The guard has to reach a pipe-less remainder WITHOUT becoming a comma test — a looser
     rule reports the doc's own post-table paragraphs and refuses the document the owner
     approved. Each case below is one of those two directions, so neither can drift.
+
+    Round 5 replaced the SPELLING list with a NORMALISATION, so the fragment cases below are
+    no longer a taxonomy to be extended: every one of them is the same list with decoration
+    on it, and the predicate strips the decoration instead of being taught each spelling.
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
@@ -2928,6 +3272,15 @@ def test_the_fragment_predicate_is_a_member_list_test_not_a_pipe_or_comma_test()
         "operator_action, annotate_operator, mitigate_operator",  # row 21's own cell
         "| mitigate_operator |",  # pipe-bounded: the round-3 spelling, unchanged
         "mitigate_operator |",
+        # Round 5: the SAME list, decorated. Each of these was measured building green.
+        ", annotate_operator, mitigate_operator",  # the cell's separator kept at the head
+        "mitigate_operator.",  # a sentence period on the last name
+        "**mitigate_operator**",  # emphasis
+        "_mitigate_operator_",  # emphasis, underscore spelling
+        "mitigate_operator *(operator-only)*",  # the doc's own inline annotation style
+        "ate_operator",  # a break INSIDE a name — no decoration at all to enumerate
+        "action, annotate_operator, mitigate_operator",  # a break on a name's underscore
+        "mitig",
     ):
         assert bt._is_table_fragment(fragment, known), fragment
         assert bt._is_member_list(fragment.strip("| "), known), fragment
@@ -2946,10 +3299,16 @@ def test_the_fragment_predicate_is_a_member_list_test_not_a_pipe_or_comma_test()
     ):
         assert not bt._is_table_fragment(line, known), line
 
-    # The predicate sees a list of ONE name that is not absorbed either: a known-ness test,
-    # not a shape test, which is why it is the doc's OWN universe that decides.
-    assert not bt._is_member_list("zzz_not_a_tool", known)
-    assert not bt._is_member_list("mitigate_operator, zzz_not_a_tool", known)
+    # Two tiers, and the SECOND is the round-5 widening: a bare-identifier line is a name
+    # list by SHAPE, so an unknown name in it fails CLOSED — that is exactly what a break
+    # landing inside a name leaves behind (`ate_operator`, `perator`). Round 4 answered `No`
+    # here, which is how 46 of the 52 break positions in row 21's cell built green.
+    assert bt._is_member_list("zzz_not_a_tool", known)
+    assert bt._is_member_list("mitigate_operator, zzz_not_a_tool", known)
+    assert bt._is_member_list("ate_operator", known)
+    # ...but the SHAPE is the test, not the word: the same unknown name inside a SENTENCE is
+    # prose, which is what keeps the doc's own paragraphs green.
+    assert not bt._is_member_list("`zzz_not_a_tool` is not on the target surface here", known)
 
 
 def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -> None:
