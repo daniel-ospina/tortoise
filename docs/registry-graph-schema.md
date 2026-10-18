@@ -97,15 +97,16 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
   name: string,      // display name (default graph: "default")
   kind: string,      // "default" | "custom"
   namespace: string, // FalkorDB tenant namespace. The DEFAULT graph's ns IS
-                     // the org namespace — the stored `Team.graph_name`:
-                     // `org_{org_id}` on the hosted Supabase-lane provision
-                     // paths (provision/register/signup/create_org),
-                     // `org_{name}` (spaces → `_`) on the registry lane's
-                     // `sdk.org_create` — which is ALSO a hosted path (selfhost
-                     // uvicorn `POST /v1/organizations`,
-                     // `_create_org_registry_lane`), so "hosted" alone does not
-                     // decide the shape; the lane does. Customs =
-                     // `org_{org_id}_{gid}`
+                     // the org namespace — the stored `Team.graph_name`: its
+                     // SHAPE is decided by the MINTING PATH, not by the
+                     // deployment lane: `org_{org_id}` on every path that
+                     // derives it — `provision_tenant` (selfhost-only; 503 in
+                     // Supabase mode), `register_user`, `agent_signup`, the
+                     // Supabase-lane `create_org` + onboarding sub-org, and the
+                     // registry `kind='default'` node — and `org_{name}`
+                     // (spaces → `_`) ONLY on `sdk.org_create`, the registry
+                     // create_org lane, which is itself reached through the
+                     // hosted API. Customs = `org_{org_id}_{gid}`
                      // (`_graph_create` / `_provision_graph`) — the graph
                      // SWITCHER/contexts ride this. `team_*` is the LEGACY
                      // pre-#3543 prefix: still recognised by the tombstone

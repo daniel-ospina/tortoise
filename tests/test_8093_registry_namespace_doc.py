@@ -61,6 +61,18 @@ _DEFAULT_CLAUSE_START = "the stored `Team.graph_name`:"
 _DEFAULT_CLAUSE_END = "Customs ="
 
 
+def _flat(text: str) -> str:
+    """Collapse the cell's line comments and wrapping to one space-separated line.
+
+    The committed cell is a code-block comment: every line is prefixed with
+    `//` and hard-wrapped, so a phrase assertion against the RAW slice is
+    defeated by a line break (verified: "not by the deployment lane" straddles a
+    wrap and was invisible to a raw `in` test). Every phrase-level assertion
+    therefore reads the FLATTENED cell; shape-level ones can keep the raw slice.
+    """
+    return " ".join(text.replace("//", " ").split())
+
+
 def _namespace_cell() -> str:
     """The committed `:Graph` namespace cell — from its key to the next key."""
     doc = SCHEMA_DOC.read_text(encoding="utf-8")
@@ -177,11 +189,13 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         be `org_{org_id}`; the registry-lane `org_{name}` half is anchored to
         `sdk.org_create`'s derivation, which no exported function returns —
         without that anchor the assertion would be the doc against itself. The
-        ATTRIBUTION is pinned too, not just the presence of both shapes: the
-        clause is split at its `org_{name}` marker, and each half must name the
-        lane it belongs to. Both shapes present is not enough — swapping which
-        lane derives which leaves the shapes intact, and the lane split is the
-        substance of this correction.
+        ATTRIBUTION is pinned too, not just the presence of both shapes, and it is
+        pinned on the right AXIS: the shape follows the MINTING FUNCTION, not the
+        deployment lane (`register_user` and `agent_signup` compute
+        `org_{org_id}` before any lane branch; `provision_tenant` is selfhost-only
+        and also mints it). `_org_graph_name` is the EXPORT seam — the open half
+        is `_open_org_graph_sdk` / `_graph_has_org_namespace`, pinned by the
+        legacy test.
     """
     from tortoise.hosted_api import _org_graph_name
 
@@ -200,18 +214,44 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
             "the same cell, so the hosted clause can vanish green")
 
     # The ATTRIBUTION, not just the presence of both shapes: the clause states
-    # `org_{org_id}` for one lane and `org_{name}` for the other, and the whole
-    # point of this correction is WHICH. Swapping the two leaves both shapes in
-    # the clause and both code anchors intact, so presence alone cannot see it.
+    # `org_{org_id}` for one set of derivers and `org_{name}` for the other, and
+    # the whole point of this correction is WHICH. Swapping the two leaves both
+    # shapes in the clause and both code anchors intact, so presence alone cannot
+    # see it.
     supabase_half, registry_half = clause.split("`org_{name}`", 1)
-    assert "org_{org_id}" in supabase_half, (
-        "the DEFAULT-graph clause must attribute `org_{org_id}` to the "
-        "Supabase-lane provision paths — it is stated BEFORE the `org_{name}` "
-        "marker, and `hosted_api._org_graph_name`'s fallback is that shape")
+    # The BACKTICKED standalone shape, not a bare substring: `org_{org_id}` is
+    # also a prefix of the custom shape `org_{org_id}_{gid}`, so a bare test is
+    # satisfied by the customs clause — the exact vacuity this pin exists to fix.
+    assert "`org_{org_id}`" in supabase_half, (
+        "the DEFAULT-graph clause must attribute `org_{org_id}` to the derivers "
+        "listed before the `org_{name}` marker — `hosted_api._org_graph_name`'s "
+        "fallback is that shape")
     assert "sdk.org_create" in registry_half, (
-        "the clause's `org_{name}` half must name the registry lane's "
-        "`sdk.org_create` as the deriver — 'hosted' does not decide the shape "
-        "(that method IS reached through the hosted API), the lane does")
+        "the clause's `org_{name}` half must name `sdk.org_create` as its ONLY "
+        "deriver — no other path stores that shape")
+    # WHICH axis the split runs on, pinned explicitly: `org_{org_id}` is minted
+    # by `register_user` / `agent_signup` BEFORE any lane branch (they compute the
+    # name unconditionally), so a hosted-vs-registry framing is FALSE and was in
+    # this cell for two rounds. The derivers are functions; the deployment mode is
+    # not the discriminator.
+    for deriver in ("provision_tenant", "register_user", "agent_signup"):
+        assert deriver in clause, (
+            f"the clause must name `{deriver}` among the `org_{{org_id}}` "
+            "derivers — `hosted_api._org_graph_name`'s docstring enumerates "
+            "them, and a lane-based split drops this one")
+    assert "the lane does" not in _flat(clause), (
+        "the clause must not claim the deployment lane decides the shape: "
+        "`register_user` and `agent_signup` mint `org_{org_id}` before any lane "
+        "branch, and `provision_tenant` is selfhost-ONLY yet also mints it")
+    assert "not by the deployment lane" in _flat(clause), (
+        "the clause must state the AXIS explicitly — that the default graph's "
+        "shape follows the minting path and not the deployment lane. Dropping "
+        "the negation leaves 'decided by the deployment lane:' followed by a "
+        "list of functions, a self-contradiction the shapes alone cannot detect")
+    assert "on every hosted provision path" not in _flat(_namespace_cell()), (
+        "the cell must not generalise the shape to 'every hosted provision "
+        "path': a hosted selfhost register/signup mints `org_{org_id}`, and the "
+        "registry create_org lane is hosted too")
     # The `org_{name}` half's code side: the registry lane's stored org
     # `graph_name` — `sdk.org_create` derives it from the org name (spaces →
     # `_`) and the registry `kind='default'` node takes it as its namespace. The
@@ -229,9 +269,12 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "the pre-#3543 `team_<name>` must not appear anywhere in the cell")
 
     bullet = _default_graph_bullet()
-    assert "graph_name" in bullet and "org_" in bullet, (
-        "the no-migration bullet must name the stored graph_name it derives — "
-        "a bare 'the team namespace' cannot be resolved to a DB graph name")
+    assert "namespace IS that stored `graph_name`" in bullet, (
+        "the no-migration bullet must say the default graph's namespace IS the "
+        "stored `graph_name` — a bare 'graph_name' substring is satisfied by the "
+        "'supabase mode reads `teams.graph_name`' clause that opens the same "
+        "bullet, so the sentence can be replaced by 'the team namespace' while "
+        "this test stays green")
 
 
 # ── 2. the legacy prefix is stated as legacy, and is really still recognised ─
@@ -412,6 +455,22 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
             f"the §2.1 coarse-isolation row must state {shape!r} too — it is the "
             "second description of the same fact, and a row that keeps only one "
             "lane's shape contradicts the §Graph cell this pin also reads")
+    # The row's ATTRIBUTION too, on the same axis as the cell: which derivers
+    # produce which shape. Presence alone let a swapped attribution pass.
+    row_org_id_half, row_name_half = row.split("`org_{name}`", 1)
+    # Backticked standalone shape — see the cell's note: the custom shape
+    # `org_{org_id}_{gid}` is also stated in this row and would satisfy a bare
+    # substring test after the attribution is swapped.
+    assert "`org_{org_id}`" in row_org_id_half, (
+        "the row must attribute `org_{org_id}` to the derivers listed before its "
+        "`org_{name}` marker")
+    assert "sdk.org_create" in row_name_half, (
+        "the row's `org_{name}` half must name `sdk.org_create` as that shape's "
+        "only source")
+    assert "the lane does" not in row, (
+        "the row must not claim the deployment lane decides the shape — "
+        "`register_user` / `agent_signup` mint `org_{org_id}` before any lane "
+        "branch, and `provision_tenant` is selfhost-only")
     cited = re.findall(r"supabase/migrations/[\w.\-]+\.sql", row)
     assert cited, (
         "the coarse-isolation row must keep citing the `graphs` table's own "
@@ -437,17 +496,24 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
 def test_authz_doc_records_the_finding_as_fixed():
     """The #2082 audit note must not keep claiming the schema doc is stale.
 
-    (1) *What value makes this test fail?*  The note reverting to "still states
-        `team_<org_id>_<gid>`" / "Filed as #8093" now that the cell is fixed —
-        a doc asserting a defect that no longer exists.
+    (1) *What value makes this test fail?*  The note reverting to a filed/stale
+        framing ("still states `team_<org_id>_<gid>`", "Filed as #8093") now
+        that the cell is fixed — a doc asserting a defect that no longer exists.
     (2) *Does the test reach it?*  Yes — the note is located by its #8093
-        mention and asserted to point at the pin.
+        mention, required to carry the `(fixed)` marker, and required to point
+        at the pin. Banning one literal phrase is not enough: a reworded stale
+        note ("still documents … as `team_<org_id>_<gid>`") would slip past it.
     """
     authz = AUTHZ_DOC.read_text(encoding="utf-8")
     note = next(
         line for line in authz.splitlines()
         if "#8093" in line and line.startswith(">")
     )
+    assert "Audit finding (fixed)" in note, (
+        "the note must be headed as a FIXED finding — anything else is the "
+        "filed/stale framing this test exists to reject")
+    assert "Filed as" not in note, (
+        "the note claims the defect was filed rather than fixed")
     assert "still states" not in note, (
         "the note claims the §Graph cell is still stale — it is corrected here")
     assert "test_8093_registry_namespace_doc.py" in note, (
