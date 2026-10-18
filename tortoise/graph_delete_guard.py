@@ -46,8 +46,11 @@ property this function can establish on its own. The sweeps that drop graphs rou
 through it: ``tests/_embedded.py`` (``_sweep_legacy_strays``, ``wipe``,
 ``_drop_one_graph``, ``_sweep_drop``, ``_sweep_team_strays``, ``wipe_server``,
 ``_sweep_proj``),
-``battery/testing/seeds.py``'s ``purge_owned_namespace``, and the two routed
-shared-server cleanup sites in ``tests/test_wipe_server.py``. Other
+``battery/testing/seeds.py``'s ``purge_owned_namespace``, the two routed
+shared-server cleanup sites in ``tests/test_wipe_server.py``, and
+``tests/_live_utils.py``'s ``drop_test_graph`` (the per-run test-graph
+``try: … finally:`` teardown the live fixtures call — ``tests/test_projection.py``
+is its first caller, #8746). Other
 ``finally:`` cleanups in this tree still issue ``DETACH``/``GRAPH.DELETE``
 directly; routing those is tracked on #2961 rather than asserted here.
 

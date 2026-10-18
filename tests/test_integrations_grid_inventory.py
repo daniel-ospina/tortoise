@@ -19,6 +19,17 @@ The JS side is PARSED from ``website/apps/dashboard/src/integrationsGrid.js``
 (text, no Node needed) — the checker reads the real declaration rather than a
 re-listed copy, so a tile added only to the JS file fails here.
 
+#3514 (the CLICK's client half) extends the same declaration one level out. The
+grid's tiles are the keys a click NAMES; ``demandCapture.js`` is the code that
+names one — the route, the body's field names, the action it sends and the
+``org_key`` it must never send. Every one of those is a place where the client
+and the server can disagree while both look right, and two of them are SILENT on
+the server side: an unregistered prop is dropped by ``_ALLOWED_ANALYTICS_PROPS``
+(no error, no row field, demand under-counted) and a body field renamed only in
+the client records nothing at all. So they are asserted here, against the real
+server objects (``hosted_api.app.routes``, ``_ALLOWED_ANALYTICS_PROPS``,
+``demand.*``), not against a re-listed copy.
+
 WHY A SEEDED-VIOLATION CONTROL. An assertion that cannot fail is not a check.
 ``test_the_assertion_discriminates`` mutates the parsed tile list to the failing
 shape and shows the same predicate rejects it.
@@ -30,10 +41,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from fastapi.routing import APIRoute
+
 from tortoise import demand
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GRID_JS = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "integrationsGrid.js"
+#: #3514: the click's CLIENT half — the module that owns the route, the body and
+#: the action the dashboard sends.
+DEMAND_JS = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "demandCapture.js"
+MAIN_JS = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
 
 
 def _scan_balanced(src: str, start: int, opener: str, closer: str) -> str:
@@ -186,3 +203,126 @@ def test_the_assertion_discriminates() -> None:
     keys = {t["key"] for t in _tiles_from_source(GRID_JS.read_text())}
     assert "agent_sessions" in keys
     assert "slack" in keys
+
+
+# ── #3514: the client half of the same declaration ──────────────────────
+
+def _js_string_const(src: str, name: str) -> str:
+    """The value of ``export const <name> = '<literal>'`` in a dashboard module."""
+    m = re.search(rf"export const {name} = '([^']*)'", src)
+    assert m, f"{name} must be a plain string literal in the client module"
+    return m.group(1)
+
+
+def _js_body_keys(src: str) -> set[str]:
+    """The keys of the body ``demandPayload`` returns.
+
+    Read from the returned object literal itself (not from a comment): the
+    function is the ONE place the wire shape is built, so its literal IS the
+    contract.
+    """
+    start = src.index("export function demandPayload(")
+    end = src.index("export function newDemandKey(", start)
+    body = src[start:end]
+    ret = body.index("return {")
+    open_brace = body.index("{", ret)
+    literal = _scan_balanced(body, open_brace, "{", "}")
+    # Split the literal's top level on commas and take each entry's KEY — the
+    # name before `:`, or the bare identifier of a shorthand property (`action`,
+    # which a colon-only regex read past, silently accepting a body with no
+    # action at all).
+    keys: set[str] = set()
+    depth = 0
+    piece = ""
+    for ch in literal[1:-1] + ",":
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            name = piece.split(":")[0].strip()
+            assert re.fullmatch(r"\w+", name), f"unreadable body entry: {piece!r}"
+            keys.add(name)
+            piece = ""
+            continue
+        piece += ch
+    return keys
+
+
+def test_the_client_posts_the_route_the_app_actually_mounts() -> None:
+    """The client's path must be a route the served table answers with POST.
+
+    A drift here is a 404 the UI reports as "Your request was not confirmed" —
+    true, and indistinguishable from a broken sink.
+    """
+    from tortoise.hosted_api import app
+
+    client_path = _js_string_const(DEMAND_JS.read_text(), "DEMAND_PATH")
+    served = {
+        route.path
+        for route in app.routes
+        if isinstance(route, APIRoute) and route.path == client_path
+        and "POST" in (route.methods or set())
+    }
+    assert served == {client_path}, (
+        f"the dashboard posts {client_path!r}, which the route table does not "
+        f"answer with POST — the click would 404 while looking recorded"
+    )
+
+
+def test_the_client_body_keys_are_the_registered_props() -> None:
+    """Every field the client sends is a prop the funnel store KEEPS.
+
+    The silent-drop trap: ``_track_analytics_event`` drops an unregistered prop
+    with no error, so a renamed client field records a row that is missing the
+    fact the operator ranks on. ``org_key`` is deliberately NOT in the body —
+    the server derives it from the authenticated team.
+    """
+    from tortoise.hosted_api import _ALLOWED_ANALYTICS_PROPS
+
+    keys = _js_body_keys(DEMAND_JS.read_text())
+    assert keys == {"integration_key", "action", "surface"}, keys
+    assert "org_key" not in keys, "org_key is SERVER-derived; a client copy would corrupt the ranking"
+    unregistered = keys - set(_ALLOWED_ANALYTICS_PROPS)
+    assert unregistered == set(), (
+        f"the client sends {sorted(unregistered)} but the analytics allowlist "
+        f"drops them silently — the record would be written without them"
+    )
+
+
+def test_the_client_sends_the_server_action_vocabulary() -> None:
+    """One action, and it is the server's own name for it."""
+    client_action = _js_string_const(DEMAND_JS.read_text(), "DEMAND_ACTION_CLICK")
+    assert client_action == demand.DEMAND_ACTION_CLICK
+    assert client_action in demand.DEMAND_ACTIONS
+    # The client sends clicks only: a dismissal is not demand (the read half
+    # counts clicks, so a client that posted dismissals would inflate #3541's
+    # trigger). Asserted as an ABSENCE in the module, with the pinned exception
+    # that the payload builder forwards what it is handed.
+    main = MAIN_JS.read_text()
+    assert "action: 'go_back'" not in main, "the dashboard must not record dismissals as demand"
+    assert "DEMAND_ACTION_CLICK" in DEMAND_JS.read_text()
+
+
+def test_the_client_records_which_surface_the_click_came_from() -> None:
+    """Both mounts declare a surface, and it is a value the record can carry."""
+    src = DEMAND_JS.read_text()
+    for name in ("DEMAND_SURFACE_WIZARD", "DEMAND_SURFACE_SETTINGS"):
+        value = _js_string_const(src, name)
+        assert value and len(value) <= demand.DEMAND_MAX_SURFACE_LEN, name
+    main = MAIN_JS.read_text()
+    assert "surface: DEMAND_SURFACE_SETTINGS" in main
+    assert "surface={DEMAND_SURFACE_WIZARD}" in main
+
+
+def test_the_client_half_is_wired_not_merely_declared() -> None:
+    """Seeded-violation control for the three assertions above.
+
+    The module existing proves nothing: the dialog must actually post through
+    it. Read as a wiring fact, not a copy — the call site names the module's
+    own function and the App's session seam.
+    """
+    main = MAIN_JS.read_text()
+    assert "from './demandCapture.js'" in main
+    assert "recordDemand({ integrationKey, surface, idempotencyKey, request: api })" in main
+    assert "X-Idempotency-Key" in DEMAND_JS.read_text()

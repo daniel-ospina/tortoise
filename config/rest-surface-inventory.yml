@@ -233,6 +233,16 @@ routes:
   - method: GET
     path: /v1/index/github/{job_id}
     class: tenant
+  # #4874: the operator read that explains WHY an org reads `status: "flagged"`
+  # on /v1/team — the active per-rule flag episodes (rule / count / threshold /
+  # window recorded in `abuse_events.details`), behind `_check_internal`
+  # (FASTAPI_INTERNAL_KEY) and read-only. Control-plane because `point_create` /
+  # `key_create` are internal vocabulary deliberately absent from every customer
+  # surface (abuse._alert_dict) — and because it reads any org by id, which a
+  # tenant key must never do.
+  - method: GET
+    path: /v1/internal/abuse/state
+    class: control-plane
   - method: GET
     path: /v1/internal/activation/cohort
     class: control-plane

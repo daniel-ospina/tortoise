@@ -335,6 +335,336 @@ class TestEpisodeLifecycle:
         assert len(ip_events) == 10  # cap-before-record
 
 
+# ── The durable un-suspend's rule list, read from the LIVE definition ──────
+# ``abuse_unsuspend`` is defined more than once (0015 for teams →
+# 20260915000001 for orgs) and supabase applies migrations in FILENAME ORDER,
+# so the definition production runs is the LAST ``CREATE [OR REPLACE]
+# FUNCTION public.abuse_unsuspend`` in ``sorted(migrations.glob("*.sql"))``.
+# Same idiom as tests/test_4242_metering_period_end_refresh.py's
+# ``_newest_definition`` and tests/test_embed_metering.py's every-migration
+# walk — a guard pinned to ONE named file is green in the wrong direction after
+# the next forward migration (#4874 review P2).
+_MIGRATIONS = (Path(__file__).resolve().parent.parent / "supabase"
+               / "migrations")
+
+_CREATE_UNSUSPEND_RE = re.compile(
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+public\.abuse_unsuspend\s*\(")
+
+
+def _newest_abuse_unsuspend_definition(
+        migrations: Path = _MIGRATIONS) -> tuple[Path, str]:
+    """The newest migration defining ``public.abuse_unsuspend`` and the body
+    of its LAST declaration, from the ``CREATE`` to the ``$$;`` that closes it.
+
+    Raises ``AssertionError`` when nothing in the tree defines it, so the
+    caller cannot pass vacuously.
+    """
+    hits: list[tuple[Path, str]] = []
+    for path in sorted(migrations.glob("*.sql")):
+        text = path.read_text()
+        if _CREATE_UNSUSPEND_RE.search(text):
+            hits.append((path, text))
+    assert hits, (f"no migration in {migrations} defines public.abuse_unsuspend "
+                  "— the durable un-suspend path moved and this guard reads "
+                  "nothing (it must fail loudly, never silently)")
+    path, sql = hits[-1]
+    start = 0
+    for match in _CREATE_UNSUSPEND_RE.finditer(sql):
+        start = match.start()
+    tail = sql[start:]
+    end = tail.find("$$;")
+    assert end != -1, (f"unterminated $$ body for public.abuse_unsuspend in "
+                       f"{path.name}")
+    return path, tail[:end]
+
+
+def _flag_clear_rules(body: str) -> set[str]:
+    """The rules a plpgsql ``abuse_unsuspend`` body writes ``flag_clear`` for."""
+    return set(re.findall(r"'flag_clear',\s*'([^']+)'", body))
+
+
+class TestActiveFlagEpisodes:
+    """#4874 — the reason behind an org's ``flagged`` chip is readable.
+
+    The chip is derived from a bare ``flagged_at``; the rule/count/threshold/
+    window live only in ``abuse_events``. These pin the read that surfaces
+    them, and — the part that keeps it honest — that it agrees with the
+    ENFORCEMENT path's ``latest_flag_at`` about what "active" means.
+    """
+
+    def test_flag_reports_rule_count_threshold_window(self, notified):
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 501, now=T0) == "flag"
+        episodes = store.active_flag_episodes("t1")
+        assert len(episodes) == 1
+        ep = episodes[0]
+        assert ep["rule"] == "point_create"
+        assert ep["count"] == 501
+        assert ep["threshold"] == 500
+        assert ep["window_s"] == 3600
+        assert ep["since"] == T0.isoformat()
+
+    def test_clear_ends_the_episode(self, notified):
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 501, now=T0) == "flag"
+        assert store.active_flag_episodes("t1")
+        # window goes clean → flag_clear row, episode gone from the read too
+        assert eng.record_point_create(
+            "t1", 1, now=T0 + timedelta(hours=3)) is None
+        assert store.active_flag_episodes("t1") == []
+
+    def test_rule_scoped_and_newest_first(self, notified):
+        store = MemoryAbuseStore()
+        eng = AbuseEngine(store)
+        assert eng.record_point_create("t1", 501, now=T0) == "flag"
+        later = T0 + timedelta(hours=2)
+        for i in range(11):
+            store.record_event("t1", "key_create", key_id=f"k{i}",
+                               created_at=later)
+        assert eng.evaluate_key_creates("t1", now=later) == "flag"
+        episodes = store.active_flag_episodes("t1")
+        assert [e["rule"] for e in episodes] == ["key_create", "point_create"]
+        assert episodes[0]["threshold"] == 10  # R2's own ceiling, not R1's
+
+    def test_clear_in_the_same_instant_ends_the_episode(self):
+        """Tie rule = ``>=``, the same one ``latest_flag_at`` applies: a clear
+        written at the flag's own instant ends the episode. Pinned because a
+        ``>`` here would resurrect a cleared episode in the operator read while
+        the engine considered it over."""
+        store = MemoryAbuseStore()
+        store.flag_org("t1", "point_create", {}, now=T0)
+        store.flag_clear("t1", "point_create", now=T0)
+        assert store.latest_flag_at("t1", "point_create") is None
+        assert store.active_flag_episodes("t1") == []
+
+    def test_flag_row_without_details_reports_null_not_a_guess(self):
+        store = MemoryAbuseStore()
+        store.record_event("t1", "flag", rule="point_create",
+                           created_at=T0)  # pre-details row
+        [ep] = store.active_flag_episodes("t1")
+        assert ep["count"] is None
+        assert ep["threshold"] is None
+        assert ep["window_s"] is None
+        assert ep["since"] == T0.isoformat()  # the one fact it does carry
+
+    def test_rows_without_a_rule_are_ignored(self):
+        """Breach traffic and the trigger's ``key_create`` rows carry no rule;
+        they must never be folded into an episode (they are not one)."""
+        store = MemoryAbuseStore()
+        store.record_event("t1", "point_create", weight=900, created_at=T0)
+        store.record_event("t1", "key_create", key_id="k", created_at=T0)
+        store.record_event("t1", "auth_ip", country="US", created_at=T0)
+        assert store.active_flag_episodes("t1") == []
+
+    def test_unknown_org_is_empty_not_an_error(self):
+        assert MemoryAbuseStore().active_flag_episodes("nobody") == []
+
+    @pytest.mark.parametrize("sequence", [
+        (),
+        (("flag", 0),),
+        (("flag", 0), ("clear", 60)),
+        (("flag", 0), ("clear", 60), ("flag", 120)),
+        (("flag", 0), ("flag", 10), ("clear", 20)),
+        (("flag", 0), ("flag", 10), ("clear", 10)),
+        (("clear", 0),),
+        (("clear", 0), ("flag", 30)),
+        (("flag", 0), ("clear", 60), ("clear", 90)),
+    ])
+    def test_fold_agrees_with_latest_flag_at(self, sequence):
+        """The read and the DECISION path must not disagree about whether an
+        episode is active — a divergence would have the operator read say
+        "no reason" for an org the engine is actively staging, or invent one
+        it has already cleared. Both are checked per flagging rule."""
+        store = MemoryAbuseStore()
+        for kind, minutes in sequence:
+            when = T0 + timedelta(minutes=minutes)
+            if kind == "flag":
+                store.flag_org("t1", "point_create", {}, now=when)
+            else:
+                store.flag_clear("t1", "point_create", now=when)
+        reported = {e["rule"] for e in store.active_flag_episodes("t1")}
+        from tortoise.abuse import FLAGGING_RULES
+        expected = {r for r in FLAGGING_RULES
+                    if store.latest_flag_at("t1", r) is not None}
+        assert reported == expected
+
+    def test_every_episode_ending_site_walks_every_flagging_rule(self):
+        """``flag_clear`` / ``unsuspend_org`` must end EVERY rule's episode:
+        a rule that flags but was never cleared keeps the org-level chip on
+        forever. Pinned against ``FLAGGING_RULES`` so adding a rule to the
+        tuple is the single place that decides this — for the MEMORY store.
+        The durable store's un-suspend is SQL and is guarded separately by
+        ``test_durable_unsuspend_clears_every_flagging_rule``."""
+        from tortoise.abuse import FLAGGING_RULES
+        store = MemoryAbuseStore()
+        for rule in FLAGGING_RULES:
+            store.flag_org("t1", rule, {}, now=T0)
+        assert len(store.active_flag_episodes("t1")) == len(FLAGGING_RULES)
+        store.unsuspend_org("t1", now=T0 + timedelta(minutes=1))
+        assert store.active_flag_episodes("t1") == []
+        assert store.org_flagged_at("t1") is None
+
+    def test_durable_unsuspend_clears_every_flagging_rule(self):
+        """The SECOND, unavoidable copy of the rule set: the durable
+        un-suspend is the plpgsql function ``abuse_unsuspend``, whose body
+        writes the ``flag_clear`` rows itself — Python cannot inject
+        ``FLAGGING_RULES`` into it.
+
+        So adding a rule to the tuple without adding it to the LIVE definition
+        would end the episode for ``MemoryAbuseStore`` (selfhost) and never for
+        ``SupabaseAbuseStore`` (production): the org-level chip outliving its
+        reason, which is the failure the tuple was introduced to prevent.
+
+        The LIVE definition is the LAST ``CREATE ... FUNCTION
+        public.abuse_unsuspend`` in filename order — supabase applies every
+        migration in order and a later ``CREATE OR REPLACE`` replaces an
+        earlier one. This function is already re-established once (``0015``
+        for teams → ``20260915000001`` for orgs), so reading one hand-picked
+        file would be wrong in BOTH directions (#4874 review P2): a forward
+        migration that redefines it and drops a rule would stay green, and a
+        correctly-updated forward migration would stay red while the failure
+        message pointed at a SHIPPED file the append-only gate forbids editing.
+        """
+        from tortoise.abuse import FLAGGING_RULES
+        path, body = _newest_abuse_unsuspend_definition(_MIGRATIONS)
+        cleared = _flag_clear_rules(body)
+        assert cleared, (f"no 'flag_clear' rows found in abuse_unsuspend in "
+                         f"{path.name} — the guard's regex no longer matches "
+                         "the SQL, so it could pass vacuously")
+        assert cleared == set(FLAGGING_RULES), (
+            "abuse_unsuspend clears a different rule set than "
+            f"abuse.FLAGGING_RULES (SQL={sorted(cleared)} in {path.name} — the "
+            f"NEWEST definition, which is what production runs; "
+            f"Python={sorted(FLAGGING_RULES)}): a rule in one and not the "
+            "other either keeps an episode open forever after an un-suspend "
+            "or clears one that was never opened. Fix it with a FORWARD "
+            "migration that redefines abuse_unsuspend — never by editing a "
+            "migration already on main (the append-only gate rejects that)")
+
+    def test_the_newest_definition_is_the_one_guarded(self, tmp_path):
+        """#4874 review P2 (non-vacuity + both directions): the guard must
+        read the NEWEST ``abuse_unsuspend`` definition, not one chosen file.
+
+        A guard pinned to a single named migration is green in the wrong
+        direction — a forward migration that redefines ``abuse_unsuspend`` and
+        drops a rule leaves it passing while production drifts — and red in
+        the wrong direction too, since the file it names is on ``main`` and the
+        append-only gate forbids editing it.
+        """
+        old = tmp_path / "0015_abuse_events.sql"
+        new = tmp_path / "20260915000001_tenancy_team_to_org.sql"
+        old.write_text(
+            "CREATE OR REPLACE FUNCTION public.abuse_unsuspend(p_team_id text)\n"
+            "AS $$\nBEGIN\n"
+            "    INSERT INTO public.abuse_events (team_id, event_type, rule)\n"
+            "    VALUES (p_team_id, 'flag_clear', 'point_create'),\n"
+            "           (p_team_id, 'flag_clear', 'key_create');\n"
+            "END;\n$$;\n")
+        new.write_text(
+            "CREATE OR REPLACE FUNCTION public.abuse_unsuspend(p_org_id text)\n"
+            "AS $$\nBEGIN\n"
+            "    INSERT INTO public.abuse_events (org_id, event_type, rule)\n"
+            "    VALUES (p_org_id, 'flag_clear', 'point_create');\n"
+            "END;\n$$;\n")
+        path, body = _newest_abuse_unsuspend_definition(tmp_path)
+        assert path.name == new.name, (
+            "the guard must read the definition production runs (the newest "
+            f"migration), not an earlier one — got {path.name}")
+        # Direction 1: a forward migration that DROPS a rule is caught. This is
+        # the assertion a hardcoded-path guard cannot make: it would still see
+        # both rules in the old file and stay green.
+        cleared = _flag_clear_rules(body)
+        assert cleared == {"point_create"}, cleared
+        assert cleared != {"point_create", "key_create"}, (
+            "a superseded definition's rule set must not satisfy the guard — "
+            "that is the drift it exists to catch")
+        # Direction 2: the reverse (forward migration adds the rule the old
+        # file lacks) resolves green instead of red against a shipped file.
+        new.write_text(
+            "CREATE OR REPLACE FUNCTION public.abuse_unsuspend(p_org_id text)\n"
+            "AS $$\nBEGIN\n"
+            "    INSERT INTO public.abuse_events (org_id, event_type, rule)\n"
+            "    VALUES (p_org_id, 'flag_clear', 'point_create'),\n"
+            "           (p_org_id, 'flag_clear', 'key_create'),\n"
+            "           (p_org_id, 'flag_clear', 'r3_new_rule');\n"
+            "END;\n$$;\n")
+        _path, body = _newest_abuse_unsuspend_definition(tmp_path)
+        assert _flag_clear_rules(body) == {"point_create", "key_create",
+                                           "r3_new_rule"}
+
+    def test_a_migrations_dir_without_abuse_unsuspend_is_loud(self, tmp_path):
+        """The guard must not pass vacuously if the function disappears from
+        the migration tree (renamed, moved into a non-``.sql`` file, or the
+        directory read wrong)."""
+        (tmp_path / "0015_unrelated.sql").write_text(
+            "CREATE OR REPLACE FUNCTION public.something_else()\n"
+            "AS $$ BEGIN END; $$;\n")
+        with pytest.raises(AssertionError,
+                           match=r"defines public\.abuse_unsuspend"):
+            _newest_abuse_unsuspend_definition(tmp_path)
+
+    # ── Registry/selfhost: the durable source, not the in-process dict ──────
+
+    @staticmethod
+    def _registry():
+        """A minimal stand-in for the registry graph: the two props
+        ``GET /v1/team`` renders, plus existence."""
+        nodes: dict[str, dict] = {}
+
+        def write(org_id, field, value):
+            nodes.setdefault(org_id, {"flagged_at": None,
+                                      "suspended_at": None})[field] = value
+
+        def read(org_id):
+            node = nodes.get(org_id)
+            if node is None:
+                return {"found": False, "flagged_at": None,
+                        "suspended_at": None}
+            return {"found": True, **node}
+
+        return nodes, write, read
+
+    def test_restart_reads_the_durable_props_not_the_empty_dicts(self):
+        """#4874 review P2: ``/v1/team`` reads the registry PROPS, and after a
+        restart the in-process dicts are empty. A read built on the dicts
+        answers ``active`` / ``suspended: false`` for an org whose chip says
+        ``flagged`` / suspended — the exact contradiction the endpoint exists
+        to prevent, rendered with no error.
+
+        ``MemoryAbuseStore(registry_read=…)`` therefore answers from the same
+        source ``/v1/team`` reads, and ``found`` makes a typo distinguishable
+        from a clean org."""
+        _nodes, write, read = self._registry()
+        store = MemoryAbuseStore(registry_write=write, registry_read=read)
+        store.flag_org("t1", "point_create", {"count": 6, "threshold": 5},
+                       now=T0)
+        store.suspend_org("t1", now=T0)
+        assert store.org_flagged_at("t1") == T0
+        assert store.org_suspended("t1") is True
+
+        # A FRESH store is a process restart: same registry, no rows/dicts.
+        restarted = MemoryAbuseStore(registry_write=write, registry_read=read)
+        assert restarted.active_flag_episodes("t1") == []  # rows are volatile
+        assert restarted.org_state("t1")["flagged_at"] == T0  # props are not
+        assert restarted.org_state("t1")["suspended"] is True
+        assert restarted.org_flagged_at("t1") == T0
+        # A mistyped id is NOT a clean org.
+        assert restarted.org_state("typo") == {
+            "found": False, "flagged_at": None, "suspended": False}
+
+    def test_no_registry_read_answers_from_the_dicts_and_admits_it(self):
+        """Without a registry seam a bare in-process store still answers from
+        its dicts (unchanged behaviour) but reports ``found: None`` — it
+        genuinely cannot say whether an org exists, so nothing upstream reads
+        a guess as an existence fact."""
+        store = MemoryAbuseStore()
+        store.flag_org("t1", "point_create", {}, now=T0)
+        assert store.org_state("t1") == {
+            "found": None, "flagged_at": T0, "suspended": False}
+
+
 class TestSwitches:
     def test_kill_switch(self, monkeypatch, notified):
         monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")

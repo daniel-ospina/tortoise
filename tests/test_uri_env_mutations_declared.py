@@ -435,6 +435,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # no lane flip can leak. DELIBERATE_URI.
     "test_engine_probe.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                               r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8746: the SHARED-URI-DEFAULT refusal arm, on BOTH lanes. `drop_test_graph`
+    # derives the default graph name from `tests/_embedded._uri_default_graph_name()`,
+    # which reads TORTOISE_DB_URI from the environment with NO injection seam —
+    # so the env control IS the test input, and the URI's PATH
+    # (`/tortoise_test_matrix`) is the assertion: the name is inside the
+    # canonical `tortoise_test` family (so the prefix gate admits it) yet must
+    # still be refused. That refusal ALONE attributes nothing — the mint-shape
+    # arm refuses it too — so the discrimination comes from a second probe whose
+    # URI DEFAULT is itself a mint-shaped name (`/test_proj125_ab12cd34`):
+    # refused with `db.calls == []`, then ADMITTED once the URI points
+    # elsewhere. The `delenv` case is the
+    # URI-LESS lane (live_proj runs there too, since it skips on a TCP probe):
+    # with no URI the default-graph arm cannot fire at all, so the same test
+    # pins the MINT-SHAPE arm that closes the class — a shared fixed name is
+    # refused, a per-run one still reaches the guard. Every probe drives
+    # `_FakeProj`, whose `db` only RECORDS calls, so no server is contacted; the
+    # function-scoped `monkeypatch` restores the URI at teardown, so no lane can
+    # leak into a later module. DELIBERATE_URI.
+    "test_projection.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                           r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
     # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
     # the assertion is that `_live_uri()` uses it AS-IS instead of probing a
@@ -657,8 +677,18 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
     stack: list[tuple[int, str, str]] = []  # (indent, kind, name)
     paren = 0
     pending_fixture = False
+    triple: str | None = None
     for i, line in enumerate(lines):
-        stripped = line.strip()
+        # Count brackets in CODE ONLY. A bracket inside a string literal or a
+        # comment is not a continuation: `assert "(as of" in text` left the
+        # counter stuck at 1 for the rest of the file, so every later `def`
+        # (guarded on `paren == 0`) was skipped and its body was attributed to
+        # the LAST function that opened — measured on
+        # `tests/test_time_aware_sdk_2520.py`, where a compliant
+        # `@contextmanager` helper was reported as a mutation inside an
+        # unrelated test (#8937 / #8487).
+        code, triple = _code_only(line, triple)
+        stripped = code.strip()
         if stripped.startswith("@") and paren == 0:
             # precise fixture-marker test: `.fixture(` / `.fixture\n` — a
             # bare "fixture" substring (usefixtures, parametrize ids) must
@@ -666,17 +696,17 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             if re.search(r'\.fixture\b', stripped):
                 pending_fixture = True
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        elif re.match(r'^(\s*)(?:async\s+)?def\s+\w+', line) and paren == 0:
-            ind = len(line) - len(line.lstrip())
+        elif re.match(r'^(\s*)(?:async\s+)?def\s+\w+', code) and paren == 0:
+            ind = len(code) - len(code.lstrip())
             while stack and stack[-1][0] >= ind:
                 stack.pop()
-            name = re.match(r'^(\s*)(?:async\s+)?def\s+(\w+)', line).group(2)
+            name = re.match(r'^(\s*)(?:async\s+)?def\s+(\w+)', code).group(2)
             stack.append((ind, "fixture" if pending_fixture else "fn", name))
             pending_fixture = False
             scopes[i] = stack[-1][1:]
         elif stripped and paren == 0 \
                 and not stripped.startswith(("#", "def", "@")):
-            ind = len(line) - len(line.lstrip())
+            ind = len(code) - len(code.lstrip())
             while stack and stack[-1][0] >= ind:
                 stack.pop()
             if ind == 0:
@@ -684,10 +714,101 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
         else:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        # paren balance for continuation detection (CODE brackets only —
-        # brackets inside string literals/comments are copy, #8995)
+        # Paren balance from the tokenize-based per-line counter: code
+        # brackets only, so a bracket inside a string literal or comment
+        # cannot freeze the continuation state (#8995). `deltas` is computed
+        # once per source above; the INDENT in this loop comes from
+        # `_code_only`, whose output is COLUMN-ALIGNED with the line, so a
+        # triple-quoted region closing mid-line cannot shift the resumed
+        # code's column (#8937 review r7).
         paren = max(0, paren + deltas[i])
     return scopes
+
+
+def _code_only(line: str, triple: str | None) -> tuple[str, str | None]:
+    """The CODE part of one line: string literals and comments replaced by
+    spaces, so a bracket inside them cannot unbalance a continuation count.
+
+    COLUMN-ALIGNED: the returned text is the same length as `line`, so the
+    leading-whitespace count of the code is the code's real indent.
+
+    Tracks a triple-quoted region across lines (docstrings are the common
+    case), honouring backslash escapes on the closing delimiter exactly as
+    `_toggle_triple_quotes` does. The two lexers answer different questions
+    ("which columns are code" here, "is this position inside a string" there)
+    and so cannot be folded into one pass — the shared escape rule is pinned
+    equal by
+    `test_the_two_triple_quote_lexers_agree_on_escaped_delimiters`.
+    Single/double-quoted literals are consumed whole, honouring backslash
+    escapes; a `#` outside a string starts a comment."""
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if triple is not None:
+            end = _find_unescaped(line, triple, i)
+            if end == -1:
+                out.append(" " * (n - i))
+                return "".join(out), triple
+            # Pad the WHOLE in-string span, closing delimiter included, so the
+            # result stays column-aligned. Padding only the 3 delimiter columns
+            # collapsed the string's content and shifted any code after a
+            # mid-line close to the left, so a line that resumes code after
+            # closing a region measured an indent of 3+ instead of its real
+            # column (#8937 review r7, nit b).
+            out.append(" " * (end + len(triple) - i))
+            i = end + len(triple)
+            triple = None
+            continue
+        ch = line[i]
+        if ch == "#":
+            out.append(" " * (n - i))
+            break
+        if line.startswith('"""', i) or line.startswith("'''", i):
+            triple = line[i:i + 3]
+            out.append("   ")
+            i += 3
+            continue
+        if ch in "\"'":
+            quote = ch
+            out.append(" ")
+            i += 1
+            while i < n:
+                if line[i] == "\\":
+                    out.append("  ")
+                    i += 2
+                    continue
+                if line[i] == quote:
+                    out.append(" ")
+                    i += 1
+                    break
+                out.append(" ")
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), triple
+
+
+def _find_unescaped(line: str, delim: str, start: int) -> int:
+    """Index of the first `delim` at/after `start` that is NOT backslash-
+    escaped, or -1. Same escape rule as `_toggle_triple_quotes`: an odd number
+    of immediately preceding backslashes escapes the delimiter, an even number
+    does not. A bare `str.find` closed a region on an escaped delimiter, which
+    made the two triple-quote lexers disagree about the same line."""
+    i = start
+    while True:
+        found = line.find(delim, i)
+        if found == -1:
+            return -1
+        backslashes = 0
+        j = found - 1
+        while j >= 0 and line[j] == "\\":
+            backslashes += 1
+            j -= 1
+        if backslashes % 2 == 0:
+            return found
+        i = found + 1
 
 
 def _scope_at(scopes: list, lineno: int) -> tuple[str, str | None]:
@@ -969,6 +1090,107 @@ def test_uri_mutations_restored():
         + "\n".join(violations))
 
 
+def test_a_def_inside_a_docstring_is_not_a_function_start():
+    """A `def`-looking line inside a STRING is copy, not a function start.
+
+    `_code_only` blanks string/comment spans before a line is matched, so a
+    docstring body cannot open a scope. Without that blanking the line below is
+    matched as a real `def`, and the scope map then contains a function that
+    exists only as text — statements up to the next dedent are attributed to
+    `fake` rather than to `test_first`, so any report about them names a scope
+    the file does not have (the wrong-name class #8487 produced).
+
+    Discriminating by construction: `_scope_map` routed through the raw line
+    (`_code_bracket_deltas` makes only BRACKETS code-only — it does not blank
+    strings for the `def` match) maps line 3 to ``("fn", "fake")``.
+    """
+    src = (
+        "def test_first():\n"
+        "    \"\"\"Doc.\n"
+        "\n"
+        "    def fake():\n"
+        "    \"\"\"\n"
+        "    os.environ[\"TORTOISE_DB_URI\"] = 'docker://x/y'\n"
+    )
+    scopes = _scope_map(src)
+    assert scopes[3] == ("fn", "test_first"), scopes[3]
+    assert ("fn", "fake") not in scopes, scopes
+
+
+def test_a_fixture_decorator_inside_a_docstring_is_not_a_fixture():
+    """`@pytest.fixture` quoted in a docstring must not arm the decorator state.
+
+    `_code_only` gates the decorator test too (`stripped.startswith("@")`), so a
+    docstring that MENTIONS the decorator cannot set ``pending_fixture``. When
+    it does, the NEXT real function is classified ``fixture``, and the guard's
+    fixture arm then demands a ``.undo()`` from a function that is not a
+    fixture — a false RED on correct code.
+
+    Discriminating by construction: routed through the raw line, the guard
+    reports ``synthetic_quoted_decorator.py:10: fixture 'helper' creates
+    pytest.MonkeyPatch() but never calls .undo()``; through `_code_only` the
+    file is clean.
+    """
+    src = (
+        "def test_first():\n"
+        "    \"\"\"Doc.\n"
+        "\n"
+        "    @pytest.fixture\n"
+        "    \"\"\"\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "def helper():\n"
+        "    mp = pytest.MonkeyPatch()\n"
+        "    mp.setenv(\"TORTOISE_DB_URI\", 'docker://x/y')\n"
+    )
+    scopes = _scope_map(src)
+    assert scopes[8] == ("fn", "helper"), (
+        f"a quoted decorator must not reclassify the next def — got {scopes[8]}")
+    assert _restoration_violations([("synthetic_quoted_decorator.py", src)]) == [], (
+        "a helper preceded by a QUOTED decorator was policed as a fixture — "
+        "the docstring armed pending_fixture")
+
+
+def test_code_only_stays_column_aligned_after_a_mid_line_triple_close():
+    """A triple-quoted region that CLOSES mid-line, with code after it, must
+    not shift that code's column (#8937 review r7, nit b).
+
+    `_code_only` padded only the 3 delimiter columns when closing, which
+    collapsed the region's content: on a line that starts INSIDE a region and
+    resumes code after the closing delimiter, the padding was 3 columns short
+    per collapsed span, so `_scope_map` read a smaller indent than the code's
+    real column — the statement could be attributed to an enclosing function
+    instead of closing it. Unreachable in this tree today; pinned so it stays
+    that way."""
+    line = 'abc""" + 1'
+    code, triple = _code_only(line, '"""')
+    assert triple is None
+    assert len(code) == len(line), (
+        "the code-only text is not column-aligned with the line", code)
+    assert len(code) - len(code.lstrip()) == line.index("+"), (
+        "the resumed code was shifted left of its real column", code)
+
+
+def test_the_two_triple_quote_lexers_agree_on_escaped_delimiters():
+    """`_code_only` and `_toggle_triple_quotes` answer different questions and
+    must not drift on the ESCAPE rule (#8937 review r7, nit a).
+
+    A backslash-escaped delimiter does not close a region in Python, and
+    `_toggle_triple_quotes` already honoured that. `_code_only` used a bare
+    `str.find`, so it closed on the escaped delimiter and then treated the
+    trailing `\\"\\"\\"` as a region OPENER — two answers for one line."""
+    line = 'z = """a\\""" + 1"""'
+    assert _toggle_triple_quotes(line, None, None) is None, (
+        "the position lexer must not close on an escaped delimiter")
+    code, triple = _code_only(line, None)
+    assert triple is None, (
+        "the code lexer closed on the ESCAPED delimiter and reopened at the "
+        "real one — it disagrees with _toggle_triple_quotes", triple)
+    assert len(code) == len(line)
+    assert code.strip() == "z ="
+
+
 def test_scope_map_reads_code_brackets_only():
     """#8995: a bracket inside a string literal is COPY, not an open
     expression — and counting it poisoned every `def` after it.
@@ -1010,6 +1232,50 @@ def test_scope_map_reads_code_brackets_only():
     unrestored = src.replace('os.environ["TORTOISE_DB_URI"] = old\n', '')
     assert _restoration_violations([("synthetic_8995.py", unrestored)]), (
         "the guard must still catch an unrestored mutation in the same shape")
+
+
+def test_a_comment_cannot_open_a_string_or_freeze_the_scope_map():
+    """A `#` comment is COPY for both lexers (#8937 review — the COMMENT arm
+    had no pin left once the interim raw-line counter was replaced).
+
+    Two arms, each discriminating on its own:
+
+    * `_code_only` truncates at `#` BEFORE it looks at quotes, so a comment
+      that MENTIONS a triple quote cannot open a region. Without that branch
+      the `\"\"\"` in the comment sets the triple state, every following line
+      is blanked as string content, and the next real `def` is not recognised
+      — so statements after it are attributed to the function above it.
+    * `_code_bracket_deltas` counts code brackets only (`tokenize` excludes
+      COMMENT), so an unmatched `(` in a comment cannot freeze the
+      continuation counter for the rest of the file.
+    """
+    line = '    note = 1  # a """ triple quote and a ( bracket in prose'
+    code, triple = _code_only(line, None)
+    assert triple is None, (
+        f"a triple quote inside a COMMENT opened a string region — {code!r}")
+    assert "#" not in code and "(" not in code and '"""' not in code, (
+        f"comment content survived into the code text — {code!r}")
+    assert len(code) == len(line), (
+        "blanking the comment shifted the column alignment", code)
+    assert code.strip() == "note = 1", code
+
+    src = (
+        'def _helper():\n'
+        '    note = 1  # a """ triple quote and a ( bracket in prose\n'
+        '    return note\n'
+        '\n'
+        '\n'
+        'def second():\n'
+        '    return 2\n'
+    )
+    assert _code_bracket_deltas(src)[1] == 0, (
+        "the bracket inside the comment was counted as an open expression",
+        _code_bracket_deltas(src)[1])
+    scopes = _scope_map(src)
+    assert scopes[1] == ("fn", "_helper"), scopes[1]
+    assert scopes[5] == ("fn", "second"), (
+        "comment copy swallowed the next def — it was attributed to "
+        f"`_helper` — got {scopes[5]}")
 
 
 def test_module_scoped_pop_without_restore_reds():

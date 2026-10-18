@@ -43,6 +43,7 @@ Practical runbooks and operational procedures for deploying, maintaining, and ve
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | Multi-graph migration runbook — no-forced-migration path + rollback drill (epic #2083, C8 #2117) | `docs/ops/multi-graph-migration-runbook.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
+| **Abuse flag state read (#4874)** — why an org reads `status: flagged`: the operator-only `GET /v1/internal/abuse/state` read (rule / count / threshold / window recorded at flag time), why the rule names are deliberately NOT on the customer surfaces, and how to tell "no active episode" from "could not read" | `docs/ops/abuse-flag-state.md` |
 | Activation scorecard runbook — beta-readiness lane B7: which sessions activate vs merely sign up, the measurable-vs-blocked legs, cohort roll-up, measured production baseline, deploy requirement | `docs/runbook/b7-activation-scorecard.md` |
 | **Ship-test instrument** — the per-deploy clean-browser onboarding walk (signup → wizard → connected only when the server observed it) + the observation artifact (#3806) | `docs/runbook/3806-ship-test-instrument.md` |
 | **Blog E2E residue cleanup runbook** — remove the `meta-contract-*` / `lifecycle-e2e-*` rows the pre-#4220 deploy E2E deposited in prod; guards, dry-run, verification | `docs/runbook/4220-blog-e2e-residue-cleanup.md` |
