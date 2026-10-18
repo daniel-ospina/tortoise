@@ -291,6 +291,15 @@ def test_bfs_draft_filter_sees_a_draft_non_point_anchor(sdk):
     assert any("(n:Subject)" in q for q in probe), (
         "the draft probe never looked at the anchor's own label — the "
         f"exclusion came from not asking, not from the filter: {probe!r}")
+    # ISSUED is not APPLIED. With the frontier prune removed (as opposed to the
+    # probe reverted) the probe still runs, still sees the draft, and `ops` is
+    # STILL empty — the BFS then reaches the operator and `_derived_live_
+    # operators` drops it (a draft neighbour counts as 0 live, so live_conn is
+    # 1 < 2). The only observable difference is that the BFS legs then run at
+    # all, and every one of them is anchored on `$frontier`:
+    assert not [q for q in counter.queries if "$frontier" in q], (
+        "the draft anchor never left the frontier — the probe ran but its "
+        f"result was not applied: {counter.queries!r}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -482,6 +491,46 @@ def test_ranker_support_ignores_a_legacy_op_type_only_operator(sdk):
     # ``incoming_impl`` = operator-mediated (r3) + DIRECT (r4). The legacy
     # operator's own edge is neither, so both columns must be 0.
     assert signals[target]["incoming_impl"] == 0, signals[target]
+
+
+def test_object_signals_are_measured_by_a_non_point_about_edge(sdk):
+    """``StateRanker._fetch_object_signals`` is the one widened read whose
+    result is AGGREGATED: ``pids`` feeds ``_fetch_point_signals`` and the
+    Object's reported confidence is the MEAN posterior of the beliefs about it
+    (``ranking.py``'s ``mean = sum(confs)/len(confs)``). So a regression here
+    does not drop a row that a caller would notice — it quietly moves a ranking
+    number. That is why it needs its own case rather than riding on the id-level
+    ones: a ``:Subject`` that is ``about*``-linked to an ``:Object`` must be
+    collected into ``pids`` and must MOVE the mean."""
+    obj = _node(sdk, "Object", "about-target-object")
+    wide = _node(sdk, "Subject", "about-source-subject",
+                 posterior_alpha=3.0, posterior_beta=1.0)   # mean 0.75
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MATCH (p {id:$p}), (o {id:$o}) MERGE (p)-[a:aboutObject]->(o)",
+        params={"p": wide, "o": obj})
+
+    sigs = StateRanker(projection=proj)._fetch_object_signals([obj])
+    assert obj in sigs, "the Object was not read at all"
+    assert sigs[obj]["degree"] == 1, sigs[obj]
+    assert sigs[obj]["has_ep"] is True, (
+        "the non-Point belief about the Object was not measured — the read "
+        f"still only collects Points: {sigs[obj]}")
+    assert sigs[obj]["confidence"] == pytest.approx(0.75), (
+        f"the about-belief did not move the Object's mean: {sigs[obj]}")
+
+
+def test_object_signals_read_uses_the_shared_traversal_disjunction():
+    """Source pin for the aggregation read. It cannot join the id-anchored
+    ``epistemic_sweep`` parametrization above: the Object anchor is
+    ``:Object`` by construction (the caller routes ``entity_type == 'object'``)
+    and the widened position is the TRAVERSAL ``p``, so the correct assertion is
+    a disjunction, not a sweep."""
+    src = inspect.getsource(StateRanker._fetch_object_signals)
+    assert "epistemic_disjunction('p')" in src
+    assert "(p:Point)" not in src, "the about-Point leg is hand-spelled again"
+    assert "MATCH (o:Object) WHERE o.id IN $ids" in src, (
+        "the Object anchor must keep its own label (per-label index)")
 
 
 def test_contested_relevance_reads_non_point_target_and_counter_claim(sdk):
@@ -696,3 +745,33 @@ def test_why_layer_records_its_residual_where_it_will_be_edited():
         "the why layer now has fewer Point-anchored reads than the note "
         "describes — either it was widened (update the note and this pin) or "
         "a read was dropped")
+
+
+def test_audit_wiring_check_names_a_key_less_event_by_its_real_key(sdk):
+    """The widened wiring checks EMIT a repair string that interpolates the
+    endpoint's key. An ``:Event`` written by ``entities._upsert_event`` may carry
+    ``eventId`` and no ``id`` — so a bare ``RETURN m.id`` renders
+    ``(m {id:'None'})``, a "fix" that matches nothing and silently leaves the
+    very edge the check just reported. The same ``coalesce(id, eventId)``
+    identity ``ep.get_contested_claims`` uses, for the same reason.
+    """
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'audit-op-6b', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    # :Event keyed on eventId only — no ``id`` property at all.
+    proj.g.query("CREATE (m:Event {eventId:'audit-ev-keyless', "
+                 "eventKind:'test', name:'a keyless event', "
+                 "startedAt:'2026-01-01T00:00:00Z'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'audit-op-6b'}), (m:Event {eventId:'audit-ev-keyless'}) "
+        "MERGE (op)-[:mitigates]->(m)")
+
+    report = audit_graph(proj)
+    legacy = [i for i in report.issues
+              if i.issue_type == "legacy_mitigates_edge"]
+    assert legacy, f"the widened check did not see the :Event endpoint: {report}"
+    for issue in legacy:
+        assert "None" not in issue.fix, (
+            f"the repair string interpolates a missing key: {issue.fix!r}")
+        assert "audit-ev-keyless" in issue.fix, (
+            f"the repair string cannot address the node it reports: {issue.fix!r}")

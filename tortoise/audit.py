@@ -517,7 +517,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         f"AND {_op_in_kinds('src', 'tgt')} AND ({kw_clauses}) "
         "AND (tgt.is_operator IS NULL OR tgt.is_operator = false) "
         "AND tgt.op_type IS NULL\n"
-        f"RETURN src.id, tgt.id, "
+        # #7927: the emitted FIX interpolates these ids, so the identity must be
+        # the node's real key. ``entities._upsert_event`` writes ``eventId`` and
+        # may leave ``id`` unset, and ``id:'None'`` in a repair string matches
+        # nothing — the "unactionable fix" failure the label was dropped for.
+        # Same coalesce ``ep.get_contested_claims`` uses for the same reason.
+        f"RETURN coalesce(src.id, src.eventId), coalesce(tgt.id, tgt.eventId), "
         "coalesce(tgt.content, tgt.name, tgt.title, '') "
         f"LIMIT {CHECK5_FETCH_LIMIT}",
         params=params,
@@ -619,7 +624,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         proj,
         "MATCH (op:Point {is_operator: true})-[mit:mitigates]->(m)\n"
         f"WHERE {epistemic_disjunction('m')} AND {_op_in_kinds('op', 'm')}\n"
-        "RETURN DISTINCT op.id, m.id, "
+        # #7927: ``m`` may be an :Event keyed on ``eventId`` with no ``id``;
+        # the emitted repair interpolates this value, so it must be the real key.
+        "RETURN DISTINCT op.id, coalesce(m.id, m.eventId), "
         "coalesce(m.content, m.name, m.title, '') "
         f"LIMIT {SAMPLE_LIMIT}",
         params=params,

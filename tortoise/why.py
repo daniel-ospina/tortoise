@@ -395,6 +395,33 @@ def _assemble_dig_deeper(by_id: dict[str, dict]) -> None:
             block["dig_deeper"] = pointers[:W4_MAX_DIG_DEEPER]
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# #7927 RESIDUAL — THE ``:Point``-ONLY SCOPE OF THIS FILE IS DELIBERATE AND
+# PENDING A LANE, NOT AN ACCIDENT OF HISTORY. EVERY read in this block is
+# Point-anchored: the two support reads below, the conflicts read, the
+# tradeoffs read, and the supersession read
+# (``search_engine.fetch_point_epistemic_state``). The EXISTENCE ANCHOR among
+# them is ``_EP_CYPHER``.
+#
+# WHAT A PARTIAL WIDENING DOES, stated as the mechanism rather than as a maxim,
+# because the mechanism is what a reader will test their observation against.
+# ``_EP_CYPHER`` runs FIRST and its ids become ``existing_ids``. Every dependent
+# read still runs and still folds its rows into ``blocks`` — so a widened
+# conflicts read DOES return rows. They are discarded at the END: the output
+# loop in ``assemble_why_blocks`` skips every id absent from ``existing_ids``.
+# So widening one dependent read alone changes no output, and it can look like
+# the widening "did not work" rather than like the anchor was not widened.
+#
+# CONSEQUENCE, recorded rather than implied: a non-Point belief is absent from
+# the why layer, while ``ranking.resolve_contested_relevance`` — widened by
+# #7927 — can fire ``W4_CONTESTED_BOOST`` on a conflict this file will not
+# render. The same note lives on that function, which is where the divergence is
+# actually experienced. The residual is the anchor plus those five dependent
+# reads, tracked on #7927 as its own lane: widening the anchor is a new
+# why-layer contract (block shape, per-label text fields, the ``:Event``
+# ``eventStatus`` vocabulary), not a read widening.
+# ══════════════════════════════════════════════════════════════════════════
+
 # Support-chain queries (bounded). Operator-mediated: the operator's INPUT
 # source at idx 0 (the evidence/statement that implies the target through the
 # operator — create_operator writes source → INPUT idx0 → op → IMPL → target).
@@ -422,22 +449,6 @@ _SUPPORT_DIRECT_CYPHER = (
     "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0)"
 )
 # Conflicts (NANDer-only; the target ep read is the dedicated _EP_CYPHER).
-#
-# #7927 RESIDUAL — THE ``:Point``-ONLY SCOPE OF THIS FILE IS DELIBERATE AND
-# PENDING A LANE, NOT AN ACCIDENT OF HISTORY. Every read below is Point-anchored
-# and the EXISTENCE ANCHOR is ``_EP_CYPHER`` (further down): ``assemble_why_blocks``
-# drops any id that read does not return, so widening THIS query alone changes
-# nothing — the block is already gone before it runs. Consequence, recorded
-# rather than implied: a non-Point belief is absent from the why layer, while
-# ``ranking.resolve_contested_relevance`` — widened by #7927 — can fire
-# ``W4_CONTESTED_BOOST`` on a conflict this file will not render (the same note
-# lives on that function, which is where the divergence is experienced).
-# The residual is therefore the anchor plus its five dependent reads, tracked on
-# #7927 as its own lane. Do NOT "harmonize" one query at a time: widening a
-# dependent read without the anchor is a no-op, and widening the anchor is a new
-# why-layer contract (block shape, per-label text fields, the ``:Event``
-# ``eventStatus`` vocabulary) rather than a read widening.
-#
 # The NANDer is either a direct statement (operator-less NAND edge) or a NAND
 # operator whose counterargument is its INPUT source at idx 0 and whose NAND
 # edge INTO the target sits at idx > 0 (idx 0 is the operator's source link —
