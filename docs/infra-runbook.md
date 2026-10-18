@@ -483,11 +483,10 @@ the higher tier until the period ends, and only then drops. When either cap
 ladder) the still-in-force one is kept for the same reason — and because an
 unpriceable subscription cannot be mirrored at all, that org lands in `failed`
 with its stored tier untouched and the run reds: loud, never a silent
-downgrade. A **genuine**
-cancellation still downgrades the moment Stripe says so: with no live
-subscription at the customer there is nothing to prefer and the stored one is
-mirrored. A customer lookup that **fails** is neither — the org is left alone
-and counted `unverified` (paid tier) or `skipped` (unpaid).
+downgrade. A **genuine** cancellation still downgrades the moment Stripe says
+so: with no live subscription at the customer there is nothing to prefer and
+the stored one is mirrored. A customer lookup that **fails** is neither — the
+org is left alone and counted `unverified` (paid tier) or `skipped` (unpaid).
 
 A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
 `alerted` / `failed` / `unrepaired` and one `drift` row per repaired org, each
