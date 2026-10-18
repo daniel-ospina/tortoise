@@ -1562,7 +1562,18 @@ def _fold_journal(events: list[dict]) -> dict:
 #: has a named home and a reader can see the two sets are different questions.
 _ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
     (label, _ENTITY_ID_PROP[label])
-    for label in ("Object", "Subject", "Event")
+    # #8859 follow-up review round 2 (P2, same fail-open-drift class): DERIVED from
+    # the one home, never re-listed. The literal this replaced
+    # (`("Object", "Subject", "Event")`) was a hand-copied second home two lines
+    # above `_ENTITY_CREATION`, whose own comment says "the hand-copied second list
+    # is what this file's doctrine forbids" — and unlike the three surfaces a
+    # widening IS pin-forced into, no test referenced this table at all. Measured
+    # on a simulated fourth creation row: the comparison DROPPED the graph node
+    # (`_entities_from_view` builds its `id_prop` map from this table) and reported
+    # `divergence="content"`, `ok=False` on a FAITHFUL graph, with an `action`
+    # telling the operator to replay/repair a graph whose only defect was the
+    # checker's label table. Latent, not live — the sets are equal today.
+    for label in sorted(_REFERENCE_FOLD_ENTITY_LABELS)
 )
 # (label, default status) per creation record. The ID PROP is NOT re-listed:
 # `_creation_entity_id` reads the writer's own `_CANONICAL_ENTITY_ID_PROPS`,
@@ -1595,6 +1606,16 @@ _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
 #: `_upsert_object` alone) and `_graph_entities` indexes EVERY label, so
 #: neither can share this constant without changing what it means.
 _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
+
+#: The labels whose ``status`` the COMPARISON decides. ``Event`` carries
+#: ``eventStatus`` under a different name and its lifecycle has no such fold, so the
+#: status leg stays bounded to the families that model the field. ONE home (#8859
+#: follow-up review round 2, P3): `_compare_entities` spells the pair at the two
+#: sites that USE it, and `entity_parity_bounds["status_compared"]` used to re-type
+#: it a third time with nothing pinning the two together — a widened status leg
+#: would have left the emitted bound telling a reader the check does not decide what
+#: it does decide, which is the round-1 dismissal-by-out-of-scope path.
+_STATUS_COMPARED_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 
 #: #7936 — the belief properties the entity leg COMPARES, read from the
 #: writer's own declarations (``_fold_confidence_changed`` writes exactly this
@@ -2311,7 +2332,7 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
         if ambiguous_status:
             excluded_ambiguous.append((label, eid, rec.get("name")))
         g = graph_entities.get(key)
-        if g is None and label in ("Object", "Subject"):
+        if g is None and label in _STATUS_COMPARED_LABELS:
             # The graph MERGEs these labels by NAME, so a second registration
             # of the same name under a fresh id is ONE node carrying the LAST
             # id — resolve by name before declaring a burial (#3585 review).
@@ -2336,7 +2357,7 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
         # (The Object-only `ambiguous_status` bound is unaffected: a Subject
         # name-only ref is REFUSED as never-guess, so it never becomes
         # ambiguous.)
-        if label in ("Object", "Subject") and not ambiguous_status:
+        if label in _STATUS_COMPARED_LABELS and not ambiguous_status:
             jv = rec.get("status")
             if jv is not None:
                 gv = g.get("status")
@@ -2669,7 +2690,7 @@ def check_consistency(log_path: str, projection, *,
         "entity_parity_ambiguous_count": len(entity_ambiguous_excluded),
         "entity_parity_bounds": {
             "direction": "journal->graph",
-            "status_compared": ["Object", "Subject"],
+            "status_compared": sorted(_STATUS_COMPARED_LABELS),
             # #7936: the non-Point belief leg. `fields` are the properties
             # compared on every reference-fold label. `baseline_digest_covers`
             # names what the BASELINE sees; the bound below names what NEITHER
@@ -2713,9 +2734,15 @@ def check_consistency(log_path: str, projection, *,
                 "the POINT leg only: `log_points`/`db_points` remain point "
                 "counts (a graph-only non-Point node is caught by the "
                 "baseline digest, not by this count)"),
-            "name_keyed": ["Object", "Subject"],
-            "identity": {"Object": "name", "Subject": "name",
-                         "Event": "eventId"},
+            # #8859 follow-up review round 2 (P3): all three emitted from their homes,
+            # never re-typed. Same bytes today; the point is that a widening which
+            # moves the DECISION also moves what the verdict SAYS it decided.
+            "name_keyed": sorted(_NAME_MERGE_LABELS),
+            "identity": {
+                label: ("name" if label in _NAME_MERGE_LABELS
+                        else _ENTITY_ID_PROP[label])
+                for label, _ in _ENTITY_PARITY
+            },
         },
         # #5285 (DEFECT 3): the COUNT (`non_folded_count` below) is
         # authoritative; this list is a bounded SAMPLE. An unrecognised-type

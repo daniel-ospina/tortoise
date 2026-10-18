@@ -41,9 +41,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tortoise.consistency import (
+    _ENTITY_ID_PROP,
+    _ENTITY_PARITY,
     _GRAPH_VIEW_LABELS as _GRAPH_VIEW_LABELS_HOME,
+    _NAME_MERGE_LABELS,
     _PROJECTION_STATE_FORMAT,
     _PROJECTION_STATE_FORMAT_HISTORY,
+    _STATUS_COMPARED_LABELS,
     check_consistency,
     projection_state_path,
     record_projection_state,
@@ -670,6 +674,18 @@ def test_the_reported_bounds_name_the_digest_coverage(tmp_path):
     # `Point/Object/Subject/Event`. Proved by re-inlining the literal: this line
     # reds, the loop above does not.
     assert "/".join(_GRAPH_VIEW_LABELS_HOME) in bounds["baseline_digest_covers"], bounds
+
+    # #8859 follow-up review round 2: the three SIBLING fields of this same dict were
+    # re-typed declarations, with nothing pinning them to their homes — the same
+    # dismissal-by-out-of-scope path, smaller blast radius. Each must be emitted from
+    # its home AND be pinned here, so a widening that moves a DECISION cannot leave the
+    # verdict describing the old one.
+    assert bounds["status_compared"] == sorted(_STATUS_COMPARED_LABELS), bounds
+    assert bounds["name_keyed"] == sorted(_NAME_MERGE_LABELS), bounds
+    assert bounds["identity"] == {
+        label: ("name" if label in _NAME_MERGE_LABELS else _ENTITY_ID_PROP[label])
+        for label, _ in _ENTITY_PARITY
+    }, bounds
     assert "name" in bounds["baseline_digest_does_not_cover"], bounds
     # The residual shape the index deliberately does not reach, named so a
     # reader does not infer a coverage the code does not have ("no
@@ -679,6 +695,32 @@ def test_the_reported_bounds_name_the_digest_coverage(tmp_path):
     assert "no identity property" in bounds["baseline_digest_does_not_cover"], bounds
     assert "eventId" in bounds["baseline_digest_does_not_cover"], bounds
     assert "POINT leg" in bounds["point_counts_cover"], bounds
+
+
+def test_the_entity_parity_table_follows_the_reference_fold(tmp_path):
+    """`_ENTITY_PARITY` must be DERIVED from the one home, never re-listed.
+
+    #8859 follow-up review round 2 (P2). It used to spell
+    `("Object", "Subject", "Event")` two lines above `_ENTITY_CREATION`, whose own
+    comment says a hand-copied second list is what this file's doctrine forbids.
+    Unlike the three surfaces a widening IS pin-forced into, no test referenced this
+    table at all: on a simulated fourth creation row `_entities_from_view` (which
+    builds its `id_prop` map from it) DROPPED the graph node and the check returned
+    `divergence="content"`, `ok=False` on a FAITHFUL graph, presecribing a replay
+    repair for a defect in its own label table.
+
+    FAILS IF: the literal comes back (the label set then stops tracking a widened
+    reference fold) — proved by re-inlining it with a label removed.
+    """
+    from tortoise.projection import _REFERENCE_FOLD_ENTITY_LABELS
+
+    assert {label for label, _ in _ENTITY_PARITY} == set(
+        _REFERENCE_FOLD_ENTITY_LABELS), (
+        "_ENTITY_PARITY no longer tracks _REFERENCE_FOLD_ENTITY_LABELS — a "
+        "widened reference fold would be DROPPED by `_entities_from_view` and "
+        "reported as a content divergence on a faithful graph")
+    for label, id_prop in _ENTITY_PARITY:
+        assert id_prop == _ENTITY_ID_PROP[label], label
 
 
 # ═══════════════════════════════════════════════════════════════════════
