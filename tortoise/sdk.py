@@ -20836,7 +20836,7 @@ class TortoiseSDK:
                          rel_filter: str = "IMPL|NAND",
                          direction: str = "both",
                          include_draft: bool = False) -> tuple[list[str], set[tuple[str, str, str]]]:
-        """BFS subgraph selection from anchor Points — A9 return contract.
+        """BFS subgraph selection from anchor epistemic nodes — A9 return contract.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
         Returns ``(operator_ids, factor_anchors)`` — the operator Point IDs
@@ -20846,6 +20846,12 @@ class TortoiseSDK:
         selection; the ≥2-live-endpoints derived-liveness predicate applies
         to operator nodes, GATE-2 Q3). With include_draft=False (default,
         #780) draft anchors, operators and frontier points are excluded.
+
+        #7927: an anchor may be any of ``live.EPISTEMIC_LABELS``
+        (:Point/:Subject/:Object/:Event, owner ruling #7813) — the widening
+        lives in the shared selector, so this surface inherits it rather than
+        re-spelling a label predicate (pinned by
+        ``tests/test_7927_epistemic_read_surfaces.py``).
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()

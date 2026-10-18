@@ -574,16 +574,22 @@ def test_pinned_gap__non_point_write_is_not_graph_persisted():
     ``_prune_nonexistent_dirty_roots`` all anchor ``MATCH (n:Point)``. So a
     write whose endpoints are ALL non-``:Point`` is EP-live IN the writing
     process (the widened EP reads see it) but EP-inert across the
-    request/process boundary, and the write-triggered local dream returns an
-    empty affected set.
+    request/process boundary.
 
-    Widening this lifecycle is NOT a label-predicate edit: it must move in
-    lockstep with the dream selector (``analyze._bfs_select_operators``) or a
-    persisted non-Point root is never swept — the #2422 / #1243 stale-region
-    class. That is #7927's surface (which already names
-    ``_bfs_select_operators``), extended there with the dirty-lifecycle sites.
-    DELETE THIS TEST when #7927 lands — it pins the gap so the PR cannot claim
-    a cross-request guarantee it does not have.
+    #7927 landed the READ half (``analyze._bfs_select_operators`` now selects
+    non-``:Point`` roots and direct-edge factors), which fixed the IN-PROCESS
+    half of this gap: the write-triggered local dream now sees the written
+    factor instead of returning an empty affected set. What remains — and what
+    this test still pins — is the CROSS-REQUEST half: the dirty marker never
+    reaches the graph, so a fresh SDK runs zero iterations and the endpoint's
+    convergence is never recomputed. Widening this lifecycle is NOT a label
+    predicate edit — it must move in lockstep with the selector (already
+    widened) or a persisted non-Point root is never swept, the #2422 / #1243
+    stale-region class.
+
+    Do NOT delete this test: #7927 did NOT close the cross-request gap, and
+    deleting the pin would let a later PR claim a guarantee it does not have.
+    Delete it only when the lifecycle persistence itself is widened.
     """
     dbdir = tempfile.mkdtemp(prefix="s7902_pin_")
     db = os.path.join(dbdir, "test.db")
@@ -599,10 +605,14 @@ def test_pinned_gap__non_point_write_is_not_graph_persisted():
         assert sorted(s1._dirty_roots) == [obj, sub], (
             "in-process mirror only")
 
-        # the write-triggered local dream selects nothing for these roots
+        # #7927: the IN-PROCESS half is now FIXED — the widened selector sees
+        # the (Subject)-[:IMPL]->(Object) direct-edge factor, so the local dream
+        # runs it instead of returning an empty affected set.
         d = s1.dream(mode="local")
-        assert d["affected_claims"] == []
-        assert d["iterations"] == 0
+        assert sorted(d["affected_claims"]) == sorted([obj, sub]), (
+            "the write-triggered local dream no longer sees the non-Point "
+            "direct-edge factor — the #7927 selector widening regressed")
+        assert d["iterations"] >= 1
 
         # a FRESH scope (the shape #1163's hydration exists for) sees nothing
         s1.close()
