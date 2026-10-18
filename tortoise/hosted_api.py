@@ -16937,11 +16937,12 @@ async def oauth_clients_count(request: Request):
     No alert threshold *in this change*: ruling C decided the growth BOUND only
     (none — no prune, no expiry, no cap) and explicitly left "warning periods"
     undecided, so a threshold is neither forbidden nor decided by it. Shipping
-    none is this change's scope call, recorded on #2853: the number is the
-    deliverable, and a scheduled reader plus its threshold remains open work
-    tied to the ruling's own 2026-11-15 revisit trigger — not retired here. The
-    revisit triggers are the ruling's own, and are returned so a reader need
-    not go find them.
+    none is this change's scope call, recorded on #2853 — and the deferred half
+    is TRACKED rather than retired: **#8923** owns the scheduled reader plus its
+    threshold (sequenced after #3134's 2026-11-15 measurement supplies the
+    scale), and that work must NOTIFY — never prune, cap or expire. The revisit
+    triggers are the ruling's own, and are returned so a reader need not go
+    find them.
     """
     _check_internal(request)
 
