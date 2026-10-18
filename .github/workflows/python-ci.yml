@@ -1444,10 +1444,10 @@ jobs:
           # cause; the full method, the calibration caveat and the per-file
           # readings are in config/ci-surfaces.yml, in the #9017 block before
           # `slow_files:`). That pair is the PRE-FIX reading; on the map this
-          # change commits those same two leg SETS weigh 21.50m / 13.30m, and
-          # the re-cut below takes them to 17.53m / 17.47m.
+          # change commits those same two leg SETS weigh 21.36m / 13.30m, and
+          # the re-cut below takes them to 17.41m / 17.45m.
           # They are the LPT legs of `slow_files - carve_out` on the committed
-          # `durations` map — 32 and 33 files at 17.527m / 17.467m; each row is a
+          # `durations` map — 32 and 33 files at 17.408m / 17.453m; each row is a
           # partition of the set. RECOMPUTE them from `durations` before quoting
           # them: they rot on every re-cut, and this comment has now been wrong
           # twice for that reason. (History, condensed: the first cut packed 43
@@ -1458,7 +1458,7 @@ jobs:
           # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
           # a leg that outruns its watchdog is killed mid-suite and reports a
           # red — the trap the #3239 budget was written for when these legs'
-          # committed weight was 2.84 min rather than the 17.53 min it is now.
+          # committed weight was 2.84 min rather than the 17.41 min it is now.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
@@ -1504,8 +1504,8 @@ jobs:
     # #5285 then added the fail-loud rebuild suite to `slow_files` and re-cut
     # BOTH rows by LPT off the committed map; #2125 added
     # `test_framework_middleware` to leg a. #9017 re-cut both rows again from a
-    # MEASURED map: the rows now carry 17.53m / 17.47m, so the watchdog holds at 40m
-    # (2.28x the heavier leg) against a 35.05m floor. The literals did NOT move
+    # MEASURED map: the rows now carry 17.41m / 17.45m, so the watchdog holds at 40m
+    # (2.29x the heavier leg) against a 34.91m floor. The literals did NOT move
     # with the re-cut — 40m already cleared the measured heavier leg — which is
     # the guard working, not a coincidence to rely on.
     #
@@ -1768,13 +1768,13 @@ jobs:
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
-          # shards derive their budget from. The heavier leg carries 17.53m
+          # shards derive their budget from. The heavier leg carries 17.45m
           # (#9017 re-cut both rows from a MEASURED map — see
           # config/ci-surfaces.yml's #9017 block; the rows before it carried
           # 14.808m / 14.443m, and the map they were packed from understated the
           # work by 1.76:1 between the legs) and this
-          # literal is 40m, i.e. 2.28x the 2.0x minimum
-          # the headroom floor requires (35.05m); it was 10m
+          # literal is 40m, i.e. 2.29x the 2.0x minimum
+          # the headroom floor requires (34.91m); it was 10m
           # when the legs' committed weight was 2.84m (the measured pytest step
           # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
           # the budget when the leg set moves is

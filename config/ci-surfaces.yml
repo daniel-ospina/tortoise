@@ -4300,14 +4300,9 @@ tier1:
 # The two clauses are worth separating, because they recompute from different
 # things: the 23.42m/1.76:1 pair is the PRE-FIX reading above, measured on the
 # tree before this change; on the map this change COMMITS, those same two leg
-# SETS weigh 21.50m / 13.30m (1.62:1), and the split then takes them to
-# 17.53m / 17.47m. Two independent reasons the b-side reads 21.50 and not 23.42:
-# the map's own re-measurement (which is the drop this change is about), and
-# main's later re-valuations of two files that sit in that leg
-# (test_extractor_v2 10.1 -> 17.2, test_relationships_bounded 16.8 -> 17.6,
-# worth +0.13m). Both act on the same side, so the pair is not decomposable from
-# the two totals alone — the 21.50 is "those leg SETS as the committed map now
-# weighs them", nothing more.
+# SETS weigh 21.36m / 13.30m (1.61:1), and the split then takes them to
+# 17.41m / 17.45m. Both clauses are recomputed from the same map, so a reader can
+# reproduce either one; the 23.42m is the MEASUREMENT, not a recomputation.
 #
 # WHAT WAS MEASURED, HOW, AND WHEN. Every file of both committed legs, one file
 # at a time, 2026-10-18 on the `ci-critical-path` worktree host: one private
@@ -4360,9 +4355,9 @@ tier1:
 #   test_battery_setup        106.8  [98.8]
 #   test_index_directory       66.0  [8.4]     — 7.9x understated
 #
-# THE SPLIT is the LPT pack of that map into two legs of 17.53m / 17.47m (it was
+# THE SPLIT is the LPT pack of that map into two legs of 17.41m / 17.45m (it was
 # 23.42m / 13.30m). `test_slow_leg_bounds_clear_the_committed_work` re-derives
-# the 40m watchdog's headroom from it (2.28x the heavier leg, against the 2.0x
+# the 40m watchdog's headroom from it (2.29x the heavier leg, against the 2.0x
 # floor) and the workflow's drift guard pins the union to
 # `slow_files - carve_out`. NOTHING was deleted, moved off the pre-merge gate, or
 # re-marked: all 65 files still run on a PR, with the same nodeids. (The pool was
@@ -5016,17 +5011,14 @@ durations:
   test_battery_corpus.py: 7.4
   test_commit_endpoint.py: 33.9  # #9017: was 21.4 (measured 2026-10-18)
   test_invites_http.py: 13.6
-  # #9017 NOTE: this file and test_extractor_v2.py were re-valued on main WHILE
-  # this change was in review (16.8 -> 17.6 and 10.1 -> 17.2 — a later CI-era
-  # reading than this pass's local CPU measurement), and an earlier cut of the
-  # merge kept BOTH rows. That is not a harmless duplicate: PyYAML silently
-  # last-wins, but `tools/ci_timing.py::_locate_durations_block` REFUSES the
-  # manifest on a duplicated key (DurationsBridgeError), and that tool is the map's
-  # only writer — so the duplicate passed every local check and would have redded
-  # the next `ci-timing` refresh. One row per key; main's later value wins.
-  test_relationships_bounded.py: 17.6
+  # #9017: ONE ROW PER KEY. A merge earlier in this change kept BOTH this row and
+  # main's predecessor, and that is not harmless — PyYAML silently last-wins, but
+  # `tools/ci_timing.py::_locate_durations_block` REFUSES a duplicated key, and
+  # that tool is the map's only writer, so the duplicate would have redded the
+  # next `ci-timing` refresh while every local check stayed green.
+  test_relationships_bounded.py: 16.8  # #9017: was 17.6 (#4729 junit sweep, 2026-09-25)
   test_expand_relationships_6976.py: 12.0  # unmeasured estimate (#6976); re-measure from the next junit sweep
-  test_extractor_v2.py: 17.2
+  test_extractor_v2.py: 10.1  # #9017: was 17.2 (#4729 junit sweep, 2026-09-25)
   test_prior_bound_4509.py: 22.0
   test_fly_machines_guard.py: 4.6
   test_fly_machine_env.py: 28.2
