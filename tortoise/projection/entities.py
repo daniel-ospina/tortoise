@@ -33,6 +33,13 @@ from tortoise.live import (
     epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
 )
 
+# #2782: the money value's five declared sibling fields. `tortoise/money.py` is
+# a stdlib-only leaf, so this import cannot cycle — and declaring them from the
+# ONE constant keeps the projection's declared set from drifting away from the
+# shape `money_props` builds (a field added there is declared here by
+# construction).
+from tortoise.money import MONEY_VALUE_FIELDS
+
 # The store's NUMERIC domain (INT64 / non-finite reject) — a leaf module, so
 # this cannot cycle. `_annotator_value_ok` answers the shape + `#7369`
 # parameter-parse half; the numeric axis is added to BOTH questions (write and
@@ -1718,7 +1725,20 @@ class _EntityHandlers:
         # does not log a FALSE `"Point prop %r is not declared"` drift warning
         # on every rebuild.
         "baseline_system_default",
-    })
+    }) | frozenset(MONEY_VALUE_FIELDS)
+    # #2782 / WS-C design (`docs/plans/2026-09-10-ws-c-numeric-normalization.md`)
+    # §7.1, §7.2 step 2: a money value is a FLAT structural field
+    # (`money_props` in `tortoise/money.py`: amountMinor, currency,
+    # minorUnitExponent, verbatim, asOf), and the Point lane's declaration is
+    # what §7.1 calls "declaration, not permission" — the open-set passthrough
+    # already PERSISTS these keys (#2795), and it does so live and on every
+    # replay. Without the declaration a point that carries an amount logs a
+    # FALSE `"Point prop 'amountMinor' is not declared"` drift warning on the
+    # live write and again on every rebuild (measured at 180fe6fd3: all five
+    # keys warn), which is exactly the noise that hides a GENUINE undeclared
+    # prop. Declaration is warning-suppression only: it grants no new write
+    # door and widens no contract — the HTTP `Point` model stays
+    # `extra="forbid"` and the field remains server-written (§7.1/S3).
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical
     # form is the declared `flatten=list` STRING (`search_keys` -> space-joined

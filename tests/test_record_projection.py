@@ -525,6 +525,54 @@ def test_the_schema_columns_are_read_from_disk_not_restated():
     assert "status" in subject_alters[-1] and "embedding" in subject_alters[-1], (
         f"the forward ALTER must re-declare BOTH names, got {subject_alters[-1]!r}"
     )
+    # #2782: the SAME forward-migration rule for COLUMNS. The five money columns
+    # reach `public.point` by `ALTER TABLE … ADD COLUMN` (append-only history),
+    # so a `CREATE TABLE`-only read reports the record poorer than it is: the
+    # amount would be pushed into the `props` tail instead of its `bigint`
+    # column, and `cache_projection` would not project it at all.
+    for column in ("amount_minor", "currency", "minor_unit_exponent",
+                   "verbatim", "as_of"):
+        assert column in columns["point"], (
+            f"point.{column} is missing from table_columns() — the forward "
+            "ALTER TABLE … ADD COLUMN form is not read"
+        )
+    base_point = rp._parse_record_tables(rp._read_migrations())["point"]
+    for column in ("amount_minor", "currency", "minor_unit_exponent",
+                   "verbatim", "as_of"):
+        assert column not in base_point, (
+            f"point.{column} now comes from the CREATE TABLE, so the ALTER "
+            "read above proves nothing"
+        )
+
+
+def test_a_point_amount_lands_in_its_money_column_not_the_props_tail():
+    """#2782: the money value is AUTHORITY, so it gets a column, not the tail.
+
+    `amountMinor`/`currency`/`minorUnitExponent`/`verbatim`/`asOf` are
+    author-supplied and carried by `PointAdded.point.<field>` — nothing
+    recomputes them — so §17.5's placement classes them PRIMARY and the record
+    must store each in its own column. In the `props` tail the amount would be
+    an unvalidated JSON scalar (the WS-C design's `bigint`-never-float rule
+    enforced by the column type instead).
+    """
+    columns = rp.table_columns()
+    refused = rp.refused_props_names()
+    props = {
+        "id": "p1",
+        "amountMinor": 25_000_000,
+        "currency": "BRL",
+        "minorUnitExponent": 2,
+        "verbatim": "R$ 250.000,00",
+        "asOf": "2026-10-18",
+    }
+    col_values, tail = rp._split_properties(
+        "point", props, columns=columns, refused=refused
+    )
+    assert set(col_values) == {
+        "id", "amount_minor", "currency", "minor_unit_exponent",
+        "verbatim", "as_of",
+    }, col_values
+    assert tail == {}, f"money left in the props tail: {tail}"
 
 
 def test_every_record_schema_migration_on_disk_is_read():
@@ -542,6 +590,10 @@ def test_every_record_schema_migration_on_disk_is_read():
     shapes = re.compile(
         rf"CREATE TABLE IF NOT EXISTS public\.(?:{tables})\b"
         rf"|ALTER TABLE public\.(?:{tables})\b[^;]*?chk_[a-z_]+_props_no_derived"
+        # #2782: a forward migration can also ADD A COLUMN, and the column set
+        # is what `_split_properties` splits on — an unread ADD COLUMN leaves
+        # the value in the `props` tail and `cache_projection` unprojected.
+        rf"|ALTER TABLE public\.(?:{tables})\b[^;]*?ADD COLUMN"
     )
     migdir = rp.REPO_ROOT / "supabase" / "migrations"
     on_disk = {
