@@ -865,13 +865,31 @@ _REG_SDKS: list = []
 
 @pytest.fixture
 def reg_client(_env, monkeypatch):
-    """A hosted REST client on the REGISTRY lane (embedded temp DB).
+    """A hosted REST client on the REGISTRY lane (one temp DB, its own graphs).
 
     `_env` is requested explicitly, not assumed: it is autouse and pins
     `TORTOISE_CONTROL_PLANE=supabase` at setup, so this fixture runs AFTER it
     and undoes exactly that (the fixture ordering, not luck, is what makes the
     lane switch deterministic). `patched_tortoise_sdk` binds every no-path SDK
-    construction to one temp embedded DB (the #1497/#1950 anchor rules).
+    construction to one temp DB (the #1497/#1950 anchor rules).
+
+    Lane scope, measured rather than assumed (#4721 review): under a
+    `TORTOISE_DB_URI` lane the #1647 redirect fires here (the temp path is
+    passed POSITIONALLY, so `explicit_path` is true and this stem is not in
+    `TEST_NO_REDIRECT_STEMS`), so both SDKs land on the SERVER — but not in a
+    shared graph: the redirect renames it per run to `test_<pathstem>_<hash>`
+    and `_get_registry` derives `test_registry_<...>_control_plane` from that,
+    both `test_`-prefixed and journaled for the session sweep. Two consecutive
+    docker-lane runs of the cases below are green. The assertions still do not
+    rely on it: the seeded ids carry a per-run suffix, so a row left by ANY
+    other run can never enter this test's live set.
+
+    The client is `verdict_client`, matching this module's `client` fixture. A
+    request parked past `_TRANSPORT_WAIT_BOUND_S` under machine load is a
+    NON-ANSWER, and the exact `sorted(statuses) == [200, 409]` assertion below
+    cannot tell a 504 refusal from a real verdict — so a raw `TestClient` would
+    turn load into a red. The seam converts that refusal into the contract's
+    INCONCLUSIVE skip (#5049).
     """
     import tempfile
 
@@ -885,7 +903,7 @@ def reg_client(_env, monkeypatch):
         patched_tortoise_sdk(os.path.join(tmpdir, "rotate-registry.db")),
     ):
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 yield tc
         finally:
             while _REG_SDKS:
@@ -971,15 +989,21 @@ def test_registry_lane_concurrent_rotate_of_one_row_admits_exactly_one(
     unconditional SET returning the row) makes BOTH calls claim and this
     assertion fails with two 200s.
     """
-    org_id = "team-4721r"
-    target = "key_target_4721"
-    caller_token = "tt_caller_4721_signin"
+    # Per-RUN ids, not fixed ones: the live-set equality below must be a
+    # statement about THIS run's rows only. Nothing in this test may depend on
+    # the graph having been empty when it started (a fixed id would make the
+    # assertion an equality against whatever a previous run left behind).
+    suffix = uuid.uuid4().hex[:8]
+    org_id = f"team-4721r-{suffix}"
+    target = f"key_target_4721-{suffix}"
+    caller_key = f"key_caller_4721-{suffix}"
+    caller_token = f"tt_caller_{suffix}_signin"
     _reg_seed_org(reg, org_id)
-    _reg_seed_key(reg, org_id, "key_caller_4721", token=caller_token)
+    _reg_seed_key(reg, org_id, caller_key, token=caller_token)
     _reg_seed_key(reg, org_id, target)
 
     before = _reg_live(reg, org_id)
-    assert before == ["key_caller_4721", target], before
+    assert before == [caller_key, target], before
 
     gate = threading.Barrier(2, timeout=60)
     # Both threads must actually ARRIVE at the claim: if the barrier timed out
@@ -1071,11 +1095,17 @@ def test_registry_lane_claim_refuses_a_row_already_revoked(reg_client, reg):
     """The registry twin's other half: an unconditional SET would still pass
     the race above whenever the two calls serialize, so pin the CONDITION — a
     second claim on an already-revoked row reports False (nothing matched) and
-    the rotate refuses 409 without leaving an orphan live replacement."""
+    does not overwrite the winner's `revoked_at`.
+
+    This pins the CLAIM primitive only (the boolean IS the claim). The
+    endpoint-level consequence — the rotate refuses 409 and compensates its
+    replacement, leaving no orphan live key — is pinned by the race case
+    above, not here."""
     from tortoise.hosted_api import _claim_key_revocation
 
-    org_id = "team-4721s"
-    target = "key_target_4721s"
+    suffix = uuid.uuid4().hex[:8]  # per-run rows — see the race case above
+    org_id = f"team-4721s-{suffix}"
+    target = f"key_target_4721s-{suffix}"
     prior = datetime.now(UTC).isoformat()
     _reg_seed_org(reg, org_id)
     _reg_seed_key(reg, org_id, target, revoked_at=prior)
