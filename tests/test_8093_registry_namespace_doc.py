@@ -234,11 +234,18 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
     # name unconditionally), so a hosted-vs-registry framing is FALSE and was in
     # this cell for two rounds. The derivers are functions; the deployment mode is
     # not the discriminator.
+    # Each deriver must sit on ITS OWN side. A whole-clause membership test lets
+    # a deriver be moved into the `org_{name}` half — attributing a mint of
+    # `org_{org_id}` to the other shape — while every name is still present.
     for deriver in ("provision_tenant", "register_user", "agent_signup"):
-        assert deriver in clause, (
-            f"the clause must name `{deriver}` among the `org_{{org_id}}` "
-            "derivers — `hosted_api._org_graph_name`'s docstring enumerates "
-            "them, and a lane-based split drops this one")
+        assert deriver in supabase_half, (
+            f"the clause must name `{deriver}` in the `org_{{org_id}}` half — "
+            "`hosted_api._org_graph_name`'s docstring enumerates it there, and "
+            "moving it across the `org_{name}` marker attributes the wrong "
+            "shape to the wrong deriver")
+        assert deriver not in registry_half, (
+            f"`{deriver}` must NOT appear in the `org_{{org_name}}` half — it "
+            "mints `org_{org_id}`, so naming it there inverts the attribution")
     assert "the lane does" not in _flat(clause), (
         "the clause must not claim the deployment lane decides the shape: "
         "`register_user` and `agent_signup` mint `org_{org_id}` before any lane "
@@ -248,10 +255,45 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "shape follows the minting path and not the deployment lane. Dropping "
         "the negation leaves 'decided by the deployment lane:' followed by a "
         "list of functions, a self-contradiction the shapes alone cannot detect")
-    assert "on every hosted provision path" not in _flat(_namespace_cell()), (
-        "the cell must not generalise the shape to 'every hosted provision "
-        "path': a hosted selfhost register/signup mints `org_{org_id}`, and the "
-        "registry create_org lane is hosted too")
+    # Ban the whole FAMILY, not one historical spelling. The merged wording was
+    # "on the hosted Supabase-lane provision paths"; a literal-phrase ban let that
+    # — and "on the hosted provision paths" — walk straight back in beside the
+    # "not by the deployment lane" negation, producing the self-contradiction
+    # this correction exists to remove.
+    assert not re.search(r"hosted[^.]{0,60}provision path",
+                         _flat(_namespace_cell())), (
+        "the cell must not generalise the default graph's shape to the hosted "
+        "provision paths: `register_user` / `agent_signup` mint `org_{org_id}` "
+        "in BOTH lanes, `provision_tenant` is selfhost-ONLY, and the registry "
+        "create_org lane is hosted too — no hosted/provision grouping decides "
+        "the shape")
+    # The node must not appear in the `org_{org_id}` half at all. It derives
+    # nothing: `sdk.py:27031` (from `org_{name}`) and `hosted_api.py:25094` (from
+    # `org_{org_id}`) both create it with `namespace=<their graph_name>`, so for
+    # every registry create_org org — the lane the clause assigns to `org_{name}`
+    # — that node's namespace IS `org_{name}`. Listing it as an `org_{org_id}`
+    # deriver puts one object on both sides of the split.
+    assert "kind='default'" not in supabase_half, (
+        "the registry `kind='default'` node must not be listed among the "
+        "`org_{org_id}` derivers: it carries its minter's name, which is "
+        "`org_{name}` for `sdk.org_create`")
+    # The Supabase-lane `create_org` is a deriver of `org_{org_id}`, so it must
+    # sit on that side — naming it on the `org_{name}` side attributes a mint of
+    # the wrong shape to it (`agent_signup` is guarded the same way above; this
+    # one is a phrase because `create_org` also legitimately appears in the
+    # registry half as `sdk.org_create`'s lane name).
+    assert "Supabase-lane `create_org`" in supabase_half, (
+        "the Supabase-lane `create_org` must be named among the `org_{org_id}` "
+        "derivers (`hosted_api` mints `org_{org_id}` there); moving it across "
+        "the `org_{name}` marker inverts the attribution")
+    # `stored` is load-bearing and must survive: `hosted_api`'s duplicate-name
+    # replay (create_org) re-derives `f"org_{name}".replace(' ', '_')` outside
+    # `sdk.org_create`, so an unqualified "only on sdk.org_create" is false. What
+    # is unique to `sdk.org_create` is the STORED `Team.graph_name`.
+    assert re.search(r"stored only by\s+`?sdk\.org_create", _flat(clause), re.I), (
+        "the clause must say `org_{name}` is STORED only by `sdk.org_create`, "
+        "not derived only there: the create_org duplicate-name replay derives "
+        "the same shape, so an unqualified 'only' is a false claim")
     # The `org_{name}` half's code side: the registry lane's stored org
     # `graph_name` — `sdk.org_create` derives it from the org name (spaces →
     # `_`) and the registry `kind='default'` node takes it as its namespace. The
