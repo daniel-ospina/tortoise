@@ -9030,8 +9030,14 @@ class TestRegistryExistingGraphs:
 
     def test_success_returns_set_of_graph_names(self, monkeypatch):
         """A successful probe returns the graph names as a set — the sweep
-        gate then skips teams whose org_{tid} graph was never minted."""
+        gate then skips teams whose org_{tid} graph was never minted.
+
+        Pinned to EMBEDDED mode: the fresh-probe-and-close shape is the
+        embedded (#2251) contract. URI mode does NOT close per probe —
+        `TestUriRegistryProbeConnectionReuse` pins that half (#4661)."""
         import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
 
         class _FakeDb:
             @staticmethod
@@ -9062,6 +9068,8 @@ class TestRegistryExistingGraphs:
         sweep this cycle instead of purging blind (best-effort contract)."""
         import tortoise.hosted_api as ha_mod
 
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
         class _BoomProj:
             class _db:
                 @staticmethod
@@ -9088,6 +9096,8 @@ class TestRegistryExistingGraphs:
         close-on-exception leak fix)."""
         import tortoise.hosted_api as ha_mod
 
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
         closed = []
 
         class _BoomProj:
@@ -9110,6 +9120,255 @@ class TestRegistryExistingGraphs:
             lambda namespace=None, graph_name=None: _Sdk())
         assert ha_mod._registry_existing_graphs() is None
         assert closed == [True], "close() must run on the exception path"
+
+
+class TestUriRegistryProbeConnectionReuse:
+    """#4661: in URI mode the registry probe REUSES one FalkorDB connection.
+
+    `_registry_existing_graphs()` sits on the onboarding projection's read
+    path (the MCP gate, GET /v1/onboarding/state). Pre-fix every probe built
+    a fresh `_make_sdk(namespace="registry")` and closed it, so in URI mode —
+    production: FalkorDB Cloud over TLS — each probe paid a TCP connect + TLS
+    handshake (`ssl.create_default_context` → `load_default_certs` re-parsing
+    the CA bundle) + `Is_Sentinel`'s INFO. py-spy on the live box caught the
+    thread inside that handshake for seconds at a time while reads blew the
+    10 s transport bound.
+
+    The LISTING must stay live; only the CONNECTION is cached.
+    """
+
+    @staticmethod
+    def _install(monkeypatch, graphs):
+        """Fake `_make_sdk` recording constructions/closures.
+
+        ``graphs`` is a MUTABLE list the fake projection reads at call time,
+        so a test can prove the listing is re-read (not cached) while the
+        connection is reused."""
+        import tortoise.hosted_api as ha_mod
+
+        constructed: list[dict] = []
+        closed: list[bool] = []
+
+        class _Db:
+            @staticmethod
+            def list_graphs():
+                return list(graphs)
+
+        class _Proj:
+            db = _Db()
+
+        class _Sdk:
+            def _get_proj(self):
+                return _Proj()
+
+            def close(self):
+                closed.append(True)
+
+        def _make_sdk(*, namespace=None, graph_name=None):
+            constructed.append({"namespace": namespace,
+                                "graph_name": graph_name})
+            return _Sdk()
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _make_sdk)
+        return constructed, closed
+
+    def test_two_probes_construct_one_connection(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/probe-reuse")
+        constructed, closed = self._install(monkeypatch, ["org_a"])
+
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+
+        assert constructed == [{"namespace": "registry",
+                                "graph_name": None}], (
+            f"built {len(constructed)} registry SDKs for two probes — the "
+            f"per-probe connection/TLS handshake (#4661) is back")
+        assert closed == [], (
+            "the process-lifetime probe handle was closed between calls — "
+            "the next probe then pays a new TCP+TLS handshake (#4661)")
+
+    def test_the_listing_is_still_live(self, monkeypatch):
+        """Only the CONNECTION is cached: a graph minted after the first
+        probe must be visible to the next one (probe-before-purge / pin-4)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/probe-live")
+        graphs = ["org_a"]
+        constructed, _closed = self._install(monkeypatch, graphs)
+
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+        graphs.append("org_b")
+        assert ha_mod._registry_existing_graphs() == {"org_a", "org_b"}, (
+            "the LISTING was cached — a probe answer on stale graph state "
+            "would defeat probe-before-purge and the pin-4 open guard")
+        assert len(constructed) == 1
+
+    def test_a_changed_uri_rebuilds_instead_of_probing_the_old_server(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/one")
+        constructed, closed = self._install(monkeypatch, ["org_a"])
+        ha_mod._registry_existing_graphs()
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/two")
+        ha_mod._registry_existing_graphs()
+
+        assert len(constructed) == 2, (
+            "the cached handle kept addressing the OLD server after the "
+            "configured URI changed")
+        assert closed == [True], "the replaced handle must be closed"
+
+    def test_probe_failure_stays_fail_open_and_reuses_the_connection(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/probe-boom")
+
+        class _BoomProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("boom")
+
+            db = _db()
+
+        constructed: list[str | None] = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return _BoomProj()
+
+            def close(self):
+                pass
+
+        def _make_sdk(*, namespace=None, graph_name=None):
+            constructed.append(namespace)
+            return _Sdk()
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _make_sdk)
+
+        assert ha_mod._registry_existing_graphs() is None
+        assert ha_mod._registry_existing_graphs() is None
+        assert len(constructed) == 1, (
+            "a failed `list_graphs` re-built the connection — a transient "
+            "error must not cost a TLS handshake per probe")
+
+    def test_a_failed_construction_is_not_cached(self, monkeypatch):
+        """The never-raise contract survives, and a half-built handle is not
+        cached: the next probe retries (a cached failed handle would make one
+        outage permanent for the whole process)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/probe-up")
+        attempts: list[str | None] = []
+        closed: list[bool] = []
+
+        class _Sdk:
+            def _get_proj(self):
+                raise RuntimeError("handshake failed")
+
+            def close(self):
+                closed.append(True)
+
+        def _make_sdk(*, namespace=None, graph_name=None):
+            attempts.append(namespace)
+            return _Sdk()
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _make_sdk)
+
+        assert ha_mod._registry_existing_graphs() is None
+        assert ha_mod._registry_existing_graphs() is None
+        assert attempts == ["registry", "registry"], (
+            "a failed construction was cached — the process never retries")
+        assert closed == [True, True], (
+            "a failed, un-cached handle must be closed, not leaked")
+
+    def test_reset_closes_and_clears_the_cache(self, monkeypatch):
+        """The suite's per-test isolation hook (`_reset_registry_probe_sdk`)
+        must actually CLOSE the cached handle — a reset that only drops the
+        reference leaks one connection per test in the docker lane."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/probe-reset")
+        constructed, closed = self._install(monkeypatch, ["org_a"])
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+        assert len(constructed) == 1 and closed == []
+
+        ha_mod._reset_registry_probe_sdk()
+
+        assert closed == [True], (
+            "the reset dropped the cached handle WITHOUT closing it — a "
+            "connection leak per test in the URI lane")
+        assert ha_mod._REGISTRY_PROBE_SDK is None
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+        assert len(constructed) == 2, "the reset did not clear the cache"
+
+
+class TestOnboardingProjectionSamplesTheRegistryOnce:
+    """#4661: the projection probes the registry ONCE, and opens the name it
+    sampled.
+
+    `_get_onboarding_projection` needs the listing twice — once for the
+    existence verdict, once to decide WHICH tenant name to open (pin 4). Each
+    leg used to run its own `_registry_existing_graphs()`, so a URI-mode
+    projection paid two separate connections; the owner's own increment on
+    this issue: "two callers, one probe, re-probed per invocation".
+    """
+
+    def test_one_probe_and_the_open_follows_it(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        org_id = "org-4661-probe-once"
+        probes: list[int] = []
+        listings = [{f"team_{org_id}"}, {f"org_{org_id}"}]
+
+        def _probe():
+            probes.append(len(probes))
+            # A DIFFERENT snapshot per call: the second probe lists the
+            # canonical name the first did not.
+            return listings[min(len(probes) - 1, len(listings) - 1)]
+
+        opened: list[dict] = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return object()
+
+        def _make_sdk(*, namespace=None, graph_name=None):
+            opened.append({"namespace": namespace,
+                           "graph_name": graph_name})
+            return _Sdk()
+
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", _probe)
+        monkeypatch.setattr(ha_mod, "_get_onboarding_state", lambda o: {})
+        monkeypatch.setattr(ha_mod, "_make_sdk", _make_sdk)
+        monkeypatch.setattr(ha_mod._os, "read_onboarding_node",
+                            lambda proj, org: None)
+
+        state = ha_mod._get_onboarding_projection(org_id)
+
+        assert probes == [0], (
+            f"the projection probed the registry {len(probes)} times — the "
+            f"existence verdict and the graph open must share ONE listing "
+            f"(#4661)")
+        assert opened == [{"namespace": None,
+                           "graph_name": f"team_{org_id}"}], (
+            "the projection opened a name its own existence verdict never "
+            "sampled (pin 4) — pre-fix the SECOND probe decided the open")
+        # The node-absent path still returns FLOW defaults (the probe change
+        # must not alter what the read serves).
+        assert state["fork"] is None
+        assert state["completed_steps"] == []
 
 
 class TestGraphHasTeamNamespaceExceptionPath:
@@ -10500,12 +10759,12 @@ class TestFirstContactPrewarm:
 # ── #4625: the capture path must not compute the projection it discards ──────
 #
 # `_update_onboarding_state` computes the merged projection as its RETURN VALUE
-# (the GET/PATCH writer-echo contract). That projection is not free: it reaches
-# `_registry_existing_graphs()` up to twice (two when the org graph exists,
-# which is the per-capture case), and in URI mode each probe builds a fresh
-# `_make_sdk(namespace="registry")` and opens a NEW FalkorDB connection — TCP +
-# TLS handshake + `Is_Sentinel`'s INFO + `list_graphs` — executed ON the event
-# loop.
+# (the GET/PATCH writer-echo contract). That projection is not free: it samples
+# `_registry_existing_graphs()` (ONCE since #4661; twice before it), and in URI
+# mode each probe used to build a fresh `_make_sdk(namespace="registry")` and
+# open a NEW FalkorDB connection — TCP + TLS handshake + `Is_Sentinel`'s INFO +
+# `list_graphs` — executed ON the event loop; #4661 makes that connection
+# process-lifetime.
 #
 # An AGENT capture — the fleet case — calls the router TWICE (the receipt
 # write, then the last-error clear) and discards both returns: four synchronous
@@ -11837,9 +12096,9 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     exempt from the bound. No load and no wall-clock wait are involved: the
     bound is forced to 0 s, so the refusal is produced by the REAL
     ``WaitBoundMiddleware`` the production request meets. The plain-client
-    control is the non-vacuity leg — it would pass unchanged if the route were
-    ever exempted, turning this pin red instead of letting the conversion
-    silently become dead code.
+    control is the non-vacuity leg — it goes RED if the route is ever exempted
+    (the middleware stops refusing, so the control's 504 assertion fails), so
+    the conversion cannot silently become dead code.
     """
     from tortoise import mcp_auth
     from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT

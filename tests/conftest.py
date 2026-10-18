@@ -1567,6 +1567,22 @@ def _process_global_isolation(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     yield
     reset_process_globals()
+    _reset_hosted_registry_probe()
+
+
+def _reset_hosted_registry_probe() -> None:
+    """#4661: drop the hosted API's cached registry probe between tests.
+
+    That probe is a PROCESS-LIFETIME connection (that is its purpose), so
+    without this reset a test that monkeypatches `_make_sdk`/`TortoiseSDK`
+    would inherit a handle an earlier test built — the #5049 order-dependence
+    class. Lazy `sys.modules` lookup: a test that never imported `hosted_api`
+    pays one dict read, not an import.
+    """
+    module = sys.modules.get("tortoise.hosted_api")
+    if module is None:
+        return
+    module._reset_registry_probe_sdk()
 
 
 # ── #3695 / #5477: the provider gate is CODE, not a property of the box ───

@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tortoise.hosted_api import app
 
 
@@ -37,7 +38,7 @@ def client(tmp_path):
             "org_id": "test-team-1", "tier": "free", "key_id": "k1",
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
         }
-        with TestClient(app) as tc:
+        with verdict_client(app) as tc:
             yield tc
 
 
@@ -47,7 +48,7 @@ def unauth_client(tmp_path):
     # #2127 wave 2: shared helper (see the client fixture audit note — the
     # 401-path tests never construct SDKs, but the fixture still pins +
     # closes deterministically for uniform discipline).
-    with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+    with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
         yield tc
 
 
@@ -699,4 +700,31 @@ class TestRevokeGitHubToken:
         monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
         assert self._run(ha._revoke_github_token("tok")) == \
             (False, "not_configured")
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``GET
+    /v1/onboarding/github/repos`` is the route this file reads most and it is
+    not exempt from the bound. The plain-client control is the non-vacuity leg
+    — it is the exact ``assert 504 == 200`` shape this conversion removes, and
+    it goes RED if the route is ever exempted (the middleware stops refusing,
+    so the control's 504 assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("GET", "/v1/onboarding/github/repos")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.get(route[1]).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.get(route[1])
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "GET /v1/onboarding/github/repos answered" in message
 

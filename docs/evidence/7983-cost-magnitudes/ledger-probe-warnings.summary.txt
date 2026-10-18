@@ -1,0 +1,7 @@
+Product read-path warnings emitted during the 200-query probe (NOT ledger errors).
+Summarised from the probe's own stderr on the live self-hosted graph (the raw log is not committed — it is regenerable by re-running `probes/ledger_probe.py`): 96 'Bounded relationship query failed' (a bounded
+relationship read timing out on the LIVE fleet map instance) + the #4997 unindexed-label notice.
+
+grep '^Bounded relationship query failed' | wc -l -> 96
+every one is CAUGHT by the product (search_engine.get_relationships_bounded, fail-open) and the
+answers were unaffected: 200 queries x 10 rows = 2,000 read events, exactly.

@@ -23,7 +23,8 @@ from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
                           _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
-                          _supersede_window_end, _now_iso)
+                          _supersede_window_end, _now_iso,
+                          _ledger_record as _ledger_record_page)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
@@ -1824,7 +1825,20 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # vanished on rebuild and live != replay. Refused here BEFORE the write is
     # attempted, with `sdk._sanitize_props` as the fail-closed backstop for the
     # direct SDK route (the same two-layer shape as `__runId`/`baseline_*`).
-    "_stub"})
+    "_stub",
+    # Lane L5 (#5097 review P1): the CAPTURE-COMPLETION discriminator is the
+    # same shape one lane over. `sdk._upsert_source` reads it as a PARAMETER:
+    # it suppresses the ON CREATE arm's creator-only defaults
+    # (`id`/`version`/`externalId`) and widens the `:Source` passthrough to
+    # `_SOURCE_CAPTURE_REPLAY_PROPS` (the capture writer's
+    # `sessionId`/`capturedAt`/`eventId`). A tenant able to write it can forge
+    # capture provenance AND strip a node's identity props, and the key rides
+    # the journal so a rebuild restores the forgery (measured on the review
+    # head through `tortoise_create_source(props={...})`). Refused here BEFORE
+    # the write is attempted; `sdk.create_source` refuses it in its own
+    # `**props` guard and `sdk._sanitize_props` is the direct-SDK backstop.
+    "_stub_completion",
+})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -1959,6 +1973,38 @@ def tortoise_create_point(kind: str, content: str,
     return result
 
 
+#: The SDK keyword-only switches a remote caller must never set. Named
+#: explicitly, NOT "any key starting with `_`": `security.validate_filter_key`
+#: ACCEPTS a leading underscore, so a tenant property literally named `_foo` is a
+#: legitimate filter — and dropping it would silently turn a filter into "no
+#: filter", i.e. return the whole collection.
+PRIVATE_FILTER_KEYS = frozenset({"_record_reads"})
+
+
+def _public_filters(filters: Any) -> dict:
+    """A caller's filter dict MINUS the SDK's private switches (#7983).
+
+    A remote caller may not switch the read ledger off with a query parameter —
+    that is a caller-controlled switch on a measurement presented as
+    authoritative — and the drop applies to the paginated and the plain path
+    alike, so the same dict means the same thing on both.
+
+    A non-empty, non-mapping `filters` raises `TypeError`, the type the plain
+    path raised before this existed (`**` unpack of a str); the dict
+    comprehension that replaced it raised `AttributeError` from `.items()`
+    instead, which no caller or test expected. A FALSY value is still "no
+    filters", as it was.
+    """
+    if not filters:
+        # `None`, `0`, `False`, `""`, `[]` — the pre-existing code read every
+        # FALSY value as "no filters" (`**(v or {})`), so raising for those would
+        # turn a caller's empty payload into an error.
+        return {}
+    if not isinstance(filters, dict):
+        raise TypeError("filters must be a mapping")
+    return {k: v for k, v in filters.items() if k not in PRIVATE_FILTER_KEYS}
+
+
 def tortoise_query(kind: str | None = None,
                    filters: Any = None,
                    text: str | None = None,
@@ -2012,7 +2058,12 @@ def tortoise_query(kind: str | None = None,
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
     if tag is not None:
-        rows = _safe(_get_org_sdk().query_points_by_tag, tag)
+        # #7983: record what this call SERVES — the post-filter population for an
+        # unpaginated caller, the one page for a paginated one. Never inside the
+        # accessor: it runs BEFORE the retracted filter below, so it would count
+        # Points the caller never receives (f HIGH, the direction that must not
+        # happen), and the two tag modes would measure different things.
+        rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
         # query_points_by_tag has no retracted exclusion in the SDK — mirror
@@ -2020,12 +2071,15 @@ def tortoise_query(kind: str | None = None,
         if not include_retracted:
             rows = [r for r in rows if r.get("status") != "retracted"]
         if not paginated:
+            _ledger_record_page("Point", rows)  # #7983: the served population
             return rows
         eff_offset = offset if offset is not None else 0
         if page is not None:
             eff_offset = (page - 1) * eff_limit
         total = len(rows)
-        return {"results": rows[eff_offset:eff_offset + eff_limit],
+        page_rows = rows[eff_offset:eff_offset + eff_limit]
+        _ledger_record_page("Point", page_rows)  # #7983: the page, not the tag
+        return {"results": page_rows,
                 "total": total,
                 "hasMore": eff_offset + eff_limit < total}
     if text:
@@ -2041,9 +2095,18 @@ def tortoise_query(kind: str | None = None,
             eff_offset = (page - 1) * eff_limit
         return _safe(_get_org_sdk().paginated_query, kind, skip=eff_offset,
                      limit=eff_limit, include_retracted=include_retracted,
-                     **(filters or {}))
+                     # #7983: the SAME underscore drop as the plain path below,
+                     # so one filter dict cannot be a private switch here and a
+                     # property filter there.
+                     **_public_filters(filters))
+    # #7983: a caller-supplied filter may not set the SDK's PRIVATE switches
+    # (PRIVATE_FILTER_KEYS), or a remote agent could turn the read ledger off
+    # with a query parameter — a caller-controlled switch on a measurement that
+    # is presented as authoritative. A tenant property named `_foo` is still a
+    # filter (validate_filter_key accepts it), so ONLY the known switches go.
     result = _safe(_get_org_sdk().query, kind,
-                   include_retracted=include_retracted, **(filters or {}))
+                   include_retracted=include_retracted,
+                   **_public_filters(filters))
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion

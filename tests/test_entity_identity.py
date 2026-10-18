@@ -784,10 +784,44 @@ _FSTRING_LABEL = re.compile(
 # Snippets are WHOLE LOGICAL STATEMENTS (see `_scan`), not physical lines: a
 # wrapped Cypher comparison (``"... o.name = "`` / ``"$value ..."``) is one
 # statement and must be dispositioned as one.
+#
+# #5509 CENSUS AND CLASSIFICATION — every surviving name-keyed site, and WHY it
+# keeps the name. "Name-keyed" is not by itself a defect: a name is the right
+# coordinate for a search, for "does any entity hold this name", and for the
+# write that MINTS the identity. It is the wrong coordinate exactly when the
+# site must answer *which ONE entity* — that is what the resolver owns.
+#
+#   A. ROUTED / DELETED by #5509 (gone from the lists below): `belief_timeline`
+#      (was a name union over both carriers), `subject_binding._resolve_target`
+#      (resolved a TERMINAL holder, D2), `resolve_structural_target`'s replay
+#      targets (was `LIMIT 1`, an arbitrary carrier), `_create_entity`'s and
+#      `mining`'s canonical-id re-fetch (was `result_set[0][0]`).
+#   B. CANDIDATE ENUMERATION that already refuses (commit_ops' successor/ref
+#      probes, `assembly.exact_objects`' name arm, `onboarding.seed.
+#      find_subject_by_name`): they must see EVERY carrier to answer "is this
+#      name ambiguous?", then refuse (`>1 -> never-guess` + a non-folded entry).
+#      Routing them through the resolver would turn "skip this one record,
+#      recorded" into "raise", a semantics change the issues defer.
+#   C. EXISTENCE / PRESENCE probe (sdk.ingest's `existed` dedup counter,
+#      `assembly._probe_visible_successors`): the question is "does any live
+#      entity hold this name", never "which one". No identity is selected.
+#   D. SEARCH / DISPLAY (sdk's `e.name CONTAINS $q` query clause,
+#      `session_link`'s exactly-one suffix probe): the name IS the input.
+#   E. WRITE-PATH identity MINTING, migration-gated (projection/entities.py's
+#      `MERGE (n:{label} {name:$name})` family + `_persist_extra_props` +
+#      lifecycle folds; projection/edges.py's legacy `_create_about_edges` /
+#      `_try_about_edge` anchors; hosted_api's session-capture anchor; sdk's
+#      `about_entities` loop). The producer sends a NAME and the fold keys on
+#      it; two carriers are attached to (over-attribution, no identity pick)
+#      rather than one being guessed. Converting these to id keys needs the
+#      name->id migration (plan S1/S3) — NOT this sweep's fix, and not
+#      something a read route can fake.
 _ALLOWED_OPERATOR = {
     'tortoise/assembly.py': {
-        # THIS PR's route-then-refuse NAME arm.
+        # B: route-then-refuse NAME arm (a candidate set, refusal per ref).
         'name_rows = proj.g.query( "MATCH (o:Object) " "WHERE o.name IN $names " f"{status_filter}" "RETURN o.id, o.name", params={"names": names}).result_set': 1,
+        # C: presence probe — "ANY visible Object of that name" verifies a
+        # successor annotation; it never selects one identity.
         'rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names " "RETURN o.name AS nm, o.status", params={"names": sorted(names)}).result_set': 1,
         # #4061 R1 "DISTINGUISHING probe" — owned by S3 (identity/resolver).
         # This is the ONE read that MUST keep the name-or-id union: the
@@ -798,6 +832,9 @@ _ALLOWED_OPERATOR = {
         'rows = proj.g.query( "MATCH (o:Object) " "WHERE (o.name IN $names OR o.id IN $names) " "AND o.status IN $statuses " "RETURN o.id, o.name", params={"names": names, "statuses": sorted( _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES)}).result_set': 1,
     },
     'tortoise/commit_ops.py': {
+        # B: candidate enumeration — every one of these probes returns ALL
+        # carriers and the fold refuses on >1 (`never-guess` + a non-folded
+        # entry). This is the shape that must keep the name key.
         # §B "Route" — successor-name candidate probe, S3/id-probe owned.
         'cand_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN o.name, o.id", params={"names": sb_names}).result_set': 1,
         '_name_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN ID(o), o.id, o.name", params={"names": refs_sorted}).result_set': 1,
@@ -813,20 +850,27 @@ _ALLOWED_OPERATOR = {
         'by_name = proj.g.query( "MATCH (s:Subject) WHERE s.name = $ref " "RETURN ID(s), s.id, s.name, s.status, s.supersededBy", params={"ref": ref}, ).result_set': 1,
     },
     'tortoise/entity_identity.py': {
-        # THE sanctioned name->id reads (this PR's resolver module). The
-        # document resolver's live-name arm goes through `_name_predicate`
-        # too, so this ONE literal is the only raw name comparison left.
-        'name_pred = ("toLower(n.name) = toLower($name)" if case_insensitive else "n.name = $name")': 1,
+        # THE sanctioned name->id reads (the resolver module). The predicate is
+        # now BUILT (`_name_predicate`), so the raw comparison lives inside
+        # that builder and this sweep sees only the builder's arms — which is
+        # the point of routing: one copy, one place.
+        # (#5509: the single-literal entry that used to live here is deleted,
+        # not replaced — the statement is no longer a name comparison.)
     },
     'tortoise/sdk.py': {
-        # #5509: `belief_timeline` — a REAL name-keyed Object read that unions
-        # both same-name carriers' decision Points; not routed here.
-        'rows = proj.g.query( "MATCH (p:Point {pointKind:\'decision\'})-[:aboutObject]->" "(o:Object) " "WHERE (p.is_operator IS NULL OR p.is_operator = false) " "AND (o.name = $topic OR o.canonical_name = $topic) " "RETURN p.id, p.content, p.validFrom, p.status, p.outdated " "ORDER BY (p.validFrom IS NULL), p.validFrom DESC LIMIT $limit", params={"topic": topic, "limit": limit}, ).result_set': 1,
+        # D: SEARCH surface — the FTS/query clause. A name is the query.
         'clauses.append("(toLower(e.name) CONTAINS $q OR any(kw IN e.keywords WHERE toLower(kw) CONTAINS $q))")': 1,
+        # #5509 A: `belief_timeline`'s ONLY remaining name arm — the
+        # UNADDRESSABLE fallback. Reached only when the resolver proved there
+        # is EXACTLY ONE live holder (and it carries no `id`), so this name
+        # cannot name two carriers; `_terminal_excluded` keeps the terminal
+        # holders out. The ambiguous and terminal-only cases are refused before
+        # this branch (test_5509_name_keyed_identity_reads.py).
+        'entity_predicate = ( "(o.name = $topic OR o.canonical_name = $topic) " f"AND {_terminal_excluded(\'o.status\')}")': 1,
     },
     'tortoise/session_link.py': {
-        # NOT a fold: the suffix probe already enforces EXACTLY-ONE
-        # (`if len(rows) == 1`), so zero/multiple matches is a no-op.
+        # D: the suffix probe already enforces EXACTLY-ONE (`if len(rows) == 1`),
+        # so zero/multiple matches is a no-op — it never picks a carrier.
         'rows = proj.g.query( "MATCH (o:Object) WHERE o.objectKind=\'pm:issue\' " "AND o.name ENDS WITH $suffix RETURN o.id", params={"suffix": suffix}, ).result_set': 1,
     },
 }
@@ -858,20 +902,32 @@ _ALLOWED_KEYED = {
         'subj_rows = proj.g.query( "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status", params={"sb": supersedes_by}, ).result_set': 2,
     },
     'tortoise/hosted_api.py': {
-        # §A hosted session-capture about-edge anchor (S1).
+        # E: the hosted session-capture ``about_entities`` anchor. It attaches
+        # the claim to EVERY same-name Object (no identity is picked, and an
+        # id-less leg stays covered). Its local twin is sdk.py's `_oid_rows`
+        # loop below. Converting it to an id key is the name->id migration's
+        # job (S1), not a read route.
         'proj.g.query( "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "name": name}, )': 1,
     },
-    'tortoise/mining.py': {
-        'r = proj.g.query("MATCH (o:Object {name:$name}) RETURN o.id", params={"name": name})': 1,
-    },
     'tortoise/onboarding/seed.py': {
-        # THIS PR's routed read — single-holder-or-refuse.
+        # B: candidate enumeration that refuses — single holder or
+        # AmbiguousEntityName, and NO status filter ON PURPOSE: it guards a
+        # name-keyed WRITE, so it must enumerate the key space its writer
+        # MERGEs on (a terminal holder would otherwise be silently adopted).
         'res = _run(handle, "MATCH (s:Subject {name: $name}) RETURN properties(s)", {"name": name})': 1,
     },
     'tortoise/projection/edges.py': {
-        # §B "Route" — resolve_structural_target / about-edge anchors.
-        'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 1", params={"name": key}).result_set': 1,
-        'self.g.query( f"MATCH (n:{n[\'label\']} {{{n[\'key\']}:$pid}}), (s:Subject {{name:$name}}) " f"MERGE (n)-[:aboutSubject]->(s)", params={"pid": n["value"], "name": entity_name}, )': 1,
+        # #5509 A: `resolve_structural_target`'s name-keyed targets now read
+        # with `LIMIT 2` and refuse on >1 (`_refuse_ambiguous_target`), so the
+        # remaining read is the holder probe itself, not a silent pick.
+        'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2", params={"name": key}).result_set': 1,
+        # E: the cascade's Subject-stub FALLBACK anchor (#8398 P1-2). Reached
+        # only when no label matched by name — including no `:Subject` — so the
+        # mint above it creates the node this read then addresses. A write key,
+        # migration-gated (owner: S3 identity/resolver). Its predecessor, the
+        # rel-ignoring `MERGE (n)-[:aboutSubject]->(s)` by name, is REMOVED with
+        # `_try_about_edge`'s inline write, not left stale below.
+        'rows = self.g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1", params={"name": link["resolve_key"]}).result_set': 1,
     },
     'tortoise/projection/entities.py': {
         # §B "Route" — lifecycle folds / participants fallback / edge anchors;
@@ -929,9 +985,13 @@ _ALLOWED_KEYED = {
         'self.g.query( "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) " "MERGE (s)-[:participatesIn]->(e)", params={"name": subj, "eid": eid}, )': 1,
     },
     'tortoise/sdk.py': {
-        # aboutObject linking fallback + ingest existence probes (§B "Route").
+        # E: the local `about_entities` claim loop (twin of hosted_api's) —
+        # attaches to every carrier, id-less stub included; migration-gated.
         '_oid_rows = proj.g.query( "MATCH (o:Object {name:$n}) " "RETURN o.id", params={"n": _n}).result_set': 1,
         'proj.g.query( "MATCH (p:Point {id:$pid}), " "(o:Object {name:$n}) " "WHERE o.id IS NULL OR o.id = \'\' " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "n": _n})': 1,
+        # C: ingest EXISTENCE probes — "does a holder exist" feeds the
+        # created/deduped counter. The canonical id comes from the create
+        # call's return value, never from this read.
         'existed = proj.g.query( "MATCH (n:Subject {name:$name}) RETURN n.id", params={"name": name}, ).result_set': 1,
         'existed = proj.g.query( "MATCH (n:Object {name:$name}) RETURN n.id", params={"name": name}, ).result_set': 1,
     },
@@ -939,27 +999,23 @@ _ALLOWED_KEYED = {
 
 _ALLOWED_FSTRING = {
     'tortoise/projection/edges.py': {
-        # §B "Route" — resolve_structural_target / about-edge anchors.
-        'q = (f"MATCH (x:{label} {{name:$key}}) " f"RETURN ID(x), x.id LIMIT 1")': 1,
-        'r = self.g.query( f"MATCH (e:{label} {{name:$name}}) RETURN e.name LIMIT 1", params={"name": target_name}, ).result_set': 1,
-        'self.g.query( f"MATCH (n:{n[\'label\']} {{{n[\'key\']}:$sid}}), (e:{label} {{name:$name}}) " f"MERGE (n)-[:{edge_type}]->(e)", params={"sid": n["value"], "name": target_name}, )': 1,
-    },
-    'tortoise/subject_binding.py': {
-        # #5509: NOT a fold, and NOT this PR's route. The write-time
-        # Point->Subject binder (#1370, PR #5230) landed on `main` after this
-        # branch forked. Its probe is `LIMIT 2` and treats anything but a
-        # single row as unresolved (`len(rows) != 1 -> (None, None)`), so two
-        # same-name carriers refuse rather than fold. Only this sweep sees it
-        # (the label is an f-string, so the literal `:Subject` keyed pattern
-        # does not match). Routing it through `entity_identity` would be a
-        # behaviour change in another lane's module, not a conflict
-        # resolution; the site is enumerated for disposition by #5509.
-        'rows = proj.g.query( f"MATCH (n:{label} {{name:$name}}) " f"RETURN n.id, n.{kind_prop} LIMIT 2", params={"name": name}).result_set': 1,
-    },
-    'tortoise/sdk.py': {
-        # #5509: `_create_entity` canonical-id re-fetch — plan §B P1-A
-        # "Delete in S1"; the slice is unlanded on main.
-        'r = proj.g.query( f"MATCH (n:{label} {{name: $name}}) RETURN n.id", params={"name": name}, )': 1,
+        # #5509 A: the non-stubbable labels' (Object/Event/Point) replay target
+        # — `LIMIT 2` + `_refuse_ambiguous_target` on >1.
+        'q = (f"MATCH (x:{label} {{name:$key}}) " f"RETURN ID(x), x.id LIMIT 2")': 1,
+        # E: the name cascade's PROBE (`_resolve_about_edge_target`) — live
+        # auto-detect still asks "which label holds this name", one attempt per
+        # label, and the answer is now JOURNALED as the pinned rel/label (#8398
+        # P1-2) instead of being re-derived at replay. Write key,
+        # migration-gated (owner: S3). Replaces the retired
+        # `RETURN e.name LIMIT 1` probe + the two by-name MERGEs it fed: the
+        # write is now by the RESOLVED internal id (`WHERE ID(t)=$tid`).
+        # `LIMIT` dropped entirely since the second #8398 review (P2-3): the
+        # probe must see EVERY same-name carrier — `LIMIT 1` pinned an arbitrary
+        # backend row order into an append-only journal, and `LIMIT 2` would
+        # still truncate at the third carrier. The coordinate text is updated,
+        # NOT the disposition — the read is still name-keyed, still one probe per
+        # cascade label, and still owned by S3.
+        'rows = self.g.query( f"MATCH (e:{label} {{name:$name}}) " "RETURN ID(e), coalesce(e.id, e.eventId, e.name)", params={"name": target_name}, ).result_set': 1,
     },
 }
 

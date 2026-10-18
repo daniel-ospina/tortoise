@@ -131,11 +131,13 @@ One primitive, in `tools/lane_stash.py`:
   would refuse states that are genuinely safe. Safe to call from a pre-flight.
 - **`recover <sha>`** — the repair recipe from the incident: `git stash store -m "<original subject>"
   <sha>` **and** pin it, so the restored entry is retrievable by this lane. It REFUSES an entry that
-  another lane's ref or `[<lane-key>]` marker names, or one already ENUMERATED by the register that is
-  not provably this lane's (nothing was dropped, so `recover` would only mint ownership; `-m` asserts
-  it deliberately): pinning a peer's entry here would leave it claimed by both lanes and `check`
-  would then clear a bare pop on work that is not this lane's. A peer's entry is restored with bare
-  `git stash store`, or by that lane from its own worktree.
+  another lane's ref or `[<lane-key>]` marker names, or one that is not provably this lane's when
+  nothing was dropped — whether the register ENUMERATES it **or** `refs/stash` still NAMES it (an
+  emptied reflog) — since that only mints ownership; `-m` asserts it deliberately. Provenance is an
+  own pin/applied record or an own `[<lane-key>]` marker, so an OWN orphan is adopted without `-m`.
+  Pinning a peer's entry here would leave it claimed by both lanes and `check` would then clear a
+  bare pop on work that is not this lane's. A peer's entry is restored with bare `git stash store`,
+  or by that lane from its own worktree.
 - **`prune`** — explicit reclamation of the shared register: an entry is removed only when the
   delete cannot lose work — its object is **pinned by a lane ref**, or this lane left a durable
   **applied-record** at `refs/lane/<key>/applied/<sha>` (written atomically by `pop` on a
@@ -193,12 +195,26 @@ One primitive, in `tools/lane_stash.py`:
 - **Orphan retention.** When an emptied register leaves `refs/stash` pointing at an entry no pin and
   no applied-record names, `prune` retains it; it now guard-pins the object rather than relying on
   `refs/stash`, because the reconciliation's `stash store` can move that ref and would otherwise have
-  destroyed the handle the retention message just promised. A retained guard has exactly one
-  lifetime: it is released once `recover` puts the entry back under `refs/lane` — under **any** lane
-  key, since another worktree may be the one to rescue it — or when a prune's `finally` sees the sha
-  back in the register. `lane_stash list` prints any still held and, per guard, whether another ref
-  names the object, so the namespace can be enumerated and cleared rather than silently keeping
-  objects un-gc-able forever.
+  destroyed the handle the retention message just promised. A retained guard is released three ways:
+  once `recover` puts the entry back under `refs/lane` — under **any** lane key, since another
+  worktree may be the one to rescue it; by the prune that created it, when the sha is back in the
+  register, which releases **only its own** guard because a foreign guard for the same sha may belong
+  to a concurrent prune that is still deleting positions, and "in the register" is exactly the
+  transient state a guard exists for; and by a later `prune --apply`, which reaps a guard whose OWNER
+  WORKTREE is gone **and** whose object is named by the register, or by any other ref that is neither
+  `refs/stash` (moved by any later `stash store`) nor another prune guard (its owner may release it
+  at will) — a lane pin, an applied record, a branch, a tag. Before
+  that reap, no routine command released such a guard — `prune`'s `finally` releases only the guards
+  it created, and `recover` frees them only for the sha it adopts — so a guard for an entry nobody
+  adopts blocked gc forever, which is what the reap exists to fix. The reap is suspended entirely
+  — and says so — while `git worktree list` reports any `prunable` registration (a worktree moved
+  with plain `mv` leaves its OLD path registered, so a stale entry could hide a LIVE key), and it
+  reports a failed register read instead of retaining silently, and its lane-key parse uses
+  `--porcelain -z` and fails closed on any field it does not recognise (a path containing a
+  newline splits the newline-separated form and would hide a LIVE key). `lane_stash list` prints any
+  still held and, per guard, whether another ref names the object — a peer guard does not count as
+  durable, since either owner may release it — so the namespace can be enumerated and cleared rather
+  than silently keeping objects un-gc-able forever.
 
 Out of scope (reported, not absorbed): the skills text (`using-git-worktrees`, `commit-workflow`) is
 a symlink to agent-infra and belongs to agent-infra #1264; the `main-worktree-guard` extension
@@ -213,7 +229,8 @@ extension is also out of this repo.
 |---|---|---|
 | `AGENTS.md` (this repo) | no stash instruction at all before this change | the rule added by this PR is the first in-repo guidance |
 | `agent-infra/skills/executing-plans/SKILL.md:278`, `:291`, `:819` | an in-hub `git stash push` is **BLOCKED** (the M4 hub-disorder gate sanctions only recovery verbs); the sanctioned route is the dirty-hub salvage path, and inside a worktree there is no "changes on main" to stash | the hazardous primitive is GONE — agent-infra `00d60c51` replaced `git stash push -m "pre-<branch>-wip"` (the text this row originally quoted, then at `:291`) with the block. The original finding stays on agent-infra #1264 |
-| `agent-infra/skills/commit-workflow`, `using-git-worktrees` | no stash instruction | #1264's "name the hazard" half is still open |
+| `agent-infra/skills/commit-workflow/workflow/01-preflight.md:223` | the `BEHIND > 0` + **dirty tree** WARN says "commit or stash first, then `git … pull --rebase`" (and `02-commit-pr.md:56`, `:100` discuss lint-staged's own stash backup/restore) | same teaching class as the `eldato` row — recorded on agent-infra #1264 rather than fixed from this worktree |
+| `agent-infra/skills/using-git-worktrees/SKILL.md` | no stash instruction at all | #1264's "name the hazard" half is still open here |
 | `eldato/AGENTS.md:155` | "Always `git stash` before `gh pr merge`" | repo-specific instance of the same teaching; recorded on #1264 rather than fixed from this worktree |
 | `docs/plans/2026-09-03-*.md`, `2026-09-06-2249-*.md`, `2026-10-11-2081-*.md` (3 files) | recommend a bare `git stash`/`git stash pop` as a measurement technique | historical plan docs — not edited (they are records); the systemic fix is the `writing-plans` half of #1264 |
 | `extensions/main-worktree-guard/classify-git.mjs:99` (the `stash-pop` rule) | already blocks `git stash pop\|apply\|drop\|clear` — but only in the MAIN checkout ("Worktrees are ISOLATED", by design) | confirms the linked-worktree case is unguarded and out of this repo's tree (#1264) |

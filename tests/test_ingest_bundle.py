@@ -1562,3 +1562,189 @@ class TestA3OperatorDedupRicherReturn:
                     "MATCH (o:Point {is_operator:true, id:$p})-[:IMPL]->() "
                     "RETURN count(*)", {"p": partial["id"]})
         assert n2 == 3
+
+
+# ── #5244: a connection's `mitigation` is APPLIED, never dropped ─────
+
+def _mitigation_bundle(strength: float = 0.3,
+                       reason: str = "p1 is unreliable") -> dict:
+    return {
+        "points": [
+            {"ref": "p1", "kind": "claim", "content": "A implies B."},
+            {"ref": "p2", "kind": "claim", "content": "B."},
+        ],
+        "entities": [], "sources": [],
+        "connections": [
+            {"from": "p1", "to": "p2", "operator": "IMPL",
+             "mitigation": {"reason": reason, "strength": strength}},
+        ],
+    }
+
+
+def _mitigation_rows(sdk, op_id: str):
+    return _query(
+        sdk,
+        "MATCH (op:Point {id:$op})-[:mitigated_by]->(m:Point) "
+        "RETURN m.id, m.content, m.mitigation_strength, m.is_operator",
+        {"op": op_id},
+    )
+
+
+class TestConnectionMitigation:
+    """#5244 — a connection spec's `mitigation` was validated (dict, non-empty
+    `reason`, numeric `strength`) and then DROPPED: the operator was written,
+    no mitigation Point existed, no `(op)-[:mitigated_by]->(m)` edge, and the
+    response carried no warning. Every read-back assetion below counts 0 on
+    the pre-fix code."""
+
+    def test_mitigation_point_and_edge_are_written(self, sdk):
+        res = sdk.ingest(_mitigation_bundle())
+        op_id = res["ids"]["connections"][0]
+        assert isinstance(op_id, str), res["ids"]["connections"]
+        assert _edge_count(sdk, "mitigated_by") == 1
+        rows = _mitigation_rows(sdk, op_id)
+        assert len(rows) == 1, rows
+        mid, content, strength, is_operator = rows[0]
+        assert content == "[MITIGATION] p1 is unreliable"
+        assert strength == pytest.approx(0.3)
+        assert is_operator is False
+        # the forward half of the bidirectional link (m)-[:IMPL]->(op)
+        assert _count(
+            sdk,
+            "MATCH (m:Point {id:$m})-[:IMPL]->(op:Point {id:$op}) "
+            "RETURN count(*)",
+            {"m": mid, "op": op_id},
+        ) == 1
+        # the write is reported, and the operator-route result shape is
+        # UNCHANGED (INGEST_CONTRACT §2.3 route matrix — no new response key)
+        assert res["created"]["connections"] == 1
+
+    def test_mitigation_is_written_on_granular_and_auto_policies(self, sdk):
+        res = sdk.ingest(_mitigation_bundle(), granularity="granular",
+                         promotion_policy="auto")
+        op_id = res["ids"]["connections"][0]
+        assert len(_mitigation_rows(sdk, op_id)) == 1
+        conn_result = next(r["result"] for r in res["results"]
+                           if r["section"] == "connections")
+        assert set(conn_result.keys()) == {"operator_id", "deduped"}
+
+    def test_resubmission_updates_in_place_and_warns(self, sdk):
+        first = sdk.ingest(_mitigation_bundle(0.3))
+        assert first["warnings"] == []
+        op_id = first["ids"]["connections"][0]
+        mid = _mitigation_rows(sdk, op_id)[0][0]
+
+        second = sdk.ingest(_mitigation_bundle(0.5))
+        # the operator dedups — the mitigation is applied to the SAME operator
+        assert second["ids"]["connections"] == [op_id]
+        assert second["deduped"]["connections"] == 1
+        # updated IN PLACE: one mitigation Point, same id, new strength
+        rows = _mitigation_rows(sdk, op_id)
+        assert len(rows) == 1
+        assert rows[0][0] == mid, "re-submission must not mint a second mitigation"
+        assert rows[0][2] == pytest.approx(0.5)
+        assert _edge_count(sdk, "mitigated_by") == 1
+        # INGEST_CONTRACT §3.2 key 6 — the in-place update is reported
+        assert len(second["warnings"]) == 1, second["warnings"]
+        assert second["warnings"][0].startswith(
+            f"mitigation_strength_change:{op_id}:{mid}:")
+        assert second["warnings"][0].endswith("0.3->0.5")
+
+    def test_reason_change_alone_is_reported_too(self, sdk):
+        first = sdk.ingest(_mitigation_bundle(0.3, "first reason"))
+        op_id = first["ids"]["connections"][0]
+        second = sdk.ingest(_mitigation_bundle(0.3, "second reason"))
+        rows = _mitigation_rows(sdk, op_id)
+        assert len(rows) == 1
+        assert rows[0][1] == "[MITIGATION] second reason"
+        assert any(w.startswith("mitigation_strength_change:")
+                   for w in second["warnings"]), second["warnings"]
+
+    def test_unchanged_resubmission_is_silent_and_idempotent(self, sdk):
+        sdk.ingest(_mitigation_bundle(0.3))
+        res2 = sdk.ingest(_mitigation_bundle(0.3))
+        assert res2["warnings"] == []
+        assert _count(
+            sdk,
+            "MATCH (m:Point) WHERE m.content STARTS WITH '[MITIGATION]' "
+            "RETURN count(m)",
+        ) == 1
+        assert _edge_count(sdk, "mitigated_by") == 1
+
+    def test_mitigation_point_is_batch_stamped_and_audited(self, sdk):
+        # INGEST_CONTRACT §16: batch_id is stamped on EVERY new Point the
+        # bundle creates — plain points, operator Points, mitigation Points —
+        # and the audit surface reaches all of them.
+        res = sdk.ingest(_mitigation_bundle())
+        bid = res["batch_id"]
+        rows = _query(
+            sdk,
+            "MATCH (m:Point) WHERE m.content STARTS WITH '[MITIGATION]' "
+            "RETURN m.batch_id",
+        )
+        assert len(rows) == 1 and rows[0][0] == bid
+        audit = sdk.list_batch(bid)
+        assert audit["counts"]["points"] == 4, audit  # 2 points + operator + mitigation
+
+    def test_mitigation_batch_record_carries_the_operator_link(self, sdk_logged):
+        res = sdk_logged.ingest(_mitigation_bundle())
+        op_id = res["ids"]["connections"][0]
+        mid = _mitigation_rows(sdk_logged, op_id)[0][0]
+        recs = [r for r in _batch_id_records(sdk_logged) if r["id"] == mid]
+        assert len(recs) == 1, recs
+        assert recs[0]["mitigates_operator_id"] == op_id
+        assert recs[0]["mitigation_strength"] == pytest.approx(0.3)
+
+    def test_mitigation_applies_on_multi_input_and_absorb(self, sdk):
+        # Multi-input fan-out is the documented reason `mitigation` is also a
+        # reification anchor (§2.1) — the dampener must land on the operator the
+        # fan-out created.
+        res = sdk.ingest({
+            "points": [{"ref": "a", "content": "A."},
+                       {"ref": "b", "content": "B."},
+                       {"ref": "c", "content": "C."}],
+            "connections": [{"from": "a", "to": ["b", "c"], "operator": "IMPL",
+                             "mitigation": {"reason": "multi", "strength": 0.2}}],
+        })
+        oid = res["ids"]["connections"][0]
+        assert [r[1] for r in _mitigation_rows(sdk, oid)] == [
+            "[MITIGATION] multi"]
+
+        # …and on the partial-ABSORB branch: a pre-existing 2-input operator is
+        # completed to the wider input set, and the mitigation applies to it
+        # (not to a second operator).
+        pa, pb, pc = [sdk.create_point("statement", t)["id"]
+                      for t in ("P.", "Q.", "R.")]
+        op = sdk.create_operator("IMPL", pa, [pb], promote_source=False)
+        res2 = sdk.ingest({"connections": [
+            {"from": pa, "to": [pb, pc], "operator": "IMPL",
+             "mitigation": {"reason": "absorbed", "strength": 0.4}}]})
+        assert res2["ids"]["connections"] == [op["id"]]
+        assert any(w.startswith("operator_absorb_completed:")
+                   for w in res2["warnings"]), res2["warnings"]
+        rows = _mitigation_rows(sdk, op["id"])
+        assert len(rows) == 1
+        assert rows[0][1] == "[MITIGATION] absorbed"
+        assert rows[0][2] == pytest.approx(0.4)
+
+    def test_dedup_hit_without_a_prior_mitigation_acquires_one(self, sdk):
+        # The pre-fix graph shape: the operator exists (an ingest that dropped
+        # the mitigation, or a direct create_operator), the mitigation does not.
+        # Re-submitting the mitigation-bearing bundle must apply it to the
+        # SAME operator — this is also the recovery path for graphs written
+        # before the fix (the bundle's batch_id is content-derived, so an
+        # identical re-submission still dedups the operator).
+        pa = sdk.create_point("claim", "A implies B.")["id"]
+        pb = sdk.create_point("claim", "B.")["id"]
+        op = sdk.create_operator("IMPL", pa, [pb], promote_source=False)
+        assert _mitigation_rows(sdk, op["id"]) == []
+
+        res = sdk.ingest({"connections": [
+            {"from": pa, "to": pb, "operator": "IMPL",
+             "mitigation": {"reason": "historic loss", "strength": 0.3}}]})
+        assert res["ids"]["connections"] == [op["id"]]
+        assert res["deduped"]["connections"] == 1
+        rows = _mitigation_rows(sdk, op["id"])
+        assert len(rows) == 1
+        assert rows[0][1] == "[MITIGATION] historic loss"
+        assert rows[0][2] == pytest.approx(0.3)

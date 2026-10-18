@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tests._provider_env import pin_provider_routing_env, provider_routing_env_names
+from tests._verdict import verdict_client
 from tortoise import hosted_api as _ha
 from tortoise.hosted_api import app, get_current_org
 from tortoise.sdk import TortoiseSDK
@@ -5585,7 +5586,7 @@ def consent_client(tmp_path, monkeypatch):
     with patched_tortoise_sdk(str(tmp_path / "c.db")):
         app.dependency_overrides[get_current_org] = lambda: dict(_CONSENT_TEAM)
         _provision_team(_CONSENT_TEAM["org_id"])
-        with TestClient(app) as tc:
+        with verdict_client(app) as tc:
             yield tc
 
 
@@ -6601,7 +6602,7 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
              "max_sessions": None})
         tok_m = _transport_mode.set("http")
         try:
-            with TestClient(app) as tc:
+            with verdict_client(app) as tc:
                 # OFF: both surfaces reject with the SAME 409 state-conflict.
                 r = tc.post("/v1/sessions",
                             json={"conversation": _CONV, "harness": "claude"})
@@ -7468,3 +7469,30 @@ def test_apply_supersessions_concurrent_divergent_fold_one_wins(
         sdk1.close()
         sdk2.close()
         # monkeypatch auto-restores at teardown even on exceptions
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#8818: the deterministic refusal pin for this module's client seams.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL ``WaitBoundMiddleware``. ``POST /v1/sessions`` is the
+    route this file reads most and it is not exempt from the bound. The
+    plain-client control is the non-vacuity leg — it is the exact
+    ``assert 504 == 200`` shape this conversion removes, and it goes RED if
+    the route is ever exempted (the middleware stops refusing, so the
+    control's 504 assertion fails).
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/sessions")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app) as raw:
+        assert raw.post(route[1], json={}).status_code == 504
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post(route[1], json={})
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "POST /v1/sessions answered" in message

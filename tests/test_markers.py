@@ -218,6 +218,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     },
     "test_session_key_http.py": {"registry": "prod-coupled"},
     "test_session_key_recovery_gate.py": {"registry": "prod-coupled"},  # #2380 — recovery-gate registry-lane parity via TortoiseSDK(namespace="registry")
+    "test_own_key_selfservice_2446.py": {"registry": "prod-coupled"},  # #2446 — the own-key slice's registry/selfhost lane parity seeds Team/Membership/APIKey through TortoiseSDK(namespace="registry"), the canonical namespace prod resolves (same class as the #2380 sibling above); renaming it would break the seed→resolution coupling
     "test_signup_token_revoke.py": {"registry": "prod-coupled"},
     "test_suspension_parity.py": {
         "registry": "prod-coupled", "reg-team-1": "team-identity",
@@ -774,6 +775,21 @@ def test_no_redirect_stems_registry_exact():
         # pin working as designed, so the stem is DECLARED here rather than
         # exempted.
         "test_verbatim_embedding_read_8316",
+        # #5097 (lane L5, gate item 2): the capture path's session `:Source`
+        # journal carrier. The fixture builds `TortoiseSDK(<tmpfile>)`, captures
+        # a session and drives BOTH replay engines (`rebuild()` and
+        # `rebuild_all()`) against the embedded store. The module carries NO
+        # module-level `embedded_only` marker, so the load-bearing reason it
+        # needs the exemption is the REDIRECT: a URI-set lane would discard the
+        # path, connect the construction to the server, and the embedded replay
+        # this file exists to prove would never happen. (The docker/FalkorDB
+        # lane also cannot run it: the server panics in `reply_compact` — same
+        # as the sibling `test_rebuild_turn_points_3947`.) The third leg of the
+        # three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding
+        # on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_5097_capture_source_replay",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

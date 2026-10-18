@@ -1,0 +1,39 @@
+relation 'competesWith': semantics 'opposes' is retired in favour of 'mutuallyExclusive' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+relation 'blocks' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'blocks': the declaration binds no write path — 'blocks' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='blocks') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'partOfSprint' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'partOfSprint': the declaration binds no write path — 'partOfSprint' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='partOfSprint') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'assignedTo' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'assignedTo': the declaration binds no write path — 'assignedTo' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='assignedTo') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'onBoard' declares no semantics — the Layer-2 meaning (ONTOLOGY §8, #7852); valid values: addresses, causes, dependsOn, hasPart, managedBy, mutuallyExclusive, mutuallySupportive, ownedBy, refutes, related, supports, transacts
+relation 'onBoard': the declaration binds no write path — 'onBoard' is neither a structural edge predicate (create_edge refuses it) nor carried by a declared mechanism, so create_operator has no declared op_type for it. This is a declaration gap, not a runtime refusal: create_operator(op_type=..., label='onBoard') still accepts the bare label (warn-not-block, #1934). Declare `mechanism: IMPL|NAND`, use a structural predicate, or mark it `declarationOnly: true` (#2766)
+relation 'funds': semantics 'funds' is retired in favour of 'transacts' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+relation 'producedBy': semantics 'produces' is retired in favour of 'causes' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+relation 'holds': semantics 'holds' is retired in favour of 'ownedBy' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
+pack registry /tmp/cell-t3/.worktrees/repair-c2a/packs: 1 pack(s) carry a non-blocking lifecycle declaration note — a `statuses` word shared with the connector vocabulary, or a bare object kind claimed by more than one pack (see registry.lifecycle_warnings): venture: kindDefs 'investment': 'statuses' reuses the shared connector vocabulary word(s) active — this kind owns its own state (the built-in connector fold does not apply to it), but the spelling is ambiguous to a reader; rename or record the intent
+rebuild: the event-log dir /tmp/tt7951-del-p4xvt90i/events differs from the embedded DB dir /tmp/tt7951-del-p4xvt90i — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /tmp/tt7951-del-p4xvt90i/events` to recover (#2943)
+Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+failed to append EntityMutated event to SDK log /tmp/tt7951-del-fail-a8nr41d6/events/events.jsonl: simulated journal append failure (probe) — the write is LIVE-ONLY and will not survive a rebuild (#4240)
+rebuild: the event-log dir /tmp/tt7951-del-heal-x42r65q_/events differs from the embedded DB dir /tmp/tt7951-del-heal-x42r65q_ — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /tmp/tt7951-del-heal-x42r65q_/events` to recover (#2943)
+Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+journal_backed (guard armed): True
+delete_point order:              ['journal-EntityMutated-delete', 'cache-DETACH-DELETE']
+ORDERING VERDICT: JOURNAL-FIRST
+delete records committed:        1
+Point live after the delete:     0
+Point live after rebuild_all:    0  (0 = the deletion is durable)
+failed append raised:            WriteNotLandedError (operation='delete_point', record_committed=False)
+Point live after refused delete: 1  (1 = nothing was destroyed)
+delete records committed:        0
+REFUSAL VERDICT: NOTHING DESTROYED, NOTHING SKIPPED FROM THE RECORD
+failed cache delete raised:      WriteNotLandedError (operation='delete_point', record_committed=True, record='EntityMutated op=delete')
+record committed despite failure: 1
+caller told COMMITTED (no blind re-issue): True
+Point live before rebuild:       1
+Point live after rebuild:        0
+COMMIT VERDICT: COMMITTED + REPLAY-HEALABLE
+RAW HANDLE LANE (proj.g.query):  SUCCEEDED, rows = [['via-raw-handle']]
+delete_entity order:             ['cache-DETACH-DELETE', 'journal-EntityMutated-delete', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE']
+RESIDUAL: the raw handle is NOT closed, and `_delete_entity` is still apply-first — both recorded on #7951; increment 4a routes ONE delete door (`delete_point`).

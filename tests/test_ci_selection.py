@@ -1284,6 +1284,46 @@ def test_the_blog_authoring_doc_guard_runs_on_its_doc_too():
     )
 
 
+def test_the_session_declaration_guard_runs_on_its_docs_subjects_too():
+    """#3554 review (P2, Finding 2): the guard's `docs/` subjects must select it.
+
+    `test_session_schema_3554.py` pins `docs/ONTOLOGY.md` §4.8's owner table
+    against the machine declaration and reads the plan's `#3554 amendment`. Both
+    are `docs/` paths: `docs/` is in NON_PYTHON_PREFIXES and neither is a
+    concrete SOURCE_PATTERNS entry, so a docs-only edit selected NO surface
+    (`surfaces=[]`) and fell back to tier-1 smoke — whose set does not contain
+    this file. A §4.8 edit could then drop an owner and merge green against the
+    declaration it claims to be pinned to. Same silent-drop class as the #3524
+    consent-bridge records; the `core` registration alone cannot fix it, because
+    a name in a surface's test_files only runs when that surface is ALREADY
+    selected.
+
+    #3554 review (P2): the THIRD subject — `docs/ONTOLOGY-CHANGELOG.md`, read by
+    `test_section_4_8_changelog_entry_sits_under_its_own_version_block` — was
+    omitted from this list and from `CORE_ALSO`, so a docs-only edit that moved
+    the `§4.8 (added by #3554` bullet back under the wrong `Changelog vX.Y`
+    header (the exact defect that test exists to prevent) selected no surface and
+    ran a 45-file smoke set without the guard. The sibling changelog readers are
+    covered only because they sit in tier1; this module is not.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for changed in ("docs/ONTOLOGY.md",
+                    "docs/ONTOLOGY-CHANGELOG.md",
+                    "docs/plans/2026-08-25-1714-memory-capture-onboarding.md"):
+        assert (root / changed).exists(), f"guarded doc subject is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False
+        assert "core" in r["surfaces"], (
+            f"{changed} selects {r['surfaces']} — the guard is not in tier1, so "
+            "a docs-only edit to this record runs it nowhere"
+        )
+        assert "test_session_schema_3554.py" in r["test_files"], (
+            f"a docs-only edit to {changed} does not run "
+            "tests/test_session_schema_3554.py, so its declaration mirror cannot "
+            "fire on the change it pins (#3554 review)"
+        )
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -1510,6 +1550,35 @@ def test_supabase_control_change_selects_the_org_purge_rpc_guard():
     assert "test_7968_org_purge_rpc.py" in r["test_files"], r
 
 
+def test_socket_bound_2969_guard_runs_on_every_spread_site():
+    # PR #8856 review P2: `tests/test_socket_bound_not_multiplied_2969.py`
+    # guards the `retry=` key that `_bounded_server_socket_kwargs()` returns and
+    # that FOUR other modules spread. Its registration was `core`-only — and
+    # `core` is added only when nothing else matched — but `tortoise/__main__.py`
+    # (the doctor probe) and `tortoise/acl_graph_users.py` (the ACL admin client)
+    # are BOTH exact SOURCE_PATTERNS["api"] entries. A diff touching either one
+    # alone therefore selected `api`, REPLACED the `core` fallback, and never
+    # collected this file: the one-attempt/wall-clock measurement simply did not
+    # run on a change to a site it pins (the #2938/#3154/#4367 silent-drop class
+    # `#3261` removed the false claim about). Registration is DUAL for that
+    # reason; `session_indexer.py` / `backup.py` match no named pattern, so they
+    # really do fall through to `core` and rely on its own entry.
+    # Mutation check: deleting the `api` arm fails the first loop; deleting the
+    # `core` arm fails the second.
+    for api_source in ("tortoise/__main__.py", "tortoise/acl_graph_users.py"):
+        r = _sel([api_source])
+        assert r["full"] is False, (api_source, r)
+        assert r["surfaces"] == ["api"], (api_source, r)
+        assert "test_socket_bound_not_multiplied_2969.py" in r["test_files"], (
+            api_source, r)
+    for core_source in ("tortoise/session_indexer.py", "tortoise/backup.py"):
+        r = _sel([core_source])
+        assert r["full"] is False, (core_source, r)
+        assert r["surfaces"] == ["core"], (core_source, r)
+        assert "test_socket_bound_not_multiplied_2969.py" in r["test_files"], (
+            core_source, r)
+
+
 def test_record_schema_pin_runs_on_migration_or_doc_change():
     # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
     # the record migrations against the placement table in
@@ -1622,6 +1691,29 @@ def test_queue_resweep_tool_change_selects_core_not_tier1():
     r = _sel(["tools/queue_resweep.py"])
     assert "core" in r["surfaces"], r
     assert "test_queue_resweep.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_retype_snapshot_tool_change_selects_core_not_tier1():
+    # #8882 review P1: tools/retype_snapshot.py is the CLI for the offline
+    # re-typing mechanics and owns tests/test_retype_8882.py, registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a CLI-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface and the
+    # file's own CLI-contract cases (`--decisions requires --out`, the propose →
+    # apply round trip, the exit codes) never ran on the PR editing the CLI.
+    # Registering the test under `core` does not help — a name in a surface's
+    # test_files only runs when that surface is already selected.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["tools/retype_snapshot.py"])`
+    # -> surfaces=[], full=False, test_retype_8882.py absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic and DB-free, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/retype_snapshot.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_retype_8882.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -2010,6 +2102,50 @@ def test_who_is_on_tool_change_fails_closed_to_full():
         assert r["full"] is True, path
         assert r["test_files"] == "ALL", path
         assert "core" in r["surfaces"], path
+
+
+def test_session_retrofit_audit_tool_change_fails_closed_to_full():
+    # #3554: tools/session_retrofit_audit.py owns
+    # tests/test_session_schema_3554.py, whose guards pin the :Session writer
+    # inventory predicate (it must be CLEAN on the tree it ships with) and the
+    # D9 retrofit CLI. Same silent-drop class as the carve-outs above: the flat
+    # "tools/" NON_PYTHON_PREFIXES entry swallows a tool-only change, so
+    # without a TOOL_CARVEOUTS entry `changed` is empty and select() takes the
+    # docs-only return (surfaces=[], tier-1 smoke only) — and that early return
+    # bypasses the `if not matched: matched.add("core")` fallback, so the guard
+    # suite would never run on the PR that changes the instrument. Registering
+    # the TEST under `core` in ci-surfaces.yml does NOT cover this: it applies
+    # to edits of the test file, not of the tool. No SOURCE_PATTERNS entry
+    # matches the path, so it lands in the unknown-path fail-closed branch ->
+    # FULL matrix + both legs. Mutation check: removing the TOOL_CARVEOUTS
+    # entry filters the path out (docs-only early return), failing all three
+    # asserts below.
+    r = _sel(["tools/session_retrofit_audit.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
+def test_session_schema_guard_runs_on_every_declared_writer_surface():
+    # #3554: the declared :Session writer inventory SPANS surfaces —
+    # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,
+    # tools/ask_spotcheck.py selects `sdk`, tortoise/hosted_api.py selects
+    # `api`, and tortoise/session_schema.py (the declaration itself) falls to
+    # the `core` fallback — so the drift guard
+    # (tests/test_session_schema_3554.py) must be registered on each surface
+    # its subjects select. A named-surface match REPLACES the `core` fallback
+    # (#2938), so a core+api-only registration silently drops the guard on an
+    # eval- or sdk-only change. Mutation check: removing ANY ci-surfaces.yml
+    # arm fails the corresponding assert below — the `api` and `core` arms were
+    # unpinned (the whole suite stayed green with either removed), so they are
+    # in this list too.
+    for path in ("tools/longmem_eval/ingest.py",
+                 "tools/longmem_eval/ingest_v2.py",
+                 "tools/ask_spotcheck.py",
+                 "tortoise/hosted_api.py",
+                 "tortoise/session_schema.py"):
+        r = _sel([path])
+        assert "test_session_schema_3554.py" in r["test_files"], path
 
 
 def test_backfill_script_only_change_selects_eval():
@@ -3405,6 +3541,78 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
     assert duration_coverage_issues(load_manifest()) == []
+
+
+# The refresher (`tools/ci_timing.py::render_refreshed_manifest`) rewrites a row's
+# VALUE and preserves its trailing comment verbatim, so a note that states WHERE
+# the number came from can outlive the basis it states — the file ships a rule about
+# it above the `durations:` block ("a row's comment is kept only while the value AND
+# its stated basis are unchanged"). Only the mechanically checkable half is pinned
+# here: a row whose value is NOT the flat default must not say it is the default.
+# The COUNTERFACTUAL forms are legitimate and must stay silent — "without the row
+# the file packs at the flat 2.0s default", "its absence packs it at the flat
+# 2.0s default", "a real weight, not the flat 2.0 default" — so the claim is
+# recognised by its VERB (`takes`/`carries`/`holds`/`is` … default), not by the
+# phrase alone. #8254 review P3 found 3 rows stale this way; the 2026-10-17 refresh
+# (#2876) found 5 more, 2 of them of this shape.
+_DURATIONS_ROW_RE = re.compile(
+    r"^  (?P<key>[^\s:#]+\.py):\s+(?P<value>[0-9.]+)(?P<tail>.*)$")
+_FLAT_DEFAULT_CLAIM_RE = re.compile(
+    # A claim about THIS row's weight: "it takes/carries/holds the … flat 2.0s
+    # default", or "the weight is the … flat 2.0s default". The bare copula form is
+    # anchored to a determiner so a note that merely SAYS `is` somewhere and then
+    # describes the counterfactual ("the file is in the fast pool, so its absence
+    # packs it at the flat 2.0s default") is not read as a claim.
+    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+2\.0s?\s+default"
+    r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+2\.0s?\s+default",
+    re.IGNORECASE)
+
+
+def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
+    """Rows that claim the flat default as their OWN basis for a non-default value."""
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None or m.group("key") not in durations:
+            continue
+        value = float(m.group("value"))
+        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        if _FLAT_DEFAULT_CLAIM_RE.search(m.group("tail")):
+            out.append((m.group("key"), value))
+    return out
+
+
+def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
+    """#2876/#8254 (P3): a re-derived value must not keep its old basis note."""
+    from tools.ci_selection import load_manifest
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_the_flat_default(
+        text, load_manifest()["durations"])
+    assert offenders == [], (
+        "a durations row states the #3400 flat 2.0s default as its basis while "
+        "carrying a different value — the refresh re-derived the row and the note "
+        f"went stale: {offenders}. Rewrite the note to the new basis (or drop the "
+        "claim), keeping any #4348 do-not-drop instruction.")
+
+
+def test_flat_default_claim_check_is_not_vacuous():
+    """The guard above must bite on the stale shape and stay quiet on its siblings."""
+    stale = (
+        "  test_a.py: 2.2  # a new file takes the #3400 flat 2.0s default."
+        "\n"
+        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required.")
+    legitimate = (
+        "  test_c.py: 7.2  # unmeasured — without this row the file packs at the"
+        " flat 2.0s default.\n"
+        "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
+        "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
+        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.")
+    durations = {f"test_{c}.py": 1.0 for c in "abcdef"}
+    assert _durations_rows_claiming_the_flat_default(stale, durations) == [
+        ("test_a.py", 2.2), ("test_b.py", 3.7)]
+    assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
 
 
 def test_duration_coverage_guard_backwards_compatible():
@@ -7700,3 +7908,45 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_lane_stash.py" in r["test_files"], r
+
+
+def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
+    # #5612: `tests/test_journal_growth.py` (registered `core`) pins the
+    # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as
+    # missing (`bytes + other_bytes == file size` exactly, malformed lines
+    # counted not raised, the embedding share found nested in the snapshot).
+    # ALL guarded paths are flat NON_PYTHON_PREFIXES entries (`tools/`,
+    # `docs/`, `supabase/`) matching no SOURCE_PATTERNS row, so without the
+    # CORE_ALSO entries a tool-only, probe-only or FIXTURE-only diff was
+    # filtered out BEFORE the "not matched -> core" fallback and the pins never
+    # ran on the files they exist to hold (the #1349/#3332/#3616 silent-drop
+    # class, the same shape as the `tools/lane_stash.py` arm above).
+    for changed in ("tools/journal_growth.py",
+                    "docs/evidence/5612-journal-growth/probes/"
+                    "corpus_growth_probe.py",
+                    # the corpus the pins hard-code (`records == 39`, 29 types)
+                    "supabase/tests/fixtures/record_projection_journal.jsonl"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_journal_growth.py" in r["test_files"], (changed, r)
+
+
+def test_dashboard_deploy_script_change_selects_core_not_tier1():
+    # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the documented
+    # manual deploy, and the #8816 guard (`tests/test_e2e_wrangler_prewarm.py`,
+    # registered `core`) both READS it and EXECUTES it from a scratch tree — the
+    # arms that catch a version path which does not resolve. `website/` is a flat
+    # NON_PYTHON_PREFIXES entry and the script matches no SOURCE_PATTERNS row, so
+    # a deploy.sh-only diff was filtered out BEFORE the "not matched -> core"
+    # fallback, took the docs-only early return and fell back to tier-1 smoke,
+    # where that guard is NOT selected — the guard never ran on the only PR that
+    # can break it (the #1349/#3332/#3616 silent-drop class).
+    #
+    # Measured before the CORE_ALSO entry: `_sel([...])` -> surfaces=[],
+    # full=False, 46 test files, test_e2e_wrangler_prewarm.py absent.
+    # Mutation check: removing the CORE_ALSO entry fails every assert below.
+    r = _sel(["website/apps/dashboard/deploy.sh"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_e2e_wrangler_prewarm.py" in r["test_files"], r

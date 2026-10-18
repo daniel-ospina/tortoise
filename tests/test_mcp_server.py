@@ -132,8 +132,10 @@ class _StubQuerySDK:
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query_points_by_tag(self, tag):
-        self.calls.append(("query_points_by_tag", tag))
+    def query_points_by_tag(self, tag, *, _record_reads=True):
+        # #7983: the real accessor takes the read-ledger opt-out, so the double
+        # must too — a paginated caller passes `_record_reads=False`.
+        self.calls.append(("query_points_by_tag", tag, _record_reads))
         return self.tag_points
 
     def tortoise_fts_query(self, query=None, **kwargs):
@@ -193,7 +195,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(tag="pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
 
     def test_tag_takes_precedence_over_text(self, query_sdk):
         """Documented precedence: tag mode wins when both are provided."""
@@ -201,6 +203,21 @@ class TestQueryConsolidation:
         result = tortoise_query(tag="pricing", text="semantic query")
         assert result == query_sdk.tag_points
         assert query_sdk.calls[-1][0] == "query_points_by_tag"
+        # #7983: the accessor never records — it runs BEFORE the retracted
+        # filter, so recording there would count Points the caller never gets.
+        assert query_sdk.calls[-1][2] is False
+
+    def test_tag_pagination_opts_out_of_recording_the_population(self, query_sdk):
+        """#7983: ONE page is served, so the tag POPULATION is not a read.
+
+        Recording the population would mark every tagged point read and bias the
+        hot fraction HIGH — the direction the instrument says must never happen.
+        """
+        from tortoise.mcp_server import tortoise_query
+        out = tortoise_query(tag="pricing", limit=1, offset=0)
+        assert out["total"] == len(query_sdk.tag_points)
+        assert len(out["results"]) == 1
+        assert query_sdk.calls[-1][2] is False, "a page must not record the population"
 
     def test_tag_with_pagination_returns_dict(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
@@ -342,7 +359,7 @@ class TestDeprecatedAliases:
         from tortoise.mcp_server import tortoise_query_points_by_tag
         result = tortoise_query_points_by_tag("pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
 
 
 class TestToolFunctions:

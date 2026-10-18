@@ -88,12 +88,19 @@ def _status(sdk, pid: str) -> str | None:
 
 
 def _two_point_bundle(operator: str | None = "IMPL",
-                      mitigation: bool = False) -> dict:
+                      reify: bool = False) -> dict:
     conn: dict = {}
     if operator:
         conn = {"ref": "c1", "from": "p1", "to": "p2", "operator": operator}
-        if mitigation:
-            conn["mitigation"] = {"reason": "x", "strength": 0.6}
+        if reify:
+            # #5244: this fixture needs the OPERATOR ROUTE, nothing more. It
+            # used to carry `mitigation` as a bare routing anchor; since #5244
+            # the anchor is applied (a mitigation Point plus its
+            # `(op)-[:mitigated_by]->(m)` edge), and that Point is itself an
+            # IMPL-connected point — which the GATE-2 Q3 derived-liveness
+            # predicate these tests measure counts. `reify: true` is the pure
+            # anchor: same route, no damping semantics riding along.
+            conn["reify"] = True
     return {
         "points": [
             {"ref": "p1", "kind": "statement", "content": "A implies B."},
@@ -200,7 +207,7 @@ def test_e2e13_gated_operator_commits_and_is_inert(sdk):
     """E2E-13 (CYCLE-26 FLIP): a gated + operator-requiring bundle COMMITS
     (the fail-closed rejection is RETIRED); the draft operator is EP-INERT
     with <2 live endpoints — the selector does not select it."""
-    bundle = _two_point_bundle(operator="IMPL", mitigation=True)
+    bundle = _two_point_bundle(operator="IMPL", reify=True)
     res = sdk.ingest(bundle, promotion_policy="gated")
     p1, p2 = res["ids"]["points"]
     op_id = res["ids"]["connections"][0]
@@ -222,7 +229,7 @@ def test_e2e13_boundary_promote_second_endpoint_activates(sdk):
     draft-status #780 filter is bypassed, so the UNCONDITIONAL ≥2-live
     predicate is the ONLY gate (a regression dropping derived-liveness
     fails this leg)."""
-    bundle = _two_point_bundle(operator="IMPL", mitigation=True)
+    bundle = _two_point_bundle(operator="IMPL", reify=True)
     res = sdk.ingest(bundle, promotion_policy="gated")
     p1, p2 = res["ids"]["points"]
     op_id = res["ids"]["connections"][0]
@@ -278,7 +285,7 @@ def test_track_b_e2e3_zombie_operator_resolution(sdk):
     DRAFT operator nodes go live ONCE ALL their endpoint Points are live
     (R16: a contradiction never stays a dead draft operator after its
     claims go live)."""
-    bundle = _two_point_bundle(operator="IMPL", mitigation=True)
+    bundle = _two_point_bundle(operator="IMPL", reify=True)
     res = sdk.ingest(bundle, promotion_policy="gated")
     p1, p2 = res["ids"]["points"]
     op_id = res["ids"]["connections"][0]

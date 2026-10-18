@@ -33,6 +33,35 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.29 (2026-10-17 — issue #3554 — the canonical `:Session` capture-container is declared, and §4.1's `speaker` row is corrected):**
+>
+> **A new model section (§4.8), recorded in its OWN release.** The `:Session` capture container
+> had no canonical declaration: what a session node carries, which writer owns each property, and
+> which writers can create one at all were re-derived per lane and answered differently. §4.8 now
+> states the property set with its owning writer per property (mirroring the machine declaration
+> `tortoise/session_schema.py`, whose writer/client inventories and scan predicate are re-runnable
+> through `tools/session_retrofit_audit.py`), the convention the `id` row uses (an owner is a
+> `SET <alias>.<prop>` writer; a `MERGE` key is **not** attributed), and the three D9
+> **recorded-honest-gap** decisions #3554 owns: the turn-count shortfall that can hide under
+> `capture_ok = true`, the capture_ok ordering against the post-verification read, and the
+> non-monotone `entity_links_created` counter.
+>
+> - §4.8 (added by #3554, 2026-10-17): the canonical `:Session` capture-container schema and
+>   its owning writers — the doc half of the machine declaration
+>   `tortoise/session_schema.py`, plus the three D9 *recorded honest gap* decisions (the
+>   turn-count shortfall under `capture_ok = true`, the pre/post-verification-read
+>   `capture_ok` ordering, and the non-monotone `entity_links_created` counter). §4.1's
+>   `speaker` row is corrected in the same change: BOTH hosted capture and the SDK write
+>   it, via the one shared turn store (#3551/#3086), not the SDK alone.
+>
+> **Why this block exists as its own version.** The section was first recorded inside the
+> `v3.24` block, which is four model versions behind the document that carries it — so the model
+> version was never bumped, and a reader asking "when was §4.8 added?" was sent to a release
+> whose date and issue list cannot contain it. A new model section is a model change: it gets its
+> own block, and `tests/test_session_schema_3554.py` pins the block's version to the version the
+> document itself declares (and pins it as the NEWEST block, so the misattribution cannot recur
+> one header at a time).
+>
 > **Changelog v3.28 (2026-10-15 — issues #3998 + #2350 — the absent-raw `:Source` state recorded in §4.6, and per-end validity precision + the 3-state window end):**
 >
 > **A record of a decided rule, not a model change.** `tortoise/projection/entities.py` has written `s.rawState` / `s.rawStateAt` since #3998 (`36d3077fd`) and the §4.6 table had no row for either (measured on `origin/main` `c377fea26`: `rg -c rawState docs/ONTOLOGY.md` → 0). §4.6 now carries the row, and it encodes the owner's ruling of **2026-10-14 (Option A, stated on #3998)**: a **deletion is an act**, recorded durably as a marker **bounded by an expiry policy**; **`offline` / `access_revoked` are conditions, observed live, never stored**; and the marker carries the expiry policy. The row states the **read-time observation contract** (`raw_state.resolve_raw_availability`) and the precedence it enforces — a recorded act wins over any observation, so a probe can never un-delete a memory — so the next lane reads the placement axis and the contract instead of re-deriving them. This closes the S7 residual recorded as **#8474**.
@@ -254,6 +283,10 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > **storage** vocabulary was unchanged at this step (the model's `-` mapped to no runtime value and
 > `<-` was deliberately left unmapped rather than recorded as the opposite) — the migration landed in
 > **v3.25** above.
+>
+> (The `:Session` capture-container declaration originally sat in this block; a new model section is
+> a model change, so §4.8 moved to its own **v3.29** block above and this header is restored to the
+> one issue that actually landed here.)
 >
 > **Changelog v3.22 (2026-10-11 — issue #7852 — the Layer-2 semantics vocabulary is closed, and validated):**
 > §8 now states the semantics vocabulary as **the** canonical table — one list, with each value's

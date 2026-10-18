@@ -29,7 +29,7 @@ from collections import defaultdict
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     _guard_execute_command,
@@ -64,6 +64,8 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     assert_no_non_folded,
     classify_terminalizer_miss,
     collect_non_folded,
+    identity_absent,
+    record_identity_skip,
     record_non_folded,
 )
 
@@ -161,8 +163,8 @@ def _resolve_socket_timeout(name: str, default: float) -> float | None:
     return value
 
 
-def _bounded_server_socket_kwargs() -> dict[str, float | None]:
-    """The product's bounded socket policy, as server-client kwargs.
+def _bounded_server_socket_kwargs() -> dict[str, Any]:
+    """The product's bounded server-client policy, as constructor kwargs.
 
     ONE resolution point for every raw server-lane client the package builds:
     the projection's host branch, ``session_indexer``'s graph-entity lookup,
@@ -177,11 +179,29 @@ def _bounded_server_socket_kwargs() -> dict[str, float | None]:
     pre-#2850 literals (5s connect / 10s read), so neither knob reached them
     either — the same defect, one step milder (bounded, but not tunable).
 
-    The returned pair is byte-identical to what the host branch has always
+    The socket pair is byte-identical to what the host branch has always
     passed, so a knob set for the product is now set for every product client:
     ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` / ``TORTOISE_DB_SOCKET_TIMEOUT``
     (parsed by ``_resolve_socket_timeout``, which fails loud on a typo) with
     ``_socket_timeouts()`` supplying the default.
+
+    The dict ALSO pins ``retry`` (#2969 residual), because a socket bound
+    multiplied by the client's own retry loop is not the bound the operator
+    set, and the multiplier is invisible at every call site. On the pinned
+    ``redis 7.4.1`` the two constructors the product uses DISAGREE: a bare
+    ``redis.Redis`` carries ``Retry(ExponentialWithJitterBackoff(),
+    retries=3)`` as a FUNCTION-SIGNATURE default (measured: 4 attempts,
+    ~11.5s for a 1s bound — the shape the owner recorded as ``184s ~= 4 x
+    45s``), while ``falkordb.FalkorDB`` declares ``retry=None`` and hands that
+    to redis-py explicitly (1 attempt, ~1.0s). ``_no_server_retry()`` pins the
+    second, exact behaviour on BOTH, so ``socket_timeout`` is the wait the
+    caller gets on every host-lane client — see that function for why zero
+    rather than one. The five consumers (this module's host branch,
+    ``session_indexer``'s graph-entity lookup, ``backup``'s BGSAVE, the
+    ``doctor`` probe in ``__main__``, and the ACL admin client in
+    ``acl_graph_users`` — the one raw ``redis.Redis``) all spread this dict,
+    which is why the pin lives here rather than at five constructors that
+    could each forget it.
 
     NOT for the embedded (unix-socket) lane: redis-py's ``Redis.__init__``
     drops ``socket_connect_timeout`` on that branch (see
@@ -196,7 +216,54 @@ def _bounded_server_socket_kwargs() -> dict[str, float | None]:
             _SOCKET_CONNECT_TIMEOUT_ENV, connect_to),
         "socket_timeout": _resolve_socket_timeout(
             _SOCKET_TIMEOUT_ENV, read_to),
+        "retry": _no_server_retry(),
     }
+
+
+# ── #2969: on the host lane the socket bound IS the wait ───────────────
+
+
+def _no_server_retry():
+    """ZERO retries: on the host lane the socket bound IS the wait (#2969).
+
+    The only product client that inherited redis-py's retry default was the
+    raw ``redis.Redis`` in ``acl_graph_users``: on the pinned 7.4.1
+    ``retries=3`` is that constructor's FUNCTION-SIGNATURE default and
+    ``TimeoutError`` is one of its supported errors, so a 1s read bound opened
+    four connections and parked the caller ~11.5s — the amplification the
+    owner recorded on #2969 as ``184s ~= 4 x 45s``.
+
+    The four ``falkordb.FalkorDB`` clients (this module's host branch,
+    ``session_indexer``, ``backup``'s BGSAVE, the ``doctor`` probe) never had
+    that multiplier: ``FalkorDB.__init__`` declares ``retry=None`` and hands it
+    to redis-py explicitly, which lands on ``Retry(NoBackoff(), 0)``. Their
+    wait was ALREADY exactly one bound (measured: 1 attempt, 1.0s for a 1s
+    bound), which is the property #2969 asks for.
+
+    So pinning ZERO is the only policy that makes ``socket_timeout`` mean what
+    it says on ALL five sites: measured with this policy, both a bare
+    ``redis.Redis`` and ``FalkorDB`` open ONE connection and raise after ~1.0s
+    for a 1s bound. Pinning ONE retry instead (an earlier revision of this
+    change) trades the raw client's 4x for 2x but DOUBLES the primary client's
+    wait (1.0s -> 2.2s) and the eval lane's 120s read budget (120s -> ~240s +
+    backoff) — i.e. moves the very property the issue names in the wrong
+    direction, on the clients that already had it right.
+
+    Reconnects are not removed from the system; they move to the layer that
+    owns the budget and knows whether an operation is idempotent. The eval's
+    ingest retry loop already consumes this ``TimeoutError`` as a retryable
+    transient (``retryable_transient`` -> ``ingest:retries_exhausted`` ->
+    ``--retry-failed``, #3068), and the embedded lane keeps its OWN single
+    reconnect (``_embedded_retry()``, #3350) because it talks to a local daemon
+    this process manages. ``hosted_backup._restore_copy_client`` uses the same
+    ``Retry(NoBackoff(), 0)`` idiom for the same "no multiplier" reason.
+
+    Built per call rather than shared so no state is aliased across clients.
+    """
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry as _Retry
+
+    return _Retry(NoBackoff(), 0)
 
 
 # ── #3585: the fail-closed run boundary (R8/R9) ───────────────────────────
@@ -329,38 +396,60 @@ _DB_TIMEOUT_MAX_PER_LANE_S = 600.0
 
 #: #3350: explicit, bounded retry policy for the EMBEDDED client.
 #:
-#: redis-py 8's client DEFAULT is ``Retry(ExponentialWithJitterBackoff(
-#: base=DEFAULT_RETRY_BASE, cap=DEFAULT_RETRY_CAP), retries=10)`` — TEN
-#: retries after the first attempt. Two consequences, both bad here:
+#: The client DEFAULT is a FUNCTION-SIGNATURE value nobody at a call site
+#: chooses, and on this dependency it has already moved once: at #3350 the
+#: RESOLVED redis was 8.1.0 (redis was an unconstrained transitive dependency
+#: until #3476 added a floor), whose
+#: ``Retry(ExponentialWithJitterBackoff(base=DEFAULT_RETRY_BASE,
+#: cap=DEFAULT_RETRY_CAP), retries=10)`` was TEN retries after the first
+#: attempt; the declared pin (``redis>=7.1,<8``, locked 7.4.1) is THREE. Two
+#: consequences, both bad here:
 #:
-#:  * a read timeout costs ``11 x socket_timeout`` PLUS up to ~75s of
-#:    exponential jitter backoff, so ONE wedged embedded daemon parks
-#:    whatever thread is running the query for ~59s (measured, SIGSTOPped
-#:    daemon, before this constant existed) — and after
-#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` was wired in (#3350) the
-#:    DEFAULT 10s read timeout would have made that ~115s;
+#:  * a read timeout costs ``(1 + retries) x socket_timeout`` PLUS
+#:    exponential jitter backoff, so ONE wedged embedded daemon parked
+#:    whatever thread was running the query for ~59s (measured, SIGSTOPped
+#:    daemon, on the then-resolved 10-retry client, before this constant
+#:    existed) — and after ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` was wired
+#:    in (#3350) the DEFAULT 10s read timeout would have made that ~115s;
 #:  * it makes the bound UN-KNOWABLE from outside: setting
-#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=t`` still waited ~11t, so the
-#:    knob an operator lowers to tighten the loop-stall ceiling did not
-#:    tighten what actually parked the thread.
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=t`` still waited ``(1 +
+#:    retries) t``, so the knob an operator lowers to tighten the loop-stall
+#:    ceiling did not tighten what actually parked the thread.
 #:
 #: ONE retry keeps the transient-blip recovery (a single reconnect) while
 #: capping the multiplier at 2, so the embedded lane's worst case is
 #: statically ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff``
 #: rather than a dependency default that can change under us. That is the
 #: property ``monitoring``'s layered-timeout doctrine needs ("make the inner
-#: call bounded so the worker frees itself"). The HOST branch is deliberately
-#: untouched — its retry policy is not what #3350 is about.
+#: call bounded so the worker frees itself").
+#:
+#: EMBEDDED LANE ONLY. This is deliberately NOT the server lane's policy, and
+#: #2969 measured why the two must not be converged: the four host-lane clients
+#: that build ``falkordb.FalkorDB`` never had a retry loop at all (that
+#: constructor's own default is ``retry=None``, which redis-py turns into ZERO
+#: retries), so their wait was already exactly the knob. Installing ONE retry
+#: on them would DOUBLE the primary client's stalled-read wait — the property
+#: #2969 asks for, moved the wrong way — so the server lane pins
+#: ``_no_server_retry()`` instead (see ``_bounded_server_socket_kwargs``).
+#: Retries on that lane belong to the caller that owns the operation's budget
+#: and idempotency (the eval's ingest retry loop), not to the socket.
 _EMBEDDED_RETRY_COUNT = 1
 _EMBEDDED_RETRY_BASE = 0.1
 _EMBEDDED_RETRY_CAP = 1.0
 
 
 def _embedded_retry():
-    """Bounded retry policy for the embedded client (#3350).
+    """The EMBEDDED lane's bounded retry policy (#3350).
 
-    See ``_EMBEDDED_RETRY_COUNT`` for why this exists. Built per call rather
-    than shared so no state is aliased across clients.
+    #3350 introduced it for the embedded client, whose window was the first
+    one measured (~59s for one wedged ``RETURN 1``). It is deliberately NOT
+    shared with the server lane: those clients never inherited a retry loop, so
+    installing one buys only a doubled wait — ``_no_server_retry()`` pins zero
+    there and records the measurement (#2969). See ``_EMBEDDED_RETRY_COUNT``
+    for why one retry and not zero (one reconnect for a real transport blip,
+    with a bound that can be computed from the knob) or the dependency default
+    (which nobody at the call site chose and which a version bump can change).
+    Built per call rather than shared so no state is aliased across clients.
     """
     from redis.backoff import ExponentialWithJitterBackoff
     from redis.retry import Retry as _Retry
@@ -2812,8 +2901,9 @@ def _journal_safe_params(params, cypher=None):
     # A READ still has to be gated. FalkorDB PARSES every parameter regardless
     # of clause, so an unwritable value in a read ``MATCH {prop:$p}`` aborts a
     # replay after the wipe exactly as a write does — skipping reads here
-    # RE-OPENED the hole (measured: ``resolve_source_key``,
-    # ``_try_about_edge``, and a plain dict in ``about_entities``).
+    # RE-OPENED the hole (measured: ``resolve_source_key``, the about-name
+    # cascade's ``_resolve_about_edge_target`` probe — ``_try_about_edge``
+    # before #8398 renamed it — and a plain dict in ``about_entities``).
     #
     # What the clause buys is a cheap route for the two dominant READ shapes:
     # scalars, and an id LIST (``WHERE p.id IN $ids``). Neither needs the
@@ -4288,15 +4378,18 @@ def _writable_id(val) -> bool:
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
-def _log_identity_skip(what: str, value, label: str = "identity") -> None:
-    """WARN, ONCE, that an unwritable identity made a record be SKIPPED (#7369).
+def _log_identity_skip(what: str, value, label: str = "identity", *,
+                       event_id: str | None = None, where: str = "",
+                       absent_is_ordinary: bool = True,
+                       drops_record: bool = False) -> None:
+    """REPORT and RECORD that an unwritable identity made a record be SKIPPED.
 
-    The boundary change turned what used to be a LOUD abort into a SKIP. The
-    folds run on replay paths whose pass-1a/1b carry no per-event
+    The boundary change (#7369) turned what used to be a LOUD abort into a
+    SKIP. The folds run on replay paths whose pass-1a/1b carry no per-event
     ``try/except``, so before the gate an unwritable identity raised AFTER
     ``_wipe_all_nodes``; now the fold drops the record instead. A drop with no
     log is invisible: an operator cannot tell a deliberate degrade from data
-    loss, which is precisely the risk this change exists to manage.
+    loss, which is precisely the risk that change exists to manage.
 
     This is the ONE place the skip is reported, and it uses the SAME
     ``logger.warning`` mechanism the point-id skips already use
@@ -4305,21 +4398,63 @@ def _log_identity_skip(what: str, value, label: str = "identity") -> None:
     ``label`` the identity's role (MERGE key vs property) so the message says
     WHICH identity was refused.
 
-    An ABSENT identity (``None``/``""``) is NOT logged: the folds default
-    missing identity fields to ``""`` and skip them by design (an event with
-    no subject is ordinary, not a degrade), so logging those would spam the
-    operator with the healthy case and drown the corrupt one. Only a TRUTHY
-    value ``_writable_id`` refuses — the NUL/lone-surrogate-bearing class this
-    gate exists for — is an anomaly worth a warning.
+    ⛔ #8702 — the message must state the TRUE CAUSE. The #7406 guard swap
+    (``isinstance(..., str)`` → ``_writable_id``) left the surrounding
+    sentences saying "missing point id" for an id that is present but cannot
+    ride as a Cypher parameter. That is the same class as #8018 (a report
+    naming a cause that is false for the record it describes): an operator
+    sent to look for a missing field that is right there. The two causes are
+    therefore separated, and the message says which one fired and, when the
+    value is present, what it actually is.
+
+    The skip is also RECORDED (:func:`record_identity_skip`), so a run
+    boundary can COUNT it instead of reading the log — ``recover_from_log``
+    needs that to stop reporting a dropped record as replayed (#8702). The
+    entry, not this line, is the record.
+
+    An ABSENT identity (``None``/``""``) is NOT reported by default: the entity
+    folds default missing identity fields to ``""`` and skip them by design (an
+    event with no subject is ordinary, not a degrade), so logging those would
+    spam the operator with the healthy case and drown the corrupt one. A call
+    site for which an absent identity IS malformed (a Point creation anchor)
+    passes ``absent_is_ordinary=False`` to report — and record — it as its own
+    distinct cause.
+
+    ⛔ ``drops_record`` is the GRANULARITY (#8840 review P1). This function has
+    ~20 call sites and MOST of them are nested inside a record that FOLDS
+    SUCCESSFULLY: ``_upsert`` writes the Point node first and wires its edges
+    after, so a refused ``aboutEntities``/``extractedFrom``/``contains_session``
+    identity loses an edge, not the record. Only the creation anchors — the
+    sites where the fold ``return``/``continue``s and the record is not written
+    at all — pass ``drops_record=True``. ``recover_from_log`` counts a DROPPED
+    RECORD from those entries only; reading *any* entry as a drop made
+    ``applied`` under-count, which flipped ``recovered`` to ``False`` and WIPED
+    a replay that had succeeded — the #7406 harm this work exists to preserve.
     """
-    if not value:
+    if identity_absent(value):
+        if absent_is_ordinary:
+            return
+        entry = record_identity_skip(what, value, label, event_id=event_id,
+                                     where=where, drops_record=drops_record)
+        logger.warning(
+            "%s#8702: skipping %s — %s (event_id=%s), "
+            "so there is no identity to fold; the record is dropped",
+            f"{where}: " if where else "", what, entry.describe(), event_id,
+        )
         return
+    entry = record_identity_skip(what, value, label, event_id=event_id,
+                                 where=where, drops_record=drops_record)
+    # The cause comes from `IdentitySkip.describe()`, NOT a sentence written
+    # here: it names the refused SHAPE (a non-str / a NUL-bearing str / a
+    # lone-surrogate-bearing str), so the "true cause" claim holds for every
+    # value `_writable_id` refuses. Asserting "NUL/lone-surrogate bearing" for
+    # a non-str id was false for a live journal shape (#8840 review P3).
     logger.warning(
-        "#7369: skipping %s — %s %r is not a writable identity (empty, or "
-        "NUL/lone-surrogate bearing); the record is dropped rather than "
-        "reaching FalkorDB and aborting a replay that has already wiped the "
-        "graph",
-        what, label, value,
+        "%s#7369/#8702: skipping %s — %s; the record is dropped rather "
+        "than reaching FalkorDB and aborting a replay that has already wiped "
+        "the graph%s",
+        f"{where}: " if where else "", what, entry.describe(),
+        f" (event_id={event_id})" if event_id else "",
     )
 
 
@@ -6320,17 +6455,12 @@ def fold_with_entities(events: list[dict]) -> tuple[dict[str, dict], dict]:
     ``fold`` is deliberately UNCHANGED: it keeps the public ``{id: point}``
     contract every existing caller depends on (``ingest``, ``sdk``, ``api``,
     ``m0``, ``embeddings`` all index it by POINT id), and this companion
-    carries the rest of the fold instead of re-keying them. The remaining
-    durable step — one ``(label, id)`` index deriving ``log_points`` /
-    ``db_points`` / ``_compare_views`` / the fingerprint from a single view —
-    stays open on #7936 and is deliberately NOT smuggled in here: re-keying the
-    digest would move ``content_hash`` for every existing baseline, which
-    entails a ``format_version`` bump — and since #8268/#7936 that is no longer
-    a dead end. A predecessor format appended to
-    ``consistency._PROJECTION_STATE_FORMAT_HISTORY`` is MIGRATED: the next
-    healthy recording run re-baselines at the current format and reports
-    ``state_superseded_format``. Only an UNKNOWN or FUTURE ``format_version``
-    stays untrusted and is never re-recorded.
+    carries the rest of the fold instead of re-keying them. The `(label, id)`
+    re-key of the graph-side index landed separately in
+    ``consistency._graph_view`` (with the ``format_version`` bump the widened
+    digest needs); what remains open on #7936 is unifying THESE two folds and
+    ``_compare_views`` into the same ``(label, id)`` shape, which would change
+    the published meaning of ``log_points``/``db_points`` (point counts).
 
     ``entities`` is a BATCH/replay view: it is built from the journal's ordered
     existence boundary, which the one-record incremental path does not have.
@@ -6403,9 +6533,11 @@ class InMemoryProjection:
         # reference-fold label an unknown id is — ``_apply_one`` surfaces the
         # drop rather than guessing, and never manufactures a ``non-folded``
         # record the batch path would not. ``rebuild`` is the path that holds
-        # the non-Point belief; the durable ``(label, id)`` re-key that would
-        # let the incremental path fold the non-Point CREATION records too
-        # stays open on #7936.
+        # the non-Point belief; folding the non-Point CREATION records into the
+        # incremental path would need this class's own ``{id: point}`` index
+        # re-keyed to ``(label, id)`` (the CHANGE its consumers were re-keyed
+        # for in #7936 shipped in ``consistency._graph_view``; this fold's
+        # index is deliberately unchanged, so ``apply`` stays bounded).
         _apply_one(self.points, event, entities=self.entities)
 
     def rebuild(self, log, *, confirm_destructive: bool = False) -> None:
@@ -6827,6 +6959,73 @@ def _merge_hard_delete(out, rid, seq, labels) -> None:
         prev = by_label.get(label)
         if prev is None or seq > prev:
             by_label[label] = seq
+
+
+def _about_link_payload(record):
+    """The part of a #8398 ``EventRecorded`` record that ADDRESSES its Event.
+
+    ONE definition of the nested-vs-flat ambiguity, shared by BOTH readers of
+    the record: the gate that decides whether to hand the record to
+    ``replay_about_links`` and that reader itself. ``event`` is not a reserved
+    name on every writer (``EventAPI.add_event`` and the miner journal use the
+    nested ``{event: {id, …}}`` form; a caller PROP may legally be called
+    ``event``), so the two shapes are ambiguous at that key. The nested form is
+    authoritative ONLY when its payload carries the record's address
+    (``id``/``eventId``, the two keys ``_upsert_event`` reads); otherwise the
+    record IS the payload and the ``event`` value is inert data.
+
+    ⛔ Two independent copies of this rule is what let the writers of this
+    branch drift six lines apart: ``replay_about_links`` was taught the
+    address check while the gate in front of it kept unwrapping ``event``
+    unconditionally, so for a caller-prop record the gate could not read the
+    address (``None``), declined to drop a record the journal had hard-deleted,
+    and the sweep then reported the very falsehood the gate exists to remove.
+    Both callers now resolve the payload HERE, so the rule cannot drift again.
+    """
+    inner = record.get("event") if isinstance(record, dict) else None
+    if isinstance(inner, dict) and ("id" in inner or "eventId" in inner):
+        return inner
+    return record
+
+
+def _about_link_event_hard_deleted(hard_delete_seqs, seq, record) -> bool:
+    """True when the journal hard-DELETES the Event that owns this record's
+    #8398 ``about*`` links at a seq AFTER ``record``'s own (#8398 review P2-2).
+
+    A hard-deleted Event is not a LOST link: live does not have those edges
+    either — ``delete`` removes the node and its edges, and the replay's own
+    hard-delete pass removes it on the way in. Counting it inflates the
+    ``failed`` number the #8398 sweep advertises as the honest signal, and emits
+    the false warning "the live graph had these edges". Measured: create an
+    Event with ``aboutObject`` → ``delete(event_id)`` → ``rebuild_all`` reported
+    "1 journaled Event→entity about* link(s) could NOT be re-wired — the live
+    graph had these edges", neither half of which was true.
+
+    This is the SAME staleness rule the sibling sweep applies through
+    ``fold_deferred_entity_links(entity_link_events, hard_delete_seqs)``: state
+    it once here rather than re-deriving it per engine. The label is always
+    ``"Event"`` (the record type is ``EventRecorded``), and a later re-creation
+    of the same id is judged on its own seq — ``_hard_delete_suppresses`` is
+    strictly "a delete AFTER this record", so a re-created-and-relinked Event
+    survives.
+
+    ⚠️ This is the SOURCE half only: a record whose Event is gone loses ALL its
+    links, so the caller drops the record. The ENDPOINT (target) half of the same
+    rule belongs to the individual link — one target can be deleted while its
+    siblings survive — and lives in ``replay_about_links`` via ``_target_stale``
+    (#8398 4th review P2-1: this function used to be the WHOLE rule, so a journal
+    holding an Event→entity link to a since-deleted Object warned on every
+    rebuild with neither half of the warning true).
+
+    The record's address is read through ``_about_link_payload`` — the SAME
+    resolver ``replay_about_links`` uses — so a caller ``event`` prop can hide
+    neither the reader's source nor this gate's subject (#8398 6th review P2).
+    """
+    if not isinstance(record, dict):
+        return False
+    inner = _about_link_payload(record)
+    rid = inner.get("id") or inner.get("eventId")
+    return _hard_delete_suppresses(hard_delete_seqs, rid, "Event", seq)
 
 
 def _hard_delete_suppresses(hard_delete_seqs, endpoint_id, label,
@@ -7298,6 +7497,13 @@ class FalkorProjection(
             # #3065: the bounds come from the shared resolution point rather
             # than being spelled out here — the same values, so the remaining
             # raw clients can share this exact pair instead of a copy of it.
+            # #2969: that dict ALSO pins `retry`, because the bound alone is not
+            # the wait when a client multiplies it. This branch builds
+            # `falkordb.FalkorDB`, whose own `retry=None` default already meant
+            # ONE attempt / one bound; the pin makes that explicit and keeps it
+            # that way (ZERO retries, so `socket_timeout` is the wait — see
+            # `_no_server_retry`). The eval lane reaches the DB here too, and
+            # its 120s read budget must stay 120s, not become ~240s.
             self.db = guarded_client(FalkorDB, host=host, port=port,
                                      username=username, password=password,
                                      ssl=ssl,
@@ -7839,7 +8045,8 @@ class FalkorProjection(
     def apply(self, event: dict, *, journal_object_surviving=None,
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
-              journal_existence=None) -> None:
+              journal_existence=None,
+              about_links_deferred: bool = False) -> None:
         # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
         # A fold is the cache WRITE of the record/cache split, so on a
         # journal-backed projection it is legal only when a sanctioned scope is
@@ -7924,10 +8131,20 @@ class FalkorProjection(
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
             # #331 (review r4): str-only ids (non-str would break Cypher params).
+            # #7369/#8702: `_writable_id` refuses an EMPTY id as well as a
+            # NUL/lone-surrogate-bearing one, and the two causes are reported
+            # as themselves — "missing point id" was FALSE for a present id
+            # once the guard changed, and misdirected the operator (#8702).
+            # #8840 review P1: `drops_record=True` — this `return` IS the drop
+            # (the record is not written at all), which is what the replay
+            # accounting counts. Every other `_log_identity_skip` site reports a
+            # NESTED identity of a record that still folds.
             if not _writable_id(p.get("id")):
-                logger.warning(
-                    "FalkorProjection.apply: skipping %s with missing point "
-                    "id (event_id=%s)", t, ev.get("event_id"))
+                _log_identity_skip(t, p.get("id"), "point id",
+                                   event_id=ev.get("event_id"),
+                                   where="FalkorProjection.apply",
+                                   absent_is_ordinary=False,
+                                   drops_record=True)
                 return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -8025,7 +8242,16 @@ class FalkorProjection(
             elif isinstance(p, dict):
                 # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
                 # the skip must be observable (see `_log_identity_skip`).
-                _log_identity_skip("PointPromoted", p.get("id"), "id")
+                # #8840 review P3 (Issue 4): `absent_is_ordinary=False` +
+                # `drops_record=True` — this branch DROPS the record, so an
+                # absent id here is the record's death, not an ordinary empty
+                # entity name. Leaving it ordinary meant the replay counted it
+                # as `applied` with no trace at all.
+                _log_identity_skip("PointPromoted", p.get("id"), "id",
+                                   event_id=ev.get("event_id"),
+                                   where="FalkorProjection.apply",
+                                   absent_is_ordinary=False,
+                                   drops_record=True)
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point
@@ -8094,7 +8320,63 @@ class FalkorProjection(
                 ev, journal_first_materialized=journal_first_materialized,
                 journal_seq=journal_seq)
         elif t == "EventRecorded":
-            return self._upsert_event(ev)
+            _replayed = self._upsert_event(ev)
+            # #8398: the about* links are GRAPH EDGES written live, not node
+            # properties — so nothing replayed them and a rebuild silently
+            # dropped every Event→entity link. Re-wire them from the record.
+            # INLINE is correct for ``apply``'s live single-event caller (its
+            # endpoints exist). Of the whole-journal engines, ``rebuild`` and
+            # ``rebuild_all`` ALSO buffer this type into a trailing sweep — the
+            # same forward-reference treatment they give ``EntityLinked`` — so a
+            # link whose target is created later is wired there. The remaining
+            # replay callers (``recover_from_log``, ``backup.restore``) drive
+            # ``apply`` directly and have no sweep: for them this warning IS the
+            # report, and it names the event so the loss is locatable.
+            _about_w, _about_f = (0, 0)
+            if about_links_deferred:
+                # #8398: the CALLER owns a trailing sweep and will wire these
+                # once every endpoint exists. Wiring here is not so much WRONG
+                # as EARLY, and the cost is small and measured: on a rotated
+                # journal whose endpoint lands in a later file, this call meets
+                # a target that is not in the graph yet, counts it as a failure
+                # and warns ("apply() could not re-wire … its target is not in
+                # the graph yet"). Measured with ``about_links_deferred`` forced
+                # False on a journal rotated so the ``EventRecorded`` precedes
+                # its ``ObjectRegistered``: the resulting graph is IDENTICAL and
+                # the sweep re-wires the edge, so the only residue is a spurious
+                # ``failed`` count plus a warning that teaches readers to ignore
+                # the warning. It does NOT corrupt anything: the stub mint is
+                # ``MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name``,
+                # which cannot create a second same-name ``:Subject`` and lands
+                # on whatever node carries that name — the same node the live
+                # write addressed. So this is a structural fix (the sweep is the
+                # one faithful order), not a repair for an unreachable
+                # corrupting bug.
+                pass
+            else:
+                # #8398 P2-5: GUARDED like every sibling sweep in this file.
+                # ``apply`` is driven directly by the engines that have NO
+                # trailing sweep (``backup.restore``, ``consistency``), so an
+                # engine error or a malformed link escaping here aborted the
+                # RESTORE — contradicting this patch's own "Reported, never
+                # raised" policy. The record has already folded above, so the
+                # loss is the LINK, and it is counted and reported below.
+                try:
+                    _about_w, _about_f = self.replay_about_links(ev)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "apply: #8398 about-link re-wire raised for event %r "
+                        "— the record folded, its links did not",
+                        ev.get("event_id") or ev.get("id"))
+                    _about_w, _about_f = 0, 1
+            if _about_f:
+                logger.warning(
+                    "#8398: apply() could not re-wire %d journaled Event→entity "
+                    "about* link(s) (event %r) — its target is not in the graph "
+                    "yet; ``rebuild``/``rebuild_all`` re-wire these in a "
+                    "trailing sweep, a direct ``apply`` replay cannot",
+                    _about_f, ev.get("event_id") or ev.get("id"))
+            return _replayed
         elif t == "EntityLinked":
             # #3664: the capture entity-attachment replay consumer — an
             # idempotent about* edge MERGE keyed on the flat logical ids
@@ -8554,6 +8836,10 @@ class FalkorProjection(
         # deferred terminalizer sweeps use.
         hard_deleted = hard_deleted_pairs(events)
         entity_link_events: list[tuple[int, dict]] = []
+        # #8398: EventRecorded replay links, buffered for the SAME reason as
+        # ``EntityLinked`` below — this engine feeds ``apply()`` ONE record at a
+        # time, so a link whose endpoint is created LATER would wire to nothing.
+        about_link_events: list[tuple[int, dict]] = []
         # #3585 re-review (cycle 2, FIX A): the whole-journal surviving Object
         # keys + the ids it hard-deletes, so ``apply()`` can refuse a supersede
         # whose target the journal never leaves in place while NOT refusing a
@@ -8603,11 +8889,22 @@ class FalkorProjection(
                 if edge is not None:
                     deferred_corrects.append(edge)
                 continue
+            _is_evrec = isinstance(ev, dict) and (
+                ev.get("type") == "EventRecorded"
+                or _norm(ev).get("type") == "EventRecorded")
             self.apply(ev, journal_object_surviving=journal_object_surviving,
                        journal_object_deleted=journal_object_deleted,
                        journal_first_materialized=first_materialized,
                        journal_existence=epistemic_existence,
-                       journal_seq=seq)
+                       journal_seq=seq,
+                       about_links_deferred=_is_evrec)
+            # #8398: buffer the record so its about* links are re-wired once
+            # every endpoint exists — deferred above, wired in the sweep below.
+            if _is_evrec:
+                # NORMALIZED, matching the edge-message sweep: a nested-payload
+                # record must be replayed through its inner dict, or the sweep
+                # reads a shape with no ``aboutLinks`` and drops the link.
+                about_link_events.append((seq, _norm(ev)))
         if deferred_corrects:
             # Guarded like the other two engines' sweeps: ``fold_deferred_*``
             # must never abort a post-wipe replay (the graph was already
@@ -8620,6 +8917,57 @@ class FalkorProjection(
                     "rebuild: deferred CORRECTS fold failed; %d edge(s) not "
                     "replayed", len(deferred_corrects))
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
+        # #8398: re-wire the journaled Event→entity about* links now that every
+        # endpoint the journal can restore exists. Reported, never raised — the
+        # graph was already wiped, so a failure must not abort the replay.
+        # #8398 review P2-2: drop the records whose EVENT the journal
+        # hard-deletes later — the sibling sweep above applies the same rule
+        # through ``fold_deferred_entity_links``, and without it this sweep
+        # accused the replay of a loss live never had (see
+        # ``_about_link_event_hard_deleted``).
+        about_link_events = [
+            (_al_s, _al_e) for _al_s, _al_e in about_link_events
+            if not _about_link_event_hard_deleted(
+                hard_delete_seqs, _al_s, _al_e)]
+        if about_link_events:
+            _wired = _failed = 0
+            for _al_seq, _al_ev in about_link_events:
+                self._replay_seq = _al_seq
+                try:
+                    _w, _f = self.replay_about_links(
+                        self._norm(_al_ev), hard_delete_seqs, _al_seq)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "rebuild: about-link re-wire failed for event %r (#8398)",
+                        _al_ev.get("event_id") or _al_ev.get("id"))
+                    continue
+                _wired += _w
+                _failed += _f
+            if _wired:
+                logger.info(
+                    "rebuild: re-wired %d journaled Event→entity about* link(s) "
+                    "(#8398)", _wired)
+            if _failed:
+                logger.warning(
+                    "rebuild: %d journaled Event→entity about* link(s) could NOT "
+                    "be re-wired — the target was not restored by this replay; "
+                    "the live graph had these edges (#8398)", _failed)
+        # #4125: pre-#4005 basename-url session Sources are re-materialised by
+        # this replay (their `SourceCreated` line, and `_link_source`'s stub
+        # mint from any PointAdded naming the bare basename) while the
+        # canonical `session:<id>` node is recreated beside them. The journal is
+        # APPEND-ONLY, so the migration cannot rewrite those records and no
+        # mapping for them exists in it to fold — but the replayed Points carry
+        # the attribution (`session_id` + the `extractedFrom` edge the passes
+        # above just rebuilt). Re-derive the migrated state here, AFTER every
+        # pass, so a rebuild converges on the same identity a live migration
+        # produces. Never raises (see `reconcile_after_replay`).
+        #
+        # NOTE: this is ``rebuild()``, not ``rebuild_all()`` — the engine label
+        # must match, or a rebuild-failure investigation is misdirected to the
+        # wrong engine (there is no #7951 re-assert in this engine).
+        from tortoise.session_source_migration import reconcile_after_replay
+        reconcile_after_replay(self, engine="rebuild")
         # #4653: re-establish the watermark captured above. DEGRADES, never
         # raises — this runs after the wipe (#2943 "no loss without proof").
         try:
@@ -9876,10 +10224,14 @@ class FalkorProjection(
                 # nothing to index by; skip rather than KeyError in
                 # _upsert_point_props.
                 # #331 (review r4): str-only ids.
+                # #8702: report the TRUE cause (present-but-unwritable is not
+                # "missing") — the guard swap left the old sentence standing.
                 if not _writable_id(p.get("id")):
-                    logger.warning(
-                        "rebuild: skipping %s with missing point id "
-                        "(event_id=%s)", t, ev.get("event_id"))
+                    _log_identity_skip(t, p.get("id"), "point id",
+                                       event_id=ev.get("event_id"),
+                                       where="rebuild",
+                                       absent_is_ordinary=False,
+                                       drops_record=True)
                     continue
                 # #2488/#3299: record the id's LAST hoisted-creation journal
                 # seq — the cross-family survivor anchor (a re-created id's
@@ -10111,6 +10463,12 @@ class FalkorProjection(
         # journal order, which is what makes a ``clear`` followed by a
         # ``set`` land on the ``set`` (last writer wins, per edge).
         edge_message_events: list[tuple[int, dict]] = []
+        # #8398: ``EventRecorded`` replay links, buffered for the SAME reason as
+        # ``edge_message_events`` — the replay stream is filename order, not
+        # chronology, and pass-1a hoists only Points/Operators, so an inline
+        # wiring would need the target Object/Subject/Source to already exist.
+        # Wired in a trailing sweep once every entity registration has folded.
+        about_link_events: list[tuple[int, dict]] = []
         # #2488: per-id highest journal seq of a same-id INLINE updatedAt
         # writer (PointRevised / PointPromoted — pass-1b applies both
         # inline; they never enter the deferred list); a PointInvalidated
@@ -10286,8 +10644,15 @@ class FalkorProjection(
                 elif isinstance(p, dict):
                     # #7369: a truthy-but-unwritable id is skipped, not folded
                     # — the skip must be observable (see `_log_identity_skip`).
+                    # #8840 review P3 (Issue 4): the pass-1b sibling of the
+                    # `apply()` anchor — a dropped record, and an absent id here
+                    # is malformed rather than an ordinary empty identity.
                     _log_identity_skip(
-                        "PointPromoted (rebuild)", p.get("id"), "id")
+                        "PointPromoted (rebuild)", p.get("id"), "id",
+                        event_id=ev.get("event_id"),
+                        where="rebuild",
+                        absent_is_ordinary=False,
+                        drops_record=True)
             elif t == "OperatorPromoted":
                 # #785/R16: fold/apply parity with the main handler
                 # (#2256 review P1): UPSERT the snapshot synthesized into
@@ -10679,6 +11044,10 @@ class FalkorProjection(
                 edge_message_events.append((seq, ev))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
+                # #8398: BUFFER the about* links — see ``about_link_events`` at
+                # its declaration. Wired in a trailing sweep, because the replay
+                # stream is filename order and the target may not exist yet.
+                about_link_events.append((seq, ev))
             elif t == "SubjectAdded":
                 self._upsert_subject(ev)
             elif t == "ObjectRegistered":
@@ -11861,11 +12230,17 @@ class FalkorProjection(
                 # #331 (review r3): parity with apply()/pass 1a — edge
                 # wiring indexes by p["id"]; skip rather than KeyError.
                 # #331 (review r4): str-only ids.
+                # #8702: report the TRUE cause, and say WHICH pass dropped it —
+                # edge wiring, not the creation fold (pass 1a already skipped
+                # the record, so an operator reading "missing" here looked for
+                # a field that is present).
                 if not _writable_id(p.get("id")):
-                    logger.warning(
-                        "rebuild: skipping edge wiring for event with "
-                        "missing point id (event_id=%s)",
-                        ev.get("event_id"))
+                    _log_identity_skip(ev.get("type"), p.get("id"),
+                                       "point id",
+                                       event_id=ev.get("event_id"),
+                                       where="rebuild edge wiring",
+                                       absent_is_ordinary=False,
+                                       drops_record=True)
                     continue
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
@@ -12477,6 +12852,48 @@ class FalkorProjection(
                     "re-created by any journaled event (#5380)",
                     _em_ev.get("event_id"), _em_ev.get("src"),
                     _em_ev.get("tgt"), _em_ev.get("rel"))
+
+        # #8398 trailing sweep: re-wire the journaled Event→entity about*
+        # links. Runs HERE, after every entity registration and after the
+        # edge-message sweep, so a rotated journal whose registration landed in
+        # a later file cannot lose the link. A link the sweep cannot re-wire is
+        # REPORTED — an un-reported drop is the defect this fixes.
+        # #8398 review P2-2: a record whose EVENT the journal hard-deletes later
+        # is skipped, never counted as failed — the sibling
+        # ``fold_deferred_entity_links`` applies the same rule, and live has no
+        # such edges either (see ``_about_link_event_hard_deleted``).
+        about_link_events = [
+            (_al_s, _al_e) for _al_s, _al_e in about_link_events
+            if not _about_link_event_hard_deleted(
+                hard_delete_seqs, _al_s, _al_e)]
+        if about_link_events:
+            _about_wired = _about_failed = 0
+            for _al_seq, _al_ev in about_link_events:
+                self._replay_seq = _al_seq
+                # Guarded like the other sweeps in this engine: ``fold_*`` must
+                # never abort a post-wipe replay (the graph was already
+                # DETACH DELETE'd above), so a failure is logged, not raised.
+                try:
+                    _w, _f = self.replay_about_links(
+                        self._norm(_al_ev), hard_delete_seqs, _al_seq)
+                except Exception:  # noqa: BLE001, RUF100
+                    logger.exception(
+                        "rebuild_all: about-link re-wire failed for event %r "
+                        "(#8398)",
+                        _al_ev.get("event_id") or _al_ev.get("id"))
+                    continue
+                _about_wired += _w
+                _about_failed += _f
+            if _about_wired:
+                logger.info(
+                    "rebuild: re-wired %d journaled Event→entity about* link(s)",
+                    _about_wired)
+            if _about_failed:
+                logger.warning(
+                    "rebuild: %d journaled Event→entity about* link(s) could "
+                    "NOT be re-wired — the target node was not restored by this "
+                    "replay (#8398); the live graph had these edges",
+                    _about_failed)
         # #5380 indicator 4 (the MIXED case): the report below is gated on
         # ``not _edge_msg_journaled`` — zero records or nothing. Once a
         # #5380-era journal has recorded even ONE edge message that flag stays
@@ -12576,6 +12993,28 @@ class FalkorProjection(
                 remove_session=session_rematerialise_seq.get(_sid, -1) <= _seq,
                 remove_source=source_rematerialise_seq.get(_sid, -1) <= _seq,
             )
+
+        # ── #4125: re-migrate pre-#4005 basename session Sources ──────
+        # AFTER every replay pass. Both re-materialisation paths are done by
+        # here: the legacy node's own `SourceCreated` line (pass 1/1b) and
+        # `_link_source`'s stub mint for any PointAdded naming the bare
+        # basename (pass 2, which re-derives `extractedFrom` from EVERY
+        # PointAdded). So by this point the legacy node exists again and the
+        # canonical `session:<id>` node sits beside it — the duplicate a
+        # graph-only migration would silently leave behind after a wipe.
+        #
+        # The journal is APPEND-ONLY (`tortoise/log.py`: "sealing writes bytes,
+        # it never rewrites"), so the pre-fix lines cannot be corrected and no
+        # mapping for them exists in the journal to fold. What the journal DOES
+        # reproduce is the attribution: the replayed Points carry their
+        # `session_id` and the `extractedFrom` edge rebuilt above still names
+        # the legacy node. Re-deriving the migrated state from that is what
+        # makes the migration rebuild-durable instead of being undone by the
+        # next wipe (#2296's write-surface invariant, satisfied by
+        # re-derivation rather than by a record). Never raises — see
+        # `reconcile_after_replay`.
+        from tortoise.session_source_migration import reconcile_after_replay
+        reconcile_after_replay(self, engine="rebuild_all")
 
         # ── #4653: re-establish the event-log watermark ───────────────
         # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is
@@ -13549,6 +13988,53 @@ class FalkorProjection(
         except Exception:
             return True
 
+    #: The fields the Event FULLTEXT index is SUPPOSED to carry (#244) — the
+    #: SAME list the sweep CREATES it with, so the migration's target cannot
+    #: drift from the schema it migrates to.
+    _EVENT_FTS_TARGET_FIELDS: tuple[str, ...] = tuple(
+        dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Event"])
+
+    def _event_fts_index_is_current(self) -> bool:
+        """Does the EXISTING Event FULLTEXT index already index BOTH fields?
+
+        #5440: the Event legacy branch exists to widen a SUBJECT-ONLY index to
+        ``(subject, name)``, and it was gated on the one-time marker ALONE.
+        The marker is absent on a graph whose index is ALREADY the target
+        shape — the state a freshly built graph is in (the sweep creates the
+        two-field index and mints only the Point marker), and the state a
+        restore/DR graph is in (the dump carries no indexes and skips the
+        markers). Whenever anything else made the schema not-current, the
+        branch then entered and issued ``db.idx.fulltext.drop('Event')``
+        against a healthy, in-use index that needed NO migration: a failure
+        between the drop and the recreate left Event FTS absent for an index
+        that was correct the whole time, and a concurrent boot could drop the
+        index a peer had just created.
+
+        So the destructive half is gated on the SCHEMA half — the same
+        reasoning as ``_point_fts_search_keys_field_missing`` (#5444).
+
+        Requires the field to be indexed AS FULLTEXT (a RANGE index on
+        ``name`` cannot answer ``queryNodes``), read from the kinds map
+        ``_schema_is_current`` reads. A probe that cannot answer returns
+        False — migrate, never assume done.
+        """
+        try:
+            for row in self.g.query("CALL db.indexes()").result_set:
+                if not row or str(row[0]) != "Event":
+                    continue
+                if len(row) < 3 or not isinstance(row[2], dict):
+                    return False
+                for field in self._EVENT_FTS_TARGET_FIELDS:
+                    kinds = row[2].get(field)
+                    if isinstance(kinds, str):
+                        kinds = [kinds]
+                    if "FULLTEXT" not in {str(k).upper() for k in (kinds or ())}:
+                        return False
+                return True
+            return False
+        except Exception:
+            return False
+
     def _array_valued_search_keys_exist(self) -> bool:
         """Does any Point still store ``search_keys`` as an ARRAY?
 
@@ -14130,25 +14616,47 @@ class FalkorProjection(
                                     "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
                                 ).result_set
                                 if not done:
-                                    # #H05: the drop procedure NAME varies by
-                                    # engine (db.idx.fulltext.drop on server
-                                    # builds, dropIndex on older ones) -- the
-                                    # single hardcoded name could never migrate
-                                    # on a build registering only the other.
-                                    for drop_proc in ("db.idx.fulltext.drop",
-                                                      "db.idx.fulltext.dropIndex"):
-                                        try:
-                                            self.g.query(
-                                                f"CALL {drop_proc}('Event')"
-                                            )
-                                            dropped = True
-                                            break
-                                        except Exception:
-                                            continue
-                                    self._create_fulltext_index(
-                                        "Event", ["subject", "name"]
-                                    )
-                                    created = True
+                                    # #5440: the marker is ALSO absent on a
+                                    # graph whose index is ALREADY
+                                    # (subject, name) — a freshly built one
+                                    # mints only the Point marker, and a
+                                    # restore/DR graph carries no indexes.
+                                    # Dropping there is a destructive no-op
+                                    # against a healthy, in-use index, so
+                                    # only a genuinely legacy (subject-only)
+                                    # index is dropped; an already-current one
+                                    # just records the migration. The
+                                    # recreate is what makes a drop
+                                    # necessary at all — you cannot widen a
+                                    # FULLTEXT index in place.
+                                    if self._event_fts_index_is_current():
+                                        # The intended index is in place, so
+                                        # a later failure is only the marker.
+                                        created = True
+                                    else:
+                                        # #H05: the drop procedure NAME
+                                        # varies by engine
+                                        # (db.idx.fulltext.drop on server
+                                        # builds, dropIndex on older ones) --
+                                        # the single hardcoded name could
+                                        # never migrate on a build
+                                        # registering only the other.
+                                        for drop_proc in (
+                                            "db.idx.fulltext.drop",
+                                            "db.idx.fulltext.dropIndex",
+                                        ):
+                                            try:
+                                                self.g.query(
+                                                    f"CALL {drop_proc}('Event')"
+                                                )
+                                                dropped = True
+                                                break
+                                            except Exception:
+                                                continue
+                                        self._create_fulltext_index(
+                                            "Event", list(self._EVENT_FTS_TARGET_FIELDS)
+                                        )
+                                        created = True
                                     self.g.query(
                                         "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
                                     )

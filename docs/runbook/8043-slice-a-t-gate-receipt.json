@@ -1,0 +1,199 @@
+{
+  "issue": 8043,
+  "parent_slice": 2683,
+  "kind": "measurement (structural leg of the re-specified Slice A gate)",
+  "reader": null,
+  "judge": null,
+  "why_no_reader": "the old T's end-to-end leg is NOT run: its pre-#2978 baseline expired (PR #3000, c01d9c468, 2026-09-11T23:00:02-05:00) and no frozen reader/judge credential or graph exists in this lane. No substitute reader is used (wave §3 freezes the reader); the end-to-end leg is re-homed per docs/runbook/8043-slice-a-t-gate.md",
+  "instrument": {
+    "module": "tools/longmem_eval/slice_a_flood_bound.py",
+    "functions": [
+      "tortoise.retrieval.assemble_context",
+      "tortoise.retrieval.package_evidence_pool",
+      "tortoise.retrieval.render_context"
+    ],
+    "hermetic": true,
+    "window_item_cap": 40,
+    "max_context_tokens": 1000000,
+    "max_verbatim": 1,
+    "pre_2978_arm": "reconstructed — the shipped assemble_context with _has_claim_text forced True (removes exactly the #2978 skip). NOT the original C2 receipt, which does not exist",
+    "pool": "constructed C2 shape (wave doc §1), not the frozen slice",
+    "caveat": "every number is a WINDOW-COMPOSITION figure — no answer quality is measured and none may be inferred"
+  },
+  "pool_census": {
+    "pool_items": 139,
+    "by_fact": {
+      "flood": 103,
+      "value": 4,
+      "other": 8,
+      "contentless": 24
+    },
+    "contentless_hits": 24
+  },
+  "arms": {
+    "pre_2978": {
+      "admission_predicate": "pre-#2978 (reconstructed)",
+      "assembly": false,
+      "admitted": 40,
+      "by_fact": {
+        "flood": 16,
+        "value": 0,
+        "other": 0,
+        "contentless": 24
+      },
+      "contentless_slots": 24,
+      "contentless_slot_share": 0.6,
+      "flood_slots": 16,
+      "flood_slot_share": 0.4,
+      "value_slots": 0,
+      "value_claims_present": [],
+      "other_slots": 0
+    },
+    "post_2978": {
+      "admission_predicate": "shipped (#2978 skip)",
+      "assembly": false,
+      "admitted": 40,
+      "by_fact": {
+        "flood": 40,
+        "value": 0,
+        "other": 0,
+        "contentless": 0
+      },
+      "contentless_slots": 0,
+      "contentless_slot_share": 0.0,
+      "flood_slots": 40,
+      "flood_slot_share": 1.0,
+      "value_slots": 0,
+      "value_claims_present": [],
+      "other_slots": 0
+    },
+    "post_2978_assembly": {
+      "admission_predicate": "shipped (#2978 skip)",
+      "assembly": true,
+      "package_stats": {
+        "applied": true,
+        "pool_items": 139,
+        "package_items": 38,
+        "packages": 37,
+        "collapsed_duplicates": 101,
+        "verbatim_refs_kept": 1,
+        "value_first_packages": 0
+      },
+      "admitted": 14,
+      "by_fact": {
+        "flood": 2,
+        "value": 4,
+        "other": 8,
+        "contentless": 0
+      },
+      "contentless_slots": 0,
+      "contentless_slot_share": 0.0,
+      "flood_slots": 2,
+      "flood_slot_share": 0.1429,
+      "value_slots": 4,
+      "value_claims_present": [
+        "v1",
+        "v2",
+        "v3",
+        "v4"
+      ],
+      "other_slots": 8
+    },
+    "post_2978_assembly_value_marked": {
+      "admission_predicate": "shipped (#2978 skip)",
+      "assembly": true,
+      "mark_provider": "eval read-time marks (value classes)",
+      "package_stats": {
+        "applied": true,
+        "pool_items": 139,
+        "package_items": 38,
+        "packages": 37,
+        "collapsed_duplicates": 101,
+        "verbatim_refs_kept": 1,
+        "value_first_packages": 4
+      },
+      "admitted": 14,
+      "by_fact": {
+        "flood": 2,
+        "value": 4,
+        "other": 8,
+        "contentless": 0
+      },
+      "contentless_slots": 0,
+      "contentless_slot_share": 0.0,
+      "flood_slots": 2,
+      "flood_slot_share": 0.1429,
+      "value_slots": 4,
+      "value_claims_present": [
+        "v1",
+        "v2",
+        "v3",
+        "v4"
+      ],
+      "other_slots": 8
+    },
+    "provenance_free_assembly": {
+      "admission_predicate": "shipped (#2978 skip)",
+      "assembly": true,
+      "provenance": "quote/source_turn_id stripped on EVERY hit — the product ask-lane shape today (#8658)",
+      "package_stats": {
+        "applied": true,
+        "pool_items": 139,
+        "package_items": 48,
+        "packages": 48,
+        "collapsed_duplicates": 91,
+        "verbatim_refs_kept": 0,
+        "value_first_packages": 0
+      },
+      "admitted": 24,
+      "by_fact": {
+        "flood": 12,
+        "value": 4,
+        "other": 8,
+        "contentless": 0
+      },
+      "contentless_slots": 0,
+      "contentless_slot_share": 0.0,
+      "flood_slots": 12,
+      "flood_slot_share": 0.5,
+      "value_slots": 4,
+      "value_claims_present": [
+        "v1",
+        "v2",
+        "v3",
+        "v4"
+      ],
+      "other_slots": 8
+    }
+  },
+  "controls": {
+    "no_dupe_no_regression": {
+      "pool_items": 8,
+      "package_items": 8,
+      "collapsed_duplicates": 0,
+      "ids_identical": true
+    }
+  },
+  "verdicts": {
+    "baseline_expired": {
+      "measured": "pre-#2978 admits 24/40 content-less slots (60.0%) and 16 slots for ONE fact",
+      "why": "the C2 window the old T measured against cannot be reproduced: #2978 changed the admission predicate after the slice merged"
+    },
+    "2978_alone_does_not_bound_the_flood": {
+      "measured": "post-#2978 admits 0 content-less slots but 40/40 for the flooded fact (100.0%) and 0 value slots",
+      "why": "the fix REALLOCATES the freed slots to the highest-ranked real hits — on a duplicate flood those are the duplicates"
+    },
+    "assembly_bounds_the_flood": {
+      "measured": "assembly ON holds the flooded fact to 2 slots (= 1 + max_verbatim), admits 14 items and 4/4 value-critical claims",
+      "why": "one fact occupies <= 1 + max_verbatim window slots; the freed slots go to DISTINCT evidence"
+    },
+    "value_safety": {
+      "measured": "value-critical claims present: pre=0/4 · post=0/4 · assembly=4/4",
+      "why": "the 300/400 (normalised overlap 0.80) and 12/60 (0.60) pairs sit below the 0.90 collapse threshold and carry distinct turns, so no value pair is a collapse candidate on its own account. The guard is still consulted — 39x per provenance arm on the >=0.90 content leg, plus one incidental same-turn pair (v1 shares source_turn_id t1 with the flood anchor; its quote does not overlap) — and every refusal leaves the outcome unchanged: disabling _pkg_differ_value_critical reproduces this receipt byte-for-byte. Its own regression is tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse"
+    },
+    "provenance_leg_is_lane_scoped": {
+      "measured": "with provenance 1 verbatim refs kept / 2 flood slots; without it 0 refs kept / 12 flood slots",
+      "why": "pass 1 (the content legs) is provenance-independent, so the STATEMENT flood is bounded either way; pass 2 — a point's OWN source chunks/turns — is the leg that is INERT without quote/source_turn_id, and #8658 is that state on the product ask lane. The instrument measures it rather than assuming it away"
+    }
+  }
+}

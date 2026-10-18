@@ -662,6 +662,35 @@ def test_document_created_does_not_store_the_retired_props():
     )
 
 
+def test_the_stub_completion_discriminator_never_reaches_the_source_row():
+    """#5097 review P2: `_stub_completion` is TRANSPORT, never source data.
+
+    `_upsert_source` reads it as a parameter, `entity_projection._META_KEYS`
+    keeps it off the `:Source` node, and `sdk._materialize_session_source` is its
+    only producer. The RECORD layer is a third home: `SourceCreated`'s mutation
+    is a `NodeSnapshot(..., path=None)`, so the record's own flat payload IS the
+    property dict — without a `_RECORD_ONLY_KEYS` entry the key fell into the
+    `source.props` jsonb tail (measured: `{"_stub_completion": true}`), which
+    `cache_projection._props_from_row` then copies back onto the node verbatim
+    ("unmapped"), re-materializing a server-managed discriminator the graph
+    deliberately keeps off. Same shape as `contains_session`, the capture
+    envelope directive that already sits in `_RECORD_ONLY_KEYS`.
+    """
+    assert "_stub_completion" in rp._RECORD_ONLY_KEYS, (
+        "the capture completion discriminator would be stored as source data")
+    record = {"type": "SourceCreated", "ts": "T", "event_id": "ev-envelope",
+              "id": "u1", "url": "u1", "contentHash": "h", "title": None,
+              "_stub_completion": True, "sessionId": "s1"}
+    insert = _node_insert(rp.mutations_for(record, org_id="o", graph_id="g"),
+                          "source")
+    assert "_stub_completion" not in insert.params[-1], (
+        "the capture completion discriminator landed in source.props — a cache "
+        "restore would put a transport key back on the node")
+    assert "stub_completion" not in insert.params[-1]
+    # The rest of the payload is still the record's data (the drop is narrow).
+    assert "s1" in insert.params
+
+
 def test_edge_record_only_carries_the_callers_attributes():
     """`confidence`/`weight` are PRIMARY on the EDGE and DERIVED on the Point."""
     statements = rp.mutations_for(

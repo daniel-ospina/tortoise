@@ -1439,9 +1439,22 @@ LEAK_HOSTS = (
 #: prove what the shipped command was pointed at — and that wrangler's cwd (which
 #: is where it resolves `functions/`) IS the upload root — plus that it never ran
 #: when a survival guard failed.
+#:
+#: #8816: a `--version` probe must be ANSWERED, or the deploy step's assertion
+#: cannot pass. The default is the declared value, which is what a correctly
+#: pinned spec resolves to; `STUB_NPX_VERSION` overrides it to model a float or a
+#: repointed tag, which the assertion must REFUSE.
 STUB_NPX = r"""#!/bin/bash
 printf '%s\n' "$@" > "$STUB_DIR/npx_args"
 pwd -P > "$STUB_DIR/npx_pwd"
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    # Absolute path: the deploy step `cd`s into the stage before calling wrangler,
+    # so a relative read here would resolve against the upload root.
+    printf '%s\n' "${STUB_NPX_VERSION:-$(cat "$STUB_DIR/config/wrangler-version")}"
+    break
+  fi
+done
 exit 0
 """
 
@@ -1584,7 +1597,11 @@ def _stub_bin(root: Path, name: str, body: str) -> Path:
 
 
 def _run_deploy(
-    tmp_path: Path, omit: str | None = None, set_runner_temp: bool = True
+    tmp_path: Path,
+    omit: str | None = None,
+    set_runner_temp: bool = True,
+    extra_env: dict[str, str] | None = None,
+    version_file: str | None = None,
 ) -> tuple[int, str, Path, Path]:
     """Execute the shipped Deploy step with the shell exactly as CI runs it.
 
@@ -1594,6 +1611,16 @@ def _run_deploy(
     """
     bin_dir = _stub_bin(tmp_path, "npx", STUB_NPX)
     site = _write_website_fixture(tmp_path, omit)
+    # #8816: the shipped step reads the wrangler version from the workspace, so
+    # the harness tree carries the same tracked file CI would.
+    cfg = tmp_path / "config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "wrangler-version").write_text(
+        (REPO / "config" / "wrangler-version").read_text(encoding="utf-8")
+        if version_file is None
+        else version_file,
+        encoding="utf-8",
+    )
     script = tmp_path / "deploy.sh"
     script.write_text(_step_code(DEPLOY), encoding="utf-8")
 
@@ -1601,6 +1628,7 @@ def _run_deploy(
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "STUB_DIR": str(tmp_path),
+        **(extra_env or {}),
     }
     if set_runner_temp:
         env["RUNNER_TEMP"] = str(tmp_path)
@@ -1678,6 +1706,12 @@ def _copy_tracked_website(root: Path) -> None:
         dst = root / "website" / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+    # #8816: the shipped deploy step reads the wrangler version from the
+    # workspace, so the reproduced checkout carries it too — otherwise the read
+    # fails and every real-tree assertion dies on the wrong error.
+    cfg = root / "config"
+    cfg.mkdir(exist_ok=True)
+    shutil.copy2(REPO / "config" / "wrangler-version", cfg / "wrangler-version")
 
 
 def test_the_staged_upload_root_equals_the_classified_public_tree(tmp_path) -> None:
@@ -1739,7 +1773,11 @@ def test_the_deploy_uploads_the_staged_directory_not_website(tmp_path) -> None:
     rc, out, stage, _site = _run_deploy(tmp_path)
     assert rc == 0, out
     args = (tmp_path / "npx_args").read_text(encoding="utf-8").splitlines()
-    assert args[:4] == ["--yes", "wrangler@4", "pages", "deploy"], args
+    # #8816: the spec is the declared version, resolved from
+    # config/wrangler-version — not the float `wrangler@4` this harness used to
+    # pin as correct.
+    declared = (REPO / "config" / "wrangler-version").read_text(encoding="utf-8").strip()
+    assert args[:4] == ["--yes", f"wrangler@{declared}", "pages", "deploy"], args
     target = args[4]
     assert target == str(stage), (
         f"the deploy was pointed at {target!r}, not the staged upload root {stage}"
@@ -1755,6 +1793,31 @@ def test_the_deploy_uploads_the_staged_directory_not_website(tmp_path) -> None:
         f"wrangler ran with cwd={ran_in!r}, not the upload root — it would resolve "
         "`<cwd>/functions`, find none, and deploy NO Functions"
     )
+
+
+def test_the_deploy_refuses_a_wrangler_that_resolved_to_a_different_version(tmp_path) -> None:
+    """#8816: the declared version is ASSERTED, not assumed.
+
+    A declared `4` (or a repointed tag) resolves to whatever npm serves; the
+    step must red rather than deploy with it. `STUB_NPX_VERSION` models that
+    resolution, so this is the executed counterpart of the workflow text.
+    """
+    rc, out, _stage, _site = _run_deploy(tmp_path, extra_env={"STUB_NPX_VERSION": "4.151.1"})
+    assert rc != 0, f"a wrong resolution deployed anyway:\n{out}"
+    assert "resolved wrangler 4.151.1" in out, out
+    assert "declared" in out, out
+
+
+def test_the_deploy_refuses_an_empty_wrangler_declaration(tmp_path) -> None:
+    """#8816: an empty declaration must fail CLOSED.
+
+    `wrangler@` with an empty spec resolves to latest — the float this change
+    exists to kill — so `${WRANGLER_VERSION:?}` has to abort before the upload.
+    """
+    rc, out, _stage, _site = _run_deploy(tmp_path, version_file="\n")
+    assert rc != 0, f"an empty declaration deployed anyway:\n{out}"
+    assert "config/wrangler-version is empty" in out, out
+    assert not (tmp_path / "npx_args").exists(), "npx was invoked despite the empty declaration"
 
 
 @pytest.mark.parametrize(
