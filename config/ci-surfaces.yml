@@ -1364,6 +1364,14 @@ surfaces:
   # against `hosted_backup`'s OWN primitives (`DUMP_FORMAT`,
   # `_sanitize_label`), which keeps that half honest without a DB.
   - test_retype_8882.py
+  # #8882 (Phase 1 measurement): the OFFLINE census of a logical dump —
+  # `tortoise/graph_census.py` matches no SOURCE_PATTERN, so a module-only
+  # change falls through to `core` and this guard runs with it (same
+  # reasoning as `test_retype_8882.py` directly above, and the two share one
+  # input contract). DB-free by construction: the subject IS a
+  # `tortoise-logical-dump-v1` dict, so the census is a pure function and the
+  # file needs no graph, no URI and no carve-out registration.
+  - test_graph_census_8882.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
   # inputs it reads select `core`: `tortoise/record_projection.py` matches no

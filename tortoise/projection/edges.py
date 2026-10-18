@@ -886,10 +886,23 @@ class _EdgeHandlers:
         orphan `:Tag` that `list_tags` reports as a `count: 0` entry while a
         rebuilt graph, which replays this routine from a clean state, has none
         (live != replay). A caller that can DELETE edges on a RETRIED path —
-        `update_point`'s tag sync — passes ``True`` so the sweep is a function of
-        the caller's tag list rather than of an attempt-local counter.
+        `update_point`'s tag sync — passes ``True`` FROM THE SECOND ATTEMPT ON
+        (``sweep_orphans=(_sync_attempts > 1)`` in `sdk.py`), so a first attempt
+        that drops NO edge pays no graph-wide `:Tag` scan. `sweep_orphans`
+        FORCES the sweep; it does not gate it — the GC still runs whenever this
+        call ``removed`` an edge, so `update_point(pid, tags=[])` on a point
+        that held a tag DOES scan on its first attempt (its own `DELETE r`
+        already left the orphan this call must clear).
         ``create_point`` keeps the default: a fresh point has no stale edges, so
         the scan stays off its hot path.
+
+        ⛔ The limit of that saving, stated so nobody rediscovers it: an orphan
+        ``:Tag`` left by an EARLIER interrupted call is collected only by a
+        later call that removes an edge or retries — a plain tagged update on a
+        point that already held the tag does not scan. `list_tags` can therefore
+        show a ``count: 0`` entry that a rebuilt graph (which replays from a
+        clean state) does not have, until such a call happens. Pinned both ways
+        by ``test_the_orphan_sweep_is_a_retry_only_cost``.
         """
         if not isinstance(tags, (list, tuple)):
             return
