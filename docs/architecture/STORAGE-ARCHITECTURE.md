@@ -1126,7 +1126,9 @@ embedding:
 | gate | question it answers | lands in | owner issue |
 |---|---|---|---|
 | **DISCARD** | does the row **exist**? | `classify_consolidation` | **`#4899`** |
-| **EMBED** | does the row **carry a vector**? | the embedding submission step | **new — same rule source** |
+| **EMBED** | does the row **carry a vector**? | the embedding submission step | **`#5008`** |
+
+**⚠️ State of the second gate (2026-10-18).** The EMBED gate is now **built**, not proposed: the predicate is `tortoise/embed_gate.py` (its rule set **is** `value_gate.RULES` — one rule set, two questions), the submission seam is `embeddings.encode_for_row`, and the graph writers (Point/Object/Subject/Document/Event, plus the ingest journal stamp) call it. It is flag-gated **off by default** (`TORTOISE_EMBED_GATE`), so the graph is unchanged until the rate effect is measured — the draft-and-run `#5008` asks for. `config/v4-mechanisms.yml` carries it as `implemented` with its test. **Still absent, and named so it cannot be inferred:** the per-kind override block described below (no pack slot exists and no caller at the submission step holds the brief), and any reaping of vectors already written (the `#4997` backfill).
 
 **⇒ The work order is: enforce the declaration that already exists, at both points.** `#4899` builds the rule set from `memory_granularity`; **the embedding gate reuses that same rule set** rather than re-deriving it. **Two gates, one source of policy, zero new declarations.**
 
