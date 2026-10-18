@@ -82,9 +82,19 @@ class Bystander:
     """A PING poller on its OWN connection — the instance's serving-ness, measured."""
 
     def __init__(self, port):
+        # ⛔ The socket timeout is deliberately ABOVE the longest block this harness
+        # measures, so ONE probe spans the block and its latency IS the outage. With a
+        # shorter timeout the reading is not a single probe's latency: redis-py's default
+        # `Retry` lists `TimeoutError` in `supported_errors`, so a timed-out PING is
+        # retried internally and the call RETURNS with the RETRY-SUMMED wall time (that is
+        # how an earlier revision of this file produced "0 failed pings, worst 3 330 ms"
+        # through a 1 s socket). A retry-summed number is true but ambiguous — the same
+        # 3 330 ms could be one 3.3 s block or four 0.8 s stalls — and this file exists to
+        # report a measurement, not a plausible one. `socket_connect_timeout` stays short:
+        # a refused port is the OTHER thing this harness must not confuse with a block.
         self.client = redis.Redis(
             host="127.0.0.1", port=port, decode_responses=True,
-            socket_timeout=1.0, socket_connect_timeout=5.0,
+            socket_timeout=30.0, socket_connect_timeout=5.0,
         )
         self.latencies: list[float] = []
         self.failures = 0

@@ -43,6 +43,7 @@ from tortoise.graph_key_restore import (
     IndexDropIncompleteError,
     IndexedGraphRestoreRefused,
     IndexRestoreMismatchError,
+    IndexRestoreUnverifiedError,
     restore_graph_key,
     restore_graph_key_safe,
     same_index_definitions,
@@ -127,7 +128,8 @@ class _FakeGraph:
     """
 
     def __init__(self, rows=None, *, drop_works=True, echo=None, restore_error=None,
-                 dump_error=None, drop_fails_on=(), create_fails_on=()):
+                 dump_error=None, drop_fails_on=(), create_fails_on=(),
+                 fail_list_on=()):
         #: keyed by the properties cell so insertion order survives and a per-index drop
         #: can remove exactly one row
         self.rows: dict[str, list] = {
@@ -139,6 +141,11 @@ class _FakeGraph:
         self.dump_error = dump_error
         self.drop_fails_on = set(drop_fails_on)
         self.create_fails_on = set(create_fails_on)
+        #: 1-based `list_indexes()` call numbers that RAISE — models a catalogue read that
+        #: fails at a specific point in the sequence (a transient outage, the case where a
+        #: failure must not be reported as a measured fact).
+        self.fail_list_on = set(fail_list_on)
+        self.list_calls = 0
         self.calls: list = []
         #: The catalogue AS IT WAS when `dump()` ran — the mutation detector for "skip the
         #: drop before the DUMP".
@@ -151,6 +158,9 @@ class _FakeGraph:
     # --- the engine seams -------------------------------------------------------
     def list_indexes(self):
         self.calls.append("list_indexes")
+        self.list_calls += 1
+        if self.list_calls in self.fail_list_on:
+            raise ConnectionError(f"catalogue read #{self.list_calls} failed")
         return [list(row) for row in self.rows.values()]
 
     def drop_index(self, definition):
@@ -733,6 +743,120 @@ def test_an_overrun_does_not_re_create_the_index_either() -> None:
     creates = [call for call in engine.calls if call.startswith("create:")]
     assert creates == [], (
         f"the index was re-created while the restore may still be running: {engine.calls}"
+    )
+
+
+# ---------------------------------------------------------------------------------
+# 10a-10d: the CYCLE-2 findings — an unverified read, a false "LOST", an option
+# reorder, and an error that pointed at an object the caller never receives
+# ---------------------------------------------------------------------------------
+
+
+def test_a_verification_read_that_fails_does_not_claim_nothing_was_touched() -> None:
+    """#8965 review cycle 2, F1: the one unguarded post-restore read.
+
+    Every other arm of the safe path attaches a note; this read did not. By the time it runs
+    the graph key has been deleted, restored and the index re-created — so an
+    ``IndexDefinitionUnreadable`` escaping from here told the caller "NOTHING HAS BEEN
+    TOUCHED" and advised a plain restore, which is false and is advice to issue exactly the
+    index-bearing RESTORE this path exists to prevent.
+    """
+    # call 1 = the pre-drop read, 2 = the post-drop re-read, 3 = the inner guard, 4 = verify
+    engine = _FakeGraph(_INDEXED_ROWS, fail_list_on={4})
+
+    with pytest.raises(IndexRestoreUnverifiedError) as raised:
+        engine.safe()
+
+    message = str(raised.value)
+    assert "WAS restored" in message and "were re-created" in message, (
+        f"the error does not say the graph and index are in place: {message}"
+    )
+    assert "NOTHING HAS BEEN TOUCHED" not in message, (
+        f"the error claims nothing was touched about a graph that was restored: {message}"
+    )
+    assert "index_guard=None" not in message, (
+        f"the error advises a plain (index-bearing) restore: {message}"
+    )
+    assert "CREATE VECTOR INDEX" in message, (
+        f"the error carries no statement to act on: {message}"
+    )
+    # It must not raise a mismatch either: nothing measured a difference.
+    assert not isinstance(raised.value, IndexRestoreMismatchError)
+
+
+def test_a_catalogue_that_cannot_be_re_read_says_UNKNOWN_not_LOST() -> None:
+    """#8965 review cycle 2, F3: a failed read made the SURVIVOR look lost.
+
+    ``_missing_from_catalogue`` returned ALL of ``expected`` when the read failed, so the
+    drop-incomplete exception listed the same index as "still in the catalogue" (in
+    ``remaining``) and as "WAS LOST" (in ``failed``), and handed the caller a CREATE the
+    engine would refuse because the index is still there.
+    """
+    # calls: 1 = pre-drop, 2 = the post-drop re-read that says it survived, 3 = the
+    # recovery read, which fails
+    engine = _FakeGraph(_INDEXED_ROWS, drop_works=False, fail_list_on={3})
+
+    with pytest.raises(IndexDropIncompleteError) as raised:
+        engine.safe()
+
+    error = raised.value
+    assert error.unverified is True
+    assert "NOT KNOWN" in str(error), (
+        f"the error claims a measured loss it never measured: {error}"
+    )
+    assert "AN INDEX WAS LOST" not in str(error)
+    # The survivor is named once, as surviving — never as lost.
+    assert [definition.property for definition in error.failed] == []
+    assert "dump" not in engine.calls
+
+
+def test_an_option_reorder_is_not_a_mismatch() -> None:
+    """#8965 review cycle 2, F4: ``signature()`` compared options in CATALOGUE ORDER.
+
+    An engine that echoes the same options in a different order re-created the same index;
+    an order-sensitive comparison raised ``IndexRestoreMismatchError`` over a perfectly good
+    restore (and told the operator to "fix the index").
+    """
+    engine = _FakeGraph(
+        _INDEXED_ROWS,
+        echo=lambda definition: tuple(reversed(definition.options)),
+    )
+
+    result = engine.safe()
+
+    assert result.indexes.verified is True, (
+        "a re-ordered option map was treated as a different index"
+    )
+
+
+def test_a_mismatch_error_carries_the_STATEMENTS_and_no_dangling_pointer() -> None:
+    """#8965 review cycle 2, F4: the message pointed at ``IndexRestoreReport.definitions``.
+
+    That report is the RETURN VALUE of ``restore_graph_key_safe``, and this raise replaces
+    it — so the caller was pointed at an object it never receives, with no statement to fix
+    the index by hand.
+    """
+    engine = _FakeGraph(
+        _INDEXED_ROWS,
+        echo=lambda _definition: (
+            ("dimension", 384),
+            ("similarityFunction", "euclidean"),
+            ("M", 16),
+        ),
+    )
+
+    with pytest.raises(IndexRestoreMismatchError) as raised:
+        engine.safe()
+
+    message = str(raised.value)
+    assert "IndexRestoreReport" not in message, (
+        f"the error still points at a report this path never returns: {message}"
+    )
+    assert "CREATE VECTOR INDEX" in message, (
+        f"the error carries no CREATE for the index that is missing: {message}"
+    )
+    assert "M: 8" in message and "efConstruction: 64" in message, (
+        f"the expected definition is not in the error: {message}"
     )
 
 

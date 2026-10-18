@@ -377,8 +377,19 @@ class VectorIndexDefinition:
         return value if isinstance(value, str) else None
 
     def signature(self) -> tuple[Any, ...]:
-        """Hashable identity — what "the same definition" means for verification."""
-        return (self.label, self.property, self.entity_type, self.options)
+        """Hashable identity — what "the same definition" means for verification.
+
+        ``options`` is compared as a MAPPING (sorted by key), not in catalogue order: an
+        engine that echoes the same options in a different order re-created the same index,
+        and an order-sensitive comparison would raise a mismatch over a perfectly good
+        restore (#8965 review cycle 2).
+        """
+        return (
+            self.label,
+            self.property,
+            self.entity_type,
+            tuple(sorted(self.options, key=lambda pair: pair[0])),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1265,14 +1276,31 @@ class IndexDropIncompleteError(RuntimeError):
     """
 
     def __init__(self, *, graph: str, remaining: Any, dropped: Any = (),
-                 restored: Any = (), failed: Any = ()):
+                 restored: Any = (), failed: Any = (), unverified: bool = False):
         self.graph = graph
         self.remaining = tuple(remaining)
         self.dropped = tuple(dropped)
         self.restored = tuple(restored)
         self.failed = tuple(failed)
+        self.unverified = unverified
         lost_text = ""
-        if self.failed:
+        if unverified:
+            # The catalogue could not be re-read, so "lost" is not a measured fact — and it
+            # is not a fact about `failed` either, which is empty here. The DROPPED set is
+            # what is unknown, and saying "LOST" about it is how an error tells an operator
+            # an index is gone while it is still there (#8965 review cycle 2).
+            uncertain = tuple(self.failed) or self.dropped
+            lost_text = (
+                " ⚠️ WHICH OF THE DROPPED INDEXES CAME BACK IS NOT KNOWN (the catalogue "
+                "could not be re-read after the drop): "
+                + "; ".join(str(definition) for definition in uncertain)
+                + ". Check with `CALL db.indexes()` and issue a CREATE ONLY for an index "
+                "that is MISSING: "
+                + " ; ".join(
+                    definition.create_cypher() for definition in uncertain
+                )
+            )
+        elif self.failed:
             lost_text = (
                 " ⛔ AN INDEX WAS LOST: it was dropped and could NOT be put back — "
                 + "; ".join(str(definition) for definition in self.failed)
@@ -1305,14 +1333,47 @@ class IndexRestoreMismatchError(RuntimeError):
         self.expected = tuple(expected)
         self.missing = tuple(missing)
         self.extra = tuple(extra)
+        # The STATEMENTS, not a pointer: this raise REPLACES the `SafeRestoreResult`, so
+        # "the definition is in ``IndexRestoreReport.definitions``" pointed the caller at an
+        # object it never receives (#8965 review cycle 2).
+        fix = "; ".join(d.create_cypher() for d in self.missing) or "none"
+        surplus = "; ".join(d.drop_cypher() for d in self.extra) or "none"
         super().__init__(
             f"the graph {graph!r} was restored, but its VECTOR index does not match the "
             f"definition read before the drop. Missing: "
             f"{'; '.join(str(d) for d in self.missing) or 'none'}. Unexpected: "
             f"{'; '.join(str(d) for d in self.extra) or 'none'}. The graph itself is "
             f"intact and the restore completed — do NOT re-issue the restore; fix the "
-            f"index (the expected definitions are in this error and in "
-            f"``IndexRestoreReport.definitions``)."
+            f"index only. To create what is missing: {fix}. To remove what should not be "
+            f"there: {surplus}."
+        )
+
+
+class IndexRestoreUnverifiedError(RuntimeError):
+    """The graph was restored and the index re-created, but the result could not be CHECKED.
+
+    Its own type because the state is its own: raising
+    :class:`IndexDefinitionUnreadable` here would tell the caller "NOTHING HAS BEEN TOUCHED"
+    and advise a plain restore — false on the first count and, on the second, advice to issue
+    exactly the index-bearing restore this path exists to prevent (#8965 review cycle 2).
+    Nothing needs re-creating: what is missing is a catalogue read.
+    """
+
+    def __init__(self, *, graph: str, expected: Any, reason: str):
+        self.graph = graph
+        self.expected = tuple(expected)
+        self.reason = reason
+        super().__init__(
+            f"the graph {graph!r} WAS restored and its {len(self.expected)} VECTOR "
+            f"index(es) were re-created, but the catalogue could not be read back to verify "
+            f"them ({reason}). Nothing is known to be missing and NOTHING should be "
+            f"re-created blindly — re-reading is. Re-read `CALL db.indexes()` once the "
+            f"engine answers; these are the definitions that were re-created, so a MISSING "
+            f"one can be created from its statement: "
+            + "; ".join(
+                f"{definition} -> {definition.create_cypher()}"
+                for definition in self.expected
+            )
         )
 
 
@@ -1923,19 +1984,23 @@ class SafeRestoreResult:
 
 def _missing_from_catalogue(
     expected: Any, list_indexes: Callable[[], Any], *, graph: str
-) -> list[VectorIndexDefinition]:
-    """Which of ``expected`` the catalogue no longer reports.
+) -> list[VectorIndexDefinition] | None:
+    """Which of ``expected`` the catalogue no longer reports; ``None`` = could not read.
 
     Compares the FULL definition (``signature()``), not "an index exists": an index that
     came back with different HNSW parameters is a different index for every purpose this
-    path cares about. A catalogue read that fails here is reported as "nothing is known to
-    be back" — the caller then gets the definition in the note rather than a claim that it
-    was restored.
+    path cares about.
+
+    ``None`` is NOT "everything is missing" (#8965 review cycle 2). Returning ``expected``
+    on a failed read made a transient catalogue failure publish the index that was never
+    dropped as LOST — in the same exception that listed it as still present — and hand the
+    caller a ``CREATE`` the engine would refuse. A caller that cannot read the catalogue
+    knows nothing about any index, and says so.
     """
     try:
         present = _coerce_definitions(list_indexes(), graph=graph)
     except Exception:
-        return list(expected)
+        return None
     present_signatures = {definition.signature() for definition in present}
     return [
         definition for definition in expected
@@ -1970,6 +2035,7 @@ def _index_state_note(
     restored: Any,
     failed: Any,
     graph_restored: bool = False,
+    unverified: bool = False,
 ) -> str:
     """The note attached to a caller's error when a dropped index's fate needs saying.
 
@@ -1978,6 +2044,10 @@ def _index_state_note(
     ``dump()`` having failed, the graph key was never deleted, so the index WAS put back and
     the caller has nothing to do; after a restore that did not return, the key may be gone
     and the caller must re-issue and re-create.
+
+    ``unverified`` says the catalogue could not be read, so ``failed`` is "all of them, as
+    far as we know" rather than "these are lost" — claiming a loss nothing measured is the
+    same defect as claiming a restore nothing verified (#8965 review cycle 2).
     """
     lines = [f"index-safe restore of {graph!r}:"]
     if restored:
@@ -1985,10 +2055,17 @@ def _index_state_note(
             "re-created: " + "; ".join(str(definition) for definition in restored)
         )
     if failed:
-        lines.append(
-            "⚠️ NOT re-created: " + "; ".join(str(definition) for definition in failed)
-        )
-        lines.append("re-create them from these statements once the graph is back:")
+        if unverified:
+            lines.append(
+                "⚠️ the catalogue could not be re-read, so which of these indexes are back "
+                "is NOT known: "
+                + "; ".join(str(definition) for definition in failed)
+            )
+        else:
+            lines.append(
+                "⚠️ NOT re-created: " + "; ".join(str(definition) for definition in failed)
+            )
+        lines.append("their statements (issue a CREATE only for an index that is MISSING):")
         lines.extend(definition.create_cypher() for definition in failed)
     if did_not_return:
         lines.append(
@@ -2091,12 +2168,16 @@ def restore_graph_key_safe(
 
     Raises:
         IndexDefinitionUnreadable: a VECTOR index whose definition the catalogue does not
-            state exactly. Nothing dropped.
+            state exactly. Nothing dropped — every raise of this type from this function
+            happens before any destructive step.
         IndexDropIncompleteError: the index survived the drop. Nothing deleted.
         IndexedGraphRestoreRefused: an index reappeared after the drop and before the
             restore. Nothing deleted.
-        IndexRestoreMismatchError: the graph was restored but the index does not match the
-            definition captured before the drop.
+        IndexRestoreMismatchError: the graph WAS restored and the re-created index does not
+            match the definition captured before the drop. The error carries the statements
+            to fix it; do not re-issue the restore.
+        IndexRestoreUnverifiedError: the graph WAS restored and the index re-created, but the
+            catalogue could not be read back to check them. Nothing is known to be missing.
         GraphRestoreSilentError / GraphRestoreLostError / GraphRestoreStalledError /
         BaseException: whatever :func:`restore_graph_key` raises, unchanged (with the
             index definitions attached as a note when any were dropped).
@@ -2119,7 +2200,10 @@ def restore_graph_key_safe(
             # catalogue now says is missing, and to say so — an index lost silently on this
             # path was the #8965 review's F3.
             gone = _missing_from_catalogue(dropped, list_indexes, graph=graph)
-            restored, failed = _try_recreate(gone, create_index)
+            unverified = gone is None
+            restored, failed = _try_recreate(
+                dropped if gone is None else gone, create_index
+            )
             with contextlib.suppress(AttributeError):
                 exc.add_note(
                     _index_state_note(
@@ -2127,6 +2211,7 @@ def restore_graph_key_safe(
                         did_not_return=False,
                         restored=restored,
                         failed=failed,
+                        unverified=unverified,
                     )
                 )
             raise
@@ -2136,13 +2221,17 @@ def restore_graph_key_safe(
             # that survived. Re-creating `remaining` re-created the ones that were never
             # lost and left the ones that WERE lost unrestored (#8965 review F2).
             gone = _missing_from_catalogue(dropped, list_indexes, graph=graph)
-            restored, failed = _try_recreate(gone, create_index)
+            unverified = gone is None
+            restored, failed = _try_recreate(
+                () if gone is None else gone, create_index
+            )
             raise IndexDropIncompleteError(
                 graph=graph,
                 remaining=remaining,
                 dropped=tuple(dropped),
                 restored=tuple(restored),
                 failed=tuple(failed),
+                unverified=unverified,
             )
         logger.info(
             "graph-key restore: dropped %d VECTOR index(es) on %r before the DUMP so the "
@@ -2216,19 +2305,36 @@ def restore_graph_key_safe(
                 # from the catalogue, not from the loop position: the CREATE may have taken
                 # effect before it raised.
                 gone = _missing_from_catalogue(definitions, list_indexes, graph=graph)
+                unverified = gone is None
                 with contextlib.suppress(AttributeError):
                     exc.add_note(
                         _index_state_note(
                             graph=graph,
                             did_not_return=False,
-                            restored=[d for d in definitions if d not in gone],
-                            failed=gone,
+                            restored=(
+                                [] if gone is None
+                                else [d for d in definitions if d not in gone]
+                            ),
+                            failed=tuple(definitions) if gone is None else gone,
                             graph_restored=True,
+                            unverified=unverified,
                         )
                     )
                 raise
         recreated = True
-        after = _coerce_definitions(list_indexes(), graph=graph)
+        try:
+            after = _coerce_definitions(list_indexes(), graph=graph)
+        except BaseException as exc:
+            # ⛔ This read happens AFTER the graph key was deleted, restored and the index
+            # re-created, so an `IndexDefinitionUnreadable` escaping from here would tell the
+            # caller "NOTHING HAS BEEN TOUCHED … restore with index_guard=None" — false on
+            # both counts, and the second half is advice to issue exactly the index-bearing
+            # restore this path exists to prevent (#8965 review cycle 2). The state is its
+            # own error: the graph IS restored, the index EXISTS, and only the verification
+            # could not be performed.
+            raise IndexRestoreUnverifiedError(
+                graph=graph, expected=definitions, reason=f"{type(exc).__name__}: {exc}"
+            ) from exc
         identical, missing, extra = same_index_definitions(definitions, after)
         verified = identical
         if not identical:

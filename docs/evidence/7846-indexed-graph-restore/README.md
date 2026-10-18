@@ -118,25 +118,32 @@ rather than issuing the restore above. Measured on `falkordb/falkordb:latest` (g
 
 | arm, 20 000 × 384 nodes | RESTORE step | worst bystander `PING` | index after |
 |---|---|---|---|
-| raw `restore_graph_key` (index in the payload) | 3.386 s | **3 330.8 ms** | `OPERATIONAL`, KNN 3 |
-| `restore_graph_key_safe` (drop-first) | **0.081 s** | **34.0 ms** | `OPERATIONAL`, KNN 3 (definition verified) |
+| raw `restore_graph_key` (index in the payload) | 2.955 s | **2 899.4 ms** | `OPERATIONAL`, KNN 3 |
+| `restore_graph_key_safe` (drop-first) | **0.069 s** | **69.4 ms** | `OPERATIONAL`, KNN 3 (definition verified) |
 
-⇒ ~42× faster RESTORE, and the instance-wide outage drops from ~3.3 s to ~34 ms. (These are
-the committed numbers from `drop-first-42201-20000.log`, not a range across runs: an earlier
-uncommitted run of the same harness read 3.19 s / 3 127 ms raw and 0.14 s / 112 ms safe, which
-is why this table quotes ONE log rather than a spread.)
+⇒ ~43× faster RESTORE, and the instance-wide outage drops from ~2.9 s to ~70 ms. Every number
+in this table is read from the committed `drop-first-42201-20000.log` — not a range across runs
+and not an ad-hoc run.
+
+⚠️ **How the bystander's number is taken, because it changes what it means.** Its socket
+timeout is deliberately ABOVE the longest block measured, so ONE probe spans the block and its
+latency IS the outage. That matters: `redis-py`'s default `Retry` lists `TimeoutError` in
+`supported_errors`, so with a 1 s socket timeout a PING that hits a 3 s block is retried
+internally and the call RETURNS with the retry-summed wall time — a true number that cannot
+distinguish one 3 s stall from four 0.8 s ones. The first revision of this harness did exactly
+that, which is why the committed logs were regenerated (#8965 review cycle 2).
 Two more readings from the same runs (`drop-first-42201-20000.log`, `drop-first-42201-5000.log`):
 
 - **Re-creating the index does NOT re-block the instance.** The safe path's TOTAL elapsed time
-  is 3.2 s at 20 000 nodes — the index build is the bulk of it — yet the bystander's worst
-  `PING` across the whole call is 34 ms, because `CREATE VECTOR INDEX` enqueues the build
+  is 3.324 s at 20 000 nodes — the index build is the bulk of it — yet the bystander's worst
+  `PING` across the whole call is 69.4 ms, because `CREATE VECTOR INDEX` enqueues the build
   instead of running it inside the command. The cost is the same; what changes is that it is no
   longer a serving-thread block.
 - **The refusal costs nothing.** On the indexed graph the guard fired with
   `{'dump': 0, 'delete': 0, 'restore': 0}` destructive calls, and the graph was left with all
   20 000 nodes, its `OPERATIONAL` index and its KNN answers intact.
-- **The effect is not size-specific** — 5 000 nodes shows the same shape (0.561 s → 0.017 s;
-  bystander 542 ms → 15.5 ms), which is why the regression test asserts the *sequence* rather
+- **The effect is not size-specific** — 5 000 nodes shows the same shape (0.599 s → 0.036 s;
+  bystander 521.1 ms → 12.1 ms), which is why the regression test asserts the *sequence* rather
   than a duration: at the test's 3 000 nodes both arms are far inside any bound CI can afford.
 
 ⚠️ **Scope of this fix.** It makes a graph-key DUMP/RESTORE of an indexed graph safe. It does
@@ -213,8 +220,8 @@ shard would answer vector search with an empty result does not hold on any engin
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | the restore completes in bounded time with an observable rebuild, or fails with an explicit error | **MET for a caller that adopts `restore_graph_key_safe`** — it never issues an index-bearing RESTORE at all (drop-first, §3a: 0.081 s vs 3.386 s at 20 000 nodes), so there is no rebuild to observe; the bound (`bound_s`, default 90 s, below the client socket timeout) turns a wedged restore into a typed, measured error instead of a socket timeout. **Upstream, unchanged** for anything else: the engine still emits no progress and no log line |
-| 2 | the instance continues to serve other graphs throughout the restore | **MET BY THE SAFE PATH, UNMET BY THE ENGINE.** An index-free payload has no index to rebuild, so the serving thread is not blocked: measured worst bystander `PING` 34.0 ms through a safe restore, against 3 330.8 ms through a raw one (§3a). The engine side is unchanged — any OTHER index-bearing operation still blocks it for its duration |
+| 1 | the restore completes in bounded time with an observable rebuild, or fails with an explicit error | **MET for a caller that adopts `restore_graph_key_safe`** — it never issues an index-bearing RESTORE at all (drop-first, §3a: 0.069 s vs 2.955 s at 20 000 nodes), so there is no rebuild to observe; the bound (`bound_s`, default 90 s, below the client socket timeout) turns a wedged restore into a typed, measured error instead of a socket timeout. **Upstream, unchanged** for anything else: the engine still emits no progress and no log line |
+| 2 | the instance continues to serve other graphs throughout the restore | **MET BY THE SAFE PATH, UNMET BY THE ENGINE.** An index-free payload has no index to rebuild, so the serving thread is not blocked: measured worst bystander `PING` 69.4 ms through a safe restore, against 2 899.4 ms through a raw one (§3a). The engine side is unchanged — any OTHER index-bearing operation still blocks it for its duration |
 | 3 | a regression test does dump → delete → restore on an index-bearing graph and asserts the server still answers `PING` | **MET — `tests/test_indexed_graph_key_restore_7846.py`** (docker lane; the populated index is a precondition, so it cannot pass vacuously). The safe path has its own test there, which additionally asserts the index was ABSENT when it was re-created — the mutation detector for "skip the drop", at any graph size |
 | 4 | the fate of the index across a restore is documented and asserted | **MET — PRESERVED, payload-carried** (§4). Asserted same-name in the regression test; the cross-name proof runs OUTSIDE CI because on the pinned engine it is the crash trigger |
 | 5 | the failure mode is distinguishable from load | **MET ONLY FOR A CALLER THAT ADOPTS THE MODULE — and no production call site adopts it yet.** Upstream unchanged: the engine still emits no progress, no timeout and no log line, so an instance blocked by a rebuild and a genuinely dead one look identical from a bare client. `tortoise/graph_key_restore.py` watches from a second connection and separates them: a witness PING that never answers plus a port that still ACCEPTS a TCP connection is *blocked (not load, not a crash)*; a REFUSED port is *the process died* (#8270). Two different errors, two different recoveries. ⚠️ Nothing in the product calls `restore_graph_key` (`rg` finds the module and its tests, no caller), so the restore production actually performs — `tortoise/hosted_backup.py::_graph_copy_with_restore_bound`, a bounded `GRAPH.COPY` swap (delete live → copy temp → live) — is **UNWITNESSED**: it has an explicit read bound and still makes no second-connection measurement, so for the wired path this criterion stays **UNMET** |
