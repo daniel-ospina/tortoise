@@ -1787,8 +1787,10 @@ def test_approved_menu_guard_fails_closed_when_a_single_row_is_dropped(
     )
 
     # ...and the numbering catches a drop the COUNT cannot: a doc that grows a row while
-    # losing another still has >= the bound, but a hole in the sequence.
-    renumbered = real.replace("| 3 |", "| 4 |", 1)
+    # losing another still has >= the bound, but a hole in the sequence. The replacement
+    # number is one no other row states (24): renumbering row 3 to an EXISTING number would
+    # now be caught earlier and more precisely, as a repeated row number (round 3, P1).
+    renumbered = real.replace("| 3 |", "| 24 |", 1)
     path2 = tmp_path / "row-renumbered.md"
     path2.write_text(renumbered, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path2)
@@ -2330,9 +2332,11 @@ def _assert_an_orphaned_continuation_fails_the_build(
         "owner-approved doc is exactly what must not reach the artifact"
     )
 
-    # ---- MUTATION: disable the orphan test (every body line reads as a separator). Same
-    # document, same row parse — and the defect comes straight back, green, in the artifact.
-    monkeypatch.setattr(bt, "_APPROVED_SEPARATOR", re.compile(r".*"))
+    # ---- MUTATION: disable the body test outright. Same document, same row parse — and
+    # the defect comes straight back, green, in the artifact. (Before round 3 this mutated
+    # `_APPROVED_SEPARATOR` to `.*`; the separator rule is part of `_body_error` itself now,
+    # so disabling the whole body test is both the equivalent and the narrower mutation.)
+    monkeypatch.setattr(bt, "_body_error", lambda *a, **k: None)
     menu_off, _, row_errors_off = bt._approved_state()
     assert row_errors_off == [], (
         f"the mutation did not disable the orphan test: {row_errors_off}"
@@ -2376,14 +2380,350 @@ def test_orphaned_continuation_line_without_a_pipe_fails_the_build(
     )
 
 
+def _edited_doc(tmp_path, monkeypatch, edited: str, name: str) -> tuple[Path, Path]:
+    """Point the builder at `edited` as the approved doc, with a fresh artifact path."""
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    doc = tmp_path / f"{name}.md"
+    doc.write_text(edited, encoding="utf-8")
+    out = tmp_path / f"{name}-artifact.md"
+    monkeypatch.setattr(bt, "APPROVED_DOC", doc)
+    monkeypatch.setattr(bt, "OUT", out)
+    return doc, out
+
+
+def _disable_the_round_3_guards(monkeypatch) -> None:
+    """MUTATION: the identity guard and the body test contribute nothing.
+
+    Turning them into `None` is the only way a test can state what they prevent, and it
+    keeps each test below from rotting into a tautology: the SAME document is built twice,
+    once with the guards answering nothing (the pre-fix behaviour, measured) and once armed.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    monkeypatch.setattr(bt, "_row_identity_error", lambda *a, **k: None)
+    monkeypatch.setattr(bt, "_body_error", lambda *a, **k: None)
+
+
+def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 1 — a wrap whose continuation is ITSELF a row RE-REGISTERED as row 21.
+
+    `…annotate_operator, |` ⏎ `| 21 | `adjust_relationship` | mitigate_operator |` ⏎ `| 22 | …`
+
+    Both lines are legal table rows and both are legal table syntax, so the body test had
+    nothing to say: the row loop matched the continuation, and `menu[name] = {…}` is an
+    unconditional assign keyed by NAME, so the one-member remainder silently REPLACED the
+    complete row. Measured before the fix: `main()` → 0, artifact WRITTEN, 23 rows parsed,
+    `row_errors == []`, `tortoise_annotate_operator` rendered "*(no approved row names it)*"
+    / **refuted**, and the section count moved 5/7/0 → 4/7/1. Nothing bounded duplicates —
+    the count guard checks only for MISSING row numbers (#8930 review, round 3, P1).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    edited = real.replace(
+        cell,
+        "operator_action, annotate_operator, |\n"
+        "| 21 | `adjust_relationship` | mitigate_operator |",
+        1,
+    )
+    assert edited != real, "the row-shaped continuation did not change the doc"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "dup-number-same-name")
+
+    # ---- the guard ON: the repeated identity is reported, naming BOTH occurrences.
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, (
+        f"every line here is shaped like a row ({len(menu)} parsed) — which is why the "
+        "row's IDENTITY, not its shape, is the datum"
+    )
+    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
+        "the discarded row must contribute NOTHING — merging it is the same truncation "
+        "from the other side"
+    )
+    assert "annotate_operator" in menu["adjust_relationship"]["members"], (
+        "the row the doc states must survive intact"
+    )
+    assert len(row_errors) == 1, f"the repeated row was not reported exactly once: {row_errors}"
+    assert "approved row 21 (`adjust_relationship`) in" in row_errors[0], row_errors[0]
+    assert "REUSES both the number 21 and the name `adjust_relationship`" in row_errors[0], (
+        f"the diagnostic does not name both occurrences: {row_errors[0]!r}"
+    )
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
+        "the specific cause must print BEFORE the generic structure diagnostics"
+    )
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])  # WRITE mode, not --check
+    assert bt.main() == 1, "a row-shaped continuation did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "approved row 21 (`adjust_relationship`)" in err, err
+    assert not out.exists(), (
+        f"the build failed but still wrote {out.name} — a false refutation of the "
+        "owner-approved doc is exactly what must not reach the artifact"
+    )
+
+    # ---- MUTATION: both round-3 guards contribute nothing. The later row replaces row 21,
+    # `annotate_operator` leaves it, and the defect returns — green, in the artifact.
+    _disable_the_round_3_guards(monkeypatch)
+    menu_off, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
+    assert menu_off["adjust_relationship"]["members"] == {
+        "adjust_relationship",
+        "mitigate_operator",
+    }, f"the mutation did not reproduce the overwrite: {menu_off['adjust_relationship']}"
+    assert bt.main() == 0, "with the guards disabled this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert "| `tortoise_annotate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+        "the mutation did not reproduce the false refutation — the test proves nothing"
+    )
+    out.unlink()
+
+
+def test_a_repeated_row_number_under_a_new_name_cannot_add_a_phantom_row(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 2 — a duplicated row number under a DIFFERENT name: 24 rows, all green.
+
+    Every bound in `_approved_structure_errors` is a FLOOR ("at least 23") plus a check for
+    MISSING numbers, so a repeat that ADDS a row is invisible to all of them: measured
+    before the fix, `main()` → 0, 24 rows parsed, `row_errors == []`, artifact written. The
+    doc states one row 5; the artifact then carries two, and only a human comparing row
+    numbers against the doc could see it (#8930 review, round 3, P1).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    row5 = next((ln for ln in real.splitlines() if ln.startswith("| 5 |")), "")
+    assert row5, "row 5 is not in the doc — this test is stale"
+    edited = real.replace(
+        row5, row5 + "\n| 5 | `get_historical_knowledge` | check_connection |", 1
+    )
+    assert edited != real, "the repeated row number did not change the doc"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "dup-number-new-name")
+
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, (
+        f"the doc states 23 rows and parses {len(menu)} — the second `| 5 |` must not "
+        "register as a row at all"
+    )
+    assert "get_historical_knowledge" not in menu, (
+        "the phantom row was kept, so the menu holds a row the doc does not state"
+    )
+    assert len(row_errors) == 1, f"the repeated number was not reported exactly once: {row_errors}"
+    assert (
+        "approved row 5 (`get_historical_knowledge`) in" in row_errors[0]
+        and "REUSES row number 5, already stated for row 5 (`explore_connections`)"
+        in row_errors[0]
+    ), f"the diagnostic does not name both occurrences: {row_errors[0]!r}"
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0]
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "a repeated row number did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "approved row 5 (`get_historical_knowledge`)" in err, err
+    assert not out.exists(), "the build failed but still wrote the artifact"
+
+    # ---- MUTATION: 24 rows, rc 0, artifact written — the count bound cannot see it.
+    _disable_the_round_3_guards(monkeypatch)
+    menu_off, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
+    assert len(menu_off) == bt.APPROVED_MIN_ROWS + 1, (
+        f"the mutation must reproduce the phantom 24th row, parsed {len(menu_off)}"
+    )
+    assert bt.main() == 0, "with the guards disabled this document MUST build green"
+    assert out.exists(), (
+        "the pre-fix build wrote an artifact for a doc whose row 5 is stated TWICE — no "
+        "count or sequence bound can see a repeat that only ADDS a row"
+    )
+    out.unlink()
+
+
+def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 3 — the same NAME on a different number, which no number bound can see.
+
+    `menu` is keyed by name, so this is the overwrite from the other side: row 21's cell is
+    replaced by the new row's and `annotate_operator` / `mitigate_operator` lose their
+    approved home. Renumbering hides it from the missing-number check too, so before the fix
+    the ONLY thing that fired was the anonymous row count ("only 22 approved rows parsed") —
+    a diagnostic that names no row and states no cause, on a document that is otherwise
+    shaped perfectly (#8930 review, round 3, P1).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    row23 = next((ln for ln in real.splitlines() if ln.startswith("| 23 |")), "")
+    assert row23, "row 23 is not in the doc — this test is stale"
+    edited = real.replace(
+        row23, row23 + "\n| 24 | `adjust_relationship` | mitigate_operator |", 1
+    )
+    assert edited != real, "the repeated row name did not change the doc"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "dup-name-other-number")
+
+    menu, closures, row_errors = bt._approved_state()
+    assert row_errors and row_errors[0].startswith(
+        "approved row 24 (`adjust_relationship`) in"
+    ), f"the repeated name was not named first: {row_errors}"
+    assert "REUSES the name `adjust_relationship` of row 21" in row_errors[0], (
+        f"the diagnostic does not name both occurrences: {row_errors[0]!r}"
+    )
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
+        "the named cause must print BEFORE the anonymous row-count complaint"
+    )
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "a repeated row name did not fail the build"
+    err = capsys.readouterr().err
+    assert "approved row 24 (`adjust_relationship`)" in err, err
+    assert not out.exists(), "the build failed but still wrote the artifact"
+
+    # ---- MUTATION: no guard fires at all; the row 21 cell is simply GONE, and the only
+    # diagnostic left is the anonymous row count — the failure this guard replaces.
+    _disable_the_round_3_guards(monkeypatch)
+    menu_off, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
+    assert menu_off["adjust_relationship"]["lineno"] == 24, (
+        f"the mutation must reproduce the overwrite, got {menu_off['adjust_relationship']}"
+    )
+    assert "annotate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert len(menu_off) == bt.APPROVED_MIN_ROWS, (
+        f"the count is unchanged ({len(menu_off)}) — a repeat that only RENAMES leaves no "
+        "count to see"
+    )
+    assert bt.main() == 1, "the numbered-sequence bound is still the backstop"
+    err_off = capsys.readouterr().err
+    assert "row number(s) 21 are missing" in err_off, err_off
+    assert "REUSES" not in err_off and "adjust_relationship" not in err_off, (
+        "the pre-fix diagnostic named the offending row after all — then this mutation is "
+        f"not the behaviour it claims to fix: {err_off}"
+    )
+    assert not out.exists()
+
+
+def test_a_continuation_after_a_blank_line_still_fails_the_build(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 4 — the wrap STRADDLES the blank line that ends the table.
+
+    `…annotate_operator, |` ⏎ *(blank)* ⏎ `mitigate_operator |`: the body pass ends at the
+    blank line, so the orphan belongs to no body and no in-body rule can see it. Measured
+    before the fix: `main()` → 0, artifact WRITTEN, `mitigate_operator` falsely refuted,
+    5/7/0 → 4/7/1 (#8930 review, round 3, P2).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    edited = real.replace(
+        cell, cell.replace("mitigate_operator |", "|\n\nmitigate_operator |"), 1
+    )
+    assert edited != real, "the blank-line wrap did not change the doc"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "continuation-after-blank")
+
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, (
+        f"every row still parses here ({len(menu)}) — the fragment is the only evidence"
+    )
+    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert len(row_errors) == 1, f"the fragment was not reported exactly once: {row_errors}"
+    assert (
+        "ORPHANED continuation line after row 21 (`adjust_relationship`), on the far side "
+        "of a BLANK line" in row_errors[0]
+    ), f"the diagnostic does not name the row and the blank: {row_errors[0]!r}"
+    assert "'mitigate_operator |'" in row_errors[0], row_errors[0]
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0]
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "a continuation across a blank line did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert not out.exists(), "the build failed but still wrote the artifact"
+
+    # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
+    _disable_the_round_3_guards(monkeypatch)
+    menu_off, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
+    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert bt.main() == 0, "with the guards disabled this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+        "the mutation did not reproduce the false refutation — the test proves nothing"
+    )
+    out.unlink()
+
+
+def test_a_separator_shaped_continuation_still_fails_the_build(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Shape 5 — the continuation is SEPARATOR-shaped, so it read as table syntax.
+
+    `…, |` ⏎ `|---|---|---|`: the separator branch skipped it as legitimate formatting, and
+    every body test passed. Measured before the fix: `main()` → 0, artifact WRITTEN,
+    `mitigate_operator` falsely refuted, 5/7/0 → 4/7/1 (#8930 review, round 3, P2).
+
+    The rule is positional, not cosmetic: the header's own separator comes BEFORE every row,
+    so a `|---|` line after a row has started cannot be one.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    edited = real.replace(cell, cell.replace("mitigate_operator |", "|\n|---|---|---|"), 1)
+    assert edited != real, "the separator-shaped continuation did not change the doc"
+    _, out = _edited_doc(tmp_path, monkeypatch, edited, "separator-shaped")
+
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS
+    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert len(row_errors) == 1, f"the separator fragment was not reported once: {row_errors}"
+    assert (
+        "SEPARATOR-shaped line after row 21 (`adjust_relationship`)" in row_errors[0]
+    ), f"the diagnostic does not name the row: {row_errors[0]!r}"
+    assert "'|---|---|---|'" in row_errors[0], row_errors[0]
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0]
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "a separator-shaped continuation did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert not out.exists(), "the build failed but still wrote the artifact"
+
+    # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
+    _disable_the_round_3_guards(monkeypatch)
+    _, _, errs_off = bt._approved_state()
+    assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
+    assert bt.main() == 0, "with the guards disabled this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+        "the mutation did not reproduce the false refutation — the test proves nothing"
+    )
+    out.unlink()
+
+
 def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -> None:
-    """ANTI-FALSE-POSITIVE: the orphan guard must not reject the REAL document.
+    """ANTI-FALSE-POSITIVE: the row guards must not reject the REAL document.
 
     `docs/product/canonical-mcp-tools.md` holds TWO `| # | Tool | Absorbs |` tables
     (bounded by a blank line each) and its rows are long enough that a badge-counting
-    guard could easily start refusing legitimate lines. The orphan test is therefore
-    pinned to the real doc's own numbers: 23 rows, no row errors, `--check` rc 0. If a
-    later tightening starts firing on the document the owner approved, this fails first.
+    guard could easily start refusing legitimate lines. The guards are therefore pinned to
+    the real doc's own numbers: 23 rows, no row errors, `--check` rc 0. If a later
+    tightening starts firing on the document the owner approved, this fails first.
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
@@ -2403,6 +2743,61 @@ def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -
     # ...and the entry point the gate runs agrees.
     monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
     assert bt.main() == 0, "--check went red on the unmodified approved doc"
+
+    # EVERY round-3 guard must be UNSATISFIED by this document. Without these, "the doc is
+    # green" says nothing about a guard that would refuse a legitimate line: each new rule
+    # is pinned to the shape the doc actually has.
+    #
+    # (a) no row number and no row name is stated twice. Read from the DOC rather than from
+    # `menu`, because the menu is the thing that would collapse a repeat silently.
+    body_rows = [
+        ln.strip() for ln in real.splitlines()
+        if bt._APPROVED_ROW_START.match(ln.strip())
+    ]
+    numbers = [int(bt._APPROVED_ROW_START.match(r).group(1)) for r in body_rows]
+    names = [bt._APPROVED_ROW_START.match(r).group(2) for r in body_rows]
+    assert numbers == list(range(1, 24)), f"the doc states 23 numbered rows: {numbers}"
+    assert len(set(names)) == len(names) == 23, f"no name is stated twice: {names}"
+    # (b) the table bodies hold EXACTLY ONE separator each — the header's own, before any
+    # row — and every line after it is a row prefix. That is the mid-body separator rule,
+    # and the real doc satisfies it without an exemption.
+    bodies: list[list[str]] = []
+    after_close: list[str] = []
+    lines = real.splitlines()
+    body: list[str] | None = None
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s == "| # | Tool | Absorbs |":
+            body = []
+            bodies.append(body)
+            continue
+        if body is None:
+            continue
+        if not s:  # the blank line that ends this body; the next non-blank one is pinned
+            after_close.append(next((x.strip() for x in lines[i + 1:] if x.strip()), ""))
+            body = None
+            continue
+        body.append(s)
+    assert len(bodies) == 2, f"the doc has TWO approved tables, found {len(bodies)}"
+    assert sum(len(b) - 1 for b in bodies) == bt.APPROVED_MIN_ROWS == 23, bodies
+    for b in bodies:
+        assert bt._APPROVED_SEPARATOR.match(b[0]), (
+            f"the header's own separator must come first: {b[0]!r}"
+        )
+        for s in b[1:]:
+            assert bt._APPROVED_ROW_START.match(s), f"a body line is not a row: {s!r}"
+            assert bt._APPROVED_SEPARATOR.match(s) is None, (
+                f"a separator appears AFTER rows started ({s!r}) — the real doc must never "
+                "need an exemption from the mid-body separator rule"
+            )
+    # (c) the first non-blank line after each body closes is prose, never pipe-bounded —
+    # so the post-blank fragment guard has nothing to fire on in the real doc.
+    assert len(after_close) == 2, after_close
+    for s in after_close:
+        assert not (s.startswith("|") or s.endswith("|")), (
+            f"the real doc has a pipe-bounded line directly after a table body ({s!r}); the "
+            "post-blank fragment guard would refuse the document the owner approved"
+        )
 
 
 

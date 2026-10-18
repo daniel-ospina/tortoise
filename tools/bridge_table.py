@@ -431,10 +431,26 @@ _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|.*\|\s*
 # table syntax) (#8930 review, round 2).
 #
 # So completeness is decided by the TABLE BODY, not by the row regex: from the
-# `| # | Tool | Absorbs |` header to the next blank line, every non-blank line must be a
-# separator or an `_APPROVED_ROW_START` — anything else is a REFLOWED continuation and
-# fails the build. A row whose cell continued is thus unrepresentable no matter how the
-# wrap is spelled, and it is impossible to express by widening: the orphan is the datum.
+# `| # | Tool | Absorbs |` header to the next blank line, the ONLY legal lines are the
+# header's own separator (before any row) and `_APPROVED_ROW_START` rows — anything else
+# is a REFLOWED continuation and fails the build (`_body_error`).
+#
+# ⛔ Round 3: that test was STILL bypassable, three ways, all measured green on the real
+# doc at row 21 (`rows=23`, `row_errors=[]`, `main()` → 0, artifact WRITTEN, partition
+# 5/7/0 → 4/7/1) — the same false `refuted` (#8930 review, round 3):
+#   * the continuation is ROW-SHAPED (`| 21 | `adjust_relationship` | mitigate_operator |`)
+#     so the body saw a legal row, and the row loop — keyed by NAME with an unconditional
+#     assign — REPLACED row 21 with the one-member remainder. Nothing bounded duplicates:
+#     the count guard checks only for MISSING numbers, and a duplicate number under a
+#     DIFFERENT name built green with 24 rows. Fixed in the row loop, not here: a repeated
+#     number OR a repeated name is a row error (`_row_identity_error`).
+#   * the wrap straddled a BLANK line, so the orphan fell outside every body — fixed here:
+#     a pipe-bounded first non-blank line after the body closes is a fragment of the row
+#     it followed.
+#   * the continuation was SEPARATOR-SHAPED (`|---|---|---|`), which was skipped as table
+#     syntax — fixed here: a separator AFTER a row has started is not the header's.
+# A row whose cell continued is thus unrepresentable however the wrap is spelled; it
+# cannot be expressed by widening, because the orphan is the datum.
 _APPROVED_HEADER = re.compile(r"^\|\s*#\s*\|\s*Tool\s*\|\s*Absorbs\s*\|\s*$")
 _APPROVED_SEPARATOR = re.compile(r"^\|[\s:|-]+\|\s*$")
 # The same prefix on its own, so an INCOMPLETE row is REPORTED instead of skipped: a line
@@ -564,29 +580,162 @@ def _approved_closures(text: str) -> list[tuple[str, set[str]]]:
     ]
 
 
+def _row_identity_error(
+    name: str,
+    lineno: int,
+    seen_numbers: dict[int, str],
+    seen_names: dict[str, int],
+) -> str | None:
+    """The diagnostic for a row that REPEATS another row's number or name, else `None`.
+
+    Two physical rows cannot both be row N, and two rows cannot share one name: `menu` is
+    keyed by NAME with an unconditional assign, so a repeat does not merely add a row — the
+    later one REPLACES the earlier one, and the replaced row's `Absorbs` cell silently
+    leaves the parse. Measured on the real doc (row 21): a row-shaped continuation of a
+    wrap replaced the complete row with its one-member remainder and built GREEN with the
+    artifact written; a repeated number under a DIFFERENT name built green with 24 rows.
+    Neither is visible to the count guard, which is a floor and checks only for MISSING
+    numbers (#8930 review, round 3, P1).
+
+    A repeated NUMBER and a repeated NAME are separate claims, so both are reported — the
+    earlier row is named in each, because "which occurrence is the real one" is exactly
+    what a reader needs and what the parse cannot decide.
+    """
+    earlier_number = seen_numbers.get(lineno)
+    earlier_name = seen_names.get(name)
+    if earlier_number is not None and earlier_name is not None:
+        return (
+            f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} REUSES both the "
+            f"number {lineno} and the name `{name}` of the row above it; two physical rows "
+            "cannot be one row, so the later one is DISCARDED and every member that is "
+            "only on it silently leaves the row — which renders as a false 'no approved "
+            "row absorbs it' for each of them"
+        )
+    if earlier_number is not None:
+        return (
+            f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} REUSES row number "
+            f"{lineno}, already stated for row {lineno} (`{earlier_number}`); two physical "
+            "rows cannot be one row, and the menu is keyed by name, so the number tells "
+            "the reader which row vanished while the parse cannot — a same-named repeat "
+            "silently REPLACES the earlier row, and a differently-named one adds a row "
+            "the doc does not state. Either way the discarded row renders as a false "
+            "'no approved row absorbs it'"
+        )
+    if earlier_name is None:
+        return None  # a first sighting: this row claims no identity another row holds
+    return (
+        f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} REUSES the name "
+        f"`{name}` of row {earlier_name}; the menu is keyed by NAME with an unconditional "
+        f"assign, so this row silently REPLACES row {earlier_name} and its whole `Absorbs` "
+        "cell leaves the parse — every member only on it renders as a false 'no approved "
+        "row absorbs it'"
+    )
+
+
+def _body_error(
+    stripped: str,
+    owner: tuple[int, str] | None,
+    *,
+    closed_by_blank: bool,
+) -> str | None:
+    """The approved-table body test: `None` when `stripped` is legitimate table syntax.
+
+    Three ways a line inside the table is NOT legitimate, each measured green on the real
+    doc with the artifact written and `mitigate_operator` falsely refuted (#8930 review,
+    round 3, P2):
+
+      * the first non-blank line after the body closes on a BLANK line, when it is
+        table-fragment-shaped (starts OR ends with `|`). The wrap straddles the blank that
+        ends the table, so the orphan belongs to no body at all and no in-body rule can see
+        it. A line that is NOT pipe-bounded is not reported: real prose follows both of the
+        doc's tables, and a bare paragraph is indistinguishable from one.
+      * a SEPARATOR after any row has started. The header's own separator comes BEFORE every
+        row (`owner is None`), so a later one is a row's continuation reflowed into a
+        `|---|` line — table syntax that silently swallowed the member.
+      * anything else that is neither a row prefix nor the header separator: the original
+        orphan, the row's remainder left on its own line.
+
+    `owner` is the row the line continues — the one above it inside a body, or the one the
+    body closed on. The diagnostic names it, because the failure it causes is stated in
+    terms of that row's membership.
+    """
+    if closed_by_blank:
+        if not (stripped.startswith("|") or stripped.endswith("|")):
+            return None
+        return (
+            f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
+            f"after row {owner[0]} (`{owner[1]}`), on the far side of a BLANK line: "
+            f"{stripped!r} is table-fragment-shaped (it starts or ends with `|`) and is the "
+            "first non-blank line after the body closed, so a row's cells have REFLOWED "
+            "across the blank that ends the table — the row still parses with the members "
+            "on this fragment missing, which renders as a false 'no approved row absorbs "
+            "it' for each of them. (A table header placed directly after another table with "
+            "no prose between them is the one legitimate line of this shape: separate the "
+            "tables, or complete the row above.)"
+        )
+    if _APPROVED_SEPARATOR.match(stripped):
+        if owner is None:  # the header's own separator — real table syntax
+            return None
+        return (
+            f"approved table in {APPROVED_DOC.name} has a SEPARATOR-shaped line after row "
+            f"{owner[0]} (`{owner[1]}`): {stripped!r} is a `|---|` line in the middle of the "
+            "body, where no table syntax allows one (the header's separator comes before "
+            "every row) — so it is a row's continuation that reflowed into a separator, and "
+            "the members it carried have silently left the row, which renders as a false "
+            "'no approved row absorbs it' for each of them"
+        )
+    if owner is None:
+        owner_text = "the header (before any row)"
+    else:
+        owner_text = f"row {owner[0]} (`{owner[1]}`)"
+    return (
+        f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
+        f"after {owner_text}: {stripped!r} is neither a `| N | name | … |` row nor a "
+        "separator, so a row's cells have REFLOWED onto a second physical line — the "
+        "row still parses, but every member on the wrapped remainder silently leaves "
+        "it, which renders as a false 'no approved row absorbs it' for each of them"
+    )
+
+
 def _parse_approved(
     text: str,
 ) -> tuple[dict[str, dict], list[tuple[str, set[str]]], list[str]]:
     """One parse of the approved doc: (approved row name -> row, closures, row errors).
 
     `row_errors` is a row the parse could not read COMPLETELY — a row that reflowed onto a
-    second line (detected by its cell prefix not ending in `|`, or by the orphaned
-    continuation line that the wrap leaves in the table body), or one with too few cells.
-    It is an ERROR, never a silent skip: dropping the row narrows what the doc says the row
-    absorbs, and the verdicts treat that set as the row's approved home (#8930 review,
-    P1/P2a).
+    second line (detected by its cell prefix not ending in `|`, by the orphaned
+    continuation line that the wrap leaves in the table body, through a blank line, or
+    behind a separator-shaped fragment), one with too few cells, or a row that REPEATS
+    another row's number or name.
+    It is an ERROR, never a silent skip: dropping or replacing the row narrows what the doc
+    says the row absorbs, and the verdicts treat that set as the row's approved home
+    (#8930 review, P1/P2a, round 3).
     """
     known = _known_names()
     closures = _approved_closures(text)
 
     menu: dict[str, dict] = {}
     row_errors: list[str] = []
+    # Two physical rows claiming ONE identity is unrepresentable in a menu keyed by name,
+    # and BOTH ways it happens were measured green: a repeated number under the SAME name
+    # made the later assign REPLACE the row, and a repeated number under a DIFFERENT name
+    # added a 24th row (the count guard is a floor, so it cannot see either). A repeated
+    # NAME reaches the same overwrite from the other side (#8930 review, round 3).
+    seen_numbers: dict[int, str] = {}
+    seen_names: dict[str, int] = {}
     for line in text.splitlines():
         start = _APPROVED_ROW_START.match(line)
         if not start:
             continue
         name = start.group(2)
         lineno = int(start.group(1))
+        repeat = _row_identity_error(name, lineno, seen_numbers, seen_names)
+        if repeat:
+            row_errors.append(repeat)
+            # The later row is DISCARDED, never merged: keeping it is what let a one-member
+            # remainder replace a complete row's member list.
+            continue
+        seen_numbers[lineno], seen_names[name] = name, lineno
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         # `cells[2]` is the `Absorbs` cell. Indexing it blind raised IndexError on a
         # two-cell row, which escaped `main()`'s build-failure path entirely — a traceback
@@ -630,40 +779,40 @@ def _parse_approved(
     # BODY INTEGRITY — the completeness test `_APPROVED_ROW` is NOT. A separate pass, because
     # it answers a different question: not "is this line a row" but "is the table the rows
     # sit in intact". From the `| # | Tool | Absorbs |` header until the next blank line,
-    # every non-blank line must be a separator or a row prefix; anything else is a REFLOWED
-    # CONTINUATION — the continuation of the row above it, which has ALREADY parsed with the
-    # members on this line missing. Appended before any cell was read from it, so the build
-    # fails and no artifact carries the truncated membership (#8930 review, round 2, P1).
+    # the only legal lines are the header's own separator and row prefixes; anything else is
+    # a REFLOWED CONTINUATION — the continuation of the row above it, which has ALREADY
+    # parsed with the members on this line missing. Appended before any cell was read from
+    # it, so the build fails and no artifact carries the truncated membership (#8930 review,
+    # round 2, P1).
     last_row: tuple[int, str] | None = None
+    # A body that ended on a BLANK line leaves one more thing to inspect: the first
+    # non-blank line after it. The wrap straddling that blank put its remainder outside
+    # every body, so no in-body rule could see it (#8930 review, round 3, P2).
+    closed_row: tuple[int, str] | None = None
     in_table = False
     for line in text.splitlines():
         stripped = line.strip()
+        if not in_table and closed_row is not None and stripped:
+            closed, closed_row = closed_row, None
+            err = _body_error(stripped, closed, closed_by_blank=True)
+            if err:
+                row_errors.append(err)
         if _APPROVED_HEADER.match(stripped):
-            in_table, last_row = True, None
+            in_table, last_row, closed_row = True, None, None
             continue
         if not in_table:
             continue
         if not stripped:  # a blank line ends the table body (the doc has TWO such tables)
-            in_table, last_row = False, None
+            in_table = False
+            last_row, closed_row = None, last_row
             continue
         start = _APPROVED_ROW_START.match(stripped)
         if start:
             last_row = (int(start.group(1)), start.group(2))
             continue
-        if _APPROVED_SEPARATOR.match(stripped):
-            continue
-        owner = (
-            f"row {last_row[0]} (`{last_row[1]}`)"
-            if last_row
-            else "the header (before any row)"
-        )
-        row_errors.append(
-            f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
-            f"after {owner}: {stripped!r} is neither a `| N | name | … |` row nor a "
-            "separator, so a row's cells have REFLOWED onto a second physical line — the "
-            "row still parses, but every member on the wrapped remainder silently leaves "
-            "it, which renders as a false 'no approved row absorbs it' for each of them"
-        )
+        err = _body_error(stripped, last_row, closed_by_blank=False)
+        if err:
+            row_errors.append(err)
 
     # Apply the closure the doc states, one hop at a time until it settles: a member
     # that `sit inside`s another member is a member too.
