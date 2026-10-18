@@ -543,6 +543,37 @@ def test_run_main_aborts_before_the_model_is_injected(monkeypatch):
     assert "injected" not in seen
 
 
+def test_run_main_aborts_before_the_cross_encoder_is_loaded(monkeypatch):
+    """BOTH model loads sit below the gate, not just ``inject_model``.
+
+    The R6 pre-warm (~90 MB cross-encoder) used to run ABOVE the gate, so a
+    ``--rerank`` arm — a documented eval A/B arm — paid that load before it
+    could learn the measurement target is defragging. Non-vacuous pre-fix: the
+    pre-warm branch ran before ``enforce_server_posture``, so ``get_scorer``
+    was reached and ``seen`` was populated.
+    """
+    from tools.longmem_eval import rerank as rerank_mod
+
+    seen: dict[str, bool] = {}
+
+    def _record_prewarm(*_a, **_kw):
+        seen["prewarmed"] = True
+        return None, "must not be called"
+
+    def _raise_posture(**_kw):
+        raise ServerPostureError("activedefrag='yes' on the measurement server")
+
+    monkeypatch.setattr(runner, "enforce_server_posture", _raise_posture)
+    monkeypatch.setattr(rerank_mod, "get_scorer", _record_prewarm)
+
+    with pytest.raises(SystemExit) as exc:
+        runner.run_main(["--db", "redis://127.0.0.1:6379/eval_posture_pin",
+                         "--mock", "--rerank", "--limit", "1",
+                         "--split", "s", "--no-download"])
+    assert exc.value.code == 1
+    assert "prewarmed" not in seen
+
+
 def test_disable_policy_fails_closed_when_the_probe_cannot_be_opened(monkeypatch):
     """``disable`` cannot apply a mitigation through a probe it never opened —
     the same fail-open as an unreadable value, one step earlier."""
