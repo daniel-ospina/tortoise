@@ -3054,6 +3054,18 @@ surfaces:
   # + the `vet_enabled` fold in `extractor_v2.py`. Registered beside its
   # sibling `test_vet_gate_5005.py` because it guards the same seam.
   - test_value_gate_4899.py
+  # #5008: the S5 EMBED gate — `tortoise/embed_gate.py` (the predicate, whose
+  # rule set IS `tortoise/value_gate.py`'s: one rule set, two questions,
+  # `STORAGE-ARCHITECTURE.md` §12.2a) plus its submission seam
+  # `encode_for_row` and the graph writers in `tortoise/projection/entities.py`
+  # that call it. Registered beside its sibling `test_value_gate_4899.py`
+  # because it guards the same seam from the other side. DUAL with `eval`
+  # (below): `tortoise/embeddings.py` is an `eval` SOURCE_PATTERN that REPLACES
+  # the `core` fallback, so an embeddings-only diff would otherwise never run
+  # this file (#1349/#2938 silent-drop class). NOT carve_out-registered — it
+  # builds its store by path (the `test_update_point_content_embedding_4208.py`
+  # pattern), which runs on any lane.
+  - test_embed_gate_5008.py
   # #5049: the verdict contract (`tests/_verdict.py`) — condition-vs-deadline
   # waits, INCONCLUSIVE-on-expiry, the measured `Deadline`, the host-capability
   # gate, and the per-test process-global reset. Registered here (core) AND its
@@ -4006,6 +4018,7 @@ surfaces:
   # the normalization & width guards), which this surface owns.
   - test_journal_embedding_5004.py
   - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
+  - test_embed_gate_5008.py  # #5008: dual with `core` — `encode_for_row` (the EMBED gate's submission seam) lives in `tortoise/embeddings.py`, which this surface owns; without this arm an embeddings.py-only diff would leave the gate unguarded
   - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
@@ -5596,6 +5609,7 @@ durations:
   test_dream_noop_3139.py: 4.0
   test_durability_posture.py: 1.1
   test_embed_metering.py: 12.0  # unmeasured — #4488: locally measured (58 tests, embedded lane: 10.9–16.0s across runs, ~12s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
+  test_embed_gate_5008.py: 6.0  # unmeasured — #5008 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Locally measured this turn on the embedded lane: 37 tests in 5.6s (`TORTOISE_TEST_CARVE_OUT=1`); declared at 6.0s so a cold leg cannot under-pack. Refresh from the first post-merge run.
   test_embedder_provision.py: 6.0
   test_entity_delete_rebuild.py: 1.9
   test_env_truthy.py: 14.6
