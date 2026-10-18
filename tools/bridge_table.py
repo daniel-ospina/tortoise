@@ -476,6 +476,8 @@ _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|.*\|\s*
 # therefore "unrepresentable however it is spelled" — it cannot be expressed by WIDENING
 # the row parse, because the orphan is the datum, and the prose-shaped spelling is a known,
 # recorded gap rather than a closed one.
+# The header is what ARMS the body-integrity pass below (`in_table`), so its own match count
+# is bounded too (`APPROVED_MIN_BODIES`): a guard that never arms cannot fail.
 _APPROVED_HEADER = re.compile(r"^\|\s*#\s*\|\s*Tool\s*\|\s*Absorbs\s*\|\s*$")
 _APPROVED_SEPARATOR = re.compile(r"^\|[\s:|-]+\|\s*$")
 # The same prefix on its own, so an INCOMPLETE row is REPORTED instead of skipped: a line
@@ -504,6 +506,16 @@ APPROVED_MIN_CLOSURES = 4
 # clause drops the successors silently, which flips `tortoise_invalidate` from
 # `successor` (support) to `rehomed` and changes an owner-facing count with a green build.
 APPROVED_MIN_SPLITS = 1
+
+# The doc states TWO approved tables (two `| # | Tool | Absorbs |` headers, ~line 142 and
+# ~line 156). The body-integrity pass — the row-reflow/orphan/separator test, the ONLY
+# detector for a wrap whose first physical line still ends in `|` — is entered from a
+# header match, and nothing else in the guard set notices a table body it never scanned.
+# So a benign header edit (a fourth column, the third column reworded) silently disarms
+# the whole family while every row still parses: 23 rows, gapless numbering, closures and
+# split green, build green, and the truncated row regenerates the artifact with a false
+# 'no approved row absorbs it'. Bounding the count makes that edit loud (#8930 review, P1).
+APPROVED_MIN_BODIES = 2
 
 
 def _known_names() -> set[str]:
@@ -784,6 +796,42 @@ def _body_error(
     )
 
 
+def _cell_count_error(lineno: int, name: str, cells: list[str]) -> str | None:
+    """The `| N | name | Absorbs |` shape test, in BOTH directions — both TRUNCATE.
+
+    Too FEW cells indexes `cells[2]` blind: that raised `IndexError` on a two-cell row,
+    which escaped `main()`'s build-failure path entirely — a traceback where the diagnostic
+    belonged (#8930 review, P2a).
+
+    Too MANY is the same truncation from the other side: an extra pipe — inside the
+    `Absorbs` cell, or inside any other cell, which shifts what `cells[2]` holds (the
+    markdown-ESCAPED pipe splits too) — leaves `cells[2]` a SHORTER member list while the
+    physical line still ends in `|`, so the row reads as complete and every other guard
+    stays green — 23 rows, gapless numbering, closures and split untouched. The members
+    past that pipe leave the row, flipping the destination they support from
+    `successor`/`row` to `rehomed`/`refuted` with no diagnostic (#8930 review, P2b). A
+    markdown cell that needs a pipe has to say it in words; the table has exactly three
+    columns.
+    """
+    if len(cells) == 3:
+        return None
+    if len(cells) < 3:
+        return (
+            f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} parses to "
+            f"{len(cells)} cell(s); the table shape is `| N | name | Absorbs |`, so "
+            "there is no `Absorbs` cell to read — the row is dropped and every method "
+            "it absorbs renders as 'no approved row absorbs it'"
+        )
+    return (
+        f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} parses to "
+        f"{len(cells)} cell(s); the table shape is `| N | name | Absorbs |`, so a pipe "
+        "has been written inside one of the row's cells and SPLIT the row — `cells[2]` "
+        "is then a TRUNCATED `Absorbs` list, so every member past that pipe silently "
+        "leaves the row, which renders as a false 'no approved row absorbs it' for each "
+        "of them"
+    )
+
+
 def _parse_approved(
     text: str,
 ) -> tuple[dict[str, dict], list[tuple[str, set[str]]], list[str]]:
@@ -824,16 +872,11 @@ def _parse_approved(
             continue
         seen_numbers[lineno], seen_names[name] = name, lineno
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        # `cells[2]` is the `Absorbs` cell. Indexing it blind raised IndexError on a
-        # two-cell row, which escaped `main()`'s build-failure path entirely — a traceback
-        # where the diagnostic belonged (#8930 review, P2a).
-        if len(cells) < 3:
-            row_errors.append(
-                f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} parses to "
-                f"{len(cells)} cell(s); the table shape is `| N | name | Absorbs |`, so "
-                "there is no `Absorbs` cell to read — the row is dropped and every method "
-                "it absorbs renders as 'no approved row absorbs it'"
-            )
+        # `cells[2]` is the `Absorbs` cell — see `_cell_count_error` for why the count is
+        # bounded in both directions rather than only from below.
+        shape = _cell_count_error(lineno, name, cells)
+        if shape:
+            row_errors.append(shape)
             continue
         # A complete row ends in `|` on this line. If it does not, the cell reflowed and
         # its continuation was never read: the row would parse with a TRUNCATED member
@@ -956,6 +999,17 @@ def _approved_state() -> tuple[dict[str, dict], list[tuple[str, set[str]]], list
     return _parse_approved(APPROVED_DOC.read_text(encoding="utf-8"))
 
 
+def _approved_header_count(text: str) -> int:
+    """How many approved table BODIES the doc states (`| # | Tool | Absorbs |` headers).
+
+    Counted from the text rather than threaded through the parse so the body-integrity
+    guard cannot be disarmed by a caller that drops it: `APPROVED_MIN_BODIES` is checked
+    against the document itself, the way `_known_names()` is read here rather than
+    supplied.
+    """
+    return sum(1 for line in text.splitlines() if _APPROVED_HEADER.match(line.strip()))
+
+
 def _approved_errors(
     menu: dict[str, dict],
     closures: list[tuple[str, set[str]]],
@@ -995,6 +1049,23 @@ def _approved_structure_errors(
             f"parse of {APPROVED_DOC.name} (parsed {len(menu)} rows, numbered "
             f"{linenos[0]}-{linenos[-1]}); a row the doc states is being dropped, so every "
             "method it absorbs would render as 'no approved row absorbs it'"
+        ]
+    # The body-integrity pass is ARMED by the header, so the header must be found: a
+    # reworded or re-columned header leaves every row parsing while the pass that catches
+    # a wrap ending in `|` never runs. Placed after the row-count/numbering guards (a doc
+    # that lost ROWS is reported as that, not as a header break) and before the content
+    # guards, because a body that was never scanned makes each of them a narrower reading
+    # of the doc than they claim.
+    bodies = _approved_header_count(APPROVED_DOC.read_text(encoding="utf-8"))
+    if bodies < APPROVED_MIN_BODIES:
+        return [
+            f"only {bodies} `| # | Tool | Absorbs |` header(s) matched in "
+            f"{APPROVED_DOC.name} (expected {APPROVED_MIN_BODIES} — the doc states two "
+            "approved tables); the row-reflow guard is decided by the table BODY, so with "
+            "no body entered it is UNARMED — a row whose cells wrapped with the first "
+            "line still ending in `|` parses with the members on the remainder silently "
+            "missing, which renders as a false 'no approved row absorbs it' for each of "
+            "them"
         ]
     # A CURRENT tool name in a cell's PROSE is a member list the em dash was misplaced
     # into — which silently strips that member from its row.

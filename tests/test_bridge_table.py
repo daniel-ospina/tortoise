@@ -3128,3 +3128,176 @@ def test_d4_membership_sentence_is_derived_from_the_parsed_closure() -> None:
     assert any("`list_graphs`" in ln and "`overview`" in ln for ln in lines2), (
         "the edited closure statement vanished entirely, so the check above is vacuous"
     )
+
+
+def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The body-integrity pass is ARMED by the header — so the header must be found.
+
+    Every row-completeness rule this build owns (the orphaned continuation, the mid-body
+    separator, the fragment across a blank) is decided by the TABLE BODY: `in_table` is set
+    only where `_APPROVED_HEADER` matches. The row loop is header-agnostic, so a benign
+    header edit — a fourth column, the third column reworded — left every row parsing (23,
+    gapless) while the pass that could see a wrap never ran. Measured green: the wrapped row
+    parsed TRUNCATED, `_approved_errors` returned `[]`, `main()` returned 0 and the artifact
+    was written with `mitigate_operator` falsely refuted — the exact false claim about the
+    owner-approved doc §D4 exists to prevent (#8930 review, P1).
+
+    The mutation is in the test, so the guard cannot rot into a tautology: with the count
+    neutered the SAME document builds green and writes the false claim; armed, the build is
+    red and nothing is written. Both halves are asserted, in that order.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+
+    # Two plausible owner edits, and BOTH are needed to reproduce it: re-column the header
+    # (so the body pass never arms) and wrap row 21 leaving `|` at the end of line 1 (so
+    # the row still reads as complete and only the body test could see the remainder).
+    mutated = real.replace("| # | Tool | Absorbs |", "| # | Tool | Absorbs | Notes |")
+    assert mutated != real, "the approved header is not in the doc — this test is stale"
+    assert mutated.count("| # | Tool | Absorbs | Notes |") == bt.APPROVED_MIN_BODIES, (
+        "both approved tables must be re-columned here, so the count guard sees zero"
+    )
+    mutated = mutated.replace(
+        cell, "operator_action, annotate_operator, |\n| mitigate_operator |", 1
+    )
+    path = tmp_path / "header-reworded.md"
+    path.write_text(mutated, encoding="utf-8")
+    out = tmp_path / "bridge-table.md"
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+    monkeypatch.setattr(bt, "OUT", out)
+
+    # The row parse is untouched — which is exactly why the header count is the only thing
+    # that can see this. The wrap has TRUNCATED row 21, and no ROW error reports it.
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS, f"{len(menu)} rows parsed, expected all of them"
+    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
+        "this shape is supposed to truncate row 21 — if it no longer does, the test no "
+        "longer reproduces the defect"
+    )
+    assert row_errors == [], (
+        f"the body pass is disarmed here, so no row may report the wrap: {row_errors}"
+    )
+
+    errs = bt._approved_errors(menu, closures, row_errors)
+    assert errs and "header(s) matched" in errs[0], (
+        f"a header the body pass cannot arm on did not fail the build: {errs}"
+    )
+    assert "UNARMED" in errs[0], f"the diagnostic does not say the guard is unarmed: {errs[0]!r}"
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])  # WRITE mode, not --check
+    assert bt.main() == 1, "a re-columned header did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "header(s) matched" in err, err
+    assert not out.exists(), (
+        f"the build failed but still wrote {out.name} — the false refutation of the "
+        "owner-approved doc is what must not reach the artifact"
+    )
+
+    # ---- MUTATION: neuter the count. Same document, same (intact) row parse — the defect
+    # comes straight back, green, in the artifact.
+    monkeypatch.setattr(bt, "_approved_header_count", lambda _text: bt.APPROVED_MIN_BODIES)
+    assert bt._approved_errors(*bt._approved_state()) == [], (
+        "the mutation did not disable the header bound"
+    )
+    assert bt.main() == 0, "with the header bound neutered this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    assert "no approved row absorbs `mitigate_operator`" in written, (
+        "the mutation did not reproduce the defect — the test proves nothing"
+    )
+    out.unlink()
+
+
+def test_a_pipe_inside_the_absorbs_cell_cannot_truncate_it(tmp_path, monkeypatch, capsys):
+    """The cell-count guard is two-sided: an extra cell CUTS the `Absorbs` cell.
+
+    Only `len(cells) < 3` was an error, so a pipe written inside the `Absorbs` cell split
+    it into a fourth cell and `cells[2]` became a SHORTER member list — while the physical
+    line still ends in `|`, so the row reads as complete and every other guard stays green
+    (23 rows, gapless, closures and split untouched). Row 17's split reworded with a raw
+    pipe is the realistic spelling: `supersede_knowledge` leaves the successors, flipping
+    `tortoise_invalidate` from `successor` (support) to `rehomed` (a disagreement) in the
+    owner-facing table, with no diagnostic (#8930 review, P2b).
+
+    The mutation half disables the shape test and shows the same document building green
+    with the truncated membership in the written artifact.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    clause = "splits this into `update_knowledge` + `supersede_knowledge`"
+    assert clause in real, "row 17's split clause is not in the doc — this test is stale"
+    mutated = real.replace(
+        clause, "splits this into `update_knowledge` | `supersede_knowledge`", 1
+    )
+    assert mutated != real, "the mutation did not change the doc"
+    path = tmp_path / "pipe-in-cell.md"
+    path.write_text(mutated, encoding="utf-8")
+    out = tmp_path / "bridge-table.md"
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+    monkeypatch.setattr(bt, "OUT", out)
+
+    # What the OLD parse would have read: the truncated cell, against the whole row.
+    row17 = next(line for line in mutated.splitlines() if line.startswith("| 17 |"))
+    cells = [c.strip() for c in row17.strip().strip("|").split("|")]
+    assert len(cells) == 4, f"the pipe did not split the cell: {len(cells)} cell(s)"
+    assert "supersede_knowledge" in row17, "the row still states the successor..."
+    assert "supersede_knowledge" not in cells[2], (
+        "...and `cells[2]` is where it is CUT OFF — that truncation is the defect"
+    )
+
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS - 1, (
+        f"the row must be DROPPED, not silently truncated — {len(menu)} rows parsed"
+    )
+    assert "revise_knowledge" not in menu
+    assert len(row_errors) == 1, f"the extra cell was not reported exactly once: {row_errors}"
+    assert "parses to 4 cell(s)" in row_errors[0], (
+        f"the diagnostic does not report the cell count: {row_errors[0]!r}"
+    )
+    assert "row 17 (`revise_knowledge`)" in row_errors[0], (
+        f"the diagnostic does not name the row: {row_errors[0]!r}"
+    )
+    assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
+        "the specific cause must print BEFORE the generic row-count diagnostic"
+    )
+
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])  # WRITE mode
+    assert bt.main() == 1, "a pipe inside the Absorbs cell did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "parses to 4 cell(s)" in err, err
+    assert not out.exists(), (
+        f"the build failed but still wrote {out.name} — a truncated member list is exactly "
+        "what must not reach the artifact"
+    )
+
+    # ---- MUTATION: disable the shape test. Same document, and the truncation lands in the
+    # artifact as a `rehomed` verdict the approved doc does not support.
+    monkeypatch.setattr(bt, "_cell_count_error", lambda *a, **k: None)
+    menu_off, _, row_errors_off = bt._approved_state()
+    assert row_errors_off == [], f"the mutation did not disable the shape test: {row_errors_off}"
+    assert len(menu_off) == bt.APPROVED_MIN_ROWS
+    assert menu_off["revise_knowledge"]["successors"] == ["update_knowledge"], (
+        "the mutation did not reproduce the truncation — the test proves nothing: "
+        f"{menu_off['revise_knowledge']['successors']!r}"
+    )
+    assert bt.main() == 0, "with the shape test disabled this document MUST build green"
+    written = out.read_text(encoding="utf-8")
+    invalidate_row = next(
+        (ln for ln in written.splitlines() if ln.startswith("| `tortoise_invalidate` |")), ""
+    )
+    assert invalidate_row, "§D4 no longer renders `tortoise_invalidate` — test is stale"
+    verdict_cell = [c.strip() for c in invalidate_row.strip().strip("|").split("|")][4]
+    assert verdict_cell == "**rehomed**", (
+        "the mutation did not flip the destination verdict the lost successor supported: "
+        f"{invalidate_row}"
+    )
+    out.unlink()
