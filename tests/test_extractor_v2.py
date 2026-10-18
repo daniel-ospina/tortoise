@@ -1423,10 +1423,19 @@ class TestS3:
         FALSIFIER — value: presence of the keyword. The strict mock below
         raises ``TypeError`` on ANY unexpected keyword, so an unconditional
         ``exclude_turn_echo_session=None`` (sent even with no session) turns
-        this test red. Reachable: both calls below omit ``session_id``."""
+        this test red. Reachable: both calls below omit ``session_id``.
+
+        The mock carries the SDK's other CURRENT private kwargs
+        (``_record_reads`` from #7983, ``_valid_time_rerank=False`` from
+        #8487) because those are sent unconditionally by design — they are
+        this repo's own SDK parameters, not a compatibility window, and the
+        falsifier here is the echo kwarg alone. Leaving them out of the mock
+        would turn this test into a tripwire on every future private kwarg
+        instead of on the one behaviour it names."""
         class StrictMockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
-                                   include_terminal=False, _record_reads=True):
+                                   include_terminal=False, _record_reads=True,
+                                   _valid_time_rerank=True):
                 return []
 
         sdk = StrictMockSDK()
