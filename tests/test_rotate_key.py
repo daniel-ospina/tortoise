@@ -184,12 +184,25 @@ def _reraise_captured_skip(errors: list[BaseException]) -> None:
     red`) failing from the seam adopted to prevent it: a loaded box would
     manufacture a red out of machine load.
 
-    Call this BEFORE `assert not errors`; every other captured exception stays
-    a genuine failure.
+    A captured skip NEVER downgrades a genuine failure (#4721 review P2): the
+    list is PARTITIONED, so the skip is re-raised only when EVERY captured
+    exception is a skip. The earlier shape raised the first skip it found and
+    returned through the `raise`, silently discarding a real exception
+    captured alongside it — a red reported as INCONCLUSIVE, i.e. the #5049
+    rule broken in the opposite direction (fail-open). Genuine failures win:
+    with `errors == [<failure>, <skip>]` the failure is what pytest records.
+
+    Call this AFTER the deadlock (liveness) assertion and BEFORE
+    `assert not errors`. The liveness fact is independent of the skip
+    contract — a worker still parked in the rendezvous is a real failure and
+    must not be reported as a skip.
     """
-    for e in errors:
-        if isinstance(e, pytest.skip.Exception):
-            raise e
+    skips = [e for e in errors if isinstance(e, pytest.skip.Exception)]
+    others = [e for e in errors if not isinstance(e, pytest.skip.Exception)]
+    if others:
+        raise others[0]
+    if skips:
+        raise skips[0]
 
 
 # ── T2: the cap proof + the spent-slot refusals ─────────────────────────────
@@ -788,14 +801,17 @@ def test_concurrent_rotate_of_one_row_admits_exactly_one(client, fake, monkeypat
         t.start()
     for t in threads:
         t.join(timeout=120)
-    # #5049: a load refusal reaches this race as a skip raised INSIDE the
-    # worker (verdict_client), so it must be re-raised here to count as a skip
-    # rather than be asserted into a red below.
-    _reraise_captured_skip(errors)
-    assert not errors, errors
+    # The liveness fact comes FIRST: a worker still parked in the rendezvous is
+    # a real failure, and a captured skip must not report it as INCONCLUSIVE.
     assert not any(t.is_alive() for t in threads), (
         "a rotate thread never returned — the claim rendezvous deadlocked"
     )
+    # #5049: a load refusal reaches this race as a skip raised INSIDE the
+    # worker (verdict_client), so it must be re-raised here to count as a skip
+    # rather than be asserted into a red below — and only when it is the ONLY
+    # kind of thing captured (see `_reraise_captured_skip`).
+    _reraise_captured_skip(errors)
+    assert not errors, errors
     statuses = sorted(r.status_code for r in results)
     assert statuses == [200, 409], [
         (r.status_code, r.text) for r in results
@@ -914,6 +930,56 @@ def test_a_threaded_non_answer_is_re_raised_as_the_contracts_skip(monkeypatch):
     # The fix: re-raised in the main thread, where pytest records the skip.
     with pytest.raises(pytest.skip.Exception):
         _reraise_captured_skip(errors)
+
+
+def test_a_captured_skip_never_downgrades_a_genuine_failure(monkeypatch):
+    """The other direction of the #5049 seam: failures win, skips do not mask.
+
+    A loaded box can refuse ONE worker's request (captured skip) while its
+    partner hits a real fault — a 500 through TestClient's
+    ``raise_server_exceptions``, an embedded-DB error, or the winner's own
+    path. The pre-fix shape raised the FIRST skip it found and returned
+    through the `raise`, so a genuine exception sitting next to it was
+    discarded and the run was recorded as SKIP: a real failure reported as
+    INCONCLUSIVE (fail-open), which is the #5049 contract broken in the
+    opposite direction.
+
+    Non-vacuity: with ``errors == [AssertionError, Skipped]`` the pre-fix
+    helper raises the skip (the test below fails on that), the fix raises the
+    AssertionError. Built from a REAL captured skip (the forced-0s bound) so
+    the element under test is the one the race workers actually produce.
+    """
+    from tortoise import mcp_auth
+
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/team/keys", json={})
+    captured_skip = excinfo.value
+    assert isinstance(captured_skip, pytest.skip.Exception)
+
+    failure = AssertionError("the other worker hit a real fault")
+    # The order that defeats the pre-fix shape: the genuine failure is FIRST,
+    # so a `for` loop raising the first skip it meets walks past it. The call's
+    # escape is captured rather than asserted with `pytest.raises` — under the
+    # pre-fix helper it raises the SKIP, which pytest would honour and record
+    # as a skip (the masking this case exists to catch); captured, it is a plain
+    # red on the assertion below.
+    mixed: list[BaseException] = [failure, captured_skip]
+    raised_exc: BaseException | None = None
+    try:
+        _reraise_captured_skip(mixed)
+    except BaseException as e:  # noqa: BLE001 — the raised TYPE is the assertion
+        raised_exc = e
+    assert raised_exc is failure, (
+        "a captured skip must never downgrade a genuine failure — the FAILURE "
+        f"is what pytest records; got {raised_exc!r}"
+    )
+    # And a skip-only race still skips: the conversion this seam exists for.
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        _reraise_captured_skip([captured_skip])
+    assert skipped.value is captured_skip
+    # Nothing captured at all: nothing raised (the ordinary green race).
+    assert _reraise_captured_skip([]) is None
 
 
 # ── T7, registry lane: the CYPHER twin's claim, raced ───────────────────────
@@ -1124,12 +1190,13 @@ def test_registry_lane_concurrent_rotate_of_one_row_admits_exactly_one(
             t.start()
         for t in threads:
             t.join(timeout=120)
-    # #5049: same seam, same reason — see the Supabase twin above.
-    _reraise_captured_skip(errors)
-    assert not errors, errors
+    # Same order as the Supabase twin: liveness first (a deadlock is a real
+    # failure), then the #5049 re-raise, then the errors assertion.
     assert not any(t.is_alive() for t in threads), (
         "a rotate thread never returned — the claim rendezvous deadlocked"
     )
+    _reraise_captured_skip(errors)
+    assert not errors, errors
     statuses = sorted(r.status_code for r in results)
     assert statuses == [200, 409], [(r.status_code, r.text) for r in results]
     assert len(claim_waiters) == 2, (

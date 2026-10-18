@@ -51,6 +51,10 @@ import { stripComments } from './testSupport.js'
 // too, so a test that extracted a local declaration would fail loudly rather
 // than silently stop guarding the seams.
 import { revealablePlaintext, revealableMintPlaintext } from './sessionKey.js'
+// #4721 (review P2): the banner's message normaliser, IMPORTED from its real
+// home (upsellGate.js) rather than stubbed — a stub with different null
+// semantics would let the composed banner be tested against the stub.
+import { errorMessage } from './upsellGate.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -336,6 +340,10 @@ test('#8249 (review P2): the composed banner shows the refusal, not the refresh 
   // failure (rotate succeeded, follow-up `loadAll('')` failed) must render the
   // destroyed-key message. On the pre-fix main.jsx the helper does not exist,
   // so the extraction throws — the test cannot pass vacuously.
+  //
+  // #4721 (review P2): "outranks" is a PRECEDENCE, not a discard — the refusal
+  // renders FIRST and the transient text after it, so no truth is dropped
+  // (see the latched-refusal/409 case below).
   const { calls, regenerateKey } = rotateEnv({
     response: { id: 'k-new', key_prefix: 'tt_rot_new' },
     loadAll: (c) => { c.error.push('Failed to fetch') },
@@ -345,16 +353,61 @@ test('#8249 (review P2): the composed banner shows the refusal, not the refresh 
     'the refresh failure did land in the error slot (the precondition for the displacement)')
   const refusal = refusalOf(calls)
   const { errorBannerText } = build(
-    { errorMessage: (e) => (typeof e === 'string' ? e : (e && e.message) || 'error') },
+    { errorMessage },
     ['function errorBannerText'])
-  assert.equal(errorBannerText('Failed to fetch', refusal), refusal,
-    'the retained refusal OUTRANKS the refresh error in the composed banner')
+  const composed = errorBannerText('Failed to fetch', refusal)
+  assert.ok(composed.startsWith(refusal),
+    'the retained refusal OUTRANKS the refresh error — it renders FIRST, so it is never hidden')
+  assert.match(composed, /Failed to fetch/,
+    'and the transient text is appended rather than discarded — the refusal is a precedence, not a filter')
   assert.equal(errorBannerText('Failed to fetch', ''), 'Failed to fetch',
     'an absent refusal leaves the error slot authoritative — the three-branch banner is unchanged')
   assert.equal(errorBannerText(null, 'only a refusal'), 'only a refusal',
     'and a refusal with no error renders alone')
   assert.match(mainJsxCode, /\{errorBannerText\(error, rotateRefusalText\)\}/,
     'the JSX banner must render the composed message, not `error ? errorMessage(error) : rotateRefusalText`')
+})
+
+test('#4721 (review P2): a LATCHED refusal does not swallow a newer definite 4xx detail', async () => {
+  // The sequence the #8249 refusal's own remedy invites: it ends "Refresh the
+  // list, revoke the unused replacement row, and create a new key". A user who
+  // instead retries the rotate on the now-dead row gets the non-occupying 409 —
+  // and until this fix `errorBannerText` returned the latched refusal and the
+  // 409 detail (the one thing the definite-4xx branch exists to restore) never
+  // reached the screen. Both are true, so both must render, refusal first.
+  let call = 0
+  const env = rotateEnv({
+    // 1st: the plaintext-less 2xx that latches the #8249 refusal for org-A.
+    // 2nd: the definite non-occupying 409 on the row that 1st rotate killed.
+    apiImpl: async () => {
+      call += 1
+      if (call === 1) return { id: 'k-new', key_prefix: 'tt_rot_one' }
+      throw Object.assign(new Error(ROTATE_409_NOT_OCCUPYING), { status: 409 })
+    },
+    loadAll: revokedReload,
+  })
+  await env.regenerateKey('k-old')
+  const refusal = refusalOf(env.calls)
+  assert.match(refusal, /has already been revoked/,
+    'precondition: the plaintext-less rotate latched the destroyed-key refusal')
+  await env.regenerateKey('k-old')
+  const surfaced = env.calls.error.filter(Boolean).at(-1)
+  assert.equal(surfaced, ROTATE_409_NOT_OCCUPYING,
+    'the definite 409 detail is the LAST write to the transient slot')
+  assert.equal(refusalOf(env.calls), refusal,
+    'and the refusal is not cleared — a refusal can never erase the destruction record')
+  const { errorBannerText } = build(
+    { errorMessage },
+    ['function errorBannerText'])
+  const banner = errorBannerText(surfaced, refusal)
+  assert.ok(banner.startsWith(refusal),
+    'the retained destruction record still renders FIRST (#8249 precedence kept)')
+  assert.match(banner, /rotate requires a live key/,
+    'and the newer definite 4xx detail is REACHABLE in the banner (#4721)')
+  // Non-vacuity: the pre-fix helper is `refusalText || errorMessage(error)`.
+  const preFix = (e, r) => r || (typeof e === 'string' ? e : (e && e.message) || 'error')
+  assert.doesNotMatch(preFix(surfaced, refusal), /rotate requires a live key/,
+    'the pre-fix banner DROPS the detail this case is about')
 })
 
 test('#8249: a team switch during the rotate RTT retains the plaintext-less refusal', async () => {

@@ -7047,8 +7047,22 @@ function claimIntentInFlight() {
   // by writing the refusal last; latching it on the record moved the write, so
   // the precedence has to live here. An empty refusal leaves the `error` slot
   // authoritative (and an empty error leaves the refusal to render alone).
+  //
+  // #4721 (review P2): "outranks" may not mean "discards". A NEWER definite
+  // 4xx detail arrives in the transient slot while a refusal can still be
+  // latched from an earlier rotate for the same team — and the #8249 refusal's
+  // own remedy text invites exactly that next request ("Refresh the list,
+  // revoke the unused replacement row, and create a new key" — retrying the
+  // rotate against the dead row answers the non-occupying 409). Dropping that
+  // detail made the branch's whole promise ("the server's precise detail is
+  // the disclosure") false whenever a refusal was latched. Both are true and
+  // answer different questions, so both render: the retained destruction
+  // record FIRST (never dropped, the #8249 precedence), the fresh detail after
+  // it. An empty side keeps the other authoritative, as before.
   function errorBannerText(error, refusalText) {
-    return refusalText || errorMessage(error)
+    const transient = errorMessage(error)
+    if (refusalText && transient) return `${refusalText} ${transient}`
+    return refusalText || transient
   }
 
   // #4370: the GRAPH reveal's key (the create-graph envelope + the per-graph
