@@ -5660,17 +5660,23 @@ class TortoiseSDK:
         caller-visible bound is one window x the number of sites that branch
         reaches. ``update_point`` is the widest, and the count is MEASURED
         rather than enumerated by hand (#8854 review P2 — the earlier "up to
-        three" omitted ``_mark_dirty``, which it always runs). On a ``:Point``:
+        three" omitted ``_mark_dirty``, which it runs on every path that
+        reaches the tail; a status-only promote on a live node returns before
+        it, so it is not "always"). On a ``:Point``:
         THREE to FOUR for ``update_point(confidence=...)``; FOUR to FIVE for
         ``update_point(tags=[...])``; FIVE to SIX for
         ``update_point(content=..., tags=[...])``. A ``:Point:Object`` node
         reaches ONE FEWER on the LAST shape (measured 4 LIVE) because its single
         ``update_point SET (Object)`` arm replaces the ``:Point`` arm's pair
         (per-key + embedding); the first two shapes are the same on both. The
-        low end is a LIVE point; the high end adds ``_mark_dirty``'s TERMINAL
-        branch
-        (``_mark_dirty terminal ep_dirty clear SET``), which runs when the
-        caller updates a terminal point. At 7-14 s per window that is roughly
+        low end is a LIVE point whose dirty ids ALL persist; the high end adds
+        ``_mark_dirty``'s TERMINAL branch
+        (``_mark_dirty terminal ep_dirty clear SET``), which runs when ANY
+        existing dirty id fails the persist ``WHERE`` — the updated point
+        itself OR one of its 1-hop reverse-BFS neighbors. Measured: a LIVE
+        point whose operator targets a retracted claim pays it, so "the caller
+        updates a terminal point" is NOT the trigger and the high end is not
+        exclusive to terminal targets. At 7-14 s per window that is roughly
         21-84 s, not 21-42 s. The
         window #7405 measured lasted **over an hour**, and no bounded retry
         should wait that long — so on exhaustion the original error still
@@ -10862,8 +10868,9 @@ class TortoiseSDK:
         # way — one record shape, one commit point per call.
         # A promote that applies NOTHING never reaches here: a status-only
         # promote on a live node leaves before this emit on BOTH of its routes —
-        # the PRE-write probe (no statement issued) and the POST-write early
-        # return (statement issued, matched nothing) — and every other zero-row
+        # the PRE-write probe (no PROMOTE WRITE issued; the door's status /
+        # label / validity READS still run) and the POST-write early return
+        # (statement issued, matched nothing) — and every other zero-row
         # promote raises in the diagnostic above. So this emit is reached only
         # by a promote that landed, and the `res.result_set` conjunct that used
         # to guard it was unreachable-false (#8854 review round 11 P3;
