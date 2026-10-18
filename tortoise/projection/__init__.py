@@ -5167,7 +5167,7 @@ def _event_mentioned_name_stubs(ev: dict) -> list[tuple[str, str]]:
     name with ``id=$name``) and it runs on replay for an about*/participatesIn
     link whose Subject endpoint did not resolve (``resolve_structural_target``,
     ``wire_about_link``). Its carrier set depends on the link-resolution fold
-    rather than on an event field, so modelling it is a separate change (#8907).
+    rather than on an event field, so modelling it is a separate change (#8914).
     A Subject name carried by one registration plus one such stub can therefore
     still put :func:`journal_epistemic_existence` on the collapsing branch while
     the graph keys by id.

@@ -98,7 +98,7 @@ def _name_holder_count(g, label: str, name: str) -> int:
     mint during replay. Those models now materialise the mention-stub half
     (``projection._event_mentioned_name_stubs``) because an undercount there
     puts them on the opposite MERGE-key branch and they bury an id the graph
-    keeps; ``edges._mint_subject_stub`` is still unmodelled (#8907). A future
+    keeps; ``edges._mint_subject_stub`` is still unmodelled (#8914). A future
     carrier source must therefore be taught to the models as well — counting
     the graph is right HERE (the MERGE sees every node), and the models are the
     side that must catch up.
