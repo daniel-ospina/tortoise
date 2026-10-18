@@ -1851,10 +1851,12 @@ def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
     raise — otherwise the ``live`` classification would turn an idempotent retry
     into a spurious error.
 
-    NOT pinned here: that the silent no-op also emits no ``PointRevised``. The
-    emit is gated on ``res.result_set``, which is empty on this path, matching
-    the probe-path short-circuit (which writes nothing and emits nothing); the
-    gate itself is pinned by
+    NOT pinned here: that the silent no-op also emits no ``PointRevised``. That
+    silence comes from the POST-write early return — the promote statement IS
+    issued, matches nothing, and ``update_point`` returns ``get_point(id)``
+    before the tail emit — so ``res.result_set`` gates nothing at this head (the
+    conjunct was deleted once the early return made it unreachable-false). The
+    observable is pinned by
     ``test_a_live_status_only_promote_emits_no_point_revised``.
     """
     sdk = _sdk(tmp_path, "promoteidem")
@@ -2004,11 +2006,14 @@ def test_a_live_status_only_promote_emits_no_point_revised(
         tmp_path, monkeypatch):
     """A no-op promote journals nothing: nothing applied ⇒ no `PointRevised`.
 
-    The MECHANISM is the early return for a status-only promote on a live node
-    — it happens before the guarded statement is issued, so the tail emit is
-    never reached. (An earlier `res.result_set` conjunct on that emit became
-    unreachable-false once the early return existed; this test pins the
-    OBSERVABLE, so it holds whichever mechanism produces the silence.)
+    The MECHANISM is the early return for a status-only promote on a live node.
+    This fixture flips the node live AT the guarded ``SET``, so the statement IS
+    issued, matches nothing, and the POST-write early return leaves before the
+    tail emit; the PRE-write probe route (a point already live at entry) leaves
+    even earlier, with no statement issued at all. An earlier ``res.result_set``
+    conjunct on that emit became unreachable-false once those early returns
+    existed; this test pins the OBSERVABLE, so it holds whichever route produces
+    the silence.
 
     The store half of `PointRevised` is the change-feed switch, which is read
     from the environment AT CALL TIME — so the emit IS observable in this

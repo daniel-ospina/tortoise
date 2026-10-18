@@ -3204,9 +3204,21 @@ class _WriteNotLanded(Exception):
     without a read the verb would otherwise not pay for — and raising the abort
     is the truthful answer for a call whose graph was replaced mid-flight.
     Verbs whose zero-row result has its OWN documented meaning (a refused
-    promote, an already-terminal retraction) do not rely on this sentinel: their
-    witnesses run the same diagnostic read the first-attempt path uses, so the
-    documented error survives a retry.
+    promote, an already-terminal retraction) do not rely on this sentinel, and
+    they reach their documented error by DIFFERENT routes — worth keeping
+    straight, because only one of them is a reuse of the first-attempt path:
+
+    * the PROMOTE witness reuses ``_raise_update_point_status_error``, the same
+      diagnostic ``update_point`` runs when its guarded ``SET`` returns no
+      rows;
+    * the RETRACTION witness must ADD a read: ``retract_point``'s first-attempt
+      path raises straight from the empty CAS with no diagnostic at all. That
+      added read takes ``rows[0]`` of
+      ``MATCH (n:Point {id:$id}) RETURN n.status, n.outdated``, which is safe
+      despite the duplicate-id fan-out: a zero-row CAS means NO node carrying
+      that id satisfies ``_terminal_excluded``, so every one of them is
+      terminal-or-outdated — exactly the witness's own raise condition — and
+      the first row cannot disagree with the verdict.
     """
 
     def __init__(self, original: BaseException):
@@ -10845,11 +10857,13 @@ class TortoiseSDK:
         # (see the outbox block above). The payload is the same dict either
         # way — one record shape, one commit point per call.
         # A promote that applies NOTHING never reaches here: a status-only
-        # promote on a live node returns early before its statement is even
-        # issued, and every other zero-row promote raises in the diagnostic
-        # above. So this emit is reached only by a promote that landed — the
-        # `res.result_set` conjunct that used to guard it was unreachable-false
-        # once the early return existed (#8854 review round 11, P3).
+        # promote on a live node leaves before this emit on BOTH of its routes —
+        # the PRE-write probe (no statement issued) and the POST-write early
+        # return (statement issued, matched nothing) — and every other zero-row
+        # promote raises in the diagnostic above. So this emit is reached only
+        # by a promote that landed, and the `res.result_set` conjunct that used
+        # to guard it was unreachable-false (#8854 review round 11 P3;
+        # mechanism corrected round 12).
         if _promote_arm:
             self._emit_event("PointRevised", id=id,
                              new_content=props.get("content"), **emit_props)
