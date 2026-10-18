@@ -9,11 +9,27 @@ Status—census block). Everything else falls through to the legacy lane.
 MEASURED CONTRACT (pinned, not aspirational — recomputed against
 tests/_assembly_census.json, the committed 133-Q temporal taxonomy):
 
-* In-scope census rows that fire: 50/55. The 5 non-fires are duration /
-  count / single-anchor rows the SEMANTIC census filed under in-scope
-  classes ("how long did it take", "how many charity events … before",
-  "how long have I been working before") — no shape template must fire on
-  them; the classifier's shape-based rejection is the point.
+The census is a MEASUREMENT INPUT, not a display fixture (#8055): every
+``rows[].question`` is the verbatim, UNTRUNCATED dataset ``question``. The
+artifact used to carry display prefixes cut at 160 chars for its four longest
+rows (filed as #8055, measured, now fixed); its ``source`` block records the
+provenance and a text digest that this file pins. A truncated row is NOT a
+shorter question: ``gpt4_f49edff3`` lost its third option, and ``0db4c65d``
+lost the word that trips a guard — so the measurements below are only
+meaningful against full text.
+
+* In-scope census rows that fire: 49/55 (was 50/55 while the artifact stored
+  the 160-char truncations — #8055 un-truncated the text and surfaced the
+  difference). 5 of the 6 non-fires are duration / count / single-anchor rows
+  the SEMANTIC census filed under in-scope classes ("how long did it take",
+  "how many charity events … before", "how long have I been working
+  before") — no shape template must fire on them; the classifier's
+  shape-based rejection is the point. The 6th is a ROUTER DEFECT the
+  truncation had masked: ``0db4c65d`` is a clean two-anchor interval-since
+  row whose interval template MATCHES, vetoed by ``_RE_RECENCY``'s bare
+  ``latest`` on the narrative clause "her latest thriller novel". It is
+  pinned as a MISS, not as a desired rejection, and #8775 owns the guard
+  narrowing that returns the count to 50/55.
 * Residual measured-negative rows that fire (after the #2652 ago/recency
   promotion, the #2654 duration-state promotion, #2653's nary-ordering
   re-measurement, and #2655's calendar-anchor day lookup): exactly 1
@@ -27,16 +43,20 @@ tests/_assembly_census.json, the committed 133-Q temporal taxonomy):
   370a8ff4 "How many weeks had passed since I recovered from the flu when
   I went on my 10th jog" — two-anchor interval-since morphology, twin
   interval rows fire. #2653 additionally moved the whole "nary-ordering"
-  class out of this set by re-measuring it: it was filed as 4 rows, but the
-  committed census stores 140-char question TRUNCATIONS, and only 2 are
-  genuine named-subject N-ary ordering questions — both now FIRE as
+  class out of this set by re-measuring it: it was filed as 4 rows, and only
+  2 are genuine named-subject N-ary ordering questions — both now FIRE as
   ORDERING with 3 terms (``test_census_nary_ordering_remeasured``). The
   other two are gpt4_70e84552_abs, the binary `_abs` twin of an
   ordering/compare row (fired already; now asserted with its class), and
   gpt4_d6585ce8 ("the concerts and musical events I attended"), a
   CLASS-PLURAL enumeration request that names no subjects. #8056 is the
   feature that owns it — it now fires as ``CLASS_PLURAL``, NOT here (see
-  ``test_census_class_plural_coverage``).
+  ``test_census_class_plural_coverage``). (#2653 measured this class off the
+  artifact while it still stored 160-char question truncations — the cut
+  removed gpt4_f49edff3's third option, which is why the class looked
+  unfireable; #8055 un-truncated the artifact and
+  ``test_census_nary_ordering_remeasured`` now measures the class from the
+  census text itself.)
 * #2655 CLASS CORRECTION (measured, same evidence standard as the two
   adjudications): the census's ``relative-date-lookup`` label UNDER-COUNTS
   its own class. Of its 6 rows only 3 name a calendar anchor; 3 further rows
@@ -61,6 +81,7 @@ arbiter — mirrored in the module docstring.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -70,7 +91,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 from tortoise.assembly import (
+    _RE_INTERVAL_SINCE,
     _RE_OR_CHAIN,
+    _RE_RECENCY,
     AssemblyShape,
     RelativeAnchor,
     ResolveResult,
@@ -134,24 +157,25 @@ _PROMOTED_MISFILED = {
 _ADJUDICATED_FIRE = {
     "370a8ff4",               # interval-since twin (filed frequency/count)
 }
-# the FULL (untruncated) question texts of the census nary-ordering class.
-# tests/_assembly_census.json stores 140-char truncations, which is why this
-# class was measured as 4 rows that fire nothing: the truncation cuts
-# gpt4_f49edff3's third option away, leaving a 2-option tail no shape fires
-# on. Re-measured against the dataset, only these 2 are genuine 3+
-# named-subject ordering questions.
-_NARY_FULL_QUESTIONS = {
-    "gpt4_f49edff3": (
-        "Which three events happened in the order from first to last: the "
-        "day I helped my friend prepare the nursery, the day I helped my "
-        "cousin pick out stuff for her baby shower, and the day I ordered "
-        "a customized phone case for my friend's birthday?"),
-    "gpt4_18c2b244": (
-        "What is the order of the three events: 'I signed up for the "
-        "rewards program at ShopRite', 'I used a Buy One Get One Free "
-        "coupon on Luvs diapers at Walmart', and 'I redeemed $12 cashback "
-        "for a $10 Amazon gift card from Ibotta'?"),
-}
+# #8055: the genuine named-subject N-ary ordering rows of the census's
+# ``nary-ordering`` class (2 of its 4 rows — the other two are the binary
+# `_abs` twin and a class-plural request, both handled in the test below).
+# The QUESTION TEXT is read from the census artifact, never restated here:
+# while the artifact stored 160-char display prefixes this file had to carry
+# a hardcoded copy of the untruncated sentences, which IS the
+# non-reproducibility #8055 removed — the measurement has to come FROM the
+# artifact, so a re-truncation now breaks
+# ``test_census_question_text_is_the_untruncated_dataset_text`` instead of
+# being papered over by a local copy.
+_NARY_NAMED_SUBJECT_QIDS = ("gpt4_f49edff3", "gpt4_18c2b244")
+# #8055: the artifact's text digest — sha256 over the rows'
+# '<qid>\t<question>' lines, sorted by qid, '\n'-joined (the recipe is
+# recorded in the artifact's ``source`` block). The brittleness is the point:
+# the census is a MEASUREMENT INPUT, so any change to it must be an explicit,
+# reviewed re-measurement (the pinned digest is what makes a silent truncation
+# — or any other silent edit — impossible).
+_CENSUS_QUESTIONS_SHA256 = (
+    "7adf663ca171c0146667a52c1bc80294becf4a626bc8c997ded39e74ed501f5f")
 # #2655: rows the census filed OUTSIDE relative-date-lookup that ARE plain
 # calendar-anchor lookups (each names a `last <weekday>` anchor and nothing
 # else). Adjudicated INTO the class by morphology — the same rule the two
@@ -196,6 +220,14 @@ _CLASS_PLURAL_NON_WINDOW = {
     # enumeration (this shape is temporal by definition)
     "gpt4_7abb270c",  # "… the six museums I visited from earliest to latest?"
 }
+# #8055: the in-scope row whose interval morphology the router REJECTS — a
+# MEASURED MISS, not a desired rejection (see the module docstring, first
+# bullet). The census stored this row truncated at 160 chars ("…where the
+# aut"), which cut the word that trips the guard, so the defect was invisible
+# until #8055 un-truncated the artifact; #8775 owns the fix. Asserted as a
+# MISS on purpose: this pin fails the moment the guard is narrowed, which is
+# the signal to move the row into the fired count and restore 50/55.
+_IN_SCOPE_SURFACED_MISS = "0db4c65d"
 # in-scope rows whose DURATION/COUNT morphology must NOT fire (pinned)
 _IN_SCOPE_NO_FIRE = {
     "How many days did it take for me to find a house I loved after "
@@ -547,10 +579,52 @@ def test_census_relative_time_recall():
     assert not misses, f"promoted rows failed to route: {misses}"
 
 
+def test_census_question_text_is_the_untruncated_dataset_text():
+    """#8055: the census is a MEASUREMENT INPUT, so its question text must be the
+    full dataset question — never a display prefix.
+
+    The defect this pins: four of the 133 rows were stored cut at 160 chars
+    (``…stuff for her b``, ``…where the aut``, ``…at Walmart', and``,
+    ``…Spring Fling Mark``). A prefix is not a shorter question — it can delete
+    an option (gpt4_f49edff3's third event) or the word that decides a guard
+    (0db4c65d's ``latest``), so every measurement taken from the artifact could
+    disagree with the dataset it claims to measure. Two independent guards:
+
+    * a PROPERTY every row must have — the dataset's questions are all
+      interrogatives, so a row that does not end in ``?`` is a cut string (a
+      truncation cuts mid-token: the four rows above ended mid-word);
+    * a DIGEST of the whole text, so a silent edit of any row — including a
+      re-truncation at a length that happens to land on a ``?`` — fails here
+      and must be an explicit, reviewed re-measurement.
+    """
+    rows = _CENSUS["rows"]
+    assert _CENSUS["n"] == len(rows) == 133
+    # the artifact's own header must agree with its rows
+    by_class = {}
+    for r in rows:
+        by_class[r["cls"]] = by_class.get(r["cls"], 0) + 1
+    assert by_class == _CENSUS["by_class"], "by_class drifted from the rows"
+
+    cut = [r["qid"] for r in rows if not r["question"].rstrip().endswith("?")]
+    assert not cut, f"census rows store a question PREFIX, not the question: {cut}"
+
+    digest = hashlib.sha256("\n".join(
+        f"{r['qid']}\t{r['question']}"
+        for r in sorted(rows, key=lambda r: r["qid"])
+    ).encode("utf-8")).hexdigest()
+    assert digest == _CENSUS_QUESTIONS_SHA256, (
+        "census question text changed — re-measure the pins below against the "
+        "dataset (longmemeval_oracle.json) and update the digest, or revert the "
+        "edit; never ship a truncated question")
+    # the provenance the digest is meaningless without
+    src = _CENSUS["source"]
+    assert src["dataset"] == "xiaowu0162/longmemeval-cleaned"
+    assert src["split"] == "oracle"
+    assert src["questions_sha256"] == digest
+
+
 def test_census_nary_ordering_remeasured():
-    """#2653: the census's nary-ordering class, RE-MEASURED from the
-    UNTRUNCATED dataset question text (the committed census stores 140-char
-    truncations — see ``_NARY_FULL_QUESTIONS``).
+    """#2653: the census's nary-ordering class, measured FROM THE ARTIFACT.
 
     Measured: 2 of the 4 rows are genuine 3+ named-subject ordering
     questions and now FIRE as ORDERING with exactly 3 extracted terms; one
@@ -558,6 +632,11 @@ def test_census_nary_ordering_remeasured():
     enumeration request that names no subjects and belongs to #8056 — it
     now fires as ``CLASS_PLURAL`` (pinned by
     ``test_census_class_plural_coverage``), never as a NAMED-subject shape.
+
+    #8055: this test used to read a hardcoded copy of the untruncated
+    sentences (``_NARY_FULL_QUESTIONS``) because the artifact stored 160-char
+    prefixes; it now measures the artifact's own text, which is what makes
+    the recorded class assignment reproducible from the committed fixture.
     """
     by_qid = {r["qid"]: r for r in _CENSUS["rows"]}
     nary_rows = [r for r in _CENSUS["rows"] if r["cls"] == "nary-ordering"]
@@ -565,10 +644,12 @@ def test_census_nary_ordering_remeasured():
         "gpt4_f49edff3", "gpt4_18c2b244", "gpt4_d6585ce8",
         "gpt4_70e84552_abs"}, "census nary-ordering membership drifted"
 
-    # the 2 genuine N-ary rows: fired shape + 3 terms, on the FULL text
-    for qid, full in _NARY_FULL_QUESTIONS.items():
-        assert classify_question(full) is AssemblyShape.ORDERING, qid
-        terms = extract_subject_terms(full, AssemblyShape.ORDERING)
+    # the 2 genuine N-ary rows: fired shape + 3 terms, on the census's text
+    assert set(_NARY_NAMED_SUBJECT_QIDS) <= {r["qid"] for r in nary_rows}
+    for qid in _NARY_NAMED_SUBJECT_QIDS:
+        text = by_qid[qid]["question"]
+        assert classify_question(text) is AssemblyShape.ORDERING, qid
+        terms = extract_subject_terms(text, AssemblyShape.ORDERING)
         assert len(terms) == 3, (qid, terms)
         assert all(t.strip() for t in terms), (qid, terms)
 
@@ -587,8 +668,14 @@ def test_census_nary_ordering_remeasured():
 
 
 def test_census_in_scope_recall_and_shape_rejections():
-    """In-scope census rows: the 50 shape-typical rows fire; the 5 pinned
-    duration/count mis-files do NOT (shape-based rejection is the point).
+    """In-scope census rows: 49 of the 55 shape-typical rows fire, 6 do not.
+
+    5 of the non-fires are the pinned duration/count mis-files (shape-based
+    rejection is the point); the 6th (``_IN_SCOPE_SURFACED_MISS``) is the
+    router defect #8055's un-truncation surfaced — it is a clean
+    interval-since row that the interval template matches and ``_RE_RECENCY``
+    vetoes (#8775). The two sets are asserted SEPARATELY so a real rejection
+    can never be confused with a recall miss.
 
     The in-scope set is the census's three fired classes (interval /
     ordering-compare / current-state, 55 rows — #2653's nary-ordering class
@@ -597,12 +684,27 @@ def test_census_in_scope_recall_and_shape_rejections():
     assert len(rows) == 55
     fired = [r for r in rows if classify_question(r["question"]) is not None]
     no_fire = [r for r in rows if classify_question(r["question"]) is None]
-    assert len(fired) == 50, \
-        f"in-scope fires drifted: {len(fired)} (expected 50)"
-    assert len(no_fire) == 5
-    by_text = {r["question"]: r for r in no_fire}
+    assert len(fired) == 49, \
+        f"in-scope fires drifted: {len(fired)} (expected 49)"
+    assert len(no_fire) == 6
+    surfaced = [r for r in no_fire if r["qid"] == _IN_SCOPE_SURFACED_MISS]
+    assert len(surfaced) == 1, "the surfaced miss is no longer in the census"
+    by_text = {r["question"]: r for r in no_fire
+               if r["qid"] != _IN_SCOPE_SURFACED_MISS}
     assert set(by_text) == _IN_SCOPE_NO_FIRE, \
         f"in-scope rejection set drifted: {sorted(set(by_text) ^ _IN_SCOPE_NO_FIRE)}"
+
+    # the surfaced miss is a DEFECT, pinned with its mechanism: the interval
+    # template matches this row cleanly and only the bare-`latest` recency
+    # guard stands between it and a FIRE. When #8775 narrows the guard this
+    # assertion fails, which is the signal to move the row into `fired` and
+    # restore 50/55 — it must never be silently re-read as a desired reject.
+    miss = surfaced[0]
+    assert _RE_INTERVAL_SINCE.match(miss["question"]), miss["qid"]
+    assert _RE_RECENCY.search(miss["question"]), miss["qid"]
+    assert classify_question(
+        _RE_RECENCY.sub("newest", miss["question"])) is AssemblyShape.INTERVAL, \
+        "the surfaced miss is no longer the bare-`latest` guard's false positive"
 
 
 def test_census_duration_state_coverage():

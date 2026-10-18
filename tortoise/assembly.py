@@ -93,8 +93,9 @@ rejected — see the floor test):
 * nary-ordering — 3+ named options ("Mark and Sarah or Tom"), sibling
   #2653; and bare "latest" as an ORDERING INSTRUCTION ("from earliest to
   latest"). The census's nary-ordering class is RE-MEASURED to 2
-  named-subject rows (#2653; the committed census stores 140-char question
-  TRUNCATIONS, which is why the class was filed as 4): the 2 genuine N-ary
+  named-subject rows (#2653; the census stored 160-char question
+  TRUNCATIONS at the time, which is why the class was filed as 4 — #8055
+  replaced them with the verbatim dataset questions): the 2 genuine N-ary
   rows (gpt4_f49edff3 / gpt4_18c2b244) now FIRE as ORDERING with 3 terms;
   gpt4_70e84552_abs is the binary `_abs` twin of an ordering row and
   already fired (adjudicated noise, pinned in test_assembly_pure.py);
