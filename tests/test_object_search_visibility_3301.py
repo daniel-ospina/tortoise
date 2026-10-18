@@ -252,7 +252,7 @@ def test_extractor_prior_leg_opts_into_terminal_objects():
             self.calls = []
 
         def tortoise_fts_query(self, query, *, entity_type, limit=3,
-                               include_terminal=False):
+                               include_terminal=False, **_ignored):
             self.calls.append((entity_type, include_terminal))
             return []
 

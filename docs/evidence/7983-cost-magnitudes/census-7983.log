@@ -1,0 +1,124 @@
+#7983 census — read-frequency instruments, measured on this tree
+Measured at: measure/7983-hot-fraction-and-rho@d15092bae9c5179177c7564aa5265575f57778c5 on 2026-10-17T19:21:32Z
+Census tree: 459f22912@459f22912edf4893fb70144d42e97df389479ed5 (committed tree — this lane's own change is excluded by construction)
+Excluded from the greps: *read_ledger.py — the instrument this lane adds; a census that counts its own answer cannot record the gap.
+Run with: --base <sha> for the committed tree, bare for the working tree.
+
+Every grep below is UNCAPPED (no head/tail): a truncated completeness
+check manufactures false confidence (AGENTS.md).
+
+=== 1. persisted per-key READ facts in product source ===
+459f22912:tools/longmem_eval/retrieve.py:2909:    last_reads: dict = {}
+459f22912:tools/longmem_eval/retrieve.py:2919:        last_reads = reads
+459f22912:tools/longmem_eval/retrieve.py:2925:                       reads=last_reads, retries=n)
+459f22912:tortoise/hosted_api.py:2506:    work item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't
+459f22912:tortoise/hosted_api.py:2554:    submit`` puts the work item on the queue BEFORE ``_adjust_thread_count()``
+459f22912:tortoise/read_status.py:105:def classify_read_status(*, reached: bool, hit_count: int, degraded: bool,
+459f22912:tortoise/read_status.py:113:    ``hit_count``   rows the read returned.
+459f22912:tortoise/read_status.py:126:    if reached or hit_count > 0:
+459f22912:tortoise/read_status.py:134:        configured=configured, reached=reached, hits=hit_count)
+459f22912:tortoise/read_status.py:142:def classify_leg_trace(entries, *, hit_count: int,
+459f22912:tortoise/read_status.py:182:    if hit_count > 0:
+459f22912:tortoise/read_status.py:187:        hit_count=hit_count,
+459f22912:tortoise/sdk.py:21361:                    status_trace or (), hit_count=len(rows),
+(exit=0)
+
+=== 2. a query log / read ledger table in the schema ===
+(no matches)
+(exit=1)
+
+=== 2b. the read-VOLUME meter that DOES exist (and what it cannot say) ===
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:46:    ADD COLUMN IF NOT EXISTS retrieval_queries     integer NOT NULL DEFAULT 0,
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:47:    ADD COLUMN IF NOT EXISTS retrieval_leg_runs    integer NOT NULL DEFAULT 0,
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:49:    ADD COLUMN IF NOT EXISTS retrieval_wall_ms     double precision NOT NULL DEFAULT 0,
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:64:COMMENT ON COLUMN public.metering_records.retrieval_queries IS
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:67:COMMENT ON COLUMN public.metering_records.retrieval_wall_ms IS
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:72:COMMENT ON COLUMN public.metering_records.retrieval_leg_runs IS
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:131:        (org_id, period, period_start, period_end, retrieval_queries,
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:132:         retrieval_leg_runs, retrieval_leg_degraded, retrieval_wall_ms,
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:145:        retrieval_queries      = coalesce(public.metering_records.retrieval_queries, 0) + p_queries,
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:146:        retrieval_leg_runs     = coalesce(public.metering_records.retrieval_leg_runs, 0) + p_leg_runs,
+459f22912:supabase/migrations/20261013000001_metering_retrieval_columns.sql:148:        retrieval_wall_ms      = coalesce(public.metering_records.retrieval_wall_ms, 0) + p_wall_ms,
+459f22912:tortoise/hosted_api.py:6931:    # vocabulary (fts / vector / structural); ``retrieval_leg_runs`` may exceed
+459f22912:tortoise/hosted_api.py:6933:    retrieval_queries: int = 0
+459f22912:tortoise/hosted_api.py:6934:    retrieval_leg_runs: int = 0
+459f22912:tortoise/hosted_api.py:6936:    retrieval_wall_ms: float = 0.0
+459f22912:tortoise/hosted_api.py:9152:        retrieval_queries=retrieval_usage.get("retrieval_queries", 0),
+459f22912:tortoise/hosted_api.py:9153:        retrieval_leg_runs=retrieval_usage.get("retrieval_leg_runs", 0),
+459f22912:tortoise/hosted_api.py:9156:        retrieval_wall_ms=retrieval_usage.get("retrieval_wall_ms", 0.0),
+459f22912:tortoise/metering.py:1540:                    "retrieval_queries": queries,
+459f22912:tortoise/metering.py:1541:                    "retrieval_leg_runs": leg_runs,
+459f22912:tortoise/metering.py:1543:                    "retrieval_wall_ms": wall_ms,
+459f22912:tortoise/metering.py:1552:            "    m.retrieval_queries = "
+459f22912:tortoise/metering.py:1553:            "        coalesce(m.retrieval_queries, 0) + $queries, "
+459f22912:tortoise/metering.py:1554:            "    m.retrieval_leg_runs = "
+459f22912:tortoise/metering.py:1555:            "        coalesce(m.retrieval_leg_runs, 0) + $leg_runs, "
+459f22912:tortoise/metering.py:1558:            "    m.retrieval_wall_ms = "
+459f22912:tortoise/metering.py:1559:            "        coalesce(m.retrieval_wall_ms, 0.0) + $wall_ms, "
+459f22912:tortoise/metering.py:1577:                "retrieval_queries": queries,
+459f22912:tortoise/metering.py:1578:                "retrieval_leg_runs": leg_runs,
+459f22912:tortoise/metering.py:1580:                "retrieval_wall_ms": wall_ms,
+459f22912:tortoise/metering.py:1601:    zeros: dict = {"retrieval_queries": 0, "retrieval_leg_runs": 0,
+459f22912:tortoise/metering.py:1602:                   "retrieval_leg_degraded": 0, "retrieval_wall_ms": 0.0,
+459f22912:tortoise/metering.py:1639:            "RETURN m.retrieval_queries, m.retrieval_leg_runs, "
+459f22912:tortoise/metering.py:1640:            "m.retrieval_leg_degraded, m.retrieval_wall_ms, "
+459f22912:tortoise/metering.py:1649:            "retrieval_queries": int(r[0] or 0),
+459f22912:tortoise/metering.py:1650:            "retrieval_leg_runs": int(r[1] or 0),
+459f22912:tortoise/metering.py:1652:            "retrieval_wall_ms": float(r[3] or 0.0),
+459f22912:tortoise/supabase_control.py:4528:        select=["retrieval_queries", "retrieval_leg_runs",
+459f22912:tortoise/supabase_control.py:4529:                "retrieval_leg_degraded", "retrieval_wall_ms",
+459f22912:tortoise/supabase_control.py:4536:        return {"retrieval_queries": 0, "retrieval_leg_runs": 0,
+459f22912:tortoise/supabase_control.py:4537:                "retrieval_leg_degraded": 0, "retrieval_wall_ms": 0.0,
+459f22912:tortoise/supabase_control.py:4542:        "retrieval_queries": int(row.get("retrieval_queries") or 0),
+459f22912:tortoise/supabase_control.py:4543:        "retrieval_leg_runs": int(row.get("retrieval_leg_runs") or 0),
+459f22912:tortoise/supabase_control.py:4546:        "retrieval_wall_ms": float(row.get("retrieval_wall_ms") or 0.0),
+  -> #4489's per-(org, period) RETRIEVAL meter: HOW MANY reads, never WHICH
+     keys. It cannot produce f (which needs the set), and on self-hosted it is a
+     no-op unless a tally is armed (tortoise/retrieval_metering.py).
+
+=== 3. the residency declaration — WHAT is it a fact about? ===
+459f22912:tortoise/residency.py:81:def residency_enabled() -> bool:
+459f22912:tortoise/residency.py:91:class ResidencyDeclaration:
+459f22912:tortoise/residency.py:105:    coverage: str = COVERAGE_COMPLETE
+459f22912:tortoise/residency.py:106:    hot_keys: frozenset[str] | None = None
+459f22912:tortoise/residency.py:107:    source: str | None = None
+459f22912:tortoise/residency.py:134:def mark_residency(declaration: ResidencyDeclaration, *,
+459f22912:tortoise/residency.py:161:def apply_residency(status: str | None, marker: str | None, *,
+459f22912:tortoise/residency.py:190:def combine_residency(*markers: str | None) -> str | None:
+459f22912:tortoise/residency.py:210:def _parse_hot_keys(raw: object) -> frozenset[str] | None:
+459f22912:tortoise/residency.py:217:def read_declaration(g, *, timeout_ms: int = 500) -> ResidencyDeclaration:
+459f22912:tortoise/residency.py:239:    coverage = row[0] if len(row) > 0 else None
+459f22912:tortoise/residency.py:240:    hot_keys = _parse_hot_keys(row[1]) if len(row) > 1 else None
+459f22912:tortoise/residency.py:251:def declare_residency(g, declaration: ResidencyDeclaration) -> None:
+459f22912:tortoise/residency.py:275:def clear_residency(g) -> bool:
+
+writers of the declaration:
+459f22912:tortoise/cache_projection.py:853:    declare_residency(g, declaration)
+459f22912:tortoise/residency.py:251:def declare_residency(g, declaration: ResidencyDeclaration) -> None:
+
+readers of the declaration:
+459f22912:tortoise/residency.py:217:def read_declaration(g, *, timeout_ms: int = 500) -> ResidencyDeclaration:
+459f22912:tortoise/sdk.py:21416:            _residency = _read_declaration(
+
+=== 4. the read surfaces, and whether a returned row carries a (label, key) ===
+459f22912:tortoise/sdk.py:12945:    def query(self, kind: str | None = None,
+459f22912:tortoise/sdk.py:21036:    def tortoise_fts_query(
+459f22912:tortoise/sdk.py:22932:    def recall_state(
+459f22912:tortoise/sdk.py:23470:    def recall_gaps(
+459f22912:tortoise/sdk.py:23599:    def recall_subgraph(self, seed: str, *,
+459f22912:tortoise/sdk.py:26877:    def search_sessions(self, query: str, *, agent: str | None = None,
+
+the (label, key) contract:
+459f22912:tortoise/cache_projection.py:97:    "KEY_PROPERTY",
+459f22912:tortoise/cache_projection.py:271:KEY_PROPERTY: dict[str, str] = _read_key_property()
+459f22912:tortoise/cache_projection.py:561:    key_prop = KEY_PROPERTY[label]
+459f22912:tortoise/cache_projection.py:653:    key_prop = KEY_PROPERTY[node.label]
+459f22912:tortoise/cache_projection.py:692:    src_kp = KEY_PROPERTY[rel.src_label]
+459f22912:tortoise/cache_projection.py:693:    tgt_kp = KEY_PROPERTY[rel.tgt_label]
+459f22912:tortoise/cache_projection.py:791:    ⛔ **The LABEL is part of the coordinate, never discarded.** ``KEY_PROPERTY``
+
+KEY_PROPERTY resolved at import:
+{'Point': 'id', 'Event': 'eventId', 'Subject': 'name', 'Object': 'name', 'Source': 'url', 'Session': 'id'}
+
+=== 5. the ledger this census justifies (shipped by this lane) ===
+tortoise/read_ledger.py present: False
