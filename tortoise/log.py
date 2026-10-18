@@ -37,9 +37,21 @@ Internal format (opaque — callers MUST NOT depend on this)::
 from __future__ import annotations
 
 import base64
+import errno
+import inspect
+import io
 import json
+import logging
+import os
 import re
+import threading
+import time
 from pathlib import Path
+
+try:                      # advisory locking is POSIX-only; Windows has none
+    import fcntl
+except ImportError:       # pragma: no cover - import-time platform branch
+    fcntl = None          # type: ignore[assignment]
 
 # ── torn-tail revival classification (#3316) ────────────────────────────
 #
@@ -423,9 +435,9 @@ def refuse_torn_tail_revival(revival_records) -> None:
     if not revival:
         return
     raise TornTailResurrectionError(
-        "refusing to replay: the journal's torn record cannot be "
+        "refusing to replay: the journal's damaged record line(s) cannot be "
         f"proven harmless (type(s): {describe_torn_tail_revival(revival)}); "
-        "a truncated record cannot be reconstructed, so replaying without it "
+        "a damaged record cannot be reconstructed, so replaying without it "
         "could resurrect state its fold would have removed (#3316). "
         "No record was replayed: the graph was NOT rebuilt. Find and repair "
         "the torn record — an append seals one mid-file, so it is not always "
@@ -487,6 +499,280 @@ def _classifier_text(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace").strip()
 
 
+# ── append serialisation (#5612) ─────────────────────────────────────────
+#
+# The hosted lane appends to ONE per-graph journal from a bounded threadpool
+# (``_graph_offload`` / ``asyncio.to_thread``), so two ``append`` calls for the
+# same graph really do run at once. Two writers interleaving inside one record
+# produce a malformed line that is NOT a torn tail: ``read_all`` refuses
+# mid-file corruption, so a single interleave would permanently break
+# ``rebuild_all`` / ``recover_from_log`` — the tools the journal exists for.
+#
+# WHAT IS RELIED ON, stated so a reviewer can check it (measured, see the
+# commit):
+#
+# 1. ONE ``write(2)`` PER RECORD. ``append`` used to hand the record to
+#    ``BufferedWriter``; that is one syscall only while the record fits the
+#    writer's buffering, and the buffered path is CPython-version-internal. A
+#    raw fd written with a single ``os.write`` removes the question.
+# 2. POSIX ``O_APPEND``. The kernel assigns the offset AND copies the bytes
+#    under the inode lock for a regular file on a local filesystem, so two
+#    concurrent appenders never interleave WITHIN one ``write(2)``. This is the
+#    guarantee the concurrency test pins; it is NOT the pipe ``PIPE_BUF`` rule
+#    (that bound applies to pipes/FIFOs, where a write above ``PIPE_BUF`` may be
+#    split — a journal is a regular file, so the record length does not bound
+#    it).
+# 3. A LOCK ON TOP, because (1)+(2) are not enough everywhere: a short write
+#    (ENOSPC mid-record, a signal) leaves a fragment, and on a filesystem whose
+#    ``O_APPEND`` is not atomic (NFSv3, some FUSE/CSI network volumes) two
+#    writers can interleave even with one syscall each. ``flock`` serialises
+#    across PROCESSES where the OS supports it; the in-process lock serialises
+#    threads (and keeps working where ``flock`` is unsupported). The lock also
+#    covers the READ-MODIFY-WRITE in :meth:`EventLog._seal_prefix`: unserialised,
+#    a writer that read the tail before a peer's record landed attaches its
+#    seal to the PEER's record, leaving a genuine torn fragment unmarked
+#    mid-file. MEASURED on the unmodified writer: 938 stray ``SEAL_SENTINEL``
+#    lines over 27,000 appends (~3.5%) at 8 KiB records, rising with the record
+#    size (~7% at 20 KiB) — the same window that can strand a fragment. Zero
+#    with the lock.
+#
+# ``_APPEND_LOCKS`` is bounded by the number of DISTINCT journals this process
+# appends to (at most the live graphs), and is deliberately never pruned: a lock
+# a waiter already holds a reference to cannot be identified from the map, so
+# evicting one could hand two threads two different locks for one path and
+# silently drop the serialisation this block exists for. The THREAD-lock state
+# is reinitialised in a FORKED CHILD (see ``_reinit_append_locks_after_fork``):
+# a lock held by another thread at ``fork()`` time has no owner on the other
+# side, so inheriting it would wedge the child on its first append for ever.
+# WHAT THAT DOES NOT COVER, stated so it is not overclaimed: a child forked
+# while a thread is INSIDE an append inherits a reference to the same OPEN FILE
+# DESCRIPTION, so the parent's ``flock`` stays held until the CHILD exits (an
+# advisory lock is released at the last close, not the first). That window is
+# fork-during-append, which nothing under ``tortoise/`` does today; closing the
+# child's inherited copies is the remaining half, and bounding the journal's
+# growth is #9025.
+_APPEND_LOCKS: dict[str, threading.Lock] = {}
+_APPEND_LOCKS_GUARD = threading.Lock()
+# BOUNDED cross-process wait. A peer that holds the lock and is wedged (SIGSTOP,
+# a hung network mount) must not park a hosted capture worker forever — the same
+# reason ``tortoise/index_lock.py`` takes ``LOCK_NB`` and attributes its holder.
+# On timeout the append PROCEEDS on the single-write ``O_APPEND`` guarantee
+# (which still holds for a regular file on a local filesystem) and says so at
+# WARNING: a stall must not silently become an outage, and a timeout must not
+# silently become a lost record.
+_FLOCK_TIMEOUT_S = 5.0
+_FLOCK_POLL_S = 0.001
+# The bound is per INCIDENT, not per append. Once a peer has been observed
+# holding the lock past the deadline, later appends skip the wait (and the
+# WARNING) for this long and go straight to the write guarantee: otherwise one
+# wedged peer costs every queued append the full deadline on the hottest path
+# the lock guards, and logs a WARNING per append for ever. Keyed by resolved
+# journal path; single assignments, so the GIL is enough (the reader also holds
+# that path's thread lock).
+_FLOCK_UNHEALTHY_FOR_S = 30.0
+_FLOCK_UNHEALTHY: dict[str, float] = {}
+# The write seam: one attribute, so a test can pin "exactly one write(2) per
+# record" without patching the global ``os`` module out from under the
+# interpreter.
+_OS_WRITE = os.write
+
+# Advisory-lock failures that mean "this filesystem does not do advisory
+# locks", not "the append is broken". Degrading to the single-write guarantee
+# is the documented posture; any OTHER errno propagates.
+_FLOCK_UNSUPPORTED = frozenset({
+    errno.EOPNOTSUPP, errno.ENOLCK, errno.ENOSYS, errno.EINVAL,
+})
+
+
+def _reinit_append_locks_after_fork() -> None:
+    """Drop the INHERITED append-lock state in a forked child (#5612).
+
+    ``threading.Lock`` state is copied into a forked child. If any thread held
+    a journal's lock (or ``_APPEND_LOCKS_GUARD``) at the instant of ``fork()``,
+    the child's copy is permanently locked with no surviving owner, and the
+    child's first ``append`` — on the capture/delete path, and reachable from a
+    prefork server that warms up before forking — blocks FOREVER.
+
+    Clearing is safe in the child precisely because only the forking thread
+    survives: no peer can be holding one of these locks there. The same remedy
+    is already registered in ``tortoise/embedded_lifecycle.py``.
+
+    The child's inherited OPEN FILE DESCRIPTORS are out of scope here — see the
+    ``_APPEND_LOCKS`` block for what that leaves open.
+    """
+    global _APPEND_LOCKS_GUARD
+    _APPEND_LOCKS.clear()
+    _FLOCK_UNHEALTHY.clear()
+    _APPEND_LOCKS_GUARD = threading.Lock()
+
+
+# POSIX only: Windows has no ``fork``, so there is nothing to reinitialise.
+if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
+    os.register_at_fork(after_in_child=_reinit_append_locks_after_fork)
+
+
+def _append_lock(key: str) -> threading.Lock:
+    """The process-wide lock for a journal, keyed by its RESOLVED path.
+
+    Resolved by the caller (:meth:`EventLog._lock_key`), so two spellings of
+    the same journal (a symlinked ``/data`` mount, a relative path) contend on
+    ONE lock instead of two — and so the resolution is not repeated on every
+    append.
+    """
+    with _APPEND_LOCKS_GUARD:
+        lock = _APPEND_LOCKS.get(key)
+        if lock is None:
+            lock = _APPEND_LOCKS[key] = threading.Lock()
+        return lock
+
+
+def _lock_exclusive(fd: int, key: str) -> None:
+    """Serialise the append against OTHER PROCESSES, where the OS can.
+
+    ``flock`` on the journal fd itself (released by ``os.close``). Two fds on
+    the same file contend even inside one process, so this arm also covers a
+    fork; :func:`_append_lock` covers the threads. A filesystem without
+    advisory locks is not an error — the single-``write`` ``O_APPEND``
+    guarantee still holds there.
+
+    *key* is the ALREADY-RESOLVED journal path (:meth:`EventLog._lock_key`),
+    passed in rather than recomputed: the append path calls ``realpath`` once
+    per journal (memoised on the instance), which is the whole reason that memo
+    exists.
+
+    The wait is BOUNDED (``_FLOCK_TIMEOUT_S``) and non-blocking-polled, because
+    an unbounded ``LOCK_EX`` lets one wedged peer park every appender to that
+    journal with nothing distinguishing the stall from a slow disk. On timeout
+    the append proceeds on the write-side guarantee and logs a WARNING — and
+    the path is marked UNHEALTHY for ``_FLOCK_UNHEALTHY_FOR_S``, so the cost is
+    paid once per incident instead of once per queued append.
+
+    WHAT A TIMEOUT GIVES UP, stated so it is not overclaimed: the seal's
+    read-modify-write is no longer serialised against a peer (a peer that
+    appends during it can make this writer attach its seal to the peer's
+    record), and on a filesystem whose ``O_APPEND`` is not atomic there is no
+    cross-process serialisation at all. That is the deliberate trade — a wedged
+    peer must not become an outage — and it is why the warning says so.
+    """
+    if fcntl is None:                  # pragma: no cover - platform branch
+        return
+    stamp = _FLOCK_UNHEALTHY.get(key)
+    now = time.monotonic()
+    if stamp is not None:
+        if now - stamp < _FLOCK_UNHEALTHY_FOR_S:
+            return
+        _FLOCK_UNHEALTHY.pop(key, None)
+    deadline = now + _FLOCK_TIMEOUT_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno in _FLOCK_UNSUPPORTED:
+                return
+            # ``EINTR`` is TRANSIENT here, not an append failure: the poll
+            # loop makes thousands of non-blocking ``flock`` calls exactly
+            # while a peer holds the lock, i.e. exactly when a signal (SIGCHLD
+            # from a reaped worker, a timer) can interrupt one. ``fcntl.flock``
+            # is NOT in PEP 475's retry-on-EINTR set, so an unhandled ``EINTR``
+            # would propagate out of ``append`` as a lost record — a failure
+            # class this lock introduced. Retrying costs nothing and does not
+            # consume the deadline meaningfully.
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EINTR):
+                raise
+            now = time.monotonic()
+            if now >= deadline:
+                _FLOCK_UNHEALTHY[key] = now
+                logging.getLogger(__name__).warning(
+                    "EventLog %s: another process held the append lock for "
+                    "%.1fs — proceeding WITHOUT it on the single-write "
+                    "O_APPEND guarantee until it is released: a regular file "
+                    "on a local filesystem still cannot interleave within one "
+                    "write, but the tail check stays unprotected and a "
+                    "filesystem whose O_APPEND is not atomic gets no "
+                    "cross-process serialisation at all. Not retrying for "
+                    "%.0fs.",
+                    key, _FLOCK_TIMEOUT_S, _FLOCK_UNHEALTHY_FOR_S)
+                return
+            time.sleep(min(_FLOCK_POLL_S, max(0.0, deadline - now)))
+
+
+def _write_record(fd: int, payload: bytes) -> None:
+    """Emit one whole record with ONE ``write(2)`` on an ``O_APPEND`` fd.
+
+    The loop exists ONLY for a partial write — a regular file returns one on
+    ENOSPC, ``EFBIG``, or an interrupted syscall, i.e. the failure class that
+    already leaves a torn record behind, so it cannot be papered over here and
+    must not be silently dropped either. On the normal path
+    ``os.write`` returns the full length and this is exactly one syscall; that
+    is what makes the record un-interleavable (see the ``_APPEND_LOCKS``
+    comment for the guarantee and its limits).
+    """
+    view = memoryview(payload)
+    while view:
+        written = _OS_WRITE(fd, view)
+        if written <= 0:                 # pragma: no cover - defensive
+            # A regular file does not return 0 for a non-empty buffer; looping
+            # would spin forever if it ever did.
+            raise OSError(f"short write to the journal: {written} bytes")
+        view = view[written:]
+
+
+def _read_exactly(f, want: int) -> bytes:
+    """Read *want* bytes, looping over short reads.
+
+    The journal fd is an UNBUFFERED ``io.FileIO``, whose ``read(n)`` is ONE
+    ``read(2)`` and may return FEWER than *n* bytes (``RawIOBase`` makes no
+    completeness promise). The tail scan below MUST NOT assume otherwise: a
+    short read would silently skip the bytes between the window edge and the
+    bytes actually returned — the very bytes that decide whether the tail is a
+    fragment — and could fabricate a seal or leave a real one unmarked on the
+    network/FUSE volumes this append path is hardened for.
+    """
+    parts: list[bytes] = []
+    got = 0
+    while got < want:
+        more = f.read(want - got)
+        if not more:                     # EOF: nothing left to consume
+            break
+        parts.append(more)
+        got += len(more)
+    return b"".join(parts)
+
+
+def read_for_replay(log) -> list[dict]:
+    """``log.read_all(salvage=True)`` — the RECOVERY read (#5612).
+
+    Every replay / recovery entry point reads through here, so a damaged
+    mid-file line is SKIPPED, counted and reported instead of making
+    ``rebuild_all`` / ``recover_from_log`` refuse forever over a line they
+    cannot repair. The #3316 refusal that protects the graph is unaffected:
+    :meth:`EventLog.torn_tail_revival_records` classifies the skipped line, so
+    a loss that could REVIVE removed state still refuses the replay before any
+    wipe or fold.
+
+    The ``salvage`` capability is PROBED, not assumed, because a replay engine
+    also accepts a SYNTHETIC log object (a projection test stub, a
+    registry-only log) that predates the keyword and only has ``read_all()``.
+    It is a SIGNATURE probe rather than a ``TypeError`` catch: catching would
+    also swallow a ``TypeError`` raised INSIDE a real ``read_all`` and then
+    silently retry the read.
+
+    A caller that needs the STRICT reader (the integrity gate — a journal that
+    cannot be trusted must not be replayed silently) calls
+    ``EventLog.read_all()`` directly; that contract is unchanged.
+    """
+    read_all = log.read_all
+    try:
+        params = inspect.signature(read_all).parameters
+    except (TypeError, ValueError):        # a builtin / C callable
+        params = {}
+    if "salvage" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return read_all(salvage=True)
+    return read_all()
+
+
 class EventLog:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -502,15 +788,46 @@ class EventLog:
         terminated and marked, so it stays classified (#3316) while the new
         record starts on a line of its own. Nothing is truncated or
         rewritten — the seal is another append.
+
+        CONCURRENCY (#5612): the tail check and the write are ONE critical
+        section — a per-path thread lock plus ``flock`` on the journal fd —
+        and the (seal + record) bytes leave in a single ``write(2)`` on an
+        ``O_APPEND`` descriptor. Two writers therefore never interleave inside
+        a record, and the reader never sees a fabricated seal. See the
+        ``_APPEND_LOCKS`` block above for the guarantee relied on and its
+        limits.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = json.dumps(event, ensure_ascii=False) + "\n"
-        # ONE handle: the tail check and the write share it, so sealing costs
-        # no second open/lseek/read on the write path.
-        with self.path.open("a+b") as f:
+        # Resolved ONCE per journal (memoised), then handed to both locks: the
+        # ``flock`` key must be the same resolved path the thread lock uses, or
+        # two spellings of one journal would contend on different flock keys.
+        key = self._lock_key()
+        # ONE descriptor: the tail check and the write share it, so sealing
+        # costs no second open/read on the write path.
+        # UNBUFFERED ``io.FileIO``: no ``BufferedWriter`` in the path, so the
+        # one ``os.write`` below is one ``write(2)`` regardless of CPython's
+        # buffering rules or the record's size.
+        with (_append_lock(key), io.FileIO(self.path, mode="a+b") as f):
+            _lock_exclusive(f.fileno(), key)
             seal = self._seal_prefix(f)
-            f.seek(0, 2)          # a read must be followed by an explicit seek
-            f.write((seal + record).encode("utf-8"))
+            _write_record(f.fileno(), (seal + record).encode("utf-8"))
+
+    def _lock_key(self) -> str:
+        """The resolved path this journal's append lock is keyed on.
+
+        Cached per EventLog because ``realpath`` costs about as much as a
+        syscall (measured ~21 us against a ~146 us append) and the hosted lane
+        holds one EventLog per graph. Re-derived when ``self.path`` changes, so
+        the cache can never describe a path the instance no longer holds.
+        """
+        raw = os.fspath(self.path)
+        memo = getattr(self, "_lock_key_memo", None)
+        if memo is not None and memo[0] == raw:
+            return memo[1]
+        resolved = os.path.realpath(raw)
+        self._lock_key_memo = (raw, resolved)
+        return resolved
 
     def _seal_prefix(self, f) -> str:
         """What must precede *record* for it to start on a clean line.
@@ -541,6 +858,15 @@ class EventLog:
         # universal newlines, so this scan must use the same line model or it
         # would annotate a fragment of a CR-separated journal that is actually
         # a complete record (measured).
+        # ``seek`` + ``read`` on an UNBUFFERED ``io.FileIO``, at an absolute
+        # offset. ``read(n)`` is ONE ``read(2)`` that may return fewer than
+        # ``n`` bytes, so the loop below reads EXACTLY the window
+        # (``_read_exactly``) — a short read must not skip the bytes between
+        # the window edge and what was actually returned.
+        # Nothing else in this process shares the position (the append
+        # serialises on the path lock plus ``flock``), and the append's write is
+        # an ``os.write`` on an ``O_APPEND`` descriptor, which ignores the read
+        # position entirely.
         f.seek(size - 1)
         final = f.read(1)
         terminated = final in (b"\n", b"\r")
@@ -562,7 +888,7 @@ class EventLog:
             # Chunks arrive newest-first, so the join is reversed.
             wstart = max(0, start - window)
             f.seek(wstart)
-            chunk = f.read(start - wstart)
+            chunk = _read_exactly(f, start - wstart)
             # A separator is a `\n` or a `\r` (read_all normalises universal
             # newlines, so CR ends a line here too), and the LAST of the two
             # in raw bytes is the last separator of the normalised text: for
@@ -611,12 +937,31 @@ class EventLog:
             return SEAL_SENTINEL + "\n"
         return ""
 
-    def read_all(self) -> list[dict]:
+    def read_all(self, *, salvage: bool = False) -> list[dict]:
         """Read all events in the log.
 
+        TWO MODES, and the difference is the MID-FILE line (#5612):
+
+        * **strict** (the default) — a malformed MID-FILE line raises. One
+          reader's contract, unchanged: a journal that cannot be trusted must
+          not be replayed, and a silent skip is the fail-open direction #3316
+          forbids.
+        * **salvage** (``salvage=True``) — a malformed mid-file line is
+          SKIPPED, counted (:attr:`corrupt_line_count`), retained verbatim
+          (:attr:`corrupt_line_raw`) and logged at ERROR, and the read
+          continues. This is what the REPLAY engines use: the journal an
+          operator most needs rebuilt is the one with a damaged line, and a
+          raise there makes ``rebuild_all`` / ``recover_from_log`` refuse
+          forever over a line they cannot repair. The lost record is NOT
+          silently forgiven — it is classified by the same #3316 allowlist
+          through :meth:`torn_tail_revival_records` (which covers mid-file
+          skips too), so a loss that could REVIVE removed state still refuses
+          the replay before any wipe or fold. Salvage changes who refuses, not
+          whether.
+
         LINE-TOLERANCE (epic #900 S15/T12, cycle-21): a malformed TRAILING
-        line (a torn tail from a SIGKILL mid-append — ``append`` is a bare
-        ``f.write`` with no fsync) is skipped with a warning + count
+        line (a torn tail from a SIGKILL mid-append — ``append`` is a single
+        ``write(2)`` with no fsync) is skipped with a warning + count
         (``self.torn_trailing_count``) and this READ never raises — a raised
         parse would kill the very recovery tool (``rebuild_all`` /
         ``_auto_health_recover``). The tolerance is for the data-LOSS
@@ -626,13 +971,14 @@ class EventLog:
         :attr:`torn_trailing_raw` through
         :func:`torn_record_may_revive_state` BEFORE any wipe or fold.
         A malformed MID-FILE line is a separate corruption class (not a torn
-        append) and raises an actionable error naming the file and line —
-        EXCEPT a fragment sealed by :meth:`append`: that fragment sits
-        mid-file by construction, is annotated by a seal marker on the
+        append) and raises an actionable error naming the file and line in
+        STRICT mode — EXCEPT a fragment sealed by :meth:`append`: that fragment
+        sits mid-file by construction, is annotated by a seal marker on the
         following line (or by a TORN marker, its prefix), and is tolerated
         like any other tear, so a fragment never costs the journal the record
         appended after it (#5917). A seal annotation is never returned as a
-        record and contributes no index.
+        record and contributes no index. In SALVAGE mode an unsealed mid-file
+        malformed line is skipped and counted instead (see above).
 
         DECODING is per line: a line that is not valid UTF-8 is a malformed
         line under the same rules (tolerated at the end, refused mid-file).
@@ -660,6 +1006,11 @@ class EventLog:
         """
         self.torn_trailing_count = 0
         self.torn_trailing_raw: list[str] = []
+        # #5612: mid-file lines skipped in SALVAGE mode. Reset on EVERY call,
+        # like the torn tail, so a reused EventLog never reports a previous
+        # read's damage.
+        self.corrupt_line_count = 0
+        self.corrupt_line_raw: list[str] = []
         if not self.path.exists():
             return []
         out = []
@@ -692,7 +1043,8 @@ class EventLog:
                 # empty-line branch below would drop it WITHOUT counting or
                 # classifying it, which is the fail-OPEN direction #3316
                 # forbids.
-                self._tolerate_or_raise(raw_bytes, idx, lines, consumed)
+                self._tolerate_or_raise(raw_bytes, idx, lines, consumed,
+                                        salvage)
                 continue
             line = raw.strip()
             if not line:
@@ -710,12 +1062,14 @@ class EventLog:
                 # journal is unbounded and read_all is O(file)).
                 out.append(json.loads(line))
             except ValueError:
-                self._tolerate_or_raise(raw_bytes, idx, lines, consumed)
+                self._tolerate_or_raise(raw_bytes, idx, lines, consumed,
+                                        salvage)
         return out
 
     def _tolerate_or_raise(self, raw_bytes: bytes, idx: int,
                            lines: list[bytes],
-                           consumed: set[int]) -> None:
+                           consumed: set[int],
+                           salvage: bool = False) -> None:
         """Tolerate a malformed line at EOF or sealed mid-file, else refuse.
 
         A fragment sealed by `append` is mid-file by construction, so without
@@ -725,7 +1079,9 @@ class EventLog:
         only there, and only for a line that directly follows a line this
         method just kept: a `{"` fragment standing on its own is a torn
         RECORD and must be counted and classified, not skipped. Any OTHER
-        mid-file malformed line keeps the #3316 posture: refuse, never skip.
+        mid-file malformed line keeps the #3316 posture in STRICT mode:
+        refuse, never skip. In SALVAGE mode it is skipped AND counted AND
+        classified (#5612) — never skipped silently.
 
         The classifier text is derived here, not carried from the caller — a
         malformed line is rare, so the decode is not worth paying per line.
@@ -745,6 +1101,9 @@ class EventLog:
         if successor is not None and _is_seal_prefix(successor.strip()):
             self._keep_torn(_classifier_text(raw_bytes), idx)
             consumed.add(idx + 1)
+            return
+        if salvage:
+            self._keep_mid_file_damage(_classifier_text(raw_bytes), idx)
             return
         raise ValueError(
             f"EventLog {self.path}: malformed line {idx + 1} — "
@@ -769,9 +1128,51 @@ class EventLog:
             "(SIGKILL mid-append tolerance, S15) — %d line(s) skipped",
             self.path, idx + 1, self.torn_trailing_count)
 
+    def _keep_mid_file_damage(self, line: str, idx: int) -> None:
+        """Count, retain and REPORT a mid-file line skipped in salvage mode.
+
+        Same retention rule as :meth:`_keep_torn` (the FULL line, uncapped,
+        so the #3316 classifier sees every legible type), but it is its OWN
+        tally and its own log level: the tail tolerance is expected crash
+        damage, while mid-file damage is a corrupted journal an operator must
+        be told about. ERROR, not WARNING, and the count goes in the message
+        so the report survives a log level filter that drops the record.
+        """
+        import logging
+        self.corrupt_line_count += 1
+        self.corrupt_line_raw.append(line)
+        logging.getLogger(__name__).error(
+            "EventLog %s: SKIPPING malformed mid-file line %d during a "
+            "salvage read (#5612) — %d line(s) skipped so far; the records "
+            "they carried are NOT replayed, and the replay is refused only "
+            "if their loss could revive removed state",
+            self.path, idx + 1, self.corrupt_line_count)
+
+    @property
+    def skipped_line_count(self) -> int:
+        """Every line the last read consumed without yielding a record.
+
+        Torn trailing fragments PLUS mid-file lines skipped in salvage mode —
+        the number a recovery report must state, so an operator never has to
+        infer "nothing was skipped" from silence. Seal annotations are not
+        damage and are not counted.
+        """
+        return (getattr(self, "torn_trailing_count", 0)
+                + getattr(self, "corrupt_line_count", 0))
+
     def torn_tail_revival_records(self) -> list[str]:
-        """Skipped trailing records whose loss can REVIVE state (#3316)."""
-        return torn_tail_revival_records(getattr(self, "torn_trailing_raw", []))
+        """Skipped records whose loss can REVIVE state (#3316 / #5612).
+
+        BOTH classes of damage: the tolerated torn TAIL and the mid-file lines
+        a salvage read skipped. A mid-file loss is the same hazard as a tail
+        loss — the record is gone and the surviving records still replay — so
+        it must reach the same classifier. Leaving it out would be the
+        fail-open direction: a salvage read that skipped a ``PointRetracted``
+        and then replayed the rest would serve removed state as current.
+        """
+        return torn_tail_revival_records(
+            getattr(self, "torn_trailing_raw", [])
+            + getattr(self, "corrupt_line_raw", []))
 
     # ── streaming tail (M1 / M4) ──────────────────────────────────────
 

@@ -484,8 +484,10 @@ class WriteNotLandedError(RuntimeError):
 
     #7951 — and the delete door's ``record_committed=False`` arm gets its own
     three clauses too (#7951 review round 3). ``False`` from `_emit_event`
-    means only that the journal ``append`` RAISED, and a buffered append can
-    land the record and then raise, so the shared create-shaped text was wrong
+    means only that the journal ``append`` RAISED, and an append can land the
+    record and then raise (a partial `write(2)` stopped by ENOSPC/EIO, or a
+    write whose close failed — #5612 removed the buffered flush that used to be
+    the common case), so the shared create-shaped text was wrong
     twice over on this door: "no rebuild record was committed for it" when the
     record may be durably on disk, and "the write was not applied, so re-issue
     it" when a blind re-issue appends a SECOND delete record for one intent.
@@ -562,10 +564,13 @@ class WriteNotLandedError(RuntimeError):
             # The DELETE door's unconfirmed arm (#7951 review round 3). The
             # `DETACH DELETE` was NOT issued — the §17.1 ordering refuses the
             # destruction when the record does not confirm — but "no record was
-            # committed" is NOT the state: an append can land and then raise
-            # (`EventLog.append` is a buffered write), so the destruction is
-            # UNCONFIRMED, not absent, and the caller must neither read the
-            # call as done nor as safely-nothing-happened.
+            # committed" is NOT the state: an append can land and then raise.
+            # #5612: the mechanism is no longer a buffered close-time flush
+            # (`EventLog.append` now writes the whole record in ONE unbuffered
+            # `write(2)`); what remains is a partial write followed by an error
+            # (ENOSPC/EIO) and a full write whose close then fails. Either way
+            # the destruction is UNCONFIRMED, not absent, and the caller must
+            # neither read the call as done nor as safely-nothing-happened.
             _headline = (
                 f"the destruction of Point {point_id!r} was NOT confirmed"
                 f"{_where}"
@@ -574,8 +579,8 @@ class WriteNotLandedError(RuntimeError):
                 "the JSONL journal append did not confirm (it raised), so the "
                 "#7951 §17.1 ordering skipped the `DETACH DELETE` and the "
                 "cache still holds this Point — the op=delete record MAY have "
-                "landed anyway, because a buffered append can commit and then "
-                "raise"
+                "landed anyway: the journal write can land partially and then "
+                "raise (ENOSPC/EIO), or land and then fail on close"
             )
             _contract = (
                 "Nothing was destroyed in the cache on this call, and the "

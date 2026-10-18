@@ -16,6 +16,13 @@ This file pins the remedy: ONE resolution point
 routed through it, and — the systemic half — an AST guard so the NEXT raw client
 cannot be added without a read bound.
 
+#8118 extends that guard over the TOOL surfaces (``tools/``, ``graph-scripts/``,
+``apps/``), where the identical defect survived because #3065's scan scope was
+deliberately the product package: nine more unbounded constructions, and four of
+them were not named in the issue body until the tree was re-measured. The scan
+roots are PINNED, so widening the guard is a visible edit rather than a quiet
+side effect.
+
 Tests:
   1. Resolver semantics (bounded default, per-lane knobs, the explicit
      ``none`` opt-out preserved).
@@ -68,6 +75,15 @@ _BOUND_LIVES_ELSEWHERE = {
     # retry. The bound belongs to the POOL, so the call node cannot show it.
     "tortoise/hosted_backup.py":
         "tests/test_dr_endpoints.py::TestRestoreSwapReadBound",
+    # #8118: the viz server's boot client is ``FalkorDB(**kwargs)`` where
+    # ``kwargs`` comes from ``apps/graph-viz/server/connection.py::
+    # build_connection_kwargs()`` — a pure env→kwargs builder with its own unit
+    # test, deliberately bounded THERE (the builder is the seam a test can
+    # observe without booting a connection). The proving test lives in this
+    # file so an exemption can never point at the very builder it is excusing.
+    "apps/graph-viz/server/main.py":
+        "tests/test_bounded_raw_clients_3065.py"
+        "::test_the_graph_viz_kwargs_builder_carries_the_bounded_read",
 }
 
 
@@ -671,6 +687,11 @@ def test_every_bound_elsewhere_claim_names_a_live_test():
     ``_BOUND_LIVES_ELSEWHERE`` is the one place where a construction with no
     visible bound is allowed through, so the proof it carries has to exist:
     otherwise the entry rots into a silent hole of exactly the shape #3065 was.
+    
+    The proving test may be written either way this repo writes tests — a
+    ``class`` (``::TestX``) or a bare ``def test_…`` (#8118: the graph-viz
+    builder's proof is a function) — so both spellings are accepted and neither
+    lowers the bar: the symbol has to be DEFINED in the named file.
     """
     for rel, node_id in _BOUND_LIVES_ELSEWHERE.items():
         path = REPO_ROOT / rel
@@ -678,13 +699,183 @@ def test_every_bound_elsewhere_claim_names_a_live_test():
         assert "::" in node_id, ("an exemption must name its proving test, "
                                  f"not a bare file: {node_id!r}")
         test_file, _, test_name = node_id.partition("::")
-        branch, _, cls = test_name.rpartition("::")
-        cls = branch or cls
-        assert test_name, f"no test named for {rel}"
+        # ``Class::test`` and ``test`` are both valid node ids; the SYMBOL is
+        # the last segment either way.
+        symbol = test_name.rpartition("::")[2]
+        assert symbol, f"no test named for {rel}"
         src = (REPO_ROOT / test_file).read_text(encoding="utf-8")
-        assert f"class {cls}" in src, (
+        assert f"class {symbol}" in src or f"def {symbol}" in src, (
             f"the test proving {rel}'s bound is elsewhere no longer exists: "
             f"{node_id}")
         assert "socket_timeout" in src, (
             f"{test_file} no longer mentions socket_timeout — the bound that "
             f"justifies exempting {rel} may be gone")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. #8118 — the same class OUTSIDE the product package
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: The roots #8118 closes the scan over. #3065's scope was deliberately
+#: ``tortoise/`` only; the identical defect survived in the tool surfaces beside
+#: it, which is what an unscanned root looks like: five sites the issue body
+#: listed, and FOUR more the re-measurement found (``tools/ask_shape_rate.py``,
+#: ``tools/graph_write_repair.py``, ``graph-scripts/smoke_test.py`` — and the
+#: graph-viz boot, which is unbounded through an env→kwargs builder rather than
+#: at the constructor). MEASURED on ``origin/main`` @ ``43e5529a3``: 15
+#: recognized constructions, 9 of them carrying no read bound.
+TOOL_SURFACE_ROOTS = ("tools", "graph-scripts", "apps")
+
+#: Every recognized construction in those roots, pinned per file. A NEW site
+#: reds this guard twice over (absent from the map, or a changed count), which is
+#: the point — a silently growing inventory is an inventory that already drifted.
+#: ``tortoise/`` keeps its own map above; this one is separate on purpose, so a
+#: change of SCOPE is a visible edit to this file rather than a wider loop.
+_EXPECTED_TOOL_SITES = {
+    "apps/graph-viz/server/main.py": 1,          # the viz boot client (bound via its builder)
+    "graph-scripts/audit_graph.py": 1,           # the shallow audit's shared client
+    "graph-scripts/audit_graph_deep.py": 1,      # the deep audit's shared client
+    "graph-scripts/context_removal_audit.py": 1,  # pre-existing 5s/120s literals
+    "graph-scripts/merge_endometriosis.py": 1,   # the one-off data merge
+    "graph-scripts/parity_sample.py": 1,         # pre-existing 5s/120s literals
+    "graph-scripts/pre_migration_snapshot.py": 2,  # two pre-existing bounded sites
+    "graph-scripts/smoke_test.py": 1,            # the server-mode liveness client
+    "tools/ask_shape_rate.py": 1,                # the scratch-graph GRAPH.DELETE
+    "tools/edge_census.py": 2,                   # GRAPH.LIST + the measurement handle
+    "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
+    "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
+}
+
+
+def test_every_tool_surface_client_is_constructed_with_a_read_bound():
+    """#8118's systemic pin: the bound is not a product-package privilege.
+
+    ``tools/edge_census.py`` is the sharpest case — its contract is "read a live
+    production graph and change nothing", so an unbounded ``recv()`` against a
+    stalled engine (the #2969 defrag loop, #2838's MERGE lock) is precisely the
+    outcome a caller cannot tolerate: the process stays alive at 0% CPU, prints
+    nothing, and exits nothing. ``apps/graph-viz/server/main.py`` is the same
+    shape on a user-facing boot path, retried 30 times.
+
+    Scope: ``tools/``, ``graph-scripts/``, ``apps/``. ``tests/`` and any
+    ``tests/`` subdirectory are excluded — test-owned fixtures are not product or
+    tool surfaces (and ``apps/graph-viz/tests/`` would otherwise be scanned by
+    virtue of its parent). ``battery/``, ``benchmarks/``, ``services/``,
+    ``integrations/``, ``client/`` and ``spike/`` were measured on
+    ``origin/main`` @ ``43e5529a3`` and carried ZERO unbounded constructions, so
+    they are not scanned here; adding a root is a deliberate edit to
+    ``TOOL_SURFACE_ROOTS``.
+    """
+    found: dict[str, int] = {}
+    offenders: list[str] = []
+    for root in TOOL_SURFACE_ROOTS:
+        root_path = REPO_ROOT / root
+        assert root_path.is_dir(), f"scan root is gone: {root}"
+        for path in sorted(root_path.rglob("*.py")):
+            if "__pycache__" in path.parts or "tests" in path.parts:
+                continue
+            rel = str(path.relative_to(REPO_ROOT))
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(path))
+            aliases = _client_aliases(tree)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not _constructs_a_client(
+                        node, aliases):
+                    continue
+                found[rel] = found.get(rel, 0) + 1
+                if (not _carries_a_read_bound(node)
+                        and rel not in _BOUND_LIVES_ELSEWHERE):
+                    offenders.append(f"{rel}:{node.lineno}")
+
+    assert not offenders, (
+        "raw FalkorDB/redis client(s) in the tool surfaces constructed with no "
+        "read bound — ``falkordb`` defaults ``socket_timeout=None`` and hands it "
+        "to redis-py explicitly, so the read is UNBOUNDED and a stalled server "
+        "parks the process in recv() forever (#8118, same defect as #3065). Pass "
+        "**_bounded_server_socket_kwargs() from tortoise.projection, or an "
+        f"explicit socket_timeout: {offenders}")
+
+    # Anti-vacuity + explicit inventory (#7053/#1349 class): a scan that found
+    # nothing would pass the assert above while guarding nothing.
+    assert found == _EXPECTED_TOOL_SITES, (
+        "the tool-surface client inventory changed — a new raw client must be "
+        "listed here (and carry a bound) rather than silently joining the tool "
+        f"surfaces: found={found} expected={_EXPECTED_TOOL_SITES}")
+
+
+def _graph_viz_connection_module(monkeypatch):
+    """Load ``apps/graph-viz/server/connection.py`` WITHOUT importing main.py.
+
+    ``main.py`` connects at import time, so the builder is loaded by path — the
+    same seam its own unit test uses.
+    """
+    import importlib.util
+
+    path = REPO_ROOT / "apps" / "graph-viz" / "server" / "connection.py"
+    spec = importlib.util.spec_from_file_location("gviz_connection_8118", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name in ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_USERNAME",
+                 "FALKORDB_PASSWORD", "FALKORDB_SSL",
+                 "TORTOISE_DB_SOCKET_TIMEOUT",
+                 "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
+    return module
+
+
+def test_the_graph_viz_kwargs_builder_carries_the_bounded_read(monkeypatch):
+    """#8118: the exemption behind ``apps/graph-viz/server/main.py``'s proof.
+
+    ``main.py`` builds its boot client as ``FalkorDB(**build_connection_kwargs())``,
+    so the bound cannot appear at the call node — the deliberate placement is the
+    env→kwargs BUILDER, which is the seam a test can observe without booting a
+    connection. This pins that the builder actually supplies it, so the exemption
+    is a claim with a live test behind it rather than a waiver.
+    """
+    mod = _graph_viz_connection_module(monkeypatch)
+    kwargs = mod.build_connection_kwargs()
+
+    assert kwargs["socket_timeout"] is not None, (
+        "the viz boot client would carry socket_timeout=None — the unbounded "
+        "recv() #8118 exists to kill, on a path that retries it 30 times")
+    assert kwargs["socket_timeout"] > 0
+    assert kwargs["socket_connect_timeout"] is not None
+    assert kwargs["socket_connect_timeout"] > 0
+    # The endpoint contract is untouched: the bound is not a re-plumbing.
+    assert kwargs["host"] == "localhost"
+    assert kwargs["port"] == 16379
+
+
+def test_the_graph_viz_builder_takes_its_bound_from_the_product_resolver(monkeypatch):
+    """The operator knobs must reach the viz server, not a second policy.
+
+    A builder that hard-codes its own seconds is the exact drift #8118 is about
+    — bounded, but blind to ``TORTOISE_DB_SOCKET_TIMEOUT`` — so the knob winning
+    is what proves the resolver (and not a literal) is the source.
+    """
+    mod = _graph_viz_connection_module(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", "3")
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", "0.5")
+
+    kwargs = mod.build_connection_kwargs()
+
+    assert kwargs["socket_timeout"] == 3.0
+    assert kwargs["socket_connect_timeout"] == 0.5
+
+
+def test_graph_viz_fallback_matches_the_product_defaults(monkeypatch):
+    """The standalone-deploy fallback is pinned EQUAL to the product defaults.
+
+    The viz server ships its own ``requirements.txt`` with no ``tortoise``, so the
+    resolver cannot be a hard import and a fallback must exist. An unpinned
+    fallback would be a second policy — the defect class this whole file is about
+    — so a change to either side without the other is this red test.
+    """
+    from tortoise.projection import (
+        _DB_CONNECT_TIMEOUT_DEFAULT,
+        _DB_SOCKET_TIMEOUT_DEFAULT,
+    )
+
+    mod = _graph_viz_connection_module(monkeypatch)
+    assert mod.FALLBACK_SOCKET_CONNECT_TIMEOUT == _DB_CONNECT_TIMEOUT_DEFAULT
+    assert mod.FALLBACK_SOCKET_TIMEOUT == _DB_SOCKET_TIMEOUT_DEFAULT

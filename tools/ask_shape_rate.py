@@ -820,13 +820,21 @@ def _drop_docker_graph(base: str, name: str) -> None:
     try:
         import redis as _redis
 
-        from tortoise.projection import resolve_db_endpoint
+        from tortoise.projection import (
+            _bounded_server_socket_kwargs,
+            resolve_db_endpoint,
+        )
 
         ep = resolve_db_endpoint(base)
+        # #8118: without the shared bounds this cleanup is UNBOUNDED — a bare
+        # ``redis.Redis`` also inherits redis-py's 3-retry signature default
+        # (#2969), so one wedged GRAPH.DELETE would go 4 attempts deep and the
+        # ``except Exception`` below never sees a hang.
         client = _redis.Redis(host=ep.host, port=ep.port,
                               username=ep.username or None,
                               password=ep.password or None,
-                              ssl=bool(ep.ssl))
+                              ssl=bool(ep.ssl),
+                              **_bounded_server_socket_kwargs())
         client.execute_command("GRAPH.DELETE", name)
     except Exception:  # noqa: BLE001, RUF100 — cleanup is best-effort
         pass

@@ -714,12 +714,22 @@ def _assert_graph_exists(uri: str, graph_name: str | None,
     """
     from falkordb import FalkorDB
 
-    from tortoise.projection import resolve_db_endpoint
+    from tortoise.projection import (
+        _bounded_server_socket_kwargs,
+        resolve_db_endpoint,
+    )
 
     endpoint = resolve_db_endpoint(uri, graph_name)
+    # #8118: the bound comes from the product's ONE resolver, not from this
+    # call. ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands it
+    # to redis-py explicitly, so an unbounded client parks this check in
+    # ``recv()`` forever against a stalled engine (#2969's defrag loop, #2838's
+    # MERGE lock) — alive, 0% CPU, no error — which is the one thing a
+    # "read, change nothing" census cannot tolerate.
     client = FalkorDB(host=endpoint.host, port=endpoint.port,
                       username=endpoint.username, password=endpoint.password,
-                      ssl=endpoint.ssl)
+                      ssl=endpoint.ssl,
+                      **_bounded_server_socket_kwargs())
     if endpoint.graph_name not in client.list_graphs() and not create_if_missing:
         raise CensusError(
             f"graph {endpoint.graph_name!r} does not exist on "
@@ -753,13 +763,20 @@ def _raw_graph_from_uri(uri: str, graph_name: str | None,
     """
     from falkordb import FalkorDB
 
-    from tortoise.projection import resolve_db_endpoint
+    from tortoise.projection import (
+        _bounded_server_socket_kwargs,
+        resolve_db_endpoint,
+    )
 
     endpoint = resolve_db_endpoint(uri, graph_name)
     _assert_graph_exists(uri, graph_name, create_if_missing=create_if_missing)
+    # #8118: bounded on the RIGHT resolver (#3065's), so an operator's
+    # TORTOISE_DB_SOCKET_TIMEOUT reaches the census's own measurement handle
+    # too — the graph reads below are the ones a wedged engine would strand.
     client = FalkorDB(host=endpoint.host, port=endpoint.port,
                       username=endpoint.username, password=endpoint.password,
-                      ssl=endpoint.ssl)
+                      ssl=endpoint.ssl,
+                      **_bounded_server_socket_kwargs())
     return client.select_graph(endpoint.graph_name)
 
 
