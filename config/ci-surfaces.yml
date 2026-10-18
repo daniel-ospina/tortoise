@@ -3077,8 +3077,9 @@ surfaces:
   # and the same fallback: `tortoise/pi-hooks/README.md` matches no
   # SOURCE_PATTERNS entry, so a README-only edit selects `core` through the
   # `tortoise/` prefix — which is the only arm that runs the guard on the change
-  # it guards. (A `docs/` edit is deliberately skipped by NON_PYTHON_PREFIXES,
-  # so the plan's own copy is covered by review of the `.md`, not by this arm.)
+  # it guards.  (A `docs/` edit is skipped by NON_PYTHON_PREFIXES, but the plan
+  # doc is itself a CORE_ALSO claim entry in `tools/ci_selection.py` (#3554), so a
+  # plan-only edit selects `core` and runs this guard too.)
   - test_pi_capture_disposition.py
   # #3575 P1-A: this pins `tortoise/session_import/parsers.py::window_turns`.
   # `tortoise/session_import/` maps to no named surface, so a parsers.py change

@@ -189,7 +189,61 @@
     },
     "value_safety": {
       "measured": "value-critical claims present: pre=0/4 · post=0/4 · assembly=4/4",
-      "why": "the 300/400 (normalised overlap 0.80) and 12/60 (0.60) pairs sit below the 0.90 collapse threshold and carry distinct turns, so no value pair is a collapse candidate on its own account. The guard is still consulted — 39x per provenance arm on the >=0.90 content leg, plus one incidental same-turn pair (v1 shares source_turn_id t1 with the flood anchor; its quote does not overlap) — and every refusal leaves the outcome unchanged: disabling _pkg_differ_value_critical reproduces this receipt byte-for-byte. Its own regression is tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse"
+      "guard_calls": {
+        "post_2978_assembly": 40,
+        "post_2978_assembly_value_marked": 40,
+        "provenance_free_assembly": 39
+      },
+      "guard_refusals": {
+        "post_2978_assembly": 1,
+        "post_2978_assembly_value_marked": 1,
+        "provenance_free_assembly": 0
+      },
+      "guard_total_calls": 119,
+      "guard_total_refusals": 2,
+      "disabling_guard_changes_output": false,
+      "refused_pairs": [
+        {
+          "arm": "post_2978_assembly",
+          "a": "the tea set cost 300 dollars",
+          "b": "the cat sheds a lot",
+          "same_source_turn": true,
+          "quote_overlap": 0.0
+        },
+        {
+          "arm": "post_2978_assembly_value_marked",
+          "a": "the tea set cost 300 dollars",
+          "b": "the cat sheds a lot",
+          "same_source_turn": true,
+          "quote_overlap": 0.0
+        }
+      ],
+      "value_pairs": [
+        {
+          "a": "v1",
+          "b": "v2",
+          "values": "300/400",
+          "overlap": 0.8,
+          "turns": [
+            "t1",
+            "t2"
+          ],
+          "distinct_turns": true
+        },
+        {
+          "a": "v3",
+          "b": "v4",
+          "values": "12/60",
+          "overlap": 0.6,
+          "turns": [
+            "t3",
+            "t4"
+          ],
+          "distinct_turns": true
+        }
+      ],
+      "collapse_threshold": 0.9,
+      "why": "the 300/400 (normalised overlap 0.80, turns t1/t2) and 12/60 (normalised overlap 0.60, turns t3/t4) pairs sit below the 0.90 collapse threshold and carry distinct turns, so no value pair is a collapse candidate on its own account. The guard is still consulted — 119 calls across the three packaging arms (post_2978_assembly=40, post_2978_assembly_value_marked=40, provenance_free_assembly=39), 2 of them refusals (post_2978_assembly=1, post_2978_assembly_value_marked=1, provenance_free_assembly=0) — and forcing it to accept everything leaves this arm's ids/order unchanged, so no refusal decides an outcome here. Its own regression is tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse"
     },
     "provenance_leg_is_lane_scoped": {
       "measured": "with provenance 1 verbatim refs kept / 2 flood slots; without it 0 refs kept / 12 flood slots",
