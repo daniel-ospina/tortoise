@@ -470,15 +470,14 @@ def test_a_failed_state_read_does_not_strip_the_page_decoration(ku_graph,
         "ask_lane/read_status fold ANY such entry into the caller-facing "
         "degradation signal — reddening a healthy read")
     assert entry["reason"] == "state_read_incomplete"
-    # The consumers that made the old flag wrong, exercised directly on THIS
-    # leg (the rest of the trace belongs to other legs, whose degradation is
-    # their own business): a short state read must leave the ordering
-    # impairment out of the caller-facing degradation signal (#8487 review P1).
+    # ``degraded=False`` on this leg is the whole property: the caller-facing
+    # degradation consumers fold on the FLAG (``ask_lane``'s
+    # ``any(leg.get("degraded"))`` and ``read_status.classify_leg_trace``), so
+    # a flag that is False here cannot contribute to their signal. Checked at
+    # the classifier, which is the consumer that was actually observable.
     from tortoise.read_status import STATUS_DEGRADED, classify_leg_trace
     assert classify_leg_trace([entry], hit_count=len(hits)) != STATUS_DEGRADED, (
         "read_status must not call this read degraded — the hits are complete")
-    assert not any(leg.get("degraded") for leg in [entry]), (
-        "ask_lane folds any degraded leg into ``retrieval_degraded``")
 
 
 @_DOCKER_ONLY
@@ -503,6 +502,78 @@ def test_a_raised_selection_records_its_own_reason(ku_graph, monkeypatch):
     entry = _valid_time_entry(trace)
     assert entry["reason"] == "selection_failed"
     assert entry["degraded"] is False
+
+
+@_DOCKER_ONLY
+def test_a_raised_state_read_is_not_recorded_as_a_selection_failure(
+        ku_graph, monkeypatch):
+    """FAIL VALUE: one shared handler recording EVERY exception of step 5e as
+    ``selection_failed`` (#8487 review round 5, P3).
+
+    The state read and the selection are separate reads; the audit leg exists so
+    a reader can tell WHICH one failed. ``fetch_point_epistemic_state`` swallows
+    its own exceptions, so the seam is patched to raise — the belt-and-braces
+    branch — and the entry must say ``state_read_failed``, not "a selection
+    blew up".
+
+    Reachable: the raised branch of the fetch seam; the read must stay
+    fail-open and the page must still be decorated by step 7.6's own read.
+    """
+    sdk, ids = ku_graph
+    import tortoise.search_engine as _se
+    real = _se.fetch_point_epistemic_state
+    calls: list[int] = []
+
+    def _first_raises(graph, point_ids):
+        calls.append(len(point_ids))
+        if len(calls) == 1:
+            raise RuntimeError("state read exploded")
+        return real(graph, point_ids)
+
+    monkeypatch.setattr(_se, "fetch_point_epistemic_state", _first_raises)
+    trace: list[dict] = []
+    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    assert hits, "a raised state read must never fail the read (fail-open)"
+    ended = _hit(hits, ids["ended"])
+    assert ended["valid_to"] == "2023-06-01", (
+        "step 7.6 must still decorate the page after 5e's read raised")
+    entry = _valid_time_entry(trace)
+    assert entry["reason"] == "state_read_failed"
+    assert entry["degraded"] is False
+
+
+@_DOCKER_ONLY
+def test_a_failed_page_state_read_is_recorded_where_it_happened(
+        ku_graph, monkeypatch):
+    """FAIL VALUE: NO leg-trace record at all when the PAGE state read fails
+    (#8487 review round 5, P3).
+
+    ``fetch_point_epistemic_state`` never raises — it returns ``{}`` — so the
+    page is served without ``status`` / ``valid_to`` / ``[SUPERSEDED BY]`` and
+    the read still classifies as healthy. Before round 5 the ordering leg
+    accidentally witnessed this; now that it reports ``degraded=False``
+    (an ordering impairment is not a degradation), the read that actually
+    failed must record it — ``epistemic_state`` with ``degraded=True``, which
+    is exactly what that flag means.
+
+    Reachable: EVERY state read of the query returns ``{}``.
+    """
+    sdk, _ = ku_graph
+    import tortoise.search_engine as _se
+
+    monkeypatch.setattr(_se, "fetch_point_epistemic_state",
+                        lambda *a, **k: {})
+    trace: list[dict] = []
+    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    assert hits, "an undecorated page is still a page"
+    page_entries = [e for e in trace if e.get("leg") == "epistemic_state"]
+    assert len(page_entries) == 1, (
+        f"the failed page read must be recorded exactly once, got {trace}")
+    assert page_entries[0]["degraded"] is True
+    assert page_entries[0]["reason"] == "state_read_failed"
+    from tortoise.read_status import STATUS_DEGRADED, classify_leg_trace
+    assert classify_leg_trace(trace, hit_count=len(hits)) == STATUS_DEGRADED, (
+        "an undecorated page IS a degraded read — the decoration leg did not run")
 
 
 @_DOCKER_ONLY

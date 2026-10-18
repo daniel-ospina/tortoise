@@ -134,16 +134,18 @@ would collide on the word `recency` (a window there, a freshness preference here
   > open is **#8487 scope 1** — a read-side temporal parameter (`as_of`) on the canonical MCP/SDK
   > target surface, which needs the owner's surface approval and is NOT part of this change.
   >
-  > **AMENDED 2026-10-18, after code review (head `3705b4cb`).** Five corrections to step 5e, all
-  > recorded here because they change what the shipped path promises:
+  > **AMENDED 2026-10-18, after code review (heads `3705b4cb` → `58c22d26f`).** Six corrections to
+  > step 5e, all recorded here because they change what the shipped path promises:
   >
   > 1. **The cached state map is reused only when COMPLETE.** `fetch_point_epistemic_state` never
   >    raises (it swallows the failure and returns `{}`), and `{} is not None`, so caching on
   >    `is not None` let a failed read stand in for the page's state: step 7.6 skipped its own read
   >    and the whole page lost `status` / `superseded_by` / the window — a superseded claim served
   >    as current, on the leg added to be the audit trail. Step 5e now publishes the map only when
-  >    it covers every id it asked for, and a short/empty map records
-  >    `valid_time: degraded=True, reason="state_read_incomplete"` instead of a clean selection.
+  >    it covers every id it asked for, and an unusable map records the **reason** instead of a
+  >    clean selection — `state_read_incomplete` (short map), `state_read_failed` (the read
+  >    raised) or `selection_failed` (`prefer_latest_ids` raised) — with **`degraded=False`**
+  >    (see item 6: an ordering impairment is not a degradation).
   > 2. **Intent is evaluated BEFORE the read.** It lived inside `prefer_latest_ids`, i.e. after it,
   >    so every topical point/relevance read paid a pool-width state read and discarded it.
   > 3. **The read is pool-width, stated as such.** Reuse by 7.6 is over the pre-truncation pool
@@ -166,6 +168,19 @@ would collide on the word `recency` (a window there, a freshness preference here
   >    `tortoise/time_aware.py`'s "no clock" publication contract was also amended: it was false the
   >    moment `resolve_question_date` landed (one wall-clock read, `today=`-injectable), and the
   >    consequence is that result order depends on the wall-clock date unless `query_date` is pinned.
+  > 6. **The ordering leg does NOT claim a degradation; the read that failed does** (round 5,
+  >    `58c22d26f`). `degraded` in a leg-trace entry is the memory layer's impairment signal, not an
+  >    audit-only field: `ask_lane` folds ANY degraded leg into the response's
+  >    `retrieval_degraded`, and `read_status.classify_leg_trace` turns it into `STATUS_DEGRADED`.
+  >    Every other `degraded=True` entry in that trace means "a retrieval leg did not run" (the
+  >    vector leg skipped, the TF-IDF fallback produced the rows). An ordering selection that could
+  >    not be improved — while step 7.6's page-width re-read still decorates every hit — is NOT
+  >    that: recording it degraded reddened a healthy read for temporal intent only. The honest
+  >    home for the impairment is the read that actually failed: when step 7.6's own page read comes
+  >    back empty for a non-empty page (the helper swallows the failure), the trace records
+  >    `epistemic_state: ran=False, degraded=True, reason="state_read_failed"`. So: an order that
+  >    could not be improved is `degraded=False` with a reason; a decoration read that did not run
+  >    is `degraded=True`.
 
 **D4 — `time_aware` is applied for NON-TR questions only (TR no-regression).** The eval resolves
 the arm once and passes the query-side anchor only when `not is_tr`; TR keeps its R5 stack

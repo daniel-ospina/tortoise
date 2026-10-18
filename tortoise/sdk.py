@@ -22341,13 +22341,18 @@ class TortoiseSDK:
             entry (reason + demoted count) — that entry plus each hit's own
             window (``valid_from``/``valid_to``/``end_state``/
             ``superseded_by``) is the audit trail for "which version was
-            selected, and why". An UNUSABLE state read (short map, or the
-            selection raising) records ``reason="state_read_incomplete"`` /
+            selected, and why". An UNUSABLE state read (short map, a raised
+            read, or the selection raising) records
+            ``reason="state_read_incomplete"`` / ``"state_read_failed"`` /
             ``"selection_failed"`` with ``degraded=False``: the entry's
             ``degraded`` flag is the memory layer's impairment signal, which
             ``ask_lane``/``read_status`` fold into the caller-facing
             degradation status, so an ORDERING impairment that step 7.6's
-            page-width re-read fully recovers must not claim it.
+            page-width re-read fully recovers must not claim it. When that
+            page-width read ITSELF comes back empty for a non-empty page, an
+            ``epistemic_state`` entry with ``degraded=True`` is recorded — a
+            read that did not run is a degradation, an order that could not be
+            improved is not.
             ``TORTOISE_VALID_TIME_RERANK=0`` is the
             operator kill switch; ``_valid_time_rerank=False`` is the
             in-process opt-out.
@@ -23088,47 +23093,62 @@ class TortoiseSDK:
                             reason="no-prefer-latest-intent", count=0))
                 else:
                     _vt_covered = False
-                    # The audit REASON for an unusable map: "state_read_incomplete"
-                    # when the read succeeded but came back short, and the
-                    # selection's OWN reason when ``prefer_latest_ids`` raised —
-                    # the leg must be able to tell a raised selection from a
-                    # short read (#8487 review P2, secondary).
+                    # The audit REASON for an unusable map, split by WHAT
+                    # failed (#8487 review round 5, P3): "state_read_failed"
+                    # when the state read raised, "state_read_incomplete" when
+                    # it came back short, and the selection's OWN
+                    # "selection_failed" when ``prefer_latest_ids`` raised. One
+                    # shared handler could not tell the first from the last.
                     _vt_reason = "state_read_incomplete"
+                    _vt_stats = {"reason": "state_read_incomplete",
+                                 "demoted": []}
                     try:
                         _vt_state = fetch_point_epistemic_state(
                             graph, result_ids)
-                        # COMPLETENESS, not presence (#8487 review P1).
-                        # ``fetch_point_epistemic_state`` NEVER raises — it
-                        # swallows every failure and returns what it has (in
-                        # practice ``{}``) — and ``{} is not None``, so
-                        # caching on ``is not None`` let a failed read stand in
-                        # for the page's state: step 7.6 skipped its own read
-                        # and every hit lost ``status`` / ``superseded_by`` /
-                        # the validity window, i.e. a superseded claim was
-                        # served WITHOUT its ``[SUPERSEDED BY]`` marker while
-                        # the trace below still reported a clean selection.
-                        # Publish the map for reuse only when it covers every
-                        # id it was asked for.
-                        _vt_covered = bool(_vt_state) and all(
-                            pid in _vt_state for pid in result_ids)
-                        result_ids, _vt_stats = (
-                            _valid_time_rules.prefer_latest_ids(
-                                result_ids, _vt_state, query=query,
-                                question_date=(
-                                    _valid_time_rules.resolve_question_date(
-                                        query_date))))
-                        _valid_time_state = _vt_state if _vt_covered else None
                     except Exception:
-                        # Fail-open, like every other decoration on this path: a
-                        # validity read must never fail a read.
+                        # Belt on top of braces: the helper swallows its own
+                        # failures, so this is reachable only if the seam
+                        # changes — and then the leg must say WHICH read died.
                         _logger.warning(
-                            "valid-time selection failed — pass-through",
+                            "valid-time state read failed — pass-through",
                             exc_info=True)
-                        _valid_time_state = None
-                        _vt_covered = False
-                        _vt_stats = {"reason": "selection_failed",
-                                     "demoted": []}
-                        _vt_reason = "selection_failed"
+                        _vt_state = {}
+                        _vt_reason = "state_read_failed"
+                    # COMPLETENESS, not presence (#8487 review P1).
+                    # ``fetch_point_epistemic_state`` NEVER raises — it
+                    # swallows every failure and returns what it has (in
+                    # practice ``{}``) — and ``{} is not None``, so
+                    # caching on ``is not None`` let a failed read stand in
+                    # for the page's state: step 7.6 skipped its own read
+                    # and every hit lost ``status`` / ``superseded_by`` /
+                    # the validity window, i.e. a superseded claim was
+                    # served WITHOUT its ``[SUPERSEDED BY]`` marker while
+                    # the trace below still reported a clean selection.
+                    # Publish the map for reuse only when it covers every
+                    # id it was asked for.
+                    _vt_covered = bool(_vt_state) and all(
+                        pid in _vt_state for pid in result_ids)
+                    if _vt_state:
+                        try:
+                            result_ids, _vt_stats = (
+                                _valid_time_rules.prefer_latest_ids(
+                                    result_ids, _vt_state, query=query,
+                                    question_date=(
+                                        _valid_time_rules.resolve_question_date(
+                                            query_date))))
+                            _valid_time_state = (
+                                _vt_state if _vt_covered else None)
+                        except Exception:
+                            # Fail-open, like every other decoration on this
+                            # path: a validity read must never fail a read.
+                            _logger.warning(
+                                "valid-time selection failed — pass-through",
+                                exc_info=True)
+                            _valid_time_state = None
+                            _vt_covered = False
+                            _vt_stats = {"reason": "selection_failed",
+                                         "demoted": []}
+                            _vt_reason = "selection_failed"
                     if status_trace is not None:
                         if _vt_covered:
                             status_trace.append(_trace_entry(
@@ -23438,12 +23458,31 @@ class TortoiseSDK:
         #      (one batch read per query, not two); an incomplete one is not,
         #      and the page then fetches its own state, exactly as it did before
         #      #8487 — a validity read must never be able to strip a page's
-        #      epistemic decoration.
-        point_state = (_valid_time_state
-                       if (entity_type == "point"
-                           and _valid_time_state is not None)
-                       else (fetch_point_epistemic_state(graph, result_ids)
-                             if entity_type == "point" else {}))
+        #      epistemic decoration. When THIS read also comes back empty for a
+        #      non-empty page (the helper swallows the failure), the leg trace
+        #      says so (``epistemic_state``, ``degraded=True``): that entry means
+        #      "a read did not run", and it is the honest home for the impairment
+        #      the ordering leg must not claim (#8487 review round 5, P3).
+        if entity_type == "point" and _valid_time_state is not None:
+            point_state = _valid_time_state
+        elif entity_type == "point":
+            point_state = fetch_point_epistemic_state(graph, result_ids)
+            # #8487 review round 5 (P3): the impairment step 5e no longer
+            # claims lives HERE. ``fetch_point_epistemic_state`` swallows its
+            # failure and returns ``{}``, and every id on this page came from a
+            # Point match — so an empty map for a non-empty page means the
+            # decoration read did not run. The silence predates #8487, but 5e
+            # used to be its accidental witness; with the ordering leg
+            # honestly reporting ``degraded=False`` (an ordering impairment is
+            # not a degradation), the honest home for "the decoration did not
+            # run" is this read, where ``degraded`` means exactly that.
+            if (status_trace is not None and result_ids
+                    and not any(pid in point_state for pid in result_ids)):
+                status_trace.append(_trace_entry(
+                    "epistemic_state", ran=False, degraded=True,
+                    reason="state_read_failed", count=0))
+        else:
+            point_state = {}
 
         # 8. Build SearchResult objects, filter, and order
         results = []
