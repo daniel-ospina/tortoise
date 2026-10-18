@@ -2937,19 +2937,19 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # `bool`, or a non-integral float) makes the head fall back to
 # `MATCH (e:GraphEvent) RETURN max(e.seq)` — the label aggregate the steady path
 # deliberately avoids — so a broken graph pays a scan per pass, and it keeps
-# paying it. Three classes, only one of which self-heals (all MEASURED):
+# paying it, and the counter does not become trustworthy on its own:
 # `next_seq` REFUSES a non-number, a `bool` and a negative and leaves them
-# unchanged; a non-integral float is bumped instead (`2.9` -> `3.9`, re-issuing a
-# seq: the #4653 class) but `reestablish_watermark` only clears it when the
-# events' max EXCEEDS it (at `max = 3` it preserves `3.9` and returns a truncated
-# `3` — a false repair); and a rebuild never gets to a negative at all, because
-# `capture_watermark` raises before the wipe. So no class has a reliable automatic
-# repair path. The alternative reading of that counter (as 0) made every
-# subscription look caught up, so the graph was never dispatched again — silently.
-# Over-admitting a broken graph is the cheap side of that asymmetry; the ONE case
-# where it is not a cheap no-op (a fractional `:GraphEvent.seq` the cursor can
-# never reach) is stated in `webhook_delivery.event_head_seq`'s docstring and
-# tracked with the cursor write in #9032.
+# unchanged, and only a non-integral float is bumped instead (`2.9` -> `3.9`,
+# re-issuing a seq: the #4653 class). Repair is upstream and carries its own trap
+# — a rebuild's pre-wipe `capture_watermark` COERCES through `int()`, so a `True`
+# counter can come back as a trusted `1` BELOW the events' max (#9059), while a
+# non-numeric string aborts the rebuild — so do not read the repair story off this
+# comment; see `webhook_delivery.event_head_seq`'s docstring. The alternative
+# reading of that counter (as 0) made every subscription look caught up, so the
+# graph was never dispatched again — silently. Over-admitting a broken graph is
+# the cheap side of that asymmetry; the ONE case where it is not a cheap no-op (a
+# fractional `:GraphEvent.seq` the cursor can never reach) is in that docstring
+# and tracked with the cursor write in #9032.
 #
 # ⛔ THE "answered yes" HALF IS THE WHOLE POINT (#8098 review F1/F3). The gate
 # is TWO clauses — due by TIME *and* behind the stream — because the temporal

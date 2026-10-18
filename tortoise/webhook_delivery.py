@@ -789,26 +789,27 @@ def event_head_seq(graph) -> int:
     priced the corrupt path as "one SDK open" — it is not). The fallback is the
     aggregate over ``:GraphEvent`` the opening paragraph exists to avoid on the
     steady path, so an UNTRUSTWORTHY graph pays it on every pass, and the counter
-    does not become trustworthy on its own. What the write side actually does,
-    MEASURED — the three classes behave differently and only one self-heals:
+    does not become trustworthy on its own.
 
-    * a non-number, a ``bool`` AND a negative are REFUSED by ``next_seq`` and
-      left unchanged (the negative fails its ``prev >= 0`` grant test — a graph
-      holding one cannot emit at all). ``reestablish_watermark`` refuses the
-      non-number/bool AFTER the write ("the monotone clause only compares
-      numbers … preserved rather than replaced"), and a rebuild never reaches a
-      negative in the first place: ``capture_watermark`` — the pre-wipe read —
-      raises "the live :GraphEventMeta.last_seq is -1, outside the event-store
-      integer domain", so the rebuild ABORTS instead of repairing it. **None of
-      these three has an automatic repair path**, and this fallback is permanent
-      for them;
-    * only a NON-INTEGRAL FLOAT is bumped by ``next_seq`` (``2.9`` → ``3.9``,
-      handing out a seq an existing ``:GraphEvent`` already holds — the #4653
-      collision), and ``reestablish_watermark`` reports it repaired only when the
-      events' max exceeds it: with ``max(:GraphEvent.seq) = 3`` and a counter of
-      ``3.9`` the monotone clause PRESERVES ``3.9`` while the read-back truncates
-      and RETURNS ``3`` — a false repair. So even this class clears only below
-      the events' max.
+    ⛔ AND REPAIR IS NOT THIS FUNCTION'S TO DESCRIBE. Three earlier revisions of
+    this paragraph each got the inventory wrong — the store's own repair path
+    contradicts the obvious reading of ``next_seq``'s guard — so it now states
+    only what is checkable from here. A reader who needs the repair story must
+    measure the counter node:
+
+    * ``next_seq`` REFUSES a non-number, a ``bool`` and a negative counter and
+      leaves it unchanged (the negative fails its ``prev >= 0`` grant test), so a
+      graph holding one stops emitting until someone repairs the node. Only a
+      non-integral float is BUMPED (``2.9`` → ``3.9``, re-issuing a seq an
+      existing ``:GraphEvent`` already holds — the #4653 class).
+    * a rebuild's behaviour is a THIRD thing, neither repair nor refusal. Its
+      pre-wipe ``capture_watermark`` reads through ``int()``, so a numeric string
+      or a ``bool`` is COERCED (``'5'`` → ``5``, ``True`` → ``1``) and the
+      rebuild proceeds — with the consequence that a ``True`` counter can come
+      back as a TRUSTED ``1``, BELOW the events' max, i.e. the stall this
+      fallback exists to prevent (recorded on #9059). A non-numeric string or an
+      out-of-domain counter makes that read RAISE, so the rebuild aborts and the
+      counter is left untouched.
 
     ⛔ THE ONE CASE THIS FIX'S OVER-ADMISSION IS NOT A CHEAP NO-OP. Every
     unbounded admission ``_BEHIND_PREDICATE`` enumerates costs one SDK open and
