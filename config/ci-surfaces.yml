@@ -5314,7 +5314,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
-  test_extractor_v4_s4_stage_claims.py: 0.1  # #8500: `ast` walks over two source files + doc-text scans; no DB, same shape as the three v4 guards above
+  test_extractor_v4_s4_stage_claims.py: 6.9  # #8500: `ast` walks over two source files + doc-text scans, plus THREE in-process behavioural tests (`vet_gate.check_batch`/`apply_vet`, `kind_classifier`/`_apply_classify_kinds`) and a row-scoped read of §4.0; no DB. Measured 2026-10-18 with `--durations=0`: 3.96–6.97 s of call time over three runs (one `ast.parse` of the 9.5k-line `extractor_v2.py` is 0.44 s and the mutation fixtures reparse it), so the previous `0.1` under-declared ~50x (#8955 review, UNVERIFIED item)
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above

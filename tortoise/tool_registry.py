@@ -105,7 +105,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.create_point",
         writes=True,
         description="Create a Point node (statement, decision, vision, hypothesis, etc.). "
-                    "dedup=True (default): idempotent — returns existing Point if content matches.",
+                    "dedup=True (default): idempotent — returns existing Point if content matches. "
+                    "Declaring extractedFrom materializes that :Source and links it (#8171); "
+                    "a fresh write with no source and no provenance is advised (advisories: "
+                    "[{code: no_source, node_id, message}] — advisory only, never a block).",
         annotations=_idem(),
         http_policy=True,
         sdk_method="create_point",
