@@ -72,7 +72,6 @@ GH_URL = "https://github.com/test/repo/issues/42"
 
 #: A ``SET`` list may be introduced bare (``… SET …``) or per arm.
 _SET_OPEN = re.compile(r"\b(?:ON CREATE |ON MATCH )?SET\b")
-#: A clause keyword that ENDS the current ``SET`` list.
 #: A clause keyword that ENDS the current ``SET`` list. Everything that can
 #: follow a ``SET`` in the same statement must be here, or the list body runs
 #: PAST the clause and a neighbouring clause's read is charged to the last SET
@@ -491,11 +490,16 @@ def test_the_capability_probe_agrees_with_the_engine_it_measures(proj):
     a probe that lied in either direction would either run vacuously or skip on an
     engine that could have shown the defect. This asserts the CONTRACT — the
     probe's verdict equals a bare control clause's ordinal on the SAME engine —
-    rather than naming the backend: the `proj` fixture follows
-    `TORTOISE_DB_URI`, and a lane pointing it at a left-to-right backend must not
-    fail a test about the embedded one. In the hermetic carve-out lane (no URI)
-    the fixture IS the embedded backend, and its PRE-write answer is what makes
-    `test_8870_version_anchor_write_order.py` skip there instead of greening.
+    which is what keeps it honest on ANY backend.
+
+    The `proj` fixture here is the EMBEDDED backend and nothing else: it passes an
+    explicit `db_path`, and `TortoiseSDK.__init__` only honours `TORTOISE_DB_URI`
+    when `db_path is None` (`tortoise/sdk.py`). So this test measures the probe
+    against a PRE-write engine — the case where a lying probe would run the live
+    file vacuously. The left-to-right half of the contract is covered where such
+    an engine exists: the live file runs this same probe and skips on its own
+    verdict, so a probe stuck on either answer is visible there as a skip that
+    should have been a run (or the reverse).
     """
     from tests.test_8870_version_anchor_write_order import (
         SET_ORDER_LEFT_TO_RIGHT,
