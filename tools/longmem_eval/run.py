@@ -6696,26 +6696,15 @@ def _run_main(parser: argparse.ArgumentParser, args,
             parser.error("--spot-check measures turn_recall@10 / ndcg@10 — "
                          f"10 must be in --k (got {','.join(map(str, ks))})")
 
-    # #1349: inject the candidate embedder BEFORE the pre-flight so the
-    # singleton IS the candidate (probe records resolved revision; HARD-FAILs
-    # on load failure). ``--model`` is benchmark-only — the production
-    # entrypoint rejects the override env (Dockerfile entrypoint.sh).
-    # The spot-check injects winner AND control itself (one pass, one
-    # artifact) — never pre-inject here.
-    if args.model and not args.spot_check:
-        if args.model not in PROBE_MODELS:
-            raise SystemExit(
-                f"unknown --model {args.model!r}; known: {sorted(PROBE_MODELS)}")
-        inject_model(args.model, query_prompt=args.query_prompt,
-                     load_timeout=args.load_timeout)
-
-    # #2969 (suggested fix 3): the SERVER posture, before the embedder and the
-    # dataset download. The measured incident was a container in a continuous
-    # active-defrag loop that turned a ~25 min/question ingest into >4 h of
-    # silent grind; #3068 bounds the wait but does not make such a server a
-    # valid measurement target. Only ``--db`` runs have a graph server to
-    # check (the embedded lane is a local unix socket). The policy is
-    # resolved here too so a typo fails at RUN START, not mid-question.
+    # #2969 (suggested fix 3): the SERVER posture FIRST — before the embedder
+    # injection (``--model`` can spend ``--load-timeout`` loading a candidate),
+    # before the embedder pre-flight, and before the dataset download. The
+    # measured incident was a container in a continuous active-defrag loop that
+    # turned a ~25 min/question ingest into >4 h of silent grind; #3068 bounds
+    # the wait but does not make such a server a valid measurement target.
+    # Only ``--db`` runs have a graph server to check (the embedded lane is a
+    # local unix socket). The policy is resolved here too so a typo fails at
+    # RUN START, not mid-question.
     if db_uri is not None:
         try:
             activedefrag_policy = resolve_activedefrag_policy()
@@ -6730,6 +6719,19 @@ def _run_main(parser: argparse.ArgumentParser, args,
                   file=sys.stderr)
             print(str(e), file=sys.stderr)
             raise SystemExit(1) from e
+
+    # #1349: inject the candidate embedder BEFORE the pre-flight so the
+    # singleton IS the candidate (probe records resolved revision; HARD-FAILs
+    # on load failure). ``--model`` is benchmark-only — the production
+    # entrypoint rejects the override env (Dockerfile entrypoint.sh).
+    # The spot-check injects winner AND control itself (one pass, one
+    # artifact) — never pre-inject here.
+    if args.model and not args.spot_check:
+        if args.model not in PROBE_MODELS:
+            raise SystemExit(
+                f"unknown --model {args.model!r}; known: {sorted(PROBE_MODELS)}")
+        inject_model(args.model, query_prompt=args.query_prompt,
+                     load_timeout=args.load_timeout)
 
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
     # the ~tens-of-MB download). EVERY run refuses to start when the dense

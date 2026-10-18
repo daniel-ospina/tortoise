@@ -28,8 +28,16 @@ This module turns that posture from an operator observation into a
 * An **unreadable** ``CONFIG`` is reported ``unknown`` and never as clean:
   a managed endpoint that forbids ``CONFIG`` cannot be asserted to be
   defrag-free, and the guard must not become a new hard dependency that
-  breaks otherwise valid runs. "We could not look" is not "off".
+  breaks otherwise valid runs. "We could not look" is not "off". The one
+  exception is ``disable``: that policy is an explicit request to APPLY the
+  mitigation, so a server it cannot reach, a value it cannot read, and an
+  uninterpretable reply are all states the operator asked to remove rather
+  than to be waved through — an unopenable probe and an unreadable value are
+  REFUSED, and an unrecognised value takes the write + read-back path.
 * The guard never fails soft on a *readable* ``yes``: refusing is the point.
+* A readable value that is neither ``yes`` nor ``no`` is ``unknown``, not
+  ``off``: only ``no`` is a positive verdict, so an uninterpretable reply
+  from a proxied or future server can never be reported as defrag-quiet.
 
 Why the client does not simply disable defrag unconditionally: ``CONFIG SET``
 is server-global. On a shared instance (the docker test lane, a hosted
@@ -46,8 +54,7 @@ import sys
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/longmem_eval/server_posture.py requires Python >= 3.12 "
-        f"(got {sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python -m tools.longmem_eval.server_posture`"
+        f"(got {sys.version_info[0]}.{sys.version_info[1]})"
     )
 
 import os
@@ -79,9 +86,10 @@ class ServerPostureError(RuntimeError):
     """The eval must not start against this server (#2969).
 
     Raised only when the posture is *known* to be bad (defrag on, policy
-    ``require-off``) or when the policy asked us to disable it and the server
-    did not end up off. An unreadable posture is reported, not raised — see
-    the module docstring.
+    ``require-off``), when the policy asked us to disable it and the server
+    did not end up off, or when ``disable`` cannot even read the value it was
+    asked to change. Otherwise an unreadable posture is reported, not raised —
+    see the module docstring.
     """
 
 
@@ -174,8 +182,8 @@ def enforce_server_posture(
     value or the read error) and ``banner`` (the line to print).
 
     Raises :class:`ServerPostureError` when the posture is KNOWN bad under
-    ``require-off``, or when ``disable`` was requested and the read-back does
-    not confirm ``no``.
+    ``require-off``, when ``disable`` was requested and the read-back does
+    not confirm ``no``, or when ``disable`` cannot read the value at all.
     """
     emit = _default_emit if emit is None else emit
     resolved = resolve_activedefrag_policy(policy)
@@ -188,6 +196,19 @@ def enforce_server_posture(
             connection = _connection_from_uri(db_uri)
         except Exception as exc:
             detail = f"could not open a posture probe: {type(exc).__name__}: {exc}"
+            # Same polarity as the unreadable-CONFIG branch below: an operator
+            # who opted in to APPLYING the mitigation must not be handed a run
+            # that proceeds without it.
+            if resolved == POLICY_DISABLE:
+                raise ServerPostureError(
+                    f"{prefix}: {detail}, and "
+                    f"{ENV_ACTIVEDEFRAG}={POLICY_DISABLE} needs a reachable "
+                    f"server to disable defrag on. Refusing to start: the run "
+                    f"would proceed with defrag possibly ON, which is the "
+                    f"#2969 stall condition this policy was set to remove. "
+                    f"Fix: point --db at a reachable server, or set "
+                    f"{ENV_ACTIVEDEFRAG}={POLICY_ALLOW} to accept the risk "
+                    f"explicitly.") from exc
             banner = (f"{prefix}: UNKNOWN — {detail}. The guard did not run; "
                       f"this run is NOT a defrag-clean assertion "
                       f"({ENV_ACTIVEDEFRAG}).")
@@ -198,18 +219,54 @@ def enforce_server_posture(
     value = read_activedefrag(connection)
     if value is None:
         detail = f"CONFIG GET {ACTIVEDEFRAG_CONFIG} could not be read"
+        # ``disable`` is an explicit request to APPLY the mitigation, and it
+        # cannot confirm its own precondition without a read. Waving the run
+        # through here would hand the operator the exact state the opt-in
+        # exists to remove (defrag possibly ON), so it fails CLOSED — the same
+        # polarity the read-back branch below already has. ``require-off`` /
+        # ``allow`` keep the documented soft UNKNOWN-and-proceed behaviour,
+        # because there the guard's own non-availability must not break a run.
+        if resolved == POLICY_DISABLE:
+            raise ServerPostureError(
+                f"{prefix}: {detail} and {ENV_ACTIVEDEFRAG}={POLICY_DISABLE} "
+                f"needs to read the current value to disable it. Refusing to "
+                f"start: the run would proceed with defrag possibly ON, which "
+                f"is the #2969 stall condition this policy was set to remove. "
+                f"Fix on the server: allow CONFIG, or set "
+                f"{ENV_ACTIVEDEFRAG}={POLICY_ALLOW} to accept the risk "
+                f"explicitly.")
         banner = (f"{prefix}: UNKNOWN — {detail} (the server refused CONFIG or "
                   f"the command is unavailable). Treating this run as NOT "
-                  f"defrag-verified; {ENV_ACTIVEDEFRAG}={POLICY_DISABLE} "
-                  f"requires a server that allows CONFIG.")
+                  f"defrag-verified.")
         emit(banner)
         return {"status": STATUS_UNKNOWN, "policy": resolved,
                 "detail": detail, "banner": banner}
 
-    if value != "yes":
+    if value == "no":
         banner = f"{prefix}: {value!r} — measurement target is defrag-quiet"
         emit(banner)
         return {"status": STATUS_OFF, "policy": resolved,
+                "detail": value, "banner": banner}
+
+    if value != "yes" and resolved != POLICY_DISABLE:
+        # READABLE but unrecognised (a truthy "1"/"true"/"on" from a future
+        # or proxied server, an unexpected RESP3 shape). Only the literal
+        # ``no`` is a PASS: classifying anything else as ``off`` would be the
+        # fail-open this module's docstring rules out — "we could not interpret
+        # it" is not "off" any more than "we could not look" is.
+        #
+        # ``disable`` is exempt from this verdict, not from the policy: the
+        # value is not ``no``, so it is a state the operator explicitly asked
+        # to remove, and guessing "unknown" there would skip the mitigation
+        # they opted into. It falls through to the disable branch below, which
+        # writes and read-back-verifies.
+        detail = (f"CONFIG GET {ACTIVEDEFRAG_CONFIG} answered {value!r}, which "
+                  f"is neither 'yes' nor 'no'")
+        banner = (f"{prefix}: UNKNOWN — {detail}, so the server cannot be "
+                  f"asserted defrag-quiet. Treating this run as NOT "
+                  f"defrag-verified.")
+        emit(banner)
+        return {"status": STATUS_UNKNOWN, "policy": resolved,
                 "detail": value, "banner": banner}
 
     # ── defrag is ON ──────────────────────────────────────────────────────
