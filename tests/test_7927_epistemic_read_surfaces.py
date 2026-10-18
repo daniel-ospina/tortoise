@@ -13,16 +13,20 @@ The six surfaces pinned here:
   3. contested claims         — ``ep.TortoiseEP.get_contested_claims``
   4. NAND/why ranker surfaces — ``ranking.resolve_contested_relevance``,
                                 ``GraphRanker/StateRanker/GapsRanker`` signal reads
-  5. audit counts             — ``audit.audit_graph`` (DELIBERATE :Point-only
-                                scope, documented in code — see the docstring test)
+  5. audit                    — ``audit.audit_graph`` (SPLIT scope: counts,
+                                ``pointKind`` scoping, provenance checks 1-2 and
+                                the window check 8 stay :Point-only; the WIRING
+                                checks 4/5/6/6b/7 widen their endpoints — see
+                                the in-body #7927 block and the docstring test)
   6. SVBP factor extractor    — ``projection.extract_svbp_factors``
 
 Each behavioral test seeds a :Subject/:Object/:Event node (parametrized over
 the three labels where the surface allows) and asserts the surface RETURNS it.
 Every widening goes through the shared declaration in ``tortoise/live.py``
-(``epistemic_label_queries`` for id-anchored reads, ``epistemic_disjunction``
-for traversal positions) — the source-level tests at the bottom pin that, so
-no surface can drift back to a hand-spelled label predicate.
+(``epistemic_sweep`` — which composes ``epistemic_label_queries`` and
+``epistemic_labels_of`` — for id-anchored reads, ``epistemic_disjunction`` for
+traversal positions) — the source-level tests at the bottom pin that, so no
+surface can drift back to a hand-spelled label predicate.
 
 Embedded lane (this file needs no shared graph)::
 
