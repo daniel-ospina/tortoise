@@ -103,6 +103,7 @@ def _raw_relationships(graph, node_id):
         "  AND (op.is_operator = true OR op.op_type IS NOT NULL) "
         "  AND other.id <> n.id "
         "  AND (other.is_operator IS NULL OR other.is_operator = false) "
+        "  AND other.op_type IS NULL "
         "  AND (other:Point OR other:Subject OR other:Object OR other:Event) "
         "RETURN op.op_type AS mechanism, other.id AS related "
         "UNION ALL "
@@ -327,6 +328,55 @@ def test_operator_without_is_operator_flag_is_visible(sdk):
     )
 
 
+# ── A peer that IS an operator: the HYBRID shape ──
+
+def test_hybrid_peer_is_not_a_co_endpoint(sdk):
+    """A peer carrying ``op_type`` is an OPERATOR — not a co-endpoint.
+
+    The reader's claim predicate has two halves (``is_operator`` absent/false
+    AND ``op_type`` NULL) and they apply to leg 1's PEER as well, so a HYBRID
+    node — ``op_type`` set, ``is_operator`` absent/false, the replayed/diagnostic
+    shape ``sdk._dedup_match_clauses`` documents as real and nothing refuses on
+    write — stops being reported as a co-endpoint of the operator. That is a
+    deliberate narrowing, not a refactor accident: operator→operator is a CHAIN
+    of single-endpoint operators, which is R4 on #8996 (the same undecided
+    question an operator anchor raises), not a peer relationship.
+
+    Discriminating: with leg 1 testing only the ``is_operator`` half, the hybrid
+    IS listed, so the ``not in related`` assertion reds.
+    """
+    hub = _point(sdk, "INCIDENT-47 with a replayed operator as an input")
+    plain_peer = _point(sdk, "the claim genuinely reached through the operator")
+    other_claim = _point(sdk, "the claim the replayed operator itself relates")
+    downstream = _point(sdk, "an input of the replayed operator")
+
+    # A real operator, then REPLAYED: op_type kept, is_operator lost.
+    hybrid = sdk.create_operator("IMPL", other_claim, [downstream])
+    _graph(sdk).query(
+        "MATCH (op:Point) WHERE op.id = $oid SET op.is_operator = false",
+        params={"oid": hybrid["id"]},
+    )
+    assert _graph(sdk).query(
+        "MATCH (op:Point) WHERE op.id = $oid AND op.op_type IS NOT NULL "
+        "RETURN count(op)",
+        params={"oid": hybrid["id"]},
+    ).result_set[0][0] == 1, (
+        "fixture: the hybrid peer must still LOOK like an operator (op_type "
+        "set, is_operator false) — otherwise it is excluded for the wrong reason"
+    )
+    sdk.create_operator("IMPL", hub, [plain_peer, hybrid["id"]])
+
+    related = {e["related_id"] for e in sdk.expand_relationships(hub)}
+    assert plain_peer in related, (
+        f"the genuine claim peer was dropped with the hybrid: {related!r}"
+    )
+    assert hybrid["id"] not in related, (
+        "a hybrid peer (op_type set, is_operator absent/false) was reported as "
+        "a co-endpoint of the operator — operator→operator is an operator "
+        f"CHAIN (R4 on #8996), not a peer relationship: {related!r}"
+    )
+
+
 # ── The contracts the widening must not break ───────────────────────────
 
 def test_isolated_point_still_returns_empty(sdk):
@@ -498,6 +548,36 @@ def test_emitted_query_keeps_the_id_predicate_and_the_widening(sdk):
             "the operator-less direct-edge leg is missing — a graph written the "
             "way ONTOLOGY §8 says plain connections are reads as isolated"
         )
+
+
+def test_the_claim_predicate_applies_to_the_peer_on_BOTH_legs(sdk):
+    """Both halves of the claim predicate sit on the PEER of BOTH legs.
+
+    Leg 2's peer half is the disclosed one; leg 1's peer half is the narrowing
+    this test exists to pin (a hybrid peer used to be listed on leg 1). Asserted
+    per leg off the emitted Cypher, because the legs are ONE statement and a
+    substring check over the whole statement cannot tell which leg carries what.
+    """
+    hub, _ = _hub_with_non_point_peers(sdk)
+    recorder = _RecordingGraph(_graph(sdk))
+    get_relationships(recorder, [hub])
+
+    leg1, leg2 = recorder.cyphers[0].split("UNION ALL")
+    peer = ("(other.is_operator IS NULL OR other.is_operator = false) "
+            "AND other.op_type IS NULL")
+    assert peer in leg1, (
+        "leg 1's peer test lost the op_type half — a hybrid peer is again "
+        "reported as an operator-mediated relationship"
+    )
+    assert peer in leg2, (
+        "leg 2's peer test lost one of its halves — an operator or hybrid peer "
+        "is reported as an operator-less direct edge"
+    )
+    assert "(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL" \
+        in leg2, (
+        "leg 2's ANCHOR half is missing — an operator anchor reports its own "
+        "typed edges as operator-less direct edges"
+    )
 
 
 def test_unhashable_peer_text_does_not_empty_the_batch(sdk):

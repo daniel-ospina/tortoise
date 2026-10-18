@@ -2792,7 +2792,14 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     * the PEER is widened by traversal (``live.epistemic_disjunction``) — it is
       reached from the operator, so no index applies — and its non-operator
       test admits an ABSENT ``is_operator`` (a ``:Object``/``:Event`` carries
-      no such property; the ``= false`` spelling excluded every one of them);
+      no such property; the ``= false`` spelling excluded every one of them).
+      That non-operator test is the whole of ``_is_claim`` on BOTH legs — i.e.
+      it also excludes ``op_type`` non-null — so a HYBRID node (``op_type`` set,
+      ``is_operator`` absent/false) is not a peer on either leg: it is an
+      operator, and operator→operator is R4 on #8996, the same undecided
+      question an operator anchor raises. This read is the STRICT answer to
+      "is a hybrid a claim?"; ``sdk._dedup_match_clauses`` keeps the lenient
+      one on purpose (a dedupe must not drop a node it was asked about).
     * the OPERATOR keeps its ``:Point`` label (ONTOLOGY §5 — a re-typing plan
       that moves an operator is refused) but is identified by
       ``is_operator = true OR op_type IS NOT NULL``, the #943 parity every other
@@ -2842,16 +2849,36 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     #           shape ``tortoise_list_batch`` reports as ``direct_edge`` — read
     #           as having NO relationships at all, from both endpoints.
     #
-    # Leg 2's `other` test is the direct-edge "is a claim" predicate the rest of
-    # this tree uses (`_window_closure`, `_reachable_claim_count`): an operator
-    # is not a peer, and an operator's own typed edge `(op)-[:IMPL]->(claim)`
-    # would otherwise be reported as a direct edge of the claim. The SAME two
-    # halves are applied to the ANCHOR, so what leg 2 reports really are
-    # OPERATOR-LESS edges — otherwise, asked about an operator, it would report
-    # that operator's own typed edge and claim `operator_id: ''` for a
-    # relationship that has one (the operator itself). An operator anchor is
-    # therefore still the one shape this read does not express; it is R4 on
-    # #8996, a decision about WHICH relation `expand_relationships` promises.
+    # `_is_claim` is the "is a claim" predicate the rest of this tree uses
+    # (`_window_closure`, `_reachable_claim_count`): an operator is not a peer,
+    # and an operator's own typed edge `(op)-[:IMPL]->(claim)` would otherwise
+    # be reported as a relationship that does not exist between claims.
+    #
+    # It is applied to THREE positions, and the third is a NARROWING, not a
+    # refactor:
+    #
+    #   leg 1 `other`  — a co-endpoint of the operator must not itself be an
+    #                    operator. Before this, leg 1 tested only the
+    #                    `is_operator` half, so a peer carrying `op_type` with
+    #                    `is_operator` absent/false — the HYBRID shape
+    #                    `sdk._dedup_match_clauses` documents as real and
+    #                    nothing refuses on write — was reported as a peer.
+    #                    Operator→operator is a CHAIN of single-endpoint
+    #                    operators, which is R4 on #8996, not a peer relation.
+    #                    So this read takes the STRICT answer to "is a hybrid a
+    #                    claim?" while `_dedup_match_clauses` takes the lenient
+    #                    one; the divergence is deliberate (dedupe must not drop
+    #                    a node it was asked about) and pinned per leg in
+    #                    `tests/test_expand_relationships_6976.py`.
+    #   leg 2 `other`  — the direct-edge peer half (above).
+    #   leg 2 `n`      — the ANCHOR half, so what leg 2 reports really are
+    #                    OPERATOR-LESS edges: otherwise, asked about an operator,
+    #                    it would report that operator's own typed edge and
+    #                    claim `operator_id: ''` for a relationship that has one
+    #                    (the operator itself). An operator anchor is therefore
+    #                    still the one shape this read does not express; it is
+    #                    R4 on #8996, a decision about WHICH relation
+    #                    `expand_relationships` promises.
     _is_claim = (
         "({a}.is_operator IS NULL OR {a}.is_operator = false) "
         "AND {a}.op_type IS NULL"
