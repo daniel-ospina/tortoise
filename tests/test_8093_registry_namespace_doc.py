@@ -22,9 +22,9 @@ Class-B test doctrine:
       doc cell AND from the live derivation functions, so the assertion is
       doc-against-code, never the doc against itself.
 
-Hermetic: four file reads (the two docs, plus ``backup_sweep.py`` and
-``mcp_server.py`` for the "still recognised" anchor) and two pure derivations —
-no fixture, no DB. ``tier1`` is the load-bearing registration, not ``core``: a
+Hermetic: five file reads (the two docs, plus ``backup_sweep.py``,
+``mcp_server.py`` and ``hosted_api.py`` for the "still recognised" anchors) and
+three pure derivations — no fixture, no DB. ``tier1`` is the load-bearing registration, not ``core``: a
 ``docs/``-only diff takes ``select()``'s early return and runs ``tier1`` alone,
 so a docs-only edit is exactly the change class this pin exists for.
 """
@@ -62,9 +62,24 @@ def _namespace_cell() -> str:
 
 
 def _default_graph_clause() -> str:
-    """The default-graph clause of the cell — from the stored-name lead-in to `Customs`."""
+    """The default-graph clause of the cell — from the stored-name lead-in to `Customs`.
+
+    Both ends are asserted, not `index()`-ed: a bare `str.index` failure reads
+    ``ValueError: substring not found`` and names nothing, so a cell that loses
+    the clause (or renames it) would red without saying what it must state —
+    which is exactly the diagnosability this pin exists for.
+    """
     cell = _namespace_cell()
+    assert _DEFAULT_CLAUSE_START in cell, (
+        "§Graph must state the default graph's namespace in a clause led by "
+        f"{_DEFAULT_CLAUSE_START!r} — the stored `graph_name` is what the "
+        "default graph's namespace IS, so the cell cannot drop it and state a "
+        "bare team/org namespace instead")
     start = cell.index(_DEFAULT_CLAUSE_START) + len(_DEFAULT_CLAUSE_START)
+    assert _DEFAULT_CLAUSE_END in cell[start:], (
+        "§Graph's default-graph clause must still be followed by the "
+        f"{_DEFAULT_CLAUSE_END!r} clause — the slice pins the default-graph "
+        "statement alone, so its end boundary must stay discoverable")
     end = cell.index(_DEFAULT_CLAUSE_END, start)
     return cell[start:end]
 
@@ -170,16 +185,32 @@ def test_legacy_prefix_is_only_stated_as_legacy():
 
 
 def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
-    """The doc's "still recognised" claim is anchored to the purge guard + resolution.
+    """The doc's "still recognised" claim is anchored to EVERY live acceptance.
 
-    (1) *What value makes this test fail?*  The purge guard dropping the
-        pre-rename `team_{org_id}_{gid}` acceptance, or the MCP graph-name
-        resolution dropping the legacy `team_{org_id}` alternative, while the
-        doc keeps claiming back-compat — the reverse direction of the same
-        drift.
-    (2) *Does the test reach it?*  Yes — both acceptances are read from the
-        committed sources (the two places the cell names), so removing either
-        reds the doc's claim.
+    The cell promises the pre-rename ``team_*`` name is "still recognised by the
+    tombstone purge and the legacy graph-name resolution". Four live sites
+    implement that, and all four are pinned here — the purge guard and the MCP
+    list filter *and* the two hosted-path acceptances (the existence PROBE and
+    the legacy OPEN). The hosted pair is the one with the operator-visible
+    consequence: probing only ``org_`` made every pre-rename org read "node
+    absent" and sent the onboarding projection down the no-write path (#3543 on
+    the probe), and the MCP comment records that the two list filters "must
+    agree or a legacy org's graphs become invisible here alone". A pin covering
+    only two of the four leaves the other two removable greenside while the doc
+    keeps claiming back-compat.
+
+    (1) *What value makes this test fail?*  Any of the four acceptances dropping
+        the pre-rename shape — the purge guard's `team_{org_id}_{gid}`, the MCP
+        resolution's `team_{org_id}`, the hosted probe's `team_{org_id}`
+        alternative, or the hosted legacy open — while the doc keeps claiming
+        back-compat: the reverse direction of the same drift.
+    (2) *Does the test reach it?*  Yes — each acceptance is read from the
+        committed source that has to contain it, so removing one reds the doc's
+        claim. The hosted two are pinned as a CO-OCCURRENCE (the probe's
+        `(f"org_{org_id}", f"team_{org_id}")` pair) and as the legacy open's own
+        argument (`graph_name=f"team_{org_id}"`), so deleting the branch reds
+        rather than merely losing one mention of a string the file uses
+        elsewhere.
     """
     source = (REPO / "tortoise" / "backup_sweep.py").read_text(encoding="utf-8")
     assert 'f"team_{org_id}_{gid}"' in source, (
@@ -194,6 +225,17 @@ def test_legacy_prefix_is_still_recognised_where_the_doc_says_it_is():
         "`team_{org_id}` org namespace")
     assert 'f"org_{org_id}"' in mcp, (
         "and the current org namespace alongside it")
+
+    hosted = (REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+    assert '(f"org_{org_id}", f"team_{org_id}")' in hosted, (
+        "`_graph_has_org_namespace` must keep probing BOTH prefixes: probing "
+        "only `org_` reported 'node absent' for every pre-rename org, which "
+        "sent the onboarding projection down the no-write FLOW-defaults path "
+        "(#3543)")
+    assert 'graph_name=f"team_{org_id}"' in hosted, (
+        "`_open_org_graph_sdk` must keep OPENING a legacy org by its pre-#3543 "
+        "name — re-deriving `org_{org_id}` there would mint a name the probe "
+        "never observed")
 
 
 # ── 3. the pin itself cannot rot the way the cell did ──────────────────────
