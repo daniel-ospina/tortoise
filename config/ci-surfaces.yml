@@ -4301,10 +4301,13 @@ tier1:
 # things: the 23.42m/1.76:1 pair is the PRE-FIX reading above, measured on the
 # tree before this change; on the map this change COMMITS, those same two leg
 # SETS weigh 21.50m / 13.30m (1.62:1), and the split then takes them to
-# 17.53m / 17.47m. (The PRE-FIX leg sets are recomputed against the COMMITTED
-# map, so they also carry main's later re-valuations of two files that sit in
-# that leg — test_extractor_v2 and test_relationships_bounded — which is why the
-# b-side reads 21.50 and not 23.42.)
+# 17.53m / 17.47m. Two independent reasons the b-side reads 21.50 and not 23.42:
+# the map's own re-measurement (which is the drop this change is about), and
+# main's later re-valuations of two files that sit in that leg
+# (test_extractor_v2 10.1 -> 17.2, test_relationships_bounded 16.8 -> 17.6,
+# worth +0.13m). Both act on the same side, so the pair is not decomposable from
+# the two totals alone — the 21.50 is "those leg SETS as the committed map now
+# weighs them", nothing more.
 #
 # WHAT WAS MEASURED, HOW, AND WHEN. Every file of both committed legs, one file
 # at a time, 2026-10-18 on the `ci-critical-path` worktree host: one private
@@ -5013,8 +5016,14 @@ durations:
   test_battery_corpus.py: 7.4
   test_commit_endpoint.py: 33.9  # #9017: was 21.4 (measured 2026-10-18)
   test_invites_http.py: 13.6
-  test_relationships_bounded.py: 16.8  # #9017: was 17.6 (measured 2026-10-18)
-  test_extractor_v2.py: 10.1  # #9017: was 17.2 (measured 2026-10-18)
+  # #9017 NOTE: this file and test_extractor_v2.py were re-valued on main WHILE
+  # this change was in review (16.8 -> 17.6 and 10.1 -> 17.2 — a later CI-era
+  # reading than this pass's local CPU measurement), and an earlier cut of the
+  # merge kept BOTH rows. That is not a harmless duplicate: PyYAML silently
+  # last-wins, but `tools/ci_timing.py::_locate_durations_block` REFUSES the
+  # manifest on a duplicated key (DurationsBridgeError), and that tool is the map's
+  # only writer — so the duplicate passed every local check and would have redded
+  # the next `ci-timing` refresh. One row per key; main's later value wins.
   test_relationships_bounded.py: 17.6
   test_expand_relationships_6976.py: 12.0  # unmeasured estimate (#6976); re-measure from the next junit sweep
   test_extractor_v2.py: 17.2
