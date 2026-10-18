@@ -2245,6 +2245,29 @@ def test_drop_test_graph_refuses_the_shared_uri_default_graph(monkeypatch):
         _live_utils._restore_graph_delete_events(snapshot)
 
 
+def test_drop_test_graph_never_raises_when_the_name_cannot_be_classified(monkeypatch):
+    """#8746 review r7 P2: its contract is "never raises", so the ARMS are guarded.
+
+    Arm 2 `urlparse`s the live ``TORTOISE_DB_URI``. A malformed value raises out
+    of the arm, which is evaluated in ``live_proj``'s ``finally`` — so an
+    unreadable URI would redden a suite with an unrelated traceback instead of
+    leaving the graph alone. An unreadable NAME is not a verdict: record it as
+    ``failed`` and do not touch the graph.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://[::1/x")  # urlparse raises
+    snapshot = _live_utils.graph_delete_events()
+    try:
+        proj = _FakeProj("test_proj125_0123abcd")
+        assert _live_utils.drop_test_graph(proj) is False, (
+            "an unclassifiable name must not delete anything")
+        assert proj.db.calls == [], proj.db.calls
+        assert any(e.get("event") == "failed" for e in
+                   _live_utils.graph_delete_events()), (
+            "the failure was silent — nothing recorded it")
+    finally:
+        _live_utils._restore_graph_delete_events(snapshot)
+
+
 class _LockRefusingConn:
     """A raw connection whose lock command fails — the guard then REFUSES."""
 

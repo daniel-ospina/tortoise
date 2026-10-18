@@ -83,9 +83,7 @@ and the `empty-uri-default-ok:` marker.
 from __future__ import annotations
 
 import ast
-import io
 import re
-import tokenize
 from pathlib import Path
 
 _TESTS_ROOT = Path(__file__).resolve().parent
@@ -603,60 +601,6 @@ def test_uri_mutations_declared_files_exist():
 # Restoration guard (#2084) — static scope/evidence analysis helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def _code_bracket_deltas(src: str) -> list[int]:
-    """Net bracket delta per line, counting ONLY brackets in CODE (#8995).
-
-    `_scope_map`'s continuation counter decides whether a `def` line is a real
-    definition or a wrapped continuation of the expression above it, so a
-    bracket counted as code when it is actually COPY poisons the classification
-    for the REST of the file. That is exactly what happened to
-    `test_time_aware_sdk_2520.py`: `assert "(as of" in t` (line 115) opened a
-    paren that nothing closes, so every later `def` — including the `_ku_sdk`
-    contextmanager that saves and restores `TORTOISE_DB_URI` — was read as a
-    continuation line of the test above it. Its restore then fell OUTSIDE that
-    test's body window and `test_uri_mutations_restored` reded on a mutation
-    that is restored in a `finally`, with a message naming the wrong function.
-    An unmatched bracket in copy is not an open expression.
-
-    String and comment tokens are located with `tokenize` (which understands
-    quoting, escapes, triple quotes and f-strings), and their spans are skipped
-    by the counter. An unparsable fragment falls back to the raw count — the
-    pre-#8995 behaviour, never a silent under-count.
-    """
-    lines = src.split("\n")
-    excluded: dict[int, list[tuple[int, int]]] = {}
-    stringish = {tokenize.STRING, tokenize.COMMENT}
-    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
-    if fstring_middle is not None:
-        stringish.add(fstring_middle)
-    try:
-        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-            if tok.type not in stringish:
-                continue
-            (start_row, start_col), (end_row, end_col) = tok.start, tok.end
-            for row in range(start_row, end_row + 1):
-                if row - 1 >= len(lines):
-                    continue
-                span_start = start_col if row == start_row else 0
-                span_end = end_col if row == end_row else len(lines[row - 1])
-                excluded.setdefault(row, []).append((span_start, span_end))
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        excluded = {}
-    deltas: list[int] = []
-    for row, line in enumerate(lines, start=1):
-        spans = excluded.get(row, ())
-        delta = 0
-        for col, ch in enumerate(line):
-            if any(s <= col < e for s, e in spans):
-                continue
-            if ch in "([{":
-                delta += 1
-            elif ch in ")]}":
-                delta -= 1
-        deltas.append(delta)
-    return deltas
-
-
 def _scope_map(src: str) -> list[tuple[str, str | None]]:
     """Per-line scope classification: ("top", None) for module-level
     code, ("fixture", <name>) inside a @pytest.fixture-decorated
@@ -673,7 +617,6 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
     scopes: list[tuple[str, str | None]] = [("top", None)] * len(lines)
     # Continuation state comes from CODE brackets only — a bracket inside a
     # string literal or comment is copy, not an open expression (#8995).
-    deltas = _code_bracket_deltas(src)
     stack: list[tuple[int, str, str]] = []  # (indent, kind, name)
     paren = 0
     pending_fixture = False
@@ -714,14 +657,21 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
         else:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        # Paren balance from the tokenize-based per-line counter: code
-        # brackets only, so a bracket inside a string literal or comment
-        # cannot freeze the continuation state (#8995). `deltas` is computed
-        # once per source above; the INDENT in this loop comes from
-        # `_code_only`, whose output is COLUMN-ALIGNED with the line, so a
-        # triple-quoted region closing mid-line cannot shift the resumed
-        # code's column (#8937 review r7).
-        paren = max(0, paren + deltas[i])
+        # Paren balance over `code`, the `_code_only` output — code brackets
+        # only, so a bracket inside copy cannot freeze the continuation state
+        # (#8995). NOT over the raw line (#8487), and NOT over a second,
+        # `tokenize`-based counter: `tokenize` emits ONE column for an
+        # `FSTRING_MIDDLE` holding `{{`, so the second brace of `f"a {{ b"`
+        # reaches a tokenize-span counter as code and opens a paren that
+        # nothing closes (measured: 7 files / 9,056 mislabelled lines at
+        # `9ed16dd18`, `tests/test_ship_test_onboarding.py` alone losing 5,845
+        # from its first `{{` onward). `_code_only` blanks the whole literal,
+        # f-string braces included, in one column-aligned pass.
+        for ch in code:
+            if ch in "([{":
+                paren += 1
+            elif ch in ")]}":
+                paren = max(0, paren - 1)
     return scopes
 
 
@@ -1101,7 +1051,7 @@ def test_a_def_inside_a_docstring_is_not_a_function_start():
     the file does not have (the wrong-name class #8487 produced).
 
     Discriminating by construction: `_scope_map` routed through the raw line
-    (`_code_bracket_deltas` makes only BRACKETS code-only — it does not blank
+    (`_code_only` makes the whole line code-only — it blanks
     strings for the `def` match) maps line 3 to ``("fn", "fake")``.
     """
     src = (
@@ -1245,9 +1195,8 @@ def test_a_comment_cannot_open_a_string_or_freeze_the_scope_map():
       the `\"\"\"` in the comment sets the triple state, every following line
       is blanked as string content, and the next real `def` is not recognised
       — so statements after it are attributed to the function above it.
-    * `_code_bracket_deltas` counts code brackets only (`tokenize` excludes
-      COMMENT), so an unmatched `(` in a comment cannot freeze the
-      continuation counter for the rest of the file.
+    * the continuation counter runs over `_code_only`'s output, so an
+      unmatched `(` in a comment cannot freeze it for the rest of the file.
     """
     line = '    note = 1  # a """ triple quote and a ( bracket in prose'
     code, triple = _code_only(line, None)
@@ -1268,14 +1217,54 @@ def test_a_comment_cannot_open_a_string_or_freeze_the_scope_map():
         'def second():\n'
         '    return 2\n'
     )
-    assert _code_bracket_deltas(src)[1] == 0, (
+    assert _scope_map(src)[1][0] == "fn", (
         "the bracket inside the comment was counted as an open expression",
-        _code_bracket_deltas(src)[1])
+        _scope_map(src)[1])
     scopes = _scope_map(src)
     assert scopes[1] == ("fn", "_helper"), scopes[1]
     assert scopes[5] == ("fn", "second"), (
         "comment copy swallowed the next def — it was attributed to "
         f"`_helper` — got {scopes[5]}")
+
+
+def test_scope_map_ignores_an_escaped_brace_in_an_fstring():
+    """`{{` in an f-string is ONE brace of COPY, not an open bracket (#8995).
+
+    A `tokenize`-span counter sees one column for the `FSTRING_MIDDLE` that
+    holds `{{`, so the SECOND brace reaches the counter as code and opens a
+    paren nothing closes: `f"a {{ b"` nets `+1`. Measured at `9ed16dd18`, that
+    mislabelled 7 files / 9,056 lines from their first `{{` — and a COMPLIANT
+    test appended downstream reded with two violations naming the wrong
+    function. `_code_only` blanks the whole literal, escaped braces included.
+
+    Only a NET-POSITIVE surplus is observable: `}}` nets `-1` and the clamp
+    absorbs it, so a `}}` line alone cannot discriminate. Of the 104 files in
+    `tests/` that carry `{{` in an f-string, 95 are balanced and 1 is
+    net-negative (both invisible to the clamp) and only 7 of the 8 net-positive
+    ones diverge (the eighth has no `def` after its surplus). This source
+    therefore carries the `{{` arm ONLY.
+    """
+    src = (
+        'import os\n'
+        'def first():\n'
+        '    assert f"a {{ b" in _text()\n'
+        '\n'
+        '\n'
+        'def second():\n'
+        '    old = os.environ.get("TORTOISE_DB_URI")\n'
+        '    os.environ["TORTOISE_DB_URI"] = _uri()\n'
+        '    try:\n'
+        '        yield\n'
+        '    finally:\n'
+        '        os.environ["TORTOISE_DB_URI"] = old\n'
+    )
+    scopes = _scope_map(src)
+    assert scopes[5] == ("fn", "second"), (
+        "an escaped brace in copy must not freeze the continuation counter — "
+        f"got {scopes[5]}")
+    assert _restoration_violations([("synthetic_8995_f.py", src)]) == [], (
+        "a mutation restored in a finally must stay green when an earlier line "
+        "carries `{{` inside an f-string")
 
 
 def test_module_scoped_pop_without_restore_reds():
