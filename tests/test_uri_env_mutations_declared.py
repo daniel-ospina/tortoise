@@ -1234,6 +1234,50 @@ def test_scope_map_reads_code_brackets_only():
         "the guard must still catch an unrestored mutation in the same shape")
 
 
+def test_a_comment_cannot_open_a_string_or_freeze_the_scope_map():
+    """A `#` comment is COPY for both lexers (#8937 review — the COMMENT arm
+    had no pin left once the interim raw-line counter was replaced).
+
+    Two arms, each discriminating on its own:
+
+    * `_code_only` truncates at `#` BEFORE it looks at quotes, so a comment
+      that MENTIONS a triple quote cannot open a region. Without that branch
+      the `\"\"\"` in the comment sets the triple state, every following line
+      is blanked as string content, and the next real `def` is not recognised
+      — so statements after it are attributed to the function above it.
+    * `_code_bracket_deltas` counts code brackets only (`tokenize` excludes
+      COMMENT), so an unmatched `(` in a comment cannot freeze the
+      continuation counter for the rest of the file.
+    """
+    line = '    note = 1  # a """ triple quote and a ( bracket in prose'
+    code, triple = _code_only(line, None)
+    assert triple is None, (
+        f"a triple quote inside a COMMENT opened a string region — {code!r}")
+    assert "#" not in code and "(" not in code and '"""' not in code, (
+        f"comment content survived into the code text — {code!r}")
+    assert len(code) == len(line), (
+        "blanking the comment shifted the column alignment", code)
+    assert code.strip() == "note = 1", code
+
+    src = (
+        'def _helper():\n'
+        '    note = 1  # a """ triple quote and a ( bracket in prose\n'
+        '    return note\n'
+        '\n'
+        '\n'
+        'def second():\n'
+        '    return 2\n'
+    )
+    assert _code_bracket_deltas(src)[1] == 0, (
+        "the bracket inside the comment was counted as an open expression",
+        _code_bracket_deltas(src)[1])
+    scopes = _scope_map(src)
+    assert scopes[1] == ("fn", "_helper"), scopes[1]
+    assert scopes[5] == ("fn", "second"), (
+        "comment copy swallowed the next def — it was attributed to "
+        f"`_helper` — got {scopes[5]}")
+
+
 def test_module_scoped_pop_without_restore_reds():
     """#2084 negative: the pre-#2073 test_index_restore pattern — a
     module-scoped autouse fixture that pops TORTOISE_DB_URI at setup and
