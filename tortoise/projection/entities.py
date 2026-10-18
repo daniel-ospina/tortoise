@@ -3751,6 +3751,19 @@ class _EntityHandlers:
         # fold the record — it just stops being the key. (`carriers` is read
         # above, before the embedding work, because the branch also decides
         # whether `sid` needs the `_writable_id` gate.)
+        #
+        # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
+        # in the `id`-keyed branch the `ON MATCH` below writes the id and the
+        # adoption markers but NOT `s.name` (`name` is an ON CREATE write), so a
+        # registration can fold onto the node that already carries `sid` while
+        # that node is named something else — `add_subject(name)` then reports an
+        # id whose node is NOT named `name`. Narrower than the clobber this
+        # replaces (no id is corrupted), and closing it means writing the name on
+        # the id-keyed `ON MATCH` AND teaching the two read-side carrier models
+        # the same name move (`journal_epistemic_existence`,
+        # `journal_object_surviving_keys`; `_fold_journal_entities` already moves
+        # the id with its merge key), or they diverge in the fail-CLOSED
+        # direction — so it is its own change, not a rider on #8864.
         if name_is_shared:
             logger.warning(
                 "projection: %d Subject carriers already hold the name %r — "
@@ -3878,6 +3891,17 @@ class _EntityHandlers:
         # id-keyed read as one. See `_upsert_subject` for the shared rationale.
         # (`carriers` is computed with the gates above so the branch can also
         # decide whether `oid` needs the `_writable_id` gate.)
+        #
+        # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
+        # in the `id`-keyed branch the `ON MATCH` below writes the id and the
+        # adoption markers but NOT `o.name` (`name` is an ON CREATE write), so a
+        # registration can fold onto the node that already carries `oid` while
+        # that node is named something else — `add_object(name)` then reports an
+        # id whose node is NOT named `name`, and a later name-keyed read resolves
+        # the OTHER carriers. Same disposition and same reason as `_upsert_subject`
+        # above: closing it means writing the name on the id-keyed `ON MATCH` AND
+        # teaching the two read-side carrier models the same name move, which is
+        # its own change (#8919), not a rider on #8864.
         if name_is_shared:
             logger.warning(
                 "projection: %d Object carriers already hold the name %r — "

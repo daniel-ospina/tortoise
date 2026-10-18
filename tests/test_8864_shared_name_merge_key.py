@@ -28,6 +28,8 @@ import sys
 sys_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, sys_path)
 
+import pytest  # noqa: E402
+
 from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
 
 
@@ -313,4 +315,78 @@ class TestReplayModelsSeeTheMentionStubs:
         ) == _EXISTENCE_EXISTS, (
             "journal_epistemic_existence buried 'sub-x', which the graph still "
             f"carries: {boundary[('Subject', 'sub-x')]}"
+        )
+
+    @pytest.mark.parametrize("label,name,mention_key", [
+        ("Object", "Acme", "object"),
+        ("Subject", "Bob", "subject"),
+    ])
+    def test_a_mention_stub_is_a_carrier_in_the_ENTITY_reference_fold(
+            self, tmp_path, label, name, mention_key):
+        """`consistency._fold_journal_entities` is the THIRD model of this fold.
+
+        `journal_epistemic_existence` and `journal_object_surviving_keys` are the
+        read-side pair; `_fold_journal_entities` is the carrier table
+        `check_consistency`'s ENTITY leg runs, and its `carriers_by_name` index
+        decides the state-op guard. Before the fix it counted registrations
+        only, so the mention-minted stub was invisible: the name looked
+        single-carrier, the guard took the collapsing branch and EVICTED the
+        live carrier — then refused the following state op `state-op-miss` on a
+        journal the graph folds (fail-CLOSED: `recover_from_log` refuses to open
+        the DB, `rebuild` parity fail-loud, `backup.restore` refuses).
+
+        Pinned against the REPLAYED GRAPH (both carriers kept, the state op
+        applied), never against the model's own opinion.
+        """
+        import copy
+
+        from tortoise.consistency import _fold_journal_entities
+        from tortoise.projection.nonfolded import (
+            collect_non_folded,
+            refused_events,
+        )
+
+        stub = _entity_name_id(label, name)
+        other = "obj-x" if label == "Object" else "sub-x"
+        creation = ("ObjectRegistered" if label == "Object" else "SubjectAdded")
+        events = [
+            # Mints `(stub, name)` — a carrier with NO registration record.
+            {"type": "EventRecorded", "eventId": "ev-1",
+             "event": {"eventId": "ev-1", "eventKind": "mentioned",
+                       mention_key: name}},
+            {"type": creation, "id": other, "name": "Other"},
+            # Now TWO nodes carry `name`, one of them the stub.
+            {"type": "EntityMutated", "label": label, "id": other,
+             "op": "rename", "state": {"name": name}},
+            {"type": creation, "id": stub, "name": name},
+            # The state op the carrier guard gates. A shared name keys on `id`
+            # (#8864), so the graph MATCHes `other` and folds.
+            {"type": "EntityMutated", "label": label, "id": other,
+             "op": "restatus", "state": {"status": "archived"}},
+        ]
+
+        sdk = TortoiseSDK(str(tmp_path / "g.db"))
+        try:
+            proj = sdk._get_proj()
+            for rec in events:
+                proj.apply(rec)
+            graph_ids = sorted(_ids(_nodes(proj, label)))
+            graph_status = _by_id(proj, label, other, "status")
+        finally:
+            sdk.close()
+
+        assert graph_ids == sorted([stub, other]), graph_ids
+        assert graph_status == [["archived"]], graph_status
+
+        with collect_non_folded() as entries:
+            entities, _deleted, _ambiguous = _fold_journal_entities(
+                copy.deepcopy(events))
+        assert [str(e) for e in refused_events(entries)] == [], (
+            "the ENTITY reference fold refused a record the graph folds — it "
+            "did not count the mention-minted stub as a carrier: "
+            f"{[str(e) for e in refused_events(entries)]}"
+        )
+        assert entities[(label, other)]["status"] == "archived", (
+            "the reference fold did not apply the state op the graph folded: "
+            f"{entities[(label, other)]}"
         )

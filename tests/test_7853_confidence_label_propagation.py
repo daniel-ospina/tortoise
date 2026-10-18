@@ -29,6 +29,7 @@ import logging
 import pytest
 
 from tortoise.ep import TortoiseEP
+from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
     EPISTEMIC_LABELS,
     epistemic_disjunction,
@@ -957,6 +958,27 @@ def _m_point(nid: str = _MATRIX_ID, content: str = "matrix point") -> dict:
     return {"type": "PointAdded", "point": {"id": nid, "content": content}}
 
 
+def _m_mention(name: str, *, subject: bool = False) -> dict:
+    """An ``EventRecorded`` that MINTS a name-stub with NO registration record.
+
+    ``_event_plain_merge`` MERGEs an ``Object``/``Subject`` stub by NAME under
+    the deterministic #7936 id (``entity_name_id``) and writes that id
+    ``ON CREATE`` only — a real graph carrier that no registration-based model
+    of the carrier table would otherwise see.
+    """
+    inner = {"eventId": "matrix-mention", "eventKind": "mentioned"}
+    inner["subject" if subject else "object"] = name
+    return {"type": "EventRecorded", "eventId": "matrix-mention",
+            "event": inner}
+
+
+def _m_restatus(nid: str = _MATRIX_ID, status: str = "archived",
+                label: str = "Object") -> dict:
+    """A state op the graph folds by ID — the shape the carrier guard gates."""
+    return {"type": "EntityMutated", "op": "restatus", "label": label,
+            "id": nid, "state": {"status": status}}
+
+
 #: ``(row, events, refused?)`` — ``refused`` is the verdict BOTH folds must
 #: reach. A row is "refused" when the belief write cannot be reproduced:
 #: the reference fold records a `point-belief-miss` and `rebuild_all` raises
@@ -1160,6 +1182,33 @@ _BOUNDARY_MATRIX = [
      [_m_subject(_MATRIX_ID, "matrix-sub-listname"),
       _m_rename(state={"name": ["matrix-moved"]}, label="Subject"),
       _m_subject("matrix-sub-third", "matrix-sub-listname"),
+      _m_belief(_MATRIX_ID)], False),
+    # ── #8864 review P1 (round 4): the mention-STUB carrier, third model ──
+    # The two rows below pin the AGREEMENT half: the graph folds this journal
+    # (both carriers kept, the state op applied), and so do `fold` and
+    # `_fold_journal`, which record no false refusal. The carrier-table fix
+    # itself lives in `consistency._fold_journal_entities` — the ENTITY leg
+    # `check_consistency` runs, which these two folders do NOT drive — and is
+    # non-vacuously pinned in
+    # `tests/test_8864_shared_name_merge_key.py::TestReplayModelsSeeTheMentionStubs::
+    # test_a_mention_stub_is_a_carrier_in_the_ENTITY_reference_fold` against the
+    # replayed graph.
+    ("mention-stub-keeps-a-shared-name-from-evicting-its-carrier",
+     [_m_mention("matrix-mention"),
+      _m_object(_MATRIX_ID, "matrix-other-name"),
+      _m_rename(_MATRIX_ID, new_name="matrix-mention"),
+      _m_object(_entity_name_id("Object", "matrix-mention"),"matrix-mention"),
+      _m_restatus(_MATRIX_ID),
+      _m_belief(_MATRIX_ID)], False),
+    # The :Subject twin (`_upsert_subject` follows the same #8864 rule, and the
+    # mention's `subject` mints a :Subject stub).
+    ("subject-mention-stub-keeps-a-shared-name-from-evicting-its-carrier",
+     [_m_mention("matrix-sub-mention", subject=True),
+      _m_subject(_MATRIX_ID, "matrix-sub-other-name"),
+      _m_rename(_MATRIX_ID, new_name="matrix-sub-mention", label="Subject"),
+      _m_subject(_entity_name_id("Subject", "matrix-sub-mention"),
+                 "matrix-sub-mention"),
+      _m_restatus(_MATRIX_ID, label="Subject"),
       _m_belief(_MATRIX_ID)], False),
 ]
 
