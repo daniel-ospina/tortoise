@@ -28,7 +28,12 @@ from typing import ClassVar
 import httpcore
 import pytest
 
-from tortoise import cimd
+from tortoise import cimd, security
+
+# #8103: the resolve-and-refuse LOOP moved to the shared home
+# (``security.resolve_global_addresses``), so the resolver seam these tests
+# intercept is ``security.socket`` — the same stdlib module object ``cimd`` used
+# to reach directly. Patching it here still drives ``cimd.public_addresses``.
 
 CLIENT_ID = "https://claude.ai/.well-known/oauth-client-metadata"
 
@@ -139,7 +144,7 @@ def _resolver(*addresses):
 
 
 def test_public_addresses_refuses_private(monkeypatch):
-    monkeypatch.setattr(cimd.socket, "getaddrinfo", _resolver("127.0.0.1"))
+    monkeypatch.setattr(security.socket, "getaddrinfo", _resolver("127.0.0.1"))
     with pytest.raises(cimd.CimdError, match="non-public"):
         cimd.public_addresses("evil.example", 443)
 
@@ -147,8 +152,24 @@ def test_public_addresses_refuses_private(monkeypatch):
 def test_public_addresses_refuses_mixed_public_and_private(monkeypatch):
     """Publishing one public A record beside a private one must not help: the
     whole resolution is refused, not filtered."""
-    monkeypatch.setattr(cimd.socket, "getaddrinfo",
+    monkeypatch.setattr(security.socket, "getaddrinfo",
                         _resolver("93.184.216.34", "10.0.0.1"))
+    with pytest.raises(cimd.CimdError, match="non-public"):
+        cimd.public_addresses("evil.example", 443)
+
+
+def test_a_private_answer_past_the_cap_is_still_refused(monkeypatch):
+    """The cap truncates AFTER every answer is judged (#8103).
+
+    The pre-#8103 shape truncated BEFORE validating (``infos[:MAX_ADDRESSES]``),
+    so a hostile resolver could hide a private answer at position 9 and let the
+    first eight public ones consume the cap — an unread tail is an unjudged
+    tail, and the two copies of this loop had already drifted on that exact
+    point.
+    """
+    public = [f"93.184.216.{i}" for i in range(1, cimd.MAX_ADDRESSES + 1)]
+    monkeypatch.setattr(security.socket, "getaddrinfo",
+                        _resolver(*public, "10.0.0.1"))
     with pytest.raises(cimd.CimdError, match="non-public"):
         cimd.public_addresses("evil.example", 443)
 
@@ -156,7 +177,7 @@ def test_public_addresses_refuses_mixed_public_and_private(monkeypatch):
 def test_public_addresses_refuses_unresolvable(monkeypatch):
     def _boom(*a, **k):
         raise OSError("no such host")
-    monkeypatch.setattr(cimd.socket, "getaddrinfo", _boom)
+    monkeypatch.setattr(security.socket, "getaddrinfo", _boom)
     with pytest.raises(cimd.CimdError, match="could not resolve"):
         cimd.public_addresses("nope.example", 443)
 
@@ -178,7 +199,7 @@ class _RecordingBackend:
 def test_pinning_backend_connects_to_the_vetted_address(monkeypatch):
     """The socket destination is the validated IP, never re-resolved from the
     name — this is the control that closes the DNS-rebinding TOCTOU."""
-    monkeypatch.setattr(cimd.socket, "getaddrinfo",
+    monkeypatch.setattr(security.socket, "getaddrinfo",
                         _resolver("93.184.216.34"))
     inner = _RecordingBackend()
     backend = cimd._PinningNetworkBackend(inner=inner)
@@ -187,7 +208,7 @@ def test_pinning_backend_connects_to_the_vetted_address(monkeypatch):
 
 
 def test_pinning_backend_never_connects_to_a_private_target(monkeypatch):
-    monkeypatch.setattr(cimd.socket, "getaddrinfo", _resolver("10.1.2.3"))
+    monkeypatch.setattr(security.socket, "getaddrinfo", _resolver("10.1.2.3"))
     inner = _RecordingBackend()
     backend = cimd._PinningNetworkBackend(inner=inner)
     with pytest.raises(cimd.CimdError):
@@ -196,7 +217,7 @@ def test_pinning_backend_never_connects_to_a_private_target(monkeypatch):
 
 
 def test_pinning_backend_tries_each_vetted_address(monkeypatch):
-    monkeypatch.setattr(cimd.socket, "getaddrinfo",
+    monkeypatch.setattr(security.socket, "getaddrinfo",
                         _resolver("93.184.216.34", "93.184.216.35"))
     inner = _RecordingBackend()
     backend = cimd._PinningNetworkBackend(inner=inner)

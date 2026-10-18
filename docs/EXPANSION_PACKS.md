@@ -423,11 +423,33 @@ loses a race gets a `409` and has written nothing.
 mutation, so C5 #2114's boundary holds. `PUT` is a full desired-state replace
 and **requires** `expected_revision` — a mismatch is a `409` with the current
 revision, so two admins cannot silently erase each other's set. Each change
-writes one audit record.
+writes one audit record. The read also carries **`available`** — the shared
+catalog plus this graph's own tombstones, minus what is already listed — so the
+UI's add-list comes from the server rather than a second copy of the catalog in
+the browser. That list is what keeps *removal* from being a one-way door:
+removal is a desired-state OMIT, and a **tenant-authored** pack appears in no
+shared catalog, so without the tombstone leg it would be un-addable once
+removed. Its rows carry the **`source` the write would store** — a namespace
+this graph already has an install record for keeps that record's `source`
+(which may also be `custom`), and one it does not gets the `starter`/`manual`
+derivation the write itself uses — and the read carries **`catalog_ok`**:
+`false` means the shared catalog could not be read (the read degrades rather
+than `503`-ing), so an empty `available` must be shown as *"the catalog could
+not be read"* — never as the claim that everything is already on the graph.
 
-> The dashboard Settings → **Configured packs** view (the modal that lists,
-> adds, disables and removes packs per graph) is #2728's remaining product
-> surface. The state model and the REST surface above are what it renders.
+> The dashboard Settings → **Configured packs** home (`settings-packs-heading`)
+> renders this contract, with a graph selector and a modal that lists each
+> pack's name, namespace, version, kind count, source and status and adds /
+> turns off / removes them. The Graphs tab carries the same dialog per row as
+> the graph-contextual door. Its decisions are derived, not invented:
+> `src/packs.js` holds the status grouping, the add-list diff, the PUT body and
+> the per-failure classification, so the surface cannot drift from the route's
+> semantics (the server's `removed` is never sent as an input status — omission
+> is what removes). `configured: false` is stated in words, with the resolved
+> set's count qualified in parentheses beside them, because such a graph still
+> resolves to the whole catalog: "Not configured yet — the full catalog applies
+> (2 active packs · 1 off)" — the count describes the rows the payload carries,
+> never a bare number a reader could mistake for the enforced set.
 
 ## Chains
 

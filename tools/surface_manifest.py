@@ -681,6 +681,104 @@ def _walk_with_functions(node, stack):
         yield from _walk_with_functions(child, stack)
 
 
+# ── the caller scan's parse cache (#9017) ───────────────────────────────────
+# `scan_callers` is the whole cost of a derivation: it reads and parses every
+# tracked `.py` file (1,706 of them; measured 2026-10-18 — 16.8-18.6s CPU of a
+# ~19s `build_doc()` on this host). A derivation is cheap to REPEAT once those
+# parses are cached, and repeating it is exactly what the suite does:
+# `tests/test_surface_manifest.py` spends ~103s of its 245s CPU in SIX tests that
+# each ask for a REAL derivation — the ones that prove the derivation itself
+# (#4192's served-default tamper, #4185's high-water pin, `cmd_cut`'s wiring),
+# and which therefore CANNOT be pointed at a canned dict. Memoizing changes
+# nothing for the shipped tool (one process, one derivation); it exists so the
+# SECOND and later in-process derivation is not a second full tree walk.
+# Measured on the file: 245s CPU before, 181s after, same host and load.
+#
+# MEMORY, stated so nobody has to discover it: the cache holds every parsed
+# file's attribute->stacks map for the life of the process (~265k stack lists
+# over ~60k attribute names), which is ~120 MB at peak in a full derivation.
+# That is acceptable because this tool is a CLI/CI gate — nothing under
+# `tortoise/` imports it — and the alternative is re-parsing 1.7k files.
+#
+# Keyed on `(st_mtime_ns, st_size)`, not on the content: a file edited under a
+# running process is re-parsed, and an unreadable one still refuses on the first
+# attempt. That key is a HEURISTIC, not a proof — a same-size write landing on
+# the same mtime tick, or a restored timestamp (`os.utime`, `rsync -t`), would
+# serve the previous parse. No consumer in this repo re-derives after mutating a
+# tracked source file (the suite patches `build_doc` or redirects the MANIFEST,
+# never the tree), so it cannot bite today; callers that ever need a guarantee
+# must drop the cache entry (or the process) themselves.
+_PARSE_CACHE_KEY = "_surface_manifest_parse_cache"
+
+
+def _parse_cache() -> dict[str, tuple[tuple[int, int], dict[str, list[tuple[str, ...]]]]]:
+    """The process-wide parse cache.
+
+    Deliberately NOT a module global. The suite loads this file as a module per
+    call (`importlib.util.spec_from_file_location(...); exec_module(...)` in
+    `tests/test_surface_manifest.py::_load_manifest_tool`), so a module-level
+    dict is re-created for EVERY test and the cache never hits — measured, that
+    is what the first cut of this change did: the file's session CPU did not
+    move (245s before, 273s after, same load). A `sys` attribute survives
+    re-execution, so it is the object with the lifetime this cache is for.
+    Do not "tidy" it back into a module global.
+
+    Scoped by `str(ROOT)` so two checkouts in one process cannot serve each
+    other's parses.
+    """
+    per_process = getattr(sys, _PARSE_CACHE_KEY, None)
+    if per_process is None:
+        per_process = {}
+        setattr(sys, _PARSE_CACHE_KEY, per_process)
+    return per_process.setdefault(str(ROOT), {})
+
+
+def _attributes_with_stacks(rel: str) -> dict[str, list[tuple[str, ...]]]:
+    """`attribute name -> every enclosing function chain it appears under`, per file.
+
+    The per-file half of `scan_callers`, memoized. Returns an empty dict for a
+    file that does not parse, which is what the scan does with it. Keyed by
+    attribute so a caller can look up the ~190 method names it cares about
+    instead of walking every attribute in the file on every derivation.
+    """
+    path = ROOT / rel
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not read the tracked file {rel}: {exc}. The caller scan must not omit "
+            "a tracked file."
+        ) from exc
+    cache = _parse_cache()
+    key = (st.st_mtime_ns, st.st_size)
+    cached = cache.get(rel)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # `git ls-files` lists INDEX entries, so a tracked file removed from the working
+        # tree (or unreadable) is still listed and this read raised `FileNotFoundError`
+        # out of the derivation — a bare traceback in the REQUIRED gate, the same defect
+        # class this file refuses for every other piece of evidence. A silently OMITTED
+        # file is worse than a refusal: a missed caller changes a row's derived class.
+        raise SurfaceEvidenceUnreadable(
+            f"could not read the tracked file {rel}: {exc}. The caller scan must not omit "
+            "a tracked file."
+        ) from exc
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, UnicodeDecodeError):
+        cache[rel] = (key, {})
+        return {}
+    found: dict[str, list[tuple[str, ...]]] = {}
+    for node, stack in _walk_with_functions(tree, []):
+        if isinstance(node, ast.Attribute):
+            found.setdefault(node.attr, []).append(stack)
+    cache[rel] = (key, found)
+    return found
+
+
 def scan_callers(method_names: set[str], registered_handlers: set[str] | None = None) -> dict[str, set[str]]:
     """method -> set of files that reference it as `<expr>.<method>`.
 
@@ -688,36 +786,35 @@ def scan_callers(method_names: set[str], registered_handlers: set[str] | None = 
     reference on a non-SDK object with a colliding name is a known false
     positive, and the artifact records it as such. What this scan must not do is
     MISS a caller, so it is deliberately over-inclusive.
+
+    The per-file parse is memoized (`_attributes_with_stacks`); the caller SET
+    is rebuilt on every call, because `registered_handlers` decides which side
+    of the handler seam a `tortoise/mcp_server.py` reference falls on.
     """
     callers: dict[str, set[str]] = {name: set() for name in method_names}
+    registered = registered_handlers or set()
     for rel in tracked_python():
-        path = ROOT / rel
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            # `git ls-files` lists INDEX entries, so a tracked file removed from the working
-            # tree (or unreadable) is still listed and this read raised `FileNotFoundError`
-            # out of the derivation — a bare traceback in the REQUIRED gate, the same defect
-            # class this file refuses for every other piece of evidence. A silently OMITTED
-            # file is worse than a refusal: a missed caller changes a row's derived class.
-            raise SurfaceEvidenceUnreadable(
-                f"could not read the tracked file {rel}: {exc}. The caller scan must not omit "
-                "a tracked file."
-            ) from exc
-        try:
-            tree = ast.parse(text)
-        except (SyntaxError, UnicodeDecodeError):
+        attributes = _attributes_with_stacks(rel)
+        if not attributes:
             continue
-        registered = registered_handlers or set()
-        for node, stack in _walk_with_functions(tree, []):
-            if isinstance(node, ast.Attribute) and node.attr in callers:
-                if rel == "tortoise/mcp_server.py":
-                    # The HANDLER leg is per-registered-tool, not per-file: only a call
-                    # inside a function that is itself a registered tool handler counts.
-                    inside = any(fn in registered for fn in stack)
-                    callers[node.attr].add(rel + ("#tool" if inside else "#other"))
-                else:
-                    callers[node.attr].add(rel)
+        for attr in callers:
+            stacks = attributes.get(attr)
+            if not stacks:
+                continue
+            if rel == "tortoise/mcp_server.py":
+                # The HANDLER leg is per-registered-tool, not per-file: only a call
+                # inside a function that is itself a registered tool handler counts.
+                # A method called BOTH inside and outside a handler carries both
+                # markers, which is what the per-occurrence scan produced before the
+                # parse cache (do not collapse this to one marker).
+                inside = any(fn in registered for stack in stacks for fn in stack)
+                outside = any(not any(fn in registered for fn in stack) for stack in stacks)
+                if inside:
+                    callers[attr].add(rel + "#tool")
+                if outside:
+                    callers[attr].add(rel + "#other")
+            else:
+                callers[attr].add(rel)
     return callers
 
 

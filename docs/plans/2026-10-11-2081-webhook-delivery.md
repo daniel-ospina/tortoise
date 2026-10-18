@@ -40,7 +40,8 @@ So #2081 is **not fixed** and **not out-of-repo**; the delivery machinery was ge
 | Retry / backoff | same | Exponential `30s · 2^(n-1)`, capped 1h (`backoff_seconds`). After `TORTOISE_WEBHOOK_MAX_ATTEMPTS` (default 8) consecutive failures the subscription is DISABLED (`disabled_at` + reason) — a dead endpoint cannot consume dispatch capacity forever. Re-enable = delete + recreate. |
 | Delivery receipts | same | `:DeliveryReceipt` per ATTEMPT (`delivered`/`retrying`/`exhausted`, with `seq`, `attempt`, `http_status`, redacted `error`, `duration_ms`), capped at 500/subscription. |
 | Signing | same | `X-Tortoise-Signature: t=<unix>,v1=<hex>` — HMAC-SHA256 over `b"<t>." + body` (Stripe scheme). `verify_signature` is exported so a pilot app and its tests share ONE implementation. |
-| SSRF guard | `tortoise/security.py` | `validate_webhook_url`: http(s) only, no userinfo, no blocked name/suffix, and **IP literals must satisfy `ipaddress.is_global`** — loopback/RFC1918/link-local/IMDS/ULA/multicast are refused. |
+| SSRF guard — registration half | `tortoise/security.py` | `validate_webhook_url`: http(s) only, no userinfo, no blocked name/suffix, and **an IP literal must satisfy `is_global_address`** — loopback/RFC1918/link-local/IMDS/ULA/multicast/NAT64/6to4-relay/site-local are refused. A *name* is accepted here and judged at connect time. |
+| SSRF guard — connect-time half (#8103) | `tortoise/security.py` + `tortoise/webhook_delivery.py` | `resolve_webhook_addresses` resolves at DISPATCH and refuses the whole answer if ANY address is non-global (a mixed public/private answer buys nothing); the transport then dials the **vetted ADDRESS** with `Host` and TLS SNI still on the name, so a rebound name cannot reach what registration refused. ONE resolve-and-refuse loop is shared with `cimd.public_addresses`, so the two controls cannot drift. |
 | REST surface (4 tenant routes) | `tortoise/hosted_api.py` | `POST /v1/context/subscriptions` (422 on a rejected target/unknown type/cap, 503 when the encryption key is unset, 201 with the one-time secret), `GET` list, `DELETE /{sub_id}`, `GET /{sub_id}/deliveries`. Declared in `config/rest-surface-inventory.yml` (#3875 — the third surface grows visibly). |
 | Delivery trigger | `tortoise/hosted_api.py::_dream_worker` | `_dispatch_webhooks(org_id, gns)` runs AFTER the dream pass, off the event loop, never on the write path, best-effort (a dispatcher fault is logged, never a dream failure). Kill switch `TORTOISE_WEBHOOK_DISPATCH=0` (the `GBRAIN_HOOKS=0` shape). |
 
@@ -69,7 +70,20 @@ private accessor, not a new public method). The REST additions are declared in t
 5. **A delivery pass that has nothing to deliver writes nothing.** The due-subscription query runs
    BEFORE `ensure_subscription_schema`, so every existing deployment (and every dream in every test)
    takes a path that creates no index and no node — pinned by a test that counts nodes around a pass.
-6. **`security.validate_webhook_url` is NOT the same predicate as `config.LOOPBACK_HOSTS`**
+6. **`trust_env=False` on the delivery client, with the CA seam restored explicitly.** An
+   env-configured proxy would take an absolute-form request and resolve the NAME itself, which
+   discards the connect-time pin — so the proxy layer must be off. But httpx reads `SSL_CERT_FILE` /
+   `SSL_CERT_DIR` only when `trust_env` is on, so switching it off also drops the CA bundle an
+   operator-configured deployment supplies. The transport therefore rebuilds that trust context from
+   those variables itself; with neither set it passes no `verify` at all, leaving httpx's default.
+   Consequence for operators: **egress must be direct** — a deployment that requires `HTTPS_PROXY`
+   for outbound traffic cannot deliver webhooks.
+7. **The connect loop is bounded by COUNT and by TIME, and they are not interchangeable.**
+   `MAX_PINNED_ADDRESSES` bounds how many sockets/handshakes one delivery opens; one shared
+   `timeout_s` budget bounds the CONNECT phase in total. `httpx`'s float timeout is per PHASE, so a
+   candidate that connects inside the budget may still spend one further read/write phase — bounded
+   by `timeout_s` each, not unbounded per address.
+8. **`security.validate_webhook_url` is NOT the same predicate as `config.LOOPBACK_HOSTS`**
    (#1647 P1-3's single-source rule): that one answers "is this URI the local test box" over three
    names; this one answers "may this process be made to call this address" over every non-global
    range. `security.py` is stdlib-only and cannot import `config`; the containment invariant (every
@@ -79,7 +93,7 @@ private accessor, not a new public method). The REST additions are declared in t
 
 ```bash
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_webhook_delivery.py -q -p no:cacheprovider
-  → 36 passed
+  → 71 passed  (36 at the registration-only round; the connect-time half added 35)
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_security.py tests/test_rest_surface_inventory.py tests/test_ci_manifest.py -q
   → 95 passed (shared run with the file above)
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_body_cap_sweep.py tests/test_transport_wait_bound.py \
@@ -92,6 +106,12 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_dream.py tests/t
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_graph_write_loop_responsiveness.py \
     tests/test_read_routes_loop_responsiveness.py tests/test_lifecycle_guards.py -q
   → 71 passed
+# the connect-time half (#8103) — private lane container, NOT the shared/canonical store
+TORTOISE_DB_URI=<tools/test_lane.py uri> python -m pytest \
+    tests/test_webhook_delivery.py tests/test_cimd_ssrf.py tests/test_security.py \
+    tests/test_from_uri_userinfo.py -q
+  → 314 passed
+python tools/surface_manifest.py check         → OK (81 tool rows, twelve properties hold)
 python tools/ci_selection.py --integrity        → ✅ all test files classified
 python tools/ci_selection.py --surface-audit    → tortoise/webhook_delivery.py (pinned by 1, registered: api, core)
 ruff check tortoise/webhook_delivery.py tortoise/security.py tests/test_webhook_delivery.py tortoise/hosted_api.py
@@ -124,9 +144,13 @@ not a logic failure. The same file is the documented embedded-lane flake class (
    app-facing (#2081) and graph-lifecycle (#3909) subscriptions. This change builds that one layer,
    so #3909 should reuse it rather than add a second dispatcher; SSE is a second transport on top.
 4. **Pilot app end-to-end** — indicator 4 needs a real third-party integration.
-5. **SSRF residual: DNS rebinding** — a public name that resolves to a private address is accepted at
-   registration and can be re-pointed before dispatch; closing it needs the connected peer's IP
-   checked against the same policy at CONNECT time.
+5. **SSRF residual: DNS rebinding** — ~~a public name that resolves to a private address is accepted
+   at registration and can be re-pointed before dispatch; closing it needs the connected peer's IP
+   checked against the same policy at CONNECT time.~~ **CLOSED by #8103**: the delivery transport now
+   resolves at connect time, judges every answer with the SAME predicate
+   (`security.is_global_address`, shared with the registration gate) and dials the vetted ADDRESS
+   with `Host`/SNI still on the name — a refuse is a `retrying`/`exhausted` receipt, never a silent
+   success. Mixed answers fail CLOSED.
 
 ## 6. Learnings
 
@@ -136,3 +160,18 @@ not a logic failure. The same file is the documented embedded-lane flake class (
 - A new test file that creates a real Point pays the **embedding-model load** (~80–150s on a cold
   host). Seeding `:GraphEvent` rows through `event_store.append_event` directly is both faster and a
   better fit for a delivery test (emission is already pinned by `tests/test_event_store.py`).
+- **A pin that moves the socket must keep the name ASCII.** `Host` is a header value and
+  `sni_hostname` a TLS server name, and httpx encodes neither with a utf-8 fallback — handing it the
+  raw IDN form raises `UnicodeEncodeError` on every attempt, which is not a `ConnectError`, so the
+  attempt ceiling DISABLES the subscription. `httpx`'s own urlparse used to IDNA-encode the name, so
+  the punycode form (`bücher.example.com` → `xn--bcher-kva.example.com`) is what must go to the
+  resolver, the `Host` header and SNI alike.
+- **A count cap is not a time bound.** `MAX_PINNED_ADDRESSES` × `TIMEOUT_S` is the amplification a
+  hostile resolver can buy (8 × 10 s for ONE event); the candidates share one `timeout_s` budget,
+  which bounds the CONNECT phase in total. `httpx`'s float timeout is per PHASE, so the honest claim
+  is "one connect budget, plus at most one further read/write phase" — not "never more than
+  `timeout_s`". Stating the stronger version would re-stale on the next reader.
+- **`raise AssertionError` inside a `_no_dial` sentinel is defanged by the production catch-all**
+  (`except Exception` → `(None, "AssertionError: …")`), so "some error at all" passes even when the
+  refused target WAS dialed. The sentinel must be a `BaseException` subclass, and the test must
+  assert the per-URL refusal text.

@@ -1149,6 +1149,36 @@ tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
 }
 .graph-key-panel table { margin-top: 6px; }
 .graph-key-panel .inline-form { margin: 6px 0; }
+
+/* ── #2728: Configured packs (Settings home 5 + the dialog) ────────────── */
+/* The Settings home's selector row. Wraps rather than overflowing at narrow
+   widths (the same rule the nav uses): a graph selector beside a primary
+   action must not push the action off-screen on a phone. */
+.packs-home-controls {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 4px 0 8px;
+}
+/* Wider than the standard 420px modal because the pack table carries six
+   columns; the narrow-breakpoint rule below keeps it inside the viewport
+   instead of letting the table scroll sideways. */
+.packs-modal { max-width: 720px; }
+.packs-modal h3 { margin-top: 0; }
+.packs-modal input, .packs-modal select { max-width: 100%; }
+.packs-table { width: 100%; margin-top: 8px; }
+.packs-table th, .packs-table td {
+  text-align: left; padding: 6px 8px; font-size: 13px;
+  border-bottom: 1px solid var(--border, #1e293b);
+}
+.packs-table th { color: var(--text-dim, #94a3b8); font-weight: 600; }
+.pack-row-off td { opacity: 0.7; }
+.pack-row-actions { white-space: nowrap; }
+.packs-consequences { margin: 10px 0 6px; padding-left: 18px; }
+.packs-consequences li { margin-bottom: 4px; }
+.packs-add { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+@media (max-width: 640px) {
+  .packs-modal { width: 100%; max-width: 100%; }
+  .packs-table td, .packs-table th { padding: 6px 4px; }
+}
 .badge {
   display: inline-block;
   margin-left: 6px;

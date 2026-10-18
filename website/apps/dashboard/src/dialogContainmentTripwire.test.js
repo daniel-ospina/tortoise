@@ -4,9 +4,11 @@
 // WHY A SOURCE PIN AND NOT ONLY THE UNIT TESTS. dialogFocus.test.js proves the
 // containment helpers are CORRECT; it cannot prove any dialog CALLS them. A
 // helper that is never wired is a no-op, and the regression it hides is exactly
-// what #2577 closes: three aria-modal dialogs that announce themselves as modal
+// what #2577 closes: aria-modal dialogs that announce themselves as modal
 // while their background stays reachable to Tab and to a screen reader's virtual
-// cursor. This file pins the three call sites in the app shell.
+// cursor. This file pins every call site in the app shell — the three #2577
+// named (create-team, reveal-key, ReauthDialog) plus #2728's Configured-packs
+// dialog, which was added afterwards and is the fourth aria-modal surface.
 //
 // It pins SHAPE, not behaviour: the real DOM behaviour of containment + the
 // `inert` attribute lives in dialogContainmentDom.test.jsx (the vitest/jsdom
@@ -57,9 +59,9 @@ test('#2577: dialogFocus exports the containment helpers', () => {
   assert.match(focusJs, /export function applyBackgroundInert\(/)
 })
 
-test('#2577: all three dialogs wrap Tab/Shift+Tab via containTabFocus', () => {
-  assert.equal(count(mainJsx, 'containTabFocus(e.currentTarget'), 2,
-    'create-team + reveal-key must each call containTabFocus on Tab')
+test('#2577: all four dialogs wrap Tab/Shift+Tab via containTabFocus', () => {
+  assert.equal(count(mainJsx, 'containTabFocus(e.currentTarget'), 3,
+    'create-team + reveal-key + configured-packs must each call containTabFocus on Tab')
   // anchored on each dialog's own identity, not on attribute adjacency: a new
   // attribute must not be able to red this wiring pin
   assert.ok(mainJsx.includes('ref={createTeamDialogRef}'), 'create-team inert ref present')
@@ -77,6 +79,17 @@ test('#2577: all three dialogs wrap Tab/Shift+Tab via containTabFocus', () => {
     /containTabFocus\(e\.currentTarget/,
     'reveal-key dialog: Tab containment')
   assert.equal(count(profileJsx, 'containTabFocus(e.currentTarget'), 1)
+  // #2728's Configured-packs dialog is a FOURTH aria-modal surface — it was
+  // shipped announcing modality with neither obligation, the exact pattern
+  // #2577 exists to prevent. Anchored on its own title id.
+  assert.match(
+    windowFrom(mainJsx, 'aria-labelledby="packs-modal-title"', 900),
+    /containTabFocus\(e\.currentTarget/,
+    'Configured-packs dialog: Tab containment')
+  assert.match(windowFrom(mainJsx, 'aria-labelledby="packs-modal-title"', 240),
+    /tabIndex=\{-1\}/,
+    'Configured-packs: the dialog container can hold focus when every control is disabled')
+  assert.ok(mainJsx.includes('ref={dialogRef}'), 'Configured-packs inert ref present')
   assert.ok(profileJsx.includes('ref={dialogRef}'), 'ReauthDialog inert ref present')
   assert.match(windowFrom(profileJsx, 'ref={dialogRef}', 80), /tabIndex=\{-1\}/,
     'ReauthDialog: the dialog container can hold focus when every control is disabled')
@@ -86,14 +99,15 @@ test('#2577: all three dialogs wrap Tab/Shift+Tab via containTabFocus', () => {
     'ReauthDialog: Tab containment')
 })
 
-test('#2577: all three dialogs make the background inert while open, cleanup-guarded', () => {
-  assert.equal(count(mainJsx, 'applyBackgroundInert(el, document)'), 2)
+test('#2577: all four dialogs make the background inert while open, cleanup-guarded', () => {
+  assert.equal(count(mainJsx, 'applyBackgroundInert(el, document)'), 3)
   assert.equal(count(profileJsx, 'applyBackgroundInert(el, document)'), 1)
   // each effect is guarded on a real document (node/SSR) and returns a
   // cleanup — a missing cleanup leaves the page inert forever
   for (const [name, src, open] of [
     ['create-team', mainJsx, 'createTeamOpen'],
     ['reveal-key', mainJsx, 'revealKey'],
+    ['configured-packs', mainJsx, 'packsGraphId'],
   ]) {
     const effect = windowFrom(src, `if (!${open} || typeof document === 'undefined')`, 460)
     assert.match(effect, /applyBackgroundInert\(el, document\)/, `${name}: inert effect`)
@@ -105,6 +119,8 @@ test('#2577: all three dialogs make the background inert while open, cleanup-gua
     'create-team: inert released before focus restore')
   assert.match(mainJsx, /function closeRevealKey\(\) \{[^}]*revealKeyInertRef\.current\(\)[^}]*restoreFocus\(revealRestoreRef\)/,
     'reveal-key: inert released before focus restore')
+  assert.match(mainJsx, /function closePacksModal\(\) \{[^}]*packsInertRef\.current\(\)[^}]*requestAnimationFrame\(\(\) => restoreFocus\(packsTriggerRef\)\)/,
+    'configured-packs: inert released before focus restore')
   const reauth = windowFrom(profileJsx, 'applyBackgroundInert(el, document)', 200)
   assert.match(reauth, /\}, \[open\]\)/, 'ReauthDialog: effect keyed on open')
   assert.match(
@@ -126,7 +142,7 @@ test('#2577: #2392 focus-restore semantics are preserved', () => {
   assert.match(mainJsx, /restoreFocus\(revealRestoreRef\)/)
   // and the dialogs are still declared modal — an inert-trapped dialog must
   // keep announcing itself as one (a11y-relevant, not cosmetic)
-  assert.ok(count(mainJsx, 'aria-modal="true"') >= 3,
+  assert.ok(count(mainJsx, 'aria-modal="true"') >= 4,
     'the aria-modal dialogs are still declared modal')
   assert.match(windowBefore(mainJsx, 'aria-labelledby={createTeamMode', 160), /aria-modal="true"/)
   assert.match(windowBefore(profileJsx, 'aria-label="Confirm it\'s you"', 140), /aria-modal="true"/)

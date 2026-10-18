@@ -19053,28 +19053,83 @@ async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | Non
     return None
 
 
-def _pack_kind_counts() -> dict[str, int]:
-    """#2728 — namespace → declared kind count, for the Configured-packs view.
+def _pack_catalog_rows() -> tuple[dict[str, dict], bool]:
+    """#2728 — the shared catalog, as Configured-packs rows, plus an OK bit.
 
     Best-effort: the catalog is read-only for tenants and a registry failure
-    must DEGRADE the view (count omitted), never 503 a read.
+    must DEGRADE the view (counts omitted, add-list empty), never 503 a read
+    that already has the graph's own pack set in hand. The boolean is what
+    lets the CLIENT tell that degradation apart from "every catalog pack is
+    already on this graph" — without it an empty add-list reads as a
+    confident claim about a catalog that was never read (the same fail-open
+    class `packCountLine` exists to avoid on the count line).
+
+    ``source`` is the value `set_graph_packs` writes: for a namespace this
+    graph has no install record for, the derivation it would use on a NEW
+    install (``"starter"`` for a starter namespace, else ``"manual"``) — so a
+    pack offered by the add-list shows the same Source it will carry once
+    saved instead of a client-side guess. `_packs_payload` then lets an
+    EXISTING record's ``source`` win over this one, which is what the write
+    does too (`rec.get("source") or <derivation>`).
     """
     try:
         from tortoise.domain_loader import _get_registry
         reg = _get_registry()
+        # #2728 review P1: `_get_registry()` RETURNS None on its documented
+        # degradation path ("None if packs are unavailable") — it does not
+        # raise. `getattr(None, "packs", None) or {}` therefore turned an
+        # unavailable registry into an EMPTY, SUCCESSFUL read and returned
+        # `catalog_ok=True`, which is the exact fail-open this bit exists to
+        # prevent (`addListEmptyLine` then reports "every pack is already on
+        # this graph" about a catalog that was never read). Both sibling
+        # readers (`pack_state._resolve_catalog`,
+        # `domain_loader._pack_kinds_by_bucket`) guard the same None.
+        if reg is None:
+            return {}, False
         packs = getattr(reg, "packs", None) or {}
-        return {
-            ns: (len(p.object_kinds) + len(p.event_kinds) + len(p.point_kinds))
-            for ns, p in packs.items()
-        }
     except Exception:
-        return {}
+        return {}, False
+    try:
+        from tortoise.pack_state import _starter_namespaces
+        starter = set(_starter_namespaces())
+    except Exception:
+        # a missing starter set must not blank the catalog
+        starter = set()
+    out: dict[str, dict] = {}
+    for ns, p in packs.items():
+        try:
+            out[ns] = {
+                "namespace": ns,
+                "name": getattr(p, "name", ns),
+                "version": getattr(p, "version", None),
+                "tier": getattr(p, "tier", "free"),
+                "description": getattr(p, "description", "") or "",
+                "source": "starter" if ns in starter else "manual",
+                "kind_count": (len(getattr(p, "object_kinds", ()) or ())
+                               + len(getattr(p, "event_kinds", ()) or ())
+                               + len(getattr(p, "point_kinds", ()) or ())),
+            }
+        except Exception:
+            # one odd pack must not blank the list
+            continue
+    return out, True
 
 
 def _graph_packs_view(gsdk) -> tuple[dict, list[dict]]:
-    """Read the per-graph state in ONE thread hop (blocking DB reads)."""
+    """Read the per-graph state in ONE thread hop (blocking DB reads).
+
+    ``include_removed=True`` keeps TOMBSTONED namespaces in the row list so
+    the Configured-packs view can offer a removed pack back. Removal is not a
+    one-way door in the UI: it is a full desired-state replace, so a namespace
+    missing from the client's next PUT would otherwise be unreachable (the
+    introspection list deliberately omits tombstones, and a TENANT-authored
+    pack is not in the shared catalog either — so neither list would carry
+    it). ``_packs_payload`` splits the rows into the visible set and the
+    add-list.
+    """
     from tortoise.pack_state import get_tenant_packs, resolved_pack_set
-    return resolved_pack_set(gsdk).to_dict(), get_tenant_packs(gsdk)
+    return (resolved_pack_set(gsdk).to_dict(),
+            get_tenant_packs(gsdk, include_removed=True))
 
 
 def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
@@ -19090,15 +19145,68 @@ def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
     return _graph_packs_view(_make_sdk(graph_name=namespace))
 
 
-def _packs_payload(graph_id: str, resolved: dict, packs: list[dict]) -> dict:
-    counts = _pack_kind_counts()
+def _packs_payload(graph_id: str, resolved: dict,
+                   rows: list[dict]) -> dict:
+    """Shape the read for the Configured-packs view.
+
+    ``packs`` is the graph's approved set (``active``/``disabled``);
+    ``available`` is what the user may ADD: the shared catalog plus this
+    graph's own tombstones, minus namespaces already listed. Keeping the two
+    in one response is what lets the modal render an honest add-list without
+    a second round trip — and lets a REMOVED pack be added back.
+
+    ``catalog_ok`` says whether the shared catalog could be READ at all. It
+    is the difference between an add-list that is empty because everything is
+    already listed and one that is empty because the registry read failed
+    (``_pack_catalog_rows`` degrades rather than 503s) — an empty
+    ``available`` must never be rendered as a claim about the catalog
+    otherwise.
+    """
+    catalog, catalog_ok = _pack_catalog_rows()
+    packs = [p for p in rows if p.get("status") != "removed"]
+    removed = [p for p in rows if p.get("status") == "removed"]
+    listed = {p["namespace"] for p in packs}
     for p in packs:
-        p["kind_count"] = counts.get(p["namespace"])
+        meta = catalog.get(p["namespace"]) or {}
+        p["kind_count"] = meta.get("kind_count")
+        if not p.get("description"):
+            p["description"] = meta.get("description", "")
+    # The SOURCE a namespace will carry if it is (re-)added is the RECORD's,
+    # not the catalog derivation's: `set_graph_packs` writes
+    # `rec.get("source") or ("starter" if ns in starter else "manual")`, so an
+    # existing record's source always wins. A catalog arm that reported the
+    # derivation instead would label a tombstoned shipped namespace with a
+    # Source that FLIPS under the user when they add it back (the defect the
+    # Source column exists to avoid). Keyed off the tombstones, because a
+    # namespace still listed already shows its own record's row.
+    recorded_source = {r["namespace"]: r.get("source")
+                       for r in removed if r.get("source")}
+    # Add-list: catalog rows first (the shipped vocabulary), then the graph's
+    # own tombstones so a tenant-authored pack is re-addable too. A tombstone
+    # that IS in the catalog is already offered by the catalog arm.
+    available: list[dict] = []
+    for ns, row in sorted(catalog.items()):
+        if ns in listed:
+            continue
+        offered = dict(row, status="available")
+        if ns in recorded_source:
+            offered["source"] = recorded_source[ns]
+        available.append(offered)
+    seen = {row["namespace"] for row in available}
+    for row in sorted(removed, key=lambda r: r["namespace"]):
+        if row["namespace"] in listed or row["namespace"] in seen:
+            continue
+        meta = catalog.get(row["namespace"]) or {}
+        available.append({**row, "status": "removed",
+                          "kind_count": meta.get("kind_count"),
+                          "description": meta.get("description", "")})
     return {
         "graph_id": graph_id,
         "revision": resolved["revision"],
         "configured": resolved["configured"],
         "packs": packs,
+        "available": available,
+        "catalog_ok": catalog_ok,
     }
 
 
@@ -19137,14 +19245,14 @@ async def _graph_packs_read(graph_id: str, org_id: str, key_ctx: dict) -> dict:
                         "message": "A graph-scoped key can only read its own "
                                    "graph's packs."})
     try:
-        resolved, packs = await asyncio.to_thread(
+        resolved, rows = await asyncio.to_thread(
             _graph_packs_view_for, namespace)
     except Exception:
         _logger.exception("pack read failed for team %s graph %s",
                           org_id, graph_id)
         raise HTTPException(status_code=503,
                             detail="Pack catalog unavailable") from None
-    return _packs_payload(graph_id, resolved, packs)
+    return _packs_payload(graph_id, resolved, rows)
 
 
 @app.get("/v1/graphs/{graph_id}/packs")
@@ -19152,11 +19260,18 @@ async def get_graph_packs(graph_id: str, org_id: str,
                           key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
     """#2728 — read ONE graph's configured pack set + its catalog metadata.
 
-    Response: ``{graph_id, revision, configured, packs: [{namespace, name,
-    version, tier, description, status, source, installed_at, kind_count}]}``.
+    Response: ``{graph_id, revision, configured, catalog_ok,
+    packs: [{namespace, name, version, tier, description, status, source,
+    installed_at, kind_count}],
+    available: [{namespace, name, version, tier, description, source,
+                 kind_count, status: 'available'|'removed'}]}``.
     ``configured=false`` means the graph was never explicitly configured, so
     ``packs`` reflects the legacy starter/starter-healed state; a configured
-    graph with ``packs == []`` is a deliberate empty set.
+    graph with ``packs == []`` is a deliberate empty set. ``available`` is the
+    add-list (shared catalog plus this graph's own tombstones, minus what is
+    already listed) and ``catalog_ok`` reports whether the shared catalog was
+    readable — an empty ``available`` with ``catalog_ok=false`` means the
+    catalog could not be read, not that nothing is left to add.
     """
     return await _graph_packs_read(graph_id, org_id, key_ctx)
 
@@ -19219,7 +19334,7 @@ async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
         UnknownPackNamespace,
     )
     try:
-        resolved, packs = await asyncio.to_thread(_write)
+        resolved, rows = await asyncio.to_thread(_write)
     except PackRevisionConflict as exc:
         raise HTTPException(
             status_code=409,
@@ -19252,22 +19367,27 @@ async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
 
     # One audit record per change, mirroring the key-lane convention
     # (actor = the key's owner, detail.via = 'api_key') so a key-driven write
-    # is attributable and never reads as a human session action.
+    # is attributable and never reads as a human session action. The detail is
+    # the graph's APPROVED set as the user sees it (a namespace's absence from
+    # one record and presence in its neighbour is what a removal looks like —
+    # ``removed`` rows are tombstones the read carries only for the add-list).
     if key_ctx.get("key_id"):
         actor = key_ctx.get("created_by")
         detail = {"via": "api_key", "key_id": key_ctx.get("key_id"),
                   "revision": resolved["revision"],
-                  "packs": [{"namespace": p["namespace"],
-                             "status": p["status"]} for p in packs]}
+                  "packs": [{"namespace": r["namespace"],
+                             "status": r["status"]} for r in rows
+                            if r["status"] != "removed"]}
     else:
         actor = key_ctx.get("session_user_id")
         detail = {"via": "session", "revision": resolved["revision"],
-                  "packs": [{"namespace": p["namespace"],
-                             "status": p["status"]} for p in packs]}
+                  "packs": [{"namespace": r["namespace"],
+                             "status": r["status"]} for r in rows
+                            if r["status"] != "removed"]}
     await _async_audit(request, org_id, "graph_packs_update",
                        resource_type="graph", resource_id=graph_id,
                        actor_user_id=actor, detail=detail)
-    return _packs_payload(graph_id, resolved, packs)
+    return _packs_payload(graph_id, resolved, rows)
 
 
 @app.put("/v1/graphs/{graph_id}/packs")
