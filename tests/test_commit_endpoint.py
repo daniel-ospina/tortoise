@@ -3176,3 +3176,85 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/sessions/commit answered" in message
+
+
+# ── #5475 — the SDK kind gate on the hosted COMMIT path ────────────────────
+#
+# #5202 keeps `entities[].kind` OUT of Layer-1 (an off-vocabulary entity kind
+# passes validation), and this door persists it through `sdk.create_entity` —
+# which is now the gated funnel. So the refusal reaches the commit door, and it
+# is DETERMINISTIC (the same payload refuses identically on every retry): the
+# fail-closed 500's "retry with the same client_commit_id" advice is wrong for
+# it, and it would discard the Option-A message the writer acts on. Same
+# reasoning, and the same 422 mapping, as the #5363 inverted-window refusal
+# above.
+
+class Test5475CommitDoorKindRefusal:
+
+    def test_unapproved_entity_kind_is_an_actionable_422(self, client):
+        """A commit naming an unapproved pack on an entity is a 422, not a 500.
+
+        FAIL-ON (pre-fix): the entity write is accepted, the pack joins the
+        approval set, and the commit reports success. With the gate but WITHOUT
+        the pre-write placement measured here, the 422 arrives after the point,
+        the sources and the Session have landed and leaves the :CommitRecord
+        ``partial`` — which reds the ``nothing landed`` leg (and reads as a
+        pre-write validation error, which it is not).
+        REACHABLE: ``entities[].kind`` is not Layer-1 gated (#5202), so the
+        payload really does reach the write phase; the graph really is
+        ``dev``-only (seeded, then read back before the commit), and the
+        payload carries a Point too, so "nothing landed" is not vacuous.
+        """
+        from tortoise.pack_state import graph_installed_namespaces
+        sdk = _team_sdk()
+        sdk._get_proj().g.query(
+            "MERGE (p:PackInstall {namespace:'dev'}) SET p.version='0.0.0', "
+            "    p.status='active', p.source='starter'")
+        assert graph_installed_namespaces(sdk) == frozenset({"dev"})
+
+        r = _commit(client, _raw_payload(
+            n_points=1,
+            # the point is what makes "nothing landed" non-vacuous: it must NOT
+            # be written before the refusal. Its about_entities is emptied so
+            # Layer-1 (which runs first) has nothing to object to.
+            points=[_point(0, about_entities=[])],
+            entities=[{"name": "CampaignAlpha", "kind": "marketing:campaign",
+                       "passes_frequency_gate": True}]))
+
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["error_code"] == "KIND_NAMESPACE_NOT_INSTALLED", r.text
+        assert detail["namespace"] == "marketing"
+        assert detail["kind"] == "marketing:campaign"
+        assert detail["property"] == "objectKind"
+        assert detail["installed_namespaces"] == ["dev"]
+        # Option A: what / why / what to do, delivered rather than swallowed.
+        assert "marketing" in detail["message"]
+        assert "balloon" in detail["message"]
+        assert "PUT /v1/graphs/{graph_id}/packs" in detail["message"]
+        assert "retry" not in json.dumps(detail).lower()
+        # the approval set did not move
+        assert graph_installed_namespaces(sdk) == frozenset({"dev"})
+        # and NOTHING of the commit landed: the refusal is a pre-write payload
+        # rejection like every other 422 on this route, not a half-commit.
+        g = sdk._get_proj().g
+        for label in ("Point", "Object", "Source", "Session", "CommitRecord"):
+            n = g.query(f"MATCH (n:{label}) RETURN count(n)").result_set[0][0]
+            assert n == 0, f"the refused commit left {n} :{label} node(s)"
+
+    def test_approved_entity_kind_commit_still_succeeds(self, client):
+        """The control: a commit whose entity kind IS approved keeps writing.
+
+        FAIL-ON: a gate that refuses every namespaced entity kind on a graph
+        with pack records (the extractor's pack-kinded entities are legitimate).
+        REACHABLE: ``dev`` is installed and ``dev:epic`` is a real dev kind.
+        """
+        sdk = _team_sdk()
+        sdk._get_proj().g.query(
+            "MERGE (p:PackInstall {namespace:'dev'}) SET p.version='0.0.0', "
+            "    p.status='active', p.source='starter'")
+        r = _commit(client, _raw_payload(
+            n_points=0,
+            entities=[{"name": "EpicAlpha", "kind": "dev:epic",
+                       "passes_frequency_gate": True}]))
+        assert r.status_code == 200, r.text

@@ -53,6 +53,9 @@ from datetime import datetime, timezone
 from threading import Lock
 
 from tortoise._gate_memo import GateMemo
+from tortoise.domain_loader import (
+    _BUCKET_ATTRS as _BUCKET_KIND_ATTRS,  # the declared twin of _KIND_PROP_PACK_ATTR
+)
 from tortoise.sdk import TortoiseSDK
 
 log = logging.getLogger(__name__)
@@ -551,18 +554,19 @@ _KIND_PROP_KEYS: tuple[str, ...] = (
 #:   "points" section is core-only — ``_minted_kind_report``: "pack point
 #:   kinds are never writable"), and the pack ``sourceTypes`` in the catalog
 #:   are core spellings the core leg already admits;
-#: * ``objectKind``/``subjectKind`` are DELIBERATELY absent: ``POST
-#:   /v1/objects`` / ``POST /v1/subjects`` persist those spellings UNGATED
-#:   (#5475). Attributing a bare value from them would make the approval set
-#:   writable again through the very door #5475 closed — one bare write would
-#:   add its declaring namespace, and the door would be self-widening again.
+#: * ``objectKind``/``subjectKind`` are DELIBERATELY absent, and the reason is
+#:   NOT "those doors are ungated" any more: #8380 gated ``POST /v1/objects`` /
+#:   ``POST /v1/subjects`` and #5475 gated the SDK/entity + point write funnels
+#:   (``sdk._create_entity``, ``sdk.create_point``). The surviving reason is
+#:   that the gates constrain a NAMESPACED spelling, while this leg would
+#:   attribute a BARE one — a shape nothing validates against the vocabulary
+#:   (Layer-1 does not check ``entities[].kind``, #5202; ``_validate_kind``
+#:   warns only). Adding them here would turn any bare
+#:   ``objectKind='campaign'`` into an approval-set write for whichever pack
+#:   declares ``campaign`` — the self-widening #5475 closes, reached without
+#:   naming a namespace at all. Re-open this only with a Layer-1 membership
+#:   test on those keys (#5202) in place first.
 _ATTRIBUTABLE_BARE_KIND_KEYS: tuple[str, ...] = ("eventKind",)
-
-#: Memo for ``bare_event_kind_owners``, keyed by the RESOLVED packs dir (packs
-#: are static per process per dir — the ``value_extractor._KIND_SPEC_CACHE``
-#: precedent). Bounded + LRU + thread-safe via ``GateMemo``.
-_BARE_KIND_OWNERS = GateMemo()
-
 
 def bare_event_kind_owners(packs_dir: str | os.PathLike | None = None
                            ) -> dict[str, frozenset[str]]:
@@ -579,23 +583,13 @@ def bare_event_kind_owners(packs_dir: str | os.PathLike | None = None
     — #5339 review P2 — so a case-folded lookup would attribute a spelling the
     gate will never accept), and only bare declarations are keys: a namespaced
     value already carries its namespace. Memoized per resolved packs dir.
+
+    Thin wrapper over ``_declared_kind_owners("event_kinds")`` (#5475 review):
+    the write gate's approved-spelling suggestion needs the same read for the
+    other buckets, so there is ONE ``PackRegistry`` reader for "which packs
+    declare this bare kind" instead of two that could drift.
     """
-    if packs_dir is None:
-        from tortoise.pack_registry import default_packs_dir
-        packs_dir = default_packs_dir()
-    cache_key = str(packs_dir)
-    cached = _BARE_KIND_OWNERS.get(cache_key)
-    if cached is not None:
-        return cached
-    from tortoise.pack_registry import PackRegistry
-    registry = PackRegistry(packs_dir)
-    registry.load_all()
-    owners: dict[str, set[str]] = {}
-    for ns, pack in registry.packs.items():
-        for kind in pack.event_kinds:
-            owners.setdefault(str(kind), set()).add(ns)
-    return _BARE_KIND_OWNERS.put_if_absent(
-        cache_key, {k: frozenset(v) for k, v in owners.items()})
+    return _declared_kind_owners("event_kinds", packs_dir)
 
 
 def _bare_event_kind_namespaces(bare: set[str]) -> frozenset[str]:
@@ -1099,6 +1093,167 @@ def graph_installed_namespaces(sdk: TortoiseSDK, *,
     return resolved_pack_set(sdk, graph_name=graph_name).namespaces
 
 
+#: The namespace of the CORE vocabulary — the engine's own kinds, not an
+#: ontology pack. ``compile_value_brief`` emits core kinds as ``core:<kind>``
+#: and ``pack_registry._resolve_kind_ref`` normalizes that spelling to the bare
+#: kind (its ``ref.startswith("core:")`` branch is the twin of this constant —
+#: NOT re-derivable from it, because that seam spells the prefix as a literal),
+#: so ``core:x`` is a SPELLING OF ``x`` and names no pack (#5475).
+CORE_NAMESPACE = "core"
+
+#: Kind property → the ``PackManifest`` attribute declaring that bucket's
+#: kinds. DERIVED from ``domain_loader._BUCKET_ATTRS`` — its declared twin
+#: (the ``_KIND_PROP_KEYS``/``hosted_api`` relationship, one module over) — so a
+#: bucket added or renamed there cannot leave the refusal's suggestion leg
+#: quietly naming nothing. ``subjectKind`` drops out because that map points it
+#: at ``None``: manifest v3 has no ``subjectKinds`` list, so a suggestion there
+#: would invent a bucket the schema does not declare.
+_KIND_PROP_PACK_ATTR: dict[str, str] = {
+    prop: attr for prop, attr in _BUCKET_KIND_ATTRS.items() if attr
+}
+
+#: Memo for ``_declared_kind_owners`` — the ONE reader of "which packs declare
+#: this bare kind" (``bare_event_kind_owners`` delegates here). Keyed by
+#: ``(resolved packs dir, attr)``: packs are static per process per dir — the
+#: ``value_extractor._KIND_SPEC_CACHE`` precedent — and ``GateMemo`` keeps it
+#: bounded, LRU and thread-safe.
+_DECLARED_KIND_OWNERS = GateMemo()
+
+
+def _declared_kind_owners(attr: str,
+                          packs_dir: str | os.PathLike | None = None
+                          ) -> dict[str, frozenset[str]]:
+    """``{bare kind: the namespaces declaring it}`` for ONE manifest bucket.
+
+    The lookup ``approved_kind_alternatives`` needs. Read from the same
+    ``PackRegistry`` the compile seams read, so a suggestion can never name a
+    kind the write gate would then refuse; a manifest that fails to load
+    contributes nothing (``load_all`` keeps healthy packs only) — this NARROWS
+    the suggestion list, never invents an alternative (#5475).
+    """
+    if packs_dir is None:
+        from tortoise.pack_registry import default_packs_dir
+        packs_dir = default_packs_dir()
+    cache_key = (str(packs_dir), str(attr))
+    cached = _DECLARED_KIND_OWNERS.get(cache_key)
+    if cached is not None:
+        return cached
+    from tortoise.pack_registry import PackRegistry
+    registry = PackRegistry(packs_dir)
+    registry.load_all()
+    owners: dict[str, set[str]] = {}
+    for ns, pack in registry.packs.items():
+        for kind in getattr(pack, attr, None) or ():
+            owners.setdefault(str(kind), set()).add(ns)
+    return _DECLARED_KIND_OWNERS.put_if_absent(
+        cache_key, {k: frozenset(v) for k, v in owners.items()})
+
+
+def kind_named_packs(kind: str, *, attribute_bare: bool = False
+                     ) -> tuple[str, ...]:
+    """The pack namespaces this kind SPELLING names — the ONE home for #5475.
+
+    Every write door needs the same answer to the same question, and the doors
+    must not answer it differently (an input constraint that one door applies
+    and another does not is the defect this issue closes), so the reading is
+    here and the doors only decide what to do with it.
+
+    * a NAMESPACED kind names the pack in its prefix (compared RAW — every
+      gate seam compares raw: ``_installed_pack_ns``, ``compile_value_brief``,
+      ``compile_kind_index_spec`` and ``compile_vocab``, #5339 review P2);
+    * an EMPTY namespace (``":kind"``) names no pack and is not collected by
+      ``graph_kind_namespaces`` (``if ns:``);
+    * the ``core:`` spelling names NO pack — it is the engine's own vocabulary
+      (see ``CORE_NAMESPACE``), so it is admitted exactly as the bare kind it
+      spells is;
+    * a BARE kind names no pack EITHER — except under ``attribute_bare``,
+      where the #5184 leg applies: a bare value that exactly ONE catalog pack
+      declares is mined back into that pack's namespace by
+      ``graph_kind_namespaces`` when it is an attributable key
+      (``_ATTRIBUTABLE_BARE_KIND_KEYS`` = ``eventKind`` only). A door writing
+      such a key must constrain the bare spelling too, or it re-opens the
+      widening the prefix leg closes (#5475 comment 2026-10-13).
+
+    The ``attribute_bare`` catalog read is memoized per resolved packs dir and
+    fails NARROWING (no namespace ⇒ nothing named ⇒ admitted), matching
+    ``_bare_event_kind_namespaces``' own contract.
+    """
+    if not isinstance(kind, str):
+        return ()
+    ns, sep, _ = kind.partition(":")
+    if sep:
+        ns = ns.strip()
+        if not ns or ns == CORE_NAMESPACE:
+            return ()
+        return (ns,)
+    if not attribute_bare:
+        return ()
+    bare = kind.strip()
+    if not bare:
+        return ()
+    return tuple(sorted(_bare_event_kind_namespaces({bare})))
+
+
+def unapproved_kind_pack(kind: str,
+                         approved: frozenset[str] | None,
+                         *, attribute_bare: bool = False) -> str | None:
+    """The UNAPPROVED pack namespace this write names, or ``None``.
+
+    The refusal a write door raises needs the namespace to name in its
+    message, so the decision and its explanation come from one call rather
+    than from a boolean plus a re-parse in the caller.
+
+    ``approved is None`` (no ``:PackInstall`` records ⇒ the catalog union,
+    #2714 indicator 3) and a spelling that names no pack are both ``None`` —
+    this is an input constraint on pack namespaces, NOT a blanket ban on
+    writes.
+    """
+    if approved is None:
+        return None
+    for ns in kind_named_packs(kind, attribute_bare=attribute_bare):
+        if ns not in approved:
+            return ns
+    return None
+
+
+def approved_kind_alternatives(kind: str,
+                              approved: frozenset[str] | None,
+                              *, prop: str) -> list[str]:
+    """``ns:kind`` spellings this graph MAY write, for the refusal message.
+
+    The owner ruling on #5475 (2026-10-17) asks the system to "normalize to
+    approved namespaces and kinds" and to be "fairly smart … user friendly"
+    rather than merely blocking. The normalization is offered HERE, as an
+    explicit alternative the writer can adopt, and never applied silently: the
+    same ruling takes Option A ("never quietly normalise"), a silent rewrite
+    would store a kind the caller did not write, and the write would be
+    metered/audited under the rewritten kind.
+
+    Only alternatives the graph may actually write are returned: the same bare
+    kind declared by a pack whose namespace is in the approval set. Empty when
+    ``prop`` has no catalog bucket (``subjectKind``), when the bare kind is
+    declared by nobody, or when no declaring pack is approved.
+
+    ⚠️ FAILURE DIRECTION — narrowing, and it must never raise: this runs on a
+    REFUSAL path, so a failed catalog read degrades to "no suggestion" (the
+    refusal itself still happens) rather than turning a clear rejection into
+    an unrelated error.
+    """
+    attr = _KIND_PROP_PACK_ATTR.get(prop)
+    if not attr or approved is None or not isinstance(kind, str):
+        return []
+    bare = kind.partition(":")[2].strip()
+    if not bare:
+        return []
+    try:
+        owners = _declared_kind_owners(attr).get(bare) or frozenset()
+    except Exception as e:  # noqa: BLE001, RUF100
+        log.warning("pack_state: kind-alternative lookup failed — the "
+                    "refusal names no alternative spelling: %s", e)
+        return []
+    return [f"{ns}:{bare}" for ns in sorted(owners) if ns in approved]
+
+
 def kind_namespace_is_approved(kind: str,
                                approved: frozenset[str] | None) -> bool:
     """#5475: may a graph WRITE a kind with this spelling?
@@ -1126,6 +1281,15 @@ def kind_namespace_is_approved(kind: str,
       still cannot widen the approval set;
     * an empty namespace (``":kind"``) contributes nothing to
       ``graph_kind_namespaces`` either, so it is admitted on the same grounds;
+    * the ``core:`` spelling names no PACK — it is the engine's own vocabulary
+      (``CORE_NAMESPACE``), which ``compile_value_brief`` emits and
+      ``pack_registry._resolve_kind_ref`` normalizes to the bare kind. A
+      ``core:`` write can therefore add only ``core`` to the mined namespace
+      set, which grants no pack, so it is admitted exactly as its bare form
+      is. (Without this the SDK/commit door would refuse every
+      ``core:Project``-spelled entity kind the extractor produces — the
+      spelling catalogued in comment 2026-10-13 as a form the fix must not
+      break.)
     * ``approved is None`` is the MEANINGFUL back-compat answer, not an empty
       one: the graph has no ``:PackInstall`` records, so its approval set IS
       the catalog union (#2714 indicator 3) and every namespace is already
@@ -1137,12 +1301,4 @@ def kind_namespace_is_approved(kind: str,
     """
     if approved is None:
         return True
-    ns, sep, _ = kind.partition(":")
-    if not sep:
-        return True
-    ns = ns.strip()
-    # An empty namespace (``":kind"``) names no pack and is not collected by
-    # ``graph_kind_namespaces`` (``if ns:``) — same admission as a bare kind.
-    if not ns:
-        return True
-    return ns in approved
+    return all(ns in approved for ns in kind_named_packs(kind))
