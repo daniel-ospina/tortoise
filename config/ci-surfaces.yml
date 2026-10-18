@@ -1159,6 +1159,16 @@ surfaces:
   # `backup.py`-only change (the #7767 registration above is the same shape and
   # the same reason).
   - test_7935_restore_destination_lock.py
+  # #4762: the deployed-CSP beacon detector (`tests/e2e/audit_prod_csp.py`) is
+  # only observable through production, so the thing under test is a WORKFLOW
+  # (`.github/workflows/prod-csp-monitor.yml`) plus the detector's beacon
+  # contract. Both subjects select `core`: a `.github/workflows/*` edit
+  # falls through to the full matrix, and the detector (under `tests/e2e/`,
+  # which the manifest does not classify) selects `core` alone — so without this
+  # entry the wiring guard would not run on the very diff that can unwire it
+  # (the #1349/#2938 silent-drop class). Registered in `core` rather than a
+  # narrower surface on purpose: there is no source path for "the schedule".
+  - test_prod_csp_monitor.py
   # #7856: half this file's subject is the `goalState` declaration in
   # `tortoise/projection/entities.py` (`_POINT_DECLARED_PROPS` — it suppresses
   # the replay passthrough's false drift warning). An `entities.py`-only change
@@ -2451,6 +2461,16 @@ surfaces:
   # code diffs (`tortoise/pack_registry.py`, `tortoise/value_extractor.py` — each
   # selects `core`) that can reverse the refusal the brief now states.
   - test_entity_attachment_brief_claims.py
+  # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
+  # cross-head licence must be the test-file check it can actually prove (it is not),
+  # the shared-hub tree state at measurement time must be recorded as un-recorded,
+  # indicator 2 must carry the anchor limit, the report's stated size for batches A/B
+  # must equal its own batch table's rows, and every `test_*` CITATION must resolve —
+  # bare symbol, `module.py`, `module.py::Class::test`, path, glob or brace set (the
+  # pre-fix extractor saw only the bare form: 15 of 55 citations). Dual-registered
+  # (`core` + `tier1`) for the same docs-only reason as the doc guards above: a
+  # `docs/`-only diff takes `select()`'s early return, so `tier1` is where it must live.
+  - test_capstone_1976_report_claims.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -4231,6 +4251,10 @@ tier1:
 # a fast, no-DB file scan of the brief plus two module-text reads, so a docs-only
 # PR must run it here.
 - test_entity_attachment_brief_claims.py
+# #2008 review: the epic-1976 capstone report's claim guard (`core` above) — doc-text
+# and section scans plus three source-file reads, no DB, so a docs-only PR must run it
+# here.
+- test_capstone_1976_report_claims.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -5338,6 +5362,7 @@ durations:
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
+  test_capstone_1976_report_claims.py: 1.0  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def/class index for the citation resolver (now covering module/path/glob citations, not only bare symbols) and one batch-table parse; no DB
   test_doc_affiliation_frontmatter.py: 0.1  # #8738 review P2: six frontmatter-block reads + one directory glob; same no-DB shape as the doc guards above
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
@@ -5415,6 +5440,7 @@ durations:
   test_security.py: 0.4
   test_session_key.py: 0.1
   test_probe_reset_inflight_4608.py: 36.0
+  test_prod_csp_monitor.py: 2.0  # unmeasured — new in #4762; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_workflow_gh_token.py / test_venture_pack.py). Do NOT substitute a local timing: this file's own call time is ~2.6s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together.
   test_sparse.py: 0.6
   test_subgraph_pure.py: 0.6
   test_supplementary.py: 0.2

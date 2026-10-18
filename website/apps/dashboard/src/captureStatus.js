@@ -21,10 +21,38 @@ import {
 // the dashboard panel, and the harness copy reference verbatim.
 export const CAPTURE_STATES = Object.freeze(['off', 'install-pending', 'waiting', 'active'])
 
+// #3513 §2 (epic #1714 decision #2: "the install runs in the agent prompt"):
+// the dashboard owns STATUS + the off-switch, so the shared capture row renders
+// this POINTER instead of the install recipe. The recipe itself is not deleted,
+// but its LIVE carrier is NOT `HARNESS_INSTALL` — that constant is reference-only
+// (#3802: zero live reads, its single reader sits inside the dead
+// `LEGACY_WIZARD_ARCHIVED` block), so naming it here would send a future editor
+// to patch copy no user receives. What actually installs the recorder is the
+// agent prompt the connect step hands over: `wizardPromptText(...)` →
+// `ONBOARDING_INSTRUCTIONS` → the served `tortoise-onboarding/SKILL.md` §5
+// ("Capture setup — ask, then install in the prompt": `tortoise install <h>`).
+// What the SETTINGS mount renders is `HARNESS_CAPTURE_INSTALL` (harnesses.js),
+// in a collapsed manual-install disclosure, for a Settings-first user who never
+// saw that prompt. Copy lives here so both mounts cannot drift into two
+// different sentences (this module is the copy home; harnessStatusCard.jsx
+// renders it and authors none).
+export const CAPTURE_INSTALL_POINTER =
+  'Your agent installs the recorder — the setup prompt on the connect step sets it up.'
+
+// #3513 §2 (review P2): the manual-install disclosure's own LABEL is user-visible
+// copy too, so it lives here beside the pointer rather than inline in the card —
+// otherwise the sentence has two homes, the "this module authors no copy"
+// contract is broken by the one line under it, and a test can only assert the
+// card's literal back at itself. The DOM lane reads THIS constant.
+export const CAPTURE_MANUAL_INSTALL_LABEL = 'Install manually'
+
 // Per-harness capture status from onboarding state:
 // - off            — the team's session_recording off-switch is not set
 // - install-pending — recording on, NO server-visible install probe yet (the
-//                     install steps render inline)
+//                     row states that honest state and renders the POINTER in
+//                     the slot the recipe used to occupy — see
+//                     CAPTURE_INSTALL_POINTER and harnessStatusCard.jsx; only
+//                     the SETTINGS mount carries the recipe, collapsed)
 // - waiting        — install probe seen (a server-visible install signal), no
 //                    capture receipt yet (waiting shown only after a probe)
 // - active         — a per-harness capture receipt is present
@@ -67,8 +95,9 @@ export function captureStatusLabelForHarness(state, harness) {
 //   * a per-harness FAILURE was recorded (`session_capture_last_error_<h>`) —
 //     an `install-pending` row after a failed first capture has no receipt and
 //     no probe.
-// Both legs live under the SAME support gate as the render sites in main.jsx
-// (the pill AND the failure line).
+// Both legs live under the SAME support gate as the render sites in
+// `harnessStatusCard.jsx` (the pill AND the failure line) — the row moved there
+// in #4915 and `main.jsx` only mounts it.
 //
 // Call sites render it as a dim fragment beside the harness name, inside the
 // head's polite live region — never inside the `role="alert"` failure sentence,
