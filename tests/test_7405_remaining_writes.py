@@ -1340,11 +1340,14 @@ def _journal_less_delete_scenario(tmp_path, tag: str):
     about the DESTRUCTION RECORD, and a journal-less door writes none whether
     the creator is live or not.
 
-    Returns ``(deleter, pid, log_dir)`` with the Point already DESTROYED by the
-    journal-less door: the graph holds nothing for it while the creator's
-    journal still holds its ``PointAdded``, so replaying that journal is what
-    can bring it back. Shared by the plain half and its strict-xfail sibling so
-    both run identical steps — a crash in here reds the plain half.
+    Returns ``(deleter, pid, log_dir, deleted)`` with the Point already
+    DESTROYED by the journal-less door: ``deleted`` is what the door answered,
+    the graph holds nothing for the Point, and the creator's journal still holds
+    its ``PointAdded``, so replaying that journal is what can bring it back.
+    Performing the delete HERE, in the shared helper, is load-bearing: the two
+    halves must run identical steps, or the strict-xfail sibling would be
+    asserting something about a Point nobody ever destroyed — a pin whose XPASS
+    fires on a replay regression instead of on its own residual.
     """
     log_dir = tmp_path / f"{tag}_creator_journal"
     log_dir.mkdir()
@@ -1360,7 +1363,23 @@ def _journal_less_delete_scenario(tmp_path, tag: str):
     finally:
         with contextlib.suppress(Exception):
             creator.close()
-    return TortoiseSDK(db_path, namespace=namespace), pid, log_dir
+    deleter = TortoiseSDK(db_path, namespace=namespace)
+    try:
+        # Fixture precondition: the journal-less door is looking at the graph
+        # the creator wrote to (the #432 same-path close/reopen this scenario
+        # leans on). Evaluated BEFORE the delete, so it measures the door's
+        # view rather than an already-emptied graph.
+        assert deleter.get_point(pid) != {}, (
+            "the journal-less door cannot see the creator's graph, so nothing "
+            "below measures the residual")
+        deleted = deleter.delete_point(pid)
+    except BaseException:
+        # The callers' `finally` only starts once this returns; without this the
+        # opened door would leak on the precondition or on a raised write.
+        with contextlib.suppress(Exception):
+            deleter.close()
+        raise
+    return deleter, pid, log_dir, deleted
 
 
 def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path):
@@ -1377,12 +1396,10 @@ def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path)
     The delete is genuinely LANDED — no abort, no retry, no witness — which is
     what makes this a durability residual rather than a row-count one.
     """
-    deleter, pid, log_dir = _journal_less_delete_scenario(tmp_path, "jltoday")
+    deleter, pid, log_dir, deleted = _journal_less_delete_scenario(
+        tmp_path, "jltoday")
     try:
-        assert deleter.get_point(pid) != {}, (
-            "fixture precondition: the journal-less door must be looking at the "
-            "graph the creator wrote to")
-        assert deleter.delete_point(pid) is True, (
+        assert deleted is True, (
             "today the journal-less destruction LANDS and is reported as "
             "landed — if this ever answers False the residual has changed "
             "shape and both pins must be revisited")
@@ -1397,11 +1414,12 @@ def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path)
 
         # The loss, end to end and OUTSIDE the xfail.
         deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
-        assert deleter.get_point(pid) != {}, (
+        restored = deleter.get_point(pid)
+        assert restored and restored.get("status") == "live", (
             "today's loss, pinned plainly: replaying the creator's journal "
-            "restores a Point the journal-less door genuinely destroyed — if "
-            "this ever ends absent the residual is closed and the issue's "
-            "paragraph must be revisited")
+            "restores the Point the journal-less door genuinely destroyed, and "
+            "it comes back LIVE — if this ever ends absent the residual is "
+            "closed and the issue's paragraph must be revisited")
     finally:
         with contextlib.suppress(Exception):
             deleter.close()
@@ -1425,8 +1443,9 @@ def test_a_journal_less_delete_must_survive_a_replay_of_the_creators_journal(tmp
     keep it assertion-only, because anything that can raise is swallowed by the
     strict xfail (the plain twin is what keeps a regression visible).
     """
-    deleter, pid, log_dir = _journal_less_delete_scenario(tmp_path, "jl")
+    deleter, pid, log_dir, deleted = _journal_less_delete_scenario(tmp_path, "jl")
     try:
+        assert deleted is True, "the journal-less delete must LAND for this pin"
         deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
         assert deleter.get_point(pid) == {}, (
             "a destruction the door cannot record must not be reported as "
