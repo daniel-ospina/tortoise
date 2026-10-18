@@ -27,7 +27,12 @@
 // are pinned as text: the mount-site comment must not reassert that the card's
 // output is unchanged, and the `#3802` reference-only block must name
 // `harnessStatusCard.jsx` (not `main.jsx`) as `HARNESS_CAPTURE_INSTALL`'s carrier.
-// Both were stale after `#3513` §2 and the DOM lane cannot see either one.
+// Both were stale after `#3513` §2 and the DOM lane cannot see either one. The
+// same two claims are also pinned in the three places a reader goes to ask "what
+// renders this / what does this test prove": the `#3802` rationale in
+// `harnesses.test.js`, the attribution note in `captureStatus.js`, and the
+// coverage list in `scripts/gen-wizard-prompts-snapshot.mjs` (the documented ONLY
+// copy guard), each of which still named `main.jsx` as the recipe's render site.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -287,4 +292,65 @@ test('#3802: the reference-only block names the LIVE carrier of HARNESS_CAPTURE_
   assert.doesNotMatch(carrier, /the copy a user actually pastes/,
     'the carrier still calls this "the copy a user actually pastes" — the wizard renders ' +
     'the pointer and the agent prompt installs the recorder (#3513 §2 / #3517)')
+})
+
+test('#3513 §2: no source still names `main.jsx` as the capture recipe\'s render site', () => {
+  // #3513 §2 took the recipe OUT of the shared capture row: the row renders
+  // `CAPTURE_INSTALL_POINTER` on every surface, the recipe renders ONLY in the
+  // Settings mount's collapsed `details.manual-install` (`harnessStatusCard.jsx`),
+  // and `main.jsx` has ZERO reads of `HARNESS_CAPTURE_INSTALL`. Three comments
+  // kept describing the pre-#3513 render, and each one sits exactly where a
+  // future editor asks "what renders this / what does this test prove" — the
+  // `#3802` rationale in `harnesses.test.js` (so the capability claim would name
+  // a file that renders nothing), the attribution note in `captureStatus.js`, and
+  // the coverage list in `scripts/gen-wizard-prompts-snapshot.mjs`, the file that
+  // calls itself the ONLY copy guard (so a surface would look pinned in a place
+  // that does not render it).
+  //
+  // These are read RAW, not comment-stripped: the claim IS the comment text.
+  // Pre-fix each slice names `main.jsx` and none names `harnessStatusCard.jsx`,
+  // so every assertion below fails on it.
+  const read = (p) => readFileSync(join(here, p), 'utf8')
+
+  // (a) harnesses.test.js — the #3802 rationale and its failure message.
+  const harnessTest = read('harnesses.test.js')
+  const rationaleStart = harnessTest.indexOf('#3802: the claim must be satisfied by the surface a user RECEIVES')
+  assert.notEqual(rationaleStart, -1, 'the #3802 rationale must exist in harnesses.test.js')
+  const rationaleEnd = harnessTest.indexOf("test('#3575: HARNESS_INSTALL.pi", rationaleStart)
+  assert.notEqual(rationaleEnd, -1, 'the #3802 rationale must end at the next test')
+  const rationale = harnessTest.slice(rationaleStart, rationaleEnd)
+  assert.match(rationale, /harnessStatusCard\.jsx/,
+    'the #3802 rationale must name harnessStatusCard.jsx — that is where the recipe renders')
+  assert.doesNotMatch(rationale, /capture row \(main\.jsx\)/,
+    'the rationale still calls HARNESS_CAPTURE_INSTALL a capture row in main.jsx, which has ' +
+    'zero reads of it since #3513 §2')
+  assert.doesNotMatch(rationale, /the capture row a user receives/,
+    'the failure message still calls this "the capture row a user receives" — the row renders ' +
+    'the pointer; what renders the recipe is the Settings disclosure')
+
+  // (b) captureStatus.js — the attribution note's render-site pointer.
+  const captureStatus = read('captureStatus.js')
+  const attributionStart = captureStatus.indexOf('the per-row harness ATTRIBUTION')
+  assert.notEqual(attributionStart, -1, 'the attribution note must exist in captureStatus.js')
+  const attributionEnd = captureStatus.indexOf('export function harnessAttributionForHarness', attributionStart)
+  assert.notEqual(attributionEnd, -1, 'the attribution note must precede its function')
+  const attribution = captureStatus.slice(attributionStart, attributionEnd)
+  assert.match(attribution, /harnessStatusCard\.jsx/,
+    'the attribution note must point at the module that renders the row (#4915 moved it out of main.jsx)')
+  assert.doesNotMatch(attribution, /render sites in `?main\.jsx/,
+    'the attribution note still points at render sites in main.jsx, which only MOUNTS the card')
+
+  // (c) the snapshot generator's coverage list — the documented ONLY copy guard.
+  const snapshotScript = read('../scripts/gen-wizard-prompts-snapshot.mjs')
+  const coverageStart = snapshotScript.indexOf('COVERAGE (#4820 review, cycle 9)')
+  assert.notEqual(coverageStart, -1, 'the COVERAGE block must exist in the snapshot generator')
+  const coverageEnd = snapshotScript.indexOf('HARNESS_SKILLS is DELIBERATELY absent', coverageStart)
+  assert.notEqual(coverageEnd, -1, 'the COVERAGE block must list the absences at its end')
+  const coverage = snapshotScript.slice(coverageStart, coverageEnd)
+  assert.match(coverage, /HARNESS_CAPTURE_INSTALL[\s\S]{0,400}?harnessStatusCard\.jsx/,
+    'the coverage list must name harnessStatusCard.jsx as HARNESS_CAPTURE_INSTALL\'s render site')
+  assert.doesNotMatch(coverage, /main\.jsx:10025/,
+    'the coverage list still points at main.jsx:10025, where this constant is never read')
+  assert.doesNotMatch(coverage, /the Pi capture row/,
+    'the coverage list still calls the Pi capture row a live render site — it renders the pointer')
 })

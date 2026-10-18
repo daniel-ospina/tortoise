@@ -95,8 +95,9 @@ export function captureStatusLabelForHarness(state, harness) {
 //   * a per-harness FAILURE was recorded (`session_capture_last_error_<h>`) —
 //     an `install-pending` row after a failed first capture has no receipt and
 //     no probe.
-// Both legs live under the SAME support gate as the render sites in main.jsx
-// (the pill AND the failure line).
+// Both legs live under the SAME support gate as the render sites in
+// `harnessStatusCard.jsx` (the pill AND the failure line) — the row moved there
+// in #4915 and `main.jsx` only mounts it.
 //
 // Call sites render it as a dim fragment beside the harness name, inside the
 // head's polite live region — never inside the `role="alert"` failure sentence,
