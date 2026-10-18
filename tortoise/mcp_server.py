@@ -26,6 +26,10 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           _supersede_window_end, _now_iso,
                           _ledger_record as _ledger_record_page)
 from tortoise import monitoring
+# #8622: the epistemic label vocabulary is the WRITER's constant (sdk.py's
+# ``create_direct_edge`` / 2a-DIRECT transfer probe it in this exact order) —
+# imported, never re-listed, so the preview cannot drift from the write.
+from tortoise.live import EPISTEMIC_LABELS
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
@@ -6356,8 +6360,9 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     value is the accurate one; the self-loop is reported under `edges_dropped`
     with the reason "self-loop on the old node". It counts every PRIMARY row
     the write removes from old, INCLUDING the delete-only rows (`edges_dropped`:
-    a self-loop, or a far endpoint that is the successor / not a Point) that the
-    writer also books as "transferred" while creating nothing. The 2a-INPUT
+    a self-loop, or a far endpoint that is the successor / carries none of the
+    four epistemic labels) that the writer also books as "transferred" while
+    creating nothing. The 2a-INPUT
     mirrors are removed from old but excluded from this count (and from
     `edges_transferred`), because the writer's own counter excludes them.
     It is therefore NOT "the edges that arrive at the successor": those are
@@ -6519,9 +6524,14 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
 
     # 2a-DIRECT — operator-less IMPL/NAND, both directions. The writer's
     # exclusion set is built from the far LOGICAL ids (a far node sharing an
-    # operator's id is excluded even if it is not itself an operator), and its
-    # repoint MERGE requires `(t:Point {id:$tid})` — a non-Point far endpoint
-    # is deleted at old and creates nothing.
+    # operator's id is excluded even if it is not itself an operator). Its
+    # repoint MERGE anchors on the label that ACTUALLY resolved each endpoint
+    # (#8622 / #7902): a direct IMPL/NAND may connect ANY two of
+    # :Point/:Subject/:Object/:Event (owner ruling #7813), so a far endpoint
+    # carrying any of the four is transferred to the successor. Only a far
+    # endpoint with NONE of them is a genuine delete-only — the writer's
+    # transfer needs a label to anchor on, cannot match, and the delete-leg
+    # removes the old edge.
     seen_direct: set = set()
     for direction in ("out", "in"):
         if direction == "out":
@@ -6550,10 +6560,19 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             elif tid == new_id:
                 dropped.append({"type": rtype, "other": tid,
                                 "reason": "far endpoint IS the successor — delete-only"})
-            elif "Point" not in (t_labels or []):
+            elif not (set(t_labels or ()) & set(EPISTEMIC_LABELS)):
+                # #8622: the writer transferred this edge before #8622 only
+                # when the far endpoint was a :Point. It now resolves the
+                # label that carries the endpoint and transfers it — so a
+                # non-Point epistemic endpoint is NOT a drop. What remains
+                # delete-only is an endpoint carrying none of the four
+                # (a raw/legacy edge the write path itself refuses): the
+                # repoint has no label to anchor on, so nothing is created.
                 dropped.append({"type": rtype, "other": tid,
-                                "reason": "far endpoint is not a Point — the repoint "
-                                          "MERGE matches nothing (old edge removed)"})
+                                "reason": "far endpoint carries none of "
+                                          ":Point/:Subject/:Object/:Event — the "
+                                          "repoint MERGE cannot match (old edge "
+                                          "removed)"})
             else:
                 merged.append((
                     (rtype, direction, t_internal),
