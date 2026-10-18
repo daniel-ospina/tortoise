@@ -4687,16 +4687,12 @@ _ENTITY_CREATION_EVENT_LABEL: dict[str, str] = {
 #: the node table :func:`journal_epistemic_existence` simulates: that table
 #: covers every ``_EPISTEMIC_BOUNDARY_LABELS`` label, but only these two key
 #: their MERGE on ``name`` (the others key it on ``id``/``eventId``, so they
-#: never collapse a second node). ``journal_object_surviving_keys``
-#: models the SAME collapse for Object ALONE. Since #8864 it is no longer a
-#: 1:1 carrier that fails OPEN above one carrier: it maps each name to the SET
-#: of ids carrying it and, above one carrier, models the graph's ID-keyed
-#: branch (nothing is re-id'd, so every carrier survives). Neither reader may
-#: bury an id the graph keeps — that fail-CLOSED direction is what the
-#: reference fold must never take — but the two remain different views (this
-#: table covers every ``_EPISTEMIC_BOUNDARY_LABELS`` label and records the
-#: ordered boundary; that one is Object-only END state), so it is a bounded
-#: sibling, NOT the same collapse in general. ``consistency._NAME_MERGE_LABELS``
+#: never collapse a second node). ``journal_object_surviving_keys`` models
+#: the SAME key choice for Object ALONE, mapping each name to the SET of ids
+#: carrying it: a registration of a name with 2+ carriers ADDS a carrier
+#: rather than evicting the earlier one (#8864 — the graph stops keying on a
+#: shared name). It is a bounded sibling, NOT the same collapse in general.
+#: ``consistency._NAME_MERGE_LABELS``
 #: declares the set for the state-op guard. Kept local (not imported from
 #: ``consistency``, which already imports this module) so the belief boundary
 #: does not reach upward. The two declarations are pinned equal by
@@ -5339,10 +5335,12 @@ def journal_epistemic_existence(events) -> dict:
     reports a single first-materialization seq, so a re-creation (or a
     collapse-driven burial) leaves them disagreeing. For the NAME-keyed labels
     (Object, Subject) the disagreement is structural: ``_upsert_object`` /
-    ``_upsert_subject`` MERGE the NODE by ``name``, and when more than one node
-    already carries that name the MERGE matches EVERY one of them and re-ids
-    ALL of them — so the node table is many-to-many and no id-keyed map can
-    answer existence. Every one of the four epistemic labels is therefore
+    ``_upsert_subject`` MERGE the NODE by ``name`` while a name identifies
+    exactly ONE carrier, and by the record's own ``id`` once it is carried by
+    TWO OR MORE (#8864, ``_name_holder_count``) — so a shared name no longer
+    re-ids anything, and the node table is many-to-many either way: no
+    id-keyed map can answer existence. Every one of the four epistemic labels
+    is therefore
     modelled by SIMULATING the graph's node table (``nodes`` below) and
     deriving the boundary from presence transitions. The EXACT shape where the
     two maps disagree: a registration or state op that RE-IDS a node.

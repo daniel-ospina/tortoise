@@ -1306,6 +1306,57 @@ def test_boundary_matrix_reference_and_graph_agree(
             f"expected={refused}")
 
 
+def test_shared_name_keeps_every_carrier_in_the_surviving_map():
+    """#8864 read-side: a name carried by 2+ nodes keeps EVERY carrier.
+
+    `_upsert_object` keys the MERGE on `id` once a name has more than one
+    carrier (``_name_holder_count``), so registering another carrier of a
+    shared name no longer evicts the earlier ones. The journal-END map must
+    say the same thing, because `apply()` / `rebuild` / `recover_from_log` /
+    `backup.restore` refuse an `ObjectSuperseded` whose target it calls dead
+    while `rebuild_all`'s sweep folds it — the reference/graph divergence this
+    map exists to prevent (#3585).
+
+    FAILS IF the map collapses a name to ONE id (its pre-#8864 shape): `c`
+    would be reported dead, and the supersede below would be refused on the
+    chronological engines while the graph folds it.
+    """
+    import copy
+
+    from tortoise.consistency import _fold_journal
+    from tortoise.projection import journal_object_surviving_keys
+    from tortoise.projection.nonfolded import (
+        collect_non_folded,
+        refused_events,
+    )
+
+    events = [
+        _m_object("a", "X"),
+        _m_object("c", "Z"),
+        _m_rename("a", new_name="Y"),
+        _m_rename("c", new_name="Y"),
+        _m_object("b", "Y"),
+        # `c` survived the shared-name registration, so a supersede on it is
+        # resolvable at the sweep: every engine must ACCEPT it.
+        {"type": "ObjectSuperseded", "id": "c", "name": "Y",
+         "supersedes_by": "b"},
+    ]
+    ids, names = journal_object_surviving_keys(events)
+    assert ids == frozenset({"a", "b", "c"}), (
+        "a shared name must keep EVERY carrier — the graph keys on `id` once "
+        f"a name has 2+ carriers, so none is evicted (#8864); got {sorted(ids)}"
+    )
+    assert names == frozenset({"Y"})
+
+    with collect_non_folded() as entries:
+        _fold_journal(copy.deepcopy(events))
+    refused = [str(e) for e in refused_events(entries)]
+    assert refused == [], (
+        "the reference fold must not refuse a supersede on a carrier the "
+        f"graph keeps (#8864): {refused}"
+    )
+
+
 def test_boundary_matrix_non_point_labels_all_agree():
     """The boundary is label-agnostic: Object / Subject / Event re-creations.
 
