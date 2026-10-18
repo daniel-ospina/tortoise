@@ -40,6 +40,34 @@ stubbed transport:
 - the debounce marker is retained **only on a 2xx send** (a failed send is
   re-attempted).
 
+### Idempotency, and what a replay is allowed to claim
+
+The client mints one `X-Idempotency-Key` per `(mount, tile)`, and the record row
+carries the SERVER-computed hash of the claim in its
+`idempotency_fingerprint` prop (`tortoise/demand.py::idempotency_fingerprint`;
+registered in `_ALLOWED_ANALYTICS_PROPS`). A replayed request is answered from
+**that row** — the write behind the claim either left one or did not — and never
+from the claim marker alone, and never from a click count (a `go_back`-only team
+holds a stored row and zero clicks, so a click-count predicate reads a real
+record as "not recorded" and then duplicates it).
+
+Four arms, and the operator reads them as follows:
+
+| Replay state | Answer | Why |
+|---|---|---|
+| a row carries this claim's fingerprint | `200 replayed: true` | the write landed — whatever its `action` was |
+| store unreadable | `200 replayed: true` | absence is NOT provable, so the honest answer is the replay |
+| no row, claim younger than `DEMAND_INFLIGHT_CLAIM_S` | `503 recorded: false`, claim KEPT | a peer may be mid-write; releasing its reservation is what makes a retry a duplicate |
+| no row, claim older than that bound | `200 replayed: false` — the retry RECOVERS and IS the first record; `503` only if a peer re-took the claim between the release and this claim, or if the recovered write itself is dropped (the write arm's own `503`) | the holder is provably gone (its write is bounded), so the recovery path re-claims and falls through to the write |
+
+A `503` therefore never means "we wrote nothing" on its own — it means *this
+request wrote nothing*. The client renders it as the failure state and offers
+`Retry`, which is safe in every arm above: the key is reused, so a write that
+DID land replays instead of recording twice. The dialog's copy claims only what
+the client can know — *"Your request was not confirmed — Retry to send it
+again."* — and never "nothing was saved", because the in-flight arm exists
+precisely because a record may be landing right now.
+
 What CI deliberately does NOT do: call the real Telegram API. A live send from CI
 would page the operator on every run and could not be told from a real click.
 
@@ -92,6 +120,19 @@ curl -sS "$API/v1/internal/data-sources/demand" \
 `org_count` then `click_count`, and a `distinct_orgs` figure that equals the
 number of distinct teams in the store.
 
+**What counts as demand:** rows whose `action` is `click`. A `go_back` row (a
+dismissal — a value the route accepts) is stored as a funnel fact and is
+EXCLUDED from both `click_count` and `org_count`; counting it would let
+close-buttons advance the N=5 trigger.
+
+**`distinct_orgs` is deliberately ACTION-AGNOSTIC** (review P3, and pinned by
+`test_a_dismissal_only_team_is_store_breadth_not_demand`): it is *store breadth*
+— how many teams hold a demand row at all — so a team whose ONLY row is a
+dismissal IS counted there and appears in no ranked row. The N=5 trigger reads
+the per-integration `org_count`, never this figure. Do not "fix" the asymmetry:
+filtering it to clicks would silently redefine a number this review already
+reads, and would hide the dismissal rows the funnel keeps on purpose.
+
 **Decision rule (epic #1714 §6):** **N distinct orgs requesting an integration →
 it becomes a scoping issue**, with N = 5 to be fixed at the plan gate. That is
 the trigger for **#3541** (Drive / Slack / Notion), which stays open while the
@@ -104,9 +145,10 @@ same endpoint.
 
 | Check | Status | Why |
 |---|---|---|
-| Automated rows (`tests/test_data_source_capture.py`) | **RUN** — 40 passed | the evidence in this PR |
+| Automated rows (`tests/test_data_source_capture.py`) | **RUN** — 51 passed | the server half: record, ping, dedupe, caps, read half, the `go_back`-is-not-demand guard, the `distinct_orgs` breadth/demand split, and the replay rows (`a claim with no row behind it is NOT a replay` — in-flight claims are never released, aged ones are recovered; `an idempotent go_back write replays instead of duplicating`; `a raised write releases its claim so the retry records`) — plus the e2e-docstring claim guard (`_wire` must name `_hold_demand_response`, the mechanism the browser samples) |
+| Client half (node + browser) | **RUN** | `demandCapture.test.js` (18, the state machine, the wire body, and the copy pins), `demandCaptureRender.test.js` (12, the dialog wiring, the focus moves, the document-level Escape, and the #8975 duplicate-key pin), and the five `#3514` rows in `tests/e2e/test_dashboard_onboarding.py` (real built bundle, real preview — including the in-flight FOCUS row, which holds the response open from the page so `document.activeElement` and Escape can be sampled during `sending`) |
 | `ops-telegram-live-send` | **NOT RUN** | no operator Telegram credentials exist in the lane that produced this PR; a live send cannot be fabricated, and the receipt gate (#3515) refuses a fabricated one |
-| `ops-monthly-demand-review` | **NOT RUN** | requires a deployed instance holding real demand rows; nothing has clicked a tile yet (#3513's grid is not merged) |
+| `ops-monthly-demand-review` | **NOT RUN** | requires a DEPLOYED instance holding real demand rows. The surface now exists end to end (the grid landed in #8327, the click trigger in #3514), so this row is runnable the first time a real user clicks a tile on a deployment — no lane can produce it from a test store without fabricating the receipt |
 
 Both un-run rows are **honest gaps, recorded rather than filled**: they are
 manual operator actions with no runner (§5), and the ping's automated contract is

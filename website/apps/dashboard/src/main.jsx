@@ -70,6 +70,19 @@ import {
   comingSoonShowMoreLabel, orderedTiles, tileActionLabel, tileAriaLabel, tileByKey, tileMark,
   tileStatus, visibleComingSoon,
 } from './integrationsGrid.js'
+// #3514 (epic #1714 J4): the coming-soon click's client half — the pinned body,
+// the per-(mount, tile) idempotency key, and the idle/sending/recorded/failed
+// states with their copy. Pure, node --test unit-tested
+// (demandCapture.test.js): the states are pinned here so the dialog cannot grow
+// a second, divergent notion of "recorded".
+import {
+  DEMAND_DISMISS_LABEL, DEMAND_FAILED, DEMAND_FAILED_COPY, DEMAND_PRIMARY_LABEL,
+  DEMAND_RECORDED, DEMAND_RECORDED_COPY, DEMAND_RETRY_LABEL, DEMAND_SENDING,
+  DEMAND_SENDING_COPY, DEMAND_SENDING_LABEL, DEMAND_SURFACE_SETTINGS,
+  DEMAND_SURFACE_WIZARD,
+  demandBusy, demandFailed, demandInitialState, demandKeyFor, demandRecorded,
+  demandRecordedDetail, demandSending, recordDemand,
+} from './demandCapture.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
@@ -2998,6 +3011,16 @@ function claimIntentInFlight() {
       throw err
     }
     return data || {}
+  }
+
+  // ── #3514: the coming-soon click's request seam ──────────────────────
+  // The click is RECORDED, never delivered (epic #1714 decision #3). The policy
+  // half lives in demandCapture.js; this is only the wiring onto the same-origin
+  // BFF proxy every other call already uses. `recordDemand` never throws and
+  // never reports a failed write as recorded, so the dialog's error state is
+  // driven by the RESULT, not by an exception escaping React.
+  async function recordDemandClick({ integrationKey, surface, idempotencyKey }) {
+    return recordDemand({ integrationKey, surface, idempotencyKey, request: api })
   }
 
   // ── #1765 identity surface: inventory fetch + link/unlink/resend handlers ──
@@ -8724,9 +8747,6 @@ function claimIntentInFlight() {
   const memorySourcesProps = {
     state: onboarding,
     loading: onboardingLoading,
-    // #3513 §2: the SETTINGS default surface (the one mount that carries the
-    // collapsed manual-install disclosure); the wizard mount overrides it.
-    surface: 'settings',
     wizardHarness: null,  // Settings default; the wizard mount overrides it
     github: wizardGithub,
     issuesWantOn,
@@ -8752,6 +8772,17 @@ function claimIntentInFlight() {
     onIssuesScopeChange: handleIssuesScopeChange,
     onLoadBranches: loadBranches,
     order: DATA_SOURCES_ORDER,
+    // #3514: the coming-soon click's request seam.
+    recordDemandClick,
+    // #3513 §2 + #3514: the SETTINGS surface default. The shared bundle IS the
+    // Settings mount (the one that carries the collapsed manual-install
+    // disclosure); the wizard mount overrides it with `DEMAND_SURFACE_WIZARD`
+    // — the one mount that must never carry the recipe. ONE prop, TWO readers:
+    // the manual-install recipe gate AND the coming-soon request body's
+    // `surface` field, so a click is attributed to the screen it came from.
+    // Declared ONCE here — a second `surface` key in this literal would win
+    // silently and make this line dead (#8975 review).
+    surface: DEMAND_SURFACE_SETTINGS,
   }
 
   if (welcomeMode && authed) {
@@ -9495,7 +9526,7 @@ function claimIntentInFlight() {
                       <MemorySources
                         {...memorySourcesProps}
                         order={DATA_SOURCES_ORDER}
-                        surface="wizard"
+                        surface={DEMAND_SURFACE_WIZARD}
                         wizardHarness={harnessPickEstablished ? wizardHarness : null}
                       />
                       <div className="wizard-nav">
@@ -12262,12 +12293,25 @@ function MemorySources(props) {
     // "your agent installs the recorder" pointer, while the SETTINGS mount
     // additionally renders the manual-install recipe as a collapsed
     // disclosure (a Settings-first user never saw the agent prompt, so the
-    // recipe would otherwise be orphaned). The default is 'wizard' —
+    // recipe would otherwise be orphaned). The default is the WIZARD surface —
     // fail-closed: a mount that does not declare a surface must not publish
-    // the manual path. `memorySourcesProps` carries 'settings' for the
+    // the manual path. `memorySourcesProps` carries the Settings surface for the
     // Settings mount and the wizard mount overrides it, exactly as
     // `wizardHarness` is handled below.
-    surface = 'wizard',
+    //
+    // #3514 makes this ONE prop serve TWO readers, which is why it may not have
+    // a per-issue default: it still gates the install recipe (#3513 §2), and it
+    // is now also the `surface` field of the demand record the click posts
+    // (`tortoise/demand.py::DEMAND_PROPS`). The values are the same two
+    // (`DEMAND_SURFACE_WIZARD` = 'wizard', `DEMAND_SURFACE_SETTINGS` =
+    // 'settings'), and the fail-closed default #3513 §2 chose for the recipe
+    // gate is kept here verbatim — an undeclared mount records a click as a
+    // wizard click, never as a Settings one it never rendered.
+    surface = DEMAND_SURFACE_WIZARD,
+    // #3514: the request seam the click posts through. `null` on a mount with no
+    // seam (the ARCHIVED rollback block) means the tile renders no posting
+    // primary at all, rather than a control that silently does nothing.
+    recordDemandClick = null,
   } = props
 
   // #1894: relative-time ticker — keeps "Indexed · 2 min ago" and the job
@@ -12292,6 +12336,14 @@ function MemorySources(props) {
   // and close it on Escape. The expanded coming-soon state resets on close
   // (per-open, never persisted).
   const comingSoonRestoreRef = React.useRef(null)
+  // #3514 review P2: the dialog's focus TARGETS. Each state transition moves
+  // focus deliberately (the effect below) instead of relying on `autoFocus`,
+  // which React honours only on MOUNT — and the failed state RECONCILES the
+  // primary in place (same element type, same slot), so its `autoFocus` never
+  // fired where it was needed.
+  const comingSoonCloseRef = React.useRef(null)
+  const comingSoonDismissRef = React.useRef(null)
+  const comingSoonRetryRef = React.useRef(null)
   const closeComingSoon = () => {
     setComingSoonKey(null)
     setComingSoonExpanded(false)
@@ -12302,6 +12354,87 @@ function MemorySources(props) {
     if (trigger) rememberRestoreTarget(comingSoonRestoreRef, trigger)
     setComingSoonKey(key)
   }
+
+  // #3514 (epic #1714 J4): the coming-soon click's post-action states.
+  //
+  // `demandStates` is keyed by integration key and lives for the MOUNT, so a
+  // second click on the same tile opens the dialog in its recorded state
+  // instead of promising a second record — the idempotency key minted once per
+  // (mount, tile) makes that a server-side replay as well, not only a UI
+  // opinion. `demandKeysRef` holds those keys; a fresh page load starts a fresh
+  // set, which is the honest reading of R4's one record per click.
+  const [demandStates, setDemandStates] = React.useState({})
+  const demandKeysRef = React.useRef(new Map())
+  const comingSoonDemand = comingSoonKey
+    ? (demandStates[comingSoonKey] || demandInitialState())
+    : demandInitialState()
+  const recordComingSoonClick = async () => {
+    const key = comingSoonKey
+    if (!key) return
+    // #3514 review P2: one submit in flight per tile. The primary is already
+    // `disabled` while busy; this guard is the second half (the Retry control
+    // and a re-opened dialog both reach this function) and it is what makes the
+    // state machine's `sending` arm authoritative rather than decorative. The
+    // request is server-idempotent regardless, so a guard that misses costs a
+    // replay, never a second record.
+    if (demandBusy(demandStates[key])) return
+    const idempotencyKey = demandKeyFor(demandKeysRef.current, key)
+    setDemandStates((s) => ({ ...s, [key]: demandSending(s[key] || demandInitialState()) }))
+    // No try/catch: `recordDemand` cannot throw — a transport failure, a 503 from
+    // a sink that refused the write and a 422 all arrive as `ok: false`, so the
+    // failure is SHOWN rather than swallowed (and never reads as recorded).
+    const outcome = typeof recordDemandClick === 'function'
+      ? await recordDemandClick({ integrationKey: key, surface, idempotencyKey })
+      // A mount with no request seam (the archived rollback block renders its own
+      // inline subset) reports the failure instead of offering an inert control:
+      // the action always DOES something and its outcome is always shown.
+      : { ok: false, status: null, reason: 'no request seam' }
+    setDemandStates((s) => ({
+      ...s,
+      [key]: outcome.ok
+        ? demandRecorded(s[key] || demandInitialState(), outcome)
+        : demandFailed(s[key] || demandInitialState(), outcome),
+    }))
+  }
+
+  // #3514 review P2 — FOCUS, and why Escape is bound TWICE.
+  //
+  // Escape is handled on the DOCUMENT while the dialog is open, in addition to
+  // the dialog's own `onKeyDown` (#3513's pinned handler, kept verbatim below).
+  // A keydown only reaches an element when the event's target is inside it, and
+  // a browser moves focus to <body> the moment the focused control becomes
+  // `disabled` — which is exactly what the sending transition does to the
+  // primary the user just pressed. With the modal-only handler, Escape stopped
+  // closing the dialog for the whole in-flight window. Both handlers are
+  // idempotent (close sets the key to null), so the double delivery of one
+  // Escape press costs a second no-op.
+  //
+  // The deps list is deliberately `[comingSoonKey]`: `closeComingSoon` is
+  // re-created on every render, and a deps array is evaluated EAGERLY during
+  // render (the #2709 white-screen shape), so naming it would only re-register
+  // the listener each render for no behaviour change.
+  React.useEffect(() => {
+    if (!comingSoonKey) return undefined
+    function onKeyDown(e) {
+      if (e.key === 'Escape') closeComingSoon()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [comingSoonKey])
+
+  // #3514 review P2: move focus on the transitions that change the controls, so
+  // it never rests on <body>:
+  //   sending  → Close, the control that is STILL ENABLED (the primary just
+  //              became disabled under the user's focus and a browser blurs it);
+  //   recorded → Dismiss (the only control), failed → Retry (the next action).
+  // The idle state keeps #3513's pinned initial focus on Close via `autoFocus`.
+  const comingSoonStatus = comingSoonDemand.status
+  React.useEffect(() => {
+    if (!comingSoonKey) return
+    if (comingSoonStatus === DEMAND_SENDING) comingSoonCloseRef.current?.focus()
+    else if (comingSoonStatus === DEMAND_FAILED) comingSoonRetryRef.current?.focus()
+    else if (comingSoonStatus === DEMAND_RECORDED) comingSoonDismissRef.current?.focus()
+  }, [comingSoonKey, comingSoonStatus])
 
   if (loading) {
     return <div className="memory-sources"><p className="dim">Loading memory sources…</p></div>
@@ -12714,8 +12847,30 @@ function MemorySources(props) {
           is pinned by the issue: role=dialog, aria-modal, aria-labelledby on the
           "Not available yet" heading, initial focus INTO the dialog, Escape
           closes (returning focus to the invoking tile via dialogFocus.js), and
-          the expansion resets per open. The post-action states are #3514's —
-          this shell carries no posting primary. */}
+          the expansion resets per open.
+
+          #3514: the POSTING PRIMARY and its post-action states. The click is
+          RECORDED, never delivered (epic #1714 R2/R4) — the primary is a label
+          on the intent signal, it creates no delivery obligation and no extra
+          state. States are pinned (no silent black hole):
+            idle     — primary enabled, Copy says nothing yet;
+            sending  — primary DISABLED (a double submit is impossible, and the
+                       request is idempotent at the server regardless), and the
+                       ghost Close stays ENABLED: it is the only control left
+                       that can hold focus;
+            recorded — the recorded state inline, with Dismiss;
+            failed   — "your request was not confirmed" + Retry, and the state
+                       never reads as recorded. Deliberately NOT "nothing was
+                       saved": the in-flight `503` arm can only mean THIS
+                       request did not record, so the client claims no more.
+          FOCUS stays INSIDE the dialog in every state, and it is MOVED on each
+          transition (the focus effect in MemorySources) instead of being left
+          to `autoFocus` — React fires that only on MOUNT, so a control a branch
+          RECONCILES in place (the failed state's Retry sits in the primary's
+          slot) never took it. This is not cosmetic: a browser blurs a control
+          that becomes `disabled` (focus falls to <body>), and a keydown whose
+          target is <body> never traverses this dialog — which is why Escape is
+          also bound on the document (see the effect in MemorySources). */}
       {comingSoonTile && (
         <div
           className="integration-modal-backdrop"
@@ -12734,8 +12889,72 @@ function MemorySources(props) {
               <strong>{comingSoonTile.name}.</strong> {COMING_SOON_DIALOG_BODY}
             </p>
             <p className="dim small">{COMING_SOON_DIALOG_FOOTNOTE}</p>
+            {/* The status region is the ONE place a post-action outcome is
+                announced (aria-live=polite, per the pinned dialog contract). It
+                carries no assertive alert role: that would upgrade the region
+                and contradict the politeness the contract pins. */}
+            <div
+              className="integration-demand-status"
+              aria-live="polite"
+              aria-busy={comingSoonDemand.status === DEMAND_SENDING}
+            >
+              {comingSoonDemand.status === DEMAND_SENDING && (
+                <p className="dim small">{DEMAND_SENDING_COPY}</p>
+              )}
+              {comingSoonDemand.status === DEMAND_RECORDED && (
+                <>
+                  <p className="small">{DEMAND_RECORDED_COPY}</p>
+                  {demandRecordedDetail(comingSoonDemand) && (
+                    <p className="dim small">{demandRecordedDetail(comingSoonDemand)}</p>
+                  )}
+                </>
+              )}
+              {comingSoonDemand.status === DEMAND_FAILED && (
+                <p className="error small">{DEMAND_FAILED_COPY}</p>
+              )}
+            </div>
             <div className="wizard-actions">
-              <button type="button" className="btn-primary" autoFocus onClick={closeComingSoon}>Close</button>
+              {comingSoonDemand.status === DEMAND_RECORDED ? (
+                <button type="button" className="btn-primary" ref={comingSoonDismissRef}
+                  onClick={closeComingSoon}>
+                  {DEMAND_DISMISS_LABEL}
+                </button>
+              ) : comingSoonDemand.status === DEMAND_FAILED ? (
+                <>
+                  <button type="button" className="btn-primary" ref={comingSoonRetryRef}
+                    onClick={recordComingSoonClick}>
+                    {DEMAND_RETRY_LABEL}
+                  </button>
+                  <button type="button" className="ghost" onClick={closeComingSoon}>Close</button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={demandBusy(comingSoonDemand)}
+                    onClick={recordComingSoonClick}
+                  >
+                    {demandBusy(comingSoonDemand) ? DEMAND_SENDING_LABEL : DEMAND_PRIMARY_LABEL}
+                  </button>
+                  {/* #3514 review P2: Close is NOT disabled while the POST is
+                      in flight. Disabling the primary already makes a double
+                      submit impossible, and the request is idempotent at the
+                      server — while disabling Close too left the dialog with NO
+                      focusable control for the whole round trip: the browser
+                      parks focus on <body> (a disabled control cannot hold it),
+                      which is the state the Escape handler cannot reach. */}
+                  <button
+                    type="button"
+                    className="ghost"
+                    autoFocus
+                    ref={comingSoonCloseRef}
+                    onClick={closeComingSoon}
+                  >
+                    Close
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

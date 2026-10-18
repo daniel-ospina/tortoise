@@ -39,11 +39,13 @@ reset per test. No network, no store, no docker lane.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
 import threading
 import time
+from pathlib import Path
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
@@ -194,7 +196,12 @@ def test_click_record_lands_in_canonical_store_with_server_derived_org_key(
     assert row["org_id"] == TEAM["org_id"]
     assert row["properties"] == {
         "integration_key": KEY_A, "action": "click", "surface": "grid",
-        "org_key": demand.derive_org_key(TEAM["org_id"])}
+        "org_key": demand.derive_org_key(TEAM["org_id"]),
+        # #3514 review P2: the record carries its OWN idempotency identity, so a
+        # replay can ask the STORE whether the write landed instead of inferring
+        # it from a click aggregate. Empty here: this POST sent no key, and an
+        # unkeyed request is never replayed.
+        "idempotency_fingerprint": ""}
     payload = resp.json()
     assert payload["ok"] is True
     assert payload["integration_key"] == KEY_A
@@ -495,6 +502,129 @@ def test_replayed_request_writes_no_second_record(client, telegram):
     assert _wait_for(lambda: True)
 
 
+def test_a_claim_with_no_row_behind_it_is_not_a_replay(client, telegram,
+                                                      monkeypatch):
+    """#3514 review P2: `replayed: true` must never be answered on the marker alone.
+
+    A claim can outlive the attempt that took it, so a replay verified only by
+    the marker can report a record that does not exist. `recordDemand` maps
+    `ok: true` to the RECORDED state, i.e. the user is shown "your team's
+    interest is saved" over an empty store — the one thing the failure state
+    exists to prevent.
+
+    THE TENURE MATTERS, in both directions (review P2, second half):
+
+    * a claim younger than `DEMAND_INFLIGHT_CLAIM_S` may belong to a LIVE
+      attempt still awaiting its write, so the replay answers 503 "still being
+      recorded" and **keeps** the reservation — releasing another request's
+      claim is what lets a third request record a SECOND row for one click;
+    * past that bound the holder is gone (its write is bounded, and a landed
+      write leaves `idempotency_fingerprint` on the row), so the replay
+      RECOVERS: it takes the claim itself and records, instead of failing a
+      write that never happened.
+
+    Pre-fix: the FIRST request answered `200 {ok: true, replayed: true}` with
+    zero rows in the store.
+    """
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(demand.DEMAND_MARKERS, "_clock", lambda: clock["now"])
+    headers = {"X-Idempotency-Key": "click-phantom"}
+    org_key = demand.derive_org_key(TEAM["org_id"])
+    claim_key = f"{org_key}:{KEY_A}:click-phantom"
+    assert demand.DEMAND_MARKERS.claim(
+        demand.MARK_RECORD, claim_key, demand.DEMAND_IDEMPOTENCY_WINDOW_S), \
+        "the claim the write path takes — taken here WITHOUT any write behind it"
+
+    phantom = _post(client, headers=headers)
+    assert phantom.status_code == 503, phantom.text
+    assert phantom.json()["detail"]["recorded"] is False
+    assert "still being recorded" in phantom.json()["detail"]["message"], \
+        "a claim inside its in-flight window is NOT provably dead"
+    assert _demand_events(client) == [], "no row was ever written for that claim"
+    assert demand.DEMAND_MARKERS.marked(
+        demand.MARK_RECORD, claim_key, demand.DEMAND_IDEMPOTENCY_WINDOW_S), (
+        "a replay must NOT release a reservation it did not take (that release "
+        "is how a retry becomes a duplicate row)")
+
+    # The abandoned attempt is now provably gone: the claim outlived the in-flight
+    # window with no row behind it. The retry RECOVERS the claim and records.
+    clock["now"] += demand.DEMAND_INFLIGHT_CLAIM_S + 1.0
+    retried = _post(client, headers=headers)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["replayed"] is False, \
+        "the retry is the first record, not a replay of a write that never landed"
+    assert len(_demand_events(client)) == 1
+
+
+def test_an_idempotent_go_back_write_replays_instead_of_duplicating(
+        client, telegram):
+    """#3514 review P2: replay evidence is about the CLAIM, not about clicks.
+
+    `go_back` is a validated, STORED action, so a team can hold a dismissal row
+    and no click row at all. A replay verified with `_demand_click_count` reads
+    `0` for that team — "nothing was recorded" — answers 503, releases the
+    claim, and the retry then writes a SECOND dismissal row for one request:
+    the duplicate the idempotency key exists to prevent, and a false "your click
+    was not recorded" for a row that IS in the store.
+
+    Pre-fix: the second POST below answered 503 `recorded: false` and a third
+    identical POST wrote a second row. Post-fix: the row's own
+    `idempotency_fingerprint` is the evidence, so the replay is a replay
+    whatever the action was.
+    """
+    headers = {"X-Idempotency-Key": "go-back-1"}
+    first = _post(client, action="go_back", headers=headers)
+    assert first.status_code == 200, first.text
+    assert first.json()["replayed"] is False
+
+    replay = _post(client, action="go_back", headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"] is True, \
+        "a stored go_back row IS a record — the replay must not read as 'not recorded'"
+    assert len(_demand_events(client)) == 1, \
+        "one idempotency key, one dismissal row — never two"
+
+    # …and the duplicate the pre-fix release made possible cannot happen either.
+    assert _post(client, action="go_back", headers=headers).status_code == 200
+    assert len(_demand_events(client)) == 1
+    # The click figure still counts CLICKS only: the dismissal is not demand.
+    assert replay.json()["click_count"] == 0, replay.json()
+
+
+def test_a_raised_write_releases_its_claim_so_the_retry_records(
+        client, telegram, monkeypatch):
+    """#3514 review P2: the ROOT CAUSE of the phantom replay above.
+
+    `_demand_record_write` deliberately RE-RAISES `UnregisteredTelemetryKey`
+    (#3821), and the claim taken before that write used to stay held for the
+    whole idempotency window. The client's Retry — same key — was then answered
+    `ok: true, replayed: true` for a click that was never stored, so the dialog
+    showed the success state over an empty store.
+
+    Pre-fix: the retry below reported `replayed: true` and wrote nothing.
+    Post-fix: every escaping path releases the claim, so the retry is a real
+    write and the store holds exactly one row.
+    """
+    headers = {"X-Idempotency-Key": "click-raised"}
+
+    def _flaky(*_args, **_kwargs):
+        raise hosted_api.UnregisteredTelemetryKey(
+            "demand_record", "test-team-3514", {"demand.surface"})
+
+    real_write_event = hosted_api._track_analytics_event
+    monkeypatch.setattr(hosted_api, "_track_analytics_event", _flaky)
+    with pytest.raises(hosted_api.UnregisteredTelemetryKey):
+        _post(client, headers=headers)
+    assert _demand_events(client) == [], "the raised write stored nothing"
+
+    monkeypatch.setattr(hosted_api, "_track_analytics_event", real_write_event)
+    retried = _post(client, headers=headers)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["replayed"] is False, \
+        "a retry after a FAILED attempt must record, not replay a phantom"
+    assert len(_demand_events(client)) == 1
+
+
 def test_unkeyed_second_click_is_a_second_record(client, telegram):
     """Without a client key, a click is a click (R4's one-record-per-click)."""
     assert _post(client).status_code == 200
@@ -608,6 +738,36 @@ def test_demand_read_is_team_scoped_by_the_authenticated_team(client, telegram):
     assert other["demand"] == []
 
 
+def test_a_go_back_row_is_recorded_but_is_not_demand(client, telegram):
+    """A dismissal is a FUNNEL row, never a click.
+
+    `action` is a closed server vocabulary (``click`` | ``go_back``), so any
+    caller holding a ``tt_`` key can post ``go_back`` — it is reachable, not
+    theoretical. The read half ranks DEMAND (clicks), so a dismissal row that
+    were counted would inflate both the per-team count the popup shows and the
+    cross-org count that triggers #3541 (N distinct orgs → scoping issue).
+
+    Both halves are asserted: the dismissal is RECORDED (the funnel keeps it —
+    dropping it would silently discard a real signal) and it adds NO click.
+    """
+    assert _post(client, integration_key=KEY_A).status_code == 200
+    assert _post(client, integration_key=KEY_A, action="go_back").status_code == 200
+
+    rows = client.get("/v1/data-sources/demand").json()["demand"]
+    entry = next(d for d in rows if d["integration_key"] == KEY_A)
+    assert entry["click_count"] == 1, entry
+    assert entry["org_count"] == 1, entry
+    # The dismissal IS in the store: the funnel event is not thrown away.
+    assert [e["properties"]["action"] for e in _demand_events(client)] == [
+        "click", "go_back"]
+
+    # The click response's own count agrees with the read half (one number, one
+    # meaning) — an unreadable store answers null, never a fabricated number.
+    after = _post(client, integration_key=KEY_A)
+    assert after.status_code == 200, after.text
+    assert after.json()["click_count"] == 2
+
+
 def test_cross_org_demand_query_requires_the_internal_key(client, telegram,
                                                           monkeypatch):
     """The cross-org count is on the OPERATOR plane, and only there."""
@@ -658,6 +818,54 @@ def test_cross_org_count_dedupes_per_org_not_per_click(tmp_path, monkeypatch):
     row = body["demand"][0]
     assert row["click_count"] == 4
     assert row["org_count"] == 2, "org_count must dedupe per team"
+
+
+def test_a_dismissal_only_team_is_store_breadth_not_demand(
+        tmp_path, monkeypatch):
+    """#3514 review P3: `distinct_orgs` is ACTION-AGNOSTIC on purpose.
+
+    The runbook states it and the operator route's comment now states it too, so
+    this pins the behaviour those words describe: a team whose ONLY row is a
+    dismissal is counted in `distinct_orgs` (store breadth — how many teams have
+    a demand row at all) and appears in NO ranked row (demand — the N=5
+    trigger's `org_count`, clicks only).
+
+    Without this arm, "deliberately action-agnostic" is a comment a future
+    reader can only trust; with it, flipping either half reds here.
+    """
+    monkeypatch.setattr(hosted_api, "_ANALYTICS_FALLBACK_PATH",
+                        str(tmp_path / "analytics_fallback.jsonl"))
+    for name in (*_ENV_KEYS, "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-secret")
+    demand.DEMAND_MARKERS.reset()
+    app.dependency_overrides[hosted_api.get_current_org_session_ungated] = (
+        lambda: TEAM)
+    try:
+        with verdict_client(app) as c:
+            assert _post(c, integration_key=KEY_A).status_code == 200
+            # A second team whose only row is a DISMISSAL.
+            app.dependency_overrides[
+                hosted_api.get_current_org_session_ungated] = (
+                    lambda: OTHER_TEAM)
+            assert _post(c, integration_key=KEY_A,
+                         action="go_back").status_code == 200
+            body = c.get("/v1/internal/data-sources/demand",
+                         headers={"Authorization": "Bearer internal-secret"}
+                         ).json()
+    finally:
+        app.dependency_overrides.pop(
+            hosted_api.get_current_org_session_ungated, None)
+        demand.DEMAND_MARKERS.reset()
+
+    assert body["distinct_orgs"] == 2, (
+        "store breadth counts the dismissal-only team — the documented reading")
+    row = body["demand"][0]
+    assert row["integration_key"] == KEY_A
+    assert row["click_count"] == 1, "the dismissal adds no click"
+    assert row["org_count"] == 1, (
+        "the N=5 trigger's unit counts CLICKING teams only — a dismissal cannot "
+        "advance it")
 
 
 # ── The read half runs OFF the event loop (#3514 review P2) ────────────
@@ -798,3 +1006,88 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "GET /v1/data-sources/demand answered" in message
+
+
+# ── The e2e harness's own claims (#8975 review P3) ─────────────────────
+# The dashboard e2e file is the one place the `sending` state is asserted
+# RUNTIME-side (`aria-busy` sampled in the browser while the POST is held by
+# `_hold_demand_response`). Its `_wire` docstring used to say the opposite — that
+# the loading state is "deliberately NOT asserted here" and is "pinned instead"
+# in the two JS suites — which tells the next reader the mechanism is absent and
+# invites deleting the browser sampling as dead weight. The repo pins
+# docstring-claim accuracy on purpose (tests/test_7846_restore_doc_and_bounds.py
+# carries that same docstring-vs-evidence guard), so the paragraph is pinned here
+# rather than trusted.
+_E2E_ONBOARDING = Path(__file__).resolve().parent / "e2e" / "test_dashboard_onboarding.py"
+
+
+def _e2e_function(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """The `ast` node for `name` in the e2e file, read WITHOUT importing it.
+
+    Importing that module raises the module-level
+    `pytest.skip(..., allow_module_level=True)` that guards `RUN_DASHBOARD_E2E`,
+    and pytest turns what it raises into a green-looking SKIP — a guard that
+    imported would stop guarding without ever failing. A doc-text claim needs no
+    runtime, so this parses the text: each lookup is one `ast.parse` + walk, and
+    a caller bounds a spec's body with its own `lineno`/`end_lineno` rather than
+    a hand-maintained line number.
+    """
+    tree = ast.parse(_E2E_ONBOARDING.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in {_E2E_ONBOARDING}")
+
+
+def test_the_e2e_harness_docstring_agrees_with_the_browser_hold() -> None:
+    """#8975 review P3: `_wire` must name the mechanism the file actually uses.
+
+    Pre-fix: the paragraph claimed the transient loading state is "deliberately
+    NOT asserted here" and "pinned instead" in `demandCapture.test.js` /
+    `demandCaptureRender.test.js`, while
+    `test_focus_stays_in_the_dialog_while_the_post_is_in_flight` in the SAME
+    file samples `aria-busy="true"` in the browser via `_hold_demand_response`.
+    """
+    doc = ast.get_docstring(_e2e_function("_wire")) or ""
+    focus_name = "test_focus_stays_in_the_dialog_while_the_post_is_in_flight"
+    # BOTH claim-bearing paragraphs, because they made the SAME false statement
+    # and only one of them was corrected first (cycle-3 P3): a guard that reads
+    # `_wire` alone leaves the sibling free to drift back out of agreement.
+    for name in ("_wire", "test_coming_soon_click_is_recorded_with_its_success_state"):
+        claim = ast.get_docstring(_e2e_function(name)) or ""
+        assert claim, f"{name} must carry the docstring this guard reads"
+        assert "deliberately NOT asserted" not in claim, (
+            f"{name}: the in-flight (loading) state IS asserted in this file — "
+            "through the page-side hold, not a sync route handler")
+        assert "_hold_demand_response" in claim, (
+            f"{name}: the paragraph must name the browser mechanism that drives "
+            "the state (patching the page's own fetch), or the next reader "
+            "cannot find it")
+        assert focus_name in claim, (
+            f"{name}: it must name the spec that samples the state, or the claim "
+            "is unanchored")
+        # The NEGATION matters more than the naming: the pre-fix sibling carried
+        # both names AND the false claim around them, so only refusing the claim
+        # itself catches a full reversion (cycle-4 P2). Whitespace-normalised,
+        # because the sentences re-wrap and a re-wrap must not hide it.
+        flat = " ".join(claim.split())
+        for false_claim in ("pinned by the two JS suites", "cannot be sampled here"):
+            assert false_claim not in flat, (
+                f"{name}: '{false_claim}' is the pre-fix FALSE claim — the state "
+                "IS sampled in this file via the page-side hold (#8975 cycle-3 P3)")
+    # The route-handler limitation is the TRUE half of the old sentence and the
+    # evidence for the mechanism above — it must survive the fix.
+    assert "10/10 polls read" in doc, (
+        "the measurement that justifies the page-side hold must stay")
+    # Non-vacuity, BOUND to the spec's OWN lines: the docstring naming the
+    # mechanism buys nothing if the spec stopped using it, and the paragraph
+    # itself mentions `aria-busy`, so a file-wide search would be satisfied by
+    # the claim rather than by the code it describes.
+    src = _E2E_ONBOARDING.read_text(encoding="utf-8")
+    focus = _e2e_function(focus_name)
+    segment = "\n".join(src.splitlines()[focus.lineno - 1:focus.end_lineno])
+    assert "_hold_demand_response(page)" in segment, (
+        "the spec must install the page-side hold before it navigates")
+    assert "getAttribute('aria-busy')" in segment, (
+        "the spec must SAMPLE the in-flight state in the browser — the "
+        "expression, not merely the word, which its own docstring also carries")

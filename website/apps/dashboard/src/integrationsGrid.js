@@ -227,9 +227,13 @@ export function tileMark(tile) {
 
 // The coming-soon dialog's copy. The dialog names no date (a launch date is a
 // claim we cannot keep). The body states the PRIORITISATION policy and does not
-// assert that this click has already been recorded — the record itself is the
-// demand endpoint's (`POST /v1/data-sources/demand`, #3514); until the client
-// trigger lands, claiming "we recorded it" in the UI would be a false promise.
+// assert that this click has already been recorded — the copy is shared by every
+// state, so it must be honest BEFORE the POST resolves. The record itself is the
+// dialog's primary (`POST /v1/data-sources/demand`, #3514): its outcome is
+// rendered inline from the pinned post-action states, and only the `recorded`
+// state says the interest is saved; the failure state says this request was not
+// CONFIRMED and never that nothing was saved (#8975) — the in-flight claim arm
+// answers 503 while a peer's write may be landing.
 export const COMING_SOON_DIALOG_TITLE = 'Not available yet'
 export const COMING_SOON_DIALOG_BODY =
   "This integration isn't built yet. Interest from tiles like this is how we prioritise what to build next — we can't name a date for it."

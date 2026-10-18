@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WIZARD_STEPS } from './wizardFlow.js'
 import { DATA_SOURCES_ORDER } from './integrationsGrid.js'
+import { DEMAND_SURFACE_SETTINGS, DEMAND_SURFACE_WIZARD } from './demandCapture.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -55,12 +56,18 @@ test('#3513: the step renders the grid through the ONE shared component', () => 
   const branch = dataSourcesBranch()
   assert.match(branch, /<MemorySources\s*\{\.\.\.memorySourcesProps\}\s*order=\{DATA_SOURCES_ORDER\}/,
     'the wizard mount must pass the explicit order')
-  // #3513 §2: the wizard mount IS the one surface that must never carry the
-  // install recipe (epic #1714 decision #2), so it declares itself — the same
-  // shape as the README's "both call sites pass it". The full surface assertion
-  // (both mounts + the component default) lives in the dedicated test below.
-  assert.match(branch, /\bsurface="wizard"/,
-    'the wizard mount must declare its surface, or the recipe gate cannot tell it apart from Settings')
+  // #3514: `surface` is BACK, and this time it is READ — it is the request
+  // body's `surface` field (`tortoise/demand.py::DEMAND_PROPS`), so the wizard
+  // click is distinguishable from a Settings click in the demand record. The
+  // earlier P2 dropped it because nothing read it; the wizard mount now must
+  // pass its own value, and `demandCaptureRender.test.js` pins that the
+  // component consumes it. #3513 §2 (which landed after this branch diverged)
+  // pins the SAME prop for the recipe gate, so the value is the shared constant
+  // `DEMAND_SURFACE_WIZARD` (= 'wizard') rather than a second string literal:
+  // one prop, one value, two readers — the full surface assertion lives in the
+  // dedicated test below.
+  assert.match(branch, /surface=\{DEMAND_SURFACE_WIZARD\}/,
+    'the wizard mount must declare its surface (the recipe gate AND the demand record read it)')
   // review P2: the wizard is the ONE mount that knows the connect-step pick, so
   // it must pass it — null when no pick was established, so the 'claude' default
   // is never presented as a user choice.
@@ -109,7 +116,9 @@ test('#3513: MemorySources renders the tile grid as the single source-list prese
   assert.match(src, /\{gridTiles\.map\(\(t\) => \{/, 'it maps the ordered tiles')
   // the SAME component is mounted at all three sites (the two live mounts plus
   // the dead ARCHIVED block); the LIVE mounts declare which surface they are
-  // (#3513 §2 — the surface decides whether the manual-install recipe renders)
+  // (#3513 §2 — the surface decides whether the manual-install recipe renders —
+  // and, since #3514, which surface the demand record names). The dead block
+  // renders its own inline subset and is not a spread site, so it carries none.
   assert.equal((src.match(/<MemorySources/g) || []).length, 3,
     'Settings + wizard + the dead archived block')
 })
@@ -138,7 +147,18 @@ test('#3513: the coming-soon dialog carries the pinned modal contract', () => {
   assert.match(src, /aria-labelledby="integration-modal-title"/, 'labelled by the heading')
   assert.match(src, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Escape'\) closeComingSoon\(\) \}\}/,
     'Escape closes')
-  assert.match(src, /autoFocus onClick=\{closeComingSoon\}/, 'initial focus moves into the dialog')
+  assert.match(src, /autoFocus\s*\n\s*ref=\{comingSoonCloseRef\}/,
+    'initial focus moves into the dialog (Close autoFocuses, #3513)')
+  // #3514 review P2: the recorded/failed controls do NOT get focus from
+  // `autoFocus` — React fires that only on MOUNT, and the failed branch
+  // reconciles the primary in place, so the prop never fired there. The
+  // transition MOVES focus, and the runtime property (document.activeElement
+  // while the POST is in flight) is asserted in the browser lane
+  // (tests/e2e/test_dashboard_onboarding.py).
+  assert.match(src, /comingSoonStatus === DEMAND_RECORDED\) comingSoonDismissRef\.current\?\.focus\(\)/,
+    'the recorded transition moves focus to Dismiss')
+  assert.match(src, /comingSoonStatus === DEMAND_FAILED\) comingSoonRetryRef\.current\?\.focus\(\)/,
+    'the failed transition moves focus to Retry')
   assert.match(src, /requestAnimationFrame\(\(\) => restoreFocus\(comingSoonRestoreRef\)\)/,
     'closing returns focus to the invoking tile (dialogFocus.js)')
 })
@@ -155,6 +175,16 @@ test('#3513: the grid order is a prop, never the array literal', () => {
   assert.match(src, /order: DATA_SOURCES_ORDER,/, 'the prop bundle declares the order explicitly')
   assert.match(src, /<MemorySources \{\.\.\.memorySourcesProps\} \/>/,
     'Settings spreads the same bundle (same order)')
+  // #3514: the surface a click came from rides the SAME bundle (Settings is the
+  // default) and the wizard overrides it, so no mount can forget to say where
+  // its click came from — and a third mount cannot appear without one. #3513 §2
+  // pins the same wiring for the recipe gate; the dedicated test below owns it,
+  // so this arm only requires the bundle to carry the Settings surface.
+  assert.match(src, /surface: DEMAND_SURFACE_SETTINGS,/,
+    'the shared bundle carries the Settings surface')
+  assert.match(src, /<MemorySources[\s\S]{0,200}?surface=\{DEMAND_SURFACE_WIZARD\}/,
+    'the wizard mount overrides it — the two mounts genuinely differ')
+
   // the order itself is the pinned ship order, declared once in the module
   assert.deepEqual([...DATA_SOURCES_ORDER], ['agent_sessions', 'github_issues', 'github_documents'])
 })
@@ -166,16 +196,28 @@ test('#3513 §2: the surface prop is explicit at BOTH live mounts (the recipe ga
   // wiring), so both call sites are pinned here. The bundle default is
   // 'settings' and the wizard OVERRIDES it — the same shape as `wizardHarness`,
   // so the two live mounts cannot drift into one rendering.
-  assert.match(src, /\bsurface: 'settings',/, 'the shared prop bundle is the Settings surface')
-  assert.match(src, /<MemorySources[\s\S]{0,200}?\bsurface="wizard"/,
+  //
+  // #8974 landed this decision on main AFTER #3514 was authored; the merge keeps
+  // main's FAIL-CLOSED default verbatim and expresses the two values through the
+  // shared constants #3514 introduced (`demandCapture.js`), which are the same
+  // two strings — asserted below, so the constant form cannot drift into a third
+  // surface behind these pins.
+  assert.equal(DEMAND_SURFACE_SETTINGS, 'settings',
+    'the Settings surface constant is the value the recipe gate compares')
+  assert.equal(DEMAND_SURFACE_WIZARD, 'wizard',
+    'the wizard surface constant is the value the recipe gate compares')
+  assert.match(src, /\bsurface: DEMAND_SURFACE_SETTINGS,/, 'the shared prop bundle is the Settings surface')
+  assert.match(src, /<MemorySources[\s\S]{0,200}?\bsurface=\{DEMAND_SURFACE_WIZARD\}/,
     'the wizard mount overrides the surface — the one mount that must never carry the recipe')
   // and MemorySources must FORWARD it to the row that renders the recipe
   assert.match(src, /<HarnessStatusCard[^>]*\bsurface=\{surface\}/,
     'the row must be told its surface, or the recipe gate cannot fire')
   // a mount that passes nothing falls back to 'wizard' (fail-closed): the
   // component default must not be 'settings', which would publish the manual
-  // path from every undeclared mount
-  assert.match(src, /\bsurface = 'wizard',/, "the component default is 'wizard' — fail closed")
+  // path from every undeclared mount — and, since #3514, would also attribute an
+  // undeclared mount's demand click to a Settings screen it never rendered
+  assert.match(src, /\bsurface = DEMAND_SURFACE_WIZARD,/,
+    "the component default is the WIZARD surface — fail closed")
 })
 
 test('#3513 review P2: the logo branch renders the descriptor it is handed, never a bare "?"', () => {

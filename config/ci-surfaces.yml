@@ -160,6 +160,23 @@ surfaces:
   # demand.py-only change selects `core`). Triple-registered deliberately: no
   # single arm covers both modules this feature spans.
   - test_data_source_capture.py
+  # #3514 (epic #1714 J4) — the CLIENT↔SERVER half of the same feature, and the
+  # #1349/#4446/#3524 class this file's own neighbour above is triple-registered
+  # for. This file reads `tortoise/hosted_api.py` directly: the mounted route
+  # table (`test_the_client_posts_the_route_the_app_actually_mounts`) and
+  # `_ALLOWED_ANALYTICS_PROPS` (`test_the_client_body_keys_are_the_registered_props`),
+  # so a rename of the route or a drop of `action` from the allowlist is exactly
+  # the diff that breaks the client.
+  #
+  # MEASURED, so the next reader does not re-derive it: a
+  # `tortoise/hosted_api.py`-only diff ALREADY ran this file, via `onboarding`
+  # (that surface lists `tortoise/hosted_api.py` in its patterns as well). This
+  # arm is not a rescue of a sleeping guard; it is the registration that makes
+  # the guard run under the surface that OWNS the module, so it does not depend
+  # on `onboarding`'s pattern list continuing to carry a backend path for a
+  # client-side reason. Triple-registered with `core` (the manifest fallback)
+  # and `onboarding` (the JS grid direction).
+  - test_integrations_grid_inventory.py
   # #3516 §B: the client-timestamp floor's inputs (`client_captured_at` + its `_source`).
   # DUAL-REGISTERED with `core` for the same reason as the lane entry above: the touched
   # files span BOTH surfaces — `hosted_api.py` / `sdk.py` / `__main__.py` select `api`,
