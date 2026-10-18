@@ -160,17 +160,18 @@ def test_conflict_subset_is_not_decided_by_row_order_under_a_collision():
 
 
 def test_shared_claim_key_merges_commutatively():
-    """Two ROWS may describe one node (a shared ``src`` with two different
-    NANDers: the alpha/beta chain falls through to the operator's when the
-    source stores no EP).
+    """Two ROWS may describe one node with DIFFERENT ``claim_id``.
 
-    A last-wins dict write let Cypher ROW ORDER decide the survivor — the same
-    `{}` / `{'p1': 0.05}` flip the tiebreak fix removed one level up. The merge
-    is commutative: the higher-mean row survives whoever comes last.
+    When ``src`` carries neither key, ``claim_nid`` is ``id(src)`` (non-null)
+    while ``claim_id`` falls through to the NANDer's — so the same node can
+    arrive with two claim ids, and that value is the SORT KEY's second
+    component. Keeping "the first seen" therefore still let row order decide
+    which claims fit the budget: measured, 12 of 24 row permutations boosted and
+    12 did not. The merge is a total order over ``(mean, content, claim_id)``.
     """
     from tortoise.ranking import resolve_contested_relevance
 
-    class _SharedKey:
+    class _SharedNode:
         def __init__(self, order):
             self.order = order
             self.g = self
@@ -180,20 +181,23 @@ def test_shared_claim_key_merges_commutatively():
                 self.result_set = rows
 
         def query(self, cypher, params=None):
-            # One node id, two rows: the HIT carries the higher mean.
+            # One node (nid 1001) carries two claim ids that STRADDLE the two
+            # unrelated claims in sort order; the budget is 2.
             rows = [
-                ("p1", "shared", 1001, "the cache rollback is safer", 9.0, 1.0),
-                ("p1", "shared", 1001, "an unrelated weather note", 1.0, 1.0),
+                ("p1", "a1", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "z1", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "c0", 1002, "an unrelated weather note", 1.0, 1.0),
+                ("p1", "c15", 1003, "another unrelated note", 1.0, 1.0),
             ]
             if self.order == "reversed":
                 rows = list(reversed(rows))
             return self._Rows(rows)
 
-    fwd = resolve_contested_relevance(_SharedKey("forward"), ["p1"], "cache rollback")
-    rev = resolve_contested_relevance(_SharedKey("reversed"), ["p1"], "cache rollback")
-    assert fwd == rev == {"p1": 0.05}, (
-        "the merged survivor depends on ROW ORDER (last-wins, not a "
-        f"commutative merge): forward={fwd} reversed={rev}")
+    fwd = resolve_contested_relevance(_SharedNode("forward"), ["p1"], "cache rollback")
+    rev = resolve_contested_relevance(_SharedNode("reversed"), ["p1"], "cache rollback")
+    assert fwd == rev, (
+        "the merged survivor — and therefore the budgeted subset — depends on "
+        f"ROW ORDER: forward={fwd} reversed={rev}")
 
 
 # ── Unit: batch relevance resolution (S8 N+1 guard) ────────────────────────

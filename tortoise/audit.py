@@ -794,7 +794,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 statement, exc)
             return "", (" — the repair could not be verified against the graph; "
                         "repair by hand")
-        if not rows or rows[0][0] != 1:
+        if not rows or rows[0][0] == 0:
+            # Zero is its OWN cause, not a narrower verdict: ``_quoted`` renders
+            # every id as a string literal, so an id that is not a string (an
+            # out-of-tree integer id) can never be re-addressed by the emitted
+            # pattern — the edge is addressable, the RENDERER cannot see it.
+            # Reporting "matches more than one" there would be untrue.
+            return "", (" — the repair addresses no edge: the row's id is not a "
+                        "string, so it cannot be re-rendered as a literal; "
+                        "repair by hand")
+        if rows[0][0] != 1:
             return "", (" — the repair matches more than the one edge this "
                         "issue describes; repair by hand")
         op_ids, m_ids = rows[0][1], rows[0][2]

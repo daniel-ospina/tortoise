@@ -297,8 +297,19 @@ def resolve_contested_relevance(
                 "nid": claim_nid,
             }
             previous = slot.get(claim_nid)
-            if previous is None or (candidate["mean"], candidate["content"]) > (
-                    previous["mean"], previous["content"]):
+            # ``claim_id`` is part of the TOTAL order too: when ``src`` carries
+            # neither key, ``claim_nid`` is ``id(src)`` (non-null) while
+            # ``claim_id`` falls through to the NANDer's, so two rows for one
+            # node can differ in ``claim_id`` alone — and that value is the
+            # sort key's second component, so first-seen would decide the
+            # budgeted subset (measured: 12 of 24 row orders boosted, 12 did
+            # not). ``str()`` because the id is a raw property value and mixed
+            # types would raise inside the outer handler and return ``{}``.
+            if previous is None or (
+                    candidate["mean"], candidate["content"],
+                    str(candidate["claim_id"])) > (
+                    previous["mean"], previous["content"],
+                    str(previous["claim_id"])):
                 slot[claim_nid] = candidate
         boosts: dict[str, float] = {}
         for pid, claims in pending.items():

@@ -1269,3 +1269,33 @@ def test_legacy_repair_refuses_a_statement_that_misses_its_own_edge(sdk):
         "MATCH (:Point {id:'edge-op'})-[r:mitigates]->() RETURN count(r)"
     ).result_set[0][0]
     assert remaining == 0
+
+
+def test_legacy_repair_reports_a_non_string_id_as_its_own_cause(sdk):
+    """A zero-match verification is NOT "matches more than one".
+
+    ``_quoted`` renders every id as a string literal, so a numeric id (an
+    out-of-tree shape) can never be re-addressed by the emitted pattern. The
+    edge exists and is reported; the RENDERER is what cannot name it, and the
+    message must say that rather than assert the opposite.
+    """
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'num-op', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    proj.g.query("CREATE (m:Point {id:12345, content:'numeric id', "
+                 "status:'live', pointKind:'statement'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'num-op'}), (m:Point) WHERE m.id = 12345 "
+        "MERGE (op)-[:mitigates]->(m)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == "num-op"]
+    assert legacy, "fixture broken: the numeric-id edge was not reported"
+    for issue in legacy:
+        assert issue.fix == ""
+        assert "not a string" in issue.detail, (
+            f"a zero-match refusal is described as something else: {issue.detail!r}")
+        assert "matches more than" not in issue.detail, (
+            "the report asserts a cause that is false — exactly one edge exists"
+            f": {issue.detail!r}")
