@@ -968,7 +968,7 @@ def test_a_captured_skip_never_downgrades_a_genuine_failure(monkeypatch):
     raised_exc: BaseException | None = None
     try:
         _reraise_captured_skip(mixed)
-    except BaseException as e:  # noqa: BLE001 — the raised TYPE is the assertion
+    except BaseException as e:  # the raised TYPE is the assertion
         raised_exc = e
     assert raised_exc is failure, (
         "a captured skip must never downgrade a genuine failure — the FAILURE "
