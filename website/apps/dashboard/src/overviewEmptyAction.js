@@ -2,6 +2,10 @@
 // primary action, and the deep-link wiring that makes it land on a REAL screen.
 // #4637 — the graph-missing empty state's action set, whose second action names
 // a ROUTE and must therefore read what the build fork actually offers.
+// #4628 — that card's PRIMARY action is role-derived: `Go to API Keys →` is an
+// owner/admin surface (POST /v1/team/keys is `_require_owner_admin`) whose own
+// copy turns a key-less member away, so a member's primary opens the setup step
+// instead. See the block above `GraphMissingEmptyStateActions`.
 //
 // The owner-approved copy (d5-copy-v2.md ③) names its two ways to add memory:
 // **Integrations** (where the agent-session recorder lives) and **Tortoise
@@ -136,20 +140,64 @@ export function emptyStateActionRoute(buildFork) {
     : { label: 'Connect your agent →', href: ONBOARDING_FUNNEL_HREF }
 }
 
-// The graph-missing empty state's action set: the API Keys tab (a real
-// first-party surface on every branch) plus the fork-derived route above. A
-// component rather than two inline elements so the suite can render the LIVE
-// route per fork and assert what a build-fork organization is actually offered
-// (the rest of this file's pattern).
-export function GraphMissingEmptyStateActions({ buildFork, onGoToKeys }) {
+// ── #4628: the primary action is ROLE-derived, never the owner-only tab ────
+//
+// The card's primary action used to be `Go to API Keys →` for everyone. That is
+// a real destination for an owner/admin — they can create and rotate keys there
+// — and a DEAD END for a member, because the tab's only guidance is
+//
+//   "Only owners and admins can create or rotate keys in this dashboard. Paste
+//    an existing key into the setup step to connect an agent."
+//
+// and POST /v1/team/keys is `_require_owner_admin`, so a member cannot act on
+// the surface the card's ONE primary action opened. Worse, the card sending
+// them there is the no-key arm: they hold no durable key to paste.
+//
+// So the primary action is derived from role, ONE derivation, and the member arm
+// is the destination the owner-only page's own copy names — "the setup step" —
+// i.e. the wizard's connect step (`openResumeWizard`, the #2005 resume door every
+// other entry point already uses, not a second hardcoded step). That step is
+// role-AWARE: a member there gets `wizardPasteRow` (paste a key an owner shared)
+// or the key-less OAuth connectors, and on the build fork the honest "ask an
+// owner or admin for an API key, then call the Tortoise SDK". The key-less
+// routes #3729's copy advertises are reachable from it; nothing on it says the
+// member cannot act.
+//
+// The owner arm is unchanged. The role input is a strict `=== true` (this file's
+// `buildFork` convention) so a caller that forgets the prop lands on the setup
+// step — a destination that works for every role — rather than on the surface
+// whose copy can refuse a member.
+export const GRAPH_MISSING_KEYS_LABEL = 'Go to API Keys →'
+export const GRAPH_MISSING_SETUP_LABEL = 'Continue setup →'
+
+// Which destination the card's ONE primary action opens, per role:
+// 'keys' (owner/admin → the API Keys tab) or 'setup' (everyone else → the
+// wizard's connect step). Returned as an id + label so the render tests can pin
+// the control and the label as one fact instead of two.
+export function graphMissingPrimaryAction(isOwnerAdmin) {
+  return isOwnerAdmin === true
+    ? { id: 'keys', label: GRAPH_MISSING_KEYS_LABEL }
+    : { id: 'setup', label: GRAPH_MISSING_SETUP_LABEL }
+}
+
+// The graph-missing empty state's action set: a role-derived primary action
+// (above) plus the fork-derived route above. A component rather than two inline
+// elements so the suite can render the LIVE route per fork and the LIVE primary
+// per role (the rest of this file's pattern).
+export function GraphMissingEmptyStateActions({ buildFork, isOwnerAdmin, onGoToKeys, onContinueSetup }) {
   const route = emptyStateActionRoute(buildFork)
+  const primary = graphMissingPrimaryAction(isOwnerAdmin)
   return React.createElement(
     React.Fragment,
     null,
     React.createElement(
       'button',
-      { type: 'button', className: 'btn-primary', onClick: onGoToKeys },
-      'Go to API Keys →',
+      {
+        type: 'button',
+        className: 'btn-primary',
+        onClick: primary.id === 'keys' ? onGoToKeys : onContinueSetup,
+      },
+      primary.label,
     ),
     React.createElement(
       'a',
