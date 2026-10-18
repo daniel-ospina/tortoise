@@ -2939,11 +2939,15 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # deliberately avoids — so a broken graph pays a scan per pass, and it keeps
 # paying it: `next_seq` refuses the non-number/negative/bool classes and leaves
 # them unchanged, and a non-integral float is bumped into another non-integral
-# value (`2.9` -> `3.9`, re-issuing a seq: the #4653 class). Repair is
-# #3902/#5379's, not this read's. The alternative reading of that counter (as 0)
-# made every subscription look caught up, so the graph was never dispatched again
-# — silently. Over-admitting a broken graph is the cheap side of that asymmetry.
-# See `webhook_delivery.event_head_seq`'s docstring.
+# value (`2.9` -> `3.9`, re-issuing a seq: the #4653 class). Repair is the
+# rebuild leg's — `event_store.reestablish_watermark` coerces a negative or a
+# non-integral float to the events' max seq (measured: `2.9` and `-1` both become
+# `3`), and refuses a string or bool counter AFTER the write, so those two have no
+# repair path and the fallback above is permanent for them. The alternative
+# reading of that counter (as 0) made every subscription look caught up, so the
+# graph was never dispatched again — silently. Over-admitting a broken graph is
+# the cheap side of that asymmetry. See `webhook_delivery.event_head_seq`'s
+# docstring.
 #
 # ⛔ THE "answered yes" HALF IS THE WHOLE POINT (#8098 review F1/F3). The gate
 # is TWO clauses — due by TIME *and* behind the stream — because the temporal
@@ -2982,6 +2986,15 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # is the obvious follow-up and is deliberately NOT done here: the cache's
 # invalidation contract belongs with #2081's backup operator, and a stale graph
 # list in a RETRY trigger would silently drop a newly created graph's deliveries.
+#
+# ⚠️ TWO THINGS THE WALK ABOVE DOES NOT HAVE, and this block would otherwise
+# leave a reader to infer that it does: on the URI lane the per-org
+# `MATCH (g:Graph {org_id: $tid})` has NO index —
+# `tortoise/sdk.py::_ensure_registry_indexes` carries no `("Graph", "org_id")`
+# entry, so it is a label scan per org per pass — and there is no per-org
+# timeout. Filed as **#9048** (index + bound) rather than paid down here: it needs
+# an index on a shared registry graph plus a concurrency decision, which is not a
+# review-fix.
 # The registry lane pays the same shape once, not per org: the anchor is cached
 # per process (`_registry_anchor` -> `_registry_probe_sdk`).
 
@@ -3117,7 +3130,8 @@ def _webhook_retry_targets() -> list[dict[str, str]]:
         try:
             org_ids = enumerate_orgs(source)
         except RuntimeError as e:
-            _log.warning("webhook retry sweep skipped: org enumeration failed: %s", e)
+            _log.warning("webhook retry sweep skipped: org enumeration failed: %s",
+                         redact_error(e))
             return []
         targets: list[dict[str, str]] = []
         for org_id in org_ids:

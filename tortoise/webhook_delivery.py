@@ -75,6 +75,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import math
 import os
 import time
 from datetime import UTC, datetime, timedelta
@@ -589,24 +590,28 @@ def event_head_seq(graph) -> int:
     priced the corrupt path as "one SDK open" — it is not). The fallback is the
     aggregate over ``:GraphEvent`` the opening paragraph exists to avoid on the
     steady path, so an UNTRUSTWORTHY graph pays it on every pass, and the counter
-    does not become trustworthy on its own — which is #5379's territory, not this
-    read's:
+    does not become trustworthy on its own. What the write side does, MEASURED:
 
-    * a non-number, a negative or a ``bool`` is REFUSED by ``next_seq`` and left
-      unchanged (re-seeding it could re-issue the seq of an existing event);
-    * a non-integral float is NOT refused there — ``2.9`` is bumped to ``3.9``
-      and a seq is handed out over an existing ``:GraphEvent`` (the #4653
-      collision class), so it stays non-integral and keeps taking this fallback.
+    * a non-number or a ``bool`` is REFUSED by ``next_seq`` and left unchanged,
+      and the rebuild repair leg (``event_store.reestablish_watermark``) refuses
+      it AFTER the write too — ``'5'`` and ``True`` both raise "the monotone
+      clause only compares numbers … preserved rather than replaced". So these
+      two classes have NO repair path, and the fallback above is permanent for
+      them;
+    * a NEGATIVE and a non-integral float are neither refused nor left alone:
+      ``next_seq`` will bump them (``2.9`` → ``3.9``, handing out a seq that an
+      existing ``:GraphEvent`` already holds — the #4653 collision), and
+      ``reestablish_watermark`` REPAIRS both by coercing them to the events'
+      ``max(:GraphEvent.seq)`` (``2.9`` and ``-1`` both become ``3``). A rebuild
+      therefore clears the recurring fallback for those two.
 
-    Repair belongs to the event store (#3902/#5379, and the float case is not yet
-    covered by either). Over-admitting a broken graph once per interval is the
-    cheap side of the asymmetry, and it beats silently never dispatching the
-    graph again. A too-LARGE counter is left alone for that same asymmetry — it
-    over-admits too.
+    Over-admitting a broken graph once per interval is the cheap side of the
+    asymmetry, and it beats silently never dispatching the graph again. A
+    too-LARGE counter is left alone for that same asymmetry — it over-admits too.
     """
 
     def _as_seq(raw) -> int | None:
-        """A usable counter value, or ``None`` when it must not be trusted.
+        """A usable COUNTER value, or ``None`` when it must not be trusted.
 
         Strictly numeric: no string coercion (``event_store`` refuses a
         non-number rather than parsing it), no ``bool`` (an ``int`` subclass),
@@ -622,14 +627,35 @@ def event_head_seq(graph) -> int:
         seq = int(raw)
         return seq if seq >= 0 else None
 
+    def _events_head() -> int:
+        """The events' own max seq — deliberately OVER-admitting, never strict.
+
+        ⚠️ NOT ``_as_seq``, on purpose. Strictness is right for the counter and
+        WRONG here: on this read a rejection IS the stall direction, because the
+        value returned is the ``$head`` that decides whether a subscription is
+        returned at all. A ``:GraphEvent.seq`` that is not an integer (a float
+        from a hand-written or restored row) must still be rounded UP so
+        ``read_after``'s payload is not filtered out by ``s.cursor < $head``;
+        coercing a numeric string generously has the same justification. Only a
+        value no number can be made of falls to 0.
+        """
+        rows = graph.query(
+            "MATCH (e:GraphEvent) RETURN max(e.seq)").result_set
+        raw = rows[0][0] if rows else None
+        try:
+            num = float(raw)
+        except (TypeError, ValueError):
+            return 0
+        if not math.isfinite(num):
+            return 0
+        return max(0, math.ceil(num))
+
     rows = graph.query(
         "MATCH (m:GraphEventMeta) RETURN max(m.last_seq)").result_set
     head = _as_seq(rows[0][0] if rows else None)
     if head is None:
-        rows = graph.query(
-            "MATCH (e:GraphEvent) RETURN max(e.seq)").result_set
-        head = _as_seq(rows[0][0] if rows else None)
-    return 0 if head is None else head
+        return _events_head()
+    return head
 
 
 def due_subscription_count(graph, now: datetime | None = None,

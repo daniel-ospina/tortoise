@@ -424,6 +424,36 @@ def test_a_corrupt_counter_cannot_starve_delivery(sdk_factory, corrupt):
         "the dispatcher delivered nothing — the corrupt counter starved it")
 
 
+def test_the_events_fallback_over_admits_rather_than_rejecting_a_seq(
+        sdk_factory):
+    """The fallback must round UP, not apply the counter's strictness.
+
+    ``_as_seq`` rejects a non-integral float on the COUNTER read, where a
+    rejected value means "ask the events instead". On the events read the same
+    rejection is the STALL direction: the value returned there is the ``$head``
+    that ``_BEHIND_PREDICATE`` compares the cursor against, so answering 0 for a
+    graph whose ``:GraphEvent.seq`` is a float hides a deliverable event behind
+    ``s.cursor < 0`` and silences the graph. Rounding up can only over-admit.
+    """
+    sdk = sdk_factory(ensure_schema=True)
+    proj = sdk._get_proj()
+    _seed_events(sdk, n=3)
+    # A hand-written / restored event row with a fractional seq, and NO counter:
+    # the graph must be read through the fallback.
+    proj.g.query("MATCH (e:GraphEvent) WHERE e.seq = 3 SET e.seq = 3.5")
+    proj.g.query("MATCH (m:GraphEventMeta) DELETE m")
+    assert wd.event_head_seq(proj.g) >= 4, (
+        "the events fallback rounded DOWN (or rejected) a fractional seq — the "
+        "head then sits under a deliverable event and the graph is starved")
+    now = datetime.now(UTC)
+    sub = wd.create_subscription(proj, url="https://hooks.example.com/cb", now=now)
+    assert sub["cursor"] == 0
+    assert wd.due_subscription_count(proj.g, now) == 1
+    assert wd.dispatch_pending(proj, transport=FakeTransport([200, 200, 200]),
+                               now=now)["delivered"] >= 1, (
+        "the fallback's head hid every unread event from the dispatcher")
+
+
 def test_the_gate_refuses_a_subscription_that_is_behind_but_not_yet_due(
         sdk_factory):
     """The OTHER half of the pair: being behind is necessary, not sufficient.
