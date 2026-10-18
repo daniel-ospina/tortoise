@@ -486,14 +486,20 @@ class TestApplyLimitsAndReconcile:
         assert t["tier"] == "free"
         assert t["subscription_status"] == "canceled"
 
-    def test_reconcile_inactive_pointer_survives_a_customer_lookup_failure(
+    def test_reconcile_list_failure_does_not_downgrade_a_paying_org(
             self, monkeypatch, stripe_env, billing_sdk):
-        """#8895 review P2: the customer LIST is a FALLBACK, not a prerequisite.
+        """#8904 review P2: an unanswerable LIST is not evidence of cancellation.
 
-        The stored sub is already inactive, so the LIST can only improve the
-        outcome. A provider error on it (a customer Stripe no longer knows, a
-        transient outage) must not turn a CORRECT downgrade into a permanent
-        ``failed`` row that reds every daily pass and hides the real state.
+        The stored subscription is inactive, so the customer LIST is the ONLY leg
+        that can prove the org holds a newer ACTIVE one. When that call fails
+        there is an absence of evidence, not evidence of a cancellation — and
+        mirroring the stored (inactive) subscription on it re-caps a PAYING org on
+        a GREEN run, because a downgrade is recorded as a clean ``repaired`` and
+        only drift UP alerts. The org is left alone: not verified, not
+        downgraded (the same policy a provider outage gets everywhere else).
+
+        Still true, and pinned below: the LIST failing must not RAISE, so a
+        correct downgrade elsewhere never becomes a permanent ``failed`` row.
         """
         sdk = billing_sdk
         team = sdk.org_create("list-failure")
@@ -511,10 +517,17 @@ class TestApplyLimitsAndReconcile:
             billing.StripeClient, "list_subscriptions",
             lambda self, cid: (_ for _ in ()).throw(
                 billing.StripeAPIError("no such customer: 'cus_gone'")))
-        reconcile_org(sdk, team["id"])  # must NOT raise
+        outcome = reconcile_org(sdk, team["id"])  # must NOT raise
+        assert outcome["action"] == "noop", (
+            "an unanswerable LIST must leave the org alone rather than mirror a "
+            f"subscription it cannot prove is current — got {outcome}")
         t = sdk.org_get(team["id"])
-        assert t["tier"] == "free"
-        assert t["subscription_status"] == "canceled"
+        assert t["tier"] == "pro", (
+            "the org is PAYING; one failed provider call in the sweep must not "
+            f"re-cap it — got {t['tier']!r}")
+        assert t["subscription_status"] == "active", (
+            "nothing was mirrored, so the stored status must be untouched "
+            f"— got {t['subscription_status']!r}")
 
     def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
             self, monkeypatch, stripe_env, billing_sdk):
@@ -2412,6 +2425,43 @@ class TestReconcileSweep:
             f"— got {summary}")
         assert summary["repaired"] == 0 and summary["drift"] == []
         assert self._row(sdk, org_id)[0] == "free"
+
+    def test_a_failed_customer_list_is_unverified_not_a_silent_downgrade(
+            self, monkeypatch, billing_client):
+        """#8904 review P2: the sweep must not cap a paying org on a provider error.
+
+        A downgrade is recorded as ``repaired`` with ``direction: "down"``, which
+        the driver neither alerts on nor fails on (only drift UP notifies).
+        Mirroring an inactive stored subscription when the customer LIST fails
+        would therefore cap a PAYING customer on a fully green run, with no page
+        and no operator signal — the precise failure the #8895 repair exists to
+        end. The org lands in ``unverified`` instead: warned about, tier untouched.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", subscription_status="active",
+                   subscription_id="sub_gone", stripe_customer_id="cus_gone")
+        monkeypatch.setattr(
+            bl.StripeClient, "get_subscription",
+            lambda self, sid: {"id": "sub_gone", "status": "canceled",
+                               "items": {"data": [
+                                   {"price": {"id": "price_100proM"}}]}})
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                bl.StripeAPIError("upstream 503")))
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1
+        assert summary["unverified"] == 1, (
+            "a paid org whose entitlement could not be verified is exactly what "
+            f"``unverified`` names — got {summary}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            "no write was justified, so nothing may be reported as repaired "
+            f"— got {summary}")
+        assert self._row(sdk, org_id)[0] == "pro", (
+            "the org is PAYING and Stripe did not say otherwise — its tier must "
+            "be untouched")
 
     def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
         """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.

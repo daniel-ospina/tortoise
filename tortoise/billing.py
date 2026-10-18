@@ -837,17 +837,23 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
         try:
             subs = client.list_subscriptions(customer_id)
         except Exception:  # noqa: BLE001, RUF100 — a provider error is not a verdict
-            # The stored status is ALREADY inactive, so this LIST can only ever
-            # IMPROVE the outcome (find a newer active subscription). A provider
-            # error here — a customer Stripe no longer knows, or a transient
-            # outage — must not turn a CORRECT downgrade into a permanent
-            # ``failed`` row that reds every daily pass and misleads the
-            # operator: fall back to the stored subscription, which can never
-            # resurrect an inactive one.
+            # ⛔ The LIST is NOT a prerequisite for a DOWNGRADE — but it is the
+            # ONLY leg that can prove a newer ACTIVE subscription exists, and a
+            # provider error is exactly when that cannot be proven. Mirroring
+            # the stored (inactive) subscription here would re-create the bug
+            # this repair exists to fix: one transient 5xx/429 on one call would
+            # revert a PAYING org to ``free``, and a downgrade is recorded as a
+            # clean ``repaired`` with no alert (only drift UP notifies), so the
+            # customer would be capped on a GREEN run. Report the org as neither
+            # verified nor downgraded instead — a paid tier lands in
+            # ``unverified`` (logged, warned, never auto-downgraded: the
+            # documented outage policy), an unpaid one in ``skipped``.
             _logger.warning(
-                "billing reconcile: %s has an inactive stored subscription but "
-                "the customer lookup failed — mirroring the stored one", org_id)
-            subs = []
+                "billing reconcile: %s has an inactive stored subscription and "
+                "the customer lookup failed — not verified, not downgraded",
+                org_id)
+            return {"org_id": org_id, "action": "noop",
+                    "status": sub.get("status")}
         current = _select_current_subscription(subs)
         if current is not None:
             summary = mirror_subscription(sdk, org_id, current)
@@ -1203,9 +1209,12 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
                           f"{e.__class__.__name__}: {_scrub_secrets(str(e))}")
             continue
         if outcome.get("action") == "noop":
-            # Stripe answered and named no ACTIVE subscription. Whether that is a
-            # symptom depends on what the STORE CLAIMS, so it is decided from
-            # the ladder and not from the presence of an identity:
+            # Either Stripe answered and named no ACTIVE subscription, or the
+            # customer LIST failed and the org was deliberately left alone (a
+            # provider error is not a verdict — mirroring an inactive stored
+            # subscription on it would silently cap a paying org). Whether that
+            # is a symptom depends on what the STORE CLAIMS, so it is decided
+            # from the ladder and not from the presence of an identity:
             # ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
             # session, so EVERY abandoned checkout leaves a customer binding at
             # ``tier=free``. That is a routine state with no entitlement to
