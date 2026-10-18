@@ -944,6 +944,18 @@ _NEVER_RAISE_OPS = frozenset({
     # (accurate) 503 ``DEMAND_STORE_UNAVAILABLE`` body rather than the
     # sign-in-specific ``control_plane_unavailable`` copy.
     "data_source_demand_read",
+    # #2853 ruling C — the operator-only ``oauth_clients`` row-count READ
+    # (``/v1/internal/oauth/clients/count``). The endpoint's contract is the
+    # fail-soft ``status="unavailable"`` body — ruling C rejected a cap, so the
+    # number's whole job is to stay observable, and a 503 from the seam would
+    # gate the one reader the ruling depends on. The helper itself does raise
+    # (``query_with_total`` wraps an ``httpx.Client``), so the site catches and
+    # logs it; ``best_effort`` only stops an OFFLOAD failure (bound miss /
+    # saturated pool) from mapping onto the fail-closed 503 in addition — the
+    # same polarity as ``data_source_demand_read`` above. Declared here rather
+    # than left undeclared because this test's second assertion pins the set to
+    # EXACTLY the best-effort sites: an undeclared site reds it (#8839).
+    "oauth_clients_count",
 })
 
 
