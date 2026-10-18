@@ -1148,7 +1148,7 @@ def test_codex_desktop_surface_reaches_config_toml_instructions(page: Page) -> N
     state and the `codexDesktop` copy in harnesses.js were dead, so a Desktop
     user got the CLI command.
 
-    The assertion pins UNIVERSAL_COMMAND.codexDesktop's distinctive stanza
+    The assertion pins CODEX_DESKTOP_COMMAND's distinctive stanza
     (`[mcp_servers.tortoise]`), not just the intro sentence that shares the
     branch (test-review P1)."""
     _seed_cookie(page, "u-codex")
@@ -1170,7 +1170,7 @@ def test_codex_desktop_surface_reaches_config_toml_instructions(page: Page) -> N
     card = page.locator(".wizard-prompt-card").first
     expect(card).to_contain_text("~/.codex/config.toml", timeout=5_000)
     assert "[mcp_servers.tortoise]" in card.inner_text(), \
-        "the Desktop variant must render UNIVERSAL_COMMAND.codexDesktop (the TOML block)"
+        "the Desktop variant must render CODEX_DESKTOP_COMMAND (the TOML block)"
     # The Desktop copy control uses the harness's own label (HARNESS_COPY_LABEL).
     expect(card.get_by_role("button", name="Copy instructions")).to_be_visible()
     # The surface choice is reversible and scoped to the Codex family.

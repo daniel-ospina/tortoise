@@ -1909,6 +1909,553 @@ class TestBootReconcile:
         with pytest.raises(bl.StripeAPIError):
             bl.reconcile_org(billing_client["sdk"], org_id)
 
+class TestReconcileSweep:
+    """#8878 — the cadenced caller of ``reconcile_org``.
+
+    The defect: ``tier`` is written ONLY by the Stripe webhook and it IS the
+    entitlement (``effective_tier`` never derives upward), so one missed
+    delivery capped a paying org at the lower tier permanently. Measured
+    2026-10-17: the fleet's own org was billed on the Pro price and enforced at
+    Solo's 25 000-node cap, every hosted write refused with "upgrade your
+    plan" while reads kept working. ``reconcile_org`` existed but had no
+    production caller, so nothing ever compared the store against Stripe.
+
+    These tests drive the four states the issue names, plus the mutation check:
+    a "reconciler" that only READS the price and writes nothing must be
+    reported as UNREPAIRED, never as a clean pass.
+    """
+
+    def _seed(self, sdk, org_id, **props):
+        sets = ", ".join(f"t.{k}=${k}" for k in props)
+        sdk._get_registry().query(
+            f"MATCH (t:Team {{id:$id}}) SET {sets}",
+            params={"id": org_id, **props})
+
+    def _row(self, sdk, org_id):
+        return sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.tier, t.max_points, "
+            "t.subscription_status", params={"id": org_id}).result_set[0]
+
+    def test_under_delivered_pro_org_is_repaired_and_the_cap_raised(
+            self, monkeypatch, billing_client):
+        """price=pro + tier=solo + active → the sweep restores Pro, and the
+        ENFORCED cap (the thing that refused the writes) goes with it."""
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="solo", subscription_status="active",
+                   subscription_id="sub_8878", stripe_customer_id="cus_8878")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_points=$mp", 
+            params={"id": org_id, "mp": 25000})  # Solo's cap, as drift left it
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        paged = []
+        summary = bl.reconcile_subscriptions(
+            sdk, notifier=lambda *a: paged.append(a))
+
+        assert summary["checked"] == 1 and summary["repaired"] == 1, summary
+        assert summary["failed"] == [] and summary["unrepaired"] == []
+        assert [d["direction"] for d in summary["drift"]] == ["up"]
+        assert summary["drift"][0]["from_tier"] == "solo"
+        assert summary["drift"][0]["to_tier"] == "pro"
+        assert summary["drift"][0]["from_max_nodes"] == 25000
+        assert summary["drift"][0]["to_max_nodes"] == 100000
+        # The customer-visible consequence: the cap that refused the writes.
+        tier, max_points, status = self._row(sdk, org_id)
+        assert (tier, max_points, status) == ("pro", 100000, "active"), \
+            "drift repaired on the tier but not on the enforced cap"
+        # ...and it PAGES (piece 3), because this is a payable customer who
+        # was under-delivered.
+        assert summary["alerted"] == 1 and len(paged) == 1
+        assert paged[0][0] == org_id and paged[0][1:] == ("solo", "pro", "active")
+
+    def test_already_correct_org_is_unchanged_and_never_pages(
+            self, monkeypatch, billing_client):
+        """price=pro + tier=pro → unchanged (no write, no page)."""
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", subscription_status="active",
+                   subscription_id="sub_8878b")
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878b", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        paged = []
+        summary = bl.reconcile_subscriptions(
+            sdk, notifier=lambda *a: paged.append(a))
+        assert summary["checked"] == 1
+        assert summary["unchanged"] == 1 and summary["repaired"] == 0
+        assert summary["drift"] == [] and paged == []
+        assert self._row(sdk, org_id)[0] == "pro"
+
+    def test_org_without_a_stripe_identity_is_skipped_not_guessed(
+            self, monkeypatch, billing_client):
+        """A free org (never checked out) must not be touched — the sweep has
+        nothing to reconcile it against, and a blind write is not a repair."""
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="solo")
+        called = []
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: called.append(sid))
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append(cid))
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["skipped"] >= 1 and summary["checked"] == 0
+        assert called == [], "a Stripe call was made for an org with no identity"
+        assert self._row(sdk, org_id)[0] == "solo"
+
+    def test_read_only_reconciler_is_reported_unrepaired(
+            self, monkeypatch, billing_client):
+        """THE MUTATION CHECK (#8878's evidence bar): a reconciler that only
+        resolves the price and writes nothing must FAIL the pass, not report
+        success.
+
+        Mutation: ``apply_limits`` becomes a recorder, so the tier resolves to
+        pro from Stripe but the store keeps solo. A pass that trusted its own
+        read would report ``repaired=1``; the reconciler re-reads the store and
+        reports ``unrepaired`` instead.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="solo", subscription_status="active",
+                   subscription_id="sub_8878m")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_points=$mp",
+            params={"id": org_id, "mp": 25000})
+        writes = []
+        monkeypatch.setattr(bl, "apply_limits",
+                            lambda sdk_, oid, tier: writes.append((oid, tier)))
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878m", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        paged = []
+        summary = bl.reconcile_subscriptions(
+            sdk, notifier=lambda *a: paged.append(a))
+
+        assert writes == [(org_id, "pro")], "the tier resolved but was not applied"
+        assert summary["repaired"] == 0
+        assert summary["unrepaired"] == [
+            {"org_id": org_id, "expected_tier": "pro", "stored_tier": "solo"}]
+        assert summary["drift"] == [] and paged == []
+        assert tuple(self._row(sdk, org_id)[:2]) == ("solo", 25000)
+
+    def test_unknown_price_fails_the_org_and_preserves_the_stored_tier(
+            self, monkeypatch, billing_client):
+        """Existing behaviour must not regress: an unresolvable price keeps the
+        stored tier/status (never downgrade a paid org on an unparseable
+        price, review fix 7) and is reported as a FAILED org."""
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", subscription_status="active",
+                   subscription_id="sub_8878u")
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878u", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_unknown8878"}}]}})
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1 and summary["repaired"] == 0
+        assert len(summary["failed"]) == 1
+        assert summary["failed"][0]["org_id"] == org_id
+        assert "unknown price" in summary["failed"][0]["error"]
+        assert self._row(sdk, org_id)[0] == "pro", "stored tier must be preserved"
+
+    def test_past_due_past_grace_still_degrades_after_the_sweep(
+            self, monkeypatch, billing_client):
+        """subscription_status=past_due past grace → still degrades per
+        ``effective_tier``. The sweep mirrors Stripe truth; it must not turn a
+        lapsed payer into an entitled one."""
+        from datetime import UTC, datetime, timedelta
+
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        past = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        self._seed(sdk, org_id, tier="solo", subscription_id="sub_8878p")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.grace_until=$g",
+            params={"id": org_id, "g": past})
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878p", "status": "past_due",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        bl.reconcile_subscriptions(sdk, notifier=False)
+        tier, max_points, status = self._row(sdk, org_id)
+        assert status == "past_due"
+        # The ISO string is the shape the ONLY production writer stores
+        # (``hosted_api`` writes ``grace.isoformat()``) — the degrade must fire
+        # on it, not just on the epoch floats the older unit tests used.
+        assert bl.effective_tier({"tier": tier, "subscription_status": status,
+                                  "grace_until": past}) == "free"
+        assert max_points == 100000, "mirror keeps Stripe truth; the READ degrades"
+
+    def test_enumeration_failure_fails_closed(self, monkeypatch, billing_client):
+        """A pass must never report "0 orgs checked" from a source it could not
+        read (the NO_ORGS class #596 named)."""
+        from tortoise import billing as bl
+
+        class _Broken:
+            def query(self, *a, **kw):
+                raise RuntimeError("control plane down")
+
+        monkeypatch.setattr(bl, "_supabase_mode", lambda: True)
+        import tortoise.supabase_control as sc
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Broken())
+        with pytest.raises(RuntimeError):
+            bl.reconcile_subscriptions(None, notifier=False)
+
+    def test_enumeration_walks_the_certifying_seam_not_a_single_page(
+            self, monkeypatch):
+        """#8878 review: the enumerate must use the seam that OWNS completeness.
+
+        ``SupabaseControlPlane.query`` is ONE PostgREST page and PostgREST caps a
+        row list at ``max_rows`` silently — a truncated read arrives as a
+        non-empty PARTIAL list with no error. Reading it as the fleet would
+        report a plausible ``checked=N`` and green the cron while every org past
+        the page was never compared to Stripe: the permanent silent cap #8878
+        exists to remove, re-created for a suffix of the fleet.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        seen: dict = {}
+
+        class _Cp:
+            def query_all(self, table, **kw):
+                seen["table"], seen["kw"] = table, kw
+                return [{"id": f"org-{i}"} for i in range(1200)], True
+
+            def query(self, *a, **kw):  # pragma: no cover - must not be used
+                raise AssertionError(
+                    "the single-page query() was used for the fleet — that is "
+                    "the truncating read #8878 exists to avoid")
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Cp())
+        rows = bl._enumerate_billed_orgs()
+        assert len(rows) == 1200, "a page past the first was dropped"
+        assert seen["table"] == "organizations"
+        assert seen["kw"]["cursor"] == "id"
+        # No `deleted_at IS NULL`: a soft-deleted org can still be BILLED, and
+        # excluding it would hide a live charge from the only pass that looks.
+        assert seen["kw"]["filters"] is None
+
+    def test_uncertifiable_enumeration_fails_closed(self, monkeypatch):
+        """``complete=False`` is a LOWER BOUND, never a clean pass."""
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Truncated:
+            def query_all(self, table, **kw):
+                return [{"id": "org-1"}], False
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Truncated())
+        with pytest.raises(RuntimeError, match="CERTIFIED"):
+            bl._enumerate_billed_orgs()
+
+    def test_seam_without_a_completeness_signal_refuses(self, monkeypatch):
+        """An older seam may certify by the SERVER's count; if it cannot, refuse.
+
+        A page nobody can vouch for must never be published as the fleet.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Opaque:
+            def query_with_total(self, table, **kw):
+                return [{"id": "org-1"}], None  # server stated no total
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Opaque())
+        with pytest.raises(RuntimeError, match="LOWER BOUND"):
+            bl._enumerate_billed_orgs()
+
+    def test_limit_caps_processing_without_weakening_certification(
+            self, monkeypatch):
+        """``limit`` is an ops/test cap on how many rows are PROCESSED."""
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Cp:
+            def query_all(self, table, **kw):
+                return [{"id": f"org-{i}"} for i in range(10)], True
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Cp())
+        assert len(bl._enumerate_billed_orgs(limit=3)) == 3
+
+    def test_limit_cannot_buy_a_partial_page(self, monkeypatch):
+        """The OTHER half of the name above, which that test cannot see.
+
+        ``limit`` must not be a way to publish an UNCERTIFIED page: hoisting the
+        truncation above the certificate check (a natural refactor — it is the
+        cheaper order) would re-open the partial-page fail-open whenever
+        ``limit`` is set, while ``test_limit_caps_processing_…`` stayed green
+        because its double is always ``complete=True``. The discriminating case
+        is ``limit`` PLUS ``complete=False``.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+
+        class _Truncated:
+            def query_all(self, table, **kw):
+                return [{"id": f"org-{i}"} for i in range(10)], False
+
+        monkeypatch.setattr(sc, "get_control_plane", lambda: _Truncated())
+        with pytest.raises(RuntimeError, match="CERTIFIED"):
+            bl._enumerate_billed_orgs(limit=3)
+
+    def test_abandoned_checkout_is_skipped_not_unverified(
+            self, monkeypatch, billing_client):
+        """A customer binding at the UNPAID tier is routine, not a symptom.
+
+        ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
+        session, so every abandoned checkout leaves a Stripe binding on a
+        ``tier=free`` row. Counting that as ``unverified`` put healthy orgs in
+        the operator's queue forever (and emitted a daily ``::warning::`` in the
+        driver) — ``docs/infra-runbook.md`` §4.2 tells the operator to look at
+        every non-zero ``unverified``. Where the org lands must be decided from
+        the LADDER (is this tier paid?), not from the presence of an identity.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="free", stripe_customer_id="cus_8878ab")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1, (
+            "the attempt WAS made (Stripe was called), so the org is checked")
+        assert summary["skipped"] == 1, (
+            "an abandoned checkout has no entitlement to verify, so it is "
+            f"skipped, not a person to look at — got {summary}")
+        assert summary["unverified"] == 0, (
+            "a customer binding at the UNPAID tier is not 'stored as billed' "
+            f"— got {summary}")
+        assert summary["repaired"] == 0 and summary["drift"] == []
+        assert self._row(sdk, org_id)[0] == "free"
+
+    def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
+        """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.
+
+        The old docstring said ``None`` = "Team = unlimited" and §4.2 said
+        ``direction: null`` = "both caps unlimited". Measured, both are false:
+        ``team`` is 600 000 and an unrecognised tier resolves to Free's 10 000
+        (``pricing.tier_limits``: "Unknown tiers default to the Free limits").
+        ``None`` is reachable only when the ladder RAISES (#750.8). A runbook
+        that calls it a benign no-op sends the operator past a config fault.
+        """
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+
+        # The real ladder: nothing here is unlimited.
+        assert bl._paid_tier_floor("team") == 600000
+        assert bl._paid_tier_floor("bogus-tier") == bl._paid_tier_floor("free")
+        assert bl._drift_direction("bogus-tier", "team") == "up"
+
+        # The only path to None: the ladder cannot be read at all.
+        def _unreadable(tier):
+            raise KeyError("pricing.json tier 'pro' missing required keys")
+
+        assert pricing.tier_limits is not _unreadable  # sanity: real symbol
+        original = pricing.tier_limits
+        pricing.tier_limits = _unreadable
+        try:
+            assert bl._paid_tier_floor("team") is None
+            assert bl._paid_tier_floor("free") is None
+            assert bl._drift_direction("pro", "team") is None
+        finally:
+            pricing.tier_limits = original
+
+    def test_supabase_mode_repairs_the_org_row_with_no_registry_sdk(
+            self, monkeypatch, stripe_env):
+        """The branch the HOSTED deployment actually takes (#8878 review P2).
+
+        Post-#669 the registry graph is deleted on the hosted lane, so
+        ``reconcile_subscriptions`` runs with ``sdk=None`` against the
+        control-plane ``organizations`` row. Without this test, the row-shape
+        handling, ``reconcile_org(None, …)``, the writes, and the
+        repaired/drift classification are exercised ONLY in registry mode —
+        i.e. everything except the path production uses.
+        """
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise import billing as bl
+
+        org_id = "11111111-1111-4111-8111-111111111111"
+
+        class _Cp(FakeControlPlane):
+            """The fake reports NO stated total (``total=None``), which the
+            enumeration correctly refuses — so this double states one, the
+            only thing a server-side count can supply (#5388)."""
+
+            def query_with_total(self, table, **kw):
+                kw.pop("count_exact", None)
+                rows = self.query(table, **kw)
+                return rows, len(rows)
+
+        cp = _Cp({"organizations": [{
+            "id": org_id,
+            "tier": "solo",              # the drift: billed Pro, stored Solo
+            "subscription_id": "sub_8878sb",
+            "stripe_customer_id": "cus_8878sb",
+            "subscription_status": "active",
+            "graph_size_cap": 25000,
+        }]})
+        # ``_supabase_mode()`` IS ``is_supabase_enabled()``; patching the seam
+        # keeps every branch in the pass (enumeration, identity read,
+        # ``apply_limits``) on the control plane instead of half of them
+        # falling back to a registry SDK this mode never constructs.
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878sb", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+
+        summary = bl.reconcile_subscriptions(None, notifier=False)
+
+        assert summary["checked"] == 1 and summary["repaired"] == 1, summary
+        assert summary["failed"] == [] and summary["unrepaired"] == []
+        assert [d["direction"] for d in summary["drift"]] == ["up"]
+        assert summary["drift"][0]["from_max_nodes"] == 25000
+        assert summary["drift"][0]["to_max_nodes"] == 100000
+        row = cp.tables["organizations"][0]
+        assert row["tier"] == "pro", "the org row was not repaired"
+        assert row["graph_size_cap"] == 100000, (
+            "the tier moved but the ENFORCED cap did not — the number that "
+            "refused the customer's writes")
+        assert row["subscription_status"] == "active", (
+            "the Stripe status never reached the row in the hosted path")
+
+    def test_no_stripe_subscription_is_unverified_not_unchanged(
+            self, monkeypatch, billing_client):
+        """A stored-billed org Stripe names no active sub for was NOT verified.
+
+        ``reconcile_org`` reports ``action="noop"`` for the missed-checkout
+        blind spot (customer id, no active subscription). Counting that as
+        ``unchanged`` reports an unexamined org as verified-clean — the exact
+        read-only-reconciler failure the ``unrepaired`` guard exists to catch.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8878n")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1
+        assert summary["unverified"] == 1, summary
+        assert summary["unchanged"] == 0, \
+            "an unverified org must never be reported as verified-clean"
+        assert summary["repaired"] == 0 and summary["drift"] == []
+        assert self._row(sdk, org_id)[0] == "pro", \
+            "no active subscription is not a licence to downgrade"
+
+    def test_one_orgs_store_failure_does_not_abort_the_pass(
+            self, monkeypatch, billing_client):
+        """The control plane fails with RuntimeError, not a BillingError.
+
+        ``update_org_billing`` raises ``RuntimeError`` when a PATCH matches no
+        row (an org deleted/renamed mid-pass). Narrowing the per-org guard to
+        the provider errors let one such row abort the whole fleet pass — on
+        every run, at the same point, because ordering is stable by id.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="solo", subscription_status="active",
+                   subscription_id="sub_8878r")
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878r", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+
+        def _boom(sdk_, oid):
+            raise RuntimeError("update_org_billing: no row matched")
+
+        monkeypatch.setattr(bl, "org_billing_identity", _boom)
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1
+        assert len(summary["failed"]) == 1, \
+            "a store failure for one org must be recorded, not propagated"
+        assert "no row matched" in summary["failed"][0]["error"]
+
+    def test_internal_endpoint_repairs_a_drifted_org(
+            self, monkeypatch, billing_client):
+        """The production caller: POST /v1/internal/billing/reconcile.
+
+        Without it the sweep is another uncalled function — the exact defect
+        #8878 reports (``reconcile_org`` existed and nothing ran it)."""
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="solo", subscription_status="active",
+                   subscription_id="sub_8878e")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_points=$mp",
+            params={"id": org_id, "mp": 25000})
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_8878e", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        monkeypatch.setattr(bl, "_notify_drift", lambda *a: None)
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+        client = billing_client["client"]
+
+        unauth = client.post("/v1/internal/billing/reconcile")
+        assert unauth.status_code == 401, unauth.text
+
+        r = client.post("/v1/internal/billing/reconcile",
+                        headers={"Authorization": "Bearer internal-test-key"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["checked"] == 1 and body["repaired"] == 1, body
+        assert body["drift"][0]["direction"] == "up"
+        tier, max_points, _status = self._row(sdk, org_id)
+        assert (tier, max_points) == ("pro", 100000)
+
+    def test_the_endpoint_names_an_uncertified_enumeration(
+            self, monkeypatch, billing_client):
+        """A fleet that cannot be CERTIFIED complete answers 503 with a NAME.
+
+        Uncaught, that refusal renders as an opaque ``500 {"detail": "Internal
+        Server Error"}`` — and the daily driver's ``::error::`` line is the
+        page, so "HTTP 500" names nothing an operator can act on. ``503
+        enumeration_incomplete`` says which leg failed and that a retry is the
+        response (the fleet was not READ, not mis-repaired).
+        """
+        import tortoise.supabase_control as sc
+        from tortoise import billing as bl
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+
+        def _cannot_certify(*_a, **_kw):
+            raise bl.BillingEnumerationError(
+                "billing reconcile: the org enumeration could not be CERTIFIED "
+                "complete (1000 row(s) returned)")
+
+        monkeypatch.setattr(bl, "reconcile_subscriptions", _cannot_certify)
+        r = billing_client["client"].post(
+            "/v1/internal/billing/reconcile",
+            headers={"Authorization": "Bearer internal-test-key"})
+        assert r.status_code == 503, r.text
+        assert r.json()["status"] == "enumeration_incomplete"
+
+
 class TestLifespanStartup:
     def test_lifespan_startup_returns_without_blocking(self, monkeypatch, tmp_path):
         """The lifespan's startup half is cheap and synchronous, so it must

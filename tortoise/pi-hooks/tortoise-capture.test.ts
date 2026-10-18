@@ -36,6 +36,7 @@ import {
   RETRY_MAX_MS,
   TRUNCATION_SENTINEL,
   TURN_MAX_CHARS,
+  _CREDENTIAL_MODE_WARNED,
   backoffDelay,
   buildCapturePayload,
   captureKey,
@@ -63,6 +64,7 @@ import {
   sourceName,
   spoolEntryBytes,
   truncationMarker,
+  warnIfCredentialStoreIsReadable,
   writeSpoolEntry,
 } from "./tortoise-capture.ts";
 import tortoiseCapture from "./tortoise-capture.ts";
@@ -588,6 +590,10 @@ function writeConfig(json: Record<string, unknown>): string {
   const dir = mkdtempSync(join(tmpdir(), "tortoise-capture-cfg-"));
   const path = join(dir, "tortoise-config.json");
   writeFileSync(path, JSON.stringify(json));
+  // Our own writers pin the store closed (`os.open(..., 0o600)`); mirror that so
+  // the co-source tests below exercise the happy mode and stay stderr-quiet.
+  // #5109's open-mode case is its own test (`chmodSync` it to 0644 there).
+  chmodSync(path, 0o600);
   return path;
 }
 
@@ -635,6 +641,122 @@ test("resolveConfig co-source: an ENV key uses the env URL (file identity loses)
       assert.equal(cfg.apiUrl, "https://env-host.example.com");
     },
   );
+});
+
+// ── #5109: the READ side of the credential store ─────────────────────────
+//
+// Our writers pin the store closed (CLI: `os.open(..., 0o600)` + `chmod(home,
+// 0o700)`), but nothing checked the mode on READ, so a store that had drifted
+// (restored from a backup, `cp`'d without `-p`, re-created by hand) was used at
+// whatever mode it carried, silently. This is the sibling of the CLI half
+// (`tortoise/__main__.py::_warn_if_credential_store_is_readable`) for the OTHER
+// in-repo reader of a credential store — `resolveConfig`, the seam every
+// `turn_end` resolves through. Warn-only, for the reason the CLI half records:
+// a 0644 store behind a 0700 parent is not reachable by another user.
+
+/** Collect what the extension writes to stderr/warn while `fn` runs. */
+function captureWarnings<T>(fn: () => T): { value: T; warnings: string[] } {
+  const warnings: string[] = [];
+  mock.method(console, "warn", (...args: unknown[]) => {
+    warnings.push(args.map((a) => String(a)).join(" "));
+  });
+  try {
+    return { value: fn(), warnings };
+  } finally {
+    mock.restoreAll();
+  }
+}
+
+function withMode<T>(json: Record<string, unknown>, mode: number, fn: (path: string) => T): T {
+  return withTempConfig(json, (path) => {
+    chmodSync(path, mode);
+    return fn(path);
+  });
+}
+
+test("resolveConfig warns when the credential store is group/other-readable", () => {
+  _CREDENTIAL_MODE_WARNED.clear();
+  withMode({ apiKey: "tt_stored" }, 0o644, (path) => {
+    const { value: cfg, warnings } = captureWarnings(() => resolveConfig({}, path));
+    assert.equal(cfg.apiKey, "tt_stored", "the check must never refuse the credential");
+    assert.equal(warnings.length, 1, `expected exactly one warning, got ${warnings.length}`);
+    assert.ok(warnings[0]?.includes(path), "the warning must name the store path");
+    assert.ok(warnings[0]?.includes("0644"), "the warning must name the mode");
+  });
+});
+
+test("the store-mode warning never quotes the credential it warns about", () => {
+  _CREDENTIAL_MODE_WARNED.clear();
+  withMode({ apiKey: "tt_sentinel_key_0123456789abcdef" }, 0o644, (path) => {
+    const { warnings } = captureWarnings(() => resolveConfig({}, path));
+    assert.equal(warnings.length, 1);
+    assert.ok(!warnings.join("\n").includes("tt_sentinel_key_0123456789abcdef"),
+      "a warning that prints the key writes the secret into the transcript #5109 is about");
+  });
+});
+
+test("a 0600 store is silent — the check fires on group/other bits only", () => {
+  _CREDENTIAL_MODE_WARNED.clear();
+  withMode({ apiKey: "tt_stored" }, 0o600, (path) => {
+    const { warnings } = captureWarnings(() => resolveConfig({}, path));
+    assert.deepEqual(warnings, [], "a correctly-permissioned store must not warn");
+  });
+});
+
+test("an ENV key never reaches the store check (no store, nothing to have drifted)", () => {
+  _CREDENTIAL_MODE_WARNED.clear();
+  withMode({ apiKey: "tt_stored" }, 0o644, (path) => {
+    const { value: cfg, warnings } = captureWarnings(() =>
+      resolveConfig({ TORTOISE_API_KEY: "tt_env" }, path),
+    );
+    assert.equal(cfg.apiKey, "tt_env");
+    assert.deepEqual(warnings, [], "the store is not the source here, so it is not checked");
+  });
+});
+
+test("an unstattable store cannot warn or throw (the check never fails the command)", () => {
+  _CREDENTIAL_MODE_WARNED.clear();
+  // A DIRECTORY at the config path: `readFileSync` fails (so no key is sourced
+  // and the check is not reached), and the assertion below is what keeps a
+  // future refactor from turning `statSync` into a throw on the resolve path.
+  const dir = mkdtempSync(join(tmpdir(), "tortoise-capture-cfgdir-"));
+  try {
+    const { value: cfg, warnings } = captureWarnings(() => resolveConfig({}, dir));
+    assert.equal(cfg.apiKey, "");
+    assert.deepEqual(warnings, []);
+    assert.doesNotThrow(() => warnIfCredentialStoreIsReadable(join(dir, "absent.json")));
+    // The DIRECT call gets its OWN capture window. `captureWarnings` restores
+    // the `console.warn` mock in its `finally` — which runs as the arrow above
+    // returns — so the earlier `warnings` array is detached by this point and
+    // asserting on it would pass no matter what the function did (a dead
+    // assertion: it could start warning about absent stores and stay green).
+    // Capturing the call itself is what makes "an absent store is silent"
+    // falsifiable.
+    const direct = captureWarnings(() =>
+      warnIfCredentialStoreIsReadable(join(dir, "absent.json")));
+    assert.deepEqual(direct.warnings, [], "a store we cannot stat is not this check's business");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the warning is keyed by PATH — one line per store, not one per process", () => {
+  _CREDENTIAL_MODE_WARNED.clear();
+  withMode({ apiKey: "tt_a" }, 0o644, (a) => {
+    withMode({ apiKey: "tt_b" }, 0o644, (b) => {
+      const { warnings } = captureWarnings(() => {
+        // Same path twice (every `turn_end` resolves it): ONE line, not two.
+        resolveConfig({}, a);
+        resolveConfig({}, a);
+        // A different store is a different hazard: it gets its own line.
+        resolveConfig({}, b);
+      });
+      assert.equal(warnings.length, 2,
+        "warn once per path — repeated resolutions must not flood, two stores must both speak");
+      assert.equal(warnings.filter((w) => w.includes(a)).length, 1);
+      assert.equal(warnings.filter((w) => w.includes(b)).length, 1);
+    });
+  });
 });
 
 test("the install probe is budgeted far shorter than the capture", () => {

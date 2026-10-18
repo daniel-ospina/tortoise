@@ -1,0 +1,271 @@
+name: billing-reconcile-cron
+
+# The cadenced caller of the billing mirror reconciler (#8878).
+#
+# WHY THIS EXISTS. The stored `tier` on an org IS its entitlement
+# (`billing.effective_tier` never derives upward) and its ONLY writer is the
+# Stripe webhook. One missed/failed `customer.subscription.*` delivery
+# therefore capped a paying org at the lower tier PERMANENTLY: measured
+# 2026-10-17, the fleet's own org was billed on the Pro price and enforced at
+# Solo's 25 000-node cap, every hosted write refused with "upgrade your plan"
+# while reads kept working — i.e. silent, and unrecoverable without a human.
+#
+# WHY AN EXTERNAL DRIVER (and not an in-process timer or a boot thread). Same
+# reasoning the backup pipeline recorded in #596: a timer inside the app dies
+# with the process and is invisible when the app is crash-looping or the
+# deploy is wedged — exactly when a missed delivery is most likely. The boot
+# reconcile thread this would otherwise restore was removed at #4262 and
+# re-adding a boot-blocking Stripe call is a regression. This job has an
+# independent failure domain: it runs even when the app is down (the request
+# then fails loudly, which is the signal).
+#
+# WHAT COUNTS AS A FAILURE. The endpoint (POST /v1/internal/billing/reconcile)
+# answers 200 with a summary. This job fails the run AND PAGES TELEGRAM when:
+#   * the request itself fails (curl rc != 0: app down / internal key wrong /
+#     the 600 s client ceiling), or
+#   * the endpoint answers 503 `enumeration_incomplete` (the pass could not
+#     certify the WHOLE fleet, so it compared an unknown fraction of it and
+#     refuses to report that as clean), or
+#   * the response cannot be read as a summary at all (not a JSON object, or
+#     missing any field the verdict below keys on — a shape change must fail
+#     closed, never read as a clean pass), or
+#   * `failed` is non-empty (a billed org could not be reconciled: a pass that
+#     verified nothing must not read as a clean pass), or
+#   * `unrepaired` is non-empty (Stripe resolved a tier the store did not end
+#     up holding — a read-only reconciler is a BROKEN reconciler, #8878), or
+#   * any `drift` entry has direction "up" (a paying customer WAS being
+#     under-delivered; it is repaired now, and the reconciler also pages it
+#     through the billing notify channel — this is the independent leg that
+#     still fires if that channel is unconfigured), or
+#   * a run triggered by `workflow_dispatch` got 202 `already_running` and
+#     therefore did no work at all.
+#
+# 202 TO A SCHEDULED RUN IS NOT A FAILURE. The endpoint answers it for a
+# concurrent pass and its docstring calls that benign (nothing queues; the next
+# scheduled run retries). An operator running the runbook's §4.2 curl inside
+# the daily window would otherwise make the daily job page a false billing
+# incident — the sibling #596 driver reads the BODY's `.status` for the same
+# reason. The two triggers want opposite answers, so this branches on the
+# trigger: `schedule` → notice + success (the manual pass is covering the
+# fleet); `workflow_dispatch` → error, because a dispatched run that did NO
+# work must not look like a completed pass.
+#
+# The Telegram leg is what makes "PAGES" true rather than aspirational: a red
+# run alone only reaches whoever opens the Actions tab (a scheduled run also
+# emails whoever last touched the default branch, which is not an owner). The
+# runbook (§4.2) advertised the page before anything delivered one. That leg
+# needs the repo ON the runner: `Page on failure` sources
+# `.github/scripts/telegram-send.sh`, and a GitHub-hosted runner's
+# `$GITHUB_WORKSPACE` starts empty, so `jobs.drive` runs `actions/checkout`
+# FIRST. Without it the `.` failed and, under `set -euo pipefail`, the step
+# exited before `tg_send` — a page step that could never deliver, which is the
+# same defect one layer down.
+#
+# RESIDUAL, stated rather than implied (the sibling backup driver's #596 header
+# covers BOTH legs; this one covers only the app-down leg): if GitHub silently
+# stops running this schedule — it disables schedules after ~60 days of repo
+# inactivity, `docs/infra-runbook.md` records "a missing run looks like
+# silence" — no request is made, so nothing fails and nothing pages. Nothing
+# here watches for a MISSING pass. Closing that needs a run stamp plus an
+# out-of-band staleness check (the driver-disabled leg #596 built); it is not
+# claimed as covered here.
+#
+# Drift DOWN (a portal downgrade or cancellation the mirror had not seen) is
+# reported in the summary and is NOT a failure: it is Stripe truth arriving
+# late, not a customer being short-changed. A `direction` of `null` (the pair
+# could not be ranked) is likewise not a failure.
+
+on:
+  schedule:
+    - cron: '43 4 * * *'   # daily, off the top of the hour (GH jitter)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: billing-reconcile
+  cancel-in-progress: false   # scheduled runs never overlap
+
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      INTERNAL_API_URL: ${{ secrets.INTERNAL_API_URL }}
+      FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+      # Which trigger this run is. Read by the 202 branch below: a scheduled run
+      # overlapping an operator's pass is BENIGN (the operator's pass is
+      # covering the fleet), while a manually dispatched run that did no work is
+      # the thing the dispatcher needs to be told. Bound in `env:` rather than
+      # interpolated into the shell text, so the step's script is the same in CI
+      # and in the tests that RUN it (tests/test_deploy_workflow.py).
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      # The `Page on failure` step SOURCES a repo script
+      # (`.github/scripts/telegram-send.sh`), and a GitHub-hosted runner's
+      # `$GITHUB_WORKSPACE` starts EMPTY — `actions/checkout` is the only thing
+      # that populates it. Without this, the `. <script>` line fails with "No
+      # such file or directory" and, under `set -euo pipefail`, the step exits
+      # non-zero BEFORE `tg_send` is ever called: every failure path fired no
+      # page at all, one layer under the very defect `33eb1364d` set out to
+      # close. `permissions: contents: read` above is sufficient for checkout,
+      # and the sibling #596 driver (`registry-backup-cron.yml`) checks out for
+      # exactly this reason.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run billing reconcile pass
+        # Secrets are bound in `env:` above and read QUOTED — never interpolated
+        # into the shell text (#4361: substitution happens before bash parses,
+        # so a secret is code there, not data).
+        run: |
+          set -euo pipefail
+          if [ -z "${INTERNAL_API_URL:-}" ] || [ -z "${FASTAPI_INTERNAL_KEY:-}" ]; then
+            echo "::error::INTERNAL_API_URL / FASTAPI_INTERNAL_KEY are unset — the billing reconciler cannot run."
+            exit 1
+          fi
+          out="$(mktemp)"
+          # `-m 600` is required, not decoration. `/v1/internal/` is
+          # PREFIX-EXEMPT from the 10 s transport wait bound and has no
+          # server-side ceiling (tests/test_transport_wait_bound.py: its CRON
+          # callers publish their own patience — `registry-cron.sh` posts the
+          # sweep with `curl -m 600`), so without a client bound a wedged
+          # endpoint is killed by `timeout-minutes` and the log says nothing.
+          # With it the driver reads the legible `curl rc=28` below.
+          rc=0
+          status="$(curl -sS -m 600 -o "$out" -w '%{http_code}' \
+            -X POST "${INTERNAL_API_URL%/}/v1/internal/billing/reconcile" \
+            -H "Authorization: Bearer ${FASTAPI_INTERNAL_KEY}")" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::billing reconcile request failed (curl rc=${rc}; rc=28 is the 600 s ceiling expiring)"
+            cat "$out" || true
+            exit 1
+          fi
+          echo "HTTP ${status}"
+          cat "$out"
+          echo
+          if [ "$status" = "202" ]; then
+            # The endpoint answers 202 `already_running` for a CONCURRENT pass,
+            # and its own docstring calls that benign — nothing queues, the next
+            # scheduled run retries. Keying on "any non-200 is an error" turned
+            # a benign overlap into a false billing incident: an operator
+            # running the runbook §4.2 curl inside the daily window made the
+            # daily job PAGE. The sibling #596 driver reads the BODY's `.status`
+            # for exactly this reason; this reads the trigger, because the two
+            # triggers want opposite answers.
+            if [ "${EVENT_NAME:-}" = "schedule" ]; then
+              echo "::notice::a reconcile pass is already running — this scheduled run is a no-op and the next one retries (nothing is queued)"
+              exit 0
+            fi
+            # A dispatched run that did NO work is the dispatcher's business:
+            # nothing was queued, so silently greening would look like a pass.
+            echo "::error::a reconcile pass is already running, so this ${EVENT_NAME:-manual} run did NO work — nothing is queued; re-dispatch once the in-flight pass finishes"
+            exit 1
+          fi
+          if [ "$status" = "503" ]; then
+            echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair, retry once the control plane is readable"
+            exit 1
+          fi
+          if [ "$status" != "200" ]; then
+            echo "::error::billing reconcile returned HTTP ${status}"
+            exit 1
+          fi
+          python3 - "$out" <<'PY'
+          import json, sys
+
+          try:
+              data = json.load(open(sys.argv[1]))
+          except (OSError, ValueError) as exc:
+              print(f"::error::reconcile response is not JSON ({exc.__class__.__name__}) "
+                    "— the pass cannot be verified")
+              sys.exit(1)
+          if not isinstance(data, dict):
+              print("::error::reconcile response is not a JSON object — the pass "
+                    "cannot be verified")
+              sys.exit(1)
+          # Required BEFORE the verdict is computed. Every read below has a
+          # default, so a response that simply OMITS a field would read as a
+          # clean pass — the same "verified nothing, looked clean" failure this
+          # job exists to catch. A renamed/reshaped summary must page, not pass.
+          required = {"checked", "repaired", "unchanged", "unverified",
+                      "skipped", "drift", "unrepaired", "failed"}
+          missing = sorted(required - set(data))
+          if missing:
+              print(f"::error::reconcile summary is missing {missing} — the "
+                    "response contract changed, so a clean pass cannot be told "
+                    "from an unverified one; failing closed")
+              sys.exit(1)
+          drift_up = [d for d in data["drift"] if d.get("direction") == "up"]
+          failed = data["failed"]
+          unrepaired = data["unrepaired"]
+          summary = (
+              f"checked={data['checked']} repaired={data['repaired']} "
+              f"up={len(drift_up)} unchanged={data['unchanged']} "
+              f"unverified={data['unverified']} skipped={data['skipped']} "
+              f"failed={len(failed)} unrepaired={len(unrepaired)}"
+          )
+          print(summary)
+          if data["unverified"]:
+              # Not a failure: Stripe answered and named no active subscription.
+              # Loud anyway — an org stored as billed that Stripe does not
+              # recognise is a person someone should look at.
+              print(f"::warning::{data['unverified']} org(s) are stored as billed "
+                    "but Stripe names no active subscription (not verified, not "
+                    "downgraded) — review them")
+          if data["checked"] == 0:
+              # Loud, never fatal. The enumeration is CERTIFIED complete before
+              # this point (an uncertifiable one raises and 500s), so 0 means a
+              # fleet with no billed org — a real state on a fresh deployment.
+              print("::warning::the pass checked 0 orgs — a certified-empty fleet "
+                    "is valid, but on a fleet with paying customers it is not")
+          problems = []
+          if failed:
+              problems.append(f"{len(failed)} org(s) FAILED to reconcile: {failed}")
+          if unrepaired:
+              problems.append(
+                  f"{len(unrepaired)} org(s) were NOT repaired (Stripe truth "
+                  f"did not reach the store): {unrepaired}")
+          if drift_up:
+              problems.append(
+                  f"{len(drift_up)} paying org(s) were being UNDER-DELIVERED "
+                  f"(repaired on this pass): {drift_up}")
+          if problems:
+              for p in problems:
+                  print(f"::error::{p}")
+              sys.exit(1)
+          PY
+
+      - name: Page on failure
+        # `failure()` covers timeouts and any failing step above, which is the
+        # whole point: the leg that matters most (app down) is exactly the one
+        # where the in-app notify channel is unreachable, so the page must come
+        # from HERE. Deliberately Telegram and NOT an auto-filed issue: an issue
+        # ledger needs a resolve leg to retire it, and a stale open incident is
+        # the defect #8841 records. Best-effort by design — an undeliverable
+        # page must not turn a red run green (it stays red).
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ -z "${TELEGRAM_CHAT_ID:-}" ] || [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are unset — the failed reconcile pass was NOT paged. The red run is the only signal; configure the secrets or fix the runbook's claim."
+            exit 0
+          fi
+          . .github/scripts/telegram-send.sh
+          tg_send "$TELEGRAM_CHAT_ID" \
+            "billing reconcile FAILED — a paying org may be capped at the wrong tier. ${run_url}" \
+            || echo "::warning::the Telegram page was not delivered (see the log above) — the red run remains the signal"
+          exit 0
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Billing mirror reconcile (#8878)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "See the step log for the pass summary and any drift rows." >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

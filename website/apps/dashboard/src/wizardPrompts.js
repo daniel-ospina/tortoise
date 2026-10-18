@@ -61,9 +61,8 @@ export function wizardPromptText(harness, step, key, mode) {
   // have no skills directory) get it in the workflows prompt body
   // (wizardWorkflowsText). ChatGPT has NO surface in this chooser (#2912's
   // HARNESS_FAMILIES excludes it — #2698 had already deleted its flat tab),
-  // so its URL rides the exported UNIVERSAL_COMMAND.chatgpt for roundtrip/
-  // total-loop consumers only — not a delivery path in THIS wizard. Its LIVE
-  // carrier is the public setup docs page (#4836): website/docs.html#chatgpt.
+  // so it has no delivery path in THIS wizard at all. Its LIVE carrier is the
+  // public setup docs page (#4836): website/docs.html#chatgpt.
   // One constant (harnesses.js) for the URL, one (ONBOARDING_INSTRUCTIONS) for
   // the sentence.
   const onboardingInstructions = ONBOARDING_INSTRUCTIONS

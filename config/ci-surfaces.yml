@@ -173,6 +173,18 @@ surfaces:
   # #3065: bounded-socket guard for the raw FalkorDB clients in the product
   # package (dual-registered with `core`, its fallback surface — see there).
   - test_bounded_raw_clients_3065.py
+  # #2969 (residual): the resolved socket bound must be the wait the caller
+  # actually gets. DUAL-REGISTERED with `core` for the reason every dual entry
+  # above exists: `tortoise/__main__.py` (the doctor probe) and
+  # `tortoise/acl_graph_users.py` (the ACL admin client) are BOTH exact `api`
+  # SOURCE_PATTERNS matches, so an `__main__.py`-only or
+  # `acl_graph_users.py`-only diff selects `api` and REPLACES the `core`
+  # fallback — without THIS entry the attempt-count/wall-clock measurements
+  # never run on a change to a site they pin. (`session_indexer.py` /
+  # `backup.py` match no named pattern, so they fall through to `core`, whose
+  # entry below covers them.) Pinned by
+  # tests/test_ci_selection.py::test_socket_bound_2969_guard_runs_on_every_spread_site.
+  - test_socket_bound_not_multiplied_2969.py
   # #2922/#2923: DB-free static guards for boot-path regressions (credential
   # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
   # Registered under `api` as well as `core` deliberately: the file it guards most
@@ -627,6 +639,11 @@ surfaces:
   # class: a `__main__.py`-only change that selected `api` alone would skip a
   # core-only registration). Dual-registered with `core`.
   - test_secret_not_printed_5109.py
+  # #5109 (read side): the same `api` exposure as the entry above — this file
+  # pins `tortoise/__main__.py`'s credential resolver, so a `__main__.py`-only
+  # diff selects `api` and would otherwise skip it (the #2938 silent-drop
+  # class). Dual-registered with `core`.
+  - test_credential_store_mode_5109.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
@@ -1039,6 +1056,11 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
+  # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
+  # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
+  # narrower, and the hook it pins lives in the read funnel every surface uses.
+  - test_read_ledger.py
   - test_5509_name_keyed_identity_reads.py
   # #4643: the served-skill mirror's parity gate. The pin
   # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
@@ -1292,8 +1314,21 @@ surfaces:
   # emits it yet (`#7970` is the consumer), so `core` alone is correct.
   - test_residency_router.py
   - test_secret_not_printed_5109.py
+  # #5109 (read side): a store whose mode drifted open must warn on READ —
+  # nothing verified on read what every writer pins shut. Pins
+  # `tortoise/__main__.py::_resolve_config_path` + the `st_` token reader.
+  - test_credential_store_mode_5109.py
   - test_sdk_retirement.py
   - test_record_schema_placement.py
+  # #8882 (Phase 2 mechanics): the OFFLINE re-typing of a logical dump —
+  # `tortoise/retype.py` matches no SOURCE_PATTERN, so a module-only change
+  # falls through to `core` and this guard runs with it. DB-free by
+  # construction: the subject IS a `tortoise-logical-dump-v1` dict, so both
+  # modes are pure functions and the file needs no graph, no URI and no
+  # carve-out registration. Its loop back to the Phase-4 loader is asserted
+  # against `hosted_backup`'s OWN primitives (`DUMP_FORMAT`,
+  # `_sanitize_label`), which keeps that half honest without a DB.
+  - test_retype_8882.py
   # #7969 (epic #7879, Interface A): the record projection — journal →
   # Postgres, total + idempotent. Registered against `core` because BOTH
   # inputs it reads select `core`: `tortoise/record_projection.py` matches no
@@ -1354,6 +1389,14 @@ surfaces:
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
   - test_fleet_state.py
+  # #8845: a registry row that outlives its cmux workspace is not a lane record. Same
+  # home and same reason as `test_fleet_state.py` beside it: DB-free and network-free
+  # (every live source monkeypatched, `do_pane=False`, `sample_s=0.0`), and
+  # `tools/fleet_state.py` is in `CORE_ALSO` (`tools/ci_selection.py`), so a fleet_state
+  # change selects `core` and this guard actually runs on it. Without the registration
+  # the file is never selected on ANY diff (the #1349/#3332/#7076 silent-drop class) and
+  # `--integrity` reports it as drift, reding the required `manifest-integrity` job.
+  - test_8845_dup_lane_label.py
   # #7957/#parent-P0: the fail-closed guard for `queue-dispatch.py`'s lane read. DB-free, no
   # network, no cmux, no dispatch -- every live source is a stub under a throwaway HOME, so it
   # belongs on `core` (hermetic, sub-second). NOTE: the registration ALONE does not select the
@@ -1597,6 +1640,7 @@ surfaces:
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_7902_write_path_label_widening.py  # #7902: the epistemic-label declaration lives in tortoise/live.py (core fallback) — keep the write-path widening guard awake on a live.py-only change
   - test_about_edges.py
+  - test_8398_aboutobject_replay.py  # #8398: the Event→entity about* links journaled with the record and re-wired by both replay engines (touches tortoise/sdk.py + tortoise/projection/{edges,__init__}.py)
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
   - test_activation_scorecard.py   # #B7: activation scorecard (with the `api` half — see there)
@@ -1626,6 +1670,20 @@ surfaces:
   # match no named pattern, so they fall through to `core`: without THIS entry
   # the guard would not run on a change to the site it was written for.
   - test_bounded_raw_clients_3065.py
+  # #2969 (residual): the resolved socket bound must be the wait the caller
+  # actually gets — `_bounded_server_socket_kwargs()` pins ZERO retries on the
+  # `retry=` key, because on the pinned 7.4.1 a raw `redis.Redis` inherits a
+  # 3-retry function-signature default (4 attempts / ~11.5s for a 1s bound)
+  # while `falkordb.FalkorDB` defaults to none (1 attempt / ~1.0s), and one
+  # retry would double the four FalkorDB clients' wait. The subject is
+  # `tortoise/projection/__init__.py` (a SHARED_MODULE: it selects the full
+  # matrix on its own), but the pin also guards the `retry=` key that
+  # `session_indexer.py` / `backup.py` / `__main__.py` / `acl_graph_users.py`
+  # spread. `session_indexer.py` and `backup.py` match no named pattern, so
+  # they fall through to `core`: without THIS entry the guard would not run on
+  # a change to either. `__main__.py` / `acl_graph_users.py` are `api` sources
+  # and are covered by the DUAL `api` entry (above), not by this one.
+  - test_socket_bound_not_multiplied_2969.py
   - test_boot_regressions.py
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
@@ -4538,6 +4596,7 @@ durations:
   test_8066_served_skill_relay_ratchet.py: 3.5  # #8066 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 782/869 = 89.99% — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor. Locally measured (embedded carve-out lane, 2 tests): call 2.67s (the registration ratchet's 1097 `select()` calls) + 0.80s (the `tests/**` walk, after the necessary-condition fast path cut it from 16.0s); conftest/collection setup is the once-per-leg cost the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_7405_remaining_writes.py: 2.2  # #7405/#8698: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the #3400 flat 2.0s default was its FIRST weight — this value is a CI measurement since the 2026-10-17 refresh, so the read-me-from-junit half of this note is dropped with it (see the provenance rule above the block). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — merging origin/main is where the fast pool crossed the DURATION_COVERAGE_MIN floor, which is how this row was found. NO pool figure or percentage is restated here on purpose (each base merge re-stales it; see the #4387 row above). Do NOT drop the row without re-deriving the floor at that head. Refresh from the first post-merge run that includes it.
   test_7405_update_point_writes.py: 2.0  # #7405/#8737: same #3400 flat default as the row above and for the same reason — a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
+  test_5509_name_keyed_identity_reads.py: 138.6  # #5509 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it is hand-added here — and WITHOUT this row the durations map drops to 89.98% coverage (799/888), below the 90% floor, which is how #8874's merge of main 46185aba9 first surfaced it. MEASURED on this host 2026-10-17 in the #8874 worktree on a private tools/test_lane.py docker container reached via TORTOISE_DB_URI: pytest session total, 16 tests, "16 passed in 138.63s". WHAT THE NUMBER IS: the session total, NOT what the refresher computes (it sums the textual `--durations=15` block from a CI log, a LOWER bound). Refresh from the first post-merge push run that includes it.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
@@ -4598,7 +4657,7 @@ durations:
   test_2296_document_created_journal.py: 27.0  # unmeasured by the refresher — #2296: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only). Measured on this host 2026-10-14 on a private `tools/test_lane.py` docker container reached via TORTOISE_DB_URI: pytest session total 26.49s (that reading was the file's original 7 tests; the file now collects 8 and a later re-measure on a loaded host read 24.9s). WHAT THE NUMBER IS: the pytest session total, NOT what the refresher computes — it reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
   test_3311_multilabel_status_vocab.py: 15.3  # unmeasured — #3311: locally re-measured 2026-10-10 on this host (load ~80-84, 10 CPUs), 14 tests as the file collects now. HOW: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_3311_multilabel_status_vocab.py -q --durations=0` — live FalkorDB on the shared docker lane, reached through the projection's TEST_MODE redirect (under pytest an explicit db_path is rewritten onto TORTOISE_DB_URI; the `env` fixture's tmp_path .db is only the redirect key). Verified this turn: the per-path graph `test_ml3311_<hash12>` is on the shared container WHILE the file runs (polled `redis-cli GRAPH.LIST` mid-run) — and do NOT use the container's `total_commands_processed` delta as evidence for this, the container is shared with other lanes and that number is not reproducible. WHAT THE NUMBER IS: pytest's own session total, "14 passed in 15.31s". It is NOT what this map's own refresher computes: `tools/ci_timing.py --refresh-durations` reads the TEXTUAL `--durations=` block out of the CI log (python-ci.yml runs `--durations=15`, so only those printed lines are summed, per `parse_log`) and never reads junit — so a CI reading is a LOWER bound on this figure (measured while correcting this note: 11.57 s parsed vs 12.14 s session, and 9.92 s vs 10.41 s). Session totals across runs were 13.6 / 15.3 / 17.1 s and the enclosing process wall was 17.2-20.7 s including uv startup; 15.3 s is committed at the map's one-decimal precision. THE 188.0 THIS ROW USED TO CARRY IS CORRECTED, not merely updated: it was a two-run local reading, and it is not reproducible here — 188.0 s is 12x the measured cost, and the same measurement at the pre-fix projection (9dd52f717, which collected 11 tests) was still only 17.5 s wall, so the drop is not the #3311 projection fix. The old note's "10 tests" was wrong even for that state (11 collected before the three rebuild tests, 14 now). Kept in this map rather than left to the sweep because `--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time. Refresh from the first post-merge run that includes it, via `tools/ci_timing.py --refresh-durations`.
   test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
-  test_e2e_wrangler_prewarm.py: 4.0  # #8743/#8816: locally measured on this host (20 assertions — 18 in-memory, each over one `yaml.safe_load` of the workflow files, plus two parametrized arms that EXECUTE `website/apps/dashboard/deploy.sh` against a scratch tree with stubbed npm/npx — no DB, no fixture; the in-memory arms complete in well under a second of assertion time, the executed pair adds ~0.1 s of bash, and the pytest session adds the shared conftest import, which dominates). PR #8852 review: this note used to say 11, which was wrong even for the 12-arm file it described — re-counted from the file. Hand-added for the same reason the test_8474_ontology_record.py entry below gives: `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from the first post-merge run that includes it.
+  test_e2e_wrangler_prewarm.py: 15.9  # #8743/#8816: locally measured on this host. WHAT THE FILE IS NOW (24 test functions, 25 executions): 23 in-memory plus ONE function parametrized over both `from_repo_root` values, which EXECUTES `website/apps/dashboard/deploy.sh` against a scratch tree with stubbed npm/npx (no DB, no fixture). Of the 23 in-memory arms, 5 exercise the guard's own helpers on literal text or hand-built documents (so "each reads the workflow files" was not true of them); the other 18 read a repo file — of the 15 that read the workflow/action files, 11 parse them by `yaml.safe_load` and 4 scan their text, 2 read `website/README.md`, and 2 read `deploy.sh`, one of which also scans a workflow. WHERE THE TIME GOES: the parsing arms, NOT the shared conftest import — nearly every arm re-globs and re-parses all 36 files (32 workflows + the 4 composite actions) (ci.yml and deploy-pages.yml are large). MEASURED at the #8874 head: session totals 11.4 s on an idle host, 18.9 s cold, and 15.9 s on a loaded one where `--durations=0` attributes call 12.8 s / setup 4.3 s / slowest single call 1.2 s. 15.9 is committed as the weight; the 4.0 this row used to carry was about a third of the measured session, and its "the conftest import dominates" sentence was wrong in the other direction. PR #8852 review: the note said 11 before that, which was wrong even for the 12-arm file it described. Hand-added for the same reason the test_8474_ontology_record.py entry below gives: `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from the first post-merge run that includes it.
   test_8474_ontology_record.py: 4.0  # #8474/#8736: locally measured (1 hermetic doc-read test — reads docs/ONTOLOGY.md only, no DB, no fixture; pytest session total 1.1s on an idle host, 3.1-4.2s on a loaded one, 2026-10-16 re-measure — the earlier 16.0 was taken on a private tools/test_lane.py container and included container lifecycle, not the pytest session). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
@@ -5557,6 +5616,7 @@ durations:
   test_ci_verdict.py: 0.2
   test_compute_attribution.py: 0.6
   test_connector_scope.py: 0.9
+  test_credential_store_mode_5109.py: 2.2  # #5109 (read side): 16 tests, local wall 2.16 s (measured at the #5109 lane head, 2026-10-12) — no DB, no network, every test a tmp-dir store plus a capsys read. A NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact), so this is the pre-merge estimate; refresh it from the first post-merge run that includes the file.
   # #4685: a NEW file has no CI junit measurement (a file that never ran cannot
   # appear in an artifact), so this is the pre-merge estimate: the four tests'
   # CALL times summed to ~1.7 s locally (0.70 + 0.53 + 0.14 + 0.04). The
@@ -5631,6 +5691,7 @@ durations:
   test_vet_gate_5005.py: 0.5
   test_vocab_gating_by_graph.py: 5.1
   test_bounded_raw_clients_3065.py: 3.0
+  test_socket_bound_not_multiplied_2969.py: 7.5  # unmeasured — file ADDED BY THIS PR (#3400 trap: the refresher samples push-to-main runs only, so a new file packs at the flat 2.0s default and drops duration coverage under the 90% floor). Readings: 4.0s warm on the authoring box, 8.1s cold on a reviewer box (first import of redis/falkordb/tortoise.projection dominates); the two socket measurements themselves are ~1.0s each. Declared at the HIGHER reading so a cold leg cannot under-pack. Refresh from the first post-merge run.
   test_entity_identity.py: 7.5
   test_3589_3326_salvage.py: 4.2
   test_5388_org_enumeration_completeness.py: 2.5
@@ -5692,6 +5753,25 @@ durations:
 #   gate — and before #3992 the lane the plan named did not exist at all, so
 #   the SLO was unverifiable. It runs from .github/workflows/perf-lane.yml.
   test_4932_per_pr_artifact_scope.py: 5.0
+  # #8849: unmeasured at PR time — a file ADDED by this PR cannot appear in a
+  # junit artifact, so it has no swept duration (the #4348/#2876/#5275 trap).
+  # 6.8 is the local wall reading on this host when the row was added, on a private
+  # test lane. The test count is deliberately NOT stated: a hand-written count here
+  # goes stale the moment a test is added, which is the failure this file exists to
+  # catch. Refresh the value from a sweep rather than trusting 6.8. NOT a junit
+  # `testcase/@time` sum, and marked rather than presented as swept, because the
+  # map's provenance for every other row is the sweep.
+  # Refresh from the first post-merge run that includes it. Do NOT drop the row
+  # without re-deriving the coverage floor at that head: the floor is a RATIO, so
+  # removing it moves 800/888 = 90.09% (pass) back to 799/888 = 89.98% (fail).
+  test_8845_dup_lane_label.py: 6.8  # unmeasured — local wall reading on a private test lane, not a junit sweep; refresh from the next sweep
+  # #8849: unmeasured — no leg of the four source sweeps collected this file, so
+  # it was packing at the flat 2.0s default. 4.9 is the local wall reading on
+  # this host, the same carry-forward shape as #4602/#5275. The test count is
+  # deliberately NOT stated — a hand-written count in this map goes stale the moment
+  # a test is added, which is the failure this file exists to catch.
+  # Refresh from the next sweep that collects it.
+  test_1890_invite_ghost_sweep_schedule.py: 4.9  # unmeasured — local wall reading, no source leg collected it; refresh from the next sweep
   test_5142_ontology_record.py: 3.7
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0

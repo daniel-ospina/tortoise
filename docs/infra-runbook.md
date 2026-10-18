@@ -415,6 +415,116 @@ stall (the #2924 shape) reds. It complements
 `tests/test_health_ready_nonblocking.py`, which pins nonblocking *structure*
 in-process and names no client-visible budget.
 
+### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
+
+**Symptom.** A customer pays for a higher tier and is enforced at a lower one.
+Their writes fail with `Team points limit reached (…) — Upgrade your plan`
+(`-32006` / HTTP 402 `quota_exceeded`) while reads keep working — so the
+instrument that reports health still answers and only the writer fails. Their
+`GET /v1/team` shows the LOW tier with `subscription_status: "active"`.
+
+**Mechanism, stated so it is not re-diagnosed.** The stored `tier` on the org
+row IS the entitlement (`billing.effective_tier` never derives upward), and its
+ONLY writer is the Stripe webhook. One missed or failed
+`customer.subscription.*` delivery therefore capped the org permanently.
+`billing.reconcile_org` repairs one org but had no production caller until
+issue #8878, so nothing ever compared the store against Stripe.
+
+**Do NOT diagnose this from `/v1/team`'s `checkout_price_id`.** That field is
+the CATALOG's default CTA price (`_default_checkout_price_id()` → pro monthly
+for every org) plus the tier→price map — it describes the upgrade buttons, not
+what the org pays. The only server-side evidence of the price is the org's
+`subscription_id` / `stripe_customer_id` in Stripe.
+
+**Repair the FLEET now** (internal key required). There is no per-org route:
+this reconciles **every** billed org, and a run already in flight answers `202
+{"status": "already_running"}` having done nothing.
+
+```bash
+# --max-time is required, not decoration: /v1/internal/ is prefix-exempt from
+# the 10s transport-wait bound (hosted_api.py, the exemption's own comment), so
+# without it this hangs with nothing printed — in exactly the situation you run
+# it. `-f` turns a 4xx/5xx into an error instead of printing the error body as
+# if it were a summary; the bound sizes the pass (N orgs x a Stripe round-trip).
+curl -sS -f --max-time 600 -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
+  -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" | jq .
+```
+
+**Repair ONE org** — for the org in the ticket, call the per-org function
+instead (the route cannot target a single org):
+
+```bash
+# Supabase/control-plane mode: sdk may be None (the org row is authoritative).
+python -c 'from tortoise.billing import reconcile_org; import sys; print(reconcile_org(None, sys.argv[1]))' "$ORG_ID"
+```
+
+A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
+`alerted` / `failed` / `unrepaired` and one `drift` row per repaired org, each
+carrying `from_tier` / `to_tier`, `from_max_nodes` / `to_max_nodes` (the
+enforced node cap before and after — the number that actually refused the
+customer's writes) and a `direction`:
+
+- `direction: "up"` — a paying org WAS being under-delivered. The reconciler
+  pages it through the billing notify channel (Resend + Telegram), and the
+  daily driver also fails its run. Counted in `alerted`.
+- `direction: "down"` — Stripe truth (a portal downgrade/cancellation) reached
+  the mirror late. Reported, never paged.
+- `direction: null` — the before/after pair could not be ranked because the
+  pricing ladder could not be READ (`tier_limits` raised — a malformed or
+  incomplete `product/pricing.json`, #750.8). That is a **config fault, not a
+  no-op**: an unrecognised tier is NOT this case, it resolves to Free's cap and
+  ranks normally. Never paged; investigate the pricing file.
+- `unverified` — the org's stored tier is PAID (it claims more entitlement than
+  Free) but Stripe answered with NO active subscription. Nothing was verified
+  against a subscription, so this is NOT `unchanged` — and it is deliberately
+  not auto-downgraded either. Counted and logged loudly; a non-zero number is a
+  person to look at.
+- `skipped` — nothing to reconcile: no `subscription_id` / `stripe_customer_id`
+  at all, **or** a Stripe customer binding that never became a paid
+  subscription (every abandoned checkout leaves one — `hosted_api` persists
+  `stripe_customer_id` before the checkout session — and its `tier` is at or
+  below Free's cap, so there is no entitlement to verify). Routine; not a
+  symptom.
+- `unrepaired` — Stripe resolved a tier the store did NOT end up holding. That
+  is a broken repair, not a clean pass; treat it as an incident.
+- `checked` / `repaired` / `unchanged` / `failed` — as named: orgs with a
+  billing identity this pass attempted, orgs whose stored tier moved, orgs that
+  already matched Stripe, and orgs that raised (Stripe outage, unknown price,
+  a control-plane write that matched no row).
+
+**Cadence.** `.github/workflows/billing-reconcile-cron.yml` runs the pass daily
+(04:43 UTC) with `INTERNAL_API_URL` + `FASTAPI_INTERNAL_KEY`, and the run FAILS
+**and pages Telegram** when the request fails (including the driver's own 600 s
+`-m` ceiling — `/v1/internal/` is prefix-exempt from the transport bound and has
+no server-side one, so the caller publishes its patience), when the endpoint
+answers `503 enumeration_incomplete` (the pass could not certify the WHOLE
+fleet, so it compared an unknown fraction and refuses to report that as clean),
+when the response cannot be read as a summary, when any org `failed` to
+reconcile, when any org is `unrepaired`, or when any `drift` row went `up`.
+The page leg sources `.github/scripts/telegram-send.sh`, so the job starts with
+`actions/checkout` — a hosted runner's workspace is empty otherwise, and the
+source would fail before `tg_send` ran (a page step that can never deliver).
+
+**`202 already_running` is a no-op, and whether it is a failure depends on the
+trigger.** The endpoint answers it for a CONCURRENT pass (`nothing queues`, the
+next scheduled run retries). A **scheduled** run that lands inside an operator's
+manual pass therefore exits 0 with a notice — the manual pass is covering the
+fleet — while a **`workflow_dispatch`** that did no work FAILS, because a
+dispatched run that silently did nothing must not look like a completed pass.
+So if you dispatch right after the 04:43 UTC schedule and it reds with
+`already_running`, that is the driver telling you to re-dispatch; it is not an
+incident.
+The driver is external deliberately (same reasoning as the backup sweep, #596):
+an in-process timer dies with the process and is invisible when the app is
+crash-looping — exactly when a missed delivery is most likely.
+
+⚠️ **Known residual — a driver that never runs is silent.** This covers the
+app-down leg only. If GitHub stops running the schedule (it disables schedules
+after ~60 days of repo inactivity — "a missing run looks like silence", §7.8),
+no request is made, so nothing fails and nothing pages; nothing watches for a
+MISSING pass. The backup driver (#596) covers that leg with a run stamp plus an
+out-of-band staleness check, and this one does not yet.
+
 ## 4.5 Local Development — Local Stays Local
 
 **Best practice: a self-hosted/local instance is intentionally local.** Do not

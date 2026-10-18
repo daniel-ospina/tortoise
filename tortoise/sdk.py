@@ -2968,6 +2968,21 @@ _RESERVED_ENVELOPE_PROPS = (
 #:   parameter added to `_emit_event` fails the suite instead of silently
 #:   re-opening this hole.
 #:
+#: * ``aboutLinks`` (#8398 review P1-1) is the case that derivation CANNOT see:
+#:   it is not an `_emit_event` parameter, so it is unreachable via
+#:   ``inspect.signature`` — it collides because ``_create_entity``'s
+#:   ``EventRecorded`` emit splats TWO ``**`` bags into ONE call (the journaled
+#:   payload and the write-time ``_journal_extra`` edge facts), and a caller
+#:   prop of that name lands in the first while the SDK supplies the second.
+#:   Measured on a38d6e775: ``create_event(..., aboutObject=oid,
+#:   aboutLinks=["caller"])`` raised ``TypeError: got multiple values for
+#:   keyword argument 'aboutLinks'`` AFTER the live write and BEFORE the
+#:   record, so the Event was live-only and ``rebuild_all`` deleted it. The
+#:   splat is merged into one dict now (so the collision cannot recur), and the
+#:   name is reserved here so the caller prop never reaches the live fold
+#:   either — where `apply`'s inline re-wire read it as journal data and
+#:   reported a phantom link failure (measured).
+#:
 #: Strip it at prop INTAKE like the envelope set above, and ALSO before any
 #: RELAY that forwards a caller bag into another method — the collision is at
 #: the call, so `update_entity` (relays to `_update_entity`) and
@@ -2975,7 +2990,7 @@ _RESERVED_ENVELOPE_PROPS = (
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self")
+_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:
@@ -5278,6 +5293,46 @@ def _read_stored_number(value, default):
         return float(value)
     except Exception:
         return default
+
+
+def _ledger_record(label: str, rows: list[dict]) -> None:
+    """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
+
+    Called from EVERY caller-facing row-returning read path that has a known
+    LABEL. The named set is carried by §17.4.6, not duplicated here — a case
+    where it was duplicated: this docstring once named only `query()`,
+    `paginated_query()` and `query_points_by_tag()` while omitting six callers
+    that were already here. An audit surface that under-reports its own call
+    sites invites a second hook at one of them, which would record a candidate
+    POOL as read and bias `f` HIGH — the direction that HURTS the split, since
+    the saving is `(1 - f) x cache` and a higher `f` removes it. (`f` divides
+    distinct read KEYS, so a duplicate hook moves `read_count`, not `f`; the
+    mechanism is the pool, not the double count.)
+    ⛔ NOT `get_point()` — it is the internal accessor the WRITE paths use
+    (`_emit_event` and the dedupe/promote checks), so counting it would mark
+    written-but-never-read nodes as read and bias `f` HIGH (#8877). The FTS
+    funnel records its rows through the same module INLINE (it resolves the
+    label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path:
+    `traverse` and `get_historical_knowledge` read by
+    direct Cypher and call nothing here (`recall_state`'s RELATED readers are
+    likewise unhooked — the method itself does record the rows it serves), and
+    the FTS funnel records only its
+    RETURNED rows, not its candidate pool — so a deployment serving those paths
+    reads an `f` that is too LOW (which flatters the split). #8877 carries the
+    wiring; the coverage gaps are named in STORAGE-ARCHITECTURE.md §17.4.6.
+
+    OFF by default and never imported when off: one env lookup (the #4097 truthy
+    contract), and a ledger failure is swallowed inside the module (a measurement
+    may not break the thing it measures).
+    """
+    if not rows or not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
+        return
+    try:
+        from . import read_ledger
+    except Exception:  # pragma: no cover — a broken install must not break a read
+        return
+
+    read_ledger.record_rows(label, rows)
 
 
 class TortoiseSDK:
@@ -13542,6 +13597,7 @@ class TortoiseSDK:
 
     def query(self, kind: str | None = None,
               *, include_retracted: bool = False,
+              _record_reads: bool = True,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
 
@@ -13591,7 +13647,15 @@ class TortoiseSDK:
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)",
             params=params,
         ).result_set
-        return [r[0] for r in rows]
+        points = [r[0] for r in rows]
+        # #7983: `_record_reads=False` is for the SDK's OWN population scans —
+        # `recall_gaps`, `issue_insight` and the FTS TF-IDF fallback. They are not
+        # a caller reading these keys: recording them would mark the ENTIRE stock
+        # read after one `recall_gaps()` call (f -> ~1) and bias `f` HIGH, the
+        # direction that removes the saving the ledger exists to measure.
+        if _record_reads:
+            _ledger_record("Point", points)
+        return points
 
     def paginated_query(self, kind: str | None = None,
                         skip: int = 0, limit: int = 20,
@@ -13679,6 +13743,11 @@ class TortoiseSDK:
             params={**params, "skip": skip, "limit": limit},
         ).result_set
         results = [r[0] for r in rows]
+        # #7983: a product READ of these Point keys — the ledger's instrument for
+        # `f` must see the structural query path, not only the FTS funnel, or the
+        # keys it serves are reported as never read (the flattering direction for
+        # the split's own saving).
+        _ledger_record("Point", results)
 
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
@@ -13694,7 +13763,16 @@ class TortoiseSDK:
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        return rows[0][0] if rows else {}
+        props = rows[0][0] if rows else {}
+        # #7983: NOT recorded, deliberately. `get_point` is the SDK's INTERNAL
+        # accessor: write paths call it to build events (`_emit_event("PointAdded",
+        # point=self.get_point(mid))`) and to check dedupe/promote/approval state,
+        # so recording it makes a node written and never read look READ — biasing
+        # `f` HIGH, i.e. AGAINST the split, and destroying the one-directional
+        # caveat §17.4.6 relies on. A caller-facing read-by-id path is a coverage
+        # hole (#8877); the right fix is a seam that separates the two, not a hook
+        # that counts every internal check as a caller read.
+        return props
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
@@ -13933,8 +14011,15 @@ class TortoiseSDK:
         ).result_set
         return [{"name": row[0], "count": row[1]} for row in rows]
 
-    def query_points_by_tag(self, tag: str) -> list[dict]:
-        """Return Points connected via TAGGED edge to the given Tag name."""
+    def query_points_by_tag(self, tag: str, *,
+                            _record_reads: bool = True) -> list[dict]:
+        """Return Points connected via TAGGED edge to the given Tag name.
+
+        #7983: this returns the WHOLE tag population, so recording it is right
+        for the SDK caller and wrong for a paginated user that receives one
+        page of it — that caller passes ``_record_reads=False`` and records the
+        page it serves. Recording the population would bias ``f`` HIGH.
+        """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) "
@@ -13942,7 +14027,10 @@ class TortoiseSDK:
             "ORDER BY p.createdAt DESC",
             params={"tag": tag},
         ).result_set
-        return [r[0] for r in rows]
+        points = [r[0] for r in rows]
+        if _record_reads:
+            _ledger_record("Point", points)  # #7983: a product read of these keys
+        return points
 
     def list_namespaces(self) -> list[dict]:
         """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""
@@ -17349,7 +17437,8 @@ class TortoiseSDK:
         query_text = (resolved or {}).get("content") or scope
         try:
             results = self.tortoise_fts_query(
-                query_text, entity_type="point", limit=200)
+                query_text, entity_type="point", limit=200,
+                _record_reads=False)  # #7983: a review pool, not a caller read
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -21246,7 +21335,10 @@ class TortoiseSDK:
         # proportionally. Invariant to the number of fused ranked lists (no
         # hardcoded multiplier).
         if not results:
-            fts_results = self.tortoise_fts_query(q, limit=limit)
+            # #7983: a CANDIDATE pool — the fallback's rows are re-scored, some
+            # dropped by the max_rrf gate and the rest reranked below, so what
+            # the caller receives is recorded at the return instead.
+            fts_results = self.tortoise_fts_query(q, limit=limit, _record_reads=False)
             results = []
             max_rrf = max(
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
@@ -21271,6 +21363,7 @@ class TortoiseSDK:
         if graph_ranker is not None and results:
             results = graph_ranker.rerank(results, entity_type="point", query=q)
 
+        _ledger_record("Point", results)  # #7983: the rows this call SERVES
         return results
 
     # ── Session Context (#6989) ──────────────────────────────
@@ -21375,6 +21468,7 @@ class TortoiseSDK:
             # the limit would otherwise be invisible at small limits.
             semantic_hits = self.tortoise_fts_query(
                 text, entity_type="point", limit=max(limit * 5, 20),
+                _record_reads=False,  # #7983: a candidate pool
             )
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
@@ -21395,7 +21489,8 @@ class TortoiseSDK:
         repo_points: list[dict] = []
         if repo:
             repo_points = self.query(
-                kind="observation", source="github", github_repo=repo
+                kind="observation", source="github", github_repo=repo,
+                _record_reads=False,  # #7983: an internal population scan
             )
 
         if total_points == 0:
@@ -21410,6 +21505,9 @@ class TortoiseSDK:
                 "repo_stats": None,
             }
 
+        # #7983: the semantic pool opted out above; the hits that SURVIVE the
+        # gate are what the caller receives, so record those (this is the read).
+        _ledger_record("Point", semantic_hits)
         data_points: list[dict] = []
         for h in semantic_hits:
             dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
@@ -21766,6 +21864,13 @@ class TortoiseSDK:
         # absent"; a SET read names no node and passes nothing, keeping
         # today's set-level polarity. Default None = byte-identical.
         _residency_key: str | None = None,
+        # #7983: PRIVATE — an INTERNAL pool read (recall_state's candidate pool,
+        # a review pool, a session search) is not a caller reading these keys.
+        # The funnel records the rows it RETURNS, and for a pool caller those
+        # rows are candidates the end caller never sees, so recording them marks
+        # up to 3-30k keys read and biases `f` HIGH — the direction that removes
+        # the saving the instrument measures. Default True = product reads.
+        _record_reads: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -22049,6 +22154,22 @@ class TortoiseSDK:
         # for a store that is merely down (§17.3's S5 failure mode).
         _residency: _ResidencyDeclaration | None = None
 
+        # #7983 (§17.4.4): the READ LEDGER — the instrument the hot fraction `f`
+        # has never had. ONE product read = ONE funnel (`tortoise_fts_query`),
+        # so this is the one seam that can say WHICH keys a read returned.
+        # OFF by default, and "off" means NOT IMPORTED: the flag is read FIRST,
+        # so a default deployment pays one env lookup, never loads the module,
+        # extracts no key and returns a byte-identical response (#4097's truthy
+        # contract, the one every other boolean env read in the tree uses).
+        _read_ledger = None
+        _read_ledger_enabled = is_truthy(os.environ.get("TORTOISE_READ_LEDGER"))
+        if _read_ledger_enabled:
+            try:
+                from . import read_ledger as _read_ledger
+            except Exception:  # pragma: no cover — a broken install, not a read
+                _read_ledger = None
+                _read_ledger_enabled = False
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -22077,6 +22198,17 @@ class TortoiseSDK:
                 read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
+            if (
+                _read_ledger is not None
+                and rows
+                and _read_ledger_enabled
+                and _record_reads
+            ):
+                # The ledger never changes the answer: it records the
+                # `(label, key)` of every row this read returned, and a ledger
+                # failure is swallowed inside the module (a measurement may not
+                # break the thing it measures).
+                _read_ledger.record_rows(label, rows)
             return rows
 
         try:
@@ -22121,7 +22253,19 @@ class TortoiseSDK:
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
         # entity_type stays "document").
-        label = "Source" if entity_type == "document" else entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+        # The alias mapping lives in `read_ledger` (next to the key contract) so
+        # the ledger's coordinate and this funnel cannot disagree: an OPERATOR is
+        # a :Point and a document IS a :Source, so recording either under its
+        # caller-facing name would be a key the stock can never join. The
+        # fallback is the pre-existing expression, kept byte-identical for the
+        # default (flag-off) deployment. The two are not pinned to each other by a
+        # test (the fallback is unused once the ledger is on); what IS pinned is
+        # the mapping itself, alias by alias.
+        label = (
+            _read_ledger.label_for_entity_type(entity_type)
+            if _read_ledger is not None
+            else ("Source" if entity_type == "document" else entity_type.capitalize())
+        )
         # Operator: Point nodes with is_operator=true, kind=op_type
         # Source: Source nodes, kind=sourceKind
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind", "operator": "op_type", "source": "sourceKind"}[entity_type]
@@ -22308,7 +22452,12 @@ class TortoiseSDK:
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
-                                    include_retracted=include_terminal)
+                                    include_retracted=include_terminal,
+                                    # #7983: these hits are recorded ONCE, by
+                                    # `_with_read_status` below — a second record
+                                    # here inflates read_count for every fallback
+                                    # hit — and the scan itself is not a caller read.
+                                    _record_reads=False)
                 if exclude_status and points:
                     # Same status exclusion as step 5d (#898 review round-2):
                     # the degraded fallback must not leak superseded/deprecated
@@ -23779,6 +23928,7 @@ class TortoiseSDK:
             _object_status = {}
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
+            _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
             exclude_status=exclude_status,
             include_terminal=include_superseded,
             # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
@@ -23793,6 +23943,7 @@ class TortoiseSDK:
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
+                _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
                 include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
@@ -23890,6 +24041,15 @@ class TortoiseSDK:
                 out = [by_id.get(i["id"], i) for i in out]
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
+        # #7983: the CANDIDATE pool above was not recorded (`_record_reads=False`)
+        # — these are the rows the caller actually receives, and they are what a
+        # read of this path means for `f`.
+        _ledger_record(
+            "Point", [i for i in out if i.get("entity_type") == "point"]
+        )
+        # NOT the Object leg: an Object's key is `name`, and these rows carry
+        # `id`, so recording them could only emit `unresolved` — reported as
+        # "rows with no key at all", which is false. Named as a hole instead.
         if read_status_out is not None:
             # B6 (#3892): the composite is derived AFTER the pipeline, from the
             # rows the caller actually RECEIVES. The filters, the rerank and
@@ -24247,7 +24407,8 @@ class TortoiseSDK:
             results = self.tortoise_fts_query(
                 query, kind=kind, entity_type="point", limit=pool,
                 exclude_status=exclude_status,
-                include_terminal=include_superseded)
+                include_terminal=include_superseded,
+                _record_reads=False)  # #7983: a candidate pool
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -24267,7 +24428,8 @@ class TortoiseSDK:
             # superseded/deprecated for the opt-in — retracted is then
             # re-filtered below by excluded_set).
             nodes = self.query(kind=kind,
-                               include_retracted=include_superseded)
+                               include_retracted=include_superseded,
+                               _record_reads=False)  # #7983: a population scan
             pool_results = []
             for n in nodes:
                 if (n.get("status") or "") in excluded_set:
@@ -24296,6 +24458,8 @@ class TortoiseSDK:
             if r["gaps_ranking"]["load"] >= min_load
             and r["gaps_ranking"]["support"] <= max_support
         ][:limit]
+        # #7983: the pool above opted out; the rows the caller RECEIVES are a read.
+        _ledger_record("Point", ranked)
         return ranked
 
     def recall_subgraph(self, seed: str, *,
@@ -24373,7 +24537,8 @@ class TortoiseSDK:
         # Topic text → hybrid retrieval (points about the topic are the seeds;
         # the expansion pulls in the entities they touch).
         return [r["id"] for r in self.tortoise_fts_query(
-            seed.strip(), entity_type="point", limit=5)]
+            seed.strip(), entity_type="point", limit=5,
+            _record_reads=False)]  # #7983: a seed lookup, not a caller read
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
@@ -25942,7 +26107,8 @@ class TortoiseSDK:
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,
-                       _return_apply_result: bool = False) -> dict | tuple[dict, object]:
+                       _return_apply_result: bool = False,
+                       _journal_extra: dict | None = None) -> dict | tuple[dict, object]:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
@@ -26202,7 +26368,19 @@ class TortoiseSDK:
             self._emit_event(
                 "EventRecorded",
                 id=event["id"],
-                **_journal_record_payload(event),
+                # #8398 P1-1: ONE dict, never two `**`-splats. Two splats that
+                # share a key raise `TypeError: _emit_event() got multiple
+                # values for keyword argument 'aboutLinks'` — AFTER the live
+                # write has committed and BEFORE the record is appended, so the
+                # Event stayed live-only and the next rebuild deleted it
+                # (measured: `create_event(..., aboutObject=oid,
+                # aboutLinks=["caller"])` on a38d6e775; on `origin/main` the
+                # same call works, so it was a regression). Merging here makes
+                # the collision impossible, and `_journal_extra` — the
+                # write-time EDGE facts — stays authoritative over a caller
+                # prop of the same name.
+                **{**_journal_record_payload(event),
+                   **(_journal_extra or {})},
             )
         if label == "Object" and _journal_object_registration:
             # (#2194) Mirror the EventRecorded block above: payload = the
@@ -27171,6 +27349,46 @@ class TortoiseSDK:
                  "status": "live", **props},
                 "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
+            # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
+            # stripped HERE, at the Event door, because ``event`` is the
+            # NESTED-record key the fold unwraps (``entities.py::_upsert_event``
+            # — ``inner = event.get("event", event)``) and the replay reader
+            # now address-checks (``edges.py::replay_about_links``). A caller
+            # bag carrying ``event`` therefore SHADOWED the record in the fold
+            # and dropped every ``aboutLinks`` link on the record. MEASURED at
+            # 742ff7246: ``create_event("withprop", "event",
+            # event={"payload": "x"}, aboutObject=oid)`` wrote the record
+            # ``{"type": "EventRecorded", "id": "1a14…", "event":
+            # {"payload": "x"}, "aboutLinks": [{"rel": "aboutObject",
+            # "how": "id", "targets": ["obj-…"]}]}``, and the rebuild
+            # replayed NOTHING — no link, no failure, no warning.
+            #
+            # Strip-and-ignore, matching ``_RESERVED_EMIT_CALL_PROPS``
+            # (``aboutLinks``, #8398 review P1-1) and the reserved actor keys:
+            # ``event`` is NOT Event content. ``_EVENT_HANDLED`` already
+            # declares it an ENVELOPE field the fold must never persist
+            # (``entities.py``), so the caller prop was never stored on the node
+            # — it only ever reached the RECORD, where it does the damage. The
+            # delta is therefore a FIX, not a loss: the prop is dropped instead
+            # of costing the whole Event node (``_upsert_event`` skipped the
+            # MERGE outright, so ``create_event`` returned ``{}`` and
+            # ``MATCH (e:Event)`` was empty) AND its journaled links.
+            #
+            # ⛔ Deliberately NOT added to ``_RESERVED_EMIT_CALL_PROPS``: that
+            # set is stripped by the shared ``_sanitize_props`` intake, which
+            # ALSO serves ``create_point``/``update_point``/``update_entity``,
+            # where ``event`` is an ordinary free-form tenant prop this fix has
+            # no business dropping. The collision exists only where an
+            # ``EventRecorded`` payload is built — here. ``create_event`` (the
+            # documented alias) relays through this branch, and its own
+            # ``_drop_reserved_emit_props`` relay strip is the matching guard
+            # for the names that DO collide at a call.
+            _shadowing_event_prop = props.pop("event", None)
+            if _shadowing_event_prop is not None:
+                _logger.warning(
+                    "ignoring client-supplied 'event' on create_entity("
+                    "type='event') — it shadows the nested EventRecorded "
+                    "payload and would drop the record's about* links (#8398)")
             eventKind = props.pop("eventKind", None)
             if not eventKind:
                 raise ValueError(
@@ -27197,19 +27415,92 @@ class TortoiseSDK:
             about_object = props.pop("aboutObject", None)
             about_point = props.pop("aboutPoint", None)
             about_document = props.pop("aboutDocument", None)
+            proj = self._get_proj()
+            # #8398: these four are wired LIVE (below) as graph edges, so they
+            # are popped before the fold and never reach the journaled
+            # EventRecorded payload — which made `derived == replay(journal)`
+            # FALSE for exactly this class: a rebuild dropped the Event→entity
+            # links while create_operator's IMPL edges survived.
+            # Classify each link HERE, against the LIVE graph, and journal the
+            # PRECISE form so replay repeats a known-good construction instead
+            # of re-deciding id-vs-name against a graph that may answer
+            # differently (the drift `_wire_about_value` exists to prevent).
+            # #8398 review P1-2: the NAME path is resolved here too.
+            # `_create_about_edges` is the rel-IGNORING Subject→Object→Event→
+            # Source→Point cascade, so `aboutObject="Acme"` with no `Acme` node
+            # wired **aboutSubject** to a fresh Subject stub — and journaling
+            # that as `how:"name"` made replay re-run the cascade against the
+            # END-OF-JOURNAL graph, landing on the by-then-registered Object: a
+            # different rel AND a different node, counted as success. So the
+            # cascade is resolved ONCE here (read-only, `resolve_about_link`)
+            # and the RESOLVED rel/label/key are journaled; the write below
+            # reuses that same resolution.
+            from .projection.edges import STRUCTURAL_REL_LABELS as _REL_LABELS
+            about_links: list[dict] = []
+            #: (rel-or-pinned-link, value-or-internal-id) for the post-fold write.
+            _about_writes: list[tuple[object, object]] = []
+            for _rel, _val in (
+                ("aboutSubject", about_subject),
+                ("aboutObject", about_object),
+                ("aboutPoint", about_point),
+                ("aboutDocument", about_document),
+            ):
+                if not _val:
+                    continue
+                _tlabel = _REL_LABELS.get(_rel)
+                if isinstance(_val, str) and _tlabel is not None:
+                    _hits = [
+                        _h for _h in proj._resolve_entity(
+                            _val, by_id=True, by_eventId=True)
+                        if _h["label"] == _tlabel
+                    ]
+                else:
+                    _hits = []
+                if _hits:
+                    # Journal the RESOLVED values, not a flag: an id that resolved
+                    # to the rel's target label NOW. Replay repeats an exact
+                    # endpoint instead of re-running the id-or-name cascade
+                    # against a graph whose answers may differ.
+                    about_links.append({
+                        "rel": _rel,
+                        "how": "id",
+                        "targets": [_h["value"] for _h in _hits],
+                    })
+                    _about_writes.append((_rel, _val))
+                elif isinstance(_val, str) and not _is_entity_id(_val):
+                    # resolves to nothing and is not handle-shaped → the name
+                    # path (resolve-or-mint) is what will actually wire it.
+                    # `resolve_about_link` is READ-ONLY: it returns the pinned
+                    # link AND the internal id(s) the write must address, so the
+                    # record and the edge come from ONE resolution instead of
+                    # two reads that could disagree. A LIST of ids because a
+                    # name may legally have several carriers — all of them are
+                    # journaled in `targets` and all of them are written, so an
+                    # arbitrary backend row order can never be pinned (review
+                    # P2-3 at 2b9626072).
+                    _link, _internal = proj.resolve_about_link(_val)
+                    if _link is not None:
+                        about_links.append(_link)
+                        _about_writes.append((_link, _internal))
+                else:
+                    # an unresolvable HANDLE wires NO edge (#3586) — nothing to
+                    # journal, but the door still has to report it.
+                    _about_writes.append((_rel, _val))
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
                 "eventStatus": "scheduled", **props}, "EventRecorded",
-                is_episodic=is_episodic)
-            proj = self._get_proj()
-            if about_subject:
-                _wire_about_value(proj, eid, about_subject, "aboutSubject")
-            if about_object:
-                _wire_about_value(proj, eid, about_object, "aboutObject")
-            if about_point:
-                _wire_about_value(proj, eid, about_point, "aboutPoint")
-            if about_document:
-                _wire_about_value(proj, eid, about_document, "aboutDocument")
+                is_episodic=is_episodic,
+                _journal_extra={"aboutLinks": about_links} if about_links else None)
+            # The writes use the SAME resolution the record was built from: an
+            # id-resolved link re-enters `_wire_about_value` (unchanged), and a
+            # name-path link is written from its pinned link + the internal id
+            # the resolution produced — never by re-running the cascade, so the
+            # edge and the journal cannot disagree.
+            for _rel_or_link, _val in _about_writes:
+                if isinstance(_rel_or_link, dict):
+                    proj.wire_about_link(eid, _rel_or_link, _val)
+                else:
+                    _wire_about_value(proj, eid, _val, _rel_or_link)
         elif t == "document":
             documentKind = props.pop("documentKind", None)
             if not documentKind:
@@ -27613,6 +27904,7 @@ class TortoiseSDK:
         hybrid = self.tortoise_fts_query(
             query, kind="AgentSession", entity_type="event",
             limit=candidate_limit,
+            _record_reads=False,  # #7983: a candidate pool, sliced before return
         )
         has_semantic = any(
             r.get("scores")
@@ -27672,7 +27964,10 @@ class TortoiseSDK:
                 key=lambda item: (item[0], item[1].get("startedAt") or ""),
                 reverse=True,
             )
-            return [props for _, props in ranked[offset:offset + limit]]
+            out = [props for _, props in ranked[offset:offset + limit]]
+            # #7983: the candidate pool opted out; the page handed back is a read.
+            _ledger_record("Event", out)
+            return out
 
         # ── Legacy keyword fallback (no FTS/vector contribution) ──
         # Preserves the pre-#244 CONTAINS surface (name + keywords) plus the
@@ -27722,20 +28017,26 @@ class TortoiseSDK:
             params=params,
         ).result_set
         # Fetch a bit extra for scoring headroom, but honor the caller's limit.
-        return [dict(r[0]) for r in rows[:limit]]
+        out = [dict(r[0]) for r in rows[:limit]]
+        _ledger_record("Event", out)  # #7983: a served page, not a pool
+        return out
 
     def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent Events, optionally filtered by eventKind."""
         proj = self._get_proj()
         if eventKind:
-            return [r[0] for r in proj.g.query(
+            out = [r[0] for r in proj.g.query(
                 "MATCH (e:Event {eventKind: $ek}) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
                 params={"ek": eventKind, "lim": limit}
             ).result_set]
-        return [r[0] for r in proj.g.query(
+            _ledger_record("Event", out)  # #7983: a served page (the other branch too)
+            return out
+        out = [r[0] for r in proj.g.query(
             "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
             params={"lim": limit}
         ).result_set]
+        _ledger_record("Event", out)  # #7983: a served page, not a pool
+        return out
 
     def get_session(self, session_id: str) -> dict | None:
         """Get a single agent session by session_id.
