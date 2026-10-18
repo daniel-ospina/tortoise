@@ -356,7 +356,22 @@ class TestDeclarationReachesThePrompt:
         assert "committedAmountMinor(money, required)" in \
             v2._render_master(master, "a tranche story", core_only=False)
 
-    def test_the_s2s4_rule_slot_states_the_policy(self, tmp_path):
+    def test_render_survives_a_non_dict_pack_values_section(self, tmp_path):
+        # #9003 review (P3): the render path must never raise on a malformed
+        # master. `_pack_values_text` guards with isinstance; `_values_suffixes`
+        # now mirrors it, so a hand-built (or JSON-derived) master whose section
+        # is a list/str yields no segment instead of AttributeError-ing inside a
+        # prompt render.
+        _, master = self._brief_and_master(tmp_path)
+        baseline = v2._render_master_verbose(
+            {k: v for k, v in master.items() if k != "pack_values"})
+        for bad in (["x"], "x", 7, [{"name": "a"}], {"acme:t": 7}):
+            broken = dict(master, pack_values=bad)
+            assert v2._values_suffixes(broken) == {}
+            assert v2._render_master_verbose(broken) == baseline
+            assert "KIND VALUE FIELDS" not in v2._s2s4_rules(broken)
+
+    def test_the_rule_slot_states_the_policy(self, tmp_path):
         _, master = self._brief_and_master(tmp_path)
         rules = v2._s2s4_rules(master)
         assert "KIND VALUE FIELDS" in rules
@@ -368,6 +383,10 @@ class TestDeclarationReachesThePrompt:
         # The closed-list instruction is the point of the rule, not decoration.
         assert "The list is CLOSED" in rules
         assert "[values:" in rules
+        # The output contract has no dedicated value-property slot, so the rule
+        # must say WHERE a declared value goes instead of leaving the model to
+        # invent a JSON key the write path would drop.
+        assert "`content`" in rules
 
     def test_the_rule_block_names_no_kind(self, tmp_path):
         # The rule slot is POLICY, never vocabulary: WHICH fields exist is

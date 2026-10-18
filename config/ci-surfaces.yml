@@ -5326,13 +5326,7 @@ durations:
   test_migration_append_only.py: 0.9
   test_notify.py: 0.4
   test_pack_kinds.py: 1.2
-  # #2818: a NEW file's first weight — the #3400/#3419 flat default, NOT a
-  # local timing (a measured-on-this-box 4.9 was written here first and is
-  # deliberately gone: a weight is a SHARD-LAYOUT input, so a number that does
-  # not model CI decides which files run together). The row's PRESENCE is what
-  # holds duration_coverage_issues() above the 90% floor. Replace with the CI
-  # junit value when a sweep collects it.
-  test_pack_value_declarations_2818.py: 2.0
+  test_pack_value_declarations_2818.py: 2.0  # unmeasured — new in #2818; no sweep has collected it, so it carries the flat default exactly as an absent key would (#3419/#2788 rule). Do NOT substitute a local timing (a measured-on-this-box 4.9 was written here first and is deliberately gone: the map is a SHARD-LAYOUT input, so a number that does not model CI decides which files run together). The row also buys the coverage floor its margin — duration_coverage_issues() passes without it too (90.01% vs 90.12%), so the row is margin, not the floor. The refresher (tools/ci_timing.py) replaces this value from the first post-merge CI run that includes the file and clears the `unmeasured` tail.
   test_session_index_lock.py: 0.5
   eval/write_path/test_write_path_corpus.py: 0.5
   test_analyze_scoped.py: 0.6

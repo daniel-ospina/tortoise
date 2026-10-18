@@ -534,6 +534,11 @@ def _pack_values_text(master: dict | None) -> str:
     values = (master or {}).get("pack_values") or {}
     if not isinstance(values, dict) or not values:
         return ""
+    # Gated on what actually RENDERS, so a malformed section (no usable
+    # declaration) does not emit a rule about a [values: …] segment that no
+    # PACK KINDS line carries.
+    if not _values_suffixes(master):
+        return ""
     return (
         "KIND VALUE FIELDS (declared by the installed packs for their own "
         "kinds — #2818): a kind in the PACK KINDS list may show a "
@@ -541,8 +546,10 @@ def _pack_values_text(master: dict | None) -> str:
         "with each one's value kind and constraints. When a claim of such a "
         "kind states one of those values, keep it EXACT under VALUE "
         "FIDELITY, use the DECLARED field name, and never move it to another "
-        "kind. The list is CLOSED: do NOT invent a value field for a kind "
-        "that declares none, and do NOT invent a value kind."
+        "kind. There is no dedicated output slot for a value property, so "
+        "name it in `content` where the claim states it rather than as an "
+        "extra JSON key. The list is CLOSED: do NOT invent a value field for "
+        "a kind that declares none, and do NOT invent a value kind."
     )
 
 
@@ -1036,8 +1043,16 @@ def _values_suffixes(master: dict | None) -> dict[str, str]:
     from tortoise.pack_values import value_field_annotations
     master = master or {}
     out: dict[str, str] = {}
-    for kind, values in (master.get("pack_values") or {}).items():
-        decls = [value_field_annotations(v) for v in (values or [])
+    pack_values = master.get("pack_values")
+    # Mirrors _pack_values_text's guard: a master built by hand (or from JSON) can
+    # carry a non-dict here, and the RENDER path must never raise on it.
+    if not isinstance(pack_values, dict):
+        return out
+    for kind, values in pack_values.items():
+        if not isinstance(values, list):
+            # Per-kind too: `{kind: 7}` is the same class of malformed master.
+            continue
+        decls = [value_field_annotations(v) for v in values
                  if isinstance(v, dict) and v.get("name")]
         if decls:
             out[kind] = " [values: " + ", ".join(decls) + "]"
