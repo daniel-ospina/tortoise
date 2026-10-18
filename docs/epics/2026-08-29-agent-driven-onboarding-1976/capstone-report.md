@@ -12,20 +12,20 @@ This epic's deploy surface is **web dashboard + hosted API + served agent skill*
 
 ## Verdict summary
 
-| # | High-level E2E (scope §4) | Surfaces (#1992) | Evidence | Result |
+| # | High-level E2E (scope §4) | Surfaces (verbatim from `04-test-design.md`, the map #1992 declares canonical) | Evidence | Result |
 |---|---|---|---|---|
-| 1 | One-sitting first-run (north star) | S1, S3, S7, S8, S17 | `test_dashboard_onboarding.py` (40 passed) + state/seed suites | ✅ PASS (browser walk, local preview) |
-| 2 | Overview calm | S9 | browser walk + `test_onboarding_w4_settings.py` | ✅ PASS — 3 elements, zero toggles, Settings present in the 6-button nav |
-| 3 | Org-name capture | S3 | `test_one_free_org_entitlement.py`, `test_free_team_entitlement.py` + wizard | ✅ PASS |
-| 4 | Ontology-precise seed | S7, S8 | `test_onboarding_seed.py`, `test_onboarding_seed_endpoint.py` | ⚠️ **PARTIAL** — 53 of 54 pass; one test has never passed under load (D1). Its graph-state assertions do hold on a quiet host |
-| 5 | Agent install across harnesses | S5, S6 | `test_installer_agents_block_3429.py`, `test_served_skills.py`, `test_served_skill_byte_parity.py`, `test_installer_preserves_foreign_skill_content.py` | ✅ PASS |
-| 6 | Graph-held state resumption | S1, S2 | `test_onboarding_state*.py` (6 files) | ✅ PASS |
-| 7 | Invite fusion (most failure-prone) | S12 | `test_invite_fusion_http.py`, `test_invites_http.py`, `test_invites_email_http.py` | ✅ PASS |
-| 8 | Atomic new-user accept | S12 | same as E2E-7 (atomic path assertions) | ✅ PASS |
-| 9 | Builder catalog | S13 | `test_capabilities_endpoint.py`, `test_capability_catalog.py` | ✅ PASS |
-| 10 | Self-hosted onboarding | S15 | `test_onboarding_selfhost_w12.py` | ✅ PASS |
-| 11 | Capture disclosure (self-use) | S11 | `test_onboarding_w6_capture_disclosure.py`, `test_capture_disclosure_template.py` | ⚠️ PASS with one flake (deviation D2) |
-| 12 | Cross-W journey (W5-owned) | S17 | `test_dashboard_onboarding.py` full-journey specs + `test_decide.py` | ✅ PASS (browser walk) |
+| 1 | One-sitting first-run (north star) | 1, 3, 4, 5, 7, 8, 17 | `test_dashboard_onboarding.py` (40 passed) + state/seed suites | ✅ PASS (browser walk, local preview) |
+| 2 | Overview calm | 9, 16 | browser walk + `test_onboarding_w4_settings.py` | ✅ PASS — 3 elements, zero toggles, Settings present in the 6-button nav |
+| 3 | Org-name capture | 3, 16 | `test_one_free_org_entitlement.py`, `test_free_team_entitlement.py` + wizard | ✅ PASS |
+| 4 | Ontology-precise seed | 7, 15 | `test_onboarding_seed.py`, `test_onboarding_seed_endpoint.py` | ⚠️ **PARTIAL** — 53 of 54 pass; one test has never passed under load (D1). Its graph-state assertions do hold on a quiet host |
+| 5 | Agent install across harnesses | 5, 6 | `test_installer_agents_block_3429.py`, `test_served_skills.py`, `test_served_skill_byte_parity.py`, `test_installer_preserves_foreign_skill_content.py` | ⚠️ PASS at the automated layer — the six-harness manual walk (surface 5's manual leg) was not run |
+| 6 | Graph-held state resumption | 1, 2, 10 | `test_onboarding_state*.py` (6 files) | ✅ PASS |
+| 7 | Invite fusion (most failure-prone) | 12 | `test_invite_fusion_http.py`, `test_invites_http.py`, `test_invites_email_http.py` | ✅ PASS |
+| 8 | Atomic new-user accept | 1, 12 | same as E2E-7 (atomic path assertions) | ✅ PASS |
+| 9 | Builder catalog | 13 | `test_capabilities_endpoint.py`, `test_capability_catalog.py` | ✅ PASS |
+| 10 | Self-hosted onboarding | 15 | `test_onboarding_selfhost_w12.py` | ⚠️ PASS at the automated layer — a hand-driven self-hosted install (surface 15's manual leg) was not run |
+| 11 | Capture disclosure (self-use) | 11 | `test_onboarding_w6_capture_disclosure.py`, `test_capture_disclosure_template.py` | ⚠️ PASS with one flake (deviation D2) |
+| 12 | Cross-W journey (W5-owned) | 1-17 (all) | `test_dashboard_onboarding.py` full-journey specs + `test_decide.py` | ✅ PASS (browser walk) |
 
 E2E-1 and E2E-12 are **walked in a browser**; the other ten are verified through the suites their surface map assigns them (integration, contract, skill lint, unit). "Walked" is not claimed for a scenario driven only by pytest.
 
@@ -36,6 +36,12 @@ E2E-1 and E2E-12 are **walked in a browser**; the other ten are verified through
 - **Which layer was not reached:** **three** surfaces carry a **manual** leg in the test-design map that this run did not fully execute — 5 (install across six harnesses), 15 (a hand-driven self-hosted install), and 16 (the manual copy sweep, which the desktop capture only *partly* covers). Their automated layers are green — see the rows.
 
 Two things are **outside** the 17 and are not counted in that number, each named with its evidence: the **deployed-host** auth/identity journey (deviation D4 — those five specs expect the production auth origin, the local build redirects to its own, and this lane has no production session), and the **W11 funnel read** (indicator 5 / A0 gate data — hosted capture returns 402, so the events of the sessions that would populate the funnel are never posted). Surface 14 is the telemetry *machinery*, and that is verified; the funnel *read* is a different artifact and is not.
+
+The `Surfaces` column is the map's own list of surfaces each scenario **exercises**, copied verbatim from
+`04-test-design.md` — not a list of what this run's evidence happened to touch. The two differ, and the difference is
+deliberate: E2E-12 is mapped to "1–17 (all)", while the browser walk that evidences it drives surfaces 3, 4, 9, 10, 16
+and 17 directly and the rest through their assigned suites. Reading the column as coverage rather than traceability is
+the mistake it invites, so it is labelled.
 
 ## Per-surface evidence
 
@@ -102,9 +108,10 @@ so no test varies the plan to prove the card is reachable without one — the pr
   "Continue setting up <org>", tabs `Overview · API Keys · Graphs · Members · Billing · Settings`, a `Setup` button,
   a `Free tier` badge, and the copy sweep visible in the body ("Your **Organization** is live"). No feature toggles
   on Overview — the calm surface holds.
-- `dashboard-desktop.png` — the **degraded** path: with a session but no reachable BFF, the dashboard renders
-  "Could not load your organizations — try again" with a contact link. That is the honest failure the surface map's
-  S9 row requires (never a blank page, never a false checklist).
+- `dashboard-desktop.png` (1440×900) and `dashboard-mobile.png` (390×844) — the **degraded** path: with a session but no
+  reachable BFF, the dashboard renders "Could not load your organizations — try again" with a contact link. That is the
+  honest failure the surface map's S9 row requires (never a blank page, never a false checklist), and the mobile capture
+  confirms it does not overflow at 390 px.
 
 ## Indicator 3 (logs + DB state at each step) — asserted in the suites, NOT captured as a per-step log
 
@@ -170,7 +177,7 @@ naming what failed (D5 below — an observation, not a defect, because the copy 
 
 | # | Finding | Evidence | Disposition |
 |---|---|---|---|
-| **D1** | `test_onboarding_seed_endpoint.py::TestSeedEndpoint::test_email_derived_person_requires_confirmation_no_writes` returns **504 "the server's wait budget for this request was exceeded"** under load — **5/5** reproductions; the same test passes in **9.08 s** on a quiet host | `--lf` ×5, each run 132–136 s, load average 26→45; body: `assert 504 == 200` | **A product-latency symptom until measured otherwise, recorded on #8000.** What was measured is the *test's* wall time (132–136 s vs 9.08 s), not the endpoint's own response latency under load — the request never returned a response, the server gave up on a budget. So the classification the data supports is: *under fleet load this endpoint exceeds its own wait budget*. Whether that budget is too small or the endpoint is too slow is the open question on #8000, and the next measurement is the endpoint's server-side latency under load (the test evidence cannot distinguish the two) |
+| **D1** | `test_onboarding_seed_endpoint.py::TestSeedEndpoint::test_email_derived_person_requires_confirmation_no_writes` returns **504 "the server's wait budget for this request was exceeded"** under load — **5/5** reproductions; the same test passes in **9.08 s** on a quiet host | `--lf` ×5, each run 132–136 s, load average 26→45; body: `assert 504 == 200` | **A product-latency symptom until measured otherwise, tracked on #9008.** What was measured is the *test's* wall time (132–136 s vs 9.08 s), not the endpoint's own response latency under load — the request never returned a response, the server gave up on a budget. So the classification the data supports is: *under fleet load this endpoint exceeds its own wait budget*. Whether that budget is too small or the endpoint is too slow is the open question on #9008, and the next measurement is the endpoint's server-side latency under load (the test evidence cannot distinguish the two) |
 | **D2** | `test_onboarding_w6_capture_disclosure.py::TestDeleteDuringCapture::test_no_orphaned_receipt_under_concurrent_delete` failed in the 6-file batch and **passed alone** (133 s) | batch B + isolated re-run | Load-sensitive; re-run green. Not written off — D1 is the same mechanism |
 | **D3** | **PROVEN, single variable.** `test_onboarding_variants.py::test_installer_dist_is_a_build_artifact_not_a_committed_mirror` compares a built `dist/` copy against `public/` **when `dist/` exists**. In the hub checkout: `dist/install-tortoise-skills.sh` is dated **28 Sep**, `public/` is dated **18 Oct** (it gained the `#4643` "WHICH REPO AUTHORS WHAT" header), so they disagree and the test reds. In a checkout built from the same lineage, `dist/` == `public/` byte-for-byte and the test passes | `ls -lT` on both files (28 Sep vs 18 Oct); `diff dist public` shows exactly the missing `#4643` header; `cmp -s` in the fresh worktree → identical; the same test re-run in that worktree → **1 passed in 12.36 s** | **Environment artifact, proven not a main defect** — one variable (the age of an ignored build output), measured on both sides. It is also a genuine trap worth knowing: **any lane that built the dashboard once will red this test the next time `public/` changes on main**, with a message that blames "a BUILT dist copy" rather than naming the remedy (`rerun the dashboard build` — which is the remedy, and it is in the assertion text) |
 | **D4** | (batch F) `tests/e2e/{test_welcome_page,test_ship_test_onboarding,test_dashboard_gate,test_dashboard_identity,test_session_login_flow}.py` → 22 passed, 40 failed, 1 skipped | first failure: expected `https://tortoise.premiselabs.co/auth`, actual `http://127.0.0.1:8790/auth` | These expect the **deployed** auth origin; the local build redirects to its own origin. They are auth/identity/gate surfaces, **outside #1976's 17** — their hosted layer is the deployed app, which this lane cannot drive (no prod session). Recorded as unverified here rather than claimed |
@@ -185,7 +192,10 @@ naming what failed (D5 below — an observation, not a defect, because the copy 
   configurable and point it at a preview deployment that carries the same redirect config. Recorded here so it is not
   mistaken for covered by the green 40/40 above.
 - **#1992** (the surface map itself) is still open — its artifact is delivered in the issue; closing it is bookkeeping.
-- **#8000** carries the D1 recurrence; the 504-class decision (budget vs assertion) has no owner.
+- **D1 is tracked on #9008** (filed by this capstone). It was **not** left on #8000: that issue is **closed**
+  (2026-10-16) and is about a *different* test (`test_capture_loop_responsiveness`), so the recurrence comment posted
+  there on 2026-10-18 landed on a dead thread two days after closure. #9008 names the measurement that classifies it
+  (server-side latency under the same concurrency, distinguishing "budget too small" from "endpoint too slow").
 - **D6** (no test varies the subscription plan, so "never a billing gate" is unproven) is **filed as #8998**, with the
   test to write and the mutation that must redden it. Not written here: this capstone's job is to verify, not to extend
   the suites.
@@ -227,7 +237,7 @@ suites. The two UI claims the epic rests on — a calm Overview and a Settings h
 in assertions.
 
 Of the three in-scope failures: **D2** was green only on re-run (a load-sensitive flake), **D1** never went green under
-load (5/5 reproductions — it passes on a quiet host, which is why the classification is unresolved and recorded on #8000),
+load (5/5 reproductions — it passes on a quiet host, which is why the classification is unresolved and tracked on #9008),
 and **D3** was **proven** an environment artifact with a single-variable control (a 28 Sep build output against
 an 18 Oct source; the same test passes in a checkout built from the same lineage). One *layer* — the deployed
 auth/identity journey, D4 — was not driven at all because it needs a production session. The W11 funnel read
