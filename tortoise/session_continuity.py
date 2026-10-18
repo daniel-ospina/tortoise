@@ -1,7 +1,7 @@
 """Session continuity — vibecoder wedge prototype.
 Auto-capture findings during a session, auto-retrieve on next session start.
 Zero config. The agent IS the interface."""
-from tortoise.sdk import TortoiseSDK  # noqa: I001
+from tortoise.sdk import TortoiseSDK, _ledger_record  # noqa: I001
 from tortoise.exceptions import CalibrationError
 from datetime import datetime
 
@@ -18,13 +18,17 @@ class SessionContinuity:
         self.session_id = datetime.now().strftime("session-%Y%m%d-%H%M%S")
         
         # Find recent context (context-based query removed #49 Phase 2)
-        prior = self.sdk.query(kind="observation")
+        # #7983: the SCAN is not a caller read (it would mark the whole
+        # observation stock read, f -> ~1), but the findings it PRINTS below are
+        # served content, so those five are recorded as reads.
+        prior = self.sdk.query(kind="observation", _record_reads=False)
         
         summary = []
         # Get last 5 findings from any session
         if prior:
             summary = [p.get("content", "")[:120] for p in prior[-5:]]
         
+        _ledger_record("Point", prior[-5:])  # #7983: printed, so a read
         print(f"Session: {self.session_id}")
         print(f"Topic: {topic}")
         if summary:

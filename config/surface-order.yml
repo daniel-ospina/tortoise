@@ -81,14 +81,24 @@ family_rank:
 # recording the new expectation here.
 # #3849: `find` 7 -> 6 — `tortoise_ask` was the removed row (its name token
 # `ask` derives `find`), so the removal moves this count and nothing else.
+# #3540 ruling B: two per-source switches retired and ONE consolidated tool
+# added, so the ADVERTISED set moved by -1, 82 -> 81, while the SERVED set moved
+# +1, 98 -> 99 (81 live + 18 retired shims, #3883). The two counts move in
+# OPPOSITE directions because a retired name is still SERVED; `served` has a
+# precise meaning here, and this table is the ADVERTISED distribution (every row
+# is resolved through `TOOL_REGISTRY`, which no retired name is in). Three
+# keyword counts moved with the retirement
+# (create 18->17, operate 7->6, link 4->5 — `tortoise_manage_sources` derives
+# `link`). Recorded deliberately, per the note above: a change to the
+# distribution requires editing the registry AND recording the expectation here.
 baseline_counts:
   fetch: 14
-  create: 18
+  create: 17
   list: 9
   check: 8
-  operate: 7
+  operate: 6
   update: 8
   find: 6
   delete: 6
-  link: 4
+  link: 5
   trace: 2

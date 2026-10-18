@@ -1,6 +1,7 @@
 """Tests for mcp_server — MCP tool registration, _safe wrapper, and tool behavior."""
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -132,8 +133,10 @@ class _StubQuerySDK:
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query_points_by_tag(self, tag):
-        self.calls.append(("query_points_by_tag", tag))
+    def query_points_by_tag(self, tag, *, _record_reads=True):
+        # #7983: the real accessor takes the read-ledger opt-out, so the double
+        # must too — a paginated caller passes `_record_reads=False`.
+        self.calls.append(("query_points_by_tag", tag, _record_reads))
         return self.tag_points
 
     def tortoise_fts_query(self, query=None, **kwargs):
@@ -193,7 +196,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(tag="pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
 
     def test_tag_takes_precedence_over_text(self, query_sdk):
         """Documented precedence: tag mode wins when both are provided."""
@@ -201,6 +204,21 @@ class TestQueryConsolidation:
         result = tortoise_query(tag="pricing", text="semantic query")
         assert result == query_sdk.tag_points
         assert query_sdk.calls[-1][0] == "query_points_by_tag"
+        # #7983: the accessor never records — it runs BEFORE the retracted
+        # filter, so recording there would count Points the caller never gets.
+        assert query_sdk.calls[-1][2] is False
+
+    def test_tag_pagination_opts_out_of_recording_the_population(self, query_sdk):
+        """#7983: ONE page is served, so the tag POPULATION is not a read.
+
+        Recording the population would mark every tagged point read and bias the
+        hot fraction HIGH — the direction the instrument says must never happen.
+        """
+        from tortoise.mcp_server import tortoise_query
+        out = tortoise_query(tag="pricing", limit=1, offset=0)
+        assert out["total"] == len(query_sdk.tag_points)
+        assert len(out["results"]) == 1
+        assert query_sdk.calls[-1][2] is False, "a page must not record the population"
 
     def test_tag_with_pagination_returns_dict(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
@@ -342,7 +360,7 @@ class TestDeprecatedAliases:
         from tortoise.mcp_server import tortoise_query_points_by_tag
         result = tortoise_query_points_by_tag("pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
 
 
 class TestToolFunctions:
@@ -456,12 +474,6 @@ class TestToolFunctions:
 
         calls: list = []
         token = _current_org_id.set("team-github-index")
-        import asyncio as _asyncio
-        # Hermetic (CI workers may have no current event loop — the tool's
-        # get_event_loop().create_task raises RuntimeError there): create an
-        # explicit loop so the scheduled task actually runs.
-        loop = _asyncio.new_event_loop()
-        _asyncio.set_event_loop(loop)
         try:
             monkeypatch.setattr(ha, "_github_token_enc", lambda tid: "enc")
             monkeypatch.setattr(ha, "_start_index_job",
@@ -481,16 +493,20 @@ class TestToolFunctions:
             monkeypatch.setattr(ms, "_validate_repo_scope",
                                 ha._validate_repo_scope, raising=False)
             result = tortoise_onboarding_github_index("acme", "repo1")
-            assert result == {"job_id": "job1", "status": "started"}
-            # the tool schedules _run_indexing via create_task on the loop
-            # we set — pump it so the capture runs
-            loop.run_until_complete(_asyncio.sleep(0.05))
+            assert result["job_id"] == "job1"
+            assert result["status"] == "started"
+            assert result["state"] == "started"
+            # The walk is spawned on its own thread (this tool used to schedule
+            # create_task on the caller's loop, which is a loop a sync MCP tool
+            # running on a worker thread does not have) — wait for it.
+            for _ in range(100):
+                if calls:
+                    break
+                time.sleep(0.05)
             assert calls == [("acme", ["repo1"])], \
                 "the repo must be wrapped into a one-item list, not a bare str"
         finally:
             _current_org_id.reset(token)
-            loop.close()
-            _asyncio.set_event_loop(None)
 
 
 class TestGraphBoundTeamSurfaceReject:
@@ -514,6 +530,10 @@ class TestGraphBoundTeamSurfaceReject:
         "tortoise_onboarding_github_index": {"org": "acme"},
         "tortoise_onboarding_github_status": {},
         "tortoise_pack_install": {"manifest_yaml": "x: 1"},
+        # #3540: the consolidated org-level writer. It replaced two entries in
+        # this sweep; leaving it out would let its reject be deleted with the
+        # suite still green.
+        "tortoise_manage_sources": {"action": "list"},
     }
 
     def test_every_team_surface_tool_rejects_graph_bound(self):
@@ -1151,12 +1171,15 @@ class TestStdioEntrypointToolRegistration:
             onboarding = {
                 "tortoise_onboarding_demo_create",
                 "tortoise_onboarding_state",
-                "tortoise_onboarding_session_recording",
                 "tortoise_onboarding_github_connect",
-                "tortoise_onboarding_github_index",
                 "tortoise_onboarding_github_status",
                 "tortoise_onboarding_seed",  # #1999 (W3)
             }
+            # #3540: the two retired switches are no longer advertised; the
+            # consolidated replacement is steady-state and stays listed.
+            assert "tortoise_manage_sources" in names
+            assert "tortoise_onboarding_session_recording" not in names
+            assert "tortoise_onboarding_github_index" not in names
             missing = onboarding - set(names)
             assert not missing, f"missing onboarding tools: {sorted(missing)}"
         finally:

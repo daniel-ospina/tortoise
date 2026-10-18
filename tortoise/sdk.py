@@ -2878,8 +2878,34 @@ def _deleted_point_payload(id: str) -> dict:
 # test_log_append_failure_warns_and_keeps_live` (an append failure must not
 # crash the create), so a fail-closed arm inside the same function would be a
 # second, contradictory convention. The chokepoint's atomic write removes both
-# windows by construction. Every OTHER live door reaches the journal FIRST and
-# treats the append as the commit point (`_apply_and_journal` does).
+# windows by construction.
+#
+# ⚠️ THE INVENTORY BELOW IS INCOMPLETE, and this paragraph used to overstate it
+# by claiming every other door already conforms. It did not, and the claim was
+# wrong by inspection (#7951 increment 4a). MEASURED at this tree, still
+# apply-first — cache write BEFORE the record — and therefore still carrying
+# contract window (a):
+#   * `TortoiseSDK._delete_entity` — `DETACH DELETE` per matched label, then one
+#     `EntityMutated` op=delete; a failed append RESURRECTS the deleted node on
+#     replay. (Its comment states the opposite preference — post-hoc "so a
+#     failed/no-op delete never leaves a phantom record" — which is the
+#     phantom-record trade, NOT an owner ruling; the resurrection direction is
+#     the one §17.1 forbids. Closing it needs a pre-read per label.)
+#   * `TortoiseSDK._session_event_write` — the `:Event` MERGE precedes
+#     `EventRecorded`.
+#   * `TortoiseSDK._update_entity`, `TortoiseSDK.create_operator` — the
+#     node `SET`/`CREATE` and its `EntityMutated` / `OperatorAdded` record come
+#     after the write.
+# Those are four doors verified line by line at this tree. ⚠️ They are NOT
+# claimed to be the whole set: a full inventory of the apply-first doors is
+# owed (a crude order scan flags a dozen more, several of which are reads
+# rather than writes, so a count from it would be a guess). Plan §7 increment 4
+# tracks the conversion; naming the four is not fixing them.
+#
+# `delete_point` WAS in that list and no longer is (#7951 increment 4a): its
+# `EntityMutated` op=delete record is appended BEFORE the `DETACH DELETE` and
+# its append is the COMMIT POINT, because on a delete the apply-first window is
+# not "the write is lost" but "the deletion is UNDONE by the next replay".
 # ═══════════════════════════════════════════════════════════════════════════
 
 # #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
@@ -5190,6 +5216,46 @@ def _read_stored_number(value, default):
         return float(value)
     except Exception:
         return default
+
+
+def _ledger_record(label: str, rows: list[dict]) -> None:
+    """#7983: feed the READ LEDGER (the instrument for the hot fraction `f`).
+
+    Called from EVERY caller-facing row-returning read path that has a known
+    LABEL. The named set is carried by §17.4.6, not duplicated here — a case
+    where it was duplicated: this docstring once named only `query()`,
+    `paginated_query()` and `query_points_by_tag()` while omitting six callers
+    that were already here. An audit surface that under-reports its own call
+    sites invites a second hook at one of them, which would record a candidate
+    POOL as read and bias `f` HIGH — the direction that HURTS the split, since
+    the saving is `(1 - f) x cache` and a higher `f` removes it. (`f` divides
+    distinct read KEYS, so a duplicate hook moves `read_count`, not `f`; the
+    mechanism is the pool, not the double count.)
+    ⛔ NOT `get_point()` — it is the internal accessor the WRITE paths use
+    (`_emit_event` and the dedupe/promote checks), so counting it would mark
+    written-but-never-read nodes as read and bias `f` HIGH (#8877). The FTS
+    funnel records its rows through the same module INLINE (it resolves the
+    label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path:
+    `traverse` and `get_historical_knowledge` read by
+    direct Cypher and call nothing here (`recall_state`'s RELATED readers are
+    likewise unhooked — the method itself does record the rows it serves), and
+    the FTS funnel records only its
+    RETURNED rows, not its candidate pool — so a deployment serving those paths
+    reads an `f` that is too LOW (which flatters the split). #8877 carries the
+    wiring; the coverage gaps are named in STORAGE-ARCHITECTURE.md §17.4.6.
+
+    OFF by default and never imported when off: one env lookup (the #4097 truthy
+    contract), and a ledger failure is swallowed inside the module (a measurement
+    may not break the thing it measures).
+    """
+    if not rows or not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
+        return
+    try:
+        from . import read_ledger
+    except Exception:  # pragma: no cover — a broken install must not break a read
+        return
+
+    read_ledger.record_rows(label, rows)
 
 
 class TortoiseSDK:
@@ -9895,6 +9961,11 @@ class TortoiseSDK:
           - Entity → delete_entity
         Returns True if a node was found and deleted, False otherwise.
 
+        Can raise instead of returning: the Point branch inherits
+        `delete_point`'s §17.1 refusal, `WriteNotLandedError`
+        (``operation="delete_point"``), when the outbox will not commit the
+        destruction. The entity branch is unchanged.
+
         #3300: for the Point branch the `PointRetracted` row is the
         :GraphEvent SUBSCRIBER signal only — rebuild parity comes from the
         JSONL `EntityMutated op="delete"` record, because the `PointRetracted`
@@ -10418,6 +10489,17 @@ class TortoiseSDK:
 
         Implementation behind delete(id) — the consolidated Point/entity
         delete (epic #888 W2).
+
+        Raises ``WriteNotLandedError`` (``operation="delete_point"``) instead of
+        returning when the §17.1 outbox refuses the destruction: either the
+        `EntityMutated` op=delete record could not be CONFIRMED (the `DETACH
+        DELETE` was then NOT issued — the record may still have landed, since a
+        buffered append can write and then raise, so the refusal reports the
+        record as unconfirmed, never as absent), or the record WAS committed and
+        the cache delete failed (``record_committed=True`` — treat the delete as
+        COMMITTED and do not re-issue it blindly, a replay heals the cache). A
+        no-op id still returns ``False``; ``True`` still means the node was
+        destroyed.
         """
         proj = self._get_proj()
         exists = proj.g.query(
@@ -10455,17 +10537,88 @@ class TortoiseSDK:
         # `(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` from them, so
         # `_affected_factors` still re-derives the operator's factor.
         neighbor_ids = [cid for cid in neighbor_claims if cid != id]
+        # ── #7951 §17.1 — THE OUTBOX ORDERING ON THE DELETE DOOR ──────────
+        # THE APPEND IS THE COMMIT POINT, and on a DELETE the ordering matters
+        # MORE than on a create. The `EntityMutated` op=delete record is the
+        # ONLY durable carrier of this destruction (`PointRetracted` is a
+        # `:GraphEvent`-only subscriber row, see #3300 below), so a delete that
+        # reached the cache without it is the one wound a replay cannot merely
+        # lose — it UNDOES: `rebuild_all` re-folds the creation record and the
+        # deleted Point comes back as live. Deleting first left that window
+        # open on every hard delete, because `_emit_event` is best-effort
+        # (#4240) and never raises.
+        #
+        # So the record is appended BEFORE the `DETACH DELETE`, and a failed
+        # append means the delete is NOT issued: the caller is told rather than
+        # handed a silent success over a destroyed node whose destruction the
+        # record never saw (the same contract `create_point` / `update_point`
+        # took in increments 1 and 2a). The residual window is the
+        # replay-healable one — a crash between the append and the delete
+        # leaves the cache holding a node the TRUTH says is gone, and the next
+        # replay removes it.
+        #
+        # The existence probe above still runs FIRST, so a delete of a
+        # non-existent id journals nothing and returns False (unchanged).
+        _delete_committed = self._journal_entity_mutation("Point", id, "delete")
+        if _delete_committed is False:
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(
+                id, getattr(proj, "graph_name", None),
+                "the journal append did not confirm, so the DETACH DELETE "
+                "was NOT issued; if the record did land, a replay will "
+                "remove the Point",
+                operation="delete_point",
+                record="EntityMutated op=delete")
         # #7405: the hard delete rides the bounded write retry. A DETACH DELETE
         # by an explicit id is idempotent — a re-issue after a non-landing ABORT
         # re-deletes a node that is (at worst) already gone, a no-op. The abort
         # MUST be proved not-landed, which is exactly what
         # `retryable_aborted_write` admits (a bare DELETE never rides
         # `retryable_transient`).
-        self._graph_write_with_retry(
-            lambda: proj.g.query(
-                "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id}),
-            what="delete_point DETACH DELETE",
-        )
+        #
+        # #7951 review P1 — THE COMMITTED ARM IS CALLER-FACING, not just the
+        # crash window the comment above describes. The record is already on
+        # disk when this statement runs, so a write that fails here (retry
+        # exhausted, or any engine error) leaves the TRUTH saying destroyed
+        # while the cache still serves the Point and the caller is told the
+        # delete did not happen. That is `WriteNotLandedError`'s
+        # ``record_committed=True`` arm, and it exists precisely so a caller
+        # does not re-issue blindly (a blind retry appends a SECOND delete
+        # record for one intent). Re-raise the engine error only when no record
+        # was committed.
+        #
+        # ⚠️ SCOPE: this wraps the `DETACH DELETE` ONLY, and that is the one
+        # statement whose failure would misreport a LANDED destruction. The
+        # statements after it stay bare deliberately (#7951 review round 2):
+        #   * `_emit_event("PointRetracted", …)` is best-effort by construction
+        #     (#4240) — it never raises, so there is nothing to wrap.
+        #   * the orphan-tag GC is a RETRIED write that can still exhaust, but
+        #     its failure leaves orphan `:Tag` rows, not a lost or an unapplied
+        #     destruction: the node is already gone and the record already
+        #     says so. A re-issue finds no node and returns False, so it
+        #     cannot append a second record.
+        #   * `_mark_dirty` / `invalidate_messages` are cache bookkeeping; a
+        #     failure there is a stale-confidence report, not a state lie.
+        # Widening this wrap would convert those into a "the delete did not
+        # happen" claim that is FALSE after the DETACH DELETE landed — the
+        # class of wrong answer this whole increment exists to remove.
+        try:
+            self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id}),
+                what="delete_point DETACH DELETE",
+            )
+        except Exception as exc:
+            if _delete_committed:
+                from .exceptions import WriteNotLandedError
+                raise WriteNotLandedError(
+                    id, getattr(proj, "graph_name", None),
+                    f"the cache delete failed AFTER the destruction record was "
+                    f"committed ({type(exc).__name__}: {exc})",
+                    operation="delete_point", record_committed=True,
+                    record="EntityMutated op=delete",
+                ) from exc
+            raise
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
         # `PointRetracted` (id=) call emitted BOTH stores, and its fold has
@@ -10484,9 +10637,16 @@ class TortoiseSDK:
         #   * JSONL ONLY (`EntityMutated` is not in _GRAPH_EVENT_TYPES) — the
         #     replay journal carries the honest hard-delete record, whose fold is
         #     `_delete_entity_by_id`. No `state`: the recorded shape carries
-        #     "nothing for a delete".
+        #     "nothing for a delete". (#7951: that record is appended ABOVE,
+        #     before the delete — it is the COMMIT POINT, not a post-hoc note.)
+        #
+        # `PointRetracted` therefore stays AFTER the write it reports: it is the
+        # `:GraphEvent` store's statement of what this call DID (hence the
+        # unconditional `deleted: true` marker), so stating it before the
+        # `DETACH DELETE` would publish a destruction that may not happen. A
+        # failed append now raises above, so no subscriber row is published for
+        # a delete that was never issued.
         self._emit_event("PointRetracted", _deleted_point_payload(id))
-        self._journal_entity_mutation("Point", id, "delete")
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
         # otherwise accumulate in list_tags.
@@ -13147,6 +13307,7 @@ class TortoiseSDK:
 
     def query(self, kind: str | None = None,
               *, include_retracted: bool = False,
+              _record_reads: bool = True,
               **filters) -> list[dict]:
         """Query points by pointKind and/or custom property filters.
 
@@ -13196,7 +13357,15 @@ class TortoiseSDK:
             f"MATCH (n:Point) WHERE {where} RETURN properties(n)",
             params=params,
         ).result_set
-        return [r[0] for r in rows]
+        points = [r[0] for r in rows]
+        # #7983: `_record_reads=False` is for the SDK's OWN population scans —
+        # `recall_gaps`, `issue_insight` and the FTS TF-IDF fallback. They are not
+        # a caller reading these keys: recording them would mark the ENTIRE stock
+        # read after one `recall_gaps()` call (f -> ~1) and bias `f` HIGH, the
+        # direction that removes the saving the ledger exists to measure.
+        if _record_reads:
+            _ledger_record("Point", points)
+        return points
 
     def paginated_query(self, kind: str | None = None,
                         skip: int = 0, limit: int = 20,
@@ -13284,6 +13453,11 @@ class TortoiseSDK:
             params={**params, "skip": skip, "limit": limit},
         ).result_set
         results = [r[0] for r in rows]
+        # #7983: a product READ of these Point keys — the ledger's instrument for
+        # `f` must see the structural query path, not only the FTS funnel, or the
+        # keys it serves are reported as never read (the flattering direction for
+        # the split's own saving).
+        _ledger_record("Point", results)
 
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
@@ -13299,7 +13473,16 @@ class TortoiseSDK:
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": id},
         ).result_set
-        return rows[0][0] if rows else {}
+        props = rows[0][0] if rows else {}
+        # #7983: NOT recorded, deliberately. `get_point` is the SDK's INTERNAL
+        # accessor: write paths call it to build events (`_emit_event("PointAdded",
+        # point=self.get_point(mid))`) and to check dedupe/promote/approval state,
+        # so recording it makes a node written and never read look READ — biasing
+        # `f` HIGH, i.e. AGAINST the split, and destroying the one-directional
+        # caveat §17.4.6 relies on. A caller-facing read-by-id path is a coverage
+        # hole (#8877); the right fix is a seam that separates the two, not a hook
+        # that counts every internal check as a caller read.
+        return props
 
     def traverse(self, id: str, relationship_type: str, direction: str = "outgoing") -> list[dict]:
         """Traverse relationships from a Point. Returns connected point dicts.
@@ -13538,8 +13721,15 @@ class TortoiseSDK:
         ).result_set
         return [{"name": row[0], "count": row[1]} for row in rows]
 
-    def query_points_by_tag(self, tag: str) -> list[dict]:
-        """Return Points connected via TAGGED edge to the given Tag name."""
+    def query_points_by_tag(self, tag: str, *,
+                            _record_reads: bool = True) -> list[dict]:
+        """Return Points connected via TAGGED edge to the given Tag name.
+
+        #7983: this returns the WHOLE tag population, so recording it is right
+        for the SDK caller and wrong for a paginated user that receives one
+        page of it — that caller passes ``_record_reads=False`` and records the
+        page it serves. Recording the population would bias ``f`` HIGH.
+        """
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) "
@@ -13547,7 +13737,10 @@ class TortoiseSDK:
             "ORDER BY p.createdAt DESC",
             params={"tag": tag},
         ).result_set
-        return [r[0] for r in rows]
+        points = [r[0] for r in rows]
+        if _record_reads:
+            _ledger_record("Point", points)  # #7983: a product read of these keys
+        return points
 
     def list_namespaces(self) -> list[dict]:
         """Installed pack namespaces with kind counts. Returns [{namespace, name, kind_count}]."""
@@ -16954,7 +17147,8 @@ class TortoiseSDK:
         query_text = (resolved or {}).get("content") or scope
         try:
             results = self.tortoise_fts_query(
-                query_text, entity_type="point", limit=200)
+                query_text, entity_type="point", limit=200,
+                _record_reads=False)  # #7983: a review pool, not a caller read
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -20851,7 +21045,10 @@ class TortoiseSDK:
         # proportionally. Invariant to the number of fused ranked lists (no
         # hardcoded multiplier).
         if not results:
-            fts_results = self.tortoise_fts_query(q, limit=limit)
+            # #7983: a CANDIDATE pool — the fallback's rows are re-scored, some
+            # dropped by the max_rrf gate and the rest reranked below, so what
+            # the caller receives is recorded at the return instead.
+            fts_results = self.tortoise_fts_query(q, limit=limit, _record_reads=False)
             results = []
             max_rrf = max(
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
@@ -20876,6 +21073,7 @@ class TortoiseSDK:
         if graph_ranker is not None and results:
             results = graph_ranker.rerank(results, entity_type="point", query=q)
 
+        _ledger_record("Point", results)  # #7983: the rows this call SERVES
         return results
 
     # ── Session Context (#6989) ──────────────────────────────
@@ -20980,6 +21178,7 @@ class TortoiseSDK:
             # the limit would otherwise be invisible at small limits.
             semantic_hits = self.tortoise_fts_query(
                 text, entity_type="point", limit=max(limit * 5, 20),
+                _record_reads=False,  # #7983: a candidate pool
             )
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
@@ -21000,7 +21199,8 @@ class TortoiseSDK:
         repo_points: list[dict] = []
         if repo:
             repo_points = self.query(
-                kind="observation", source="github", github_repo=repo
+                kind="observation", source="github", github_repo=repo,
+                _record_reads=False,  # #7983: an internal population scan
             )
 
         if total_points == 0:
@@ -21010,11 +21210,16 @@ class TortoiseSDK:
                 "repo_not_indexed": False,
                 "data_points": [],
                 "insight": "The graph has no prior knowledge yet — nothing to pull. "
-                            "Run tortoise_onboarding_github_index to seed it.",
+                            "Run tortoise_manage_sources(action=\"enable\", "
+                            "source=\"github_issues\") to seed it — that call "
+                            "indexes EVERY connected repo, not one.",
                 "more_in_graph": None,
                 "repo_stats": None,
             }
 
+        # #7983: the semantic pool opted out above; the hits that SURVIVE the
+        # gate are what the caller receives, so record those (this is the read).
+        _ledger_record("Point", semantic_hits)
         data_points: list[dict] = []
         for h in semantic_hits:
             dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
@@ -21044,7 +21249,10 @@ class TortoiseSDK:
                 "repo_not_indexed": True,
                 "data_points": data_points,
                 "insight": f"Graph is populated but '{repo}' has no indexed issues yet — "
-                            "run tortoise_onboarding_github_index to index it.",
+                            "run tortoise_manage_sources(action=\"enable\", "
+                            "source=\"github_issues\") to index it. That call has "
+                            "no per-repo scope: it indexes EVERY connected repo, "
+                            f"so '{repo}' is covered only if it is one of them.",
                 "more_in_graph": None,
                 "repo_stats": None,
             }
@@ -21371,6 +21579,13 @@ class TortoiseSDK:
         # absent"; a SET read names no node and passes nothing, keeping
         # today's set-level polarity. Default None = byte-identical.
         _residency_key: str | None = None,
+        # #7983: PRIVATE — an INTERNAL pool read (recall_state's candidate pool,
+        # a review pool, a session search) is not a caller reading these keys.
+        # The funnel records the rows it RETURNS, and for a pool caller those
+        # rows are candidates the end caller never sees, so recording them marks
+        # up to 3-30k keys read and biases `f` HIGH — the direction that removes
+        # the saving the instrument measures. Default True = product reads.
+        _record_reads: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -21654,6 +21869,22 @@ class TortoiseSDK:
         # for a store that is merely down (§17.3's S5 failure mode).
         _residency: _ResidencyDeclaration | None = None
 
+        # #7983 (§17.4.4): the READ LEDGER — the instrument the hot fraction `f`
+        # has never had. ONE product read = ONE funnel (`tortoise_fts_query`),
+        # so this is the one seam that can say WHICH keys a read returned.
+        # OFF by default, and "off" means NOT IMPORTED: the flag is read FIRST,
+        # so a default deployment pays one env lookup, never loads the module,
+        # extracts no key and returns a byte-identical response (#4097's truthy
+        # contract, the one every other boolean env read in the tree uses).
+        _read_ledger = None
+        _read_ledger_enabled = is_truthy(os.environ.get("TORTOISE_READ_LEDGER"))
+        if _read_ledger_enabled:
+            try:
+                from . import read_ledger as _read_ledger
+            except Exception:  # pragma: no cover — a broken install, not a read
+                _read_ledger = None
+                _read_ledger_enabled = False
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -21682,6 +21913,17 @@ class TortoiseSDK:
                 read_status_out["status"] = status
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
+            if (
+                _read_ledger is not None
+                and rows
+                and _read_ledger_enabled
+                and _record_reads
+            ):
+                # The ledger never changes the answer: it records the
+                # `(label, key)` of every row this read returned, and a ledger
+                # failure is swallowed inside the module (a measurement may not
+                # break the thing it measures).
+                _read_ledger.record_rows(label, rows)
             return rows
 
         try:
@@ -21726,7 +21968,19 @@ class TortoiseSDK:
         # :Document graph label, so post-retrieval Cypher must never address
         # one. Mirrors tortoise/search_engine.py's legs (the caller-facing
         # entity_type stays "document").
-        label = "Source" if entity_type == "document" else entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+        # The alias mapping lives in `read_ledger` (next to the key contract) so
+        # the ledger's coordinate and this funnel cannot disagree: an OPERATOR is
+        # a :Point and a document IS a :Source, so recording either under its
+        # caller-facing name would be a key the stock can never join. The
+        # fallback is the pre-existing expression, kept byte-identical for the
+        # default (flag-off) deployment. The two are not pinned to each other by a
+        # test (the fallback is unused once the ledger is on); what IS pinned is
+        # the mapping itself, alias by alias.
+        label = (
+            _read_ledger.label_for_entity_type(entity_type)
+            if _read_ledger is not None
+            else ("Source" if entity_type == "document" else entity_type.capitalize())
+        )
         # Operator: Point nodes with is_operator=true, kind=op_type
         # Source: Source nodes, kind=sourceKind
         kind_field = {"point": "pointKind", "event": "eventKind", "subject": "subjectKind", "document": "documentKind", "object": "objectKind", "operator": "op_type", "source": "sourceKind"}[entity_type]
@@ -21913,7 +22167,12 @@ class TortoiseSDK:
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
-                                    include_retracted=include_terminal)
+                                    include_retracted=include_terminal,
+                                    # #7983: these hits are recorded ONCE, by
+                                    # `_with_read_status` below — a second record
+                                    # here inflates read_count for every fallback
+                                    # hit — and the scan itself is not a caller read.
+                                    _record_reads=False)
                 if exclude_status and points:
                     # Same status exclusion as step 5d (#898 review round-2):
                     # the degraded fallback must not leak superseded/deprecated
@@ -23384,6 +23643,7 @@ class TortoiseSDK:
             _object_status = {}
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
+            _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
             exclude_status=exclude_status,
             include_terminal=include_superseded,
             # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
@@ -23398,6 +23658,7 @@ class TortoiseSDK:
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
+                _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
                 include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
@@ -23495,6 +23756,15 @@ class TortoiseSDK:
                 out = [by_id.get(i["id"], i) for i in out]
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
+        # #7983: the CANDIDATE pool above was not recorded (`_record_reads=False`)
+        # — these are the rows the caller actually receives, and they are what a
+        # read of this path means for `f`.
+        _ledger_record(
+            "Point", [i for i in out if i.get("entity_type") == "point"]
+        )
+        # NOT the Object leg: an Object's key is `name`, and these rows carry
+        # `id`, so recording them could only emit `unresolved` — reported as
+        # "rows with no key at all", which is false. Named as a hole instead.
         if read_status_out is not None:
             # B6 (#3892): the composite is derived AFTER the pipeline, from the
             # rows the caller actually RECEIVES. The filters, the rerank and
@@ -23852,7 +24122,8 @@ class TortoiseSDK:
             results = self.tortoise_fts_query(
                 query, kind=kind, entity_type="point", limit=pool,
                 exclude_status=exclude_status,
-                include_terminal=include_superseded)
+                include_terminal=include_superseded,
+                _record_reads=False)  # #7983: a candidate pool
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -23872,7 +24143,8 @@ class TortoiseSDK:
             # superseded/deprecated for the opt-in — retracted is then
             # re-filtered below by excluded_set).
             nodes = self.query(kind=kind,
-                               include_retracted=include_superseded)
+                               include_retracted=include_superseded,
+                               _record_reads=False)  # #7983: a population scan
             pool_results = []
             for n in nodes:
                 if (n.get("status") or "") in excluded_set:
@@ -23901,6 +24173,8 @@ class TortoiseSDK:
             if r["gaps_ranking"]["load"] >= min_load
             and r["gaps_ranking"]["support"] <= max_support
         ][:limit]
+        # #7983: the pool above opted out; the rows the caller RECEIVES are a read.
+        _ledger_record("Point", ranked)
         return ranked
 
     def recall_subgraph(self, seed: str, *,
@@ -23978,7 +24252,8 @@ class TortoiseSDK:
         # Topic text → hybrid retrieval (points about the topic are the seeds;
         # the expansion pulls in the entities they touch).
         return [r["id"] for r in self.tortoise_fts_query(
-            seed.strip(), entity_type="point", limit=5)]
+            seed.strip(), entity_type="point", limit=5,
+            _record_reads=False)]  # #7983: a seed lookup, not a caller read
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
@@ -26023,7 +26298,7 @@ class TortoiseSDK:
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
                                  name: str | None = None,
-                                 provenance: dict | None = None) -> None:
+                                 provenance: dict | None = None) -> bool | None:
         # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD. No producer passes it
         # (the rename op is deferred to #4769), and `_fold_entity_mutation` does
         # NOT read it — the fold's `rename` arm applies `state`, so a record
@@ -26070,6 +26345,16 @@ class TortoiseSDK:
             ``ObjectSuperseded`` event does
             (``commit_ops.apply_supersessions``). ``None`` (the default, and
             every ``_update_entity`` call) leaves the record byte-identical.
+
+        RETURNS ``_emit_event``'s per-call outcome (#7951): ``True`` when the
+        record was appended to a configured JSONL journal, ``False`` when a
+        configured journal's append RAISED, ``None`` when there is nothing to
+        log or no journal is configured. The per-call value — never a delta of
+        the shared ``_journal_write_failures`` counter, which a CONCURRENT
+        writer on the same instance can move (#5612) — is what a live door must
+        gate its cache write on: it is the §17.1 COMMIT SIGNAL. Its first
+        consumer is ``delete_point``, where a failed append must leave the node
+        standing instead of destroying a node the journal never recorded.
         """
         from tortoise.projection import _ENTITY_MUTATION_IMPLEMENTED_OPS
         if op not in _ENTITY_MUTATION_IMPLEMENTED_OPS:
@@ -26098,7 +26383,11 @@ class TortoiseSDK:
                     "record envelope and were DROPPED (#1423)", _clash)
             record.update({k: v for k, v in provenance.items()
                            if k not in _ENTITY_MUTATION_RESERVED_KEYS})
-        self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
+        # #7951: the append's OWN per-call outcome is returned to the caller so
+        # a live door can treat it as the COMMIT POINT (see the docstring); the
+        # `_emit_event` call itself, its payload and its best-effort failure
+        # handling are unchanged.
+        return self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
         # #2296 review: `_reserved_supplied` is the set of reserved names the
@@ -27344,6 +27633,7 @@ class TortoiseSDK:
         hybrid = self.tortoise_fts_query(
             query, kind="AgentSession", entity_type="event",
             limit=candidate_limit,
+            _record_reads=False,  # #7983: a candidate pool, sliced before return
         )
         has_semantic = any(
             r.get("scores")
@@ -27403,7 +27693,10 @@ class TortoiseSDK:
                 key=lambda item: (item[0], item[1].get("startedAt") or ""),
                 reverse=True,
             )
-            return [props for _, props in ranked[offset:offset + limit]]
+            out = [props for _, props in ranked[offset:offset + limit]]
+            # #7983: the candidate pool opted out; the page handed back is a read.
+            _ledger_record("Event", out)
+            return out
 
         # ── Legacy keyword fallback (no FTS/vector contribution) ──
         # Preserves the pre-#244 CONTAINS surface (name + keywords) plus the
@@ -27453,20 +27746,26 @@ class TortoiseSDK:
             params=params,
         ).result_set
         # Fetch a bit extra for scoring headroom, but honor the caller's limit.
-        return [dict(r[0]) for r in rows[:limit]]
+        out = [dict(r[0]) for r in rows[:limit]]
+        _ledger_record("Event", out)  # #7983: a served page, not a pool
+        return out
 
     def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent Events, optionally filtered by eventKind."""
         proj = self._get_proj()
         if eventKind:
-            return [r[0] for r in proj.g.query(
+            out = [r[0] for r in proj.g.query(
                 "MATCH (e:Event {eventKind: $ek}) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
                 params={"ek": eventKind, "lim": limit}
             ).result_set]
-        return [r[0] for r in proj.g.query(
+            _ledger_record("Event", out)  # #7983: a served page (the other branch too)
+            return out
+        out = [r[0] for r in proj.g.query(
             "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT $lim",
             params={"lim": limit}
         ).result_set]
+        _ledger_record("Event", out)  # #7983: a served page, not a pool
+        return out
 
     def get_session(self, session_id: str) -> dict | None:
         """Get a single agent session by session_id.

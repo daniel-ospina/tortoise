@@ -449,7 +449,7 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "empty"
                     read_status_out[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
@@ -507,7 +507,7 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _DownSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
                 if read_status_out is not None:
                     # the store is down: the SDK sets `degraded` and the
                     # declaration is never read, so no residency key.
@@ -531,7 +531,7 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _DownSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "degraded"
                 return []

@@ -2238,6 +2238,10 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
     # default (terminal Points stay out of capture priors, as before).
     rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit,
                                   include_terminal=entity_type in ("object", "subject"),
+                                  # #7983: a link-before-create PRIOR, never a
+                                  # surfaced result — recording it would count
+                                  # candidates the caller never sees (f HIGH).
+                                  _record_reads=False,
                                   **extra)
     out = []
     for r in rows or []:
