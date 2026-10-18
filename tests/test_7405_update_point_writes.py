@@ -2176,6 +2176,8 @@ def test_the_object_arm_refuses_a_reissue_that_lands_nothing(
             sdk.update_point(pid, confidence=0.31)
 
         assert proxy.vanished, "fixture precondition: the Point must be gone"
+        assert proxy.matching >= 2, (
+            "the aborted statement was never re-issued — the witness was never consulted")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -2183,7 +2185,16 @@ def test_the_object_arm_refuses_a_reissue_that_lands_nothing(
 
 def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
         tmp_path, monkeypatch):
-    """`SET (Object promote)` returns `n`; an empty row set is a NON-landing."""
+    """A promote whose re-issue matched nothing is classified by STATUS.
+
+    An empty row set is NOT automatically a non-landing on this arm: the witness
+    reads the node's status, and a status-only promote on a node the replay landed
+    LIVE is the #1088 idempotent no-op — a success, pinned by
+    `test_a_status_only_promote_on_an_already_live_node_is_idempotent`. What must
+    stay loud is the node that is ABSENT, which is what this fixture builds: the
+    rebuild has not replayed it, so the re-issue cannot apply and the graph abort
+    surfaces.
+    """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "objpromotelanding")
@@ -2200,6 +2211,8 @@ def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
             sdk.update_point(pid, status="live")
 
         assert proxy.vanished, "fixture precondition: the Point must be gone"
+        assert proxy.matching >= 2, (
+            "the aborted statement was never re-issued — the witness was never consulted")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -2228,6 +2241,8 @@ def test_the_derived_embedding_arm_refuses_a_reissue_that_lands_nothing(
             sdk.update_point(pid, content=f"revised {uuid.uuid4().hex}")
 
         assert proxy.vanished, "fixture precondition: the Point must be gone"
+        assert proxy.matching >= 2, (
+            "the aborted statement was never re-issued — the witness was never consulted")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -2256,6 +2271,8 @@ def test_the_corrects_edge_refuses_a_reissue_that_lands_nothing(
             sdk.invalidate_point(old, new)
 
         assert proxy.vanished, "fixture precondition: the old Point must be gone"
+        assert proxy.matching >= 2, (
+            "the aborted statement was never re-issued — the witness was never consulted")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
