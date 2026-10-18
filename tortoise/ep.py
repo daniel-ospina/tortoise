@@ -82,7 +82,12 @@ class EPSubgraphHopError(_ResponseError):
 
     This class carries the hop identity so the failure is *addressable*: a
     caller can bound the hop (smaller seeds / fewer hops), report which hop
-    was unaffordable, or retry that hop alone.
+    was unaffordable, or retry that hop alone. The attributes are delivered on
+    the exception an SDK caller catches; the MCP/HTTP wire path flattens
+    exceptions to a prose error payload (``mcp_server._safe``), so a hosted
+    caller still reads the hop out of the message until that channel gets a
+    structured arm (tracked on #6211), and the ``recovery`` sentence in the
+    message is written to be actionable on its own.
 
     COMPATIBILITY. It subclasses ``redis.exceptions.ResponseError`` (the
     exception the engine actually raised), so every existing
@@ -96,10 +101,12 @@ class EPSubgraphHopError(_ResponseError):
                        pattern, run once over the seeds BEFORE the loop — so
                        it is usually the first query that can die), and
                        ``1..max_hops`` are the loop's hops.
-        phase:         which half of the hop failed — ``"seed_neighbourhood"``
-                       (hop 0), ``"operator_bridge"`` (the operator-mediated
-                       two-hop pattern), or ``"direct_edge"`` (the
-                       operator-less IMPL|NAND hop).
+        phase:         which half of the hop failed — ``"seed_lookup"`` /
+                       ``"seed_operators"`` / ``"seed_direct_edge"`` /
+                       ``"seed_neighbourhood"`` (all hop 0: the seed phase).
+                       ``"operator_bridge"`` (the operator-mediated two-hop
+                       pattern) or ``"direct_edge"`` (the operator-less
+                       IMPL|NAND hop) for the BFS loop's hops.
         frontier_size: how many claim ids the failed hop was expanding FROM.
                        This is the quantity that drives the hop's cost, so it
                        is the number an operator needs to bound the pass.
@@ -1054,11 +1061,16 @@ class TortoiseEP:
             # A node carries exactly one epistemic label, so the first label
             # in EPISTEMIC_LABELS order that resolves wins — the same
             # stop-at-first result as the per-seed sweep.
-            rows = self.g.query(
+            # #6211: the whole SEED PHASE is hop 0 and is typed: these queries'
+            # operand is the caller's full seed set (2,073 ids in the issue's
+            # measurement), so they are the FIRST place a dense graph aborts on
+            # the engine's query timeout — before the BFS loop makes a hop.
+            rows = self._hop_query(
                 f"MATCH (n:{_label}) WHERE n.id IN $ids "
                 "RETURN n.id, (n.is_operator = true), n.status",
-                params={"ids": unresolved},
-            ).result_set
+                {"ids": unresolved}, hop=0,
+                phase="seed_lookup", frontier_size=len(unresolved),
+            )
             for sid, is_op, status in rows:
                 seed_meta[sid] = (_label, bool(is_op), status)
             unresolved = [s for s in unresolved if s not in seed_meta]
@@ -1083,12 +1095,13 @@ class TortoiseEP:
                 conds.append(live_c)
             if live_o:
                 conds.append(live_o)
-            rows = self.g.query(
+            rows = self._hop_query(
                 "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
                 "WHERE o.id IN $oids AND " + " AND ".join(conds) + " "
                 "RETURN DISTINCT c.id",
-                params={"oids": op_seeds},
-            ).result_set
+                {"oids": op_seeds}, hop=0,
+                phase="seed_operators", frontier_size=len(op_seeds),
+            )
             affected.update(r[0] for r in rows)
 
         for _label, group in plain_by_label.items():
@@ -1105,7 +1118,7 @@ class TortoiseEP:
                 conds.append(live_b)
             if live_a:
                 conds.append(live_a)
-            rows = self.g.query(
+            rows = self._hop_query(
                 f"MATCH (a:{_label})-[r:IMPL|NAND]-(b) "
                 "WHERE a.id IN $ids AND " + " AND ".join(conds) + " "
                 # #3139/#3154: index-independent non-operator predicate
@@ -1113,8 +1126,9 @@ class TortoiseEP:
                 "AND (b.is_operator IS NULL OR b.is_operator = false) "
                 "AND b.op_type IS NULL "
                 "RETURN DISTINCT b.id",
-                params={"ids": group},
-            ).result_set
+                {"ids": group}, hop=0,
+                phase="seed_direct_edge", frontier_size=len(group),
+            )
             affected.update(r[0] for r in rows)
             live_group = [
                 s for s in group

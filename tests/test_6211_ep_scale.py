@@ -27,10 +27,14 @@ the INJECTION here stands in for that engine reply, and everything downstream
 of it (which hop, which phase, which frontier size, how it composes with the
 BFS) is the real code path.
 
-Scale cost: ~2-4 s of graph build, ~15-25 s of EP. That is a merge-gate
-liability if the whole 33-minute suite paid it on every PR, so this file is
-registered in ``config/ci-surfaces.yml`` ``slow_files`` (the ``test-slow``
-leg) and named in the PR body.
+Scale cost (measured, whole file): ~10.4 s (graph build plus four EP passes),
+so this file runs in the FAST ``core``/``ep`` surfaces rather than the
+``test-slow`` leg — its ``durations`` row in ``config/ci-surfaces.yml``
+(11.0 s) is what keeps the shard balancer honest about it, and the file is
+named in the PR body so a reviewer knows the merge gate carries it. It is NOT
+in ``slow_files``: 10 seconds that prove both mechanisms on every PR is worth
+its 10 seconds, and moving it to the slow leg would take the #6211 regression
+guard out of the lane where #6211's code lands.
 """
 
 from __future__ import annotations

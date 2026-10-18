@@ -20855,26 +20855,39 @@ class TortoiseSDK:
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
-        FACTOR-SELECTION REPORT (#6211) — always present:
+        FACTOR-SELECTION REPORT (#6211) — on every result THIS method builds:
         ``truncated``, ``operators_seen``, ``operators_used``.
 
           * ``truncated`` — True when this result was computed over a REDUCED
             topology: the BFS operator selection hit its cap (``operators_used``
             < ``operators_seen``) OR the affected-claim expansion was cut short
-            by the #395 degeneration guard. False means the run consumed every
-            factor its selection found. A caller that must not rank on a partial
-            topology reads THIS, not ``converged``: before #6211 a capped pass
-            returned ``converged: true`` and nothing in the result said a cap
-            had been hit, so a confident number computed over a truncated
-            factor set was indistinguishable from a full-graph ranking.
+            by the #395 degeneration guard (the same condition that sets
+            ``diagnostic: "truncated"``). False means neither bound bit — the
+            selection was NOT capped. It is not a claim that every wired factor
+            voted: ``skipped_factors`` is the SEPARATE, additive record of
+            factors EP dropped before consuming them (#6105).
+            A caller that must not rank on a partial topology reads THIS, not
+            ``converged``: before #6211 a capped pass returned ``converged:
+            true`` and nothing in the result said a cap had been hit, so a
+            confident number computed over a truncated factor set was
+            indistinguishable from a full-graph ranking.
           * ``operators_seen`` — operators the selection COLLECTED.
-          * ``operators_used`` — operators the run actually consumed.
+          * ``operators_used`` — operators the selection RETURNED (the set the
+            run was seeded with). Two things can make the run consume fewer:
+            ``skipped_factors`` (#6105) and the direct-edge factor anchors the
+            anchors path adds as seeds.
 
         ``operators_seen > operators_used`` names the operator cap specifically
         (the default cap is 200 — the value is not re-stated here because a
         caller that owns a budget passes its own). Both are 0 on the no-arg
         dirty-root path, which selects NO operators (its only bound is the
         affected-claim guard, still reported through ``diagnostic``).
+
+        The report is on every RESULT this method builds. One transport sibling
+        builds its own dict and is therefore NOT covered: the MCP handler's
+        HTTP no-dirty-state short-circuit (``mcp_server``), which returns
+        ``diagnostic: "no_dirty_state_http"`` without the three keys — a caller
+        on the hosted surface must read that diagnostic first.
 
         Two diagnostics can accompany the result, both ABSENT when they do not
         apply: ``diagnostic`` — one of ``truncated`` (#395 degeneration guard),

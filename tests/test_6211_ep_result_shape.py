@@ -181,6 +181,37 @@ def test_the_selector_stats_out_parameter_is_opt_in():
         sdk.close()
 
 
+def test_the_selector_stats_describe_the_current_call_only():
+    """A REUSED stats dict must not leak an earlier call's truncation.
+
+    #6211 review round 1: deciding whether to write the final block by reading
+    the caller's dict back (``stats.get("truncated")``) let a dict that once
+    saw a cap SKIP that write, so a later UNCAPPED selection on the same dict
+    kept the earlier call's ``truncated: True`` and its numbers — a report that
+    describes a different call than the one the caller is asking about.
+    """
+    sdk = _fresh_sdk()
+    try:
+        anchor, _other = _hub(sdk, DEFAULT_OP_CAP + 5)
+        proj = sdk._get_proj()
+        stats: dict = {}
+        _bfs_select_operators(proj, [anchor], max_hops=1, op_cap=2, stats=stats)
+        assert stats["truncated"] is True, "precondition: the dict saw a cap"
+        assert stats["operators_seen"] == DEFAULT_OP_CAP + 5
+        ops, _anchors = _bfs_select_operators(
+            proj, [anchor], max_hops=1,
+            op_cap=DEFAULT_OP_CAP + 100, stats=stats)
+        assert len(ops) == DEFAULT_OP_CAP + 5
+        assert stats["truncated"] is False, (
+            "the report must describe THIS call; a stale truncated=True from "
+            f"the reused dict is wrong; got {stats!r}"
+        )
+        assert stats["operators_seen"] == DEFAULT_OP_CAP + 5
+        assert stats["operators_used"] == DEFAULT_OP_CAP + 5
+    finally:
+        sdk.close()
+
+
 # ── 2. The timed-out hop is TYPED ──────────────────────────────────
 
 #: A fragment unique to the operator-mediated bridge query in
@@ -308,6 +339,34 @@ def test_the_seed_neighbourhood_hop_is_typed_as_hop_zero():
             _ep_over(faulty)._affected_claims([anchor], 2)
         assert excinfo.value.hop == 0
         assert excinfo.value.phase == "seed_neighbourhood"
+        assert excinfo.value.frontier_size == 1
+    finally:
+        sdk.close()
+
+
+@pytest.mark.parametrize(("seed", "fragment", "phase"), [
+    ("c0", "RETURN n.id, (n.is_operator = true), n.status", "seed_lookup"),
+    ("op0", "RETURN DISTINCT c.id", "seed_operators"),
+    ("c0", "RETURN DISTINCT b.id", "seed_direct_edge"),
+])
+def test_every_seed_phase_query_is_typed_as_hop_zero(seed, fragment, phase):
+    """The WHOLE seed phase is hop 0, not just its two-hop neighbour query.
+
+    #6211 review round 1: the label-resolution sweep, the operator-seed
+    # expansion and the plain-seed direct-edge expansion each take the caller's
+    # seed set as their operand, so on the issue's dense graph they are the
+    # first queries that can exceed the engine's timeout — leaving them bare
+    # would have kept the old hop-less ``ResponseError`` on exactly the paths
+    # the issue measured.
+    """
+    sdk = _fresh_sdk()
+    try:
+        _hub(sdk, 2)
+        faulty = _FaultyGraph(sdk._get_proj().g, fragment, "Query timed out")
+        with pytest.raises(EPSubgraphHopError) as excinfo:
+            _ep_over(faulty)._affected_claims([seed], 2)
+        assert excinfo.value.hop == 0
+        assert excinfo.value.phase == phase
         assert excinfo.value.frontier_size == 1
     finally:
         sdk.close()
