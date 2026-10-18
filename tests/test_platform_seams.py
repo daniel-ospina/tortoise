@@ -1626,13 +1626,19 @@ def test_seam_matrix_pins_the_measured_gemini_contract():
     The model hook `BeforeModel` / `llm_request` is Gemini CLI's TOO — its own
     reference documents it (`BeforeModel` fires before sending a request, input
     `llm_request` {model, messages, config}), and
-    `platform-landscape.md:192-193` records it from the same primary page.
+    `platform-landscape.md:192-194` records it from the same primary page.
     Google ADK's `before_model_callback(callback_context, llm_request)` (#2125)
     independently uses that parameter NAME, and an earlier revision of this
     correction read the shared name as proof the seam was "another harness's" —
     the matrix now RECOMMENDS `BeforeAgent` (per-turn, no message rewriting)
     while recording that `BeforeModel` exists, and it may never do less: the
     denial is what a later lane would build against.
+
+    The sibling record `platform-landscape.md` is pinned too, and on the
+    RECOMMENDATION rather than on symbol presence: the two docs must both say
+    `BeforeAgent` is the per-turn seam it is (`BeforeModel` is per LLM call).
+    Presence alone is not agreement — the lines that carried the wrong
+    recommendation also contained both symbol names.
 
     Also retracted, and pinned here: the shared script's bare-text default. At
     Gemini CLI stdout is strict JSON, and a non-JSON emission is rendered as a
@@ -1646,9 +1652,17 @@ def test_seam_matrix_pins_the_measured_gemini_contract():
     assert "BeforeModel" in text and "llm_request" in text, (
         "the matrix must record Gemini CLI's model hook too — an earlier "
         "revision denied it exists, and that denial is what this pins against")
-    # The two records must AGREE. `platform-landscape.md` is the live sibling
-    # record (indexed at docs/00_index.md) and the correction names it, so a
-    # reader arriving from either side finds the same measurement.
+    # The two records must AGREE — and AGREEMENT IS THE RECOMMENDATION, not
+    # symbol presence. `platform-landscape.md` is the live sibling record
+    # (indexed at docs/00_index.md) and the correction names it, so a reader
+    # arriving from either side must find the same measurement. An earlier
+    # revision of this test asserted only that the sibling CONTAINS the two
+    # names, which passed on text that recommended the opposite seam (:47
+    # "`BeforeModel` … → per-turn injection", :111 "→ append pointer block …
+    # Real per-turn seam", :193, :239) — green guard, contradicting docs. The
+    # sibling's Gemini rows are corrected in this pass, and the pin is per
+    # LINE: no line may pair `BeforeModel` with a per-turn recommendation
+    # without naming `BeforeAgent` too.
     assert "platform-landscape.md" in text, (
         "the correction must reconcile with platform-landscape.md by NAME — "
         "otherwise a reader of :192-193 finds a matrix that contradicts it")
@@ -1656,6 +1670,23 @@ def test_seam_matrix_pins_the_measured_gemini_contract():
     assert "BeforeModel" in sibling and "llm_request" in sibling, (
         "platform-landscape.md still records BeforeModel/llm_request as "
         "Gemini CLI's — if THAT changed, re-measure both docs in one pass")
+    assert "BeforeAgent" in sibling, (
+        "platform-landscape.md must name Gemini CLI's per-turn seam too — the "
+        "matrix recommends `BeforeAgent` → `hookSpecificOutput.additionalContext`, "
+        "and a sibling doc that names only `BeforeModel` sends a lane arriving "
+        "from there to the wrong seam (the divergence #8963's review found)")
+    per_turn_seam = re.compile(
+        r"per-?turn|append pointer block|message mutation", re.IGNORECASE)
+    for line in sibling.splitlines():
+        if "BeforeModel" not in line or not per_turn_seam.search(line):
+            continue
+        assert "BeforeAgent" in line, (
+            "platform-landscape.md again presents `BeforeModel` as the per-turn "
+            "seam without naming `BeforeAgent`: `BeforeModel` fires per LLM "
+            "CALL and mutates `llm_request`; the per-TURN seam to register is "
+            "`BeforeAgent` → `hookSpecificOutput.additionalContext`. Both docs "
+            "must be fixed in one pass: "
+            f"{line.strip()[:200]!r}")
     # ...and no line may deny Gemini CLI owns that seam (the retracted reading).
     denial = re.compile(r"wrong harness|ADK['’]s object|not Gemini CLI",
                         re.IGNORECASE)

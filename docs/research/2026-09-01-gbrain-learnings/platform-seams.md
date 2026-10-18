@@ -109,14 +109,25 @@ claims were wrong.
 
 **Reconciliation with the sibling record.** This correction does not supersede
 `docs/research/2026-09-01-gbrain-learnings/platform-landscape.md` (`:47`, `:85`,
-`:111`, `:192-193`, `:239` — the live Gemini CLI record, most recently
-maintained by #8110): the two now say the SAME thing. Gemini CLI's `BeforeModel`
-hook takes `llm_request`, AND `BeforeAgent` is the per-turn seam to register,
-because `#2125`'s ADK callback independently names its own parameter
+`:111`, `:192-194`, `:239` — the live Gemini CLI record, most recently
+maintained by #8110): the two now say the SAME thing, **because the sibling's
+Gemini rows were corrected in this same pass (2026-10-18)**. Before that edit it
+recommended the seam this correction retracts — `:47` "`BeforeModel` … → per-turn
+injection", `:111` "mutable `llm_request.messages` → append pointer block … Real
+per-turn seam", `:193` "→ per-turn injection by mutating
+`llm_request.messages`", `:239` "`BeforeModel` message mutation" — so a reader
+arriving from the sibling doc still got the wrong seam. What both records now
+say: Gemini CLI's `BeforeModel` hook takes `llm_request` (per LLM CALL), AND
+`BeforeAgent` → `hookSpecificOutput.additionalContext` is the per-turn seam to
+register, because `#2125`'s ADK callback independently names its own parameter
 `llm_request`. An earlier draft of this row concluded from that shared
 parameter name that the seam belonged to a different harness; that reading was
-WRONG, is corrected in the row above, and is not carried forward. If either doc
-is re-measured and they diverge again, fix BOTH here in one pass.
+WRONG, is corrected in the row above, and is not carried forward. The agreement
+is pinned per LINE, not by symbol presence
+(`tests/test_platform_seams.py::test_seam_matrix_pins_the_measured_gemini_contract`)
+— symbol presence passes on the contradicting text, because the lines that
+carried the wrong recommendation also contained the two symbol names. If either
+doc is re-measured and they diverge again, fix BOTH here in one pass.
 
 Two facts a future Gemini adapter needs for its INGESTION half (measured
 2026-10-18 in `packages/core/src/services/chatRecordingService.ts` and
