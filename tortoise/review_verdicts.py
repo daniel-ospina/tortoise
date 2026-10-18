@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .env_truthy import env_flag
+from .live import LIFECYCLE_FANOUT_QUERY
 
 logger = logging.getLogger(__name__)
 
@@ -381,21 +382,124 @@ class VerdictLayer:
             review_key = "temporal_reviewed" if is_temporal else "dedup_reviewed"
             prior_review = props.get(review_key)
             prior_reviewed = props.get("reviewed")
+
+            def _promotion_landed() -> bool:
+                """Whether the promotion should be TREATED as landed.
+
+                ``promote_point`` answers ``already_live`` for a node that was
+                live BEFORE its CAS — it returns, it does not raise — so in the
+                cases this handler exists for, a raise with a live node is a
+                promotion that landed and whose tail then failed. EVERY step of
+                the landed tail can raise, and all of them leave the node live:
+                ``_mark_dirty`` (a retried write that can exhaust); the
+                post-CAS quarantine re-check's ``batch_status`` read; the
+                ``alreadyDecided`` wire, whose two graph reads are uncaught and
+                which also raises ``ValueError`` when the prior is deleted
+                between promote_point's own check and that call; the temporal
+                NAND/supersede block, which catches only ``ValueError``, so a
+                graph abort escapes; the incident-operator promote; and the
+                ``PointPromoted`` snapshot read (``get_point`` — the emit itself
+                is best-effort and does not raise). Rolling the review write
+                back there is the INVERSE of the #2354 limbo: the stamps are
+                erased from a promotion that LANDED, so the graph contradicts
+                its own journal (``DedupeRecorded`` records the merge, the node
+                says undecided). For a temporal candidate, ``sweep()`` selects on
+                the stamp and not on status — unlike ``list_dedup_candidates``,
+                which hides a live node — so it offers the candidate back as
+                though it had never been decided, and above the auto-accept bar
+                it re-issues ``keep``, whose ``approve_merge`` no longer
+                short-circuits (the stamp it compares against is the one just
+                erased) and so journals a SECOND ``DedupeRecorded`` for one
+                logical merge. A content candidate is re-surfaced by nothing
+                (``list_dedup_candidates`` wants a draft), so there the journal
+                is the only record that its merge ever happened. Re-issuing
+                ``keep`` by hand does eventually re-stamp either arm, so what is
+                lost is not the write but the record that it had already been
+                decided; that is why the rollback must be reserved for the raises
+                that really did not land.
+
+                The answer is deliberately CONSERVATIVE, not a proof: a live
+                node carrying the id may be a promotion under the same id that
+                is already live rather than this call's. Treating that as
+                landed is the safe direction because the rollback is itself
+                fan-out-wide (a bare ``MATCH … SET``), so guessing "not landed"
+                could erase the stamps of the node that DID land; a candidate
+                stranded by the wrong guess (this CAS did not land, a sibling
+                live) is recoverable by re-issuing ``keep``.
+
+                Scanned over the WHOLE id fan-out (#7822): point ids are not
+                unique, every lifecycle writer's bare ``MATCH … SET`` binds
+                every node carrying the id, and a verdict read off ``rows[0]``
+                is server-row-order dependent — here that would erase the stamp
+                of a landed promotion whenever a duplicate sibling happened to
+                be returned first. Only the literal ``status`` column is
+                consulted: the CAS writes ``status='live'`` and nothing else
+                that this asks about, so an ``is_operator``, ``outdated`` or
+                statusless sibling neither counts as landed nor is filtered
+                out of the scan.
+
+                An unreadable graph reads as landed: a rollback that cannot be
+                verified must not be risked against stamps that are correct,
+                and the limbo it would otherwise leave is recoverable by
+                re-issuing ``keep`` (``reviewDecision`` is unset, and
+                ``approve_merge`` is idempotent for a temporal candidate whose
+                stamp still matches — a content candidate re-stamps and
+                journals a further ``DedupeRecorded``) whereas a rollback erases
+                a record that a landed promotion had already paid for.
+                """
+                try:
+                    rows = self._proj.g.query(
+                        LIFECYCLE_FANOUT_QUERY,
+                        params={"id": candidate_id},
+                    ).result_set
+                    # Indexed, not unpacked: the shape is owned by a SHARED
+                    # constant that may grow a column, and an unpack error here
+                    # would replace the promote error this whole block exists
+                    # to preserve.
+                    return any(row[1] == "live" for row in rows)
+                except Exception:
+                    logger.warning(
+                        "review rollback skipped: could not read %r after a "
+                        "failed promote — leaving the review stamps in place",
+                        candidate_id, exc_info=True)
+                    return True
+
+            def _roll_back_review_write() -> None:
+                # Roll the review write back so the candidate is NOT left
+                # reviewed-but-unpromoted (#2354), then surface the failure.
+                # The ``DedupeRecorded`` emit inside approve_merge cannot be
+                # unjournaled — it remains an audit record of an attempt.
+                # Reached for a ``blocked`` answer (which never follows a
+                # landed CAS: ``not_draft`` means the CAS matched nothing,
+                # ``already_live`` answers blocked=False) and for a raise that
+                # did NOT land (an absent node, or a rebuild that exhausted
+                # its retries before the CAS) — ``_promotion_landed`` excludes
+                # the post-CAS raise, where the stamps are correct.
+                # A failed cleanup must never mask the failure it cleans up:
+                # the caller re-raises the ORIGINAL exception, so this only
+                # logs.
+                try:
+                    self._proj.g.query(
+                        f"MATCH (n:Point {{id:$id}}) "
+                        f"SET n.{review_key} = $prior, n.reviewed = $reviewed",
+                        params={"id": candidate_id, "prior": prior_review,
+                                "reviewed": prior_reviewed},
+                    )
+                except Exception:
+                    logger.warning(
+                        "review rollback FAILED for %r — the review stamps may "
+                        "be left applied (the #2354 limbo)", candidate_id,
+                        exc_info=True)
+
             self.sdk.approve_merge(candidate_id, action="merge")
-            applied = self.sdk.promote_point(candidate_id)
+            try:
+                applied = self.sdk.promote_point(candidate_id)
+            except Exception:
+                if not _promotion_landed():
+                    _roll_back_review_write()
+                raise
             if applied.get("blocked"):
-                # Lost the read-then-CAS race (a quarantine landed between the
-                # check above and promote_point's own). Roll the review write
-                # back so the candidate is NOT left reviewed-but-unpromoted,
-                # then surface the refusal. The ``DedupeRecorded`` emit inside
-                # approve_merge cannot be unjournaled — it remains an audit
-                # record of an attempted merge.
-                self._proj.g.query(
-                    f"MATCH (n:Point {{id:$id}}) "
-                    f"SET n.{review_key} = $prior, n.reviewed = $reviewed",
-                    params={"id": candidate_id, "prior": prior_review,
-                            "reviewed": prior_reviewed},
-                )
+                _roll_back_review_write()
                 raise ValueError(
                     f"candidate {candidate_id!r} could not be promoted: "
                     f"{applied.get('reason') or 'blocked'}")
