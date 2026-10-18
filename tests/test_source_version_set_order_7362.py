@@ -73,7 +73,13 @@ GH_URL = "https://github.com/test/repo/issues/42"
 #: A ``SET`` list may be introduced bare (``… SET …``) or per arm.
 _SET_OPEN = re.compile(r"\b(?:ON CREATE |ON MATCH )?SET\b")
 #: A clause keyword that ENDS the current ``SET`` list.
-_SET_CLOSE = re.compile(r"\b(?:RETURN|DELETE|REMOVE|WITH|ON CREATE|ON MATCH)\b")
+#: A clause keyword that ENDS the current ``SET`` list. Everything that can
+#: follow a ``SET`` in the same statement must be here, or the list body runs
+#: PAST the clause and a neighbouring clause's read is charged to the last SET
+#: item — a false positive (`SET s.b = 1 MERGE (t:Tag {name: s.b})`).
+_SET_CLOSE = re.compile(
+    r"\b(?:RETURN|DELETE|REMOVE|WITH|ON CREATE|ON MATCH|MERGE|CREATE|MATCH|"
+    r"WHERE|CALL|UNWIND|FOREACH|LIMIT|ORDER|SKIP|UNION)\b")
 
 
 class _RecordingGraph:
@@ -172,6 +178,17 @@ def _order_violations(statement: str) -> list[str]:
 #: a comparison inside another item's CASE (``s.x = ''``, ``s.x <> $v``) is never
 #: mistaken for an assignment.
 _ITEM_ASSIGN = re.compile(r"\s*s\.(\w+)\s*=(?!=)")
+#: A map update — ``SET s = s {.*, title: $t}`` — assigns EVERY property, so it
+#: must be recorded as such or every later read of any property is missed.
+_ITEM_MAP_ASSIGN = re.compile(r"\s*s\s*=\s*s\s*\{")
+#: Quoted spans, stripped before the read scan: a property name inside a string
+#: literal (``s.b = 's.a'``) is text, not a read.
+_STR_LIT = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def _strip_literals(text: str) -> str:
+    """Blank out quoted spans so their contents are never scanned as reads."""
+    return _STR_LIT.sub("''", text)
 
 
 def _same_clause_violations(
@@ -196,19 +213,26 @@ def _same_clause_violations(
     for keyword, body in _set_lists(statement):
         items = _set_items(body)
         written: dict[str, int] = {}
-        for i, (_s, _e, text) in enumerate(items):
+        wildcard: int | None = None
+        for i, (_s, _e, raw) in enumerate(items):
+            text = _strip_literals(raw)
             assign = _ITEM_ASSIGN.match(text)
+            if _ITEM_MAP_ASSIGN.match(text):
+                # `s = s {.*, title: $t}` writes every property, so any later
+                # read of any `s.<p>` is a read-after-write.
+                wildcard = i if wildcard is None else wildcard
             for read in re.finditer(r"\bs\.(\w+)\b", text):
                 prop = read.group(1)
                 if only is not None and prop != only:
                     continue
                 if assign and assign.group(1) == prop:
                     continue  # its own right-hand side: pre-write on both engines
-                if prop not in written:
+                if prop not in written and wildcard is None:
                     continue
+                wrote_at = written.get(prop, wildcard)
                 violations.append(
                     f"{keyword}: item {i} of the SET list READS `s.{prop}` AFTER "
-                    f"item {written[prop]} WROTE it — on a left-to-right engine "
+                    f"item {wrote_at} WROTE it — on a left-to-right engine "
                     f"(falkordb 6.x, the production backend) that read sees the "
                     f"value the same clause just installed, so its guarded "
                     f"branch never fires."
@@ -488,3 +512,43 @@ def test_the_capability_probe_agrees_with_the_engine_it_measures(proj):
     direct = (SET_ORDER_LEFT_TO_RIGHT if raw and raw[0][0] == 1
               else SET_ORDER_PRE_WRITE)
     assert _probe_set_order(proj) == direct
+
+
+# ── the detector's own edges (review round 4, each demonstrated) ────
+
+def test_the_detector_does_not_charge_a_neighbouring_clause_to_a_set_item():
+    """A clause AFTER the SET list is not part of it.
+
+    Without `MERGE`/`MATCH`/`CREATE`/… in `_SET_CLOSE` the list body ran past the
+    clause, so a read in `MERGE (t:Tag {name: s.b})` was charged to the last SET
+    item — a FALSE POSITIVE that would red a correct writer, which is how a guard
+    gets deleted.
+    """
+    assert _same_clause_violations(
+        "MATCH (s:Source) SET s.b = $b, s.a = 1 MERGE (t:Tag {name: s.b})"
+    ) == []
+
+
+def test_the_detector_treats_a_map_update_as_writing_every_property():
+    """`SET s = s {.*, title: $t}` writes ALL properties — a later read is a hit.
+
+    A property-by-property matcher records nothing for a map update, so a writer
+    that used one and then read a property it had just merged in was silently
+    clean.
+    """
+    violations = _same_clause_violations(
+        "MERGE (s:Source {url:$u}) SET s = s {.*, title: $t}, "
+        "s._searchText = coalesce($st, s.title)"
+    )
+    assert len(violations) == 1, violations
+
+
+def test_the_detector_ignores_a_property_name_inside_a_string_literal():
+    """`s.b = 's.a'` is text, not a read of `s.a`."""
+    assert _same_clause_violations(
+        "MERGE (s:Source {url:$u}) SET s.a = 1, s.b = 's.a'"
+    ) == []
+    # …and a REAL read in the same item is still caught.
+    assert len(_same_clause_violations(
+        "MERGE (s:Source {url:$u}) SET s.a = 1, s.b = 'x', s.c = s.a"
+    )) == 1
