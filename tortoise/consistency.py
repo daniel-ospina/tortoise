@@ -2829,6 +2829,23 @@ def check_consistency(log_path: str, projection, *,
     }
 
 
+def _corrupt_skip_note(n: int) -> str:
+    """The one sentence that reports a replay which salvaged over damage (#5612).
+
+    ONE home for the wording, because ``recover_from_log`` reaches its result
+    by three routes (replay, pending snapshot, refusal) and a salvaged replay
+    reported as clean on one of them is the silent partial loss this clause
+    exists to prevent. It is a pure function so the sentence is pinned without
+    a live store.
+    """
+    if not n:
+        return ""
+    lost = ("the record it carried is" if n == 1
+            else "the records they carried are")
+    return (f" ({n} corrupt mid-file line(s) SKIPPED — {lost} NOT in this "
+            f"graph, #5612)")
+
+
 @tolerates_altered_numbers
 def recover_from_log(events_dir: str, projection) -> dict:
     """Rebuild a projection from a JSONL event-log dir when its graph was lost.
@@ -2879,8 +2896,10 @@ def recover_from_log(events_dir: str, projection) -> dict:
         direction the tolerance was written for; when the dropped record is a
         removal/terminal one, dropping it would RESURRECT the state it
         removed, so the replay is refused before any event is applied
-        (#3316). Mid-file corruption is refused for the same reason
-        (``EventLog.read_all`` raises there). The ONE deliberate exception is
+        (#3316). Mid-file damage is refused for the same reason — the read
+        SALVAGES it (#5612: skipped, counted, logged) and the #3316 classifier
+        refuses the replay, so the refusal happens in the same place, over the
+        same verdict, and the count is reported. The ONE deliberate exception is
         a PROGRAMMING error in this engine's own wiring: if the projection's
         ``apply_journal_point_restamp`` cannot accept the required
         ``hard_deleted=`` context, this raises ``_RestampSignatureError``
@@ -3151,6 +3170,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
             nodes = int(counts.get("nodes") or 0)
             events = int(counts.get("events") or 0)
             edges = int(counts.get("edges") or 0)
+            # #5612 review (P2): the lines `rebuild_all`'s salvage read had to
+            # skip. Carried into `reason` below — this route is a WIPE+REPLAY
+            # the caller believes succeeded, so a dropped record must not be
+            # visible only in a log line.
+            rebuilt_corrupt = int(counts.get("corrupt_lines") or 0)
         except WipePreconditionRefused as e:
             # #3044: nothing was wiped, so there is nothing to roll back — and
             # a rollback would BE the destruction this refusal exists to
@@ -3240,6 +3264,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
                   "db_points": nodes,
                   "reason": ("rebuilt from the pending pre-wipe snapshot "
                              f"(#2943): {nodes} nodes, {edges} edges")}
+        result["reason"] += _corrupt_skip_note(rebuilt_corrupt)
         if onboarding_gap:
             result["onboarding_gap"] = onboarding_gap
             # Additive, not a chain: a confirmed partial loss and a
@@ -3310,10 +3335,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
 
     # Parse the single log. THE SHARED READER, so this engine cannot diverge
     # from the others: a torn TRAILING line is skipped + counted, and a
-    # malformed MID-FILE line raises (EventLog.read_all's contract) instead of
-    # being dropped one-by-one as a local `except: torn += 1` loop did — that
-    # loop silently discarded corruption ANYWHERE in the file, not just the
-    # torn tail.
+    # malformed MID-FILE line is skipped + counted + CLASSIFIED by the salvage
+    # read (#5612) and refused by the #3316 refusal below when its loss could
+    # revive state — instead of being dropped one-by-one as a local
+    # `except: torn += 1` loop did. That loop discarded corruption ANYWHERE in
+    # the file with no count, no classification and no report; here the skip is
+    # counted (`corrupt_line_count`), classified, and named in `reason`.
     log_path = os.path.join(events_dir, files[0])
     from tortoise.log import (
         EventLog,
@@ -3644,9 +3671,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # line replayed the records around it, so the recovery SUCCEEDED over a
         # journal it could only partly read — the one thing an operator must
         # not have to infer from silence.
-        extra += (f" ({corrupt} corrupt mid-file line(s) SKIPPED — the record "
-                  f"{'it' if corrupt == 1 else 's'} could not be parsed and "
-                  f"{'is' if corrupt == 1 else 'are'} NOT in this graph)")
+        extra += _corrupt_skip_note(corrupt)
     if refused:
         extra += f" ({refused} refused by the numeric domain)"
     if identity_skipped:

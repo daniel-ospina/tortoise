@@ -44,7 +44,12 @@ from pathlib import Path
 
 import pytest
 
-from tortoise.log import SEAL_SENTINEL, EventLog, TornTailResurrectionError
+from tortoise.log import (
+    SEAL_SENTINEL,
+    EventLog,
+    TornTailResurrectionError,
+    read_for_replay,
+)
 from tortoise.projection import InMemoryProjection
 
 THREADS = 12
@@ -278,3 +283,88 @@ def test_recover_from_log_names_the_skipped_count_in_its_refusal(tmp_path: Path)
     assert result["recovered"] is False, result
     assert "1 mid-file line(s) skipped by the salvage read" in result["reason"], (
         result["reason"])
+
+
+class _Result:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _SyntheticStore:
+    """The four calls ``recover_from_log`` makes on the success route.
+
+    `recover_from_log` counts nodes (`query`) and folds each record (`apply`);
+    nothing else on this route is store-specific, so a stand-in is faithful
+    (and keeps this file hermetic — no FalkorDB, no Docker lane).
+    """
+
+    def __init__(self):
+        self.nodes = 0
+        self.applied: list[dict] = []
+
+    def query(self, _cypher, params=None):
+        return _Result([[self.nodes]])
+
+    def apply(self, event):
+        self.applied.append(event)
+        if event.get("type") in ("PointAdded", "OperatorAdded"):
+            self.nodes += 1
+
+
+def test_a_successful_recovery_reports_the_skip_it_salvaged_over(tmp_path: Path):
+    """`recovered: True` must not read as clean when a line was skipped.
+
+    This is the branch an operator (and `_auto_health_recover`) reads as "the
+    rebuild is fine": a salvage read that dropped a record and then replayed
+    the survivors has to say so there, not only in a log line.
+    """
+    from tortoise.consistency import _corrupt_skip_note, recover_from_log
+
+    log_dir = tmp_path / "journals"
+    log_dir.mkdir()
+    _damaged_mid_file_journal(log_dir / "graph.jsonl", "PointAdded")
+
+    store = _SyntheticStore()
+    result = recover_from_log(str(log_dir), store)
+    assert result["recovered"] is True, result
+    assert result["log_points"] == 2, result
+    assert [e["point"]["id"] for e in store.applied] == ["before", "after"]
+    assert "1 corrupt mid-file line(s) SKIPPED" in result["reason"], result["reason"]
+    assert "NOT in this graph" in result["reason"], result["reason"]
+
+    # The sentence itself, in both shapes: one broken line reads as "the record
+    # it carried", several as "the records they carried", and none is silent.
+    assert _corrupt_skip_note(0) == ""
+    assert "the record it carried is NOT" in _corrupt_skip_note(1)
+    assert "the records they carried are NOT" in _corrupt_skip_note(3)
+
+
+def test_read_for_replay_keeps_working_for_a_log_without_the_keyword(tmp_path: Path):
+    """The capability is PROBED, not assumed (#5612 review).
+
+    A replay engine also accepts synthetic log objects — a projection stub in
+    the tests, a registry-only log — that only have `read_all()`. They must
+    keep being read (strict), not raise `TypeError`, and a `**kwargs` reader
+    must still receive `salvage=True`.
+    """
+
+    class _PreKeywordLog:
+        def read_all(self):
+            return [{"type": "PointAdded", "point": {"id": "stub"}}]
+
+    assert read_for_replay(_PreKeywordLog()) == [
+        {"type": "PointAdded", "point": {"id": "stub"}}]
+
+    class _VarKeywordLog:
+        def read_all(self, **kwargs):
+            return [{"salvage": kwargs.get("salvage")}]
+
+    assert read_for_replay(_VarKeywordLog()) == [{"salvage": True}]
+
+    # And a real EventLog goes down the SALVAGE route through the same helper:
+    # a damaged mid-file line is skipped here, not raised.
+    log = EventLog(_damaged_mid_file_journal(tmp_path / "graph.jsonl",
+                                             "PointAdded"))
+    records = read_for_replay(log)
+    assert [r["point"]["id"] for r in records] == ["before", "after"]
+    assert log.corrupt_line_count == 1

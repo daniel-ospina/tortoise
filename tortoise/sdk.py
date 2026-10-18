@@ -11240,8 +11240,10 @@ class TortoiseSDK:
         returning when the §17.1 outbox refuses the destruction: either the
         `EntityMutated` op=delete record could not be CONFIRMED (the `DETACH
         DELETE` was then NOT issued — the record may still have landed, since a
-        buffered append can write and then raise, so the refusal reports the
-        record as unconfirmed, never as absent), or the record WAS committed and
+        journal append can write and then raise (a partial `write(2)` stopped by
+        ENOSPC/EIO, or a write whose close failed; #5612 removed the buffered
+        flush), so the refusal reports the record as unconfirmed, never as
+        absent), or the record WAS committed and
         the cache delete failed (``record_committed=True`` — treat the delete as
         COMMITTED and do not re-issue it blindly, a replay heals the cache). A
         no-op id still returns ``False``; ``True`` still means the node was

@@ -41,9 +41,11 @@ import errno
 import inspect
 import io
 import json
+import logging
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 try:                      # advisory locking is POSIX-only; Windows has none
@@ -533,8 +535,23 @@ def _classifier_text(raw: bytes) -> str:
 #    lines over 27,000 appends (~3.5%) at 8 KiB records, rising with the record
 #    size (~7% at 20 KiB) — the same window that can strand a fragment. Zero
 #    with the lock.
+#
+# ``_APPEND_LOCKS`` is bounded by the number of DISTINCT journals this process
+# appends to (at most the live graphs), and is deliberately never pruned: a lock
+# a waiter already holds a reference to cannot be identified from the map, so
+# evicting one could hand two threads two different locks for one path and
+# silently drop the serialisation this block exists for.
 _APPEND_LOCKS: dict[str, threading.Lock] = {}
 _APPEND_LOCKS_GUARD = threading.Lock()
+# BOUNDED cross-process wait. A peer that holds the lock and is wedged (SIGSTOP,
+# a hung network mount) must not park a hosted capture worker forever — the same
+# reason ``tortoise/index_lock.py`` takes ``LOCK_NB`` and attributes its holder.
+# On timeout the append PROCEEDS on the single-write ``O_APPEND`` guarantee
+# (which still holds for a regular file on a local filesystem) and says so at
+# WARNING: a stall must not silently become an outage, and a timeout must not
+# silently become a lost record.
+_FLOCK_TIMEOUT_S = 5.0
+_FLOCK_POLL_S = 0.001
 # The write seam: one attribute, so a test can pin "exactly one write(2) per
 # record" without patching the global ``os`` module out from under the
 # interpreter.
@@ -562,7 +579,7 @@ def _append_lock(path: Path) -> threading.Lock:
         return lock
 
 
-def _lock_exclusive(fd: int) -> None:
+def _lock_exclusive(fd: int, path) -> None:
     """Serialise the append against OTHER PROCESSES, where the OS can.
 
     ``flock`` on the journal fd itself (released by ``os.close``). Two fds on
@@ -570,15 +587,34 @@ def _lock_exclusive(fd: int) -> None:
     fork; :func:`_append_lock` covers the threads. A filesystem without
     advisory locks is not an error — the single-``write`` ``O_APPEND``
     guarantee still holds there.
+
+    The wait is BOUNDED (``_FLOCK_TIMEOUT_S``) and non-blocking-polled, because
+    an unbounded ``LOCK_EX`` lets one wedged peer park every appender to that
+    journal with nothing distinguishing the stall from a slow disk. On timeout
+    the append proceeds on the write-side guarantee and logs a WARNING.
     """
     if fcntl is None:                  # pragma: no cover - platform branch
         return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    except OSError as exc:
-        if exc.errno in _FLOCK_UNSUPPORTED:
+    deadline = time.monotonic() + _FLOCK_TIMEOUT_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
-        raise
+        except OSError as exc:
+            if exc.errno in _FLOCK_UNSUPPORTED:
+                return
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            now = time.monotonic()
+            if now >= deadline:
+                logging.getLogger(__name__).warning(
+                    "EventLog %s: another process held the append lock for "
+                    "%.1fs — proceeding WITHOUT it on the single-write "
+                    "O_APPEND guarantee (a regular file on a local "
+                    "filesystem still cannot interleave within one write)",
+                    path, _FLOCK_TIMEOUT_S)
+                return
+            time.sleep(min(_FLOCK_POLL_S, max(0.0, deadline - now)))
 
 
 def _write_record(fd: int, payload: bytes) -> None:
@@ -667,7 +703,7 @@ class EventLog:
         # one ``os.write`` below is one ``write(2)`` regardless of CPython's
         # buffering rules or the record's size.
         with _append_lock(self.path), io.FileIO(self.path, mode="a+b") as f:
-            _lock_exclusive(f.fileno())
+            _lock_exclusive(f.fileno(), self.path)
             seal = self._seal_prefix(f)
             _write_record(f.fileno(), (seal + record).encode("utf-8"))
 

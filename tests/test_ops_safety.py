@@ -635,6 +635,37 @@ def test_inmemory_rebuild_refuses_a_torn_removal_tail():
     assert "kept-1" in proj2.points, "a harmless torn tail must still replay"
 
 
+def test_rebuild_all_reports_the_lines_its_salvage_read_skipped():
+    """#5612: a wipe+replay that dropped a record must SAY so in its counts.
+
+    ``rebuild_all`` is the flagship recovery tool (the ``tortoise rebuild``
+    CLI, ``recover_from_log``'s pending-snapshot branch and the hosted
+    auto-recovery all route through it). Its journal read is a salvage read, so
+    one damaged mid-file line no longer refuses the rebuild — which means the
+    graph it produces can be missing records the journal held. Before the
+    #5612 review the tally was thrown away and the result reported a bare
+    event count, so the loss was visible only in a log line.
+    """
+    tmp = _mk_tmp()
+    events_dir = os.path.join(tmp, "journals")
+    os.makedirs(events_dir, exist_ok=True)
+    _write_journal(
+        os.path.join(events_dir, "graph.jsonl"),
+        _point_added("before-1"),
+        '{"type": "PointAdded", "point": {"id": "damaged"',   # mid-file damage
+        _point_added("after-1"),
+    )
+    db_path = os.path.join(tmp, "salvage_report.db")
+    proj = FalkorProjection(db_path)
+    try:
+        counts = proj.rebuild_all(events_dir, confirm_destructive=True)
+    finally:
+        proj.close()
+    assert counts["events"] == 2, counts          # both survivors replayed
+    assert counts["corrupt_lines"] == 1, counts   # and the loss is COUNTED
+    assert counts["torn_lines"] == 0, counts
+
+
 def test_recover_from_log_refuses_mid_file_corruption():
     """The reader swap in ``recover_from_log``: a malformed MID-FILE line is
     refused (the old local loop dropped any malformed line anywhere), and the

@@ -83,6 +83,16 @@ def _cmd_rebuild(args):
         # rebuild_all() elsewhere cannot wipe a graph by forgetting it.
         counts = proj.rebuild_all(args.dir, confirm_destructive=True)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
+        # #5612: the rebuild SALVAGES a damaged mid-file line (so one bad line
+        # cannot make this tool refuse forever), which means the graph it just
+        # produced may be missing records the journal held. Say so — the count
+        # is read from the same result the numbers above came from, never
+        # inferred from silence.
+        _corrupt = int(counts.get("corrupt_lines") or 0)
+        if _corrupt:
+            print(f"Warning: {_corrupt} corrupt mid-file journal line(s) "
+                  f"SKIPPED — the records they carried are NOT in this graph "
+                  f"(#5612)", file=sys.stderr)
         # #2814: the operator surface for the config third state. Without this a
         # SUCCESSFUL rebuild that staged the `config_reset` marker would print
         # `Done:` and say nothing — the marker would be written and never

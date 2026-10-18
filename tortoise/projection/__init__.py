@@ -9693,6 +9693,13 @@ class FalkorProjection(
         # the same-source-file chronology key the pass-1b content boundary
         # needs (see ``event_source`` at the assembly below).
         journal_source: list[int] = []
+        # #5612 review (P2): the lines the salvage read had to SKIP, tallied
+        # here and returned with the counts. A wipe+replay that dropped records
+        # must not report a bare "N events" — the loss would be visible only in
+        # a log line, never in the result an operator or `recover_from_log`
+        # reads (#8702/#7174's defect class, at the parse seam this time).
+        corrupt_lines = 0
+        torn_lines = 0
         for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
                 file_log = EventLog(os.path.join(log_dir, fname))
@@ -9702,6 +9709,8 @@ class FalkorProjection(
                 # #3316 refusal below still fires when their loss could revive
                 # removed state — before the wipe, as before.
                 chunk = read_for_replay(file_log)
+                corrupt_lines += getattr(file_log, "corrupt_line_count", 0)
+                torn_lines += getattr(file_log, "torn_trailing_count", 0)
                 # #3316: same refusal as `rebuild`/`recover_from_log`, before
                 # the wipe below.
                 _refuse_revival_torn_tail(
@@ -13390,6 +13399,14 @@ class FalkorProjection(
         # above is what makes the returned counts trustworthy: reaching this
         # line means every pre-wipe episodic Point was recreatable.
         return {"events": len(events), "nodes": node_count, "edges": edge_count,
+                # #5612 review (P2): additive, and NOT folded into `events` —
+                # `events` is what the replay APPLIED. `corrupt_lines` are
+                # mid-file journal lines the salvage read skipped (unknown
+                # damage); `torn_lines` are tolerated torn trailing fragments
+                # (crash damage). Either being non-zero means this rebuilt
+                # graph is missing records the journal once held.
+                "corrupt_lines": corrupt_lines,
+                "torn_lines": torn_lines,
                 # #2814: additive. `config_expected`/`config_restored` are
                 # COUNTS of (label, identity) pairs (the staged marker is in
                 # neither); `config_reset` is a BOOL — named distinctly from
