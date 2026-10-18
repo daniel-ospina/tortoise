@@ -658,16 +658,22 @@ def test_idempotent_remitigation_dirties_the_operator():
     """#5566 review (P2) — a re-mitigation must reach downstream confidence.
 
     `mitigate_operator`'s idempotent UPDATE branch marked only the mitigation
-    dirty (`_mark_dirty([mid])`); its CREATE branch marks the pair
-    (`_mark_dirty([mid, id])`). The mitigation edge runs `(mit)-[:IMPL]->(op)`
+    dirty (`_mark_dirty([mid])`); its CREATE branch marked the pair
+    (`_mark_dirty([mid, id])`) — as of #7505 BOTH branches mark `[mid]` only.
+    The mitigation edge runs `(mit)-[:IMPL]->(op)`
     while `_reverse_bfs_neighbors` matches `(op:Point {is_operator:true})
-    -[:IMPL|NAND]->(p)`, so the mitigation alone reaches no operator and no
-    claim. With the #5566 hop now factor-filtered, a changed strength would
-    never enter a run. In-process the operator's own creation-time `ep_dirty`
-    flag masks it; `ep_dirty` is deliberately NOT journaled (#5166), so a
-    rebuilt/replayed graph has no mask. This test clears every trace of the
-    creation-time marking before the update — the state a fresh process
-    hydrates — and asserts the pass is not a no-op.
+    -[:IMPL|NAND]->(p)`, so BEFORE #6599 the mitigation alone reached no
+    operator and no claim. With the #5566 hop now factor-filtered, a changed
+    strength would never enter a run. In-process the operator's own
+    creation-time `ep_dirty` flag masks it; `ep_dirty` is deliberately NOT
+    journaled (#5166), so a rebuilt/replayed graph has no mask. This test
+    clears every trace of the creation-time marking before the update — the
+    state a fresh process hydrates — and asserts the pass is not a no-op.
+
+    #7505: the mark that carries the re-mitigation is now `[mid]` alone, and
+    `mid` reaches the operator's inputs through #6599's back-link branch. So
+    this pins BOTH halves: the two claims are the roots, and the strength
+    still moves downstream confidence — the outcome the write exists for.
     """
     with _fresh_sdk() as sdk:
         src = _make_claim(sdk, "source")
@@ -687,19 +693,27 @@ def test_idempotent_remitigation_dirties_the_operator():
         assert sdk.compute_confidence()["diagnostic"] == "no_dirty_roots"
         # The idempotent UPDATE path: a stronger mitigation on the same operator.
         sdk.mitigate_operator(op["id"], "major counter-evidence", strength=0.5)
-        assert op["id"] in sdk._dirty_roots, (
-            "the OPERATOR is the dirty root: EP reads the changed strength off "
-            "its factor, and only a seeded operator pulls its inputs in")
+        # #7505: the roots are the operator's INPUTS (which is what seeds its
+        # factor), not the operator — an operator root is not sweepable, so
+        # marking it would strand `_auto_dream_mode()` on 'local' forever.
+        assert src["id"] in sdk._dirty_roots
+        assert claim["id"] in sdk._dirty_roots
+        assert op["id"] not in sdk._dirty_roots, (
+            "#7505: a mitigation write must not mint an unsweepable operator "
+            "root — the operator's INPUTS carry the re-mitigation")
         strong = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
         assert strong < weak, (
             "a stronger re-mitigation must lower the downstream claim's "
             f"confidence: weak(0.10)={weak:.4f}, strong(0.50)={strong:.4f}")
         # The coverage denominator (`_window_closure`) must not under-count a
-        # window that contains an OPERATOR — the dirty-root state a mitigation
-        # write produces. EP seeded at the operator reaches that operator's
-        # inputs, so they belong in the closure; without the operator-seed
-        # branch `reachable` is smaller than `affected` and coverage exceeds
-        # 1.0 (measured 2.0 on this fixture's shape).
+        # window that contains an OPERATOR. #7505: a mitigation write no longer
+        # makes the operator a dirty root, but an operator root is still
+        # REACHABLE (`update_point(op)` marks one), so this synthetic window
+        # keeps the operator-seed branch pinned. EP seeded at the operator
+        # reaches that operator's inputs, so they belong in the closure;
+        # without the operator-seed branch `reachable` is smaller than
+        # `affected` and coverage exceeds 1.0 (measured 2.0 on this fixture's
+        # shape).
         window = [mit["id"], op["id"]]
         reachable = sdk._window_closure(window, max_hops=2)
         affected = sdk._get_ep()._affected_claims(window, max_hops=2)
