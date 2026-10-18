@@ -53,9 +53,13 @@ Two verbs against ONE declaration (``tortoise/cost_dimensions.py``):
     4. **no undeclared dimension** — every org-attributed prometheus child in
        ``tortoise/monitoring.py`` must be declared, and no OTHER tracked module
        may construct a prometheus metric without declaring it (detected from the
-       callee's IMPORT provenance, so an aliased constructor and a ``name=``
-       keyword construction are both visible). A seventh counter added in a hurry
-       is the failure mode #5045 exists to end.
+       callee's IMPORT provenance — package- and submodule-level, aliased or
+       bare — so an aliased constructor, a ``name=`` keyword construction and
+       ``from prometheus_client.metrics import Counter`` are all visible).
+       ``tests/``, ``tools/``, ``battery/``, ``graph-scripts/`` and ``docs/`` are
+       excluded as developer/eval surfaces, so the claim is about PRODUCTION
+       modules. A seventh counter added in a hurry is the failure mode #5045
+       exists to end.
     5. **cardinality** — each declared cap/overflow attribute resolves to a live
        int/str, on BOTH axes (the per-org cap/overflow and the route-class
        ``path_caps``/``path_overflow`` that carries its own ``__unrouted__``
@@ -990,6 +994,21 @@ def foreign_metric_findings(root: Path) -> list[str]:
 #: The prometheus metric constructors this repo's surface is built from.
 _PROMETHEUS_TYPES = frozenset({"Counter", "Gauge", "Histogram", "Summary"})
 
+#: The package the constructors come from. Matched as a PREFIX, never by equality:
+#: ``prometheus_client`` re-exports these names from ``prometheus_client.metrics``,
+#: so the submodule spelling is the one a reader copies out of the package's own
+#: source — and an exact match bound nothing for it, making
+#: :func:`foreign_metric_findings` report clean over a metric built outside
+#: ``monitoring.py`` (a false PASS in the check #5045 exists to make).
+_PROMETHEUS_MODULE = "prometheus_client"
+
+
+def _is_prometheus_module(name: str | None) -> bool:
+    """Is *name* the prometheus package or one of its submodules?"""
+    return bool(name) and (
+        name == _PROMETHEUS_MODULE
+        or name.startswith(_PROMETHEUS_MODULE + "."))
+
 
 def _prometheus_handles(tree: ast.Module) -> tuple[frozenset[str], frozenset[str]]:
     """The names *tree* binds to prometheus constructors / the module itself.
@@ -1000,19 +1019,42 @@ def _prometheus_handles(tree: ast.Module) -> tuple[frozenset[str], frozenset[str
     both directions: an aliased constructor is still caught, while
     ``collections.Counter(...)`` — ordinary tally code used all over this repo — is
     not, whatever its arguments look like.
+
+    Both the package and its SUBMODULE spellings bind a handle: ``from
+    prometheus_client.metrics import Counter``, ``import prometheus_client.metrics
+    as pm`` and ``from prometheus_client import metrics as m`` are the same
+    construction as the package-level form, and prometheus_client's own
+    ``__init__`` re-exports through ``.metrics``, so they are realistic copies
+    rather than contrived ones. Every form is keyed on the name it BINDS (the
+    leading component for a bare ``import a.b``, which is what Python binds).
     """
     constructors: set[str] = set()
     modules: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "prometheus_client":
+        if isinstance(node, ast.ImportFrom) and _is_prometheus_module(node.module):
             for alias in node.names:
                 if alias.name in _PROMETHEUS_TYPES:
                     constructors.add(alias.asname or alias.name)
+                else:
+                    # A non-constructor name from the package is a handle to a
+                    # submodule (`from prometheus_client import metrics as m`),
+                    # so `m.Counter(...)` resolves through the module arm.
+                    modules.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "prometheus_client":
-                    modules.add(alias.asname or alias.name)
+                if _is_prometheus_module(alias.name):
+                    # `import prometheus_client.metrics as pm` binds `pm`; the
+                    # bare `import a.b` form binds only `a`, so the root is what
+                    # a later `prometheus_client.metrics.Counter` walks from.
+                    modules.add(alias.asname or alias.name.split(".")[0])
     return frozenset(constructors), frozenset(modules)
+
+
+def _prometheus_root_name(node: ast.expr) -> str | None:
+    """The leading ``Name`` of an attribute chain (``a.b.c`` -> ``a``)."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
 
 
 def _looks_like_prometheus(node: ast.Call, constructors: frozenset[str] = frozenset(
@@ -1027,6 +1069,11 @@ def _looks_like_prometheus(node: ast.Call, constructors: frozenset[str] = frozen
     check cannot see an aliased import (``_C("tortoise_x_total", …)``) and cannot
     see a ``name=`` keyword construction (``Counter(name="tortoise_x_total",
     documentation=…)``), while an any-identifier check reds on honest tallies.
+
+    The module-qualified arm walks the attribute chain to its ROOT, so the nested
+    submodule spelling (``pc.metrics.Counter(...)``) resolves to the same handle as
+    ``pc.Counter(...)``; ``collections.Counter`` still does not, because only
+    prometheus-derived roots are in *modules*.
     """
     func = node.func
     if isinstance(func, ast.Name) and func.id in constructors:
@@ -1034,8 +1081,7 @@ def _looks_like_prometheus(node: ast.Call, constructors: frozenset[str] = frozen
     return (
         isinstance(func, ast.Attribute)
         and func.attr in _PROMETHEUS_TYPES
-        and isinstance(func.value, ast.Name)
-        and func.value.id in modules
+        and _prometheus_root_name(func.value) in modules
     )
 
 

@@ -211,6 +211,85 @@ def test_an_aliased_prometheus_constructor_is_still_caught(tmp_path):
     assert "aliased.py" in findings[0]
 
 
+def test_a_SUBMODULE_imported_prometheus_constructor_is_still_caught(tmp_path):
+    """MUTATION: the SUBMODULE spellings of the import must not be a bypass.
+
+    ``prometheus_client`` itself re-exports ``Counter``/``Gauge``/… from
+    ``prometheus_client.metrics``, so ``from prometheus_client.metrics import
+    Counter`` is the spelling a reader copies out of the package's own source.
+    ``_prometheus_handles`` matched the module name EXACTLY (``node.module ==
+    "prometheus_client"`` / ``alias.name == "prometheus_client"``), so every
+    submodule form bound nothing and ``foreign_metric_findings`` reported clean
+    while a metric was built outside ``monitoring.py`` — a false PASS in the one
+    check #5045 exists to make, with no backstop:
+    ``undeclared_metric_findings`` enumerates the LIVE children of
+    ``tortoise.monitoring`` only, so a metric constructed elsewhere appeared in
+    neither check.
+
+    Five arms, all of which the exact-match version missed: the ``ImportFrom``
+    submodule (bare and aliased), the ``Import`` submodule (module-qualified and
+    nested-attribute), and a submodule imported FROM the package.
+    """
+    pkg = tmp_path / "tortoise"
+    pkg.mkdir(parents=True)
+    spellings = {
+        "sub_from.py": """
+            from prometheus_client.metrics import Counter
+            NEW = Counter("tortoise_sub_from_total", "x", ["org"])
+        """,
+        "sub_alias.py": """
+            from prometheus_client.metrics import Counter as _C
+            NEW = _C("tortoise_sub_alias_total", "x", ["org"])
+        """,
+        "sub_import.py": """
+            import prometheus_client.metrics as pm
+            NEW = pm.Counter("tortoise_sub_import_total", "x", ["org"])
+        """,
+        "nested_attr.py": """
+            import prometheus_client as pc
+            NEW = pc.metrics.Counter("tortoise_nested_attr_total", "x", ["org"])
+        """,
+        "from_package.py": """
+            from prometheus_client import metrics as m
+            NEW = m.Counter("tortoise_from_package_total", "x", ["org"])
+        """,
+    }
+    for name, source in spellings.items():
+        (pkg / name).write_text(textwrap.dedent(source), encoding="utf-8")
+    findings = audit.foreign_metric_findings(tmp_path)
+    for name in spellings:
+        assert any(name in f for f in findings), (
+            f"a metric built via the {name} import spelling was not flagged; "
+            f"findings={findings}")
+
+
+def test_the_declaration_module_calls_no_metric_writer():
+    """The exemption the two single-writer scans grant this module stays honest.
+
+    ``tests/test_egress_bytes.py`` and ``tests/test_compute_attribution.py`` skip
+    ``tortoise/cost_dimensions.py`` by FILENAME, because it names the families to
+    declare their labels and cardinality policy — quoting a metric is not writing
+    one. That exemption is legitimate for what the file does today, but by itself
+    it would ALSO excuse a future second writer added to this module, and nothing
+    replaces the guard: ``check_bindings`` only verifies DECLARED writers resolve,
+    ``check_dead_hooks`` only checks a declared writer has a call site, and
+    ``foreign_metric_findings`` sees metric CONSTRUCTION, never an increment. So
+    the "one writer per family" invariant (#4490/#4491) would be unenforced for
+    exactly one module — this one.
+
+    Pinned here rather than by widening the two scans: the declaration module must
+    hold no writer call at all.
+    """
+    source = (_ROOT / "tortoise" / "cost_dimensions.py").read_text(encoding="utf-8")
+    offenders = [
+        marker for marker in (".labels(", ".inc(", ".observe(", ".set(")
+        if marker in source
+    ]
+    assert not offenders, (
+        "tortoise/cost_dimensions.py declares the metric surface and must not also "
+        f"write it; found {offenders}")
+
+
 def test_an_unparseable_module_is_reported_not_skipped(tmp_path):
     """MUTATION: a module the scans cannot parse is a FINDING, never a pass.
 

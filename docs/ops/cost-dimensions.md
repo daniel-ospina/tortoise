@@ -103,8 +103,12 @@ declares the limit instead of inventing one.
    production: "wired and tested" is not "measured".
 4. **no undeclared dimension** — every org-attributed prometheus child in
    `tortoise/monitoring.py` is declared, and no other tracked module builds a prometheus
-   metric. The construction check resolves the callee to its **import**, so an aliased
-   constructor (`import … as _C`) and a `name=` keyword construction are both caught.
+   metric. "Tracked" here excludes the developer/eval surfaces the scan cannot speak for
+   (`tests/`, `tools/`, `battery/`, `graph-scripts/`, `docs/`), which is why bullet 3 names
+   its exclusions too. The construction check resolves the callee to its **import**, so an
+   aliased constructor (`… as _C`), a `name=` keyword construction, and the submodule
+   spellings (`from prometheus_client.metrics import Counter`,
+   `import prometheus_client.metrics as pm`, `pc.metrics.Counter(...)`) are all caught.
 5. **cardinality** — each declared cap/overflow attribute resolves to a live int/str, on
    both the per-org axis and the route axis.
 6. **states** — every row's `state` is in the declared vocabulary, so a typo cannot fall
