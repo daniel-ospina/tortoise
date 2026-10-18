@@ -458,9 +458,20 @@ class RestoreObservation:
             return (
                 f"graph-key RESTORE of {self.graph!r} FINISHED after "
                 f"{self.restore_s:.2f}s (bound {self.bound_s:g}s) — its RESTORE call "
-                f"RAISED, so it did not return; {self.witness_failures} of "
-                f"{self.witness_samples} witness PINGs went unanswered (slowest answered "
-                f"{self.witness_max_latency_ms:.0f} ms)."
+                f"RAISED, so it did not return; "
+                # #8827 review round 3: "0 of 0 witness PINGs went unanswered (slowest
+                # answered 0 ms)" reads as a CLEAN witness on a run that measured
+                # nothing. The zero-sample arm below exists to prevent exactly that
+                # wording, and this arm sat above it, so the vacuous-green shape rounds
+                # 1-2 removed came back on the arm that precedes it.
+                + (
+                    f"{self.witness_failures} of {self.witness_samples} witness PINGs "
+                    f"went unanswered (slowest answered "
+                    f"{self.witness_max_latency_ms:.0f} ms)."
+                    if self.witness_samples
+                    else "the witness took NO samples inside the window, so its "
+                         "behaviour is not evidence about the instance either way."
+                )
             )
         if self.witness_samples == 0:
             gave_up = (
@@ -1094,13 +1105,24 @@ def restore_graph_key(
                 # error present `unmeasured_reason` used to be dropped, so a run that
                 # both raised AND had a non-transport witness failure named the witness
                 # nowhere (#8827 review round 2).
-                "; ".join(
-                    part for part in (
-                        (f"{type(error).__name__}: {error}"
-                         if error is not None else unmeasured_reason),
-                        ("witness fault: " + ", ".join(instrument_failures)
-                         if instrument_failures else None),
-                    ) if part
+                #
+                # ⛔ Scoped to `error is not None` and closed with `or None` (#8827 review
+                # round 3): `unmeasured_reason` ALREADY names the non-transport failures,
+                # so appending them on that arm named the same failure twice; and a
+                # `"; ".join(())` is `""`, not `None` — so every healthy SERVED/BLOCKED run
+                # published `error=""`, which a consumer testing `error is not None` (the
+                # test the `str | None` annotation invites) reads as an error on a clean
+                # restore. `as_dict()` publishes this field.
+                (
+                    "; ".join(
+                        part for part in (
+                            f"{type(error).__name__}: {error}",
+                            ("witness fault: " + ", ".join(instrument_failures)
+                             if instrument_failures else None),
+                        ) if part
+                    ) or None
+                    if error is not None
+                    else unmeasured_reason
                 )
             ),
         )

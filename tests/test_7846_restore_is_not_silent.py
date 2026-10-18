@@ -102,6 +102,17 @@ def test_an_answering_instance_is_reported_served_not_blocked() -> None:
     assert observation.silent is False
     assert observation.silent_ms == 0.0
     assert observation.blocked_ms < observation.blocked_latency_ms
+    # #8827 review round 3: a healthy run must publish `error is None`, not `""`.
+    # The completed-path `error` is built by a `"; ".join(...)` that once had no
+    # `or None`, so `join(())` published an EMPTY STRING on every SERVED/BLOCKED run.
+    # A consumer distinguishing "no reason recorded" by identity — `if obs.error is
+    # not None`, which is what the `str | None` annotation invites — then took the
+    # error branch on a clean restore, and `as_dict()["error"] == ""` was
+    # indistinguishable from "an error was recorded with empty text".
+    # FAILS IF: the join loses its `or None` on either arm.
+    assert observation.error is None, (
+        f"a SERVED run recorded an error: {observation.error!r}")
+    assert observation.as_dict()["error"] is None
 
 
 def test_the_silence_during_a_blocking_restore_is_measured_and_ends_with_it() -> None:
