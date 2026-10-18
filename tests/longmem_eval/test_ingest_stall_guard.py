@@ -37,6 +37,7 @@ from tools.longmem_eval.stall_guard import (  # noqa: E402, RUF100
     DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
     DEFAULT_EVAL_SOCKET_TIMEOUT_S,
     DEFAULT_STALL_TIMEOUT_S,
+    ENV_EMBEDDED_SOCKET_TIMEOUT,
     ENV_SOCKET_CONNECT_TIMEOUT,
     ENV_SOCKET_TIMEOUT,
     ENV_STALL_TIMEOUT,
@@ -497,6 +498,33 @@ def _client_read_timeout_via_projection() -> float:
     return fake.call_args.kwargs["socket_timeout"]
 
 
+def _embedded_read_timeout_via_projection() -> tuple[float, int]:
+    """``(socket_timeout, attempts)`` the real EMBEDDED branch wires (#4683).
+
+    Twin of :func:`_client_read_timeout_via_projection` for the
+    ``path=`` branch: the banner claims a NUMBER and a NAMED KNOB for the
+    embedded lane, and both are read back off the production construction
+    (mocked, no daemon spawned) rather than re-derived from an expression in
+    the banner — a private re-derivation is exactly what let the old
+    ``n/a (embedded lane)`` clause survive #3350.
+    """
+    import tempfile
+    from unittest import mock
+
+    fake = mock.MagicMock()
+    fake.return_value.select_graph.return_value = mock.MagicMock()
+    with mock.patch("tortoise.FalkorDB", fake):
+        proj = FalkorProjection.__new__(FalkorProjection)
+        FalkorProjection.__init__(
+            proj,
+            path=os.path.join(tempfile.mkdtemp(prefix="t4683_"), "embed.db"),
+            graph_name="test_embed_4683",
+            skip_health_check=True)
+    assert fake.call_args.args[0].endswith("embed.db"), "not the embedded branch"
+    retry = fake.call_args.kwargs["retry"]
+    return fake.call_args.kwargs["socket_timeout"], 1 + retry._retries
+
+
 def test_graph_read_timeout_precedence_per_lane_var_beats_product_knob(
         monkeypatch):
     """P2-1: pin the ACTUAL precedence the host branch implements.
@@ -622,4 +650,50 @@ def test_ingest_bound_banner_is_well_formed(monkeypatch):
     monkeypatch.delenv(ENV_SOCKET_TIMEOUT, raising=False)
     embedded = runner._ingest_bound_banner(0.0, db_uri=None)
     assert "stall budget: disabled " in embedded
-    assert "read timeout: n/a (embedded lane) " in embedded
+    # #4683: the embedded lane HAS a read bound, and it is the PRODUCT knob.
+    # Both halves are pinned against the production wiring: the value the
+    # embedded branch actually passes to `FalkorDB`, and the variable name
+    # that value responds to.
+    embedded_read, embedded_attempts = _embedded_read_timeout_via_projection()
+    assert embedded == (
+        "[longmem_eval] ingest stall budget: disabled "
+        f"({ENV_STALL_TIMEOUT}); graph socket read timeout: "
+        f"{embedded_read:g}s ({ENV_EMBEDDED_SOCKET_TIMEOUT}; embedded lane, "
+        f"{embedded_attempts} attempts)"
+    ), embedded
+    # The named variable is the LIVE one — not a copy of a stale name: setting
+    # it moves the resolved product value, which is what the banner prints.
+    monkeypatch.setenv(ENV_EMBEDDED_SOCKET_TIMEOUT, "30")
+    assert _socket_timeouts()[1] == 30.0
+    assert _embedded_read_timeout_via_projection()[0] == 30.0
+    assert (f"read timeout: 30s ({ENV_EMBEDDED_SOCKET_TIMEOUT}; embedded lane, "
+            in runner._ingest_bound_banner(0.0, db_uri=None))
+    # …and the per-lane var the banner used to name moves NOTHING here. This
+    # is the discriminating half: were the banner (or the wiring) to start
+    # reading `TORTOISE_DB_SOCKET_TIMEOUT` for the embedded lane, the value
+    # would follow 45s and this assertion fails.
+    monkeypatch.setenv(ENV_SOCKET_TIMEOUT, "45")
+    embedded_line = runner._ingest_bound_banner(0.0, db_uri=None)
+    assert "read timeout: 30s " in embedded_line
+    assert "45s" not in embedded_line.split("read timeout: ")[1]
+    assert ENV_SOCKET_TIMEOUT not in embedded_line
+    assert _embedded_read_timeout_via_projection()[0] == 30.0
+
+
+def test_stall_timeout_message_names_the_knob_each_lane_reads():
+    """#4683, second site: the `IngestStallTimeout` message told an
+    embedded-lane operator to lower ``TORTOISE_DB_SOCKET_TIMEOUT``, which that
+    lane never reads. The heartbeat does not know the lane, so the message must
+    name BOTH knobs and say which lane each belongs to — a single-var claim is
+    false on one lane whichever var it picks.
+    """
+    clock = [0.0]
+    hb = Heartbeat(stall_timeout_s=10.0, clock=lambda: clock[0])
+    clock[0] = 60.0
+    with pytest.raises(IngestStallTimeout) as exc:
+        hb.check("next-stage")
+    msg = str(exc.value)
+    assert ENV_SOCKET_TIMEOUT in msg
+    assert ENV_EMBEDDED_SOCKET_TIMEOUT in msg
+    assert msg.index(ENV_SOCKET_TIMEOUT) < msg.index(ENV_EMBEDDED_SOCKET_TIMEOUT)
+    assert "--db lane" in msg and "embedded" in msg
