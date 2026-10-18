@@ -34,9 +34,12 @@ from tortoise.hosted_api import app, get_current_user
 from tortoise.retention import RESTORE_WINDOW_HOURS
 from tortoise.sdk import TortoiseSDK
 
-from tests._http_fixtures import patched_tortoise_sdk
+from tests._http_fixtures import (
+    patched_tortoise_sdk,
+    quiesce_testclient_background_work,
+)
 from tests._verdict import verdict_client
-from tests.fake_control_plane import FakeControlPlane, rpc_call_named
+from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM, TOKEN, _key_row, _membership_row,
 )
@@ -533,112 +536,17 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # double-start can occur. `test_export_delete` is NOT in
 # `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that branch.
 # What protects THIS file on the docker lane is the BOOT-SWEEP quiesce
-# (`_quiesce_testclient_background_work`), not the serialization. The lock is
+# (`quiesce_testclient_background_work`), not the serialization. The lock is
 # live only on the embedded tier-2 / carve-out lane (no URI), where
 # constructions stay local-file and real daemons are spawned; it is kept for
 # correctness there, not because the docker lane depends on it.
-
-
-async def _quiet_boot_sweeps() -> None:
-    """#3472: no-op stand-in for the lifespan's one-shot `_run_boot_sweeps`.
-
-    Must be `async def`: `_lifespan` arms it with
-    `create_task(_run_boot_sweeps())`, so a sync stub would hand
-    `create_task` a `None` and raise inside the startup half — turning a
-    test-isolation fix into a second, unrelated failure.
-    """
-
-
-def _quiesce_testclient_background_work(monkeypatch) -> None:
-    """#3472/#3505: make `TestClient(app)` entry safe for this file's tests.
-
-    `_lifespan` arms background work for EVERY `TestClient(app)` entry,
-    regardless of control-plane mode, and all of it touches the same store
-    the test body is driving:
-
-    1. `_run_boot_sweeps()` (armed by `_lifespan` as
-       `app.state._boot_sweep_task`, one-shot) and `_event_retention_loop()`
-       (armed by `_lifespan` as `app.state._event_retention_task`,
-       re-armed every `event_retention_interval()`) BOTH call
-       `_purge_deleted_teams`. A
-       background purge landing between a test's seeding and its own
-       `ha_mod._purge_deleted_teams()` call makes both read the row before
-       either deletes it: two `_drop_team_graph` calls and two
-       `team_delete_purged` audit rows — `assert ['reg-old', 'reg-old'] ==
-       ['reg-old']` on the registry fixture. Worse on Supabase mode, where
-       the test injects its `_drop_team_graph_strict` fault ONLY AFTER
-       seeding: a boot sweep in that window runs the REAL strict drop for
-       the past-grace teams and deletes the retry-anchor row the test
-       asserts must survive.
-
-       The product behaviour is benign (dropping an already-dropped graph
-       is idempotent) — the defect is test isolation: the assertions assume
-       exclusive ownership of a sweep production also runs. Every caller is
-       therefore quiesced here.
-
-       #3036 added a THIRD caller to both sites — `_sweep_oauth_retention`
-       (a `_run_boot_sweeps` member AND an `_event_retention_loop` call). It
-       is benign for THIS file (it touches only the fake control plane), but
-       the enumeration above is the guard that makes the next lifespan-armed
-       caller visible, so keep it complete: a new sweep reachable from either
-       entry point belongs in this list.
-
-       The CALLEE is deliberately not stubbed: this file's tests call
-       `ha_mod._purge_deleted_teams()` directly and resolve it off the
-       module at call time, so a callee stub would silence the very call
-       under test. `_run_boot_sweeps` is stubbed with an `async def` because
-       `_lifespan` arms it with `create_task(...)` (see
-       `_quiet_boot_sweeps`). The retention interval is pinned beyond any
-       test's lifetime: `_event_retention_loop` invokes BOTH `_sweep_events`
-       and `_purge_deleted_teams` on the same target, so pinning the
-       interval quiesces the loop while leaving the directly-called
-       `_purge_deleted_teams` under test.
-
-    2. The app's `_health_probe_loop` (armed by `_lifespan` as
-       `app.state._health_probe_task`) is NOT stubbed:
-       it runs `_probe_db -> _probe_sdk -> _make_sdk(namespace=None)` and so
-       constructs a projection on the SAME pinned db file, concurrently with
-       the test body's own constructions (the seeder's and
-       `_registry_count`'s SDKs). Quiescing the boot sweeps does NOT remove
-       that constructor, so the embedded double-start race would stay live.
-       Rather than quiesce a third background caller one caller at a time
-       (whack-a-mole — `_lifespan` already grew the probe loop after
-       #2850), the CONSTRUCTION is serialized: the invariant redislite
-       actually needs is that the first construction on a given db_path
-       writes `<db>.settings` before any other opener evaluates the
-       fresh-start branch. #3546 moved that serialization to ONE
-       process-wide lock for the whole session
-       (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by
-       `tests/conftest._serialize_embedded_construction`) — this file no
-       longer installs its own.
-
-       LANE SCOPE — the serialization is INERT on the lane CI runs this file
-       on. Under a supported `TORTOISE_DB_URI` (the docker lane, this file's
-       default) every construction from this module redirects to that server
-       (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect:
-       `path` is nulled, so `_is_embedded` is False), so no redislite daemon
-       exists and no double-start is possible. `test_export_delete` is NOT in
-       `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that
-       branch. On that lane the protection this file actually gets is item 1
-       — the BOOT-SWEEP quiesce, which removes the second caller of
-       `_purge_deleted_teams` — and NOT the serialization. The lock is live
-       only on the embedded tier-2 / carve-out lane (no URI), where
-       constructions stay local-file and real daemons are spawned; it is
-       kept for correctness there, not because the docker lane depends on
-       it.
-    """
-    # (1) quiesce both background callers of the purge sweep (the caller, not
-    # the callee — `_purge_deleted_teams` itself stays under test).
-    monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
-    monkeypatch.setattr(ha_mod, "event_retention_interval",
-                        lambda *args, **kwargs: 86400.0)
 
 
 @pytest.fixture
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB.
 
-    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    #3472/#3505: `quiesce_testclient_background_work` is applied BEFORE the
     app is entered — the same lifespan-armed purge callers and health-probe
     constructor run for this fixture too (the arming is mode-independent),
     and on Supabase mode a boot sweep in the seeding window would run the
@@ -650,7 +558,7 @@ def sb_client(monkeypatch):
     pin + close-at-restore still apply (anchors created mid-test via
     _export_graph_snapshot are reused, not evicted).
     """
-    _quiesce_testclient_background_work(monkeypatch)
+    quiesce_testclient_background_work(monkeypatch)
     fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
@@ -677,17 +585,17 @@ def sb_client(monkeypatch):
 def reg_client(monkeypatch):
     """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB.
 
-    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    #3472/#3505: `quiesce_testclient_background_work` is applied BEFORE the
     tempdir opens — it neutralizes the lifespan-armed background work that
     would otherwise race this fixture's own seeding: a background
-    `_purge_deleted_teams` landing between the seed and the test's direct
+    `_purge_deleted_orgs` landing between the seed and the test's direct
     call (two `_drop_team_graph` calls, two `team_delete_purged` rows,
     surfacing as `assert ['reg-old', 'reg-old'] == ['reg-old']`), plus the
     health probe's projection construction on the same db file. Neither is
     registry-specific — see the helper — but this is the fixture whose
     exact-count assertions make the race an outright failure.
     """
-    _quiesce_testclient_background_work(monkeypatch)
+    quiesce_testclient_background_work(monkeypatch)
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
@@ -1127,7 +1035,17 @@ class TestDashboardCreatedTeamRoundTrip:
         body = r.json()
         org_id = body["org_id"]
         assert body["graph_name"] == f"org_{org_id}"  # Indicator 1
-        fn, p = rpc_call_named(fake, "provision_team")
+        # Index pin, deliberately (#8920): `sb_client` applies
+        # `quiesce_testclient_background_work` BEFORE entering the app, so the
+        # lifespan's boot sweep cannot record its #4241
+        # `metering_repair_period_bounds` RPC first.
+        #
+        # WHAT IS ACTUALLY GUARDED, exactly: `tests/test_8920_harness_pointer.py`
+        # pins this FIXTURE by name (`CONSUMER_FIXTURES`) — it asserts that
+        # `sb_client` itself calls the seam, so a regression here reddens in CI
+        # rather than only flaking this pin. A regression of the shared helper
+        # (not of this call site) also reddens `test_pack_state.py`'s clean arm.
+        fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{org_id}"
         # data-plane write (the real write path: namespace=org_id)

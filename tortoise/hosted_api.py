@@ -24024,7 +24024,7 @@ def _stored_grace_elapsed(row_deleted_at, row_grace_hours,
 # ['reg-old']`) came from a third, different overlap: the lifespan's background
 # entry racing a DIRECT `_purge_deleted_orgs()` call on the test body's thread,
 # which bypasses the worker entirely (#3511 quiesced the test; the harness
-# pattern is recorded in `tests/test_export_delete._quiesce_testclient_background_work`).
+# pattern is recorded in `tests/_http_fixtures.quiesce_testclient_background_work`).
 # No direct caller exists in production, but that IS the shape a future one
 # would take, and the guard holds against it too.
 #
