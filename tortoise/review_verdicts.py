@@ -403,17 +403,17 @@ class VerdictLayer:
                 back there is the INVERSE of the #2354 limbo: the stamps are
                 erased from a promotion that LANDED, so the graph contradicts
                 its own journal (``DedupeRecorded`` records the merge, the node
-                says undecided), and the temporal queue offers the candidate
-                back as though it had never been decided. For a temporal
-                candidate ``sweep()`` — which filters on the stamp and not on
-                status — re-examines it and, above the auto-accept bar, re-issues
-                ``keep``, whose ``approve_merge`` no longer short-circuits (the
-                stamp it compares against is the one just erased) and so
-                journals a SECOND ``DedupeRecorded`` for one logical merge.
-                Re-issuing ``keep`` by hand does eventually re-stamp the node, so
-                what is lost is not the write but the record that it had already
-                been decided; that is why the rollback must be reserved for the
-                raises that really did not land.
+                says undecided) and ``sweep()`` — whose selection filters on the
+                stamp and not on status, unlike ``list_dedup_candidates``, which
+                still hides the live node — offers the candidate back as though
+                it had never been decided. For a temporal candidate above the
+                auto-accept bar that re-issues ``keep``, whose ``approve_merge``
+                no longer short-circuits (the stamp it compares against is the
+                one just erased) and so journals a SECOND ``DedupeRecorded`` for
+                one logical merge. Re-issuing ``keep`` by hand does eventually
+                re-stamp the node, so what is lost is not the write but the
+                record that it had already been decided; that is why the
+                rollback must be reserved for the raises that really did not land.
 
                 The answer is deliberately CONSERVATIVE, not a proof: a live
                 node carrying the id may be a promotion under the same id that

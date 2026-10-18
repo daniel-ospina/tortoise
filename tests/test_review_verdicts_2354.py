@@ -547,19 +547,21 @@ def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
     """A raise AFTER the promotion CAS must NOT roll the review write back.
 
     ``promote_point`` lands the CAS (``status='live'``, ``promotedAt``,
-    ``reviewed=true``) and then runs a tail of untried writes: ``_mark_dirty``
-    (a retried write that can exhaust), the ``alreadyDecided`` dedup wire, the
-    incident-operator promote, the ``PointPromoted`` snapshot read. Rolling the
-    stamps back there is the INVERSE of the #2354 limbo — a promotion that landed
-    is put back to undecided, so the graph contradicts its own ``DedupeRecorded``
-    and the candidate is offered to the operator again: for a temporal candidate
-    ``sweep()`` (which filters on the stamp, not on status) re-examines it and,
-    above the auto-accept bar, re-issues ``keep``, which journals a SECOND
-    ``DedupeRecorded`` for one logical merge.
+    ``reviewed=true``) and then runs a tail of untried writes — ``_promotion_landed``'s
+    docstring is the authoritative list of the six stages — so a raise from any of
+    them leaves the node live. Rolling the stamps back there is the INVERSE of the
+    #2354 limbo: a promotion that landed is put back to undecided, so the graph
+    contradicts its own ``DedupeRecorded`` and — because ``sweep()`` filters on the
+    stamp, not on status, while ``list_dedup_candidates`` still hides the live node —
+    it is offered back as though it had never been decided. Above the auto-accept
+    bar the sweep re-issues ``keep``, which journals a SECOND ``DedupeRecorded`` for
+    one logical merge.
 
-    ``already_live`` is not the discriminator: ``promote_point`` RETURNS it for
-    a node live before the CAS. In the cases this handler exists for, a raise
-    with a live node is a landed promotion whose tail failed.
+    ``already_live`` is not the discriminator: ``promote_point`` RETURNS it for a
+    node live before the CAS. In THIS single-node fixture, a raise with a live node
+    is a landed promotion whose tail failed; over an id fan-out the live node may
+    instead be a sibling's promotion, which is why ``_promotion_landed`` states its
+    answer as a conservative default rather than a proof.
     """
     _seed_candidate(sdk, "rv-a", "rv-prior")
 
@@ -651,8 +653,11 @@ def _proxied_projection(sdk, monkeypatch, *, fail_on=None, worst_order=False,
                 ordered = _live_in_the_middle(rows)
                 if ordered is not None:
                     self.reordered += 1
-                    self.last_order = [row[1] for row in ordered]
                     rows = ordered
+                    # Recorded from what is RETURNED, not from the intent above
+                    # it: a proxy that computes an order and forgets to apply
+                    # it must fail the self-check, not satisfy it.
+                    self.last_order = [row[1] for row in rows]
             return types.SimpleNamespace(result_set=rows)
 
     class _P:
