@@ -9322,9 +9322,10 @@ class FalkorProjection(
         # the wipe. (The wipe re-asserts it via _wipe_all_nodes.)
         self._assert_destructive_confirmed(confirm_destructive, "rebuild_all")
 
-        # #2958 review: reset the once-per-key deny-drop warning set for this
-        # rebuild pass (see `_upsert_point_props`) so the report is emitted once
-        # per key per pass instead of once per graph-only point.
+        # #2958 review: reset the once-per-(source, key) deny-drop warning set
+        # for this rebuild pass (see `_upsert_point_props`) so each arm reports
+        # its own attribution once per pass instead of once per graph-only
+        # point.
         self._deny_drop_warned = set()
         # #5004: the same once-per-pass de-dup for the replay's embedding-identity
         # warnings (an embedder swap would otherwise emit one line per Point).
@@ -10473,9 +10474,10 @@ class FalkorProjection(
                 # embedder can be unavailable while the hash still computes).
                 # #8018 review: `event_source[seq] is None` marks a SYNTHETIC
                 # event — one rebuilt from the #548 pre-wipe GRAPH snapshot for
-                # an id with no journal record (see the `events` construction
-                # above) — so the writer's deny report names THAT source instead
-                # of asserting the journal is not the gap.
+                # an id with no journaled CREATION (see `log_point_ids` in the
+                # capture above; a promote/revise record does not count) — so
+                # the writer's deny report names the payload's source instead of
+                # denying the journal.
                 wrote_embedding, wrote_content_hash, persisted_extras = (
                     self._upsert_point_props(
                         p, from_prewipe_snapshot=event_source[seq] is None))

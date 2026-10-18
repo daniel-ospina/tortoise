@@ -1808,14 +1808,16 @@ class _EntityHandlers:
         ``from_prewipe_snapshot`` says WHERE this payload came from, because
         the deny-drop report below has to name the right cause: ``False`` (the
         default, and every journal arm — live ``apply``/``_upsert``, rebuild
-        pass 1a's journal records, the promote folds) means the record IS the
-        journal, so a deny-listed key it carries was journaled and only the
-        policy refuses it. ``True`` means the entry came from the #548 pre-wipe
-        GRAPH snapshot rebuilt for an id the journal never recorded (rebuild
-        pass 1a's synthetic events) — there the journal gap is REAL as well,
-        and the report must not deny it (#8018 review: the class that used to
-        be told "not a journal gap" was the EP-state class, `_REPLAY_GAP_PROPS`,
-        which is exactly the class whose only carrier IS that snapshot).
+        pass 1a's journal records, the promote folds) means the payload IS the
+        journal record, so the key it carries was journaled and only the policy
+        refuses it. ``True`` means the entry is the #548 pre-wipe GRAPH snapshot
+        rebuilt for an id with no journaled CREATION (see `log_point_ids` in
+        ``rebuild_all``), so the snapshot — not a journal record — is what
+        carried the key into this pass (#8018 review round 2: the flag proves
+        the payload's source, NOT that the journal lacks the key for that id; an
+        id whose only record is a ``PointPromoted`` snapshot or a
+        ``ConfidenceChanged`` belief fold carries EP state in the journal too,
+        so the report must not assert the stronger claim).
 
         ``persisted_extra_keys`` is the key set ``_persist_extra_props``
         actually handed to the engine (a ``None``, a non-persistable value, and
@@ -2196,23 +2198,29 @@ class _EntityHandlers:
         # recompute keys (`embedding`/`updatedAt`/`_nid`/`_graph_id`) are
         # fixed-clause/handled and excluded here to avoid noise; the genuinely
         # payload-hostile set is `_POINT_DENY - _POINT_HANDLED`.
-        # #2958 review: warn ONCE per key per rebuild pass (the `_deny_drop_warned`
-        # set, reset by `rebuild_all`) — the #548 synthetic snapshot carries
-        # EP-owned state for every dreamed graph-only point, so a per-row
-        # warning emitted O(N) lines and buried genuine violations. On the live
-        # path the set persists for the process, which is the right cadence for
-        # a policy-level signal.
+        # #2958 review: warn ONCE per (source, key) per rebuild pass (the
+        # `_deny_drop_warned` set, reset by `rebuild_all`) — the #548 synthetic
+        # snapshot carries EP-owned state for every dreamed graph-only point, so
+        # a per-row warning emitted O(N) lines and buried genuine violations. On
+        # the live path the set persists for the process, which is the right
+        # cadence for a policy-level signal.
         # #8018 review: the de-dup key carries the SOURCE and the text is chosen
-        # by it, because two sources feed this report and their causes DIFFER.
-        # On the journal arm the record carries the key and only the writer's
-        # policy refuses it; on the #548 arm the point has NO journal record at
-        # all, so the journal gap is real too — `posterior_alpha`/`outdated`/
-        # `expiredAt`/`content_hash` are carried ONLY by that snapshot
-        # (`_REPLAY_GAP_PROPS`, #2943). Keying the de-dup on the bare key let the
-        # arm that happened to run first (synthetic events sort first) speak for
-        # the other, which re-minted the very misattribution #8018 removed — the
-        # report told a reader "not a journal gap" about EP state, the one class
-        # where the journal IS the gap.
+        # by it, because two sources feed this report and they are NOT the same
+        # event. On the journal arm the payload IS a journal record that carries
+        # the key, so only the writer's policy refuses it. On the #548 arm the
+        # payload is the pre-wipe GRAPH snapshot rebuilt for an id with no
+        # journaled creation, so the snapshot carried the value into this pass.
+        # Keying the de-dup on the bare key let the arm that happened to run
+        # first (synthetic events sort first) speak for the other, which
+        # re-minted the very misattribution #8018 removed.
+        # ⛔ Neither arm may claim what this writer cannot see. "The journal never
+        # carries EP state" is FALSE (`consistency.py::_JOURNAL_RESTORABLE_DENY`:
+        # `posterior_alpha`/`posterior_beta`/`lastDreamedAt` fold from
+        # `ConfidenceChanged`, `outdated`/`expiredAt` from the
+        # PointSuperseded/PointInvalidated folds), and "this id has NO journal
+        # record" is FALSE whenever the only record is a promote snapshot or a
+        # revise (#6239's promote-only shape). Both claims are therefore made
+        # about the PAYLOAD's source only.
         for key in self._POINT_DENY - self._POINT_HANDLED:
             if p.get(key) is None:
                 continue
@@ -2225,21 +2233,20 @@ class _EntityHandlers:
             if from_prewipe_snapshot:
                 logger.warning(
                     "Point prop %r dropped — deny-listed (recompute/EP-owned, "
-                    "#2795): this point has NO journal record, so the value "
-                    "came from the #548 pre-wipe graph snapshot and the writer "
-                    "refuses the key by policy — the journal gap is REAL here "
-                    "as well, unlike a journal-covered point, where the "
-                    "record itself carries the key and only the policy refuses "
-                    "it (#8018)", key)
+                    "#2795): this payload is the #548 pre-wipe graph SNAPSHOT, "
+                    "not a journal record (the id has no journaled creation), "
+                    "so the snapshot is what carried the key into this pass "
+                    "and the writer refuses it by policy — a different case "
+                    "from the journal arm, where a record does carry it "
+                    "(#8018)", key)
                 continue
             logger.warning(
                 "Point prop %r dropped — deny-listed (recompute/EP-owned, "
-                "#2795): this point IS journal-covered, the record carries it "
-                "and the replay writer refuses it by policy, so this is a "
-                "policy drop, not a journal gap. Keys the journal never "
-                "carries by design (EP state, #2884) reach this report on the "
-                "#548 snapshot arm instead, which names that source (#8018)",
-                key)
+                "#2795): this payload IS the journal record and it carries "
+                "the key, so only the writer's policy refuses it — a policy "
+                "drop, not a journal gap. The #548 snapshot arm reports the "
+                "other case, where no journal record supplied the value "
+                "(#8018)", key)
         # (b) a policy-denied list is also reported: the live SDK writer stores
         # raw lists, but replay refuses an UNDECLARED one, so the drop MUST be
         # visible (#2795 indicator 4 / D7). `tags` was this branch's exemplar
