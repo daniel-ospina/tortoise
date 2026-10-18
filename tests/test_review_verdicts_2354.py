@@ -15,12 +15,15 @@ path this layer rides (`_temporal_wire`); this file owns the verdict contract.
 """
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
+import types
 
 import pytest
 
 from tortoise.extractor import entity_stage_fixture
+from tortoise.live import LIFECYCLE_FANOUT_QUERY
 from tortoise.review_verdicts import (
     DECISION_DECIDED,
     DECISION_QUEUED,
@@ -548,13 +551,14 @@ def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
     (a retried write that can exhaust), the ``alreadyDecided`` dedup wire, the
     incident-operator promote, the ``PointPromoted`` emit. Rolling the stamps
     back there is the INVERSE of the #2354 limbo — the node is live and can
-    never be promoted again, its ``merge`` stamp is destroyed, and ``sweep()``
-    (which filters on the stamp, not on status) re-examines it and journals a
-    SECOND ``DedupeRecorded`` for one logical merge.
+    never be promoted again, its ``merge`` stamp is destroyed, and the candidate
+    is re-surfaced: for a temporal candidate ``sweep()`` (which filters on the
+    stamp, not on status) re-examines it and, above the auto-accept bar,
+    journals a SECOND ``DedupeRecorded`` for one logical merge.
 
     ``already_live`` is not the discriminator: ``promote_point`` RETURNS it for
-    a node live before the CAS. A raise with a live node can only be a landed
-    promotion whose tail failed.
+    a node live before the CAS. In the cases this handler exists for, a raise
+    with a live node is a landed promotion whose tail failed.
     """
     _seed_candidate(sdk, "rv-a", "rv-prior")
 
@@ -576,3 +580,131 @@ def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
     assert props.get("reviewed") is True, (
         f"a landed promotion keeps the reviewer flag: saw {props.get('reviewed')!r}"
     )
+
+
+def _proxied_projection(sdk, monkeypatch, *, fail_on=None, reverse_fanout=False):
+    """Route every ``sdk._get_proj()`` read through a proxy for ONE statement.
+
+    ``fail_on`` makes the statement whose Cypher contains that substring raise;
+    ``reverse_fanout`` reverses the row order of the id fan-out read. Both are
+    used to pin behaviour a healthy single-node graph cannot express: the
+    graph's row order is NOT a contract (#7822), so an order-independent answer
+    has to be measured against a deliberately adversarial order.
+    """
+    real = sdk._get_proj()
+
+    class _G:
+        def query(self, cypher, params=None, **kwargs):
+            if fail_on is not None and fail_on in cypher:
+                raise RuntimeError("graph unavailable")
+            res = real.g.query(cypher, params=params, **kwargs)
+            if reverse_fanout and cypher.strip() == LIFECYCLE_FANOUT_QUERY.strip():
+                return types.SimpleNamespace(
+                    result_set=list(reversed(list(res.result_set))))
+            return res
+
+    class _P:
+        def __init__(self):
+            self.g = _G()
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(sdk, "_get_proj", lambda: _P())
+
+
+def test_an_unreadable_classification_read_leaves_the_review_write_alone(
+        sdk, monkeypatch):
+    """A rollback that cannot be VERIFIED must not be risked.
+
+    The classification read is a second graph statement, so it can fail on its
+    own (the correlated case: the same churn that broke the promote). Answering
+    "not landed" there would erase the stamps of a promotion that had landed;
+    the limbo it leaves instead is recoverable — ``reviewDecision`` is unset and
+    ``approve_merge`` is idempotent, so re-issuing ``keep`` completes it. The
+    original exception must still reach the caller.
+    """
+    _seed_candidate(sdk, "rv-a", "rv-prior")
+
+    def refuse(point_id):
+        raise ValueError(f"No point {point_id!r}")
+
+    monkeypatch.setattr(sdk, "promote_point", refuse)
+    _proxied_projection(sdk, monkeypatch, fail_on=LIFECYCLE_FANOUT_QUERY)
+
+    with pytest.raises(ValueError, match="No point"):
+        VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    props = _props(sdk, "rv-a")
+    assert props.get("temporal_reviewed") == "merge", (
+        "an unverifiable landing must leave the review write in place: "
+        f"saw {props.get('temporal_reviewed')!r}")
+    assert props.get("reviewed") is True
+
+
+def test_a_failed_rollback_logs_and_does_not_mask_the_promote_error(
+        sdk, monkeypatch, caplog):
+    """A cleanup that fails must never replace the failure it was cleaning up.
+
+    The rollback is a graph write, so it fails in the same outage that failed
+    the promote. Letting its exception escape would hand the caller a graph
+    error in place of the ``ValueError`` its contract documents — ``drain()``
+    records that error, and callers keyed on the type would miss it entirely.
+    """
+    _seed_candidate(sdk, "rv-a", "rv-prior")
+
+    def refuse(point_id):
+        raise ValueError(f"No point {point_id!r}")
+
+    monkeypatch.setattr(sdk, "promote_point", refuse)
+    _proxied_projection(sdk, monkeypatch, fail_on="$prior")
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.review_verdicts"), \
+            pytest.raises(ValueError, match="No point"):
+        VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    assert "review rollback FAILED" in caplog.text, (
+        "the failed cleanup must be observable in the log")
+    props = _props(sdk, "rv-a")
+    assert props.get("temporal_reviewed") == "merge", (
+        "the failed rollback left the stamp applied — the node must be "
+        f"recoverable, not silently clean: saw {props.get('temporal_reviewed')!r}")
+
+
+def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
+        sdk, monkeypatch):
+    """ANY live node carrying the id means the CAS landed (#7822).
+
+    Point ids are NOT unique — ``create_point(..., id=X)`` twice is a tested,
+    graph-reachable shape — and a bare ``MATCH (n:Point {id:$id})`` binds every
+    node carrying the id. A verdict read off ``rows[0]`` is therefore
+    server-row-order dependent, and in THIS path the wrong answer is
+    destructive: it erases the review stamps of a promotion that landed. The
+    duplicate is minted from inside the failing tail so the pre-write reads
+    (which are single-node by construction here) cannot see it, and the fan-out
+    read's rows are reversed so the worst order is the one measured.
+    """
+    _seed_candidate(sdk, "rv-a", "rv-prior")
+    proj = sdk._get_proj()
+
+    def boom(*_args, **_kwargs):
+        proj.g.query(
+            "CREATE (n:Point {id:$id, status:'retracted', "
+            "pointKind:'decision', content:'duplicate sibling'})",
+            params={"id": "rv-a"})
+        raise RuntimeError("post-CAS tail failed")
+
+    monkeypatch.setattr(sdk, "_mark_dirty", boom)
+    _proxied_projection(sdk, monkeypatch, reverse_fanout=True)
+
+    with pytest.raises(RuntimeError, match="post-CAS"):
+        VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, n.temporal_reviewed "
+        "ORDER BY n.status", params={"id": "rv-a"}).result_set
+    live = [r for r in rows if r[0] == "live"]
+    assert live, f"fixture precondition: the CAS must land (rows {rows!r})"
+    assert live[0][1] == "merge", (
+        "a landed promotion keeps its review stamp whatever row order the "
+        f"duplicate id returns: saw {live[0][1]!r} (rows {rows!r})")

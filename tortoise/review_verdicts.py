@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .env_truthy import env_flag
+from .live import LIFECYCLE_FANOUT_QUERY
 
 logger = logging.getLogger(__name__)
 
@@ -386,27 +387,44 @@ class VerdictLayer:
                 """True when the promotion CAS already landed.
 
                 ``promote_point`` answers ``already_live`` for a node that was
-                live BEFORE its CAS — it returns, it does not raise — so a
-                raise reaching here with a LIVE node is a promotion that
-                landed and whose post-CAS tail failed: ``_mark_dirty`` (a
-                retried write that can exhaust), the ``alreadyDecided`` dedup
-                wire (a ``ValueError`` when the prior is deleted between
-                promote_point's own check and that call), the
-                incident-operator promote, or the ``PointPromoted`` emit.
+                live BEFORE its CAS — it returns, it does not raise — so in the
+                cases this handler exists for, a raise reaching here with a
+                live node is a promotion that landed and whose tail then
+                failed. EVERY step after the CAS can raise (``_mark_dirty``, a
+                retried write that can exhaust; the post-CAS quarantine
+                re-check's ``batch_status`` read; the ``alreadyDecided`` dedup
+                wire, a ``ValueError`` when the prior is deleted between
+                promote_point's own check and that call; the temporal
+                NAND/supersede block, where only ``ValueError`` is caught, so a
+                graph abort escapes; the incident-operator promote; the
+                ``PointPromoted`` emit), and all of them leave the node live.
                 Rolling the review write back there is the INVERSE of the
-                #2354 limbo: the node is live and can never be promoted
-                again, its ``merge`` stamp is destroyed, and ``sweep()`` —
-                which filters on the stamp, not on status — re-examines it and
-                journals a SECOND ``DedupeRecorded`` for one logical merge.
+                #2354 limbo: the node is live and can never be promoted again
+                (``promote_point`` will only ever answer ``already_live``), its
+                ``merge`` stamp is destroyed, and the candidate is re-surfaced
+                — for a temporal candidate ``sweep()``, which filters on the
+                stamp and not on status, re-examines it and (above the
+                auto-accept bar) journals a SECOND ``DedupeRecorded`` for one
+                logical merge.
+
+                Scanned over the WHOLE id fan-out (#7822): point ids are not
+                unique, every lifecycle writer's bare ``MATCH … SET`` binds
+                every node carrying the id, and a verdict read off ``rows[0]``
+                is server-row-order dependent — here that would erase the stamp
+                of a landed promotion whenever a duplicate sibling happened to
+                be returned first. ANY live node carrying the id means the CAS
+                landed.
 
                 An unreadable graph reads as landed: a rollback that cannot be
-                verified is worse than the limbo re-issuing ``keep`` recovers,
-                and a graph unreadable at this instant is one that could not
-                have been written either.
+                verified must not be risked against stamps that are correct,
+                and the limbo it would otherwise leave is recoverable by
+                re-issuing ``keep`` (``reviewDecision`` is unset and
+                ``approve_merge`` is idempotent) whereas erasing a landed
+                promotion's stamps is not.
                 """
                 try:
                     rows = self._proj.g.query(
-                        "MATCH (n:Point {id:$id}) RETURN n.status",
+                        LIFECYCLE_FANOUT_QUERY,
                         params={"id": candidate_id},
                     ).result_set
                 except Exception:
@@ -415,7 +433,7 @@ class VerdictLayer:
                         "failed promote — leaving the review stamps in place",
                         candidate_id, exc_info=True)
                     return True
-                return bool(rows) and rows[0][0] == "live"
+                return any(status == "live" for _op, status, _outdated in rows)
 
             def _roll_back_review_write() -> None:
                 # Roll the review write back so the candidate is NOT left
