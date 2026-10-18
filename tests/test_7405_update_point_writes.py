@@ -286,7 +286,7 @@ class _CountSweeps(_AbortOnceGraph):
         return super().query(cypher, params=params, timeout=timeout)
 
 
-def test_a_half_landed_tag_sync_is_not_a_success(tmp_path):
+def test_a_half_landed_tag_sync_is_not_a_success(tmp_path, monkeypatch):
     """The witness must require the FULL set of wanted names, not "at least one".
 
     A retry re-issues the whole reconciler; if it lands SOME of the requested
@@ -295,6 +295,11 @@ def test_a_half_landed_tag_sync_is_not_a_success(tmp_path):
     Pinned here because the empty-request test cannot reach the comparison (it
     returns at the ``not _sync_wanted`` guard).
     """
+    # Stub the backoff clock: this path EXHAUSTS the retry budget, so a real
+    # sleep would add ~8.7 s (measured: 1.64 + 2.34 + 4.73) and make the result
+    # clock-dependent. Same stub as the four landing pins above.
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "tagpartial")
     try:
         pid = _pid(sdk)
