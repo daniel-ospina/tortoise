@@ -394,12 +394,72 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 # LIVE (``_terminal_excluded``'s NULL check), so an Event passes the same
 # predicate a Point does, and the draft filter is a no-op for it by
 # construction rather than by a special case (#7927).
+#
+# The BOUND on that claim, stated so a future status word cannot quietly widen
+# it: the widened legs apply the POINT vocabulary (``TERMINAL_EXCLUDED_STATUSES``
+# — the superset), bypassing ``search_engine._status_vocab_for``, which is the
+# declared owner of the "which family excludes what" decision. That is
+# behaviour-preserving TODAY because ``OBJECT_TERMINAL_STATUSES`` and
+# ``SUBJECT_TERMINAL_STATUSES`` are subsets of the Point set and no entity writer
+# sets the legacy ``outdated`` flag — so the predicate cannot drop a live entity.
+# A family-ONLY terminal word (the #1423/#3301 class) would be admitted as LIVE
+# on every widened leg; wire the legs through ``_status_vocab_for`` then.
 # ══════════════════════════════════════════════════════════════════════════
 
 #: The four labels on which confidence propagates (#7813 ruling). Ordered
 #: Point-first: the Point query is the hot path and stays the first, indexed
 #: lookup in every id-anchored sweep.
 EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
+
+#: The keys an epistemic node's identity may live under, in resolution order
+#: (#7927). ONE declaration for a question three widened surfaces ask —
+#: ``audit``'s legacy-edge repair, ``ep.get_contested_claims`` and
+#: ``ranking.resolve_contested_relevance`` — each of which used to spell
+#: ``coalesce(id, eventId)`` inline with nothing pinning them together.
+#:
+#: ``id`` FIRST, deliberately, and it DIVERGES from
+#: ``projection._CANONICAL_ENTITY_ID_PROPS`` (which names ``eventId`` as the
+#: Event family's PRIMARY identity key) and from
+#: ``consistency._graph_view_key`` (eventId first for ``Event``): those answer
+#: "which key identifies this node for the graph view", this answers "which key
+#: does a READ hand back". ``id`` is the right answer for the second because the
+#: belief fold addresses an Event's belief BY ``id`` (#7936), and the order is
+#: functionally safe for every in-tree writer — ``_upsert_event`` MERGEs on
+#: ``eventId`` and then sets ``id = eid``, so wherever BOTH exist they are equal
+#: and the choice cannot change the result. ``session_indexer`` writes
+#: ``eventId`` only, which is the case the second key exists for.
+EPISTEMIC_ID_KEYS = ("id", "eventId")
+
+
+def epistemic_identity(alias: str) -> str:
+    """Cypher expression: ``alias``'s identity, whatever key it lives under.
+
+    Use wherever a widened surface COMPARES or RETURNS an identity. Do not use
+    it where the value will be fed back into an ``{id: …}`` anchor: an identity
+    that came from ``eventId`` is not an ``id``, and an id-keyed frontier cannot
+    follow it (the ``navigation._node_identity`` lesson, #8538) — such a leg must
+    require ``alias.id`` instead, which is what the widened BFS/factor returns
+    do (see ``analyze._bfs_select_operators``).
+    """
+    if len(EPISTEMIC_ID_KEYS) == 1:
+        return f"{alias}.{EPISTEMIC_ID_KEYS[0]}"
+    return "coalesce(" + ", ".join(
+        f"{alias}.{key}" for key in EPISTEMIC_ID_KEYS) + ")"
+
+
+def epistemic_identity_key(node: dict) -> str | None:
+    """The key (an ``EPISTEMIC_ID_KEYS`` member) that ``node`` carries, or None.
+
+    ``node`` is a property map as returned by the graph. The KEY is needed — not
+    just the value — wherever a repair has to be rendered as a pattern: matching
+    ``(m {id: <a value that came from eventId>})`` addresses nothing, and
+    matching on the coalesced value alone equates two different properties and
+    can address an unrelated node (#7927).
+    """
+    for key in EPISTEMIC_ID_KEYS:
+        if node.get(key) is not None:
+            return key
+    return None
 
 
 def epistemic_disjunction(alias: str) -> str:

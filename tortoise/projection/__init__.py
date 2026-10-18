@@ -15878,6 +15878,14 @@ class FalkorProjection(
             f"AND {epistemic_disjunction('c')} "
             f"AND {_terminal_excluded('c.status')} "
             f"{draft_c} {draft_o} "
+            # #7927: the returned claim id is consumed as an ``id`` (the
+            # factor's input list), so a node with no ``id`` — a keyless legacy
+            # :Event — would arrive as ``None`` and still count toward
+            # ``len(input_ids) >= 2``, a PHANTOM input in the factor math.
+            # Coalescing would substitute an ``eventId`` value that is not an
+            # ``id`` (#8538), so the identity-less population is held to what
+            # the pre-widening label predicate admitted.
+            "AND c.id IS NOT NULL "
             "RETURN o.id, c.id "
             "ORDER BY o.id, c.id"
         ).result_set

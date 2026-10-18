@@ -21,6 +21,7 @@ from .live import (
     _terminal_excluded,
     direction_flows,
     epistemic_disjunction,
+    epistemic_identity,
     epistemic_label_queries,
     TERMINAL_EXCLUDED_STATUSES,
 )
@@ -1913,7 +1914,7 @@ class TortoiseEP:
                 # sets it "for edge matching") but key on ``eventId``, so the
                 # coalesce keeps the row ADDRESSABLE (and the dedupe below
                 # from collapsing every id-less Event onto a ``None`` key).
-                "RETURN coalesce(n.id, n.eventId), "
+                f"RETURN {epistemic_identity('n')}, "
                 "       coalesce(n.content, n.name, n.title, n.label, ''), "
                 "       a, b, v",
                 params={"t": variance_threshold},

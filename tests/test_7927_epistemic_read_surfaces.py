@@ -554,6 +554,59 @@ def test_contested_relevance_reads_non_point_target_and_counter_claim(sdk):
     assert boosts == {target: W4_CONTESTED_BOOST}
 
 
+def test_bfs_frontier_never_holds_an_identity_less_anchor(sdk):
+    """A widened traversal that RETURNS ``.id`` must not hand a ``None`` to the
+    frontier.
+
+    ``session_indexer`` mints ``(e:Event {eventId:…})`` with no ``id`` at all.
+    Widening the traversal to admit it and then returning ``target.id`` puts
+    ``None`` into ``new_points`` / ``factor_anchors`` / ``compute_confidence``'s
+    seeds — a node the next id-keyed hop can never re-anchor. ``coalesce(id,
+    eventId)`` is NOT the fix there (it would re-anchor on a value that is not an
+    ``id``, #8538), so the leg requires ``.id`` and the population stays exactly
+    what the pre-widening label predicate admitted.
+    """
+    proj = sdk._get_proj()
+    anchor = _point(sdk, "an anchor claim")
+    proj.g.query("CREATE (e:Event {eventId:'bfs-keyless', eventKind:'test', "
+                 "name:'keyless endpoint'})")
+    # A DIRECT edge (operator-less, A9 §5.6): the traversal walks from the
+    # anchored Point straight to the keyless Event, which is exactly the leg
+    # whose ``(src, tgt, type)`` anchor tuple would carry the ``None``.
+    proj.g.query(
+        "MATCH (a:Point {id:$a}), (e:Event {eventId:'bfs-keyless'}) "
+        "MERGE (a)-[:NAND]->(e)", params={"a": anchor})
+
+    ops, anchors = _bfs_select_operators(proj, [anchor], max_hops=2)
+    assert None not in ops, f"a None operator id reached the selection: {ops}"
+    assert all(
+        all(part is not None for part in anchor_tuple)
+        for anchor_tuple in anchors), (
+        f"a None reached a factor anchor: {anchors}")
+
+
+def test_object_signals_do_not_count_a_belief_they_cannot_address(sdk):
+    """``_fetch_object_signals`` returns ``pids`` into an ID-ANCHORED Point
+    read, so counting an edge whose belief has no ``id`` reported a measured
+    Object as unmeasured with a phantom degree (measured: ``degree 1,
+    has_ep False``). The window for an Object whose ONLY about-belief is a
+    keyless Event must be internally consistent: the belief is either read or
+    not counted."""
+    obj = _node(sdk, "Object", "phantom-target")
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (e:Event {eventId:'phantom-belief', eventKind:'test', "
+                 "name:'an unaddressable belief', posterior_alpha:9.0, "
+                 "posterior_beta:1.0})")
+    proj.g.query(
+        "MATCH (o:Object {id:$o}), (e:Event {eventId:'phantom-belief'}) "
+        "MERGE (e)-[:aboutObject]->(o)", params={"o": obj})
+
+    sig = StateRanker(projection=proj)._fetch_object_signals([obj])[obj]
+    assert not (sig["degree"] > 0 and sig["has_ep"] is False), (
+        "a belief the read cannot address was counted as a degree while its "
+        f"posterior vanished: {sig}")
+
+
 def test_contested_relevance_never_boosts_a_point_from_its_own_text(sdk):
     """The self-reference guard must survive the identity WIDENING.
 
@@ -927,3 +980,54 @@ def test_legacy_repair_survives_an_id_that_needs_quoting(sdk):
     assert proj.g.query(
         "MATCH (:Point {id:$i})-[r:mitigates]->() RETURN count(r)",
         params={"i": quoted_op}).result_set[0][0] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 6. The emitted repairs must be RUNNABLE literals (#7927 review)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_quoted_round_trips_a_backslash_before_a_quote(sdk):
+    """Escape ORDER is the bug, not the escaping.
+
+    ``_quoted`` must escape ``\\`` FIRST: doing the quote first leaves an
+    escaped backslash in front of the quote and re-opens the literal. A value
+    containing a backslash AND a quote is the only shape that distinguishes the
+    two orders, so nothing else pins it — measured here through the engine.
+    """
+    from tortoise.audit import _quoted
+
+    proj = sdk._get_proj()
+    tricky = "a\\'b"          # backslash, then quote — the order-sensitive pair
+    proj.g.query("CREATE (n:Probe {id:" + _quoted(tricky) + "})")
+    got = proj.g.query(
+        "MATCH (n:Probe) RETURN n.id").result_set
+    assert [r[0] for r in got] == [tricky], (
+        "the quoted literal did not round-trip — the escape order is wrong: "
+        f"{got}")
+
+
+def test_legacy_repair_refuses_an_endpoint_with_no_identity(sdk):
+    """A node carrying NEITHER key has no addressable identity, so the honest
+    answer is NO STATEMENT — not a ``(m)`` pattern that rewrites every legacy
+    edge from the operator (measured: two unkeyed endpoints produced the SAME
+    statement, and running either repaired both). A repair whose stated subject
+    is narrower than its effect is the defect class this shape exists to
+    remove."""
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'audit-op-noid', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    proj.g.query("CREATE (m:Event {eventKind:'test', name:'no key at all'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'audit-op-noid'}), (m:Event) "
+        "WHERE m.name = 'no key at all' MERGE (op)-[:mitigates]->(m)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == "audit-op-noid"]
+    assert legacy, "fixture broken: the identity-less edge was not reported"
+    for issue in legacy:
+        assert issue.fix == "", (
+            "a statement was emitted for an endpoint that cannot be "
+            f"addressed: {issue.fix!r}")
+        assert "neither `id` nor `eventId`" in issue.detail, (
+            f"the refusal is not explained in the message: {issue.detail!r}")

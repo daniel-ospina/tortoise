@@ -38,6 +38,7 @@ from .search_engine import (  # noqa: E402, RUF100
 )
 from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
     epistemic_disjunction,  # #7927: traversal-position widening
+    epistemic_identity,  # #7927: the two-key identity, declared ONCE in live.py
     epistemic_labels_of,  # #7927: present-label resolution (resolved ONCE per rerank)
     epistemic_sweep,  # #7927: id-anchored present-label sweep
     is_draft_status,
@@ -219,7 +220,8 @@ def resolve_contested_relevance(
             # counter-claim. The same identity ``ep.get_contested_claims`` and
             # the audit wiring checks use; all three widened in this change, so
             # they must not disagree on how a node is addressed.
-            "WHERE coalesce(c.id, c.eventId) <> coalesce(n.id, n.eventId) "
+            f"WHERE {epistemic_identity('c')} "
+            f"<> {epistemic_identity('n')} "
             # The SELF-REFERENCE guard: skip the comparison only when ``src``
             # has NO identity at all (an unkeyed optional match). Written with
             # ``OR`` across the two keys it is dead for every ordinary source —
@@ -228,17 +230,18 @@ def resolve_contested_relevance(
             # a self-referential NAND (``create_operator('NAND', p, [p])`` is
             # accepted) boost the contested point by its OWN text — measured:
             # ``{'self-x': 0.05}`` where the pre-widening guard returned ``{}``.
-            "AND (coalesce(src.id, src.eventId) IS NULL "
-            "     OR coalesce(src.id, src.eventId) "
-            "        <> coalesce(n.id, n.eventId)) AND ("
+            f"AND ({epistemic_identity('src')} IS NULL "
+            f"     OR {epistemic_identity('src')} "
+            f"        <> {epistemic_identity('n')}) AND ("
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
             "  ((c.is_operator = false OR c.is_operator IS NULL) "
             "   AND c.op_type IS NULL)) "
             # #7927: ``c`` is the NANDer — the counter-claim is epistemic too.
             f"AND {epistemic_disjunction('c')} "
             "AND " + _exclude_status_clause("c") + " "
-            "RETURN coalesce(n.id, n.eventId), "
-            "  coalesce(src.id, src.eventId, c.id, c.eventId), "
+            f"RETURN {epistemic_identity('n')}, "
+            f"  coalesce({epistemic_identity('src')}, "
+            f"           {epistemic_identity('c')}), "
             # #7927: the counter-claim TEXT must come from the node that
             # actually carries it. A :Subject/:Object stores ``name``/``title``
             # (never ``content``), so the old chain fell through to
@@ -935,6 +938,15 @@ class StateRanker:
             # measured by may be any epistemic label, not only a Point.
             "OPTIONAL MATCH (p)-[a:" + about_types + "]->(o) "
             f"  WHERE {epistemic_disjunction('p')} "
+            # ``pids`` feeds ``_fetch_point_signals`` — an ID-ANCHORED Point
+            # read — so a belief with no ``id`` (a keyless legacy :Event) would
+            # be a ``None`` in that list: the edge counted toward ``degree``
+            # while its posterior vanished, i.e. a measured Object reported as
+            # unmeasured with a phantom degree (measured: degree 1, has_ep
+            # False). Held to what the pre-widening predicate admitted rather
+            # than coalescing, because the value would be re-anchored as an
+            # ``id`` it is not (#8538; #7927 review).
+            "  AND p.id IS NOT NULL "
             "WITH o, count(a) AS about_degree, collect(DISTINCT p.id) AS pids "
             "RETURN o.id, about_degree, pids",
             params={"ids": ids},

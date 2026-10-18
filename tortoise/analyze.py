@@ -651,6 +651,16 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                             "MATCH (op:Point {is_operator:true})-[:" + safe_rel + "]->(target) "
                             f"WHERE op.id IN $ops {live_op} {live_t} "
                             f"AND {epistemic_disjunction('target')} "
+                            # A keyless legacy ``:Event`` (``session_indexer`` mints
+                            # ``(e:Event {eventId:…})`` with no ``id``) has NO
+                            # addressable identity for an id-keyed frontier, so its
+                            # widened return would be a ``None`` id in ``new_points``
+                            # and in ``compute_confidence``'s seeds. Requiring ``.id``
+                            # keeps the population at exactly what the PRE-widening
+                            # label predicate admitted — ``coalesce(id, eventId)`` here
+                            # would hand back a value that is not an ``id``
+                            # (``navigation._node_identity``, #8538; #7927 review).
+                            "AND target.id IS NOT NULL "
                             "RETURN DISTINCT target.id",
                             params={"ops": list(alive)},
                         ).result_set
@@ -675,6 +685,16 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     "MATCH (a:{label})-[r:" + safe_rel + "]->(b) "
                     f"WHERE a.id IN $frontier {live_a} {live_b} "
                     f"AND {epistemic_disjunction('b')} "
+                    # A keyless legacy ``:Event`` (``session_indexer`` mints
+                    # ``(e:Event {eventId:…})`` with no ``id``) has NO
+                    # addressable identity for an id-keyed frontier, so its
+                    # widened return would be a ``None`` id in ``new_points``
+                    # and in ``compute_confidence``'s seeds. Requiring ``.id``
+                    # keeps the population at exactly what the PRE-widening
+                    # label predicate admitted — ``coalesce(id, eventId)`` here
+                    # would hand back a value that is not an ``id``
+                    # (``navigation._node_identity``, #8538; #7927 review).
+                    "AND b.id IS NOT NULL "
                     # #3139/#3154: index-independent non-operator predicate.
                     "AND (a.is_operator IS NULL OR a.is_operator = false) "
                     "AND a.op_type IS NULL "
@@ -701,6 +721,16 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     "MATCH (a)-[r:" + safe_rel + "]->(b:{label}) "
                     f"WHERE b.id IN $frontier {live_a} {live_b} "
                     f"AND {epistemic_disjunction('a')} "
+                    # A keyless legacy ``:Event`` (``session_indexer`` mints
+                    # ``(e:Event {eventId:…})`` with no ``id``) has NO
+                    # addressable identity for an id-keyed frontier, so its
+                    # widened return would be a ``None`` id in ``new_points``
+                    # and in ``compute_confidence``'s seeds. Requiring ``.id``
+                    # keeps the population at exactly what the PRE-widening
+                    # label predicate admitted — ``coalesce(id, eventId)`` here
+                    # would hand back a value that is not an ``id``
+                    # (``navigation._node_identity``, #8538; #7927 review).
+                    "AND a.id IS NOT NULL "
                     # #3139/#3154: index-independent non-operator predicate.
                     "AND (a.is_operator IS NULL OR a.is_operator = false) "
                     "AND a.op_type IS NULL "
@@ -758,6 +788,13 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                 f"WHERE op.id IN $ops {live_p} "
                 # #7927: ``p`` is reached from the anchored operator.
                 f"AND {epistemic_disjunction('p')} "
+                # The EXPANSION frontier is re-anchored by ``p.id`` on the next
+                # hop, so a node with no ``id`` cannot continue it: requiring
+                # it keeps the identity-less legacy ``:Event`` population at
+                # exactly what the pre-widening label predicate admitted
+                # (``coalesce`` would re-anchor on a value that is not an ``id``
+                # — #8538; #7927 review).
+                "AND p.id IS NOT NULL "
                 "RETURN DISTINCT p.id",
                 params={"ops": ops_list},
             ).result_set

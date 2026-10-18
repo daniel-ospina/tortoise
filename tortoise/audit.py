@@ -37,7 +37,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from tortoise.live import epistemic_disjunction  # #7927: traversal-position widening
+from tortoise.live import (  # #7927: traversal-position widening + the ONE
+    # two-key identity declaration (``EPISTEMIC_ID_KEYS``) every widened
+    # surface must resolve through.
+    epistemic_disjunction,
+    epistemic_identity,
+    epistemic_identity_key,
+)
 
 # resolve_tier precedence: explicit credibilityTier (T0-T4) > sourceKind
 # tier-form (T0-T4) > registry default > None (neutral). The Source-level check
@@ -409,9 +415,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "(extractedFrom)"),
             # Point-level sourceKind is legacy — tier the SOURCE node instead
             # (#398); see the missing_sourceKind_source check (7).
-            fix=("wire provenance + tier the source: create_source(url, kind, "  # noqa: UP031
-                 "tier=...) then MATCH (ev:Point {id:'%s'}), (s:Source "
-                 "{url:'...'}) CREATE (ev)-[:extractedFrom]->(s)" % ev_id),
+            fix=("wire provenance + tier the source: create_source(url, kind, "
+                 "tier=...) then MATCH (ev:Point {id:" + _quoted(ev_id) + "}), "
+                 "(s:Source {url:'...'}) CREATE (ev)-[:extractedFrom]->(s)"),
             legacy=True,
         )
         for op_id, ev_id, ev_content in rows1
@@ -438,7 +444,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="low",
             node_id=str(ev_id),
             detail=f"'{ev_content}' has sourceKind={sk} but no sourceDate",
-            fix=f"MATCH (n:Point {{id:'{ev_id}'}}) SET n.sourceDate = '2026-01-01'",
+            fix=f"MATCH (n:Point {{id:{_quoted(ev_id)}}}) "
+                "SET n.sourceDate = '2026-01-01'",
         )
         for ev_id, ev_content, sk in rows2
     ], count2)
@@ -471,7 +478,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             node_id=str(nid),
             detail=f"Superseded point '{content}' has no :CORRECTS edge from its replacement",
             fix=(f"Link the replacement: tortoise_supersede({_quoted(nid)}, '<new_id>') "
-                 f"or MATCH (old:Point {{id:'{nid}'}}), "
+                 f"or MATCH (old:Point {{id:{_quoted(nid)}}}), "
                  f"(new:Point {{id:'<replacement>'}}) CREATE (new)-[:CORRECTS]->(old)"),
         )
         for nid, content in rows3
@@ -505,7 +512,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "MATCH (sup)<-[r:IMPL|NAND]-(active) "
         f"WHERE {epistemic_disjunction('active')} "
         "AND (active.status IS NULL OR active.status = 'live')\n"
-        f"RETURN DISTINCT sup.id, sup.content, type(r), active.id LIMIT {SAMPLE_LIMIT}",
+        # #7927: the widened endpoint's identity, coalesced — it is rendered
+        # into the message and the guidance ("mark X as superseded too"), never
+        # re-anchored as an ``id``, so this is the place ``epistemic_identity``
+        # IS right (unlike an id-keyed frontier, #8538).
+        f"RETURN DISTINCT sup.id, sup.content, type(r), "
+        f"{epistemic_identity('active')} LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
     _record("superseded_active_edges", [
@@ -515,7 +527,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             node_id=str(sup_id),
             detail=(f"Superseded '{sup_content}' has active {edge_type} edge "
                     f"from {active_id}"),
-            fix=f"Remove edges into '{sup_id}' or mark {active_id} as superseded too",
+            fix=(f"Remove edges into {_quoted(sup_id)} or mark "
+                 f"{_quoted(active_id)} as superseded too"),
         )
         for sup_id, sup_content, edge_type, active_id in rows4
     ], count4)
@@ -552,7 +565,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # on ``eventId`` only (the #7936 residual ``consistency.py`` describes),
         # and ``id:'None'`` in a repair string addresses nothing. Same identity
         # ``ep.get_contested_claims`` coalesces.
-        f"RETURN coalesce(src.id, src.eventId), coalesce(tgt.id, tgt.eventId), "
+        f"RETURN {epistemic_identity('src')}, {epistemic_identity('tgt')}, "
         "coalesce(tgt.content, tgt.name, tgt.title, '') "
         f"LIMIT {CHECK5_FETCH_LIMIT}",
         params=params,
@@ -582,8 +595,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 detail=(f"IMPL edge {src_id} → '{str(tgt_content)[:80]}' "
                         f"(keyword: '{hit}') — verify whether NAND applies"),
                 fix=f"Verify semantic contradiction BEFORE converting — if "
-                    f"confirmed: tortoise_create_operator('NAND', '{src_id}', "
-                    f"['{tgt_id}'])",
+                    f"confirmed: tortoise_create_operator('NAND', {_quoted(src_id)}, "
+                    f"[{_quoted(tgt_id)}])",
             ))
     # conf 58: count5 is an UPPER-BOUNDED fetch sample (LIMIT
     # CHECK5_FETCH_LIMIT candidates, word-boundary filtered Python-side) — not
@@ -670,44 +683,53 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         params=params,
     )
 
-    def _legacy_repair(op_id, m_id, m_eid) -> str:
-        """A repair that addresses EXACTLY the edge the issue names.
+    def _legacy_repair(op_id, m_id, m_eid) -> tuple[str, str]:
+        """``(fix, detail_suffix)`` addressing EXACTLY the edge the issue names.
 
         Key-specific on purpose: the node's own key (``id`` first, ``eventId``
-        for a keyless legacy :Event) pins the blast radius to one endpoint. A
-        node carrying NEITHER key has no addressable identity at all — the
-        pattern then omits the property and the edge is what identifies ``m``,
-        so every legacy ``mitigates`` edge from this operator is repaired (the
-        only honest reading when the endpoints are indistinguishable).
+        for a keyless legacy :Event) pins the blast radius to one endpoint.
+
+        An endpoint carrying NEITHER key has no addressable identity, and a
+        repair is REFUSED rather than widened: ``(m)`` alone would rewrite every
+        legacy ``mitigates`` edge from this operator — measured, one operator
+        with two unkeyed endpoints emitted the SAME statement for both issues and
+        running either repaired all of them, including ones it does not
+        describe. A statement whose stated subject is narrower than its effect
+        is the defect this whole shape exists to remove, so the honest answer is
+        "cannot be emitted" (#7927 review round 7).
 
         ``MERGE``, not ``CREATE``: this check reports a state a PARTIALLY
         applied migration leaves behind (both edges present on the same pair),
         and two parallel direct edges between one pair share a single message
         slot (``ep._affected_factors``) — the repair must not mint the second.
         """
-        if m_id is not None:
-            target = f"(m {{id:{_quoted(m_id)}}})"
-        elif m_eid is not None:
-            target = f"(m {{eventId:{_quoted(m_eid)}}})"
+        key = epistemic_identity_key({"id": m_id, "eventId": m_eid})
+        if key is not None:
+            target = f"(m {{{key}:{_quoted(m_id if key == 'id' else m_eid)}}})"
         else:
-            target = "(m)"
+            return "", (" — the endpoint carries neither `id` nor `eventId`, so "
+                        "no statement can address it; repair by hand")
         return (f"MATCH (op:Point {{id:{_quoted(op_id)}}})-[r:mitigates]->"
-                f"{target} DELETE r MERGE (op)-[:mitigated_by]->(m)")
+                f"{target} DELETE r MERGE (op)-[:mitigated_by]->(m)"), ""
 
-    _record("legacy_mitigates_edge", [
-        AuditIssue(
+    def _legacy_issue(op_id, m_id, m_eid, m_content) -> AuditIssue:
+        fix, suffix = _legacy_repair(op_id, m_id, m_eid)
+        return AuditIssue(
             issue_type="legacy_mitigates_edge",
             severity="low",
             node_id=str(op_id),
             detail=(f"Legacy mitigates edge {op_id} -[:mitigates]-> "
-                    f"'{m_content}' — migrate to mitigated_by"),
+                    f"'{m_content}' — migrate to mitigated_by{suffix}"),
             # #7927: ``m`` is unlabeled in the FIX too — it may now be a
             # :Subject/:Object/:Event, and a ``(m:Point {id:…})`` pattern would
             # match nothing, making the suggested repair a silent no-op that
             # leaves the very edge this issue reports.
-            fix=_legacy_repair(op_id, m_id, m_eid),
+            fix=fix,
             legacy=True,
         )
+
+    _record("legacy_mitigates_edge", [
+        _legacy_issue(op_id, m_id, m_eid, m_content)
         for op_id, m_id, m_eid, m_content in rows6b
     ], count6b, legacy=True)
 
@@ -745,7 +767,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "-[:extractedFrom]->(src:Source)\n"
         f"WHERE {epistemic_disjunction('ev')} "
         f"AND {_op_in_kinds('op', 'ev')} AND {source_untiered_w}\n"
-        "RETURN DISTINCT src.url, ev.id, "
+        "RETURN DISTINCT src.url, "
         "coalesce(ev.content, ev.name, ev.title, '') "
         f"LIMIT {SAMPLE_LIMIT}",
         params=params,
@@ -759,9 +781,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "resolves to a NEUTRAL tier (no explicit credibilityTier / "
                     "tier-form or registry-tiered sourceKind)"),
             fix=(f"tier the source: tortoise_set_source_tier({_quoted(src_url)}, "
-                 f"'T0'..'T4') or create_source('{src_url}', kind, tier=...)"),
+                 f"'T0'..'T4') or create_source({_quoted(src_url)}, kind, "
+                 f"tier=...)"),
         )
-        for src_url, ev_id, ev_content in rows7
+        for src_url, ev_content in rows7
     ], count7)
 
     # ── 8. inverted_validity_window (high, #5361) ──────────────────
