@@ -50,6 +50,10 @@ DB_PORT = kwargs["port"]
 import time  # noqa: E402, I001
 for attempt in range(1, 31):  # retry for ~30s
     try:
+        # #8118: the socket READ bound travels in `kwargs` (from
+        # connection.build_connection_kwargs) — ``FalkorDB`` defaults
+        # ``socket_timeout=None``, so without it a wedged engine parks each of
+        # these 30 attempts in ``recv()`` forever and the boot never fails.
         _db = FalkorDB(**kwargs)
         _g = _db.select_graph(DB_GRAPH)
         _g.query("RETURN 1")
