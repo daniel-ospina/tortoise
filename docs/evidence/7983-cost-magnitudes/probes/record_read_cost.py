@@ -58,6 +58,11 @@ MIGRATIONS = [
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
     "20261014000001_record_subject_props_no_derived.sql",
+    # FORWARD `ALTER TABLE public.point ADD COLUMN` (#2782's money value): the
+    # row width this probe measures is the SHIPPED schema's, and a list behind
+    # `record_projection.RECORD_MIGRATIONS` would measure five columns short.
+    # Pinned by `tests/test_7950_capstone_probe.py`.
+    "20261018000001_record_point_money_value_2782.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and
