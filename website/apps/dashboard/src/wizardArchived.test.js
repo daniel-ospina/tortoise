@@ -143,10 +143,25 @@ function stageLabelCall(element) {
 function hasWizardStepsRead(element) {
   let found = false
   walkNodes(element, (node) => {
-    if (found || node.type !== 'MemberExpression') return
-    if (node.object?.type === 'Identifier' && node.object.name === 'wizardSteps') found = true
+    if (found || !isWizardStepsRead(node)) return
+    found = true
   })
   return found
+}
+
+/**
+ * A read of the legacy array: `wizardSteps[i]`, `wizardSteps?.[i]`, `wizardSteps?.at(i)`.
+ *
+ * #3726 cycle 5 (P2): the predicate used to test `node.type === 'MemberExpression'`
+ * only. Optional chaining is a DIFFERENT node type (`OptionalMemberExpression`), so
+ * one keystroke moved the read out of both pins in both directions (measured): an
+ * in-card `{wizardSteps?.[wizardStep]}` rendered the duplicate stage label with the
+ * negative pin GREEN, and re-spelling the ARCHIVED title as `wizardSteps?.[…]` — a
+ * no-op — redded the positive pin.
+ */
+function isWizardStepsRead(node) {
+  return (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
+    && node.object?.type === 'Identifier' && node.object.name === 'wizardSteps'
 }
 
 // #3726 cycle 2: the two #3913 pins below were still written as source regexes,
@@ -233,12 +248,12 @@ function orFallbacks(ast) {
 }
 
 /**
- * The live welcome card's span, read from the AST: from its `div.welcome-head`
- * element to the archived block that follows it. BOTH bounds are asserted here,
- * once — an unresolved END is what turns a window into the rest of the file, an
- * unresolved START what turns it into an empty slice, and an END inside the card
- * what turns a negative pin into an inspection of the wrong region; either way
- * every pin that uses the window certifies a region it does not name.
+ * The live welcome card's span, read from the AST: from the `div.welcome-card`
+ * element to the archived gate that follows its head block. BOTH bounds are asserted
+ * here, once — an unresolved END is what turns a window into the rest of the file, an
+ * unresolved START what turns it into an empty slice, and an END inside the card what
+ * turns a negative pin into an inspection of the wrong region; either way every pin
+ * that uses the window certifies a region it does not name.
  *
  * #3726 cycle 6: existence is not CONTAINMENT, and the END used to be a TEXT
  * sentinel searched on the RAW source — comments included. `main.jsx` already
@@ -310,12 +325,63 @@ function archivedSubtree(ast) {
 function wizardStepsReadsOutside(ast, span) {
   const out = []
   walkNodes(ast, (node) => {
-    if (node.type !== 'MemberExpression') return
-    if (!(node.object?.type === 'Identifier' && node.object.name === 'wizardSteps')) return
+    if (!isWizardStepsRead(node)) return
     if (span && node.start >= span.start && node.end <= span.end) return
     out.push(node.start)
   })
   return out.sort((a, b) => a - b)
+}
+
+/**
+ * `name -> [init, …]` for every `VariableDeclarator` with a bare identifier id.
+ *
+ * #3726 cycle 5 (P2): both copy pins anchored on WHERE an expression is WRITTEN, so
+ * both were one binding hop from the truth — a hoist
+ * (`const legacyStageLabel = wizardSteps[wizardStep]` then `<p>{legacyStageLabel}</p>`)
+ * rendered the duplicate stage label with the pin green, and a hoisted
+ * `const orgLabel = shownOrgName || '…'` made a pure refactor of the ready copy a
+ * FALSE RED (both measured). A resolved VALUE is not a position; this map is the one
+ * hop both pins take.
+ */
+function bindingsByName(ast) {
+  const map = new Map()
+  walkNodes(ast, (node) => {
+    if (node.type !== 'VariableDeclarator' || node.id.type !== 'Identifier') return
+    const list = map.get(node.id.name) ?? []
+    list.push(node.init)
+    map.set(node.id.name, list)
+  })
+  return map
+}
+
+/**
+ * The init of `name`'s SINGLE declarator, or `null` — not a local binding (a prop, a
+ * parameter, a hook result) or declared more than once, in which case the reader
+ * refuses to guess which one a render means.
+ */
+function uniqueInit(bindings, name) {
+  const inits = bindings.get(name)
+  return inits && inits.length === 1 ? inits[0] : null
+}
+
+/**
+ * Every stage label READ that reaches the live card: direct `wizardSteps[…]` reads in
+ * the card outside the archived subtree, plus a rendered identifier whose single
+ * declarator IS such a read (the hoist one hop away).
+ */
+function inCardStageReads(ast, card, archivedSpan) {
+  const inArchived = (n) => archivedSpan && n.start >= archivedSpan.start && n.end <= archivedSpan.end
+  const direct = wizardStepsReadsOutside(ast, archivedSpan)
+    .filter((offset) => offset > card.start && offset < card.end)
+  const bindings = bindingsByName(ast)
+  const hoisted = []
+  walkNodes(card.node, (node) => {
+    if (node.type !== 'JSXExpressionContainer' || node.expression.type !== 'Identifier') return
+    if (inArchived(node)) return
+    const init = uniqueInit(bindings, node.expression.name)
+    if (init && hasWizardStepsRead(init)) hoisted.push(node.start)
+  })
+  return [...direct, ...hoisted].sort((a, b) => a - b)
 }
 
 /**
@@ -450,18 +516,41 @@ function readyCopyOrgFallbacks(ast) {
   // render-REACHABLE from its carrier: no short-circuit or ternary on the way up.
   const parents = new Map()
   walk(ast.program, (node, parent) => { if (parent) parents.set(node, parent) })
+  // Render-REACHABLE and in TEXT position: `{false && …}` never renders, and a
+  // `title={shownOrgName || '…'}` is a tooltip, not the copy the pin names (measured:
+  // the attribute form satisfied the pin while the visible copy rendered
+  // "You're set up in .").
   const reachableFrom = (f, carrier) => {
     let n = parents.get(f.node)
     while (n && n !== carrier.node) {
       if (n.type === 'LogicalExpression' || n.type === 'ConditionalExpression') return false
+      if (n.type === 'JSXAttribute') return false
       n = parents.get(n)
     }
     return n === carrier.node
   }
-  return orFallbacks(ast)
+  const inline = orFallbacks(ast)
     .filter((f) => f.left === 'shownOrgName'
       && minimal.some((e) => f.start > e.start && f.start < e.end && reachableFrom(f, e)))
     .map((f) => f.value)
+  // #3726 cycle 5 (P2): a HOIST is a value, not a position — extracting the fallback
+  // to `const orgLabel = shownOrgName || '…'` and rendering `{orgLabel}` changes no
+  // rendered character, so requiring the inline shape made that refactor a FALSE RED
+  // (measured). One hop is resolved, the same way `inCardStageReads` resolves the
+  // legacy-array read.
+  const bindings = bindingsByName(ast)
+  const hoisted = []
+  for (const e of minimal) {
+    walkNodes(e.node, (node) => {
+      if (node.type !== 'JSXExpressionContainer' || node.expression.type !== 'Identifier') return
+      const init = uniqueInit(bindings, node.expression.name)
+      if (!init || init.type !== 'LogicalExpression' || init.operator !== '||') return
+      if (init.left.type !== 'Identifier' || init.left.name !== 'shownOrgName') return
+      const value = literalString(init.right)
+      if (value !== null) hoisted.push(value)
+    })
+  }
+  return [...inline, ...hoisted]
 }
 
 /**
@@ -556,19 +645,17 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
     connected: 'serverHarnessConnected',
     buildFork: 'isBuildFork',
   }, 'the org-holding, paused, #3428 not-connected and cycle-4 build-fork overrides are all passed to wizardStageLabel')
-  // The NEGATIVE pin's region: the live welcome card, from its own element to the
-  // archived block that legitimately keeps the in-card label. Both boundaries are
-  // checked; an unresolved END is the hazard that makes a negative pin vacuous.
-  // #3726 cycle 5: the window bounds are derived ONCE, by a helper that asserts
-  // BOTH ends, and are shared with the ready-copy pin below. An unresolved END is
-  // the hazard that makes a negative pin vacuous; an unresolved START makes it
-  // empty, which passes `!includes(...)`.
-  const { start: headOpen, end: headEnd } = welcomeCardWindow(SRC_AST)
+  // The NEGATIVE pin's region: the live welcome card, from the card element to the
+  // archived block that legitimately keeps the in-card label. The bounds are derived
+  // ONCE, by a helper that asserts both ends, and shared with the ready-copy pin
+  // below: an unresolved END makes a negative pin watch the rest of the file, an
+  // unresolved START makes it empty, and `!includes(…)` passes over both.
+  const { start: cardStart, end: gateStart } = welcomeCardWindow(SRC_AST)
   // #3726 cycle 3: the assertion itself was still a two-delimiter regex, so the
   // third delimiter — and the JSX container form — kept the pin GREEN while the
   // label was genuinely back in the card. Class names from the AST instead: one
   // shape covers every spelling (`"wizard-title"`, `{'wizard-title'}`, `` {`wizard-title`} ``).
-  const inCardTitles = SRC_JSX.filter((e) => e.start > headOpen && e.start < headEnd && hasClass(e.cls, 'wizard-title'))
+  const inCardTitles = SRC_JSX.filter((e) => e.start > cardStart && e.start < gateStart && hasClass(e.cls, 'wizard-title'))
   assert.deepEqual(inCardTitles, [],
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // #3726 cycle 4 (P2): the pin above is anchored to the class NAME, so four
@@ -581,8 +668,7 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   // archived subtree.
   const card = welcomeCard(SRC_AST)
   const archivedSpan = archivedSubtree(SRC_AST)
-  const inCardStepReads = wizardStepsReadsOutside(SRC_AST, archivedSpan)
-    .filter((offset) => offset > card.start && offset < card.end)
+  const inCardStepReads = inCardStageReads(SRC_AST, card, archivedSpan)
   assert.deepEqual(inCardStepReads, [],
     'no in-card stage label may return — anchored to the `wizardSteps[…]` READ, so a classless or `class=` copy, or one below the archived block, cannot evade it')
   // The archived block's title still READS wizardSteps (kept for rollback): the
@@ -668,7 +754,7 @@ test('#3726 falsifiability: the legacy-label pin reads the ARRAY, not copy that 
 })
 
 test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate and ignores prose', () => {
-  // Two ways the ONE guarded span in this file can stop naming the live card.
+  // Every way the ONE guarded span in this file can stop naming the live card.
   const card = (block) => [
     '<div className="welcome-card">',
     '  <div className="welcome-head">',
@@ -823,9 +909,7 @@ test('#3726 falsifiability: the in-card pin is anchored to the wizardSteps READ,
   ].join('\n')
   const read = (source) => {
     const ast = parseModule(source)
-    const card = welcomeCard(ast)
-    return wizardStepsReadsOutside(ast, archivedSubtree(ast))
-      .filter((offset) => offset > card.start && offset < card.end)
+    return inCardStageReads(ast, welcomeCard(ast), archivedSubtree(ast))
   }
   // The archived block's OWN read is legitimately in the card: excluded, so the
   // control below is `[]` and the pin is not vacuous by construction.
@@ -835,10 +919,32 @@ test('#3726 falsifiability: the in-card pin is anchored to the wizardSteps READ,
     ['classless', '    <p>{wizardSteps[wizardStep]}</p>'],
     ['the class= alias', '    <p class="wizard-title">{wizardSteps[wizardStep]}</p>'],
     ['a template className', '    <p className={`wizard-title ${wizardStep}`}>{wizardSteps[wizardStep]}</p>'],
+    // #3726 cycle 5 (P2): optional chaining is a DIFFERENT node type
+    // (`OptionalMemberExpression`), so `?.[…]` and `?.at(…)` were invisible to a
+    // `MemberExpression`-only predicate — one keystroke past the pin in both
+    // directions (measured: the in-card label rendered with the pin green).
+    ['optional chaining', '    <p>{wizardSteps?.[wizardStep]}</p>'],
+    ['optional .at()', '    <p>{wizardSteps?.at(wizardStep)}</p>'],
   ]) {
     assert.equal(read(build(inner)).length, 1,
       `an in-card stage label spelled ${label} must be SEEN — the class-name pin alone misses it`)
   }
+  // A HOIST is a value, not a position: the legacy array read assigned to a binding
+  // and rendered by name is the same defect one hop away (measured green before this
+  // reader resolved it).
+  const hoisted = [
+    'const legacyStageLabel = wizardSteps[wizardStep]',
+    'export const Card = () => (',
+    '<div className="welcome-card">',
+    '  <div className="welcome-head">',
+    '    <p>{legacyStageLabel}</p>',
+    '  </div>',
+    `  ${gate}`,
+    '</div>',
+    ')',
+  ].join('\n')
+  assert.equal(read(hoisted).length, 1,
+    'a stage label HOISTED through a binding is still an in-card stage label')
   // …and a copy BELOW the archived block is still inside the card, where the
   // window-to-the-gate pin cannot see it.
   const below = [
@@ -870,9 +976,9 @@ test('#3726 falsifiability: the in-card title pin fires on EVERY className spell
     ].join('\n')
     // The SAME window helper the live pin uses — so the synthetic exercises the
     // boundary checks too, rather than re-deriving a window with its own fallback.
-    const { start: headOpen, end: headEnd } = welcomeCardWindow(parseModule(synthetic))
+    const { start: cardStart, end: gateStart } = welcomeCardWindow(parseModule(synthetic))
     const inCard = jsxOf(synthetic)
-      .filter((e) => e.start > headOpen && e.start < headEnd && hasClass(e.cls, 'wizard-title'))
+      .filter((e) => e.start > cardStart && e.start < gateStart && hasClass(e.cls, 'wizard-title'))
     assert.equal(inCard.length, 1, `an in-card label spelled className={${className}} must redden the pin`)
   }
 })
@@ -968,6 +1074,20 @@ test('#3726 falsifiability: the ready-copy pin is anchored to the welcome card, 
     .replace("</strong></p>", "</strong>. {false && <span>{shownOrgName || 'your organization'}</span>}Next, choose</p>")
   assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${deadDecoy}\n${archived}`)), [],
     'a non-rendered decoy in the SAME paragraph must not satisfy the ready-copy pin')
+  // …nor a fallback in an ATTRIBUTE of the carrier: a `title={…}` is a tooltip, not the
+  // copy the pin names (measured green while the visible copy rendered
+  // "You're set up in .").
+  const attributeDecoy = card('{shownOrgName}')
+    .replace("</strong></p>", "</strong>. Next, choose<span title={shownOrgName || 'your organization'} /></p>")
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${attributeDecoy}\n${archived}`)), [],
+    'a fallback in an ATTRIBUTE of the carrier is not the rendered copy')
+  // …and the HOIST, the other direction: extracting the fallback to a binding changes
+  // no rendered character, so it must not red (measured as a false red before the
+  // reader resolved one hop).
+  const hoistedFallback = `const orgLabel = shownOrgName || 'your organization'\n`
+    + card('{orgLabel}')
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(`${hoistedFallback}\n${archived}`)), ['your organization'],
+    'hoisting the fallback into a binding is a refactor, not a missing fallback')
 })
 
 test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan T7)', () => {
