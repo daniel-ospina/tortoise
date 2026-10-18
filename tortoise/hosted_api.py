@@ -36827,6 +36827,100 @@ async def webhooks_stripe(request: Request):
         return JSONResponse(status_code=500, content={"detail": "processing failed"})
 
 
+# ── Billing mirror reconcile (#8878) ────────────────────────────────────
+#
+# The webhook above is the ONLY writer of the stored ``tier``, and the stored
+# tier IS the entitlement (``billing.effective_tier`` never derives upward).
+# One missed/failed delivery therefore capped a paying org at the lower tier
+# permanently — measured 2026-10-17 on the fleet's own org: billed on the Pro
+# price, enforced at Solo's 25 000-node cap, every hosted write refused with
+# "upgrade your plan", reads still working so nothing looked broken.
+#
+# ``billing.reconcile_org`` has existed since the #310 billing module (PR #778)
+# and had NO production caller since the boot reconcile thread went away
+# (#4262) — #4726 only re-routed it through the Supabase control-plane seam —
+# so nothing ever compared the store against Stripe. This endpoint is that
+# caller, and the
+# cadence is EXTERNAL (``.github/workflows/billing-reconcile-cron.yml`,
+# daily) for the same reason the backup pipeline chose an external driver
+# (#596): an in-process timer dies with the process, is invisible when the
+# app is crash-looping, and would re-introduce the boot-blocking Stripe call
+# #4262 removed.
+_BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
+
+
+@app.post("/v1/internal/billing/reconcile")
+async def billing_reconcile(request: Request):
+    """Reconcile EVERY billed org's mirror against live Stripe (#8878).
+
+    Internal-key only. Idempotent and safe to re-run: the pass reads Stripe
+    truth and rewrites ``tier`` + its limits, which is exactly what the
+    webhook would have written had the delivery arrived.
+
+    FLEET-WIDE — there is no per-org targeting. An operator repairing one
+    customer runs ``billing.reconcile_org(sdk, org_id)`` directly (see
+    ``docs/infra-runbook.md`` §4.2), not this route.
+
+    Returns the pass summary (``checked``/``repaired``/``unchanged``/
+    ``unverified``/``skipped``/``drift``/``unrepaired``/``failed``). ``drift``
+    entries with ``direction: "up"`` are the payable-customer-under-delivered
+    events, and each one is also paged through the existing billing notify
+    channel by the reconciler itself. A concurrent run returns **202**
+    ``{"status": "already_running"}`` and does NO work (the next scheduled run
+    retries; nothing queues) — a caller must not read 202 as a completed pass.
+
+    Fails CLOSED on an uncertifiable enumeration — **503**
+    ``{"status": "enumeration_incomplete"}`` — so the daily driver's red run is
+    the alarm rather than a partial pass reported as clean, and its log names
+    the leg instead of showing an opaque 500.
+    """
+    _check_internal(request)
+    from tortoise.billing import BillingEnumerationError, reconcile_subscriptions
+
+    if _BILLING_RECONCILE_INFLIGHT.locked():
+        return JSONResponse(status_code=202,
+                            content={"status": "already_running"})
+    async with _BILLING_RECONCILE_INFLIGHT:
+        from tortoise.supabase_control import is_supabase_enabled
+
+        # #4726 discipline: in Supabase mode the pass must NEVER construct a
+        # registry-namespaced SDK (a write vector post-#669 that RESURRECTS the
+        # deleted registry graph, #878) — ``reconcile_org``/``org_billing_identity``
+        # read the authoritative ``organizations`` row with ``sdk=None``.
+        try:
+            if is_supabase_enabled():
+                sdk = None
+                result = await asyncio.to_thread(reconcile_subscriptions, None)
+            else:
+                sdk = await asyncio.to_thread(_registry_sdk)
+                try:
+                    # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
+                    # rides a worker hand-off so it cannot hold the single uvicorn
+                    # event loop (the #2988/#3498 class).
+                    result = await asyncio.to_thread(reconcile_subscriptions, sdk)
+                finally:
+                    with suppress(Exception):
+                        sdk.close()
+        except BillingEnumerationError as exc:
+            # The pass refuses to reconcile a fleet it cannot certify COMPLETE.
+            # That is not a request error — it is "the source is unavailable or
+            # unprovable, retry" — so it answers 503 with a NAME, instead of the
+            # opaque 500 an uncaught RuntimeError produces: the driver's
+            # ``::error::`` line is the page, and "HTTP 500" names nothing an
+            # operator can act on. Every PER-ORG failure is caught inside the
+            # pass, so this exception is always the enumeration's.
+            from tortoise.security import redact_error
+            _logger.warning("billing reconcile: enumeration unavailable: %s",
+                            redact_error(exc))
+            return JSONResponse(
+                status_code=503,
+                content={"status": "enumeration_incomplete",
+                         "detail": "the fleet enumeration could not be "
+                                   "confirmed complete — refusing to report a "
+                                   "partial pass as clean"})
+    return result
+
+
 # ── OAuth 2.1 for remote MCP (#524) ─────────────────────────────────────
 # Authorization-code + PKCE server with DCR + RFC 8707 resource indicators,
 # Supabase-auth-backed (D2). Locked decisions in

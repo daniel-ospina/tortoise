@@ -979,7 +979,7 @@ class TestS3:
             def __init__(self):
                 self.calls = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 self.calls.append((query, entity_type))
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
@@ -1107,7 +1107,7 @@ class TestS3:
             def __init__(self):
                 self.calls = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 self.calls.append((query, entity_type))
                 # the REAL callee row shape: ``SearchResult.to_dict()`` keys
                 # the kind as ``point_kind`` (#4511) — never ``kind``.
@@ -1145,7 +1145,7 @@ class TestS3:
         """
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 return {
                     "point": [{"id": "pt-1", "content": "flash is the path",
                                "point_kind": "statement"}],
@@ -1181,7 +1181,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
                              "point_kind": "core:plan"}]
@@ -1219,7 +1219,7 @@ class TestS3:
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
-                                   exclude_turn_echo_session=None):
+                                   exclude_turn_echo_session=None, **_ignored):
                 if entity_type != "point":
                     return []
                 rows = [
@@ -1352,7 +1352,7 @@ class TestS3:
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
-                                   exclude_turn_echo_session=None):
+                                   exclude_turn_echo_session=None, **_ignored):
                 self.seen[entity_type] = exclude_turn_echo_session
                 if entity_type == "point":
                     rows = [
@@ -1403,7 +1403,7 @@ class TestS3:
 
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
-                                   exclude_turn_echo_session=None):
+                                   exclude_turn_echo_session=None, **_ignored):
                 self.asked.append((entity_type, limit, exclude_turn_echo_session))
                 return []
 
@@ -1426,7 +1426,7 @@ class TestS3:
         this test red. Reachable: both calls below omit ``session_id``."""
         class StrictMockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
-                                   include_terminal=False):
+                                   include_terminal=False, _record_reads=True):
                 return []
 
         sdk = StrictMockSDK()
@@ -1441,7 +1441,7 @@ class TestS3:
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
-                                   exclude_turn_echo_session=None):
+                                   exclude_turn_echo_session=None, **_ignored):
                 if entity_type != "point":
                     return []
                 rows = [{"id": f"pt_{i}", "content": f"claim {i}",
@@ -1466,7 +1466,7 @@ class TestS3:
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
-                                   exclude_turn_echo_session=None):
+                                   exclude_turn_echo_session=None, **_ignored):
                 if entity_type != "point":
                     return []
                 rows = [{"id": "s1_t0", "content": "[user] hi",
@@ -1538,7 +1538,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class BoomSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 raise ConnectionError("graph unreachable")
 
         res = v2.search_graph(BoomSDK(), S2_FIXTURE, "STORY")
