@@ -786,8 +786,16 @@ class TestNegativePaths:
 
     # ── compute_reputation with all-superseded claims ─────────────────
 
-    def test_compute_reputation_all_superseded_returns_neutral(self, sdk):
-        """compute_reputation excludes outdated claims, neutral 0.5 when all superseded."""
+    def test_compute_reputation_excludes_an_outdated_claim(self, sdk):
+        """compute_reputation excludes outdated claims, neutral 0.5 when all superseded.
+
+        #8622 note: the edge is created AFTER the supersede on purpose. An
+        ``IMPL`` edge incident to a point that is then superseded is MOVED onto
+        the successor by the 2a-DIRECT transfer (E2E-11.6: zero direct edges
+        remain incident to a superseded point), so it no longer witnesses the
+        reader's ``outdated`` filter — building the edge afterwards pins exactly
+        the filter this test is about, without depending on the transfer.
+        """
         subj = sdk.create_subject("all-superseded-agent", "analyst")
         claim = sdk.create_point("statement", "superseded claim")
         replacement = sdk.create_point("statement", "replacement claim")
@@ -801,20 +809,71 @@ class TestNegativePaths:
             "eventKind": "analysis",
             "subject": subj["name"],
         })
+
+        # Supersede the claim → outdated, THEN record the event's assertion
+        # about it (the transfer cannot move an edge that does not exist yet).
+        sdk.supersede_point(claim["id"], replacement["id"])
         proj.g.query(
             "MATCH (e:Event {eventId:'ev-sup-all'}), (p:Point {id:$pid}) "
             "CREATE (e)-[:IMPL]->(p)",
             params={"pid": claim["id"]},
         )
 
-        # Supersede the claim → outdated
-        sdk.supersede_point(claim["id"], replacement["id"])
-
         # Reputation should be neutral — outdated claim excluded
         rep = sdk.compute_reputation(subj["id"])
         assert rep["mean"] == 0.5
         assert rep["total_events"] == 0
         assert rep["impl_count"] == 0
+
+    def test_compute_reputation_counts_an_event_whose_claim_was_superseded(self, sdk):
+        """An event's IMPL edge is TRANSFERRED to the successor, so it still counts.
+
+        #8622: the supersede transfer is label-agnostic at every consumer, so
+        ``(Event)-[:IMPL]->(claim)`` moves onto the replacement instead of being
+        destroyed by the delete-leg (which is what it used to be — the MERGE
+        matched nothing because the far endpoint is an ``:Event``, and the
+        original edge was then removed: silent live data loss). E2E-11.6
+        requires zero direct edges incident to a superseded point, so the edge
+        cannot simply stay behind either. Consequence, pinned here: the subject's
+        event supports the LIVE successor and remains part of the score.
+        """
+        subj = sdk.create_subject("superseded-transfer-agent", "analyst")
+        claim = sdk.create_point("statement", "claim to be superseded")
+        replacement = sdk.create_point("statement", "replacement claim")
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-sup-moved",
+            "eventId": "ev-sup-moved",
+            "eventKind": "analysis",
+            "subject": subj["name"],
+        })
+        proj.g.query(
+            "MATCH (e:Event {eventId:'ev-sup-moved'}), (p:Point {id:$pid}) "
+            "CREATE (e)-[:IMPL]->(p)",
+            params={"pid": claim["id"]},
+        )
+        before = sdk.compute_reputation(subj["id"])
+        assert before["total_events"] == 1
+
+        result = sdk.supersede_point(claim["id"], replacement["id"])
+        assert result["edges_transferred"] == 1
+
+        # The edge followed the successor, and nothing is left on the prior.
+        targets = [r[0] for r in proj.g.query(
+            "MATCH (e:Event {eventId:'ev-sup-moved'})-[:IMPL]->(t) "
+            "RETURN t.id").result_set]
+        assert targets == [replacement["id"]], targets
+        stranded = proj.g.query(
+            "MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old}) RETURN ID(r)",
+            params={"old": claim["id"]},
+        ).result_set
+        assert not stranded, stranded
+
+        after = sdk.compute_reputation(subj["id"])
+        assert after["total_events"] == 1
+        assert after["impl_count"] == 1
+        assert after["outcomes"][0]["point_id"] == replacement["id"]
 
     # ── create_operator with part/whole types ─────────────────────────
 
