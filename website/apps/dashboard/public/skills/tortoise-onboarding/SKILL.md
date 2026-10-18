@@ -529,6 +529,52 @@ Guide the human through:
    Anthropic — your key, their cloud).
 3. The connector exposes the `tortoise_*` MCP tools to claude.ai workflows.
 
+**Already installed — refreshing is the same command.** An install is not a
+one-time write. The installer owns two things inside your project: the skills
+directory and, on a Codex project, the marker-delimited Tortoise block in
+`AGENTS.md`. Re-running the installer is the upgrade path: it replaces what sits
+between ONE well-formed `<!-- tortoise:start -->` / `<!-- tortoise:end -->` pair
+and leaves everything you wrote around it alone.
+
+```bash
+curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness <harness>
+```
+
+The block carries a version line (`<!-- tortoise:block vN -->`) and the installer
+says what it did: `created (block vN)`, `upgraded (unversioned → vN)` — the
+migration case, a repo provisioned before versioning — `upgraded vM → vN`,
+`refreshed (vN — same version, updated text)`, or `already current` — and, if your
+installer is older than the block (a cached or rolled-back copy), the literal line
+`written at vN (the file had vM: this installer is OLDER than the block it
+replaced)`, so a downgrade is never announced as an upgrade. A version line that
+is not a number (`v2-rc1`), or has more than 18 digits, gets
+`… "vM" is not a number this installer can compare …` / `… too large to compare
+safely …` instead of any claim about which is newer.
+`already current` is a statement about the TEXT — the block on disk is
+byte-identical to the one just built — not about the version number, so it is
+safe to trust.
+
+If the marker lines are not one clean pair — two copies, a stray marker, or one
+with different internal spacing or an invisible character — the installer prints
+`✗ AGENTS.md — the Tortoise block markers are MALFORMED` with per-marker counts
+(`start markers: N (first at line L), end markers: M (first at line …)`) and the
+cause it actually found, REFUSES rather than duplicating the block, and exits 3
+(the skills ARE installed by then; only the block is not upgraded).
+
+A marker inside a fenced code block is an EXAMPLE, not a block. Every fence
+CommonMark recognises is skipped — backticks or tildes, three or more, indented
+up to three spaces, and a longer fence may contain a shorter one — for the count
+AND for the version read, the comparison and the rewrite, so a project that
+documents the markers keeps its documentation exactly as written and still gets
+its block created or refreshed.
+
+An UNCLOSED fence is the one ambiguity, and it is refused: the installer says
+`An UNTERMINATED code fence is hiding part of this file` and exits 3 without
+writing, because the markers below it cannot be told apart from an example.
+Close the fence and re-run.
+
+Never hand-edit inside markers you did not write; the next refresh discards it.
+
 ## 4. Verify, then checkpoint harness-connected
 
 1. Call `tortoise_health` (MCP tool, all 6 harnesses once connected). It
