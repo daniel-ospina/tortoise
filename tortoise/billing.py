@@ -80,6 +80,35 @@ def _stored_pointer_is_current(sub: dict) -> bool:
             and not sub.get("cancel_at_period_end"))
 
 
+def _subscription_rank(sub: dict) -> int | None:
+    """The node cap this subscription's price entitles, or ``None`` if unrankable.
+
+    ``None`` covers both "the price is not in the catalog" (``subscription_plan``
+    raises ``BillingError`` — the caller decides, see its docstring) and "the
+    pricing ladder could not be read" (``_paid_tier_floor``), because a
+    comparison this function cannot make must never be mistaken for "ranks low".
+    """
+    try:
+        tier, _interval = subscription_plan(sub)
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable price is not a rank
+        return None
+    return _paid_tier_floor(tier)
+
+
+def _best_ranked(subs):
+    """``(subscription, rank)`` for the highest-capped entry, else ``(None, None)``.
+
+    Entries whose rank cannot be read are skipped rather than treated as zero,
+    so an unrankable subscription never *wins* a comparison it did not prove.
+    """
+    best, best_rank = None, None
+    for sub in subs:
+        rank = _subscription_rank(sub)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best, best_rank = sub, rank
+    return best, best_rank
+
+
 def _select_current_subscription(subs):
     """The subscription that represents the customer's CURRENT entitlement.
 
@@ -92,17 +121,40 @@ def _select_current_subscription(subs):
     still applies to a failing card).
 
     ⛔ And within the live ones, a subscription that is already ENDING
-    (``cancel_at_period_end``) LOSES to one that is not: the ending sub is the
-    old, soon-dead pointer, and taking it because Stripe listed it first is the
-    same ordering bug one level down. A customer whose ONLY live subscriber is
-    an ending one still gets it — that is a real cancellation, not a gap.
+    (``cancel_at_period_end``) normally LOSES to one that is not: the ending sub
+    is the old, soon-dead pointer, and taking it because Stripe listed it first
+    is the same ordering bug one level down. A customer whose ONLY live
+    subscriber is an ending one still gets it — that is a real cancellation, not
+    a gap.
+
+    ⛔⛔ But "newer" is NOT "better", and the ending sub is still IN FORCE.
+    ``cancel_at_period_end`` is not a refund: the customer has paid the ending
+    subscription THROUGH ``current_period_end``, so replacing it with a
+    merely-non-ending one revokes a paid entitlement before the period it was
+    paid for has run out — a downgrade, recorded as a clean ``repaired``, and
+    silent (only drift UP notifies). Ranked case: Team ending + an unprompted
+    Solo signup inside the window must stay Team until the period ends. A
+    non-ending subscription therefore replaces an ending one only when it is
+    PROVABLY ranked at or above it (same cap or higher); when either rank is
+    unreadable the still-in-force one is kept, because "cannot prove it is not
+    lower" is not a reason to take entitlement away. The lower-ranked newer
+    sub is not lost: once the ending one dies, the next pass sees no live
+    ending sub and mirrors the newer one then.
     """
     live = [s for s in subs if s.get("status") in _POINTER_CURRENT_STATUSES]
-    for sub in live:
-        if not sub.get("cancel_at_period_end"):
-            return sub
-    if live:
-        return live[0]
+    live_now = [s for s in live if not s.get("cancel_at_period_end")]
+    ending = [s for s in live if s.get("cancel_at_period_end")]
+    if live_now:
+        candidate = live_now[0]
+        if ending:
+            kept, kept_rank = _best_ranked(ending)
+            if kept is not None:
+                cand_rank = _subscription_rank(candidate)
+                if cand_rank is None or cand_rank < kept_rank:
+                    return kept
+        return candidate
+    if ending:
+        return ending[0]
     for sub in subs:
         if sub.get("status") in _ACTIVE_STATUSES:
             return sub
@@ -820,6 +872,12 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       match, which let ``past_due`` (or the ending pointer) win on Stripe's
       ordering — → mirror (this also rewrites the stale pointer). With neither,
       mirror the stored one — a real cancellation, which must still downgrade.
+      ⛔ An ENDING subscription is still IN FORCE: the customer paid it through
+      ``current_period_end``, so a newer non-ending subscription replaces it
+      only when it is ranked at or above it (``_select_current_subscription``).
+      An org that adds a CHEAPER subscription before its paid period ends keeps
+      the higher tier until that period ends; replacing it there would revoke
+      an entitlement already paid for, silently (only drift UP notifies).
       ⛔ If the LIST itself FAILS, none of that applies: the org is returned as
       ``action: "noop"`` and left alone (a provider error is not a verdict —
       mirroring the stored one there would re-cap a paying org, which is the
@@ -828,9 +886,11 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       alone.
     - elif Org has ``stripe_customer_id`` only (missed checkout event blind
       spot) → LIST subscriptions → the same live-then-``past_due`` preference,
-      ending subs last → mirror. A failed LIST is a ``noop`` here too, for the
-      same reason: the population is dominated by abandoned checkouts, and one
-      5xx must not turn a routine row into a FAILED pass that pages.
+      ending subs last (and the same still-in-force guard: a non-ending sub
+      replaces an ending one only at an equal-or-higher cap) → mirror. A failed
+      LIST is a ``noop`` here too, for the same reason: the population is
+      dominated by abandoned checkouts, and one 5xx must not turn a routine row
+      into a FAILED pass that pages.
     - else no-op.
 
     #4726: the identifiers are read from the SAME store ``mirror_subscription``

@@ -505,6 +505,84 @@ class TestApplyLimitsAndReconcile:
             f"capped at {t['tier']!r}")
         assert t["subscription_id"] == "sub_new"
 
+    def test_reconcile_a_cheaper_newer_sub_does_not_revoke_a_paid_ending_one(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P2: ENDING is not a refund — the paid period still runs.
+
+        ``cancel_at_period_end`` keeps the subscription ``active`` until
+        ``current_period_end`` and the customer has PAID for that period. An
+        org that cancels Team and adds a cheaper Solo before the period ends
+        must therefore stay on Team until the period does: preferring "any
+        non-ending subscription" over a still-in-force higher one drops the
+        org from Team's 600 000 nodes to Solo's 25 000 while it is paid up,
+        and every write past Solo's cap is refused with "upgrade your plan".
+        The row is recorded as a clean ``repaired``/``direction: down``, which
+        does NOT page (only drift UP notifies) — so the revocation is silent
+        on a GREEN run, the exact failure class this cadence exists to remove.
+
+        The newer Solo subscription is not lost: once the ending Team one dies
+        the next pass sees no live ending sub and mirrors Solo then.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-team-cheaper-newer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team', "
+            "t.stripe_customer_id='cus_1', t.tier='team', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [ending, cheaper])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active", (
+            f"the customer must still be consulted about the ending sub — {out}")
+        assert t["tier"] == "team", (
+            "Team is paid through current_period_end, so a NEWER but CHEAPER "
+            f"subscription must not revoke it early — got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team", (
+            f"the still-in-force pointer is the current one — got {t}")
+
+    def test_reconcile_customer_only_keeps_a_paid_ending_sub_over_a_cheaper_newer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """The SAME rank guard on the customer-only LIST site.
+
+        An abandoned/missed checkout can leave a ``stripe_customer_id`` and no
+        ``subscription_id``, and this branch feeds the same selector. Without
+        the guard here an org whose only stored binding is the customer would
+        drop from Team to a newer Solo before its paid period ended — a silent
+        downgrade the fleet cadence then reports as a clean repair.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("customer-only-ending-team")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_1', "
+            "t.tier='team', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending])
+        reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "team", (
+            "the ending Team sub is paid through the period, so it outranks "
+            f"the newer Solo one — got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team"
+
     def test_reconcile_real_cancellation_still_downgrades(
             self, monkeypatch, stripe_env, billing_sdk):
         """#8895 P1 guard: the customer-level fallback must NOT keep a canceled
@@ -2931,6 +3009,48 @@ class TestReconcileSweep:
         assert self._row(sdk, org_id)[0] == "pro", (
             "the org is PAYING and Stripe did not say otherwise — its tier must "
             "be untouched")
+
+    def test_an_unreadable_rank_never_awards_a_replacement(
+            self, stripe_env):
+        """The rank guard's SAFE direction, unit-pinned.
+
+        ``_subscription_rank`` returns ``None`` for a price the catalog does not
+        know and for an unreadable pricing ladder (``_paid_tier_floor``). Both
+        mean "cannot prove this is not lower", which is not a reason to take
+        entitlement away from a subscription the customer has PAID through
+        ``current_period_end`` — so the still-in-force one is kept. The mirror
+        of it: a provably equal-or-higher newer sub does replace it (the
+        upgrade case, also pinned end-to-end by
+        ``test_reconcile_an_active_but_ENDING_pointer_follows_the_newer_sub``).
+        """
+        from tortoise import billing as bl
+
+        def _sub(sid, price, ending, status="active"):
+            return {"id": sid, "status": status,
+                    "cancel_at_period_end": ending,
+                    "items": {"data": [{"price": {"id": price}}]}}
+
+        ending_team = _sub("sub_team", "price_300teamM", True)
+        unknown_price = _sub("sub_unknown", "price_nope", False)
+        assert bl._subscription_rank(unknown_price) is None
+        assert bl._select_current_subscription([unknown_price, ending_team]) \
+            is ending_team
+
+        # A provably lower newer sub loses too, on either side of the ordering.
+        ending_solo = _sub("sub_solo", "price_100soloM", True)
+        newer_free = _sub("sub_free", "price_000freeM", False)
+        assert bl._select_current_subscription([newer_free, ending_solo]) \
+            is ending_solo
+        assert bl._select_current_subscription([ending_solo, newer_free]) \
+            is ending_solo
+
+        # Equal or higher DOES replace it — the rule is a floor, not a freeze.
+        newer_team = _sub("sub_team2", "price_300teamM", False)
+        assert bl._select_current_subscription([ending_solo, newer_team]) \
+            is newer_team
+        newer_solo = _sub("sub_solo2", "price_100soloM", False)
+        assert bl._select_current_subscription([ending_solo, newer_solo]) \
+            is newer_solo
 
     def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
         """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.

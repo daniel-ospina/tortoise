@@ -466,6 +466,24 @@ instead (the route cannot target a single org):
 python -c 'from tortoise.billing import reconcile_org; import sys; print(reconcile_org(None, sys.argv[1]))' "$ORG_ID"
 ```
 
+**Which subscription the pass mirrors when the org holds more than one** (the
+rule that decides between them, so it is not re-diagnosed as a bug): the stored
+`subscription_id` is authoritative for **identity**, never for the current
+entitlement. An INACTIVE one, and one that is `cancel_at_period_end`, is a
+pointer to **check against the customer**, not to trust — mirroring a stale
+pointer on sight is the #8895 P1. The customer's subscriptions then decide, in
+this order: a live (`active`/`trialing`) one beats a merely-`past_due` one; and
+within the live ones a newer, not-ending subscription replaces an ENDING one
+**only when it is ranked at or above it** on the same node-cap ladder the drift
+row reports. A subscription with `cancel_at_period_end` is still **in force** —
+the customer has paid it through `current_period_end`, and cancelling is not a
+refund — so an org that adds a cheaper subscription inside that window keeps
+the higher tier until the period ends, and only then drops. A **genuine**
+cancellation still downgrades the moment Stripe says so: with no live
+subscription at the customer there is nothing to prefer and the stored one is
+mirrored. A customer lookup that **fails** is neither — the org is left alone
+and counted `unverified` (paid tier) or `skipped` (unpaid).
+
 A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
 `alerted` / `failed` / `unrepaired` and one `drift` row per repaired org, each
 carrying `from_tier` / `to_tier`, `from_max_nodes` / `to_max_nodes` (the
