@@ -355,7 +355,7 @@ jobs:
           # pass, so anything that is not plain digits fails closed.
           def _count(value, name):
               text = str(value).strip()
-              if not text.isdigit():
+              if not text.isdecimal():
                   print(f"::error::reconcile summary field {name} is not an integer "
                         "- the response contract changed; failing closed")
                   sys.exit(1)
@@ -383,7 +383,7 @@ jobs:
                       "against an active Stripe subscription (Stripe named none, the "
                       "customer lookup failed, or pricing.json could not be read) - not "
                       "downgraded, review them; a broken pricing.json shows up "
-                      "here AND as failed rows naming the ladder")
+                      "here, usually with failed rows naming the ladder")
           if data["checked"] == 0:
               # Loud, never fatal. The enumeration is CERTIFIED complete before
               # this point (an uncertifiable one raises and 500s), so 0 means a

@@ -490,10 +490,13 @@ customer's writes) and a `direction`:
   pricing ladder could not be READ (#750.8), which makes "is this tier paid?"
   UNKNOWN rather than "no" — an unread file is not evidence that a stored `pro`
   org pays nothing, so it is counted here instead of `skipped`. In that third
-  case the signature is a MIX, not a clean sweep: bound orgs whose repair
-  path also touches the ladder land in `failed` (reddening the run) with
-  rows naming the error, so a single-day jump in `unverified` TOGETHER
-  WITH `failed` rows is `product/pricing.json`, not a mass cancellation.
+  case there are TWO signatures and neither is "every org": orgs whose repair
+  path also reads the ladder land in `failed`, reddening the run with rows
+  naming the error; orgs with only a customer binding never mirror, so a
+  fleet of those sends ALL of them here and produces NO `failed` rows —
+  a clean sweep into `unverified` that still exits 0. So a jump in
+  `unverified` alone, or together with `failed` rows, is
+  `product/pricing.json` — not a mass cancellation, and not nothing.
   Nothing was verified against a subscription, so this is NOT `unchanged` —
   and it is deliberately not auto-downgraded either. Counted and logged
   loudly; a non-zero number is a person to look at.
