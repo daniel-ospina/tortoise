@@ -1473,6 +1473,10 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
         # task whose LOSS is the failure the external alarm detects, so a
         # dropped member here would orphan it on re-entry/shutdown.
         "_analytics_canary_task",
+        # #8098: the scheduled webhook retry sweep — the ONLY trigger that
+        # retries an idle tenant's failed delivery, so an orphaned copy silently
+        # stops every retry (or a duplicated one double-delivers).
+        "_webhook_sweep_task",
     }
     attr_tuple: tuple[str, ...] | None = None
     for node in ast.walk(tree):

@@ -507,17 +507,37 @@ def _embedded_read_timeout_via_projection() -> tuple[float, int]:
     (mocked, no daemon spawned) rather than re-derived from an expression in
     the banner — a private re-derivation is exactly what let the old
     ``n/a (embedded lane)`` clause survive #3350.
+
+    The measured construction is exempted from Epic #1647's URI-aware test
+    redirect (:data:`TORTOISE_TEST_NO_REDIRECT`), because in a session with
+    ``TORTOISE_DB_URI`` set that redirect rewrites an explicit ``path=`` onto
+    the URI's SERVER and sets ``path = None`` — the embedded branch then never
+    runs, so the value read back would be the server lane's and the
+    ``FalkorDB`` patch below would never be called at all (``NoneType`` has no
+    ``args``). The exemption is the seam's documented one and is scoped to this
+    construction, so no other test in the file changes lane.
     """
     import tempfile
     from unittest import mock
 
+    exempt = {s.strip() for s in
+              os.environ.get("TORTOISE_TEST_NO_REDIRECT", "").split(",")
+              if s.strip()}
+    exempt.add(Path(__file__).stem)
+
     fake = mock.MagicMock()
     fake.return_value.select_graph.return_value = mock.MagicMock()
-    with mock.patch("tortoise.FalkorDB", fake):
+    with (
+        mock.patch.dict(
+            os.environ,
+            {"TORTOISE_TEST_NO_REDIRECT": ",".join(sorted(exempt))}),
+        mock.patch("tortoise.FalkorDB", fake),
+    ):
         proj = FalkorProjection.__new__(FalkorProjection)
         FalkorProjection.__init__(
             proj,
-            path=os.path.join(tempfile.mkdtemp(prefix="t4683_"), "embed.db"),
+            path=os.path.join(
+                tempfile.mkdtemp(prefix="t4683_"), "embed.db"),
             graph_name="test_embed_4683",
             skip_health_check=True)
     assert fake.call_args.args[0].endswith("embed.db"), "not the embedded branch"

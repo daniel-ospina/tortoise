@@ -5998,6 +5998,64 @@ def test_registry_anchor_reuses_healthy_anchor(monkeypatch):
 
 
 @pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_registry_anchor_caches_the_uri_mode_handle(monkeypatch):
+    """#8098 review F1: the URI branch must be the CACHED handle its docstring
+    claims, not a fresh-and-never-closed SDK per call.
+
+    Pre-fix ``_registry_anchor()``'s URI branch was
+    ``return TortoiseSDK(namespace="registry")`` — a new handle every call — so
+    the per-interval caller (the webhook retry sweep) built one a minute AND
+    re-ran ``_get_registry()``'s 9 ``CREATE INDEX`` statements against the
+    fleet-shared ``registry_control_plane`` on every one. URI mode is the lane
+    that SHIPS (`entrypoint.sh` derives ``TORTOISE_DB_URI``), so the lifetime
+    claim has to hold HERE, not only on the embedded lane.
+
+    The spy records constructions without touching a server (no real connect),
+    so this is the same record-only shape the #2251 envelope tests use.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/anchor-cache")
+    ha._reset_registry_probe_sdk()  # start from no cached handle
+    constructed: list[tuple] = []
+
+    class _Recording:
+        def __init__(self, *a, **kw):
+            constructed.append((a, kw))
+            self.closed = 0
+
+        def _get_proj(self):
+            self._proj = object()
+            return self._proj
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(ha, "TortoiseSDK", _Recording)
+
+    first = ha._registry_anchor()
+    second = ha._registry_anchor()
+
+    assert first is second, (
+        "URI mode built a FRESH registry handle per call — every caller pays a "
+        "new connection and `_get_registry()`'s 9 CREATE INDEX statements "
+        "(#8098 review F1)")
+    assert len(constructed) == 1, constructed
+
+    # The cache is keyed by the URI: a reconfiguration must never be served the
+    # previous server's handle.
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/anchor-cache-2")
+    third = ha._registry_anchor()
+    assert third is not first, (
+        "the cached handle kept addressing the OLD server after the URI changed")
+    assert len(constructed) == 2, constructed
+
+    ha._reset_registry_probe_sdk()  # the suite's isolation hook owns the close
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
 def test_registry_anchor_concurrent_first_calls_single_anchor(monkeypatch):
     """#2172: _registry_anchor() and _make_sdk(namespace="registry") share
     the "registry" keepalive key through TWO separate check-then-set code

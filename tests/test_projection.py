@@ -7,6 +7,7 @@ Runnable without pytest:  .venv/bin/python tests/test_projection.py
 """
 from __future__ import annotations  # noqa: I001
 
+import contextlib
 import json
 import math
 import os
@@ -2010,7 +2011,17 @@ if __name__ == "__main__":
 
 @pytest.fixture
 def live_proj():
-    """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
+    """Live FalkorProjection on a test-prefixed graph (safe via test_guard).
+
+    #8746: the graph is DELETED at teardown, not merely emptied. The PRE-FIX
+    fixture emptied it in SETUP (``MATCH (n) DETACH DELETE n`` before the
+    ``yield``) and its teardown was ``proj.close()`` ALONE — so the graph object
+    was never deleted at all: every run of this fixture added one graph to the
+    instance's ``CACHE_SIZE`` count — the
+    documented trigger for ``graph was deleted or replaced while the query was
+    running`` (#7357). The session sweep reaped the journaled name at session
+    END, so the suite stayed green while the graph count climbed mid-session.
+    """
     if not _docker_falkor_reachable():
         pytest.skip(f"live FalkorDB ({_live_utils.service_host()}:{_live_utils.legacy_port()}) not reachable")
     # #1553: the CI tier-2 env exports TORTOISE_DB_URI as an EMPTY string
@@ -2023,10 +2034,270 @@ def live_proj():
     # path — bulk-DETACHing it clobbers concurrent sessions; per-test graph.
     proj = FalkorProjection.from_uri(
         uri, graph_name=f"test_proj125_{os.urandom(4).hex()}")
-    # Clean the test graph (test-prefixed — test_guard permits; production blocked)
-    proj.g.query("MATCH (n) DETACH DELETE n")
-    yield proj
-    proj.close()
+    # #8746: NO setup `DETACH DELETE`. The name is freshly random (4 hex bytes =
+    # 32 bits per run), so there is nothing to clean, and a DETACH is the
+    # phantom-creating half of the #2961 AOF-poisoning sequence (an implicit
+    # create emits no GRAPH.EFFECT, so a later GRAPH.DELETE would have nothing
+    # to replay).
+    #
+    # The graph key IS created before this fixture yields — by CONSTRUCTION, not
+    # by the test: `FalkorProjection.from_uri` → `_ensure_indexes()` issues
+    # `CREATE INDEX …`. (This comment previously claimed the graph was
+    # "materialised only by the test's OWN writes"; that is false, corrected in
+    # #8746's review round 2.) The teardown delete is safe anyway, and NOT for
+    # the reason that claim implied: index creation is AOF-replay-safe in its own
+    # right (`_ensure_indexes`' note — "CREATE INDEX survives AOF replay"), and
+    # `tests/_embedded.py::_sweep_proj` ships the identical shape (construct,
+    # then `safe_graph_delete(detach=False, drop=True)`). What this teardown
+    # needs is not "no writes before the test" but "no unreplayable DETACH" —
+    # hence the removed setup DETACH and the guard-routed delete below.
+    try:
+        yield proj
+    finally:
+        try:
+            _live_utils.drop_test_graph(proj)  # #8746: GRAPH.DELETE, not DETACH
+        finally:
+            proj.close()
+
+
+# ── #8746: the per-run graph must be DELETED, not emptied ──────────────
+
+
+def _graph_names(conn) -> set[str]:
+    """GRAPH.LIST over a raw connection — the only evidence a graph is gone.
+
+    Deliberately NOT the journal and NOT a fixture: #8746's second defect was
+    that the leak stayed invisible because the only evidence consulted was
+    the suite's own bookkeeping.
+    """
+    return {str(g) for g in (conn.execute_command("GRAPH.LIST") or [])}
+
+
+def test_live_proj_teardown_deletes_the_graph_not_just_its_contents():
+    """#8746: the per-run graph is GONE from GRAPH.LIST after teardown.
+
+    Pins the FIXTURE's wiring, not just the helper: it drives the fixture's
+    own generator, so the teardown runs inside the test. The defect this pins
+    is invisible to a green suite — the session-end sweep reaps the journaled
+    name, so the leak only ever showed as mid-session accumulation and a graph
+    count that grew +1 per run on a shared instance (481 measured 2026-10-15).
+    """
+    if not _docker_falkor_reachable():
+        pytest.skip(
+            f"live FalkorDB ({_live_utils.service_host()}:{_live_utils.legacy_port()}) not reachable")
+
+    gen = live_proj.__wrapped__()
+    proj = next(gen)
+    name = proj.graph_name
+    conn = proj.db.connection  # raw redis handle (survives proj.close())
+    try:
+        assert name.startswith("test_proj125_"), name
+        # The fixture no longer pre-DETACHes the graph. The graph KEY comes from
+        # `_ensure_indexes()` at construction (replay-safe on its own — see the
+        # fixture docstring); this write is what makes the CONTENTS real, so the
+        # assertion below is about a graph the test itself populated.
+        proj.g.query("CREATE (n:Point {id:'teardown-8746'})")
+        assert name in _graph_names(conn), "fixture handed the test no live graph"
+        with contextlib.suppress(StopIteration):
+            next(gen)  # run the fixture's own teardown
+        assert name not in _graph_names(conn), (
+            f"{name} survived the live_proj teardown — emptied, not deleted "
+            f"(#8746: it stays in the server's CACHE_SIZE until the session "
+            f"sweep runs, which is the #7357 eviction churn)")
+    finally:
+        with contextlib.suppress(Exception):
+            proj.close()
+
+
+class _RecordingDb:
+    """Records every command; a refused name must reach NONE of them."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def list_graphs(self):
+        self.calls.append(("list_graphs",))
+        return ["tortoise"]
+
+    def select_graph(self, name):
+        self.calls.append(("select_graph", name))
+        raise AssertionError(
+            f"a refused graph name reached select_graph({name!r}) (#8746)")
+
+
+class _FakeProj:
+    def __init__(self, name) -> None:
+        self.graph_name = name
+        self.db = _RecordingDb()
+
+
+def test_drop_test_graph_refuses_a_non_test_owned_name():
+    """#8746: fail-closed. The delete gate is the NAME — GRAPH.LIST carries no
+    ownership attribution, so only the two ``_SERVER_WIPE_PREFIXES`` families
+    may be deleted. A fixture that resolved a product/tenant graph by mistake
+    must not be able to destroy it."""
+    snapshot = _live_utils.graph_delete_events()
+    try:
+        # The `org_`/`team_` twins carry `_short_id()`'s 26 hex, which the
+        # MINT-SHAPE arm ADMITS (`_<8+ hex>`) — so only the PREFIX arm can
+        # refuse them. Without these two the loop proves nothing about the arm
+        # it claims to pin: every other name here is also refused by shape
+        # (review r7 P2, measured).
+        tenant = "deadbeef" * 3 + "ab"
+        for name in ("tortoise", "org_acme", "team_x", "proj125_x", None, 42,
+                     "org_" + tenant, "team_" + tenant):
+            proj = _FakeProj(name)
+            assert _live_utils.drop_test_graph(proj) is False, name
+            assert proj.db.calls == [], (name, proj.db.calls)
+    finally:
+        # Keep the session-end artifact honest: these are the test's own probes,
+        # not a real teardown refusal (the #7735 `_discard_tolerated_leaks`
+        # precedent).
+        _live_utils._restore_graph_delete_events(snapshot)
+
+
+def test_drop_test_graph_refuses_the_shared_uri_default_graph(monkeypatch):
+    """#8746 review r2 P3 + r5 P2: the shared-graph refusal holds on BOTH lanes.
+
+    The shared URI-default graph (here ``tortoise_test_matrix``, the docker
+    job's ``TORTOISE_DB_URI`` path) starts with ``tortoise_test``, so the
+    canonical prefix gate ADMITS it — yet it belongs to the whole job, and every
+    other targeted delete path in this tree excludes it explicitly
+    (``tests/_embedded.py::_wipe_or``'s ``scope.discard(default)``,
+    ``wipe_server``'s per-test ``g == default_graph`` arm); only the session-end
+    sweep owns it. Without the explicit arm, a fixture that resolved the shared
+    graph by mistake would delete the job's own graph.
+
+    The URI-DEFAULT arm is lane-gated by construction (``_uri_default_graph_name()``
+    answers ``None`` with no URI set), and ``live_proj`` runs on the URI-LESS
+    lane too — it skips on a TCP probe, not on the URI. So the class is closed
+    by the MINT-SHAPE arm instead: a family name that is not ``…_<8+ hex>`` is
+    refused whether or not a URI is set. The last block asserts that directly —
+    and pins the WIDTH as a floor, since a mint that is one character wider
+    must still be deleted (a refusal is a silent leak).
+    """
+    # #6673: build the URI through tests/_live_utils — the docker lane's
+    # service port is EPHEMERAL, so a hand-written :6379 would prove the arm
+    # against a dead port. Only the GRAPH PATH is the input here and it is
+    # parsed, never dialled (`_FakeProj.db` records calls; it is not a client).
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       _live_utils.docker_uri("tortoise_test_matrix"))
+    snapshot = _live_utils.graph_delete_events()
+    try:
+        proj = _FakeProj("tortoise_test_matrix")
+        assert _live_utils.drop_test_graph(proj) is False
+        assert proj.db.calls == [], proj.db.calls
+        # NARROWING CONTROL — for the PREFIX arm only (the mint-shape arm
+        # refuses `tortoise_test_matrix` too, so this proves nothing about the
+        # DEFAULT-graph arm; the discriminating case is the mint-shaped URI
+        # default further down).
+        per_run = _FakeProj("tortoise_test_matrix_7f3a9c21")
+        assert _live_utils.drop_test_graph(per_run) is False
+        assert per_run.db.calls, (
+            "the narrowing control never reached the guard — the refusal above "
+            "cannot be attributed to the default-graph arm")
+        assert ("select_graph", "tortoise_test_matrix_7f3a9c21") not in per_run.db.calls
+
+        # URI-LESS LANE (review r5 P2): with no TORTOISE_DB_URI the default-graph
+        # arm cannot fire at all, so the class must be closed by the MINT SHAPE.
+        # A shared FIXED fixture name in the family is refused; a per-run one
+        # still reaches the guard (the precondition that keeps this honest).
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        shared = _FakeProj("tortoise_test_integration_search")
+        assert _live_utils.drop_test_graph(shared) is False
+        assert shared.db.calls == [], shared.db.calls
+        fresh = _FakeProj("test_uri_less_probe_0badc0de")
+        assert _live_utils.drop_test_graph(fresh) is False
+        assert fresh.db.calls, (
+            "a per-run name was refused on the URI-less lane too — the shape "
+            "arm is over-broad and the shared-graph refusal above is vacuous")
+        # ARM 2 DISCRIMINATOR (review r7 P2): make the URI's OWN default graph
+        # a per-run-shaped name, which the MINT-SHAPE arm admits. Only the
+        # default-graph arm can refuse it — otherwise that arm could be deleted,
+        # or reordered behind the shape arm, with the whole suite still green.
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           _live_utils.docker_uri("test_proj125_ab12cd34"))
+        the_default = _FakeProj("test_proj125_ab12cd34")
+        assert _live_utils.drop_test_graph(the_default) is False
+        assert the_default.db.calls == [], (
+            "a mint-shaped URI DEFAULT reached the guard — arm 2 did not fire, "
+            "so nothing here distinguishes it from the shape arm")
+        # …and the SAME name is deleted-through-the-guard once it is no longer
+        # the default, which is what makes the refusal above attributable.
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           _live_utils.docker_uri("test_proj125_cafebabe"))
+        not_default = _FakeProj("test_proj125_ab12cd34")
+        assert _live_utils.drop_test_graph(not_default) is False
+        assert not_default.db.calls, (
+            "the same mint-shaped name was refused when it was NOT the URI "
+            "default — the refusal above cannot be attributed to arm 2")
+
+        # The width is a FLOOR, not the 8 this file happens to mint: the site
+        # tortoise#8936 adopts next mints TEN hex (`uuid4().hex[:10]`), and a
+        # refusal there would be a silent leak — the exact defect #8746 exists
+        # to remove. Pinned here so narrowing the width reds a test.
+        wide = _FakeProj("test_subj1423_0123456789")
+        assert _live_utils.drop_test_graph(wide) is False
+        assert wide.db.calls, (
+            "a 10-hex mint was refused by the shape arm — the width floor is "
+            "too narrow for the mints this tree produces")
+    finally:
+        _live_utils._restore_graph_delete_events(snapshot)
+
+
+class _LockRefusingConn:
+    """A raw connection whose lock command fails — the guard then REFUSES."""
+
+    def execute_command(self, *args, **kwargs):
+        raise RuntimeError("lock unavailable (simulated peer hold)")
+
+
+class _PresentDb:
+    """The graph IS present but the cross-process lock cannot be taken."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[tuple] = []
+        self.connection = _LockRefusingConn()
+
+    def list_graphs(self):
+        self.calls.append(("list_graphs",))
+        return [self.name]
+
+    def select_graph(self, name):
+        self.calls.append(("select_graph", name))
+        raise AssertionError(
+            f"deleted {name!r} WITHOUT the cross-process lock (#2961)")
+
+
+def test_drop_test_graph_records_a_guard_refusal_as_a_leak():
+    """#8746 review r3 P3: a LOCK refusal is recorded, not just returned.
+
+    `safe_graph_delete` returns False for two indistinguishable cases — "already
+    absent" and "the lock is unavailable, nothing transmitted" — and its own
+    docstring makes the CALLER re-check presence (`tests/_embedded.py`'s
+    `_drop_one_graph` and `_sweep_proj` do). A lock refusal is the LIKELIEST one
+    on a shared instance (a peer holds `tortoise:graph-delete-lock`) and its
+    consequence is one empty graph per run left in `CACHE_SIZE` until the
+    session sweep — the exact #7357 churn this PR removes. Returning False
+    silently would make that invisible, so the helper re-checks presence and
+    records the tolerated leak.
+    """
+    name = "test_lock_refused_8746ab12"
+    snapshot = _live_utils.graph_delete_events()
+    try:
+        proj = _FakeProj(name)
+        proj.db = _PresentDb(name)
+        assert _live_utils.drop_test_graph(proj) is False
+        # The guard never reached the delete (it refused), and the caller
+        # re-checked presence so the leak is RECORDED rather than silent.
+        assert ("select_graph", name) not in proj.db.calls, proj.db.calls
+        events = [e for e in _live_utils.graph_delete_events()
+                  if e["name"] == name]
+        assert events and events[-1]["event"] == "refused", events
+        assert "lock" in str(events[-1]["reason"]), events
+    finally:
+        _live_utils._restore_graph_delete_events(snapshot)
 
 
 def test_upsert_document_capture_fields(live_proj):
@@ -2281,13 +2552,16 @@ def test_add_document_journals_the_anchor_and_replays_identically(live_proj):
     replay = FalkorProjection.from_uri(
         uri, graph_name=f"test_proj125_5422_{os.urandom(4).hex()}")
     try:
-        replay.g.query("MATCH (n) DETACH DELETE n")
         for ev in log.read_all():
             replay.apply(ev)
         assert _doc_anchor(replay, "doc-h6") == live, (
             "replay diverged on the document anchor")
     finally:
-        replay.close()
+        # #8746: DELETE the per-run replay graph (was: DETACH its contents)
+        try:
+            _live_utils.drop_test_graph(replay)
+        finally:
+            replay.close()
 
 
 def test_document_version_does_not_double_bump_across_the_two_folds(live_proj):

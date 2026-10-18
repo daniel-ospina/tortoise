@@ -415,6 +415,12 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   "keys",
   "backupInfo",
   "tab",
+  // #3514 review P2 — the two dialog effects in MemorySources: Escape is bound on
+  // the DOCUMENT while the dialog is open (a keydown whose target is outside the
+  // modal never reaches the modal's own handler), and focus is MOVED on each
+  // state transition (a reconciled control never honours `autoFocus`).
+  "comingSoonKey",
+  "comingSoonKey, comingSoonStatus",
   ])
 })
 

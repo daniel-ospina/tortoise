@@ -873,9 +873,37 @@ def _registry_anchor() -> TortoiseSDK:
     URI mode: honors TORTOISE_DB_URI exactly like _make_sdk (the registry
     control plane + real FalkorDB config) — host-mode finalizers are no-ops,
     so there is no GC/NOSAVE concern there and the anchor is just the
-    cached handle."""
+    cached handle.
+
+    ⛔ "CACHED" IS LOAD-BEARING IN URI MODE TOO (#8098 review F1). This branch
+    used to ``return TortoiseSDK(namespace="registry")`` — a FRESH, uncached,
+    never-closed handle per call — which meant the docstring's own claim was
+    false on the lane that ships: `entrypoint.sh` derives ``TORTOISE_DB_URI`` on
+    Fly, so production IS this branch. Every call then built a new handle AND
+    paid ``_get_registry()``'s ``_ensure_registry_indexes`` (9 ``CREATE INDEX``
+    statements against the fleet-shared ``registry_control_plane``) again, once
+    per caller. The per-INTERVAL caller (``_control_plane_source_on_worker``,
+    the #8098 webhook retry sweep) made that a per-minute cost.
+
+    So URI mode delegates to ``_registry_probe_sdk()`` — the #4661 cache that
+    already exists for exactly this shape: one handle per process, keyed by the
+    ``TORTOISE_DB_URI`` STRING (a reconfigured URI closes the stale handle and
+    rebuilds, so a test's private lane or a process reconfiguration can never be
+    served the old server), built under ``_KEEPALIVE_LOCK`` so two threads
+    cannot both build one, and closed by ``_reset_registry_probe_sdk()`` (the
+    suite's isolation hook). Sharing it with the probe is deliberate: both want
+    "the one registry connection this process holds", and a second cache would
+    be the drift ``_control_plane_source``'s docstring warns about (#2823/#2340).
+
+    ONE behaviour difference that follows, stated so it is not a surprise: URI
+    mode now binds EAGERLY (that `_get_proj()` is what makes the handle worth
+    caching), so the first caller's connect failure raises from HERE instead of
+    lazily from the first query. The failure is not cached, so the next call
+    retries — and the request-scoped lane keeps `_registry_sdk()`'s explicit
+    one-retry (#1579) where a blip must not become a 500.
+    """
     if os.environ.get("TORTOISE_DB_URI"):
-        return TortoiseSDK(namespace="registry")
+        return _registry_probe_sdk()
     db_path = _resolve_embedded_db_path()
     anchor = _FALLBACK_KEEPALIVE.get("registry")
     if anchor is None or not _anchor_usable(anchor, db_path):
@@ -1839,6 +1867,12 @@ _LIVENESS_TASK_ATTRS = (
     # detect — a re-entry or shutdown that left it orphaned (or a second copy
     # alive) would corrupt the very signal the external alarm reads.
     "_analytics_canary_task",
+    # #8098: the scheduled webhook retry sweep. Process-lifetime and periodic
+    # like the rest, and its LOSS is silent by construction: nothing else
+    # retries an IDLE tenant's failed delivery, so an orphaned (or duplicated)
+    # sweep task would either stop every retry or double-deliver — and neither
+    # shows up anywhere except as "the subscriber never got the event".
+    "_webhook_sweep_task",
 )
 
 
@@ -2354,6 +2388,35 @@ async def _lifespan(app):
                 "event retention loop not started (the one-time boot sweeps "
                 "above WERE scheduled independently): %s", exc, exc_info=True)
 
+        # ── #8098: the scheduled webhook retry sweep. The dream cycle is a
+        # WRITE-triggered delivery cadence, so a retry whose backoff elapses
+        # while its tenant is IDLE had no trigger at all. Armed as a BACKGROUND
+        # task (#2953 — never awaited before this startup half returns, or the
+        # machine accepts no traffic until a fleet-wide pass finishes) and in
+        # its OWN try, so a bad interval disables the sweep only: sharing the
+        # retention try above would let a config typo cancel event retention,
+        # the deleted-team purge and the OAuth GC with it.
+        try:
+            from tortoise import webhook_delivery as _webhook_delivery
+
+            _webhook_interval = _webhook_delivery.sweep_interval_s()
+            # Logged at INFO because the ENABLE knob and the interval are the
+            # only way an operator can tell "sweeping, nothing due" from
+            # "never armed" — the sweep is otherwise invisible when idle.
+            _logger.info(
+                "webhook retry sweep armed: interval=%ss concurrency=%s "
+                "enabled=%s", _webhook_interval,
+                _webhook_delivery.sweep_concurrency(),
+                _webhook_delivery.sweep_enabled()
+                and _webhook_delivery.dispatch_enabled())
+            app.state._webhook_sweep_task = asyncio.get_event_loop().create_task(
+                _webhook_retry_sweep_loop(_webhook_interval))
+        except Exception as exc:
+            _logger.error(
+                "webhook retry sweep not started — a failed delivery whose "
+                "backoff elapses while its tenant is idle will NOT be retried "
+                "until that tenant's next dream cycle: %s", exc, exc_info=True)
+
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
         try:
@@ -2774,13 +2837,49 @@ def _embed_metered(fn):
     return _sync_wrapper
 
 
-async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None) -> None:
+def _dispatch_webhooks_sync(org_id: str, graph_namespace: str | None = None,
+                            graph_name: str | None = None) -> dict | None:
+    """The BLOCKING body shared by both dispatch triggers (#2081 / #8098).
+
+    Build the tenant graph's SDK, run ``dispatch_pending``, close the SDK. Kept
+    separate from the async wrappers because the two triggers offload it to
+    DIFFERENT lanes: the dream cycle uses ``asyncio.to_thread`` (its historical
+    lane, unchanged here) while the scheduled sweep uses its own bounded, sized
+    ``_WEBHOOK_SWEEP_EXECUTOR`` — the #3060/#3498 starvation lesson: a fleet-wide
+    pass must never occupy the loop's shared default executor.
+
+    ``graph_name`` (a FULL DB graph name) wins over ``graph_namespace``: the
+    sweep resolves each tenant's DEFAULT graph name through the control-plane
+    seam (``backup_sweep._sweep_graph_list``), which for Supabase-lane orgs is
+    ``teams.graph_name`` and not necessarily ``org_{org_id}``.
+
+    RAISES (it is the sync body, not the never-raise wrapper): the callers own
+    their own failure policy, because a dream must not fail on a delivery and a
+    sweep must not abort on one graph.
+    """
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    if graph_name is not None:
+        sdk = _make_sdk(graph_name=graph_name)
+    elif graph_namespace is not None:
+        sdk = _make_sdk(graph_name=graph_namespace)
+    else:
+        sdk = _make_sdk(namespace=org_id)
+    try:
+        return _webhook_delivery.dispatch_pending(sdk._get_proj())
+    finally:
+        sdk.close()
+
+
+async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
+                             *, graph_name: str | None = None) -> dict | None:
     """#2081: push this tenant graph's pending events to its subscribers.
 
-    Called at the END of ``_dream_worker`` (the dream cycle is the delivery
-    cadence — the phase-2 target is "push latency ≤ one dream-cycle cadence") and
-    ONLY there. Nothing on the write path ever awaits this: a capture must stay
-    2xx regardless of a subscriber's endpoint.
+    Called at the END of ``_dream_worker`` — the dream cycle is the delivery
+    cadence for NEW events (a write enqueues the dream that pushes it) — and
+    ONLY there; the RETRY path's second trigger is the scheduled sweep
+    (``_webhook_retry_sweep_pass``, #8098). Nothing on the write path ever
+    awaits this: a capture must stay 2xx regardless of a subscriber's endpoint.
 
     Best-effort by construction. ``dispatch_pending`` itself never raises; this
     wrapper additionally catches the SDK/edge failures around it (an
@@ -2788,12 +2887,8 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None) ->
     never surface as a dream failure, and it must never abort the worker (the
     roots are already drained; a raise here would be read as a dream bug).
 
-    KNOWN LIMITATION (follow-up filed, not fixed here): the pass runs when a
-    dream runs, so a subscription whose retry backoff elapses while the tenant
-    is IDLE waits for that tenant's next dream. The backoff/attempt state is
-    durable and correct (`next_attempt_at` gates the next pass), so the gap is
-    the TRIGGER, not the bookkeeping — a scheduled sweep across tenants is the
-    fix.
+    Returns the dispatcher summary (``None`` when it could not run) so a caller
+    can aggregate/assert on what actually happened.
     """
     import logging
 
@@ -2801,26 +2896,371 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None) ->
     from tortoise.security import redact_error
 
     if not _webhook_delivery.dispatch_enabled():
-        return
+        return None
     _log = logging.getLogger("tortoise.api")
 
-    def _run() -> dict:
-        sdk = (_make_sdk(graph_name=graph_namespace) if graph_namespace is not None
-               else _make_sdk(namespace=org_id))
-        try:
-            return _webhook_delivery.dispatch_pending(sdk._get_proj())
-        finally:
-            sdk.close()
-
     try:
-        summary = await asyncio.to_thread(_run)
+        summary = await asyncio.to_thread(
+            _dispatch_webhooks_sync, org_id, graph_namespace, graph_name)
     except Exception as e:
         _log.warning("webhook dispatch failed for tenant %s: %s",
                      org_id, redact_error(e))
-        return
+        return None
     if summary.get("delivered") or summary.get("failed"):
         _log.info("webhook dispatch tenant=%s graph=%s %s",
-                  org_id, graph_namespace or org_id, summary)
+                  org_id, graph_name or graph_namespace or org_id, summary)
+    return summary
+
+
+# ── #8098: the scheduled retry sweep ────────────────────────────────────
+#
+# WHY IT EXISTS. The dream cycle is a WRITE-triggered cadence: a subscription
+# whose retry backoff (`next_attempt_at`) elapses while its tenant stays IDLE
+# waits for that tenant's next write — potentially forever. The bookkeeping was
+# already durable and correct; the TRIGGER was missing. This sweep IS the
+# trigger: enumerate every tenant graph, ask one cheap read per graph whether it
+# owes a delivery right now, and dispatch only the graphs that do.
+#
+# COST (the indicator this had to be measured against). Per pass: ONE
+# `list_graphs()` + ONE `MATCH (m:GraphEventMeta) RETURN max(m.last_seq)` + ONE
+# `MATCH (s:ContextSubscription) WHERE <due> AND <behind> RETURN count(s)` per
+# EXISTING tenant graph, plus one SDK open ONLY for the graphs that answered
+# yes. A no-subscription graph therefore costs two node/label reads that create
+# NO node and NO index (`webhook_delivery.due_subscription_count` takes a raw
+# graph handle for exactly this reason — see its docstring), and a tenant that
+# has never registered a webhook never gets an SDK, a projection, a journal bind
+# or an embedder warm-up from this path at all.
+#
+# ⚠️ ONE CONDITIONAL THIRD READ. A graph whose `:GraphEventMeta.last_seq` is
+# ABSENT or not a trustworthy position (a non-number — including a numeric
+# string, which `event_store.next_seq` refuses to coerce — a negative, a
+# `bool`, or a non-integral float) makes the head fall back to
+# `MATCH (e:GraphEvent) RETURN max(e.seq)` — the label aggregate the steady path
+# deliberately avoids — so a broken graph pays a scan per pass, and it keeps
+# paying it. Three classes, only one of which self-heals (all MEASURED):
+# `next_seq` REFUSES a non-number, a `bool` and a negative and leaves them
+# unchanged; a non-integral float is bumped instead (`2.9` -> `3.9`, re-issuing a
+# seq: the #4653 class) but `reestablish_watermark` only clears it when the
+# events' max EXCEEDS it (at `max = 3` it preserves `3.9` and returns a truncated
+# `3` — a false repair); and a rebuild never gets to a negative at all, because
+# `capture_watermark` raises before the wipe. So no class has a reliable automatic
+# repair path. The alternative reading of that counter (as 0) made every
+# subscription look caught up, so the graph was never dispatched again — silently.
+# Over-admitting a broken graph is the cheap side of that asymmetry; the ONE case
+# where it is not a cheap no-op (a fractional `:GraphEvent.seq` the cursor can
+# never reach) is stated in `webhook_delivery.event_head_seq`'s docstring and
+# tracked with the cursor write in #9032.
+#
+# ⛔ THE "answered yes" HALF IS THE WHOLE POINT (#8098 review F1/F3). The gate
+# is TWO clauses — due by TIME *and* behind the stream — because the temporal
+# half alone is true for the entire life of every healthy subscription, which
+# meant every tenant that had EVER registered a webhook paid the SDK open above
+# on every pass, forever, to run a dispatcher that delivered nothing. The head
+# read is the cheap half of that condition; see `webhook_delivery
+# ._BEHIND_PREDICATE` and `event_head_seq`.
+#
+# The enumerator is the per-graph one the backup sweep already uses
+# (`backup_sweep.enumerate_orgs` + `_sweep_graph_list`) rather than a raw
+# `enumerate_org_graphs` call: `_sweep_graph_list` SYNTHESIZES the default graph
+# from the authoritative name seam, so pre-#2083 orgs (which have no `Graph`
+# nodes at all) are swept instead of silently skipped.
+#
+# ⛔ CONTROL-PLANE COST — the term the per-graph table above does NOT cover, and
+# the one that scales with the fleet's LARGEST dimension (#8098 review, P2).
+# The enumeration walks EVERY org, SERIALLY, on the one daemon worker: one
+# control-plane query for `enumerate_orgs`, then per org `_sweep_graph_list` =
+# `org_graph_name` (ONE query) + `enumerate_org_graphs` -> `graph_metadata` (on
+# the Supabase lane: the `organizations` row, then the kind='default' `graphs`
+# row, then the active custom rows — ~3 more). So ~4 PostgREST round trips PER
+# ORG PER PASS at the 60 s default: ~4N/min against the SAME control plane the
+# auth path uses. Two things a reader must not have to infer:
+#
+#   * a similar walk already runs HOURLY (`.github/scripts/registry-cron.sh`
+#     -> POST /v1/internal/backups/sweep) — but NOT the identical one, and the
+#     difference runs the wrong way: the hourly endpoint enumerates ELIGIBLE orgs
+#     (`backup_sweep.enumerate_eligible_orgs`: tier != free AND backup_enabled),
+#     while this one enumerates EVERY org (`enumerate_orgs`). So the load here is
+#     60x the cadence over a strict SUPERSET of that population, and it is bounded
+#     by nothing but the fleet size.
+#   * because the walk is SERIAL, once ~4N round trips exceed the interval the
+#     knob's liveness bound degrades silently: "a retry resumes within <= one
+#     interval of `next_attempt_at`" becomes "within <= one pass duration". The
+#     loop still cannot overlap itself (it awaits the pass), so the failure mode
+#     is latency, not storming.
+#
+# Reusing/caching the org->graph walk across passes (TTL, or every K intervals)
+# is the obvious follow-up and is deliberately NOT done here: the cache's
+# invalidation contract belongs with #2081's backup operator, and a stale graph
+# list in a RETRY trigger would silently drop a newly created graph's deliveries.
+#
+# ⚠️ TWO THINGS THE WALK ABOVE DOES NOT HAVE, and this block would otherwise
+# leave a reader to infer that it does: on the URI lane the per-org
+# `MATCH (g:Graph {org_id: $tid})` has NO index —
+# `tortoise/sdk.py::_ensure_registry_indexes` carries no `("Graph", "org_id")`
+# entry, so it is a label scan per org per pass — and there is no per-org
+# timeout. Filed as **#9048** (index + bound) rather than paid down here: it needs
+# an index on a shared registry graph plus a concurrency decision, which is not a
+# review-fix.
+# The registry lane pays the same shape once, not per org: the anchor is cached
+# per process (`_registry_anchor` -> `_registry_probe_sdk`).
+
+#: Graphs whose dispatch pass is IN FLIGHT in this process. A SET, not a lock:
+#: an in-flight graph is simply skipped this pass (the next one retries it), and
+#: nothing ever waits on it. Cleared in a ``finally`` so a cancelled pass cannot
+#: wedge a graph out of every later pass.
+#:
+#: SCOPE, stated plainly because the guard is otherwise read as proof of
+#: something it does not prove (#8098 review, non-counted): TODAY it cannot
+#: fire. ``_webhook_retry_sweep_loop`` ``await``s each pass and
+#: ``_start_liveness`` cancels a prior sweep task before re-arming, so two
+#: passes never overlap inside a process — a pass longer than the interval
+#: DELAYS the next pass, it does not re-enter one. So this is defence against a
+#: FUTURE concurrent-pass shape (a second pass armed from the request path, or
+#: dispatch moved off ``asyncio.gather``), not against a pass that outruns its
+#: interval; the invariant it protects is "one in-flight dispatch per graph"
+#: and it is cheap enough to hold unconditionally.
+_WEBHOOK_SWEEP_INFLIGHT: set[str] = set()
+
+#: The sweep's dispatch pool (`_run_off_loop`) — its OWN bounded executor, never
+#: the loop's shared default one (#3060). Built lazily on the first pass so a
+#: process that never sweeps creates no threads, and sized ONCE from
+#: `webhook_delivery.sweep_concurrency()`: a knob change takes effect on the next
+#: process, the same sized-once contract as every other pool in this module.
+_WEBHOOK_SWEEP_EXECUTOR: ThreadPoolExecutor | None = None
+_WEBHOOK_SWEEP_EXECUTOR_LOCK = threading.Lock()
+
+
+def _webhook_sweep_executor() -> ThreadPoolExecutor:
+    """Lazily build the sweep's bounded dispatch pool (see the constant above)."""
+    global _WEBHOOK_SWEEP_EXECUTOR
+    from tortoise import webhook_delivery as _webhook_delivery
+
+    with _WEBHOOK_SWEEP_EXECUTOR_LOCK:
+        if _WEBHOOK_SWEEP_EXECUTOR is None:
+            _WEBHOOK_SWEEP_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_webhook_delivery.sweep_concurrency(),
+                thread_name_prefix="webhook-sweep-dispatch")
+        return _WEBHOOK_SWEEP_EXECUTOR
+
+
+# ── #8098 review F2: dispose the sweep pool during THREADING shutdown ──────
+# The pool above is a plain ``ThreadPoolExecutor``: CPython 3.9+ (bpo-39812)
+# made its workers NON-daemon and `concurrent.futures.thread` registers
+# `_python_exit` — which puts a sentinel on the queue and JOINS every worker —
+# via `threading._register_atexit`. So `_stop_liveness` cancelling the sweep
+# TASK does not abandon an in-flight dispatch: it stops the `await`, and the
+# queued futures still run to completion while `_python_exit` waits for them in
+# FIFO order. One pass queues one future per due graph, and one graph's dispatch
+# is up to `DEFAULT_BATCH` (50) sequential POSTs at `TIMEOUT_S` (10 s) each — a
+# SIGTERM landing during a pass could hold interpreter exit far past fly.toml's
+# `kill_timeout`.
+#
+# This is the same class and the same fix as `_dispose_capture_executor`
+# (#3087) and `_dispose_demand_ping_executor`: `shutdown(wait=False,
+# cancel_futures=True)` from `threading._register_atexit`, NOT `atexit
+# .register` (that runs AFTER `threading._shutdown()` already joined). Same
+# LIMITATION too, stated at its real granularity: cancellation drops QUEUED
+# futures only — a worker already RUNNING one is not interruptible, and one
+# future is a WHOLE graph dispatch (`_dispatch_webhooks_sync` →
+# `dispatch_pending`: up to `MAX_SUBSCRIPTIONS` (25) × `DEFAULT_BATCH` (50)
+# sequential POSTs at `TIMEOUT_S` (10 s) each), not a single POST. So the thing
+# that actually bounds a SIGTERM landing mid-dispatch is fly.toml's
+# `kill_timeout` SIGKILL, not `TIMEOUT_S`; this hook's job is to make sure the
+# futures still in the QUEUE are dropped instead of being joined by
+# `_python_exit` behind that running one.
+def _dispose_webhook_sweep_executor() -> None:
+    """Cancel queued sweep dispatches and release the pool at thread shutdown.
+
+    None-safe BY CONSTRUCTION: the pool is built lazily on the first pass, so a
+    process that never swept reaches this hook with `_WEBHOOK_SWEEP_EXECUTOR is
+    None` and must not raise (the hook runs during shutdown, where a raise is
+    unhelpful and unreportable).
+    """
+    global _WEBHOOK_SWEEP_EXECUTOR
+    with _WEBHOOK_SWEEP_EXECUTOR_LOCK:
+        pool, _WEBHOOK_SWEEP_EXECUTOR = _WEBHOOK_SWEEP_EXECUTOR, None
+    if pool is None:
+        return
+    with contextlib.suppress(Exception):
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# `threading._register_atexit` orders against the executor's own hook (the whole
+# point); fall back to `atexit` where it is unavailable, which is strictly worse
+# (too late to cancel anything) but never crashes on import.
+if hasattr(threading, "_register_atexit"):
+    threading._register_atexit(_dispose_webhook_sweep_executor)  # the hook the stdlib itself uses
+else:  # pragma: no cover — Python < 3.9
+    atexit.register(_dispose_webhook_sweep_executor)
+
+
+def _webhook_retry_targets() -> list[dict[str, str]]:
+    """#8098: the tenant graphs that owe a delivery RIGHT NOW. BLOCKING.
+
+    Runs on the sweep's enumeration worker, never on the event loop: every step
+    below is a blocking graph/control-plane read. Returns
+    ``[{org_id, graph_name}]``; failures are per-graph (logged, that graph
+    skipped this pass) and a failed EXISTENCE probe skips the whole pass — a
+    read that did not answer must never be read as "nothing is due".
+
+    The existence gate is the #2251 probe-before-touch rule: a query against an
+    ABSENT ``org_{tid}`` graph (an orphan registry row from a partial provision)
+    MATERIALIZES an empty graph, which would flip the onboarding existence
+    verdict for an org whose graph never existed. The probe is ONE
+    ``list_graphs()`` on the data-plane handle the per-graph reads reuse, and it
+    never mints a graph.
+    """
+    import logging
+
+    from tortoise import webhook_delivery as _webhook_delivery
+    from tortoise.backup_sweep import _sweep_graph_list, enumerate_orgs
+    from tortoise.security import redact_error
+
+    _log = logging.getLogger("tortoise.api")
+    data_sdk, db = _data_plane_db()
+    try:
+        try:
+            existing = set(db.list_graphs() or [])
+        except Exception as e:
+            _log.warning("webhook retry sweep skipped: graph list probe failed: %s",
+                         redact_error(e))
+            return []
+        # ONE dialect-aware control-plane source for BOTH the org walk and the
+        # per-org graph list (the #2823 seam the backup operators share), so a
+        # Supabase-lane sweep never constructs the registry (#669). The
+        # WORKER-THREAD lifetime shape is deliberate: this pass runs every
+        # interval, and a per-pass fresh registry handle would leak one a minute
+        # (registry lane) plus re-run `_get_registry()`'s 9 CREATE INDEX
+        # statements against the shared control-plane graph (#8098 review F1).
+        source = _control_plane_source_on_worker()
+        try:
+            org_ids = enumerate_orgs(source)
+        except RuntimeError as e:
+            _log.warning("webhook retry sweep skipped: org enumeration failed: %s",
+                         redact_error(e))
+            return []
+        targets: list[dict[str, str]] = []
+        for org_id in org_ids:
+            if not org_id:
+                continue
+            try:
+                graphs = _sweep_graph_list(source, org_id)
+            except Exception as e:
+                _log.warning(
+                    "webhook retry sweep: graph list failed for %s: %s",
+                    org_id, redact_error(e))
+                continue
+            for row in graphs:
+                gname = row.get("graph_name") or ""
+                if row.get("_invalid") or not gname or gname not in existing:
+                    continue
+                try:
+                    due = _webhook_delivery.due_subscription_count(
+                        db.select_graph(gname))
+                except Exception as e:
+                    _log.warning(
+                        "webhook retry sweep: due read failed for %s: %s",
+                        gname, redact_error(e))
+                    continue
+                if due:
+                    targets.append({"org_id": org_id, "graph_name": gname})
+        return targets
+    finally:
+        with suppress(Exception):
+            data_sdk.close()
+
+
+async def _webhook_retry_sweep_pass() -> dict:
+    """#8098: ONE sweep pass — enumerate, gate, dispatch at bounded concurrency.
+
+    Never raises for a delivery/graph problem (``_guarded_step`` still wraps it,
+    but the contract here is the same best-effort one ``dispatch_pending``
+    keeps): a dead subscriber endpoint, an unreadable graph, or a failed
+    enumeration costs this pass, never the loop.
+
+    Cancellation DOES propagate — shutdown cancels the loop task, so the pass
+    must not swallow ``CancelledError`` to keep its ``_WEBHOOK_SWEEP_INFLIGHT``
+    cleanup honest. What happens to the dispatch ALREADY queued in the pool is
+    the pool's contract, not this pass's: its workers are non-daemon and are
+    JOINED at interpreter exit, so ``_dispose_webhook_sweep_executor``
+    (registered on ``threading._register_atexit``) is what cancels the queued
+    futures — without it a SIGTERM during a pass waits out every queued
+    dispatch's POSTs (#8098 review F2).
+    """
+    import logging
+
+    from tortoise import webhook_delivery as _webhook_delivery
+    from tortoise.security import redact_error
+
+    _log = logging.getLogger("tortoise.api")
+    summary = {"enabled": False, "targets": 0, "skipped": 0,
+               "delivered": 0, "failed": 0}
+    # The kill switch stops the SWEEP too, not just the write-triggered push: an
+    # operator who flips ``TORTOISE_WEBHOOK_DISPATCH=0`` must not keep paying a
+    # fleet-wide pass every interval.
+    if not _webhook_delivery.dispatch_enabled() or not _webhook_delivery.sweep_enabled():
+        return summary
+    summary["enabled"] = True
+    try:
+        targets = await run_on_daemon_worker(
+            _webhook_retry_targets, name="tortoise-webhook-sweep-enum")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        _log.warning("webhook retry sweep: enumeration failed: %s", redact_error(e))
+        return summary
+    fresh = [t for t in targets
+             if t["graph_name"] not in _WEBHOOK_SWEEP_INFLIGHT]
+    summary["targets"] = len(fresh)
+    summary["skipped"] = len(targets) - len(fresh)
+    if not fresh:
+        return summary
+    executor = _webhook_sweep_executor()
+
+    async def _one(target: dict[str, str]) -> dict | None:
+        gname = target["graph_name"]
+        _WEBHOOK_SWEEP_INFLIGHT.add(gname)
+        try:
+            return await _run_off_loop(executor, _dispatch_webhooks_sync,
+                                       target["org_id"], None, gname)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Per-graph isolation: one unreadable graph must not cost the pass
+            # the deliveries of every other tenant (the same shape the
+            # event-retention sweep uses for a per-team failure).
+            _log.warning("webhook retry sweep failed for %s: %s",
+                         gname, redact_error(e))
+            return None
+        finally:
+            _WEBHOOK_SWEEP_INFLIGHT.discard(gname)
+
+    for row in await asyncio.gather(*(_one(t) for t in fresh)):
+        if not row:
+            continue
+        summary["delivered"] += int(row.get("delivered") or 0)
+        summary["failed"] += int(row.get("failed") or 0)
+    if summary["delivered"] or summary["failed"] or summary["skipped"]:
+        _log.info("webhook retry sweep %s", summary)
+    return summary
+
+
+async def _webhook_retry_sweep_loop(interval: float) -> None:
+    """#8098: the periodic retry runner (the missing TRIGGER, not bookkeeping).
+
+    Sleeps FIRST: the first pass lands one interval after boot rather than on
+    the startup path (#2953 — nothing may delay the bind, and a fleet-wide pass
+    is the last thing a cold boot should be doing).
+
+    ``interval`` is a parameter rather than a captured closure so the loop is
+    directly drivable by a test (the ``_event_retention_loop`` precedent), and
+    each pass goes through ``_guarded_step`` (#5381) so a raising pass cannot
+    end the ``while True`` — the failure mode that would silently stop retrying
+    every idle tenant for the process's lifetime.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        await _guarded_step("webhook retry sweep", _webhook_retry_sweep_pass)
 
 
 @_embed_metered
@@ -9683,6 +10123,91 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
     except Exception:
         alerts = []  # best-effort — an alert-history failure is not a 500
     return {"org_id": org_id, "alerts": alerts}
+
+
+@app.get("/v1/internal/abuse/state")
+async def internal_abuse_state(request: Request, org_id: str):
+    """Operator-only: WHY an org reads ``status: "flagged"`` (#4874).
+
+    ``GET /v1/team`` renders the status from a bare ``flagged_at`` timestamp
+    and nothing else. The rule that fired, the count that breached it, the
+    threshold and the staging window ARE recorded — ``AbuseEngine._flag`` →
+    ``AbuseStore.flag_org`` writes them into ``abuse_events.details`` — and
+    before this route the only way to read them back was to query that table
+    by hand. That cost a real investigation an hour on a flagged org nobody
+    could explain.
+
+    OPERATOR-ONLY by construction (``_check_internal`` / `FASTAPI_INTERNAL_KEY`;
+    an org-scoped ``tt_`` key cannot satisfy it), and that is a DECISION, not an
+    oversight: ``point_create`` / ``key_create`` are our internal vocabulary and
+    are deliberately absent from every customer surface — ``/v1/team/alerts``
+    carries a customer-facing message with no rule token for exactly this
+    reason (see ``abuse._alert_dict``). A human operator needs the rule; the
+    customer is told what happened. So this does NOT extend ``/v1/team``.
+
+    ``status`` / ``flagged_at`` / ``suspended`` come from the SAME source
+    ``/v1/team`` reads (the ``organizations`` row in Supabase mode, the
+    ``Team`` node props in registry/selfhost mode — ``abuse.org_state``), not
+    from the same expression over a different store: the store's in-process
+    dicts are empty after a restart, and an operator read built on those would
+    answer "active" for an org whose chip says "flagged". ``status`` is
+    therefore one of ``flagged`` / ``active`` — the same ``flagged_at is not
+    None`` derivation — or ``unknown_org`` when the org does not exist, so a
+    mistyped ``org_id`` cannot read as a clean bill of health.
+
+    Read-only. A failed read is NEVER rendered as "nothing is flagged": on a
+    store error ``flags`` is null with ``flags_error`` set, so the two states an
+    operator must never confuse — "there is no active episode" and "I could not
+    read the episodes" — stay distinguishable. ``status`` is null when the org
+    state itself could not be read, for the same reason.
+
+    ``flags`` lists the ACTIVE episodes (newest-first), each with the count /
+    threshold / window recorded at flag time; a flag row written before those
+    fields existed reports ``null`` for them rather than a recomputed guess.
+    """
+    _check_internal(request)
+    from tortoise.supabase_control import get_abuse_store
+
+    def _read() -> dict:
+        """ONE offloaded hop; each read fails to its OWN sentinel."""
+        out: dict = {"org_id": org_id, "status": None, "flagged_at": None,
+                     "suspended": None, "org_found": None, "flags": None,
+                     "org_state_error": None, "flags_error": None}
+        try:
+            store = get_abuse_store()
+        except Exception as exc:
+            # No store at all: BOTH answers are unknown, and saying so is the
+            # only honest option — reporting either one as empty/false would
+            # read as "this org is clean".
+            out["org_state_error"] = f"{type(exc).__name__}: {exc}"
+            out["flags_error"] = out["org_state_error"]
+            return out
+        try:
+            state = store.org_state(org_id)
+            org_found = state.get("found")
+            flagged_at = state.get("flagged_at")
+            out["org_found"] = org_found
+            out["suspended"] = bool(state.get("suspended"))
+            out["flagged_at"] = (flagged_at.isoformat()
+                                 if flagged_at is not None else None)
+            # Mirrors GET /v1/team's derivation EXACTLY (`flagged_at is not
+            # None`) over the SAME source, so the two cannot disagree about
+            # the chip they describe. A third value for a nonexistent org: a
+            # typo must not render as a confidently clean "active".
+            if org_found is False:
+                out["status"] = "unknown_org"
+            else:
+                out["status"] = ("flagged" if flagged_at is not None
+                                 else "active")
+        except Exception as exc:
+            out["org_state_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            out["flags"] = store.active_flag_episodes(org_id)
+        except Exception as exc:
+            out["flags_error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    return await asyncio.to_thread(_read)
 
 
 # ── Onboarding: Self-Service Registration (#498) ──────────────────
@@ -20261,8 +20786,18 @@ async def _membership_role(user_id: str, org_id: str) -> str | None:
     # fresh _make_sdk is GC'd with close-on-GC + SHUTDOWN NOSAVE, killing
     # the shared embedded server and losing un-saved cascade writes; the
     # anchor is process-lifetime and sees them).
-    sdk = _registry_anchor()
+    #
+    # ⛔ The anchor is resolved INSIDE the try (#8098 review, code-review P2):
+    # `_registry_anchor()` binds EAGERLY in URI mode (it returns the cached
+    # `_registry_probe_sdk()`, whose `_get_proj()` IS the connect), so a
+    # registry connect failure now raises from the anchor call itself. Resolved
+    # one line above the `try`, that failure skipped `_raise_503_if_cp_outage`
+    # and reached the global handler as a raw 500 — falsifying this helper's
+    # own #2380 outage contract three lines up. Keeping the resolve inside the
+    # same try is what preserves "outage ⇒ 503, never a raw 500" on the first
+    # registry access of a process.
     try:
+        sdk = _registry_anchor()
         # #2446: this read stays INLINE, and is declared in
         # `tests/test_read_routes_loop_responsiveness.py::_KNOWN_INLINE_HELPER_RESIDUAL`
         # beside `_membership_org`, `_org_node` and `_require_owner_admin` — the
@@ -30047,6 +30582,14 @@ _ALLOWED_ANALYTICS_PROPS = {
     # `action` and `surface` are deliberately NOT reused names: nothing else in
     # the flat allowlist emits them, so a drift cannot be masked by a sibling.
     "integration_key", "action", "surface", "org_key",
+    # #3514 review P2: the record's OWN idempotency identity. The replay branch
+    # asks the STORE whether the write behind a claim landed, and this prop is
+    # the answer — without it registered, the fingerprint is stripped here in
+    # silence and every replay falls back to "no row carries this claim", i.e.
+    # the phantom-replay guard would misread a landed write as a phantom. It is
+    # a server-computed hash (never the client's header value) and is `""` for
+    # an unkeyed request.
+    "idempotency_fingerprint",
     # #3834: the transport-level wait bound's breach event. `method` and
     # `latency_ms` are already registered above; `path` is the one new key.
     # Without it the refusal would be counted but the ROUTE would be stripped
@@ -34380,6 +34923,42 @@ def _control_plane_source():
     return _registry_sdk()._get_registry()
 
 
+def _control_plane_source_on_worker():
+    """``_control_plane_source()`` for a caller that runs on a WORKER THREAD.
+
+    Same dialect resolution and the same two lanes — but in registry mode it
+    resolves through the PROCESS-LIFETIME ``_registry_anchor()`` instead of
+    ``_registry_sdk()``'s fresh-and-never-closed handle, because the cadence is
+    different: `_control_plane_source`'s callers are request-scoped operators
+    and boot/hourly sweeps, while this exists for a PER-INTERVAL pass (the #8098
+    webhook retry sweep, 60s by default). At that cadence a fresh registry SDK
+    per pass would build (and leave to the GC) one handle a minute — and, worse,
+    re-run ``_get_registry()``'s 9 ``CREATE INDEX`` statements against the
+    fleet-shared ``registry_control_plane`` once a minute.
+
+    That lifetime is real on BOTH lanes (#8098 review F1): the embedded anchor
+    caches ``_registry_g`` in ``_FALLBACK_KEEPALIVE``, and URI mode now
+    delegates to the #4661 URI-keyed ``_registry_probe_sdk()`` cache instead of
+    constructing a fresh handle — see ``_registry_anchor``'s docstring for why
+    the old URI branch made this paragraph false on the lane that ships.
+
+    `_iter_registered_orgs` already carries the rule this follows — "If a
+    to_thread/threadpool shape is ever introduced here, route through
+    ``_registry_anchor()`` first" — and the #669 half is unchanged: Supabase
+    mode NEVER constructs the registry, it returns the PostgREST control plane.
+
+    ⛔ Keep this as a SIBLING of ``_control_plane_source`` rather than a
+    hand-rolled dialect branch at the call site: #2823/#2340 is precisely the
+    defect of resolving the pair per caller, and one function per LIFETIME
+    shape is the smallest number of homes that keeps both rules true.
+    """
+    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+
+    if is_supabase_enabled():
+        return get_control_plane()
+    return _registry_anchor()._get_registry()
+
+
 # Per-org restore serialization: the swap (delete live → copy temp) must not
 # interleave with a concurrent same-org restore — a second restore landing in
 # the delete→copy window would recreate the live key and fail the copy, or
@@ -38376,7 +38955,7 @@ def _demand_dispatch_ping(text: str, *, org_key: str,
 
 async def _demand_record_write(org_id: str, *, integration_key: str,
                                action: str, surface: str,
-                               org_key: str) -> str:
+                               org_key: str, idem_fp: str = "") -> str:
     """Write the demand record and RETURN the sink outcome (#3514).
 
     ``_emit_analytics_off_loop`` is the wrong seam here: it is ``best_effort``
@@ -38384,6 +38963,12 @@ async def _demand_record_write(org_id: str, *, integration_key: str,
     caller. R2 requires the opposite — the write's response is CHECKED and its
     failure SURFACES — so the record rides the same off-loop path with the
     result returned.
+
+    ``idem_fp`` is the caller's idempotency fingerprint
+    (``demand.idempotency_fingerprint``; ``""`` for an unkeyed request). It is
+    stored ON the row so a replay can ask "did the write behind THIS claim
+    land?" of the record itself, instead of inferring it from an aggregate that
+    is blind to every action but ``click`` (#3514 review P2).
 
     The props dict is written as a LITERAL at the emit site (rather than built
     by the caller and forwarded) so `tests/test_telemetry_registration.py`'s
@@ -38402,7 +38987,8 @@ async def _demand_record_write(org_id: str, *, integration_key: str,
             lambda: _track_analytics_event(
                 org_id, _demand.DEMAND_EVENT_NAME,
                 {"integration_key": integration_key, "action": action,
-                 "surface": surface, "org_key": org_key},
+                 "surface": surface, "org_key": org_key,
+                 "idempotency_fingerprint": idem_fp},
                 local_fallback=not intended),
             op="demand_record", pool="telemetry")
     except UnregisteredTelemetryKey:
@@ -38536,6 +39122,13 @@ def _demand_aggregate(rows: list[dict]) -> tuple[list[dict], bool]:
         key = props.get("integration_key")
         if not key:
             continue  # a row without a key cannot be ranked; never guessed
+        if props.get("action", _demand.DEMAND_ACTION_CLICK) != _demand.DEMAND_ACTION_CLICK:
+            # #3514: `action` is a closed vocabulary, so a dismissal (`go_back`)
+            # is a legitimate row — but it is a FUNNEL fact, not DEMAND. Ranking
+            # it would inflate the distinct-org count that triggers #3541 with
+            # close-buttons. A row with no action prop reads as a click (the
+            # body's own default), so this can never silently zero real demand.
+            continue
         org = row.get("org_id") or ""
         entry = per.get(key)
         if entry is None:
@@ -38647,17 +39240,74 @@ async def record_data_source_demand(
     # at ONE RECORD PER CLICK — so an unkeyed request always records.
     idem = (request.headers.get("X-Idempotency-Key") or "").strip()
     idem_key = f"{org_key}:{integration_key}:{idem}" if idem else ""
+    idem_fp = _demand.idempotency_fingerprint(idem_key)
     if idem_key and not _demand.DEMAND_MARKERS.claim(
             _demand.MARK_RECORD, idem_key, _demand.DEMAND_IDEMPOTENCY_WINDOW_S):
         rows, source = await _demand_store_rows_off_loop(org_id)
-        return {"ok": True, "integration_key": integration_key,
-                "replayed": True, "org_key": org_key,
-                "click_count": _demand_click_count(rows, integration_key),
-                "source": source}
+        recorded = _demand_row_for_idempotency(rows, integration_key, idem_fp)
+        if recorded is None or recorded:
+            # #3514 review P2 — `recorded is None` means the store could not be
+            # read, which is NOT evidence of absence, so the replay answer stands
+            # (answering 503 would fail a write that may well have landed).
+            # `recorded is True` is the record's OWN evidence: a row carries this
+            # claim's fingerprint, so the write landed whatever its action was.
+            return {"ok": True, "integration_key": integration_key,
+                    "replayed": True, "org_key": org_key,
+                    "click_count": _demand_click_count(rows, integration_key),
+                    "source": source}
+        # No row carries this claim's fingerprint. That is two different
+        # situations, and the response must not confuse them:
+        age = _demand.DEMAND_MARKERS.claim_age(_demand.MARK_RECORD, idem_key)
+        if age is not None and age < _demand.DEMAND_INFLIGHT_CLAIM_S:
+            # (a) the holder is still INSIDE its write window: a peer is very
+            # possibly writing right now. Do NOT release its reservation — this
+            # request never took it, and dropping it lets a third request claim
+            # afresh and record a SECOND row for one click (the duplicate the
+            # idempotency key exists to prevent). Fail closed, keep the claim.
+            raise HTTPException(
+                status_code=503,
+                detail={"recorded": False,
+                        "message": ("this click is still being recorded — "
+                                    "please retry shortly")})
+        # (b) the holder is GONE: its write was bounded, and a write that landed
+        # would have left its fingerprint behind. So the claim outlived an
+        # attempt that recorded nothing — the phantom this guard exists for.
+        # RECOVER rather than fail closed: take the claim ourselves and let the
+        # write below be THE record, so the client's retry records instead of
+        # replaying a phantom (or being told, wrongly, that nothing was written).
+        _demand.DEMAND_MARKERS.release(_demand.MARK_RECORD, idem_key)
+        if not _demand.DEMAND_MARKERS.claim(
+                _demand.MARK_RECORD, idem_key,
+                _demand.DEMAND_IDEMPOTENCY_WINDOW_S):
+            # A peer retook it between the release and this claim: it is the
+            # writer now, so stay fail-closed and write nothing.
+            raise HTTPException(
+                status_code=503,
+                detail={"recorded": False,
+                        "message": "the click was not recorded — please retry"})
 
-    outcome = await _demand_record_write(
-        org_id, integration_key=integration_key, action=body.action,
-        surface=surface, org_key=org_key)
+    try:
+        outcome = await _demand_record_write(
+            org_id, integration_key=integration_key, action=body.action,
+            surface=surface, org_key=org_key, idem_fp=idem_fp)
+    except UnregisteredTelemetryKey:
+        # #3514 review P2 — the ROOT CAUSE of the phantom replay above. A claim
+        # that outlives a FAILED attempt makes the client's retry a no-op for a
+        # write that never landed, so this escaping path releases it.
+        # `dropped` is the handled failure (below); this is the raise path —
+        # `_demand_record_write` deliberately re-raises `UnregisteredTelemetryKey`
+        # (#3821).
+        #
+        # DELIBERATELY NOT `except BaseException`: on CANCELLATION the write is
+        # NOT cancelled (`_cp_offload` abandons the await, never the worker
+        # thread — CPython #87185), so it can land AFTER this handler returns.
+        # Releasing here would let the client's retry claim afresh and write a
+        # SECOND row for the same click. The claim age + the row fingerprint are
+        # what make retention safe instead: a landed write replays, and a claim
+        # that outlived a dead attempt is recovered on age.
+        if idem_key:
+            _demand.DEMAND_MARKERS.release(_demand.MARK_RECORD, idem_key)
+        raise
     if outcome == "dropped":
         if idem_key:
             # The record is not on the sink, so the claim must not make the
@@ -38683,6 +39333,33 @@ async def record_data_source_demand(
             "source": source}
 
 
+def _demand_row_for_idempotency(
+        rows: list[dict] | None, integration_key: str,
+        idem_fp: str) -> bool | None:
+    """Whether a stored row IS the write behind this idempotency claim.
+
+    ``True`` / ``False``, and ``None`` when the store could not be read (which
+    is not evidence of absence — the caller must not treat it as one).
+
+    ACTION-AGNOSTIC ON PURPOSE. The question is not "how much demand is there"
+    (that is ``_demand_click_count``, and it counts clicks only) but "did the
+    write behind THIS claim land" — and ``go_back`` is a stored, validated
+    action, so a click-only predicate answers "not recorded" for a row that IS
+    in the store, releases the claim, and lets the retry duplicate it (#3514
+    review P2). The row's own fingerprint answers the real question.
+    """
+    if rows is None:
+        return None
+    if not idem_fp:
+        return False
+    for row in rows:
+        props = row.get("properties") or {}
+        if (props.get("integration_key") == integration_key
+                and props.get(_demand.DEMAND_PROP_IDEM) == idem_fp):
+            return True
+    return False
+
+
 def _demand_click_count(rows: list[dict] | None, integration_key: str) -> int | None:
     """This team's recorded clicks for one integration; ``None`` when unreadable.
 
@@ -38691,9 +39368,14 @@ def _demand_click_count(rows: list[dict] | None, integration_key: str) -> int | 
     """
     if rows is None:
         return None
-    return sum(1 for row in rows
-               if (row.get("properties") or {}).get("integration_key")
-               == integration_key)
+
+    def _is_this_click(row: dict) -> bool:
+        props = row.get("properties") or {}
+        return (props.get("integration_key") == integration_key
+                and props.get("action", _demand.DEMAND_ACTION_CLICK)
+                == _demand.DEMAND_ACTION_CLICK)
+
+    return sum(1 for row in rows if _is_this_click(row))
 
 
 @app.get("/v1/data-sources/demand")
@@ -38739,6 +39421,15 @@ async def operator_data_source_demand(request: Request):
                     "message": "the demand store could not be read"})
     demand, truncated = _demand_aggregate(rows)
     return {"ok": True, "source": source, "truncated": truncated,
+            # DELIBERATELY ACTION-AGNOSTIC (#3514 review P3). This figure is
+            # STORE BREADTH — "how many teams have a demand row at all" — and it
+            # is NOT the N=5 trigger's unit: that is the per-integration
+            # `org_count` in `demand` below, which ranks clicks only. So a team
+            # whose only row is a dismissal appears HERE and in no ranked row,
+            # which is the honest reading of a funnel figure rather than a
+            # demand one. Filtering it to clicks would silently redefine a
+            # number the monthly review already reads, and would make the
+            # dismissal (a stored funnel fact) invisible to the operator.
             "distinct_orgs": len({row.get("org_id") for row in rows
                                   if row.get("org_id")}),
             "demand": demand}

@@ -869,6 +869,57 @@ def test_a_failed_command_degrades_to_empty_not_to_a_confident_answer(monkeypatc
     assert fs.cmux_workspaces().measured is False
 
 
+def test_the_windows_TABLE_HEADER_is_not_counted_as_a_window(monkeypatch) -> None:
+    """`cmux list-windows` prints a TABLE: a header row, then one row per window.
+
+    Counting non-blank LINES reports n+1, so a healthy single-window box reads as
+    "saw 2" and the reconciliation is INERT — every lane unmeasured, the collision
+    pre-flight's claim gate INCOMPLETE for every candidate, and the cell dispatches
+    nothing behind a full pool (measured 2026-10-18 on a live cell: `lanes=0` behind a
+    198-candidate pool). The fix counts the `--json` ARRAY and, in the text fallback,
+    drops the header row by matching the `ID` column heading.
+    """
+    payload = json.dumps({"workspaces": [{"id": "ab", "current_directory": "/x"}]})
+    header = "ID                                       NAME  INDEX  FOCUSED  LAYOUT  WORKSPACE ID\n"
+    one_row = "screen_abc                               -     0      true     {}      ws_abc\n"
+
+    def run(cmd, timeout=60):
+        if cmd[:2] == ["cmux", "list-windows"]:
+            # text form: header + ONE data row. The old line count said 2.
+            return header + one_row
+        return payload
+
+    monkeypatch.setattr(fs, "_run", run)
+    assert fs.open_window_count() == 1, "the header is not a window"
+    assert fs.cmux_workspaces().measured is True, "a single-window box must measure"
+
+    # --json is preferred and counted by its array length
+    def run_json(cmd, timeout=60):
+        if cmd[:2] == ["cmux", "list-windows"] and "--json" in cmd:
+            return json.dumps([{"id": "screen_abc"}, {"id": "screen_def"}])
+        if cmd[:2] == ["cmux", "list-windows"]:
+            return header + one_row
+        return payload
+
+    monkeypatch.setattr(fs, "_run", run_json)
+    assert fs.open_window_count() == 2
+
+    # non-vacuous in the other direction: TWO real windows (header + 2 rows) still refuse
+    def run_two(cmd, timeout=60):
+        if cmd[:2] == ["cmux", "list-windows"]:
+            return header + one_row + one_row.replace("screen_abc", "screen_def")
+        return payload
+
+    monkeypatch.setattr(fs, "_run", run_two)
+    assert fs.open_window_count() == 2
+    assert fs.cmux_workspaces().measured is False
+
+    # and an UNREADABLE answer is None -> unmeasured, never "no windows"
+    monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60: "")
+    assert fs.open_window_count() is None
+    assert fs.cmux_workspaces().measured is False
+
+
 def test_workspace_map_fails_open_when_more_than_one_window_is_open(monkeypatch) -> None:
     """`cmux list-workspaces` lists ONE window. With a second window open every lane
     in it is merely ABSENT — and absence is exactly what makes a lane terminal — so

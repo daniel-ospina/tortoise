@@ -136,7 +136,18 @@ mechanisms:
     tracking_issue: 5009
     note: >-
       Escalate on measured INSUFFICIENCY of the assembled evidence, not on query
-      type. No code path in `tortoise/`.
+      type. The DECISION layer landed in `tortoise/sufficiency_router.py`
+      (`tests/test_sufficiency_router.py`; §12.5a in
+      docs/architecture/STORAGE-ARCHITECTURE.md): a three-state verdict with the
+      residency precedence (§17.3), a bounded `serve`/`escalate-tier` trigger
+      that takes no query class, and a write-back plan whose units carry their
+      span, cannot promote a class and dedupe by identity. ⚠️ The state stays
+      `not-implemented` on purpose: NOTHING ESCALATES YET — no tier walk, no
+      Tier-1 store, no read-path caller, and #5009's premise measurement (are
+      our queries actually answered badly by a cheap tier?) precedes that
+      wiring. §12.3's tier count is also OPEN (a design fold, not an owner
+      ruling). A row marked `implemented` here would recreate the exact
+      declared-implies-present defect this registry exists to catch.
 
   - id: fanout_cap
     name: "connection fan-out cap (200)"

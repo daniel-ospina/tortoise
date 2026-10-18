@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import math
 import re
 import threading
 import time
@@ -46,11 +47,22 @@ from pathlib import Path
 #: store (R2), which is also what makes the cross-org count readable.
 DEMAND_EVENT_NAME = "data_source_demand"
 
+#: The prop that carries the record's OWN idempotency identity (a fingerprint;
+#: see ``idempotency_fingerprint``). Named once here because three sites read
+#: it: the write, the replay's evidence check, and the registration test.
+DEMAND_PROP_IDEM = "idempotency_fingerprint"
+
 #: Every prop the record carries. Registered in ``_ALLOWED_ANALYTICS_PROPS``
 #: (hosted_api) — an unregistered prop is silently dropped there, so the
 #: registration test is parametrized over THIS tuple (a prop-name drift would
 #: under-count demand with no diagnostic).
-DEMAND_PROPS = ("integration_key", "action", "surface", "org_key")
+#:
+#: ``idempotency_fingerprint`` is the ONE prop no reader ranks on: it is the
+#: record's own evidence that THIS claim's write landed. It is a hash, never the
+#: client's header value, and it is empty for an unkeyed request (which is never
+#: replayed).
+DEMAND_PROPS = ("integration_key", "action", "surface", "org_key",
+                DEMAND_PROP_IDEM)
 
 # ── Pinned literals (the tests assert these, not "a cap exists") ────────
 #: 20 demand requests / minute / team → 429 + ``Retry-After``.
@@ -66,6 +78,18 @@ DEMAND_DEDUPE_WINDOW_S = 60.0
 #: carries no idempotency field, so the key is the ``X-Idempotency-Key`` header
 #: when the client supplies one and a content fingerprint otherwise.
 DEMAND_IDEMPOTENCY_WINDOW_S = 300.0
+
+#: How long a HELD claim with no record behind it may still be IN FLIGHT.
+#:
+#: A replay arrives on a claim it did not take, and the claim alone cannot say
+#: whether its holder is dead or merely awaiting its write. Under this bound the
+#: holder is presumed LIVE and the replay answers "still recording, retry
+#: shortly" WITHOUT touching the reservation — releasing it would let the
+#: client's retry write a SECOND row for one click. Past the bound the holder is
+#: provably gone (its write is bounded, and a landed write leaves the
+#: ``idempotency_fingerprint`` prop behind), so the replay RECOVERS: it takes the
+#: claim itself and records, instead of failing a write that never happened.
+DEMAND_INFLIGHT_CLAIM_S = 30.0
 
 #: The ping's transport timeout, passed EXPLICITLY to ``send_message``. Pinned
 #: because the hung-transport row asserts it: a send that neither returns nor
@@ -108,8 +132,16 @@ DEMAND_READ_LIMIT = 2000
 #: Bound on the ping text, so a long surface name cannot grow the message.
 DEMAND_MESSAGE_MAX_CHARS = 512
 
-#: The closed action vocabulary.
-DEMAND_ACTIONS = frozenset({"click", "go_back"})
+#: The action that IS demand. Only this one counts toward the click totals and
+#: the cross-org ranking (``_demand_aggregate`` / ``_demand_click_count``): a
+#: dismissal is a funnel fact, not a click, and counting it would inflate the
+#: distinct-org count that triggers #3541.
+DEMAND_ACTION_CLICK = "click"
+
+#: The closed action vocabulary. ``go_back`` is a dismissal the client MAY
+#: report; the dashboard client does not (it sends clicks only), but any caller
+#: holding a ``tt_`` key can, so the read half guards the count explicitly.
+DEMAND_ACTIONS = frozenset({DEMAND_ACTION_CLICK, "go_back"})
 
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
@@ -224,6 +256,30 @@ def derive_org_key(org_id: str) -> str:
     return hashlib.sha256(b"tortoise:demand:org:v1:" + raw).hexdigest()[:32]
 
 
+def idempotency_fingerprint(idem_key: str) -> str:
+    """The RECORD-SIDE identity of one idempotency claim — ``""`` when unkeyed.
+
+    WHY IT IS STORED ON THE ROW. A replay has to answer one question: *did the
+    write behind THIS claim land?* The claim marker cannot answer it (a claim
+    outlives a failed attempt, and it is process-local), and neither can an
+    aggregate — "this org holds N CLICK rows for the key" is a different fact,
+    and it is blind to every action that is not a click, so a recorded
+    ``go_back`` reads as "not recorded" and the retry then duplicates it. The
+    row's own copy of the claim's derived identity is the fact itself: it
+    survives the marker set (a restart, a second worker) and it is
+    action-AGNOSTIC — whatever the write stored, the row says which claim wrote
+    it.
+
+    It is a SHA-256 of the server-built ``idem_key`` — never the client's header
+    value — so the stored prop reveals nothing the client did not already hold
+    and cannot be replayed from the store.
+    """
+    if not idem_key:
+        return ""
+    raw = str(idem_key).encode("utf-8")
+    return hashlib.sha256(b"tortoise:demand:idem:v1:" + raw).hexdigest()[:32]
+
+
 def format_ping(*, integration_key: str, action: str, surface: str,
                 org_key: str) -> str:
     """The operator ping's text — aggregate-ready, never a promise to a user."""
@@ -250,18 +306,26 @@ class _Markers:
         self._lock = threading.Lock()
         self._rate: dict[str, deque[float]] = {}
         self._marks: dict[tuple[str, str], float] = {}
+        #: When each HELD claim was taken (the in-flight clock). Only `claim()`
+        #: writes it: a `mark()` is a completed fact, not a reservation, and it
+        #: pops its entry so an aged mark can never be mistaken for a stuck
+        #: claim.
+        self._claims: dict[tuple[str, str], float] = {}
         self._keys: dict[str, set[str]] = {}
 
     def reset(self) -> None:
         with self._lock:
             self._rate.clear()
             self._marks.clear()
+            self._claims.clear()
             self._keys.clear()
 
     # ── structure cap ──────────────────────────────────────────────────
     def _cap(self, mapping: dict) -> None:
         while len(mapping) > self._capacity:
-            mapping.pop(next(iter(mapping)))
+            oldest = next(iter(mapping))
+            self._claims.pop(oldest, None)
+            mapping.pop(oldest)
 
     # ── rate: a true sliding window ────────────────────────────────────
     def rate_ok(self, team: str, *, cap: int = DEMAND_RATE_CAP_PER_MINUTE,
@@ -316,8 +380,31 @@ class _Markers:
                 return False
             if deadline <= now:
                 self._marks.pop(name, None)
+                self._claims.pop(name, None)
                 return False
             return True
+
+    def claim_age(self, namespace: str, key: str) -> float | None:
+        """Seconds since a HELD claim was taken; ``None`` when it is not held.
+
+        The one distinction a replay cannot make from ``claim()`` alone: a
+        held reservation is either a LIVE holder still awaiting its write or an
+        ABANDONED one whose attempt died. Age is the only in-process evidence
+        that separates them, so the caller uses it to decide between "still in
+        flight, do not touch my reservation" and "the holder is gone, recover".
+        A reservation installed by ``mark()`` carries no start and reads as
+        infinitely old — it is a completed fact, never an in-flight write.
+        """
+        now = self._clock()
+        with self._lock:
+            name = (namespace, key)
+            deadline = self._marks.get(name)
+            if deadline is None or deadline <= now:
+                self._marks.pop(name, None)
+                self._claims.pop(name, None)
+                return None
+            started = self._claims.get(name)
+            return math.inf if started is None else max(0.0, now - started)
 
     def claim(self, namespace: str, key: str, ttl: float) -> bool:
         """ATOMICALLY reserve ``(namespace, key)`` for ``ttl``.
@@ -336,7 +423,9 @@ class _Markers:
             if deadline is not None and deadline > now:
                 return False
             self._marks.pop(name, None)
+            self._claims.pop(name, None)
             self._marks[name] = now + ttl
+            self._claims[name] = now
             self._cap(self._marks)
             return True
 
@@ -344,10 +433,12 @@ class _Markers:
         """Drop a claim (the work behind it did not succeed)."""
         with self._lock:
             self._marks.pop((namespace, key), None)
+            self._claims.pop((namespace, key), None)
 
     def mark(self, namespace: str, key: str, ttl: float) -> None:
         with self._lock:
             self._marks.pop((namespace, key), None)
+            self._claims.pop((namespace, key), None)
             self._marks[(namespace, key)] = self._clock() + ttl
             self._cap(self._marks)
 
