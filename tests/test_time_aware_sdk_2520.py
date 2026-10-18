@@ -214,12 +214,21 @@ _PRESENT_QUERY = "what production database do we use for the billing ledger now?
 
 
 #: The same claim, phrased so it OUTRANKS the current one on relevance (it
-#: carries the query's own "we use … now" words). Needed by the one test that
-#: must observe the not-yet-effective demotion: in the default fixture that
-#: claim already ranks last, so its demotion is invisible (see
+#: carries the query's own "we use … now" words in a SHORT form). Needed by the
+#: one test that must observe the not-yet-effective demotion: in the default
+#: fixture that claim already ranks last, so its demotion is invisible (see
 #: ``test_not_yet_effective_claim_is_not_served_as_current``).
+#:
+#: MEASURED, not assumed (#8487 review P2): the recording embedder makes the
+#: dense leg fail (the mock returns lists, the vector leg wants ``.tolist()``),
+#: so relevance here IS the FalkorDB FTS/BM25 score — length-normalised. A
+#: LONGER phrasing that merely repeats the query's words therefore ranks
+#: LOWER (measured: "We use the production database now for the billing
+#: ledger: Postgres 17" scored 0.61 vs the current claim's 1.17 and came
+#: back LAST). This shorter form carries the same words and wins the
+#: BM25 comparison (measured: future first).
 _FUTURE_OUTRANKING = (
-    "We use the production database now for the billing ledger: Postgres 17")
+    "the production database billing ledger we use now is Postgres 17")
 
 
 @contextmanager
@@ -455,9 +464,45 @@ def test_a_failed_state_read_does_not_strip_the_page_decoration(ku_graph,
     assert len(calls) >= 2, (
         "step 7.6 must fetch its own page state when 5e's map is unusable")
     entry = _valid_time_entry(trace)
-    assert entry["degraded"] is True, (
-        "a failed validity read must not be recorded as a clean selection")
+    assert entry["degraded"] is False, (
+        "a short state read is an ordering impairment, NOT a degraded read: "
+        "``degraded`` in a leg trace means a retrieval leg did not run, and "
+        "ask_lane/read_status fold ANY such entry into the caller-facing "
+        "degradation signal — reddening a healthy read")
     assert entry["reason"] == "state_read_incomplete"
+    # The consumers that made the old flag wrong, exercised directly on THIS
+    # leg (the rest of the trace belongs to other legs, whose degradation is
+    # their own business): a short state read must leave the ordering
+    # impairment out of the caller-facing degradation signal (#8487 review P1).
+    from tortoise.read_status import STATUS_DEGRADED, classify_leg_trace
+    assert classify_leg_trace([entry], hit_count=len(hits)) != STATUS_DEGRADED, (
+        "read_status must not call this read degraded — the hits are complete")
+    assert not any(leg.get("degraded") for leg in [entry]), (
+        "ask_lane folds any degraded leg into ``retrieval_degraded``")
+
+
+@_DOCKER_ONLY
+def test_a_raised_selection_records_its_own_reason(ku_graph, monkeypatch):
+    """FAIL VALUE: a RAISED selection recorded as ``state_read_incomplete``,
+    i.e. the audit leg unable to tell a selection that blew up from a state
+    read that came back short (#8487 review P2, secondary).
+
+    Reachable: ``prefer_latest_ids`` raising is the exception branch of step
+    5e; it is fail-open by design, so the read must still succeed.
+    """
+    sdk, _ = ku_graph
+    import tortoise.time_aware as _ta
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("selection exploded")
+
+    monkeypatch.setattr(_ta, "prefer_latest_ids", _boom)
+    trace: list[dict] = []
+    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    assert hits, "a raised selection must never fail the read (fail-open)"
+    entry = _valid_time_entry(trace)
+    assert entry["reason"] == "selection_failed"
+    assert entry["degraded"] is False
 
 
 @_DOCKER_ONLY

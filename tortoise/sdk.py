@@ -22341,7 +22341,14 @@ class TortoiseSDK:
             entry (reason + demoted count) — that entry plus each hit's own
             window (``valid_from``/``valid_to``/``end_state``/
             ``superseded_by``) is the audit trail for "which version was
-            selected, and why". ``TORTOISE_VALID_TIME_RERANK=0`` is the
+            selected, and why". An UNUSABLE state read (short map, or the
+            selection raising) records ``reason="state_read_incomplete"`` /
+            ``"selection_failed"`` with ``degraded=False``: the entry's
+            ``degraded`` flag is the memory layer's impairment signal, which
+            ``ask_lane``/``read_status`` fold into the caller-facing
+            degradation status, so an ORDERING impairment that step 7.6's
+            page-width re-read fully recovers must not claim it.
+            ``TORTOISE_VALID_TIME_RERANK=0`` is the
             operator kill switch; ``_valid_time_rerank=False`` is the
             in-process opt-out.
         """
@@ -23081,6 +23088,12 @@ class TortoiseSDK:
                             reason="no-prefer-latest-intent", count=0))
                 else:
                     _vt_covered = False
+                    # The audit REASON for an unusable map: "state_read_incomplete"
+                    # when the read succeeded but came back short, and the
+                    # selection's OWN reason when ``prefer_latest_ids`` raised —
+                    # the leg must be able to tell a raised selection from a
+                    # short read (#8487 review P2, secondary).
+                    _vt_reason = "state_read_incomplete"
                     try:
                         _vt_state = fetch_point_epistemic_state(
                             graph, result_ids)
@@ -23115,6 +23128,7 @@ class TortoiseSDK:
                         _vt_covered = False
                         _vt_stats = {"reason": "selection_failed",
                                      "demoted": []}
+                        _vt_reason = "selection_failed"
                     if status_trace is not None:
                         if _vt_covered:
                             status_trace.append(_trace_entry(
@@ -23122,12 +23136,28 @@ class TortoiseSDK:
                                 reason=_vt_stats["reason"],
                                 count=len(_vt_stats["demoted"])))
                         else:
-                            # A short map is a FAILED read, never an
-                            # all-current pool: the audit leg must not claim a
-                            # selection that could not be made (#8487 scope 3).
+                            # A short map is a FAILED READ OF THE STATE, never
+                            # an all-current pool: the audit leg must not claim
+                            # a selection that could not be made (#8487 scope 3).
+                            #
+                            # ``degraded`` is DELIBERATELY False (#8487 review
+                            # P1). In a leg trace that flag is not audit-only:
+                            # ``ask_lane`` folds ANY degraded leg into the
+                            # response's ``retrieval_degraded`` and
+                            # ``read_status.classify_leg_trace`` turns it into
+                            # STATUS_DEGRADED — and every other ``degraded=True``
+                            # entry in this trace means "a retrieval leg did not
+                            # run" (vector skipped, TF-IDF produced the rows).
+                            # Here nothing was degraded: the hits are complete and
+                            # step 7.6 re-reads the page state (this PR's other
+                            # half), so the hits keep ``status`` /
+                            # ``superseded_by`` / the window. Claiming a
+                            # degradation would redden a healthy read — for
+                            # temporal intent only, which no caller could
+                            # interpret. The REASON carries the impairment.
                             status_trace.append(_trace_entry(
-                                "valid_time", ran=True, degraded=True,
-                                reason="state_read_incomplete", count=0))
+                                "valid_time", ran=True, degraded=False,
+                                reason=_vt_reason, count=0))
 
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]

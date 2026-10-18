@@ -555,12 +555,23 @@ def test_future_window_is_not_yet_effective_but_not_stale():
     ("0", False), ("false", False), ("no", False), ("off", False),
     ("OFF", False), ("  off  ", False), ("garbage", True),
 ])
-def test_kill_switch_resolution(raw, expected):
+def test_kill_switch_resolution(raw, expected, monkeypatch):
     """FAIL VALUE: a typo or an explicit OFF flipping the default. Follows
     the ONE declared env contract (#4097): garbage → default (ON), explicit
-    falsy → OFF."""
-    assert prefer_latest_enabled(raw) is expected
+    falsy → OFF.
+
+    ENVIRONMENT-INDEPENDENT (#8487 review P2): the process variable is pinned
+    to the OPPOSITE of the expected value first, so this case set must pass on
+    a shell that exported ``TORTOISE_VALID_TIME_RERANK=0`` to try the OFF arm —
+    which is exactly what the knob ships for. ``raw=None`` is NOT passed to
+    ``prefer_latest_enabled``: ``None`` there means "read ``os.environ``", so
+    that resolution is pinned by ``test_kill_switch_reads_the_environment``
+    (monkeypatch) instead of being asserted against the developer's shell.
+    """
+    monkeypatch.setenv(VALIDITY_RERANK_ENV, "0" if expected else "1")
     assert env_flag_from_value(raw, True) is expected
+    if raw is not None:
+        assert prefer_latest_enabled(raw) is expected
 
 
 def test_kill_switch_reads_the_environment(monkeypatch):
