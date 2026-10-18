@@ -36848,6 +36848,16 @@ async def webhooks_stripe(request: Request):
 # #4262 removed.
 _BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
 
+#: How long an in-flight pass may hold the lock before it is presumed WEDGED
+#: rather than merely slow (a hung provider socket has no client-side timeout).
+#: The lock deliberately outlives the request so a cancelled request cannot let a
+#: second pass run over the same fleet — but that means a wedged pass would
+#: otherwise hold it forever, and the driver's scheduled branch treats the 202
+#: "benign overlap" as success, which would silence the daily page permanently.
+#: Past this bound the endpoint answers a FAILURE instead, so the run reds.
+_BILLING_RECONCILE_STALE_S = 1800.0
+_BILLING_RECONCILE_STARTED_AT: float | None = None
+
 
 @app.post("/v1/internal/billing/reconcile")
 async def billing_reconcile(request: Request):
@@ -36877,10 +36887,25 @@ async def billing_reconcile(request: Request):
     _check_internal(request)
     from tortoise.billing import BillingEnumerationError, reconcile_subscriptions
 
+    global _BILLING_RECONCILE_STARTED_AT
     if _BILLING_RECONCILE_INFLIGHT.locked():
+        started = _BILLING_RECONCILE_STARTED_AT
+        if (started is not None
+                and (time.monotonic() - started) > _BILLING_RECONCILE_STALE_S):
+            _logger.error(
+                "billing reconcile: the in-flight pass has held the lock for "
+                "over %.0fs — presumed WEDGED, not merely slow; the fleet is "
+                "not being reconciled", _BILLING_RECONCILE_STALE_S)
+            return JSONResponse(
+                status_code=503,
+                content={"status": "reconcile_stuck",
+                         "detail": "a previous pass has held the lock past the "
+                                   "staleness bound and is presumed wedged — "
+                                   "the fleet may be unreconciled"})
         return JSONResponse(status_code=202,
                             content={"status": "already_running"})
     await _BILLING_RECONCILE_INFLIGHT.acquire()
+    _BILLING_RECONCILE_STARTED_AT = time.monotonic()
     # The lock is handed to the PASS when one is handed off to a worker thread
     # (``_release_when_finished``), and released by this ``finally`` only for a
     # path that never handed one off. Releasing on cancellation would let the
@@ -36905,9 +36930,11 @@ async def billing_reconcile(request: Request):
                 # Close first, then hand the lock back: these are ONE unit. A
                 # second pass must never start while the SDK this pass writes
                 # through is still open — the original defect, in reverse.
+                global _BILLING_RECONCILE_STARTED_AT
                 if sdk is not None:
                     with suppress(Exception):
                         sdk.close()
+                _BILLING_RECONCILE_STARTED_AT = None
                 with suppress(Exception):
                     _BILLING_RECONCILE_INFLIGHT.release()
 
@@ -36946,6 +36973,7 @@ async def billing_reconcile(request: Request):
         return result
     finally:
         if not handed_off:
+            _BILLING_RECONCILE_STARTED_AT = None
             with suppress(Exception):
                 _BILLING_RECONCILE_INFLIGHT.release()
 

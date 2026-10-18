@@ -1503,6 +1503,80 @@ class TestBillingReconcileDriverVerdicts:
             f"{expected} — {why}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
 
+    def test_the_public_log_never_carries_a_customer_org_id(self):
+        """#8904 review round 3: this repository's Actions log is PUBLIC.
+
+        A bare UUID shape matches NEITHER id this fleet mints — hosted orgs are
+        ``uuid4().hex[:26]`` (26 hex, no dashes) and registry orgs are
+        ``ulid()`` = ``<hex-ts>-<12hex>``. The ids reach the log inside the
+        provider's own prose (``no organizations row matched id='<id>'``), not
+        only in the ``org_id`` key, so a key-only filter publishes them anyway.
+        Both real shapes are exercised, and the fingerprints must DIFFER —
+        hashing a value an earlier redaction already replaced collapses every
+        org onto one fingerprint and kills the correlation it exists for.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        hosted = "f69f0773cfa54c62b900c13c6a"
+        registry = "0006553f0ff-0123456789ab"
+        payload = json.dumps(_billing_case(
+            unchanged=0,
+            failed=[
+                {"org_id": hosted,
+                 "error": "RuntimeError: update_org_billing: no organizations "
+                          f"row matched id='{hosted}'"},
+                {"org_id": registry,
+                 "error": f"BillingError: reconcile_org: org '{registry}' "
+                          "not found"},
+            ],
+        ))
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "schedule",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        emitted = proc.stdout + proc.stderr
+        assert proc.returncode == 1, f"a failed row must red the run: {emitted}"
+        for label, raw in (("hosted", hosted), ("registry", registry)):
+            assert raw not in emitted, (
+                f"the {label} org id reached the PUBLIC log unredacted:\n{emitted}"
+            )
+        fingerprints = set(re.findall(r"org-[0-9a-f]{10}", emitted))
+        assert len(fingerprints) == 2, (
+            "the two orgs must keep DISTINCT fingerprints, or the log cannot "
+            "correlate a row across runs"
+        )
+
     def test_unset_secret_fails_before_calling_the_endpoint(self):
         """A missing INTERNAL_API_URL/FASTAPI_INTERNAL_KEY is a red run.
 
