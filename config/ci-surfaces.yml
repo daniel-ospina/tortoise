@@ -5825,11 +5825,16 @@ durations:
   test_egress_bytes.py: 1.1
   test_entry_point_python_guard.py: 4.6
   test_extractor_embed_coerce_5060.py: 0.6
-  # #8746: 4 tests, local wall 1.8 s (measured at the #8746 review head,
+  # #8746: 5 tests, local wall 1.8 s (measured at the #8746 review head,
   # 2026-10-18). A NEW file has no CI junit measurement (a file that never ran
   # cannot appear in an artifact), so this is the pre-merge estimate; refresh it
-  # from the first post-merge run that includes the file. Hermetic — the YAML pin
-  # reads two workflows, the writer tests use tmp_path — so it does not move with
+  # from the first post-merge run that includes the file. Hermetic — no DB, no
+  # network: the writer tests use tmp_path and the wiring pin parses
+  # `tests/conftest.py` with `ast`. (The pin that every suite-session job DUMPS
+  # the artifact is a DIFFERENT file —
+  # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak,
+  # which is the one that reads the two workflows; nothing here reads YAML.)
+  # So this estimate does not move with
   # box load. Both halves are load-bearing: the surface entry alone leaves
   # durations coverage under the floor and `tools/ci_selection.py --integrity`
   # reds (#4348 trap), and a durations entry with no surface registration leaves

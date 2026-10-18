@@ -668,20 +668,36 @@ def _code_only(line: str, triple: str | None) -> tuple[str, str | None]:
     """The CODE part of one line: string literals and comments replaced by
     spaces, so a bracket inside them cannot unbalance a continuation count.
 
+    COLUMN-ALIGNED: the returned text is the same length as `line`, so the
+    leading-whitespace count of the code is the code's real indent.
+
     Tracks a triple-quoted region across lines (docstrings are the common
-    case). Single/double-quoted literals are consumed whole, honouring
-    backslash escapes; a `#` outside a string starts a comment."""
+    case), honouring backslash escapes on the closing delimiter exactly as
+    `_toggle_triple_quotes` does. The two lexers answer different questions
+    ("which columns are code" here, "is this position inside a string" there)
+    and so cannot be folded into one pass — the shared escape rule is pinned
+    equal by
+    `test_the_two_triple_quote_lexers_agree_on_escaped_delimiters`.
+    Single/double-quoted literals are consumed whole, honouring backslash
+    escapes; a `#` outside a string starts a comment."""
     out: list[str] = []
     i = 0
     n = len(line)
     while i < n:
         if triple is not None:
-            end = line.find(triple, i)
+            end = _find_unescaped(line, triple, i)
             if end == -1:
+                out.append(" " * (n - i))
                 return "".join(out), triple
+            # Pad the WHOLE in-string span, closing delimiter included, so the
+            # result stays column-aligned. Padding only the 3 delimiter columns
+            # collapsed the string's content and shifted any code after a
+            # mid-line close to the left, so a line that resumes code after
+            # closing a region measured an indent of 3+ instead of its real
+            # column (#8937 review r7, nit b).
+            out.append(" " * (end + len(triple) - i))
             i = end + len(triple)
             triple = None
-            out.append(" " * len(line[end:end + 3]))
             continue
         ch = line[i]
         if ch == "#":
@@ -711,6 +727,27 @@ def _code_only(line: str, triple: str | None) -> tuple[str, str | None]:
         out.append(ch)
         i += 1
     return "".join(out), triple
+
+
+def _find_unescaped(line: str, delim: str, start: int) -> int:
+    """Index of the first `delim` at/after `start` that is NOT backslash-
+    escaped, or -1. Same escape rule as `_toggle_triple_quotes`: an odd number
+    of immediately preceding backslashes escapes the delimiter, an even number
+    does not. A bare `str.find` closed a region on an escaped delimiter, which
+    made the two triple-quote lexers disagree about the same line."""
+    i = start
+    while True:
+        found = line.find(delim, i)
+        if found == -1:
+            return -1
+        backslashes = 0
+        j = found - 1
+        while j >= 0 and line[j] == "\\":
+            backslashes += 1
+            j -= 1
+        if backslashes % 2 == 0:
+            return found
+        i = found + 1
 
 
 def _scope_at(scopes: list, lineno: int) -> tuple[str, str | None]:
@@ -1036,6 +1073,45 @@ def test_a_bracket_inside_a_comment_does_not_freeze_the_scope_map():
     )
     scopes = _scope_map(src)
     assert scopes[5] == ("fn", "second"), scopes[5]
+
+
+def test_code_only_stays_column_aligned_after_a_mid_line_triple_close():
+    """A triple-quoted region that CLOSES mid-line, with code after it, must
+    not shift that code's column (#8937 review r7, nit b).
+
+    `_code_only` padded only the 3 delimiter columns when closing, which
+    collapsed the region's content: on a line that starts INSIDE a region and
+    resumes code after the closing delimiter, the padding was 3 columns short
+    per collapsed span, so `_scope_map` read a smaller indent than the code's
+    real column — the statement could be attributed to an enclosing function
+    instead of closing it. Unreachable in this tree today; pinned so it stays
+    that way."""
+    line = 'abc""" + 1'
+    code, triple = _code_only(line, '"""')
+    assert triple is None
+    assert len(code) == len(line), (
+        "the code-only text is not column-aligned with the line", code)
+    assert len(code) - len(code.lstrip()) == line.index("+"), (
+        "the resumed code was shifted left of its real column", code)
+
+
+def test_the_two_triple_quote_lexers_agree_on_escaped_delimiters():
+    """`_code_only` and `_toggle_triple_quotes` answer different questions and
+    must not drift on the ESCAPE rule (#8937 review r7, nit a).
+
+    A backslash-escaped delimiter does not close a region in Python, and
+    `_toggle_triple_quotes` already honoured that. `_code_only` used a bare
+    `str.find`, so it closed on the escaped delimiter and then treated the
+    trailing `\\"\\"\\"` as a region OPENER — two answers for one line."""
+    line = 'z = """a\\""" + 1"""'
+    assert _toggle_triple_quotes(line, None, None) is None, (
+        "the position lexer must not close on an escaped delimiter")
+    code, triple = _code_only(line, None)
+    assert triple is None, (
+        "the code lexer closed on the ESCAPED delimiter and reopened at the "
+        "real one — it disagrees with _toggle_triple_quotes", triple)
+    assert len(code) == len(line)
+    assert code.strip() == "z ="
 
 
 def test_module_scoped_pop_without_restore_reds():
