@@ -1810,14 +1810,14 @@ class _EntityHandlers:
         default, and every journal arm — live ``apply``/``_upsert``, rebuild
         pass 1a's journal records, the promote folds) means the payload IS the
         journal record, so the key it carries was journaled and only the policy
-        refuses it. ``True`` means the entry is the #548 pre-wipe GRAPH snapshot
-        rebuilt for an id with no journaled CREATION (see `log_point_ids` in
-        ``rebuild_all``), so the snapshot — not a journal record — is what
-        carried the key into this pass (#8018 review round 2: the flag proves
-        the payload's source, NOT that the journal lacks the key for that id; an
-        id whose only record is a ``PointPromoted`` snapshot or a
-        ``ConfidenceChanged`` belief fold carries EP state in the journal too,
-        so the report must not assert the stronger claim).
+        refuses it. ``True`` means the payload is a SYNTHETIC event built from
+        the #548 pre-wipe GRAPH snapshot rather than from a journal record, so
+        the snapshot — not a journal record — is what carried the key into this
+        pass (#8018 review round 2: the flag proves the payload's source, NOT
+        that the journal lacks the key for that id; an id whose only record is a
+        ``PointPromoted`` snapshot or a ``ConfidenceChanged`` belief fold
+        carries EP state in the journal too, so the report must not assert the
+        stronger claim).
 
         ``persisted_extra_keys`` is the key set ``_persist_extra_props``
         actually handed to the engine (a ``None``, a non-persistable value, and
@@ -2208,8 +2208,8 @@ class _EntityHandlers:
         # by it, because two sources feed this report and they are NOT the same
         # event. On the journal arm the payload IS a journal record that carries
         # the key, so only the writer's policy refuses it. On the #548 arm the
-        # payload is the pre-wipe GRAPH snapshot rebuilt for an id with no
-        # journaled creation, so the snapshot carried the value into this pass.
+        # payload is the pre-wipe GRAPH snapshot rather than a journal record,
+        # so the snapshot carried the value into this pass.
         # Keying the de-dup on the bare key let the arm that happened to run
         # first (synthetic events sort first) speak for the other, which
         # re-minted the very misattribution #8018 removed.
@@ -2219,8 +2219,11 @@ class _EntityHandlers:
         # `ConfidenceChanged`, `outdated`/`expiredAt` from the
         # PointSuperseded/PointInvalidated folds), and "this id has NO journal
         # record" is FALSE whenever the only record is a promote snapshot or a
-        # revise (#6239's promote-only shape). Both claims are therefore made
-        # about the PAYLOAD's source only.
+        # revise (#6239's promote-only shape), and a promote-only id gets BOTH
+        # a synthetic event and a promoting fold in the same pass (#8018
+        # review round 3). Both claims are therefore made about the PAYLOAD's
+        # source only — the snapshot arm names the snapshot as the carrier and
+        # says NOTHING about the id's journal coverage.
         for key in self._POINT_DENY - self._POINT_HANDLED:
             if p.get(key) is None:
                 continue
@@ -2231,22 +2234,32 @@ class _EntityHandlers:
                 continue
             warned.add((from_prewipe_snapshot, key))
             if from_prewipe_snapshot:
+                # #8018 review round 3: this says what the flag PROVES — the
+                # payload's source — and nothing about the id's journal
+                # coverage. "(the id has no journaled creation)" was false in
+                # exactly the shapes this branch must support: a promote-only
+                # id (`_JOURNAL_CREATING_EVENT_TYPES` counts `PointPromoted`
+                # as a creation) gets a synthetic event AND a promoting fold in
+                # one pass, and the persisted-sidecar union (`synthetic_events`
+                # in `rebuild_all`) is not re-checked against `log_point_ids`,
+                # so an id can be BOTH synthetic and journal-created. In both
+                # the sibling message below says the journal record carries the
+                # key, so an id-level denial would be contradicted beside it.
                 logger.warning(
                     "Point prop %r dropped — deny-listed (recompute/EP-owned, "
                     "#2795): this payload is the #548 pre-wipe graph SNAPSHOT, "
-                    "not a journal record (the id has no journaled creation), "
-                    "so the snapshot is what carried the key into this pass "
-                    "and the writer refuses it by policy — a different case "
-                    "from the journal arm, where a record does carry it "
-                    "(#8018)", key)
+                    "not a journal record, so the snapshot is what carried the "
+                    "key into this pass and the writer refuses it by policy — "
+                    "a different case from the journal arm, where a record "
+                    "does carry it (#8018)", key)
                 continue
             logger.warning(
                 "Point prop %r dropped — deny-listed (recompute/EP-owned, "
                 "#2795): this payload IS the journal record and it carries "
                 "the key, so only the writer's policy refuses it — a policy "
                 "drop, not a journal gap. The #548 snapshot arm reports the "
-                "other case, where no journal record supplied the value "
-                "(#8018)", key)
+                "other case, where the payload is the pre-wipe graph snapshot "
+                "rather than a journal record (#8018)", key)
         # (b) a policy-denied list is also reported: the live SDK writer stores
         # raw lists, but replay refuses an UNDECLARED one, so the drop MUST be
         # visible (#2795 indicator 4 / D7). `tags` was this branch's exemplar

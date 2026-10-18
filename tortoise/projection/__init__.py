@@ -10473,11 +10473,15 @@ class FalkorProjection(
                 # needs the outcome, never a `bool(content)` guess (the
                 # embedder can be unavailable while the hash still computes).
                 # #8018 review: `event_source[seq] is None` marks a SYNTHETIC
-                # event — one rebuilt from the #548 pre-wipe GRAPH snapshot for
-                # an id with no journaled CREATION (see `log_point_ids` in the
-                # capture above; a promote/revise record does not count) — so
-                # the writer's deny report names the payload's source instead of
-                # denying the journal.
+                # event — one built from the #548 pre-wipe GRAPH snapshot rather
+                # than from a journal record (the capture above emits these for
+                # ids `log_point_ids` did not see: it counts only
+                # PointAdded/OperatorAdded, so a promote-only id gets one too,
+                # and the persisted-sidecar union is not re-checked against it)
+                # — so the writer's deny report names the payload's source
+                # instead of denying the journal. #8018 review round 3: it does
+                # NOT prove the id lacks a journal record, so the report must
+                # not say so.
                 wrote_embedding, wrote_content_hash, persisted_extras = (
                     self._upsert_point_props(
                         p, from_prewipe_snapshot=event_source[seq] is None))

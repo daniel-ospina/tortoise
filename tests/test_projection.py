@@ -857,8 +857,19 @@ def test_falkor_rebuild_deny_report_names_its_source(caplog):
         assert any("'reason'" in m for m in snapshot_arm), caplog.text
         assert any("'posterior_alpha'" in m for m in snapshot_arm), caplog.text
         for msg in snapshot_arm:
-            assert "not a journal gap" not in msg, msg
-            assert "NO journal record" not in msg, msg
+            low = msg.lower()
+            # The snapshot arm names the payload's SOURCE — that is all the
+            # flag proves (#8018 review round 3). The POINT's journal coverage
+            # may not be denied: the round-1 phrasing ("NO journal record") and
+            # the round-2 one ("the id has no journaled creation") are both
+            # pinned here, so a reword cannot silently re-mint the claim.
+            assert "not a journal gap" not in low, msg
+            assert "no journal record" not in low, msg
+            assert "no journaled creation" not in low, msg
+            # ...and the scoped statement must still be there, so deleting the
+            # report cannot satisfy the negatives above vacuously.
+            assert "pre-wipe graph snapshot" in low, msg
+            assert "not a journal record" in low, msg
     finally:
         proj.close()
 
@@ -905,8 +916,17 @@ def test_falkor_rebuild_deny_report_does_not_deny_the_journal_for_a_promoted_poi
         # text must not deny the journal.
         assert snapshot_arm, caplog.text
         for msg in snapshot_arm:
-            assert "not a journal gap" not in msg, msg
-            assert "NO journal record" not in msg, msg
+            low = msg.lower()
+            # Id-level denial is forbidden in EITHER phrasing: this id's own
+            # `PointPromoted` record is a journaled creation
+            # (`_JOURNAL_CREATING_EVENT_TYPES`), and its promote fold reports
+            # the same keys in this same pass. Only the payload's source may be
+            # named (#8018 review round 3).
+            assert "not a journal gap" not in low, msg
+            assert "no journal record" not in low, msg
+            assert "no journaled creation" not in low, msg
+            assert "pre-wipe graph snapshot" in low, msg
+            assert "not a journal record" in low, msg
     finally:
         proj.close()
 
