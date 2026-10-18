@@ -102,6 +102,44 @@ Restart your client. You should now have Tortoise's tools (create points, query 
 
 Rate limit: **100 requests/min per key**.
 
+### Already installed? Re-run the installer
+
+The installer is idempotent **and it is the upgrade path** — re-running it is how an existing setup picks up a
+newer standing block, a corrected instruction, or new skill text. Nothing else rewrites them: for a Codex
+project the installer owns the `AGENTS.md` block, and a block written by an older version would otherwise be
+re-read in every future session, forever.
+
+```bash
+curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness codex
+```
+
+It replaces only what sits between its own `<!-- tortoise:start -->` / `<!-- tortoise:end -->` markers — **one
+well-formed pair** — so the text you wrote around them is kept as written (two line-level caveats: a final line
+with no newline gains one, and a CRLF file gets the block's own line endings, so a mixed-ending file stays mixed).
+It prints which block version you ended up on, and what it did to get there:
+
+| it prints | it means |
+|---|---|
+| `created (block vN)` | there was no Tortoise block to upgrade — no `AGENTS.md`, or one without markers |
+| `upgraded (unversioned → vN)` | provisioned before versions existed — this is the migration |
+| `upgraded vM → vN` | an older block was replaced |
+| `refreshed (vN — same version, updated text)` | the version matched but the text did not |
+| `already current` | the block on disk is byte-identical to the one just built, ignoring line endings (CRLF vs LF) |
+| `written at vN (the file had vM …)` | your installer is OLDER than the block (a cached or rolled-back copy) — it says so instead of calling a downgrade an upgrade |
+| `written at vN (the file's version "vM" is not a number this installer can compare …)` | the version line was malformed (e.g. `v2-rc1`); nothing is claimed about which is newer |
+| `written at vN (… "vM" is too large to compare safely)` | the version has more than 18 digits |
+| `MALFORMED … NOT rewritten` | the marker lines are not one clean start→end pair — two copies, a stray marker, or one with different internal spacing or an invisible character; it refuses rather than duplicate the block, prints per-marker counts (`start markers: N (first at line L), end markers: M (first at line …)`, plus how many are only indented / trailing-spaced / BOM-prefixed and how many are spacing-mangled), names the cause it actually found, and exits 3 — the SKILLS are installed at that point, only the block is not. A marker inside a fenced code block is an EXAMPLE: every fence CommonMark recognises (backticks or tildes, 3+, indented up to 3 spaces, a longer fence may contain a shorter one) is skipped for the count AND for the version read, the comparison and the rewrite, so documenting the markers does not block the install and the example is preserved verbatim. An UNCLOSED fence is refused instead (`An UNTERMINATED code fence is hiding part of this file`, exit 3, nothing written) because the markers below it cannot be told apart from an example |
+
+`already current` is a statement about the **text**, not the version number, so it is safe to trust. To see what
+you have without changing anything:
+
+```bash
+sed -n '/<!-- tortoise:start -->/,/<!-- tortoise:end -->/p' AGENTS.md | grep -o 'tortoise:block v[0-9]*'
+```
+
+Empty output with both markers present means the block predates versioning — re-run the installer to upgrade it.
+(A match found elsewhere in the file, outside those markers, means nothing: only the block's own version counts.)
+
 ## 3. Use the CLI (optional, for scripting)
 
 ```bash

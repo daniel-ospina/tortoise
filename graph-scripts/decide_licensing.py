@@ -19,9 +19,31 @@ Compares the three license options recorded in graph research:
 Criteria + findings (from graph research) are wired to options via IMPL/NAND,
 then EP belief propagation computes per-option confidence.
 
-Run:
+Kept for provenance; this invocation files nothing (see the notice below):
   cd "$(dirname "$0")/.."
   TORTOISE_DB_URI=docker://:@127.0.0.1:16379/tortoise uv run python graph-scripts/decide_licensing.py
+
+⚠️ This script is inert, not merely archived — a run files NOTHING and exits 0 anyway (#4812).
+
+Both write loops below are dead, and the close-out line is false:
+
+  * `sdk.create_point(kind, content, context=ctx, status="live")` raises `TypeError`: `context` was
+    removed by #49 and the guard is `tortoise/sdk.py:7018-7023`; `_sanitize_props`
+    (`tortoise/sdk.py:3327`) does not strip it, so the guard fires. Every point fails, `point_ids`
+    stays empty, and every edge in the second loop dies on `point_ids[src]` before reaching
+    `create_operator`.
+  * both loops catch bare `Exception`, print `⚠` and continue — so
+    `Done. Decision comparison filed to context='…'` prints over an empty write set and the process
+    exits 0. Nothing is filed; the exit status and the last line both say otherwise.
+
+No repair is made here. `docs/plans/2026-08-05-remove-context-field-plan.md` §8.6 froze these
+one-shots, and its reopen (§8.6.1, #4812) withholds repair, migration or relocation pending the
+owner's ruling — this notice RECORDS the failure rather than answering the write-repair question.
+#4730 owns the detector and counted baseline for the class (not landed yet, which is why the
+failure is disclosed in prose here); `skills/how-to-use-tortoise/SKILL.md:371` still presents this
+script as a runnable full-pattern example, and running it as instructed produces the false success
+above. For a comparison that does write, use `tortoise decide` (`tortoise/__main__.py:11224`) or
+the swept `graph-scripts/decide.py` (#1643).
 """
 import sys
 

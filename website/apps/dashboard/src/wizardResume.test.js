@@ -224,6 +224,92 @@ test('#2005: NO door hardcodes the entry step — every door opens via openResum
   //    the Setup-guide card renders.
   const body = src.slice(src.indexOf('function openResumeWizard()'))
     .slice(0, 400)
-  assert.match(body, /setWizardStep\(resumeStep\(onboarding, \{ hasOrg: welcomeHasOrg \}\)\)/,
-    'the resume door derives its step from the per-org projection')
+  assert.match(body, /setWizardStep\(resumeStep\(onboarding, \{ hasOrg: welcomeHasOrg, graphMissing: overviewGraphMissing \}\)\)/,
+    'the resume door derives its step from the per-org projection + the graph fact')
+})
+
+// ── #4628: the GRAPH fact outranks the FLOW verdict ─────────────────────────
+//
+// A collapsed/complete projection is a verdict about the FLOW, and it is
+// satisfied by an Organization whose graph does not exist (a deleted graph, or a
+// flag set without one ever being created). Landing such a user on DONE names no
+// working next step — the done screen's Back control reaches data-sources, never
+// connect. With `graphMissing` the door lands on the CONNECT step instead: the
+// step whose write creates the graph, whose key gate offers paste and the key-less
+// connectors, and which the API Keys tab's own copy names as "the setup step".
+test('#4628: a graph-missing Organization never resumes at DONE', () => {
+  // every route to DONE in the projection axis: server 'complete', the
+  // grandfathered jsonb flag, and a server-observed connection
+  const doneStates = [
+    active({ status: 'complete', fork: 'self' }),
+    active({ fork: 'self', onboarding_complete: true }),
+    active({ compact: true, status: 'complete', fork: 'self' }),
+    active({ fork: 'self', completed_steps: ['team-named', 'harness-connected'] }),
+    active({ fork: 'self', completed_steps: ['team-named', 'harness-connected', 'first-points-filed'] }),
+  ]
+  for (const s of doneStates) {
+    // the axis is real: without the graph fact these DO resume at done
+    assert.equal(resumeStep(s, { hasOrg: true }), RESUME_STEP_DONE, JSON.stringify(s))
+    // …and with it, they resume at the step that creates the graph
+    assert.equal(resumeStep(s, { hasOrg: true, graphMissing: true }), RESUME_STEP_CONNECT,
+      `a graph-missing Organization must resume at connect: ${JSON.stringify(s)}`)
+  }
+})
+
+test('#4628: the graph fact does not outrank the facts it cannot replace', () => {
+  // (1) no Organization — nothing to resume, whatever the graph says
+  assert.equal(resumeStep(null, { hasOrg: false, graphMissing: true }), RESUME_STEP_ORG_CREATE)
+  assert.equal(resumeStep(active({ fork: 'self' }), { hasOrg: false, graphMissing: true }), RESUME_STEP_ORG_CREATE)
+  // (2) the once-per-org fork question — it decides what connect OFFERS, and
+  // skipping it would leave `wizardFork` on its untouched default
+  assert.equal(resumeStep(active(), { hasOrg: true, graphMissing: true }), RESUME_STEP_FORK)
+  assert.equal(resumeStep(active({ fork_unsure_at: '2026-09-01T00:00:00Z' }),
+    { hasOrg: true, graphMissing: true }), RESUME_STEP_FORK)
+  // (3) a fork already chosen is not re-asked even though the graph is missing
+  assert.equal(resumeStep(active({ fork: 'build' }), { hasOrg: true, graphMissing: true }), RESUME_STEP_CONNECT)
+  // (4) a degraded projection: `graph_ready` IS a measurement of the thing the
+  // step is about, so this lands on connect rather than the fail-honest
+  // org-create step (which is right when the graph fact is unknown)
+  const unavailable = {
+    status: 'unavailable', version: 'unavailable', compact: 'unavailable',
+    fork: 'unavailable', completed_steps: 'unavailable',
+    member_progress: 'unavailable', last_decide_attempt: 'unavailable',
+    fork_unsure_at: 'unavailable',
+  }
+  assert.equal(resumeStep(unavailable, { hasOrg: true }), RESUME_STEP_ORG_CREATE,
+    'without the graph fact a graph-down read stays fail-honest')
+  assert.equal(resumeStep(unavailable, { hasOrg: true, graphMissing: true }), RESUME_STEP_CONNECT,
+    'with it, the remaining work is the connect step')
+  // (5) the default is unchanged: a caller that does not know the graph fact
+  // (every other door) keeps the projection's verdict
+  assert.equal(resumeStep(active({ status: 'complete', fork: 'self' }), { hasOrg: true }), RESUME_STEP_DONE)
+  // (6) no projection at all (the fetch never landed) with an Organization and a
+  // missing graph: the graph fact alone names the remaining step
+  assert.equal(resumeStep(null, { hasOrg: true, graphMissing: true }), RESUME_STEP_CONNECT)
+  assert.equal(resumeStep(undefined, { hasOrg: true, graphMissing: true }), RESUME_STEP_CONNECT)
+  // …and a non-boolean `graphMissing` is not the fact (strict, like `hasOrg`'s callers)
+  for (const notTrue of [false, undefined, 'true', 1, {}]) {
+    assert.equal(resumeStep(active({ status: 'complete', fork: 'self' }), { hasOrg: true, graphMissing: notTrue }),
+      RESUME_STEP_DONE, `graphMissing=${JSON.stringify(notTrue)} must not override the projection`)
+  }
+})
+
+test('#4628 wiring: main.jsx derives the graph fact once and hands it to the door', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, join } = await import('node:path')
+  const here = dirname(fileURLToPath(import.meta.url))
+  const src = readFileSync(join(here, 'main.jsx'), 'utf8')
+  // ONE derivation, in the literal shape the Overview card renders from — so a
+  // door and the card cannot disagree about whether the graph exists.
+  assert.equal((src.match(/const overviewGraphMissing =/g) || []).length, 1,
+    'exactly one `overviewGraphMissing` derivation')
+  assert.match(src, /const overviewGraphMissing =\s*!!team && team\.graph_ready === false && \(team\.point_count \?\? 0\) === 0/,
+    'the fact must be the server-state predicate (graph_ready false AND no points)')
+  // the card renders from it…
+  assert.match(src, /\{tab === 'overview' && team && !showReentryCard && overviewGraphMissing && \(/,
+    'the graph-missing card must render from the shared fact')
+  // …and the door is told it
+  assert.match(src, /resumeStep\(onboarding, \{ hasOrg: welcomeHasOrg, graphMissing: overviewGraphMissing \}\)/,
+    'the resume door must receive the graph fact')
 })
