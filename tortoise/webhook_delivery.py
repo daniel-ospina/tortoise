@@ -791,11 +791,10 @@ def event_head_seq(graph) -> int:
     steady path, so an UNTRUSTWORTHY graph pays it on every pass, and the counter
     does not become trustworthy on its own.
 
-    ⛔ AND REPAIR IS NOT THIS FUNCTION'S TO DESCRIBE. Three earlier revisions of
-    this paragraph each got the inventory wrong — the store's own repair path
-    contradicts the obvious reading of ``next_seq``'s guard — so it now states
-    only what is checkable from here. A reader who needs the repair story must
-    measure the counter node:
+    ⛔ AND REPAIR IS NOT THIS FUNCTION'S TO DESCRIBE. The store's own repair path
+    contradicts the obvious reading of ``next_seq``'s guard, so this paragraph
+    now states only what is checkable from here. A reader who needs the repair
+    story must measure the counter node:
 
     * ``next_seq`` REFUSES a non-number, a ``bool`` and a negative counter and
       leaves it unchanged (the negative fails its ``prev >= 0`` grant test), so a
@@ -805,11 +804,13 @@ def event_head_seq(graph) -> int:
     * a rebuild's behaviour is a THIRD thing, neither repair nor refusal. Its
       pre-wipe ``capture_watermark`` reads through ``int()``, so a numeric string
       or a ``bool`` is COERCED (``'5'`` → ``5``, ``True`` → ``1``) and the
-      rebuild proceeds — with the consequence that a ``True`` counter can come
-      back as a TRUSTED ``1``, BELOW the events' max, i.e. the stall this
-      fallback exists to prevent (recorded on #9059). A non-numeric string or an
-      out-of-domain counter makes that read RAISE, so the rebuild aborts and the
-      counter is left untouched.
+      rebuild proceeds — and a ``True`` counter comes back as a TRUSTED ``1`` on
+      a graph that had already issued seqs 1..3, so the next emit RE-ISSUES an
+      already-issued seq (the #4653 class; recorded on #9059). Note the compared
+      quantity: ``:GraphEvent`` rows are not replayed after a rebuild (#4664), so
+      that ``1`` is below the seqs the graph HAD issued, not below any surviving
+      row. A non-numeric string or an out-of-domain counter makes that read RAISE,
+      so the rebuild aborts and the counter is left untouched.
 
     ⛔ THE ONE CASE THIS FIX'S OVER-ADMISSION IS NOT A CHEAP NO-OP. Every
     unbounded admission ``_BEHIND_PREDICATE`` enumerates costs one SDK open and

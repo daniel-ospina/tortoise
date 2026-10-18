@@ -2942,7 +2942,8 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # unchanged, and only a non-integral float is bumped instead (`2.9` -> `3.9`,
 # re-issuing a seq: the #4653 class). Repair is upstream and carries its own trap
 # — a rebuild's pre-wipe `capture_watermark` COERCES through `int()`, so a `True`
-# counter can come back as a trusted `1` BELOW the events' max (#9059), while a
+# counter comes back as a trusted `1` on a graph that had already issued seqs 1..3
+# and the next emit RE-ISSUES an already-issued seq (#4653; #9059) — while a
 # non-numeric string aborts the rebuild — so do not read the repair story off this
 # comment; see `webhook_delivery.event_head_seq`'s docstring. The alternative
 # reading of that counter (as 0) made every subscription look caught up, so the
