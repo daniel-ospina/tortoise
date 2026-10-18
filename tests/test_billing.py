@@ -2596,6 +2596,56 @@ class TestReconcileSweep:
         tier, max_points, _status = self._row(sdk, org_id)
         assert (tier, max_points) == ("pro", 100000)
 
+    def test_a_wedged_pass_is_a_failure_not_a_benign_overlap(
+            self, monkeypatch, billing_client):
+        """#8904 round 4: the lock outlives the request, so a pass that WEDGES
+        would hold it forever and every later driver run would read 202 — which
+        the scheduled branch treats as a benign overlap — silencing the daily
+        page permanently. Past the staleness bound the endpoint must answer a
+        FAILURE that names the cause; a FRESH hold must still be 202.
+        """
+        import time as _time
+
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+        client = billing_client["client"]
+
+        class _Held:
+            """A lock held by a pass that is still running."""
+
+            def locked(self):
+                return True
+
+            async def acquire(self):
+                return True
+
+            def release(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(ha, "_BILLING_RECONCILE_INFLIGHT", _Held())
+        headers = {"Authorization": "Bearer internal-test-key"}
+
+        # A hold inside the bound is the documented benign overlap.
+        monkeypatch.setattr(ha, "_BILLING_RECONCILE_STARTED_AT", _time.monotonic())
+        fresh = client.post("/v1/internal/billing/reconcile", headers=headers)
+        assert fresh.status_code == 202, fresh.text
+        assert fresh.json()["status"] == "already_running"
+
+        # Past it, the pass is presumed wedged and the run must red.
+        monkeypatch.setattr(
+            ha, "_BILLING_RECONCILE_STARTED_AT",
+            _time.monotonic() - (ha._BILLING_RECONCILE_STALE_S + 1.0))
+        stuck = client.post("/v1/internal/billing/reconcile", headers=headers)
+        assert stuck.status_code == 503, stuck.text
+        assert stuck.json()["status"] == "reconcile_stuck", stuck.text
+
     def test_the_endpoint_names_an_uncertified_enumeration(
             self, monkeypatch, billing_client):
         """A fleet that cannot be CERTIFIED complete answers 503 with a NAME.

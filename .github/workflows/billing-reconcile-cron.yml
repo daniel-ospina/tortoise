@@ -139,12 +139,27 @@ jobs:
           # tenant ids), NOT as hyphenated UUIDs, so a UUID-only pattern redacts
           # nothing an actual customer id looks like. Both shapes are covered
           # here; the python redactor below redacts the row's own id BY VALUE.
-          show_body() {
+          redact_once() {
             sed -E \
               -e 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<org-id>/g' \
+              -e 's/(^|[^0-9A-Za-z])[0-9a-f]{10,13}-[0-9a-f]{12}([^0-9A-Za-z]|$)/\1<org-id>\2/g' \
               -e 's/(^|[^0-9A-Za-z])[0-9a-f]{26}([^0-9A-Za-z]|$)/\1<org-id>\2/g' \
-              -e 's/(cus|sub)_[A-Za-z0-9]{6,}/<stripe-id>/g' \
-              "$1" | head -c 2000 || true
+              -e 's/(cus|sub)_[A-Za-z0-9]{6,}/<stripe-id>/g'
+          }
+          redact_stream() {
+            # APPLIED TWICE on purpose. The boundary classes consume their own
+            # delimiter, so on a line carrying two ids (`a, b`) the first match
+            # eats the gap and the second id is never seen. Re-running the same
+            # rules over the OUTPUT catches it, because the delimiter has been
+            # re-emitted. Cheaper and more portable than lookarounds (BSD sed
+            # has none).
+            redact_once | redact_once
+          }
+          show_body() {
+            # The REAL id shapes this fleet mints: hosted orgs are
+            # ``uuid4().hex[:26]`` (26 hex, no dashes) and registry orgs are
+            # ``ulid()`` = <hex-ts>-<12hex>. A bare UUID pattern matches NEITHER.
+            redact_stream < "$1" | head -c 2000 || true
           }
           # `-m 600` is required, not decoration. `/v1/internal/` is
           # PREFIX-EXEMPT from the 10 s transport wait bound and has no
@@ -183,7 +198,17 @@ jobs:
             exit 1
           fi
           if [ "$status" = "503" ]; then
-            echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair, retry once the control plane is readable"
+            # The endpoint answers 503 for TWO different causes and they need
+            # OPPOSITE responses. Naming the wrong one sends the operator to
+            # check a control plane that is fine, while the real cause (a dead
+            # pass holding the lock until the process restarts) goes unsaid.
+            cause="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$out" 2>/dev/null || true)"
+            if [ "$cause" = "reconcile_stuck" ]; then
+              echo "::error::billing reconcile is STUCK (HTTP 503 reconcile_stuck) — a previous pass has held the lock past the staleness bound and is presumed wedged. The fleet is NOT being reconciled, and the lock clears only when that pass ends or the process restarts; retrying will NOT help."
+            else
+              echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair, retry once the control plane is readable"
+            fi
+            show_body "$out"
             exit 1
           fi
           if [ "$status" != "200" ]; then
@@ -205,6 +230,13 @@ jobs:
               r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
               re.IGNORECASE)
           _HEX26 = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{26}(?![0-9A-Za-z])")
+          # Registry orgs are ``ids.ulid()`` = <hex-ts>-<12hex>: an ~11-hex
+          # MILLISECOND stamp, a hyphen, then 12 hex. The UUID pattern matches
+          # none of them and the 26-hex pattern matches none of them either, so
+          # without this rule a registry org named in prose is published
+          # verbatim. The stamp widens with time, hence a range not a width.
+          _ULID = re.compile(
+              r"(?<![0-9A-Za-z])[0-9a-f]{10,13}-[0-9a-f]{12}(?![0-9A-Za-z])")
           # Stripe object ids (customers/<cus_…>, subscriptions/<sub_…>) reach
           # ``failed[].error`` through ``StripeAPIError('stripe GET <path> …')``.
           _STRIPE_ID = re.compile(
@@ -247,6 +279,7 @@ jobs:
                       if raw_id:
                           value = value.replace(str(raw_id), fingerprint)
                       value = _UUID.sub("<org-id>", value)
+                      value = _ULID.sub("<org-id>", value)
                       value = _HEX26.sub("<org-id>", value)
                       value = _STRIPE_ID.sub("<stripe-id>", value)
                   out[key] = value

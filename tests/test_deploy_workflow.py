@@ -1521,12 +1521,15 @@ class TestBillingReconcileDriverVerdicts:
 
         hosted = "f69f0773cfa54c62b900c13c6a"
         registry = "0006553f0ff-0123456789ab"
+        # A registry id that is NOT any row's own ``org_id``: only the SHAPE
+        # rules can catch this one, so it proves the net, not the by-value pass.
+        other_ulid = "0006559a1ff-aaaabbbbcccc"
         payload = json.dumps(_billing_case(
             unchanged=0,
             failed=[
                 {"org_id": hosted,
                  "error": "RuntimeError: update_org_billing: no organizations "
-                          f"row matched id='{hosted}'"},
+                          f"row matched id='{hosted}' (also saw {other_ulid})"},
                 {"org_id": registry,
                  "error": f"BillingError: reconcile_org: org '{registry}' "
                           "not found"},
@@ -1567,7 +1570,8 @@ class TestBillingReconcileDriverVerdicts:
 
         emitted = proc.stdout + proc.stderr
         assert proc.returncode == 1, f"a failed row must red the run: {emitted}"
-        for label, raw in (("hosted", hosted), ("registry", registry)):
+        for label, raw in (("hosted", hosted), ("registry", registry),
+                           ("other registry", other_ulid)):
             assert raw not in emitted, (
                 f"the {label} org id reached the PUBLIC log unredacted:\n{emitted}"
             )
@@ -1576,6 +1580,70 @@ class TestBillingReconcileDriverVerdicts:
             "the two orgs must keep DISTINCT fingerprints, or the log cannot "
             "correlate a row across runs"
         )
+
+    def test_a_wedged_reconcile_is_named_stuck_not_enumeration_incomplete(self):
+        """#8904 round 4: 503 is TWO causes and they want opposite responses.
+
+        A wedged lock was paged as "the control plane is unreadable, retry once
+        it is readable" — a cause that clears itself — while the real cause (a
+        dead pass holding the lock until the process restarts) went unsaid, so
+        the operator retries forever. The body also carries ids on the non-200
+        path, through a shell redactor whose boundary classes consume their own
+        delimiter: two adjacent ids on one line used to leave the second raw.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        first = "f69f0773cfa54c62b900c13c6a"
+        second = "aaaabbbbccccddddeeeeffff11"
+        payload = json.dumps({
+            "status": "reconcile_stuck",
+            "detail": f"a previous pass is wedged (orgs {first},{second})",
+        })
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{server.server_port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    "EVENT_NAME": "schedule",
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        emitted = proc.stdout + proc.stderr
+        assert proc.returncode == 1, emitted
+        assert "reconcile_stuck" in emitted, (
+            f"a wedged pass must be NAMED, not reported as an unreadable "
+            f"control plane:\n{emitted}"
+        )
+        for raw in (first, second):
+            assert raw not in emitted, (
+                f"{raw} reached the PUBLIC log through the non-200 body:\n{emitted}"
+            )
 
     def test_unset_secret_fails_before_calling_the_endpoint(self):
         """A missing INTERNAL_API_URL/FASTAPI_INTERNAL_KEY is a red run.

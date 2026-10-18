@@ -36855,7 +36855,12 @@ _BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
 #: otherwise hold it forever, and the driver's scheduled branch treats the 202
 #: "benign overlap" as success, which would silence the daily page permanently.
 #: Past this bound the endpoint answers a FAILURE instead, so the run reds.
-_BILLING_RECONCILE_STALE_S = 1800.0
+#: The bound is SIX TIMES the driver's own 600 s client ceiling — the pass
+#: deliberately outlives the request and ``reconcile_subscriptions`` has no
+#: fleet-size cap, so a bound sized to the request would libel a healthy long
+#: pass — while staying far inside the 24 h cadence, so a genuinely wedged pass
+#: cannot hide past the next cycle.
+_BILLING_RECONCILE_STALE_S = 3600.0
 _BILLING_RECONCILE_STARTED_AT: float | None = None
 
 
