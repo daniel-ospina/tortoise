@@ -244,10 +244,14 @@ def _same_clause_violations(
     carried_wildcard: tuple[int, int] | None = None
     for clause, (keyword, body) in enumerate(_set_lists(statement)):
         items = _set_items(body)
-        # A MERGE arm starts a fresh (mutually exclusive) write sequence.
+        # A MERGE arm's OWN writes are mutually exclusive with the sibling arm's,
+        # but a BARE `SET` before the MERGE runs UNCONDITIONALLY — so every
+        # clause starts from the writes earlier BARE clauses committed. Only a
+        # bare clause commits its writes back (below), which is what keeps the
+        # two arms invisible to each other.
         bare = keyword == "SET"
-        written: dict[str, tuple[int, int]] = dict(carried) if bare else {}
-        wildcard: tuple[int, int] | None = carried_wildcard if bare else None
+        written: dict[str, tuple[int, int]] = dict(carried)
+        wildcard: tuple[int, int] | None = carried_wildcard
         for i, (_s, _e, raw) in enumerate(items):
             text = _strip_literals(raw)
             assign = _ITEM_ASSIGN.match(text)
@@ -295,10 +299,10 @@ def _same_clause_violations(
             # ``written`` already carries every earlier clause's writes, so a
             # chain of three or more ``SET`` clauses composes.
             carried, carried_wildcard = written, wildcard
-        else:
-            # An arm boundary ends the chain: what a MERGE arm writes is not
-            # visible to whatever follows on the other arm.
-            carried, carried_wildcard = {}, None
+        # An arm boundary does NOT clear what BARE clauses wrote (those already
+        # executed before the MERGE): an arm's writes are simply not committed,
+        # so the sibling arm cannot see them and the next one starts from the
+        # bare-clause writes again.
     return violations
 
 
@@ -729,3 +733,24 @@ def test_the_detector_treats_the_parameter_map_form_as_writing_everything():
         "MATCH (s:Source {url:$u}) SET s.a = 1, s += $props, s.c = s.b"
     )
     assert len(violations) == 1, violations
+
+
+def test_a_bare_set_before_a_merge_arm_is_still_a_read_after_write():
+    """A bare `SET` executes unconditionally, so an arm's read of it is a hit.
+
+    The carry was cleared at every arm boundary, which discarded writes that had
+    certainly run: `SET s.a = 1 MERGE (s) ON MATCH SET s.b = s.a` reported clean
+    while the bare→bare form reported the violation (review round 10).
+    """
+    assert len(_same_clause_violations(
+        "MATCH (s:Source {url:$u}) SET s.a = 1 MERGE (s) ON MATCH SET s.b = s.a"
+    )) == 1
+
+
+def test_the_two_merge_arms_stay_invisible_to_each_other():
+    """The sibling arm is the case the split exists for: ON CREATE writing
+    `contentHash` with no reader in front of it is legitimate."""
+    assert _same_clause_violations(
+        "MERGE (s:Source {url:$u}) ON CREATE SET s.contentHash = $h "
+        "ON MATCH SET s.version = coalesce(s.version, 0) + 1"
+    ) == []
