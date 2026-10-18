@@ -1,5 +1,13 @@
 {
  "n": 133,
+ "source": {
+  "dataset": "xiaowu0162/longmemeval-cleaned",
+  "split": "oracle",
+  "file": "longmemeval_oracle.json",
+  "question_text": "verbatim, UNTRUNCATED dataset `question` — never a display prefix (#8055)",
+  "questions_sha256": "7adf663ca171c0146667a52c1bc80294becf4a626bc8c997ded39e74ed501f5f",
+  "questions_sha256_recipe": "sha256 of '<qid>\\t<question>' lines sorted by qid, '\\n'-joined (pinned in tests/test_assembly_pure.py::test_census_question_text_is_the_untruncated_dataset_text)"
+ },
  "by_class": {
   "interval": 19,
   "nary-ordering": 4,
@@ -23,7 +31,7 @@
   },
   {
    "qid": "gpt4_f49edff3",
-   "question": "Which three events happened in the order from first to last: the day I helped my friend prepare the nursery, the day I helped my cousin pick out stuff for her b",
+   "question": "Which three events happened in the order from first to last: the day I helped my friend prepare the nursery, the day I helped my cousin pick out stuff for her baby shower, and the day I ordered a customized phone case for my friend's birthday?",
    "cls": "nary-ordering"
   },
   {
@@ -78,7 +86,7 @@
   },
   {
    "qid": "0db4c65d",
-   "question": "How many days had passed since I finished reading 'The Seven Husbands of Evelyn Hugo' when I attended the book reading event at the local library, where the aut",
+   "question": "How many days had passed since I finished reading 'The Seven Husbands of Evelyn Hugo' when I attended the book reading event at the local library, where the author of 'The Silent Patient' is discussing her latest thriller novel?",
    "cls": "interval"
   },
   {
@@ -103,7 +111,7 @@
   },
   {
    "qid": "gpt4_18c2b244",
-   "question": "What is the order of the three events: 'I signed up for the rewards program at ShopRite', 'I used a Buy One Get One Free coupon on Luvs diapers at Walmart', and",
+   "question": "What is the order of the three events: 'I signed up for the rewards program at ShopRite', 'I used a Buy One Get One Free coupon on Luvs diapers at Walmart', and 'I redeemed $12 cashback for a $10 Amazon gift card from Ibotta'?",
    "cls": "nary-ordering"
   },
   {
@@ -148,7 +156,7 @@
   },
   {
    "qid": "gpt4_61e13b3c",
-   "question": "How many weeks passed between the time I sold homemade baked goods at the Farmers' Market for the last time and the time I participated in the Spring Fling Mark",
+   "question": "How many weeks passed between the time I sold homemade baked goods at the Farmers' Market for the last time and the time I participated in the Spring Fling Market?",
    "cls": "interval"
   },
   {
