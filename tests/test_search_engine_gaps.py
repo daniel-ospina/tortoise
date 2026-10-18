@@ -1545,8 +1545,7 @@ class TestGetRelationships:
         get_relationships(graph, ["p1", "p2"])
         assert len(graph.query_calls) == len(EPISTEMIC_LABELS)
         for label, (cypher, params, _kw) in zip(EPISTEMIC_LABELS,
-                                               graph.query_calls,
-                                               strict=True):
+                                               graph.query_calls, strict=False):
             assert f"MATCH (n:{label})" in cypher
             assert params == {"ids": ["p1", "p2"]}
             assert "IMPL|NAND|hasPart" in cypher

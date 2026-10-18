@@ -552,3 +552,61 @@ def test_6105_skip_diagnostics_are_precise(sdk):
     # The read-only callers pass no sink: the EP object's own stash is
     # untouched by a scope-only extraction.
     assert ep._last_skipped_factors == []
+
+
+# ── #6107: a plainly-created point is born LIVE (the #1088 default) ──────
+#
+# The measured failure this pins (2026-09-28, a live causality map: 1
+# incident, 1 goal, 1 risk, 27 causes, 224 operators). The GOAL was created
+# with no explicit status and was born draft. It is an operator TARGET in all
+# 27 edges, so nothing ever promoted it, and EP discarded the whole arm:
+# `converged=True`, 14 iterations, 18 of 29 scored points at their prior, and
+# the goal holding no confidence at all. Nothing said so.
+#
+# The kind here is `statement`, NOT `goal`, on purpose: by the time #1088
+# landed, #7856 had already made `GOAL_KINDS` born live, so a `goal` can no
+# longer reproduce the birth — `statement` is the kind that carried the old
+# draft default, and it is the one still able to carry it.
+#
+# #1088 (owner OVERRIDES recorded on #6107) inverted the default: `live` for
+# everything added to the graph, `draft` only when a caller deliberately asks.
+# This is that inversion's end-to-end rail — created plainly, wired ONLY as a
+# target, the factor must be KEPT and the target must vote.
+#
+# Non-vacuous, and precisely so: reverting the default literal alone yields
+# `statuses: draft draft` on a copy — the source is NOT promoted, because
+# #1088 narrowed the promotion clauses to never-set-only, so the arm never
+# enters the live selector at all: `converged=True`, `iterations=0`,
+# `confidences={}`, no posterior. The HISTORICAL pre-#1088 end state is
+# `live draft` (its `IS NULL OR = 'draft'` clause promoted the operator's
+# SOURCE while the pure target stayed draft) — the shape that produced
+# `1/2 inputs stripped — degenerate`. Both shapes must red, which is why the
+# run-is-not-empty assertions below are separate from the degenerate guard:
+# `not skipped_factors` alone is satisfied by a run that scored nothing.
+
+def test_6107_plainly_created_target_is_live_and_not_degenerate(sdk):
+    blocker = sdk.create_point("statement", "blocker")           # no status
+    goal = sdk.create_point("statement", "GOAL - pure target")   # no status
+    assert sdk.get_point(blocker["id"])["status"] == "live"
+    assert sdk.get_point(goal["id"])["status"] == "live", (
+        "a plainly-created point must be EP-visible (#1088/#6107)"
+    )
+    set_evidence(sdk, blocker["id"], 8.0, 1.0)
+    set_evidence(sdk, goal["id"], 1.0, 1.0)
+
+    op = sdk.create_operator("NAND", blocker["id"], [goal["id"]])
+    res = sdk.compute_confidence(factors=[op["id"]])
+
+    # The run DID work — positive evidence, not just the absence of a skip.
+    # `not skipped_factors` is also true of a run that selected nothing
+    # (`iterations=0`, `confidences={}`), so it cannot carry the claim alone.
+    assert (res.get("iterations") or 0) >= 1, res
+    assert goal["id"] in (res.get("confidences") or {}), res.get("confidences")
+    # The factor is NOT dropped as degenerate ("1/2 inputs stripped")...
+    assert not res.get("skipped_factors"), res.get("skipped_factors")
+    assert res.get("diagnostic") is None, res.get("diagnostic")
+    # ...and the TARGET actually votes. This is the assertion the measured
+    # map failed: the goal held no confidence while the run reported healthy.
+    scored = sdk.get_point(goal["id"])
+    assert scored.get("posterior_alpha") is not None
+    assert scored.get("confidence") is not None

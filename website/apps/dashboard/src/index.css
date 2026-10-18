@@ -1100,6 +1100,15 @@ input::placeholder, textarea::placeholder {
 .harness-status.status-waiting .capture-state { color: var(--accent, #06b6d4); border-color: rgba(6, 182, 212, 0.4); }
 .harness-status.status-install-pending .capture-state { color: #facc15; border-color: rgba(196, 167, 60, 0.4); }
 .harness-status .snippet { margin-top: 8px; font-size: 12px; }
+/* #3513 §2: the Settings mount's manual-install recipe, as a COLLAPSED
+   disclosure (epic #1714 decision #2 — the WIZARD mount never carries the
+   recipe; Settings carries it collapsed, regardless of install state and of the
+   recording switch). Nothing here hides it: a collapsed <details> is the
+   user-agent behaviour the user opens on demand, and the row's status + pointer
+   stay visible without opening anything. */
+.manual-install { margin-top: 8px; }
+.manual-install > summary { cursor: pointer; }
+.manual-install .snippet { margin-top: 6px; }
 .harness-status .error.small { margin-top: 6px; }
 
 

@@ -1456,17 +1456,42 @@ class TestExplicitDraftIsHonoured1088:
     command may move it to live. Only an explicit promotion (``promote_point``
     or ``update_point(status="live")``) may do that.
 
-    Non-vacuous because the pre-#1088 code did the opposite on every path
-    pinned here: a non-decide kind defaulted to 'draft', and each promotion
-    clause moved an explicitly-drafted source to live.
+    Non-vacuous on the paths #1088 CHANGED that this class pins — the create
+    default, the two #131 edge-promotion clauses (``create_operator``,
+    ``create_direct_edge``) and ``update_point``'s already-live clause. The
+    third clause #1088 narrowed, ``_reapply_operator_promotion``, is not
+    exercised here, so it is named and not counted. Two other families are
+    deliberately NOT inversion evidence, also named rather than counted:
+
+    (i) the four decide-part parameters of ``test_create_point_defaults_to_live``
+        were born live already (#2199) — a BIRTH-STATUS pin for the universal
+        ruling (#6107's acceptance rail asks for them). ``statement`` is the
+        only discriminating parameter: it is the kind the pre-#1088 code
+        defaulted to 'draft'.
+    (ii) the guard pins pass on the pre-#1088 code as well, and none of them
+        discriminates #1088:
+        ``test_1088_null_status_is_still_filled_with_live`` reds only if the
+        narrowed ``IS NULL`` clause is deleted outright;
+        ``test_1088_explicit_draft_still_promotable`` and
+        ``test_1088_explicit_draft_promotable_via_update_point`` red only if the
+        draft→live admission is NARROWED so a draft is refused (deleting the
+        guard outright leaves them GREEN — a wider guard still admits the
+        draft); ``test_1088_update_point_still_refuses_terminal_resurrection``
+        is the reverse: it reds when the already-live probe OVER-WIDENS to a
+        terminal status, or the terminal refusal is dropped.
     """
 
-    def test_create_point_defaults_to_live_for_non_decide_kind(self, sdk):
+    @pytest.mark.parametrize("kind", [
+        "statement",   # the DISCRIMINATING case: draft pre-#1088
+        "decision", "option", "criterion", "evidence",   # live pre-#1088
+    ])
+    def test_create_point_defaults_to_live(self, sdk, kind):
         # 'statement' is NOT in DECIDE_PART_KINDS ({decision, option,
         # criterion, evidence}), so the pre-#1088 code defaulted it to
-        # 'draft' — this test is non-vacuous only for a genuine non-decide
-        # kind.
-        p = sdk.create_point("statement", "the sky is blue")
+        # 'draft'; the decide parts were already born live (#2199). Both
+        # families must stay live — #1088's ruling is universal, and #6107's
+        # acceptance rail is what this pin answers.
+        p = sdk.create_point(kind, "the sky is blue")
         assert p["status"] == "live"
         assert sdk.get_point(p["id"])["status"] == "live"
 
