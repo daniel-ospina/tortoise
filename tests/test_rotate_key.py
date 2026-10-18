@@ -968,7 +968,7 @@ def test_a_captured_skip_never_downgrades_a_genuine_failure(monkeypatch):
     raised_exc: BaseException | None = None
     try:
         _reraise_captured_skip(mixed)
-    except BaseException as e:  # noqa: BLE001 — the raised TYPE is the assertion
+    except BaseException as e:  # the raised TYPE is the assertion
         raised_exc = e
     assert raised_exc is failure, (
         "a captured skip must never downgrade a genuine failure — the FAILURE "
@@ -1050,8 +1050,20 @@ def reg_client(_env, monkeypatch):
 
 
 @pytest.fixture
-def reg():
-    """The registry graph handle (kept alive past the test — #1588)."""
+def reg(reg_client):
+    """The registry graph handle (kept alive past the test — #1588).
+
+    `reg_client` is requested explicitly, not assumed: it is what installs
+    `patched_tortoise_sdk`, i.e. it binds this no-path construction to the
+    registry lane's temp DB. Relying on a caller listing both fixtures in the
+    right order made the isolation emergent — a test taking `reg` alone would
+    construct against the ambient `TORTOISE_DB_URI` and seed
+    `registry_control_plane` on the shared docker instance (`_get_registry`
+    derives `{ns}_control_plane` from the un-prefixed `registry_tortoise`, so
+    the name matches neither sweep-ownership set and nothing reclaims it).
+    Depending on it here makes the coupling structural (registry-lane review
+    finding).
+    """
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(namespace="registry")

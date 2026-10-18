@@ -1097,10 +1097,14 @@ _LEGACY_RESIDUE_PREFIXES = (
 #
 # `_DIVERGENCE_REGISTER` ties every NAMED prefix constant on the declared
 # surface (`tests/_embedded.py`, `tortoise/sdk.py`,
-# `tortoise/projection/__init__.py`) to its rationale BY OBJECT IDENTITY —
-# tests/test_graph_name_ownership.py asserts the ties and fails on an
-# unregistered named constant. Anonymous prefix LITERALS are out of the
-# scanner's scope; they are governed by the DIVERGENCE comment above.
+# `tortoise/projection/__init__.py`, `tests/_live_utils.py`) to its rationale BY
+# OBJECT IDENTITY — tests/test_graph_name_ownership.py asserts the ties and
+# fails on an unregistered named constant. Anonymous prefix LITERALS are out of
+# the scanner's scope; they are governed by the DIVERGENCE comment above.
+# An OFF-SURFACE consumer of the vocabulary does neither: it IMPORTS
+# `_SERVER_WIPE_PREFIXES` from here rather than restating it, so a narrowing of
+# this set narrows every consumer with it (`tests/_live_utils.py::drop_test_graph`
+# is the first, #8746 — its gate is an irreversible GRAPH.DELETE, not a sweep).
 _DIVERGENCE_REGISTER = {
     "_SWEEP_OWNED_PREFIXES": {"set": _SWEEP_OWNED_PREFIXES,
                               "reason": "the canonical journal-ownership declaration (#7795)."},

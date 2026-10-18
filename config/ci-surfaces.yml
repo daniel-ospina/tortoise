@@ -66,6 +66,18 @@ surfaces:
   # `test_7809_hosted_prewarm_warmup_flag.py <- tortoise/hosted_api.py`). The
   # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #2728 review P2: DUAL-REGISTERED with `core` (line ~2688) for the same
+  # reason as #7809. `tests/test_pack_selection_by_graph.py` pins
+  # `hosted_api._packs_payload` / `_pack_catalog_rows` / `_graph_packs_view` —
+  # and `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERN match that
+  # REPLACES the `core` fallback. Measured before this arm:
+  # `--changed-files tortoise/hosted_api.py` → surfaces=['api','onboarding']
+  # with `test_pack_selection_by_graph.py` ABSENT, so the five tests pinning the
+  # add-list / `catalog_ok` / `source` shaping — the code a follow-up edit is
+  # most likely to touch — would not run at all. Keep the `core` entry too: the
+  # state-model half lives in `tortoise/pack_state.py`, which does select `core`
+  # today, and `--integrity` requires every file to carry a classification.
+  - test_pack_selection_by_graph.py
   # #7951 (remaining doors) / review P1: the write-door INVENTORY is
   # DUAL-REGISTERED with `core` (below) AND with every surface whose exact
   # SOURCE_PATTERN match can REPLACE the `core` fallback for a file the
@@ -1089,6 +1101,31 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #8093: the `:Graph.namespace` cell of `docs/registry-graph-schema.md` vs the
+  # namespace the code derives (`acl_graph_users._graph_namespace`,
+  # `sdk._graph_create`, `hosted_api._provision_graph` / `_org_graph_name`).
+  # The cell is the input another lane derives an ACL key pattern from
+  # (`docs/authorization-architecture.md` §2.1), and it had gone stale on BOTH
+  # shapes after the #3543 `team_` → `org_` rename.
+  #
+  # `tier1` (below) is the LOAD-BEARING registration; this one is secondary, the
+  # same dual-registration idiom as the `test_7818_ontology_record.py` /
+  # `test_8474_ontology_record.py` doc pins. `tier1` is in EVERY PR selection
+  # (`files = set(tier1)` on the match path, the whole selection on the
+  # docs-only early return, `"ALL"` on full), so the pin runs on a docs-only
+  # diff — the exact change class that re-stales the cell — and on a code diff.
+  #
+  # Do NOT re-read this entry as "`core` covers the code-side diffs": it does
+  # not. `tortoise/hosted_api.py` and `tortoise/acl_graph_users.py` are BOTH
+  # exact `api` SOURCE_PATTERNS matches, so an either-file-only diff selects
+  # `api` and REPLACES the `core` fallback (`core` is added only in the
+  # `if not found:` branch; `CORE_ALSO` is the separate post-match addition and
+  # lists neither file), and `tortoise/sdk.py` is a SHARED_MODULE → full
+  # matrix. Those diffs reach this pin through `tier1`, never through `core`.
+  # The rule is stated the same way near the top of `core`, in the #2969 entry
+  # (`test_socket_bound_not_multiplied_2969.py`) — cite it by name, not by
+  # offset: a line count here rots with every insertion between the two.
+  - test_8093_registry_namespace_doc.py
   # #5612: concurrent journal appends are serialised and the recovery read
   # salvages a damaged mid-file line. `tortoise/log.py` matches no
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
@@ -1542,6 +1579,12 @@ surfaces:
   # mechanism (its excludes-list is stated in `cypher_guard._guard_numeric_params`).
   # Pure-unit guard: needs no DB or network, exactly like the file above it.
   - test_7174_param_boundary_numeric_guard.py
+  # #8746: the graph-delete refusal record's WRITER contract — how its section
+  # merges into `tempdir-hygiene-end.json`, plus the conftest wiring that feeds
+  # it. Hermetic (ast/json only + a fake projection); the pin that every
+  # suite-session job DUMPS the artifact is
+  # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak.
+  - test_graph_delete_hygiene_report.py
   - test_graph_name_ownership.py
   # #5331: the graph byte meter (tortoise/graph_storage.py + the metering/
   # supabase graph-storage lane). Dual-registered with `api`: a change to the new
@@ -4195,6 +4238,7 @@ surfaces:
   # (#2938).
   - test_session_schema_3554.py
 tier1:
+- test_8093_registry_namespace_doc.py  # #8093: `docs/registry-graph-schema.md` §Graph namespace cell vs the derived namespace (hermetic doc↔code pin; a docs-only diff runs tier1 only) — dual-registered with `core`
 - test_cli_serve.py
 - test_config.py
 - test_crypto.py
@@ -4364,7 +4408,8 @@ tier1:
 # workflow's drift guard pins the union to `slow_files - carve_out`. NOTHING was
 # deleted, moved off the pre-merge gate, or re-marked: all 65 files still run on
 # a PR, with the same nodeids.
-- test_capstone_1976_report_claims.py
+# ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
+#
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4922,6 +4967,8 @@ durations:
   test_tortoise_client.py: 1.7
   eval/retrieval/test_run.py: 63.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 20.3
   test_4314_inert_hooks.py: 20.1
+  # #2125: NEW file — no CI junit measurement exists yet, so it carried the local
+  # embedded-lane reading for that turn under the `# unmeasured` convention above
   test_platform_seams.py: 85.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.6
   # #2125: NEW file — no CI junit measurement exists yet, so it carried the local
   # embedded-lane reading for that turn under the `# unmeasured` convention above
@@ -5009,6 +5056,11 @@ durations:
   test_battery_corpus.py: 7.4
   test_commit_endpoint.py: 51.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 33.9
   test_invites_http.py: 13.6
+  # #9017: ONE ROW PER KEY. A merge earlier in this change kept BOTH this row and
+  # main's predecessor, and that is not harmless — PyYAML silently last-wins, but
+  # `tools/ci_timing.py::_locate_durations_block` REFUSES a duplicated key, and
+  # that tool is the map's only writer, so the duplicate would have redded the
+  # next `ci-timing` refresh while every local check stayed green.
   # #9017: ONE ROW PER KEY. A merge earlier in this change kept BOTH this row and
   # main's predecessor, and that is not harmless — PyYAML silently last-wins, but
   # `tools/ci_timing.py::_locate_durations_block` REFUSES a duplicated key, and
@@ -5986,10 +6038,13 @@ durations:
   # CALL times summed to ~1.7 s locally (0.70 + 0.53 + 0.14 + 0.04). The
   # per-test `setup` bodies are the embedded lane's shared cold-start (measured
   # 0.2-22 s across runs and mostly one-time), which the packer's per-file
-  # weight must not double-count. Both halves are load-bearing: the surface
-  # entry alone leaves `durations` coverage under the floor and
-  # `tools/ci_selection.py --integrity` reds (#4348 trap), and a durations entry
-  # with no surface registration leaves the file unclassified. Refresh from the
+  # weight must not double-count. Registration and weight are different guards,
+  # and only one is enforced: `tools/ci_selection.py --integrity` reports a
+  # `durations` key with no surface entry as unclassified, while fast-pool
+  # coverage is checked against a 0.90 floor (#3400), so one omitted weight can
+  # still pass. Measured at the #8746 head: 824/914 = 90.15%, and dropping this
+  # entry leaves 823/914 = 90.04% with `duration_coverage_issues` still empty.
+  # Refresh from the
   # first post-merge run that includes it.
   test_connector_oauth_flow.py: 2.5
   test_cypher_regex_guard_3595.py: 0.2
@@ -5998,6 +6053,25 @@ durations:
   test_egress_bytes.py: 1.1
   test_entry_point_python_guard.py: 4.6
   test_extractor_embed_coerce_5060.py: 0.6
+  # #8746: 5 tests, local wall 1.8 s (measured at the #8746 review head,
+  # 2026-10-18). A NEW file has no CI junit measurement (a file that never ran
+  # cannot appear in an artifact), so this is the pre-merge estimate; refresh it
+  # from the first post-merge run that includes the file. Hermetic — no DB, no
+  # network: the writer tests use tmp_path and the wiring pin parses
+  # `tests/conftest.py` with `ast`. (The pin that every suite-session job DUMPS
+  # the artifact is a DIFFERENT file —
+  # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak,
+  # which is the one that reads the two workflows; nothing here reads YAML.)
+  # So this estimate does not move with
+  # box load. Registration and weight are different guards, and only one is
+  # enforced: `--integrity` reports a `durations` key with no surface entry as
+  # unclassified, while fast-pool coverage is checked against a 0.90 floor
+  # (#3400), so one omitted weight can still pass. Measured at this head the
+  # pool is 824/914 = 90.15%, and dropping THIS entry leaves 823/914 = 90.04%
+  # with `duration_coverage_issues` still empty — one unmeasured file of margin
+  # (822/914 = 89.93% would red). Add a weight for every new fast file rather
+  # than trusting it to red.
+  test_graph_delete_hygiene_report.py: 1.8
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
   # #4492: added by a PR, so no CI reading exists yet (`--refresh-durations`
@@ -6146,6 +6220,19 @@ durations:
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
   test_orchestrator_harness.py: 23.3
+  # #8093: unmeasured — a file ADDED BY A PR has no CI junit measurement (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a
+  # local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit
+  # value models the leg that carries the file.
+  #
+  # Do NOT restate a floor figure here. This row is registered for the SURFACE (a
+  # docs-only diff runs `tier1` only) and for the shard layout; the durations
+  # coverage ratio it also nudges is a property of the whole fast pool, which every
+  # origin/main merge changes — the same trap the #4387 row above records, where a
+  # restated figure re-staled for three review rounds. If you need the number, run
+  # `ci_selection.duration_coverage_issues()` at YOUR head; do not quote this file.
+  test_8093_registry_namespace_doc.py: 2.0
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

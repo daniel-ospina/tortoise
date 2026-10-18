@@ -796,12 +796,41 @@ def _registry_abuse_write(org_id: str, field: str, value) -> None:
     )
 
 
+def _registry_abuse_read(org_id: str) -> dict:
+    """The READ half of ``_registry_abuse_write`` (#4874 review P2): the
+    durable enforcement props on the registry Team node, read exactly the way
+    ``GET /v1/team`` reads them (the same MATCH, the same two props).
+
+    This exists because the in-process ``MemoryAbuseStore`` dicts are NOT a
+    source ``/v1/team`` shares: they are per-process and empty after a restart,
+    so an operator read built on them answers "active" for an org whose chip
+    says "flagged". Reading the props instead makes the two agree by sharing a
+    source rather than by sharing an expression. ``found: False`` distinguishes
+    "no such org" from "exists and is clean".
+
+    Raises on a registry failure so the caller can render it as unknown state
+    (never as a clean org). Lazy hosted_api import — same direction rule as the
+    write half."""
+    from tortoise import hosted_api as _ha
+    sdk = _ha._make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) RETURN t.flagged_at, t.suspended_at",
+        params={"id": org_id},
+    ).result_set
+    if not rows:
+        return {"found": False, "flagged_at": None, "suspended_at": None}
+    flagged_at, suspended_at = rows[0]
+    return {"found": True, "flagged_at": flagged_at,
+            "suspended_at": suspended_at}
+
+
 def get_abuse_store():
     """Lazy abuse-event store (tests monkeypatch this, mirroring
     get_control_plane). Supabase mode → durable SupabaseAbuseStore; registry
-    mode → MemoryAbuseStore with a registry-write callback so enforcement is
-    durable in selfhost too (R2 session-mint under-counting remains the
-    documented registry degradation)."""
+    mode → MemoryAbuseStore with registry-write + registry-read callbacks so
+    enforcement is durable in selfhost too AND a read of that state sees the
+    same props ``/v1/team`` renders (#4874; R2 session-mint under-counting
+    remains the documented registry degradation)."""
     global _abuse_store
     if _abuse_store is None:
         from tortoise.abuse import MemoryAbuseStore, SupabaseAbuseStore
@@ -809,7 +838,8 @@ def get_abuse_store():
             _abuse_store = SupabaseAbuseStore(get_control_plane())
         else:
             _abuse_store = MemoryAbuseStore(
-                registry_write=_registry_abuse_write)
+                registry_write=_registry_abuse_write,
+                registry_read=_registry_abuse_read)
     return _abuse_store
 
 

@@ -649,6 +649,198 @@ class TestMintGateAndAlerts:
         assert r.json()["status"] == "flagged"
 
 
+# ── Operator reason read (#4874) ────────────────────────────────────────────
+
+_INTERNAL_KEY = "internal-test-key-4874"
+
+
+def _internal_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+
+
+class TestOperatorAbuseState:
+    """#4874: ``status: flagged`` exposes no reason on any customer surface.
+
+    The reason (rule + count + threshold + window) is recorded in
+    ``abuse_events`` and is readable over the OPERATOR route only — the rule
+    names are deliberately absent from ``/v1/team/alerts`` (see
+    ``abuse._alert_dict``), which is why this does not ride ``/v1/team``.
+    """
+
+    def test_requires_the_internal_key(self, env, monkeypatch):
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+        with verdict_client(env["app"]) as tc:
+            bare = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}")
+            org_key = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                             headers=_auth())
+            ok = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                        headers=_internal_headers())
+        assert bare.status_code == 401
+        # An org-scoped tt_ key is NOT an operator credential.
+        assert org_key.status_code == 401
+        assert ok.status_code == 200
+
+    def test_unconfigured_internal_key_is_503_not_open(self, env, monkeypatch):
+        monkeypatch.delenv("FASTAPI_INTERNAL_KEY", raising=False)
+        with verdict_client(env["app"]) as tc:
+            r = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                       headers={"Authorization": "Bearer anything"})
+        assert r.status_code == 503
+
+    def test_reports_the_rule_behind_the_flag(self, env, monkeypatch):
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+        SupabaseAbuseStore(env["fake"]).flag_org(
+            TEAM, "point_create",
+            {"count": 6, "threshold": 5, "window_s": 3600})
+        with verdict_client(env["app"]) as tc:
+            r = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                       headers=_internal_headers())
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "flagged"
+        assert body["flagged_at"] is not None
+        assert body["flags_error"] is None
+        [ep] = body["flags"]
+        assert ep["rule"] == "point_create"
+        assert (ep["count"], ep["threshold"], ep["window_s"]) == (6, 5, 3600)
+        assert ep["since"] is not None
+
+    def test_active_org_reports_no_episode(self, env, monkeypatch):
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+        with verdict_client(env["app"]) as tc:
+            body = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                          headers=_internal_headers()).json()
+        assert body["status"] == "active"
+        assert body["flags"] == []  # readable, and genuinely none
+
+    def test_unreadable_store_is_not_reported_as_no_flags(self, env,
+                                                         monkeypatch):
+        """The two states an operator must never confuse: "no active
+        episode" and "could not read". A failure reports ``flags: null``
+        plus ``flags_error`` — never an empty list."""
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+
+        class _Broken:
+            def org_state(self, org_id):
+                return {"found": True, "flagged_at": None,
+                        "suspended": False}
+
+            def active_flag_episodes(self, org_id):
+                raise RuntimeError("abuse_events unreachable")
+
+        monkeypatch.setattr(sc, "get_abuse_store", lambda: _Broken())
+        with verdict_client(env["app"]) as tc:
+            body = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                          headers=_internal_headers()).json()
+        assert body["flags"] is None
+        assert "abuse_events unreachable" in body["flags_error"]
+
+    def test_unreadable_org_state_is_null_never_active(self, env, monkeypatch):
+        """The org-state half has its own sentinel: when that read fails the
+        status is null, NOT a derived "active" from a half-read org — the
+        operator must see "could not read", never "clean"."""
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+
+        class _HalfBroken:
+            def org_state(self, org_id):
+                raise RuntimeError("organizations unreachable")
+
+            def active_flag_episodes(self, org_id):
+                return []
+
+        monkeypatch.setattr(sc, "get_abuse_store", lambda: _HalfBroken())
+        with verdict_client(env["app"]) as tc:
+            body = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                          headers=_internal_headers()).json()
+        assert body["status"] is None
+        assert body["suspended"] is None
+        assert "organizations unreachable" in body["org_state_error"]
+
+    def test_unknown_org_is_not_a_clean_org(self, env, monkeypatch):
+        """``org_id`` is typed by hand on this route, so a typo is a real
+        case. It must not come back as ``status: "active"`` + ``flags: []`` +
+        no error — that is a confident clean bill of health for an org that
+        does not exist."""
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+        with verdict_client(env["app"]) as tc:
+            body = tc.get("/v1/internal/abuse/state?org_id=no-such-org",
+                          headers=_internal_headers()).json()
+        assert body["org_found"] is False
+        assert body["status"] == "unknown_org"
+        assert body["flags"] == []
+
+    def test_registry_mode_status_comes_from_the_durable_prop(self, env,
+                                                              monkeypatch):
+        """#4874 review P2, at the route: in registry/selfhost mode the
+        store's dicts are per-process, so after a restart a flagged org would
+        read ``active`` while ``/v1/team`` renders ``flagged`` from the durable
+        prop. The route must answer from the prop (the same source) — and
+        report it as found."""
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+        nodes = {TEAM: {"flagged_at": "2026-09-23T08:30:35+00:00",
+                        "suspended_at": "2026-09-23T09:00:00+00:00"}}
+
+        def _read(org_id):
+            node = nodes.get(org_id)
+            if node is None:
+                return {"found": False, "flagged_at": None,
+                        "suspended_at": None}
+            return {"found": True, **node}
+
+        # A fresh store = a restarted selfhost process: no rows, no dicts.
+        monkeypatch.setattr(sc, "get_abuse_store",
+                            lambda: abuse.MemoryAbuseStore(registry_read=_read))
+        with verdict_client(env["app"]) as tc:
+            body = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                          headers=_internal_headers()).json()
+        assert body["org_found"] is True
+        assert body["status"] == "flagged"
+        assert body["flagged_at"] == "2026-09-23T08:30:35+00:00"
+        assert body["suspended"] is True
+        # The episode rows ARE volatile: empty, not invented.
+        assert body["flags"] == []
+
+    def test_no_store_at_all_is_null_everywhere_not_active(self, env,
+                                                          monkeypatch):
+        """A store that cannot even be BUILT (broken control-plane config)
+        must not read as a clean org: both answers are null, not "active" /
+        "no flags"."""
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+
+        def _boom():
+            raise RuntimeError("no control plane")
+
+        monkeypatch.setattr(sc, "get_abuse_store", _boom)
+        with verdict_client(env["app"]) as tc:
+            body = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                          headers=_internal_headers()).json()
+        assert body["status"] is None
+        assert body["flags"] is None
+        assert "no control plane" in body["org_state_error"]
+        assert "no control plane" in body["flags_error"]
+
+    def test_cleared_episode_stops_being_reported(self, env, monkeypatch):
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", _INTERNAL_KEY)
+        store = SupabaseAbuseStore(env["fake"])
+        store.flag_org(TEAM, "point_create", {"count": 6, "threshold": 5})
+        store.flag_clear(TEAM, "point_create")
+        with verdict_client(env["app"]) as tc:
+            body = tc.get(f"/v1/internal/abuse/state?org_id={TEAM}",
+                          headers=_internal_headers()).json()
+        assert body["flags"] == []
+        assert body["flagged_at"] is None
+        assert body["status"] == "active"
+
+    def test_durable_read_agrees_with_latest_flag_at(self, env):
+        """The operator read folds the SAME rows the enforcement path reads;
+        on the durable store too, both must call the episode active."""
+        store = SupabaseAbuseStore(env["fake"])
+        store.flag_org(TEAM, "point_create", {"count": 6, "threshold": 5})
+        reported = {e["rule"] for e in store.active_flag_episodes(TEAM)}
+        assert reported == {"point_create"}
+        assert store.latest_flag_at(TEAM, "point_create") is not None
+
+
 # ── Turnstile on the signup endpoint ────────────────────────────────────────
 
 class TestTurnstileSignup:
