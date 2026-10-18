@@ -549,12 +549,13 @@ def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
     ``promote_point`` lands the CAS (``status='live'``, ``promotedAt``,
     ``reviewed=true``) and then runs a tail of untried writes: ``_mark_dirty``
     (a retried write that can exhaust), the ``alreadyDecided`` dedup wire, the
-    incident-operator promote, the ``PointPromoted`` emit. Rolling the stamps
-    back there is the INVERSE of the #2354 limbo — the node is live and can
-    never be promoted again, its ``merge`` stamp is destroyed, and the candidate
-    is re-surfaced: for a temporal candidate ``sweep()`` (which filters on the
-    stamp, not on status) re-examines it and, above the auto-accept bar,
-    journals a SECOND ``DedupeRecorded`` for one logical merge.
+    incident-operator promote, the ``PointPromoted`` snapshot read. Rolling the
+    stamps back there is the INVERSE of the #2354 limbo — a promotion that landed
+    is put back to undecided, so the graph contradicts its own ``DedupeRecorded``
+    and the candidate is offered to the operator again: for a temporal candidate
+    ``sweep()`` (which filters on the stamp, not on status) re-examines it and,
+    above the auto-accept bar, re-issues ``keep``, which journals a SECOND
+    ``DedupeRecorded`` for one logical merge.
 
     ``already_live`` is not the discriminator: ``promote_point`` RETURNS it for
     a node live before the CAS. In the cases this handler exists for, a raise
@@ -582,41 +583,77 @@ def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
     )
 
 
-# Markers of the id fan-out read's RETURN shape. Keyed on the projection rather
-# than on whole-statement equality with the shared constant: an added
-# `ORDER BY`/`WHERE` must not silently disable the adversarial ordering below.
-_FANOUT_MARKERS = ("n.is_operator", "coalesce(n.outdated")
+# Markers of the id fan-out statement. Keyed on its projection + MATCH shape
+# rather than on whole-statement equality with the shared constant: an added
+# `ORDER BY`/`WHERE` must not silently disable the transforms below, and the
+# MATCH shape keeps the key off `_fetch_endpoint_info`, which shares two columns.
+_FANOUT_MARKERS = ("MATCH (n:Point {id:$id})", "n.is_operator", "coalesce(n.outdated")
 
 
-def _proxied_projection(sdk, monkeypatch, *, fail_on=None, worst_order=False):
+def _live_in_the_middle(rows):
+    """Order the fan-out rows so the live one is neither first nor last.
+
+    ``rows[0]`` and ``rows[-1]`` are the two ends a reader can accidentally
+    depend on, so the adversary has to defeat BOTH; putting the live row last
+    only defeats the first. Returns None when the fixture cannot express it
+    (fewer than two non-live rows), so the caller's counter stays 0 and the
+    test fails loudly instead of measuring nothing.
+    """
+    live = [r for r in rows if r[1] == "live"]
+    rest = sorted((r for r in rows if r[1] != "live"), key=lambda r: str(r[1]))
+    if not live or len(rest) < 2:
+        return None
+    return rest[:1] + live + rest[1:]
+
+
+def _resize(row, width):
+    """Pad or truncate a fan-out row to ``width`` columns."""
+    return tuple(row[:width]) + (None,) * max(0, width - len(row))
+
+
+def _proxied_projection(sdk, monkeypatch, *, fail_on=None, worst_order=False,
+                       row_width=None):
     """Route every ``sdk._get_proj()`` read through a proxy for ONE statement.
 
     ``fail_on`` makes the statement whose Cypher contains that substring raise;
-    ``worst_order`` re-orders the id fan-out read's rows so every non-live row
-    precedes the live ones. Both are used to pin behaviour a healthy single-node
-    graph cannot express: the graph's row order is NOT a contract (#7822), so an
-    order-independent answer has to be measured against a deliberately
-    adversarial order — and the order is FORCED here, never inherited from the
-    server followed by a reversal (a reversal only produces the worst order when
-    the server happens to return the live row first).
+    ``worst_order`` re-orders the id fan-out read's rows so the live row is
+    neither first nor last; ``row_width`` pads or truncates its rows, modelling
+    the shared statement growing or losing a column. Each pins behaviour a
+    healthy single-node graph cannot express: the graph's row order is NOT a
+    contract (#7822), and the read's arity belongs to a SHARED constant — so both
+    properties have to be measured against a deliberately hostile shape.
+    The order is FORCED here, never inherited from the server followed by a
+    reversal (a reversal only produces the worst order when the server happens
+    to return the live row first).
 
     Returns the proxy; ``proxy.g.reordered`` counts the fan-out reads it
-    re-ordered, so a test can prove its own adversary was applied.
+    re-ordered and ``proxy.g.last_order`` records the status order it produced,
+    so a test can prove its own adversary actually applied.
     """
     real = sdk._get_proj()
 
     class _G:
         reordered = 0
+        last_order = None
 
         def query(self, cypher, params=None, **kwargs):
             if fail_on is not None and fail_on in cypher:
                 raise RuntimeError("graph unavailable")
             res = real.g.query(cypher, params=params, **kwargs)
-            if worst_order and all(m in cypher for m in _FANOUT_MARKERS):
-                self.reordered += 1
-                return types.SimpleNamespace(result_set=sorted(
-                    res.result_set, key=lambda row: row[1] == "live"))
-            return res
+            if row_width is None and not worst_order:
+                return res
+            if not all(m in cypher for m in _FANOUT_MARKERS):
+                return res
+            rows = list(res.result_set)
+            if row_width is not None:
+                rows = [_resize(row, row_width) for row in rows]
+            if worst_order:
+                ordered = _live_in_the_middle(rows)
+                if ordered is not None:
+                    self.reordered += 1
+                    self.last_order = [row[1] for row in ordered]
+                    rows = ordered
+            return types.SimpleNamespace(result_set=rows)
 
     class _P:
         def __init__(self):
@@ -699,11 +736,12 @@ def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
     the wrong answer is destructive: it erases the review stamps of a promotion
     that landed. The scan is over the whole fan-out instead.
 
-    The duplicate is minted from inside the failing tail so the pre-write reads
-    (which are single-node by construction here) cannot see it, and the proxy
-    FORCES the worst order — every non-live row ahead of the live ones — rather
-    than reversing whatever the server returned, so the order that would defeat
-    a first-row read is the one measured, on every run.
+    The duplicates are minted from inside the failing tail so the pre-write reads
+    (which are single-node by construction here) cannot see them, and the proxy
+    FORCES the order — the live row neither first nor last, so both ``rows[0]``
+    and ``rows[-1]`` are the wrong row — rather than reversing whatever the
+    server returned. It also records the order it produced, so a direction flip
+    in the adversary is a loud failure instead of a silent re-opening of the hole.
     """
     _seed_candidate(sdk, "rv-a", "rv-prior")
     proj = sdk._get_proj()
@@ -712,6 +750,10 @@ def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
         proj.g.query(
             "CREATE (n:Point {id:$id, status:'retracted', "
             "pointKind:'decision', content:'duplicate sibling'})",
+            params={"id": "rv-a"})
+        proj.g.query(
+            "CREATE (n:Point {id:$id, status:'superseded', "
+            "pointKind:'decision', content:'second duplicate sibling'})",
             params={"id": "rv-a"})
         raise RuntimeError("post-CAS tail failed")
 
@@ -724,13 +766,46 @@ def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
     assert proxy.g.reordered == 1, (
         "the adversarial order must be applied to the fan-out read, or this "
         "test silently stops testing row-order independence")
+    assert proxy.g.last_order == ["retracted", "live", "superseded"], (
+        "the live row must be neither first nor last, or only one end of the "
+        f"scan is measured: saw {proxy.g.last_order!r}")
     rows = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, n.temporal_reviewed "
         "ORDER BY n.status", params={"id": "rv-a"}).result_set
-    assert sorted(r[0] for r in rows) == ["live", "retracted"], (
-        f"fixture precondition: the duplicate sibling must exist and this "
+    assert sorted(str(r[0]) for r in rows) == ["live", "retracted", "superseded"], (
+        "fixture precondition: both duplicate siblings must exist and this "
         f"CAS must land (rows {rows!r})")
     live = [r for r in rows if r[0] == "live"]
     assert live[0][1] == "merge", (
         "a landed promotion keeps its review stamp whatever row order the "
         f"duplicate id returns: saw {live[0][1]!r} (rows {rows!r})")
+
+
+@pytest.mark.parametrize("width", [2, 4])
+def test_a_fanout_row_of_unexpected_width_does_not_replace_the_promote_error(
+        sdk, monkeypatch, width):
+    """The parse belongs INSIDE the guard, and must not depend on the arity.
+
+    ``LIFECYCLE_FANOUT_QUERY`` is a SHARED constant that has already grown a
+    column. If it grows (or shrinks) and the row parse sits outside the guard,
+    the resulting ``ValueError: too many values to unpack`` REPLACES the promote
+    error the caller keys on — the exact masking this block exists to prevent,
+    and the reason the parse indexes one column instead of unpacking the tuple.
+    """
+    _seed_candidate(sdk, "rv-a", "rv-prior")
+
+    def refuse(point_id):
+        raise ValueError(f"No point {point_id!r}")
+
+    monkeypatch.setattr(sdk, "promote_point", refuse)
+    _proxied_projection(sdk, monkeypatch, row_width=width)
+
+    with pytest.raises(ValueError, match="No point"):
+        VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    props = _props(sdk, "rv-a")
+    assert props.get("status") == "draft", (
+        f"fixture precondition: the promote never landed (saw {props.get('status')!r})")
+    assert props.get("temporal_reviewed") is None, (
+        "a pre-landing raise still rolls the review write back, whatever the "
+        f"fan-out statement's width: saw {props.get('temporal_reviewed')!r}")
