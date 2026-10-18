@@ -753,7 +753,9 @@ connect** — turning issues off never disconnects GitHub for documents (the
   applied. The two GitHub tiles are writable self-hosted too, but only in the OFF
   direction: their `disable` intent write lands, while `enable` needs a connected
   GitHub credential that a self-hosted team may not have — so never promise a
-  GitHub change on a deployment that has never connected one.
+  GitHub ENABLE on a deployment that has never connected one (the OFF
+  direction does land: the `disable` intent write is the one that works
+  without a credential).
 - **An unbuilt integration is never faked.** Anything not in the inventory
   above is **coming soon**: say so plainly, honour a "yes" as interest rather
   than as a setup step, and **never** present it as available or connect it.

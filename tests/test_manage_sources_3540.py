@@ -209,9 +209,11 @@ def test_enabling_agent_sessions_reports_already_on_without_writing(ctx):
     """Ruling B says deny-by-default; #1927 says this source is default ON.
 
     The ruling does not reverse a recorded default, so `enable` here reports the
-    truth and changes nothing — it does not flip the product's behaviour. This is
-    the case where the CAPTURE DISCLOSURE is already accepted; without
-    `capture_revised` the write still has to land (next test).
+    truth and changes nothing — it does not flip the product's behaviour. The
+    state already records a recording write (`capture_revised`), so there is
+    nothing left to land: `capture_revised` is the backward-compat COMPANION KEY
+    that marks a recording-state write as having happened, NOT a consent record
+    — no disclosure acceptance is stored, or should be invented, for it.
     """
     ctx["state"]["capture_revised"] = True
     out = m.tortoise_manage_sources("enable", "agent_sessions")
