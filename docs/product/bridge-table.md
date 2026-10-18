@@ -416,13 +416,15 @@ same rows, not a correction of it.
   this method, so it neither supports nor refutes it. A row resting only on `unstated` is
   genuinely owner-open.
 
-The membership set is the doc's OWN closure: it states in prose that
-`get_point`/`get_events`/`get_operator`/`get_governance` `sit inside` `get`, that
-`health`/`status`/`stale`/`taxonomy`/`list_pointkinds`/`list_sources`/`list_tags`/
-`list_namespaces`/`list_graphs`/`list_topics` `sit inside` `overview`, that
-`paginated_query` and `query_points_by_tag` `sit inside` `query`, and that
-`index_sessions` and `ingest_corpus` `sit inside` `index_files` — a name it collapses
-without listing still resolves, and a closure the parse drops fails the build.
+The membership set is the doc's OWN closure, parsed from its prose:
+`get_events`/`get_governance`/`get_operator`/`get_point` `sit inside` `get`
+`health`/`list_graphs`/`list_namespaces`/`list_pointkinds`/`list_sources`/`list_tags`/`list_topics`/`stale`/`status`/`taxonomy` `sit inside` `overview`
+`paginated_query`/`query_points_by_tag` `sit inside` `query`
+`index_sessions`/`ingest_corpus` `sit inside` `index_files`
+
+A name it collapses without listing still resolves, and a closure the parse drops
+fails the build. The lines above are emitted from that parse — not typed — so this
+paragraph cannot describe a closure the membership does not use.
 
 | Row | Map destination | Approved home | Home's beta successors | Map destination reads | Citation rivals read |
 |---|---|---|---|---|---|

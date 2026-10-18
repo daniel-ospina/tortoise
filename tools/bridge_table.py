@@ -407,7 +407,21 @@ _SPLIT_INTO = re.compile(r"splits this into([^;]*)")
 _CELL_PROSE = "—"
 # `onboarding_*` — the doc's shorthand for a family of names (row 23).
 _WILDCARD = re.compile(r"`([a-z_][a-z0-9_]*)\*`")
-_APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|")
+# A numbered table row — and it must be COMPLETE ON ONE PHYSICAL LINE, i.e. it has to end
+# in `|` on the same line (`…\s*\|.*\|\s*$`). `cells` is split out of ONE line, so a row
+# whose `Absorbs` cell REFLOWED onto a second line parsed as a row with a SHORTER member
+# list: measured, adding a newline inside row 21's cell still parsed 23 rows with no guard
+# firing, `mitigate_operator` silently left the row, and the regenerated artifact reported
+# `tortoise_mitigate_operator` as "*(no approved row names it)*" / **refuted**, shifting
+# the partition from 5/7/0 to 4/7/1 — a false claim about the owner-approved doc, in the
+# artifact #4513 exists to make trustworthy (#8930 review, P1).
+# Deliberately NOT a widening that joins continuation lines: a wrapped row must be
+# DETECTED (`_APPROVED_ROW_START` + the diagnostics in `_parse_approved`), never accepted.
+_APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|.*\|\s*$")
+# The same prefix on its own, so an INCOMPLETE row is REPORTED instead of skipped: a line
+# that starts like a row and does not end in `|` is a reflow, and a two-cell row (`| 3 |
+# `recall_beliefs` |`) has no `Absorbs` cell to read at all.
+_APPROVED_ROW_START = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|")
 _IDENT = re.compile(r"[a-z_][a-z0-9_]*")
 
 # The doc's title claims 23 rows, and every row it states is numbered. The bound is the
@@ -531,21 +545,54 @@ def _approved_closures(text: str) -> list[tuple[str, set[str]]]:
     ]
 
 
-def _parse_approved(text: str) -> tuple[dict[str, dict], list[tuple[str, set[str]]]]:
-    """One parse of the approved doc: (approved row name -> row, closure statements)."""
+def _parse_approved(
+    text: str,
+) -> tuple[dict[str, dict], list[tuple[str, set[str]]], list[str]]:
+    """One parse of the approved doc: (approved row name -> row, closures, row errors).
+
+    `row_errors` is a row the parse could not read COMPLETELY — a row that reflowed onto a
+    second line, or one with too few cells. It is an ERROR, never a silent skip: dropping
+    the row narrows what the doc says the row absorbs, and the verdicts treat that set as
+    the row's approved home (#8930 review, P1/P2a).
+    """
     known = _known_names()
     closures = _approved_closures(text)
 
     menu: dict[str, dict] = {}
+    row_errors: list[str] = []
     for line in text.splitlines():
-        row = _APPROVED_ROW.match(line)
-        if not row:
+        start = _APPROVED_ROW_START.match(line)
+        if not start:
             continue
-        name = row.group(2)
+        name = start.group(2)
+        lineno = int(start.group(1))
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # `cells[2]` is the `Absorbs` cell. Indexing it blind raised IndexError on a
+        # two-cell row, which escaped `main()`'s build-failure path entirely — a traceback
+        # where the diagnostic belonged (#8930 review, P2a).
+        if len(cells) < 3:
+            row_errors.append(
+                f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} parses to "
+                f"{len(cells)} cell(s); the table shape is `| N | name | Absorbs |`, so "
+                "there is no `Absorbs` cell to read — the row is dropped and every method "
+                "it absorbs renders as 'no approved row absorbs it'"
+            )
+            continue
+        # A complete row ends in `|` on this line. If it does not, the cell reflowed and
+        # its continuation was never read: the row would parse with a TRUNCATED member
+        # list — a false refutation of the owner-approved doc, on a green build.
+        if not _APPROVED_ROW.match(line):
+            row_errors.append(
+                f"approved row {lineno} (`{name}`) in {APPROVED_DOC.name} is not a "
+                "complete physical row — it does not end in `|` on the same line, so its "
+                "`Absorbs` cell has REFLOWED and the continuation is not read; the members "
+                "on the wrapped remainder silently leave the row, which renders as a false "
+                "'no approved row absorbs it' for each of them"
+            )
+            continue
         clauses = _split_clauses(cells[2])
         menu[name] = {
-            "lineno": int(row.group(1)),
+            "lineno": lineno,
             "members": _cell_members(cells[2], name, known) | {name},
             "successors": sorted({t for c in clauses for t in c["targets"]}),
             "prose_names": _prose_names(cells[2]),
@@ -576,7 +623,7 @@ def _parse_approved(text: str) -> tuple[dict[str, dict], list[tuple[str, set[str
                         changed = True
         r["members"] = members
         r["closes"] = by_outer.get(name, set())
-    return menu, closures
+    return menu, closures, row_errors
 
 
 def _approved_menu() -> dict[str, dict]:
@@ -595,12 +642,26 @@ def _approved_menu() -> dict[str, dict]:
     return _parse_approved(APPROVED_DOC.read_text(encoding="utf-8"))[0]
 
 
-def _approved_state() -> tuple[dict[str, dict], list[tuple[str, set[str]]]]:
-    """The menu AND the closure statements, from ONE read — the pair `_approved_errors` needs."""
+def _approved_state() -> tuple[dict[str, dict], list[tuple[str, set[str]]], list[str]]:
+    """The menu, the closure statements AND any unreadable row — from ONE read."""
     return _parse_approved(APPROVED_DOC.read_text(encoding="utf-8"))
 
 
 def _approved_errors(
+    menu: dict[str, dict],
+    closures: list[tuple[str, set[str]]],
+    row_errors: tuple[str, ...] = (),
+) -> list[str]:
+    """Row-level parse errors FIRST, then the structural guards.
+
+    A row the parse could not read completely is the ROOT of the structural failure it
+    causes (the row count drops below the doc's own title), so it is reported ahead of the
+    count's diagnostic: `only 22 approved rows parsed` does not say WHICH row, or why.
+    """
+    return [*row_errors, *_approved_structure_errors(menu, closures)]
+
+
+def _approved_structure_errors(
     menu: dict[str, dict], closures: list[tuple[str, set[str]]]
 ) -> list[str]:
     """Structural failures only — a DISAGREEMENT is a finding, not an error."""
@@ -1263,7 +1324,31 @@ def _blockers(rows: list[dict], sdk_defs: dict[str, int]) -> tuple[list[dict], l
     return no_method, unresolved
 
 
-def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -> str:
+def _closure_sentences(closures: list[tuple[str, set[str]]]) -> list[str]:
+    """The `X/Y `sit inside` Z` lines of §D4's membership paragraph — from the PARSE.
+
+    Hand-typed here, this list was a SECOND answer that could drift from the closure the
+    membership actually uses: removing `list_topics` from the doc's `overview` statement
+    left the build green and the artifact still asserting that `list_topics` `sits inside`
+    `overview` (#8930 review, P2b). Emitting it from `closures` makes disagreement
+    impossible — the sentence and the applied membership are one value.
+
+    Members are sorted: the parse yields a set, and the sentence is prose, so a stable
+    order is all it needs.
+    """
+    return [
+        f"{'/'.join(f'`{m}`' for m in sorted(inners))} `sit inside` `{outer}`"
+        for outer, inners in closures
+    ]
+
+
+def render(
+    rows: list[dict],
+    sdk_defs: dict[str, int],
+    cites: dict[str, dict],
+    menu: dict[str, dict],
+    closures: list[tuple[str, set[str]]],
+) -> str:
     by_dest: dict[str, list[str]] = {}
     for r in rows:
         by_dest.setdefault(DESTINATION[r["name"]], []).append(r["name"])
@@ -1418,7 +1503,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
     # ── Part D — the destination citations ──────────────────────────
     n_cited = len(cites)
     unsupported, clause_only, ambiguous = _citation_findings(cites)
-    approved = _approved_readings(_approved_menu(), (unsupported, clause_only, ambiguous))
+    approved = _approved_readings(menu, (unsupported, clause_only, ambiguous))
     by_quote: dict[tuple[str, str], list[str]] = {}
     for tool, c in sorted(cites.items()):
         by_quote.setdefault((c["doc"], c["quote"]), []).append(tool)
@@ -1591,13 +1676,12 @@ def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -
         "  this method, so it neither supports nor refutes it. A row resting only on `unstated` is",
         "  genuinely owner-open.",
         "",
-        "The membership set is the doc's OWN closure: it states in prose that",
-        "`get_point`/`get_events`/`get_operator`/`get_governance` `sit inside` `get`, that",
-        "`health`/`status`/`stale`/`taxonomy`/`list_pointkinds`/`list_sources`/`list_tags`/",
-        "`list_namespaces`/`list_graphs`/`list_topics` `sit inside` `overview`, that",
-        "`paginated_query` and `query_points_by_tag` `sit inside` `query`, and that",
-        "`index_sessions` and `ingest_corpus` `sit inside` `index_files` — a name it collapses",
-        "without listing still resolves, and a closure the parse drops fails the build.",
+        "The membership set is the doc's OWN closure, parsed from its prose:",
+        *_closure_sentences(closures),
+        "",
+        "A name it collapses without listing still resolves, and a closure the parse drops",
+        "fails the build. The lines above are emitted from that parse — not typed — so this",
+        "paragraph cannot describe a closure the membership does not use.",
         "",
         "| Row | Map destination | Approved home | Home's beta successors | Map destination reads | Citation rivals read |",
         "|---|---|---|---|---|---|",
@@ -1718,11 +1802,15 @@ def main() -> int:
     rows = _registry_rows()
     sdk_defs = _sdk_targets()
     cites = _doc_citations()
+    # ONE read of the approved doc, for the guards AND the section that renders it: the
+    # membership sentence and the membership applied are then the same parse, by
+    # construction (#8930 review, P2b).
+    menu, closures, row_errors = _approved_state()
 
     errs = [
         *_validate(rows),
         *_citation_errors(cites),
-        *_approved_errors(*_approved_state()),
+        *_approved_errors(menu, closures, row_errors),
     ]
     if errs:
         print("BRIDGE TABLE BUILD FAILURE — the map and the registry disagree:", file=sys.stderr)
@@ -1730,7 +1818,7 @@ def main() -> int:
             print(f"  • {e}", file=sys.stderr)
         return 1
 
-    doc = render(rows, sdk_defs, cites)
+    doc = render(rows, sdk_defs, cites, menu, closures)
 
     if args.check:
         current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""

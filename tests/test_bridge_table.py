@@ -1746,7 +1746,7 @@ def test_approved_menu_guard_fails_closed_when_a_closure_is_dropped(tmp_path, mo
     path.write_text(dropped, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
 
-    menu, closures = bt._approved_state()
+    menu, closures, _ = bt._approved_state()
     assert len(menu) >= bt.APPROVED_MIN_ROWS, (
         "the row bound is what is being bypassed here — the doc must still parse its rows"
     )
@@ -1777,7 +1777,7 @@ def test_approved_menu_guard_fails_closed_when_a_single_row_is_dropped(
     path.write_text(dropped, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
 
-    menu, closures = bt._approved_state()
+    menu, closures, _ = bt._approved_state()
     assert len(menu) == bt.APPROVED_MIN_ROWS - 1, (
         "one row must be gone here — that is what the bound has to catch"
     )
@@ -1792,7 +1792,7 @@ def test_approved_menu_guard_fails_closed_when_a_single_row_is_dropped(
     path2 = tmp_path / "row-renumbered.md"
     path2.write_text(renumbered, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path2)
-    menu2, closures2 = bt._approved_state()
+    menu2, closures2, _ = bt._approved_state()
     assert len(menu2) == bt.APPROVED_MIN_ROWS, "the count is unchanged — only the numbering moved"
     errs = bt._approved_errors(menu2, closures2)
     assert errs and "are missing from the" in errs[0], (
@@ -1824,7 +1824,7 @@ def test_approved_menu_guard_fails_closed_when_a_member_moves_after_the_em_dash(
     path.write_text(moved, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
 
-    menu, closures = bt._approved_state()
+    menu, closures, _ = bt._approved_state()
     assert "annotate_operator" not in menu["adjust_relationship"]["members"], (
         "the misplaced list must be the failure under test, so the member is gone here"
     )
@@ -1915,7 +1915,7 @@ def test_approved_menu_guards_fail_closed_when_a_closure_does_not_RESOLVE(
     path = tmp_path / "members-detached.md"
     path.write_text(detached, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
-    menu, closures = bt._approved_state()
+    menu, closures, _ = bt._approved_state()
     assert len(closures) >= bt.APPROVED_MIN_CLOSURES, (
         "the statement still PARSES here — that is the point of this test"
     )
@@ -1935,7 +1935,7 @@ def test_approved_menu_guards_fail_closed_when_a_closure_does_not_RESOLVE(
     path3 = tmp_path / "member-unresolved.md"
     path3.write_text(partial, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path3)
-    menu3, closures3 = bt._approved_state()
+    menu3, closures3, _ = bt._approved_state()
     assert "paginated_query" in menu3["list_knowledge"]["members"], (
         "the real member resolved — so the failure below is about `zzz` alone"
     )
@@ -1952,7 +1952,7 @@ def test_approved_menu_guards_fail_closed_when_a_closure_does_not_RESOLVE(
     path2 = tmp_path / "container-renamed.md"
     path2.write_text(renamed, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path2)
-    menu2, closures2 = bt._approved_state()
+    menu2, closures2, _ = bt._approved_state()
     errs = bt._approved_errors(menu2, closures2)
     assert errs and "container" in errs[0], (
         f"a closure whose CONTAINER the doc never names did not fail the build: {errs}"
@@ -1980,7 +1980,7 @@ def test_approved_menu_guard_fails_closed_when_the_split_clause_is_reworded(
     path = tmp_path / "split-reworded.md"
     path.write_text(reworded, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
-    menu, closures = bt._approved_state()
+    menu, closures, _ = bt._approved_state()
     assert len(menu) >= bt.APPROVED_MIN_ROWS, "the doc must still parse its rows"
     assert menu["revise_knowledge"]["successors"] == [], (
         "the reword is what this test is about — it does empty the successors"
@@ -1999,7 +1999,7 @@ def test_approved_menu_guard_fails_closed_when_the_split_clause_is_reworded(
     path2 = tmp_path / "split-unresolved.md"
     path2.write_text(emptied, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path2)
-    menu2, closures2 = bt._approved_state()
+    menu2, closures2, _ = bt._approved_state()
     assert menu2["revise_knowledge"]["split_clauses"] == 1, (
         "the clause still parses here — that is the point of this half"
     )
@@ -2020,7 +2020,7 @@ def test_approved_menu_guard_fails_closed_when_the_split_clause_is_reworded(
     path3 = tmp_path / "split-partial.md"
     path3.write_text(partial, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path3)
-    menu3, closures3 = bt._approved_state()
+    menu3, closures3, _ = bt._approved_state()
     assert menu3["revise_knowledge"]["successors"] == ["update_knowledge"], (
         "the surviving successor must still resolve — only the renamed one is lost"
     )
@@ -2169,3 +2169,160 @@ def test_approved_verdict_is_mechanical_in_all_five_directions() -> None:
     # difference is what stops an owner-facing row from denying its own quoted evidence.
     assert _approved_verdict(menu, {"events_poll"}, "check_confidence") == "rehomed"
     assert _approved_verdict(menu, {"invalidate"}, "refresh_confidence") == "rehomed"
+
+
+def test_approved_row_that_reflows_fails_the_build_instead_of_truncating_its_members(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """A wrapped `Absorbs` cell must FAIL the build — never parse as a shorter row.
+
+    `cells` is split out of ONE physical line, so a cell that reflows onto a second line
+    leaves its continuation unread while the row still parses. Measured before the fix:
+    adding a newline inside row 21's cell still parsed 23 rows with no guard firing,
+    `mitigate_operator` silently left the row, and the regenerated artifact told the owner
+    `annotate_operator` had "*no approved row* … refuted" — a false statement about the
+    owner-approved doc, in the artifact #4513 exists to make trustworthy (#8930 review, P1).
+
+    The row is DETECTED, not joined: a widened regex would accept the wrap and keep
+    guessing at the continuation.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    wrapped = real.replace(
+        "operator_action, annotate_operator, mitigate_operator |",
+        "operator_action, annotate_operator,\nmitigate_operator |",
+        1,
+    )
+    path = tmp_path / "row-reflowed.md"
+    path.write_text(wrapped, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+
+    menu, closures, row_errors = bt._approved_state()
+    assert len(menu) == bt.APPROVED_MIN_ROWS - 1, (
+        f"the wrapped row must NOT parse — {len(menu)} rows were read"
+    )
+    assert "adjust_relationship" not in menu, (
+        "row 21 parsed anyway, so its member list is a truncation of what the doc says"
+    )
+
+    errs = bt._approved_errors(menu, closures, row_errors)
+    assert errs and "is not a complete physical row" in errs[0], (
+        f"a reflowed row reported nothing about itself: {errs}"
+    )
+    assert "row 21" in errs[0], f"the diagnostic does not name the row: {errs[0]!r}"
+    assert any("silently dropping rows" in e for e in errs), (
+        f"the row-count bound must still fire as the backstop: {errs}"
+    )
+
+    # ...and through the entry point the gate runs: the build is RED, so no artifact is
+    # written carrying a `refuted` verdict the approved doc does not support.
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
+    assert bt.main() == 1, "a reflowed approved row did not fail the build"
+    err = capsys.readouterr().err
+    assert "BRIDGE TABLE BUILD FAILURE" in err, err
+    assert "is not a complete physical row" in err, err
+
+
+def test_approved_row_with_two_cells_reports_a_diagnostic_not_an_traceback(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """A row with no `Absorbs` cell must fail the build through the NORMAL diagnostic.
+
+    `cells[2]` was indexed blind, so a row that states only `| N | name |` raised
+    `IndexError` — a traceback that bypassed `main()`'s `BRIDGE TABLE BUILD FAILURE` path,
+    which is the only thing that reports a broken parse as a broken parse (#8930 review,
+    P2a). BOTH physical shapes that state two cells are pinned: the short row
+    (`| 3 | `recall_beliefs` |`) and `| 3 | `recall_beliefs` ||` — the second one ENDS in
+    `|`, so it reads as a complete row and only the cell-count guard can see it.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    row3 = next((ln for ln in real.splitlines() if ln.startswith("| 3 |")), "")
+    assert row3, "row 3 is not in the doc — this test is stale"
+
+    for shape in ("| 3 | `recall_beliefs` |", "| 3 | `recall_beliefs` ||"):
+        path = tmp_path / f"row-shape-{len(shape)}.md"
+        path.write_text(real.replace(row3, shape, 1), encoding="utf-8")
+        monkeypatch.setattr(bt, "APPROVED_DOC", path)
+
+        menu, _, _ = bt._approved_state()
+        assert len(menu) == bt.APPROVED_MIN_ROWS - 1, (
+            f"{shape!r}: a row with no Absorbs cell must not parse — {len(menu)} rows "
+            "were read"
+        )
+
+        # The diagnostic, not a traceback: `main()` must report it and return 1.
+        monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
+        assert bt.main() == 1, f"{shape!r} did not fail the build"
+        err = capsys.readouterr().err
+        assert "BRIDGE TABLE BUILD FAILURE" in err, err
+        assert f"approved row 3 (`recall_beliefs`) in {path.name}" in err, err
+        assert "parses to 2 cell(s)" in err, f"{shape!r} was not reported as a short row:\n{err}"
+        assert "IndexError" not in err and "Traceback" not in err, err
+
+
+def _d4_membership_lines(doc: str) -> list[str]:
+    """The `X/Y `sit inside` Z` lines of §D4's membership paragraph."""
+    section = _section(doc, "### D4 —")
+    marker = "The membership set is the doc's OWN closure"
+    assert marker in section, "§D4 no longer states where its membership comes from"
+    block = section.split(marker, 1)[1].split("\n\n", 1)[0]
+    return [ln for ln in block.splitlines() if "sit inside" in ln]
+
+
+def test_d4_membership_sentence_is_derived_from_the_parsed_closure() -> None:
+    """§D4's closure enumeration must be EMITTED from the parse, not typed beside it.
+
+    It was a literal list in `render()`, while the membership it described was parsed — so
+    deleting `list_topics` from the doc's `overview` statement left the build green and the
+    artifact still asserting that `list_topics` `sits inside` `overview`: the "second answer
+    that can drift" the module comment forbids (#8930 review, P2b). Derived means the
+    sentence MOVES when the doc does.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    rows = bt._registry_rows()
+    sdk_defs = bt._sdk_targets()
+    cites = bt._doc_citations()
+    menu, closures, _ = bt._approved_state()
+    lines = _d4_membership_lines(bt.render(rows, sdk_defs, cites, menu, closures))
+
+    assert lines, "§D4 rendered no closure line — this test would be vacuous"
+    assert len(lines) == len(closures), (
+        f"§D4 rendered {len(lines)} closure line(s) for {len(closures)} parsed statement(s)"
+    )
+    # Every member and container of the closure ACTUALLY USED is stated, on its container's
+    # own line: the sentence cannot be a subset of the membership.
+    for outer, inners in closures:
+        for m in inners:
+            assert any(f"`{m}`" in ln and f"`{outer}`" in ln for ln in lines), (
+                f"§D4's membership paragraph omits `{m}`, which the parse puts inside "
+                f"`{outer}`"
+            )
+    assert any("`list_topics`" in ln and "`overview`" in ln for ln in lines), (
+        f"the doc says `list_topics` sits inside `overview`; §D4 does not: {lines}"
+    )
+
+    # Now move the DOC: `list_topics` leaves the `overview` statement. The rendered
+    # sentence must move with it — a hand-typed list stays put.
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    stripped = real.replace("`list_graphs`, `list_topics` sit inside `overview`", "`list_graphs` sit inside `overview`", 1)
+    assert stripped != real, "the overview closure statement is not in the doc — test is stale"
+    menu2, closures2, errs2 = bt._parse_approved(stripped)
+    assert not errs2, f"the edited doc fails its own row guards: {errs2}"
+    assert len(closures2) == len(closures), "the edit removed a whole statement, not a member"
+    lines2 = _d4_membership_lines(bt.render(rows, sdk_defs, cites, menu2, closures2))
+    assert not any("`list_topics`" in ln for ln in lines2), (
+        "§D4 still asserts `list_topics` sits inside `overview` after the doc stopped "
+        f"saying so — the enumeration is typed beside the parse, not derived from it: {lines2}"
+    )
+    assert any("`list_graphs`" in ln and "`overview`" in ln for ln in lines2), (
+        "the edited closure statement vanished entirely, so the check above is vacuous"
+    )
