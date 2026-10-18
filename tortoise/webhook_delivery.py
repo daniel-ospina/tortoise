@@ -775,13 +775,15 @@ def event_head_seq(graph) -> int:
     would therefore STARVE the graph's deliveries with no log line at all, which
     is the opposite of this gate's stated bias.
 
-    "Corrupt" is the same domain ``event_store.next_seq`` refuses on the write
-    side: anything that is not a real number (a numeric STRING included —
-    ``next_seq`` is explicit that a property of another type is "refused, never
-    coerced", because ``'5' + 1`` cannot be compared), a NEGATIVE value, or a
-    ``bool`` — which is an ``int`` subclass, so ``int(True) == 1`` would
-    otherwise pass as a trustworthy head of 1 while the events run to 5. A
-    non-integral float (``2.9``) is not a position either. All of them take the
+    "Corrupt" means a value ``_as_seq`` below will not accept as a POSITION. Note
+    that this is not the set ``event_store.next_seq`` refuses on the write side —
+    the two diverge at both ends, and the bullets below name both: anything that is
+    not a real number (a numeric STRING included — ``next_seq`` is explicit that a
+    property of another type is "refused, never coerced", because ``'5' + 1``
+    cannot be compared), a NEGATIVE value, or a ``bool`` — which is an ``int``
+    subclass, so ``int(True) == 1`` would otherwise pass as a trustworthy head of
+    1 while the events run to 5. A non-integral float (``2.9``) is not a position
+    either, and ``next_seq`` BUMPs it rather than refusing it. All of them take the
     events fallback, whose head is at or above every deliverable seq: it can only
     over-admit, never stall.
 
