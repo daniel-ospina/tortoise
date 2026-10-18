@@ -495,6 +495,11 @@ def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path)
         # The stub WAS minted and WAS adopted: the canonical id landed and the
         # discriminator was cleared.
         assert rows and rows[0][0] == _OBJECT_ID, rows
+        # EXACTLY ONE node may carry the registered id (the docstring's "ONE
+        # node"): if the registration CREATED a second `:Object` instead of
+        # adopting the stub, `rows` holds two and inspecting `rows[0]` alone
+        # would make this verdict depend on store row order rather than pin it.
+        assert len(rows) == 1, rows
         assert rows[0][1] is None, rows
         first = _verdict(log_path, proj, record_state=True)
         assert first["ok"] is False, first
