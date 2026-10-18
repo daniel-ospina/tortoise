@@ -28,6 +28,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1586,3 +1587,70 @@ class TestVolunteerTrustBoundary:
         assert "hosted (127.0.0.1:" in r.stderr
         assert str(cfg) in r.stderr  # identity file named
         assert "attacker" not in r.stderr
+
+
+# ── #2124 matrix provenance — the DEMAND-GATED harnesses ─────────────────
+#
+# This matrix has recorded an optimistic contract for a sibling lane three
+# times (#2120's `.claw` / `handle_AgentRequest`, #2121's `.agents.yml`,
+# #2122's Claude-shaped `beforeSubmitPrompt`) and a lane then BUILT on each
+# one. #2124's body carried the same defect for Gemini CLI — it named ADK's
+# `llm_request` / `BeforeModel` (that is #2125's seam) — so the re-measured
+# contract is pinned here: a correction that lives only in prose gets
+# re-fabricated by the next reader.
+
+_SEAM_DOC = (_REPO_ROOT / "docs" / "research" / "2026-09-01-gbrain-learnings"
+             / "platform-seams.md")
+
+
+def test_seam_matrix_pins_the_measured_gemini_contract():
+    """Gemini CLI's per-turn seam is `BeforeAgent` → `additionalContext`.
+
+    NOT ADK's `BeforeModel` / `llm_request` (the field #2124's body named), and
+    NOT the shared script's bare-text default: Gemini CLI's stdout contract is
+    strict JSON, and a non-JSON emission is rendered as a `systemMessage` —
+    which its reference defines as shown to the user in the terminal, i.e.
+    never injected into the model's context.
+    """
+    text = _SEAM_DOC.read_text(encoding="utf-8")
+    assert "BeforeAgent" in text, (
+        "the matrix must name Gemini CLI's measured per-turn event")
+    assert "hookSpecificOutput.additionalContext" in text
+    # The retracted claim may appear only INSIDE its own correction — the
+    # record has to be able to say what was wrong. Same rule, same reason, as
+    # tests/test_openclaw_seam.py::_fabricated_mentions_are_corrections.
+    for block in re.split(r"\n\s*\n", text):
+        if "harmless where unsupported" not in block:
+            continue
+        assert re.search(r"retract|not an injection|non-injection", block,
+                         re.IGNORECASE), (
+            "the retracted claim is presented as the contract again: at "
+            "Gemini CLI a bare-text emission is a NON-injection (strict-JSON "
+            "stdout → systemMessage, shown to the user in the terminal), "
+            "which must not read as the fail-open posture")
+
+
+def test_demand_gated_harnesses_have_no_installer(tmp_path):
+    """The matrix says "NOT built — demand-gated"; the CLI must agree.
+
+    Both directions are checked, because claim drift runs both ways: a row
+    claiming a registration `tortoise install` cannot write (the
+    #2120/#2121/#2122 failure), and an installer shipping a seam the matrix
+    still calls gated — which would be the same decision reversal, from the
+    other side. The gated pair must stay DECLARED in the listing (silently
+    dropping it reads as "no such harness", not "deferred").
+    """
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+    listing = _run(["install", "--list"], env, cwd=str(tmp_path))
+    assert listing.returncode == 0, listing.stderr
+    assert "gemini, opencode" in listing.stdout, (
+        "the demand-gated pair must stay declared in the install listing")
+    for harness in ("gemini", "opencode"):
+        assert f"install {harness}" not in listing.stdout, (
+            f"the listing offers `install {harness}`, but #2124's demand gate "
+            "is unmet — the adapter is not built")
+        r = _run(["install", harness, "--dir", str(tmp_path / "proj")], env,
+                 cwd=str(tmp_path))
+        assert r.returncode != 0 and "invalid choice" in r.stderr, (
+            f"`install {harness}` must not exist until the demand gate is met: "
+            f"{r.stdout}{r.stderr}")
