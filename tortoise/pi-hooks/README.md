@@ -149,9 +149,9 @@ The product half is already landed: the extension here is the artifact
 `capture_install._install_pi` writes, it ships in the wheel, and
 `tests/test_pi_capture_disposition.py` pins the **README** half of the record
 (`#3512`) against this tree, so a `tortoise/pi-hooks/` edit cannot name a home
-that does not exist. (The plan's own copy of the record is covered by the
-#3554 carve-out in `tools/ci_selection.py`: a plan-only edit selects `core` and
-runs `test_pi_capture_disposition.py`, which pins the plan's copy too.)
+that does not exist. (The plan's own copy of the record is covered by the #3554
+carve-out in `tools/ci_selection.py`: a plan-only edit selects `core` and runs
+`test_pi_capture_disposition.py`, which pins the plan's copy too.)
 
 ## Verification — what is executable, what is manual-only
 
