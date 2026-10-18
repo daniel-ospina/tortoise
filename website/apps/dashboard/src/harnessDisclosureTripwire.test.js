@@ -23,7 +23,11 @@
 // is described by the row name group. Plus: `main.jsx` mounts the card once, with
 // the four props it needs (`state`, `sessionsOn`, `wizardHarness`, `surface`), and
 // the Settings disclosure's summary is named per row and reads its label from the
-// copy module rather than a literal.
+// copy module rather than a literal. Finally, the two CLAIMS the code contradicts
+// are pinned as text: the mount-site comment must not reassert that the card's
+// output is unchanged, and the `#3802` reference-only block must name
+// `harnessStatusCard.jsx` (not `main.jsx`) as `HARNESS_CAPTURE_INSTALL`'s carrier.
+// Both were stale after `#3513` §2 and the DOM lane cannot see either one.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -34,6 +38,7 @@ import { stripComments } from './testSupport.js'
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
 const cardJsx = readFileSync(join(here, 'harnessStatusCard.jsx'), 'utf8')
+const harnessesJs = readFileSync(join(here, 'harnesses.js'), 'utf8')
 // Every scan below reads comment-stripped source.
 const mainCode = stripComments(mainJsx)
 const cardCode = stripComments(cardJsx)
@@ -229,4 +234,57 @@ test('#3700: the alert is described by the row name group', () => {
   assert.ok(describedBy, 'the alert must carry aria-describedby')
   assert.equal(describedBy[1], nameId[1],
     'the alert must be described by the row name group it belongs to')
+})
+
+test('#3513 §2: the mount-site comment does not claim the card\'s output is unchanged', () => {
+  // The card's DOM output DID change in #3513 §2 — the row now renders from
+  // `surface` (pointer on every mount, plus the Settings mount's collapsed
+  // manual-install disclosure) — and the comment above the mount is where a
+  // reader looks before adding a fourth surface. The `#4915` EXTRACTION was
+  // byte-identical; the claim that the OUTPUT is may not be reasserted.
+  //
+  // Pre-fix the comment read "…the block that used to sit inline here —
+  // byte-identical output, one import", so the first assertion fails on it.
+  // The second arm keeps the replacement honest: it must say WHAT changed, not
+  // merely drop the word.
+  const mountAt = mainJsx.indexOf('<HarnessStatusCard state={state} sessionsOn={sessionsOn} wizardHarness={wizardHarness} surface={surface} />')
+  assert.notEqual(mountAt, -1, 'the MemorySources card mount must exist')
+  const commentStart = mainJsx.lastIndexOf('{/*', mountAt)
+  const commentEnd = mainJsx.indexOf('*/}', commentStart)
+  assert.ok(commentStart > -1 && commentEnd > commentStart && commentEnd < mountAt,
+    'the mount must carry a comment block directly above it')
+  const mountComment = mainJsx.slice(commentStart, commentEnd)
+  assert.doesNotMatch(mountComment, /byte-identical output/,
+    'the mount-site comment still claims the card renders byte-identical output — ' +
+    '#3513 §2 changed the output on purpose (see harnessStatusCard.jsx)')
+  assert.match(mountComment, /#3513/,
+    'the mount-site comment must scope the #4915 extraction claim and name the change that altered the output')
+})
+
+test('#3802: the reference-only block names the LIVE carrier of HARNESS_CAPTURE_INSTALL', () => {
+  // `HARNESS_INSTALL`'s block exists to tell a future editor where each
+  // reference-only constant's LIVE carrier is. After #3513 §2 the capture
+  // recipe's carrier is the Settings mount's collapsed disclosure in
+  // `harnessStatusCard.jsx` — NOT a row in `main.jsx` (zero reads of
+  // `HARNESS_CAPTURE_INSTALL` there) and NOT "the copy a user actually pastes"
+  // (the wizard renders the pointer; the agent prompt installs the recorder).
+  //
+  // Pre-fix the bullet read "the Memory-sources capture row in `main.jsx`, the
+  // copy a user actually pastes for session capture", so all three arms fail on
+  // it: no `harnessStatusCard.jsx`, and both retired phrasings present.
+  const blockStart = harnessesJs.indexOf('REFERENCE-ONLY COPY (#3802)')
+  assert.notEqual(blockStart, -1, 'the #3802 reference-only block must exist')
+  const blockEnd = harnessesJs.indexOf('export const HARNESS_INSTALL = {', blockStart)
+  assert.notEqual(blockEnd, -1, 'the reference-only block must precede HARNESS_INSTALL')
+  const block = harnessesJs.slice(blockStart, blockEnd)
+  const bullet = block.match(/\/\/\s*\*\s*`HARNESS_CAPTURE_INSTALL`[\s\S]*?;\n/)
+  assert.ok(bullet, 'the block must list HARNESS_CAPTURE_INSTALL as a shipped-copy carrier')
+  const carrier = bullet[0]
+  assert.match(carrier, /harnessStatusCard\.jsx/,
+    'the carrier must name harnessStatusCard.jsx — that is where the recipe renders')
+  assert.doesNotMatch(carrier, /capture row in `main\.jsx`/,
+    'the carrier still points at a row in main.jsx, which has no read of this constant')
+  assert.doesNotMatch(carrier, /the copy a user actually pastes/,
+    'the carrier still calls this "the copy a user actually pastes" — the wizard renders ' +
+    'the pointer and the agent prompt installs the recorder (#3513 §2 / #3517)')
 })

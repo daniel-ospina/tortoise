@@ -584,7 +584,7 @@ def test_uri_mutations_declared_files_exist():
 # ═══════════════════════════════════════════════════════════════════════
 
 def _code_bracket_deltas(src: str) -> list[int]:
-    """Net bracket delta per line, counting ONLY brackets in CODE (#9020).
+    """Net bracket delta per line, counting ONLY brackets in CODE (#8995).
 
     `_scope_map`'s continuation counter decides whether a `def` line is a real
     definition or a wrapped continuation of the expression above it, so a
@@ -601,7 +601,7 @@ def _code_bracket_deltas(src: str) -> list[int]:
     String and comment tokens are located with `tokenize` (which understands
     quoting, escapes, triple quotes and f-strings), and their spans are skipped
     by the counter. An unparsable fragment falls back to the raw count — the
-    pre-#9020 behaviour, never a silent under-count.
+    pre-#8995 behaviour, never a silent under-count.
     """
     lines = src.split("\n")
     excluded: dict[int, list[tuple[int, int]]] = {}
@@ -652,7 +652,7 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
     lines = src.split("\n")
     scopes: list[tuple[str, str | None]] = [("top", None)] * len(lines)
     # Continuation state comes from CODE brackets only — a bracket inside a
-    # string literal or comment is copy, not an open expression (#9020).
+    # string literal or comment is copy, not an open expression (#8995).
     deltas = _code_bracket_deltas(src)
     stack: list[tuple[int, str, str]] = []  # (indent, kind, name)
     paren = 0
@@ -685,7 +685,7 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
         else:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
         # paren balance for continuation detection (CODE brackets only —
-        # brackets inside string literals/comments are copy, #9020)
+        # brackets inside string literals/comments are copy, #8995)
         paren = max(0, paren + deltas[i])
     return scopes
 
@@ -970,10 +970,10 @@ def test_uri_mutations_restored():
 
 
 def test_scope_map_reads_code_brackets_only():
-    """#9020: a bracket inside a string literal is COPY, not an open
+    """#8995: a bracket inside a string literal is COPY, not an open
     expression — and counting it poisoned every `def` after it.
 
-    This is the #9020 regression reproduced as a minimal source: an assert on a
+    This is the #8995 regression reproduced as a minimal source: an assert on a
     literal containing an unmatched `(` (test_time_aware_sdk_2520.py:115,
     `assert "(as of" in t`) left the scope map's continuation counter open for
     the rest of the file. Every later `def` was classified as a continuation of
@@ -1002,13 +1002,13 @@ def test_scope_map_reads_code_brackets_only():
     assert scopes[5] == ("fn", "second"), (
         "the def after a string literal holding an unmatched bracket must be "
         f"its OWN scope, not a continuation of `first` — got {scopes[5]}")
-    assert _restoration_violations([("synthetic_9020.py", src)]) == [], (
+    assert _restoration_violations([("synthetic_8995.py", src)]) == [], (
         "a mutation restored in a finally must stay green even when an earlier "
         "line carries an unmatched bracket inside copy")
     # Falsifiability: the same source WITHOUT the restore must still red, so the
     # assertion above cannot pass by the guard going blind to this shape.
     unrestored = src.replace('os.environ["TORTOISE_DB_URI"] = old\n', '')
-    assert _restoration_violations([("synthetic_9020.py", unrestored)]), (
+    assert _restoration_violations([("synthetic_8995.py", unrestored)]), (
         "the guard must still catch an unrestored mutation in the same shape")
 
 

@@ -436,8 +436,14 @@ tortoise install cursor
 //   * the agent PROMPT — `wizardPrompts.js` `wizardPromptText` (the dashboard
 //     never shows `claude mcp add`; it hands the agent "Add Tortoise MCP at
 //     <url>"), pinned against the RENDERED value in `wizardPrompts.test.js`;
-//   * `HARNESS_CAPTURE_INSTALL` — the Memory-sources capture row in `main.jsx`,
-//     the copy a user actually pastes for session capture (#1728 / #3754);
+//   * `HARNESS_CAPTURE_INSTALL` — the per-harness session-capture recipe. Its
+//     only render site is the Settings mount's collapsed `details.manual-install`
+//     disclosure in `harnessStatusCard.jsx` (the row itself lives there, not in
+//     `main.jsx`) — NOT the copy a user pastes for capture any more (#3513 §2).
+//     The wizard mount renders `CAPTURE_INSTALL_POINTER` instead, and the
+//     install itself runs in the agent prompt (`wizardPromptText` →
+//     `ONBOARDING_INSTRUCTIONS` → the served `tortoise-onboarding/SKILL.md` §5,
+//     `tortoise install <harness>`; #1728 / #3754 / #3517);
 //   * `website/docs.html` — the public install commands for a manual setup.
 // So an edit to a SHIPPED behavior in this block must be mirrored to the
 // carrier above, and the test asserting that behavior must assert the carrier

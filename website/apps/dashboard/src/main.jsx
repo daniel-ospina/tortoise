@@ -11935,9 +11935,13 @@ function MemorySources(props) {
           </p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
           {/* #4915: the rows live in their own module so the DOM lane can
-              render them. The markup this component produces is the block that
-              used to sit inline here — byte-identical output, one import.
-              See `harnessStatusCard.jsx` for why the extraction exists. */}
+              render them. The #4915 EXTRACTION was byte-identical to the block
+              that used to sit inline here — one import, nothing a user could
+              see. That is no longer true of the output: #3513 §2 made the card
+              render from `surface` (status + the pointer on every mount, plus
+              the collapsed manual-install disclosure on Settings), which is why
+              the prop is forwarded below. See `harnessStatusCard.jsx` for why
+              the extraction exists and what the two surfaces render. */}
           <HarnessStatusCard state={state} sessionsOn={sessionsOn} wizardHarness={wizardHarness} surface={surface} />
         </div>
       </div>
