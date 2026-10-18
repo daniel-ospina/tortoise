@@ -160,6 +160,23 @@ surfaces:
   # demand.py-only change selects `core`). Triple-registered deliberately: no
   # single arm covers both modules this feature spans.
   - test_data_source_capture.py
+  # #3514 (epic #1714 J4) — the CLIENT↔SERVER half of the same feature, and the
+  # #1349/#4446/#3524 class this file's own neighbour above is triple-registered
+  # for. This file reads `tortoise/hosted_api.py` directly: the mounted route
+  # table (`test_the_client_posts_the_route_the_app_actually_mounts`) and
+  # `_ALLOWED_ANALYTICS_PROPS` (`test_the_client_body_keys_are_the_registered_props`),
+  # so a rename of the route or a drop of `action` from the allowlist is exactly
+  # the diff that breaks the client.
+  #
+  # MEASURED, so the next reader does not re-derive it: a
+  # `tortoise/hosted_api.py`-only diff ALREADY ran this file, via `onboarding`
+  # (that surface lists `tortoise/hosted_api.py` in its patterns as well). This
+  # arm is not a rescue of a sleeping guard; it is the registration that makes
+  # the guard run under the surface that OWNS the module, so it does not depend
+  # on `onboarding`'s pattern list continuing to carry a backend path for a
+  # client-side reason. Triple-registered with `core` (the manifest fallback)
+  # and `onboarding` (the JS grid direction).
+  - test_integrations_grid_inventory.py
   # #3516 §B: the client-timestamp floor's inputs (`client_captured_at` + its `_source`).
   # DUAL-REGISTERED with `core` for the same reason as the lane entry above: the touched
   # files span BOTH surfaces — `hosted_api.py` / `sdk.py` / `__main__.py` select `api`,
@@ -986,6 +1003,15 @@ surfaces:
   # — they fall through to `core` — so without that arm a webhook_delivery-only
   # change would run no guard at all.
   - test_webhook_delivery.py
+  # #8098: the scheduled retry sweep — the TRIGGER the delivery layer lacked
+  # (an idle tenant's backoff had nothing to notice it elapsed). The sweep's
+  # arm site, its task registration and the never-raise/off-loop dispatch
+  # wrapper all live in `tortoise/hosted_api.py` (an exact `api`
+  # SOURCE_PATTERN), so this arm runs the lifecycle pins on a hosted change.
+  # DUAL-REGISTERED with `core` (below) for the same reason as #2081 above:
+  # the due predicate and its cost gate live in `tortoise/webhook_delivery.py`,
+  # which matches no named surface and falls through to `core`.
+  - test_8098_webhook_retry_sweep.py
   # #3520: the per-session EXTRACTION status (`{status, extractor,
   # outcome_known}`) on BOTH hosted session read surfaces, the `last_error`
   # agreement on the 2xx path, and the appended-at-the-END column positions.
@@ -1101,6 +1127,31 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #8093: the `:Graph.namespace` cell of `docs/registry-graph-schema.md` vs the
+  # namespace the code derives (`acl_graph_users._graph_namespace`,
+  # `sdk._graph_create`, `hosted_api._provision_graph` / `_org_graph_name`).
+  # The cell is the input another lane derives an ACL key pattern from
+  # (`docs/authorization-architecture.md` §2.1), and it had gone stale on BOTH
+  # shapes after the #3543 `team_` → `org_` rename.
+  #
+  # `tier1` (below) is the LOAD-BEARING registration; this one is secondary, the
+  # same dual-registration idiom as the `test_7818_ontology_record.py` /
+  # `test_8474_ontology_record.py` doc pins. `tier1` is in EVERY PR selection
+  # (`files = set(tier1)` on the match path, the whole selection on the
+  # docs-only early return, `"ALL"` on full), so the pin runs on a docs-only
+  # diff — the exact change class that re-stales the cell — and on a code diff.
+  #
+  # Do NOT re-read this entry as "`core` covers the code-side diffs": it does
+  # not. `tortoise/hosted_api.py` and `tortoise/acl_graph_users.py` are BOTH
+  # exact `api` SOURCE_PATTERNS matches, so an either-file-only diff selects
+  # `api` and REPLACES the `core` fallback (`core` is added only in the
+  # `if not found:` branch; `CORE_ALSO` is the separate post-match addition and
+  # lists neither file), and `tortoise/sdk.py` is a SHARED_MODULE → full
+  # matrix. Those diffs reach this pin through `tier1`, never through `core`.
+  # The rule is stated the same way near the top of `core`, in the #2969 entry
+  # (`test_socket_bound_not_multiplied_2969.py`) — cite it by name, not by
+  # offset: a line count here rots with every insertion between the two.
+  - test_8093_registry_namespace_doc.py
   # #5612: concurrent journal appends are serialised and the recovery read
   # salvages a damaged mid-file line. `tortoise/log.py` matches no
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
@@ -1402,6 +1453,13 @@ surfaces:
   # that stops reporting the coordinate still runs this guard. No hosted route
   # emits it yet (`#7970` is the consumer), so `core` alone is correct.
   - test_residency_router.py
+  # #5009 (§12.4 / §12.5): the SUFFICIENCY ROUTER and the ESCALATION WRITE-BACK.
+  # It pins tortoise/sufficiency_router.py, which matches no SOURCE_PATTERN rule
+  # and therefore falls back to `core` — the decision layer is hermetic (no DB,
+  # no graph, no model, no clock), so `core` is the correct floor, not a claim
+  # about reach. Nothing calls the router yet (the tier count is OPEN per §12.3),
+  # so a read-path registration would run it on diffs it cannot speak about.
+  - test_sufficiency_router.py
   - test_secret_not_printed_5109.py
   # #5109 (read side): a store whose mode drifted open must warn on READ —
   # nothing verified on read what every writer pins shut. Pins
@@ -1554,6 +1612,12 @@ surfaces:
   # mechanism (its excludes-list is stated in `cypher_guard._guard_numeric_params`).
   # Pure-unit guard: needs no DB or network, exactly like the file above it.
   - test_7174_param_boundary_numeric_guard.py
+  # #8746: the graph-delete refusal record's WRITER contract — how its section
+  # merges into `tempdir-hygiene-end.json`, plus the conftest wiring that feeds
+  # it. Hermetic (ast/json only + a fake projection); the pin that every
+  # suite-session job DUMPS the artifact is
+  # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak.
+  - test_graph_delete_hygiene_report.py
   - test_graph_name_ownership.py
   # #5331: the graph byte meter (tortoise/graph_storage.py + the metering/
   # supabase graph-storage lane). Dual-registered with `api`: a change to the new
@@ -3269,6 +3333,12 @@ surfaces:
   # engine's contract tests on that diff. Dual-registered under `api` (above)
   # for `tortoise/hosted_api.py`, which is an exact `api` match.
   - test_webhook_delivery.py
+  # #8098: the sweep's cheap gate (`webhook_delivery.due_subscription_count`)
+  # is the ONE predicate the dispatcher also reads, so it must ride a
+  # `webhook_delivery.py`-only diff: that file matches no named SOURCE_PATTERN
+  # and selects `core`. Dual-registered under `api` (above) for the hosted
+  # lifecycle half (the arm site, the task tuple, the dispatch wrapper).
+  - test_8098_webhook_retry_sweep.py
   # #3520: the `core` half of the dual registration documented at the `api`
   # entry — `tortoise/session_projection.py` (the extraction vocabulary and
   # `session_extraction_status`, the ONE derivation every read surface calls)
@@ -3321,6 +3391,18 @@ surfaces:
   # PING, or a 3 000-node restore would report `served` while the instance was off the
   # air for it. Runs on every `core` selection (no URI, no skip).
   - test_7846_restore_is_not_silent.py
+  # #7846 (the INDEX-SAFE restore, #8965): HERMETIC guards for
+  # `restore_graph_key_safe` — the path that drops the graph's VECTOR index BEFORE the
+  # `DUMP` (the index travels inside the payload, so it must be off the graph first),
+  # restores an index-free payload, and re-creates the SAME definition afterwards — and
+  # for `restore_graph_key`'s refusal guard. No server: a fake engine holding a catalogue
+  # of rows pins the ORDER (the DUMP must see an index-free graph), the refusal before any
+  # destructive step, the definition fidelity (dimension/metric/M/efConstruction/efRuntime
+  # are read, never hardcoded), and every fail-closed arm (unreadable definition, drop that
+  # does not take, unrecognised index type, catalogue seam answering None). Runs on every
+  # `core` selection. `tortoise/graph_key_restore.py` matches no SOURCE_PATTERN, so `core`
+  # is its fallback arm, exactly as for the two #7846 files above.
+  - test_7846_index_safe_restore_guard.py
   # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
   # declaration asserted across the surfaces that must agree (the JS grid ↔
   # `tortoise/demand.py::DEMAND_DECLARED_TILES` ↔ every
@@ -4216,6 +4298,7 @@ surfaces:
   # (#2938).
   - test_session_schema_3554.py
 tier1:
+- test_8093_registry_namespace_doc.py  # #8093: `docs/registry-graph-schema.md` §Graph namespace cell vs the derived namespace (hermetic doc↔code pin; a docs-only diff runs tier1 only) — dual-registered with `core`
 - test_cli_serve.py
 - test_config.py
 - test_crypto.py
@@ -4932,6 +5015,7 @@ durations:
   test_7405_update_point_writes.py: 2.0  # #7405/#8737: same #3400 flat default as the row above and for the same reason — a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_5509_name_keyed_identity_reads.py: 138.6  # #5509 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it is hand-added here — and WITHOUT this row the durations map drops to 89.98% coverage (799/888), below the 90% floor, which is how #8874's merge of main 46185aba9 first surfaced it. MEASURED on this host 2026-10-17 in the #8874 worktree on a private tools/test_lane.py docker container reached via TORTOISE_DB_URI: pytest session total, 16 tests, "16 passed in 138.63s". WHAT THE NUMBER IS: the session total, NOT what the refresher computes (it sums the textual `--durations=15` block from a CI log, a LOWER bound). Refresh from the first post-merge push run that includes it.
   test_8864_shared_name_merge_key.py: 2.0  # #8864: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Local reading on this host (embedded carve-out lane, 8 tests): "8 passed in 5.82s" — the session total, which is conftest/DB setup the #3400 method attributes to no file; NOT substituted for a CI weight. Refresh from the first post-merge run that includes it.
+  test_8098_webhook_retry_sweep.py: 8.8  # #8098 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-18 at the PR head AFTER the LAST review fixes (embedded carve-out lane, **56 tests**, `--junitxml`): sum of testcase/@time ranged **7.25s** on a quiet host to **24.65s** with the fleet loading this box, max single test 1.65-6.90s (`test_every_test_the_plan_cites_exists`, which rglobs `tests/`). The reading is re-derived with the COUNT at every revision, never carried forward (the neighbouring #3429 row states the same convention): earlier revisions of this row read 39, 48, 49, 51, 53 and 55 tests as the file grew. The 8.8 WEIGHT is deliberately left alone: it is the shard packer's input, and keeping the higher of the readings means a file whose per-test sum is dominated by one cold-lane test is never under-weighted, so do not "correct" it down without a CI junit measurement. Required for the durations half as well as the surface half (#4348 trap): MEASURED this turn, WITHOUT this row `tools/ci_selection.py --integrity` reds the durations coverage floor (the file is in the fast pool, so an absent row also packs it at the flat 2.0s default). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_installer_agents_block_3429.py: 12.8  # #3429 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention. MEASURED on this host 2026-10-18 on a private tools/test_lane.py container, TWO consecutive runs, sum of testcase/@time over ALL 42 tests: 11.95s and 13.58s — the reading is re-derived with the count at every revision, never carried forward (earlier rows here said 4.53s/4, 5.8s/10, 7.2s/15, 9.0s/20, 14.4s/25, 20.4s/30, 20.9s/35 and 18.6s/40 as the review added cases; the count and the sum move together, and this spread shows the host load, not the tests). The file drives the REAL installer in a temp HOME/project, so it is subprocess-bound, not DB-bound. NOTE: the sum is per-test durations; WALL-CLOCK under a loaded fleet has measured 2.8x this. Refresh from the first post-merge push run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_backup_watcher_health.py: 0.2
@@ -5008,6 +5092,7 @@ durations:
   test_8474_ontology_record.py: 4.0  # #8474/#8736: locally measured (1 hermetic doc-read test — reads docs/ONTOLOGY.md only, no DB, no fixture; pytest session total 1.1s on an idle host, 3.1-4.2s on a loaded one, 2026-10-16 re-measure — the earlier 16.0 was taken on a private tools/test_lane.py container and included container lifecycle, not the pytest session). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_write_verb.py: 4.3  # #9017: was 34.6 (measured 2026-10-18)
   test_index_restore.py: 2.7
+  test_7846_index_safe_restore_guard.py: 9.0  # unmeasured — #7846/#8965: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so the >=90% coverage floor (#2876) would fail by construction for this test-adding PR. Locally re-measured on this host 2026-10-18 at the #8965 final head (the file now collects 38 tests; the 3.0 this row used to carry quoted "23 passed in 3.03s", i.e. a measurement of a revision FIFTEEN tests smaller — a stale figure in a manifest, which this repo treats as a defect rather than a cosmetic one): `TORTOISE_TEST_CARVE_OUT=1 PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_7846_index_safe_restore_guard.py -q` → "38 passed in 14.18s" and "38 passed in 14.90s" on a host under fleet load, against 4.25-6.71s for the same file at 35 tests on an idle one (so the figure moves with host load, not with the assertions). The file needs no server and takes no skip; its cost is the conftest import plus a handful of deliberate sub-second windows (a 0.2s caller bound with a witness join, a 0.3s simulated block). WHAT THE NUMBER IS: pytest's session total, NOT what the refresher computes — `--refresh-durations` reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
   test_7846_restore_is_not_silent.py: 14.0  # unmeasured — #7846 criterion 5: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so the >=90% coverage floor (#2876) would fail by construction for this test-adding PR. Measured on this host 2026-10-17: `uv run pytest tests/test_7846_restore_is_not_silent.py -q` → "10 passed in 4.32s"; re-measured after the #8827 review added eight guards and two hermetic probe arms → "20 passed in 7.15s"; re-measured again after the #8827 cycle-9 review added three behavioural guards (a refused port outranking the caller-stall inference, an answered-but-slow overrun, and the caller-held-time tail) → "23 passed in 10.50s", then re-measured again after the #8827 cycle-10 review added two guards (the completed-vs-overrun account arm and the module's caller-held ceiling) → "25 passed in 13.94s", URI-less as well (`TORTOISE_TEST_CARVE_OUT=1`). The file needs no server and takes no skip, and its cost is dominated by deliberate sub-second windows (a 0.3 s simulated block, a 0.1 s caller bound, a sample the witness never records, an abandoned worker), which is why the row is 14.0 rather than 5.0, so the reading is a function of the assertions rather than of host load. WHAT THE NUMBER IS: pytest's session total, NOT what the refresher computes — `--refresh-durations` reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
   test_capture_session.py: 43.7  # #9017: was 53.9 (measured 2026-10-18)
   test_write_session_and_turns_3551.py: 2.1  # #3551 (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — NOW CI-MEASURED from run 39040632415 (was 70.8 locally measured; the local figure counted container lifecycle, not the pytest session)
@@ -5888,6 +5973,7 @@ durations:
   test_reader_4107_advice_shape.py: 1.4  # unmeasured
   test_reader_4837_advice_battery.py: 2.6  # #4837: hermetic (no DB, no reader call) — 23 tests, measured 2.6s on this host
   test_fanout_cap.py: 0.2  # unmeasured
+  test_sufficiency_router.py: 7.5  # #5009: hermetic (no DB, no graph, no model call) — 211 tests, measured 4.5-7.8s on a quiet host and 15.9-17.5s while this box carried a 40-deep CI queue. The WEIGHT stays at the quiet-host reading on purpose: it is a packing weight, and the 17s sample measures fleet load, not the file. Refresh from the first post-merge junit sweep (`--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR has no measured value at PR time).
   test_never_across_fold_5080.py: 2.0  # unmeasured
   test_operator_alert.py: 2.3
   test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
@@ -6020,10 +6106,13 @@ durations:
   # CALL times summed to ~1.7 s locally (0.70 + 0.53 + 0.14 + 0.04). The
   # per-test `setup` bodies are the embedded lane's shared cold-start (measured
   # 0.2-22 s across runs and mostly one-time), which the packer's per-file
-  # weight must not double-count. Both halves are load-bearing: the surface
-  # entry alone leaves `durations` coverage under the floor and
-  # `tools/ci_selection.py --integrity` reds (#4348 trap), and a durations entry
-  # with no surface registration leaves the file unclassified. Refresh from the
+  # weight must not double-count. Registration and weight are different guards,
+  # and only one is enforced: `tools/ci_selection.py --integrity` reports a
+  # `durations` key with no surface entry as unclassified, while fast-pool
+  # coverage is checked against a 0.90 floor (#3400), so one omitted weight can
+  # still pass. Measured at the #8746 head: 824/914 = 90.15%, and dropping this
+  # entry leaves 823/914 = 90.04% with `duration_coverage_issues` still empty.
+  # Refresh from the
   # first post-merge run that includes it.
   test_connector_oauth_flow.py: 2.5
   test_cypher_regex_guard_3595.py: 0.2
@@ -6032,6 +6121,25 @@ durations:
   test_egress_bytes.py: 1.1
   test_entry_point_python_guard.py: 4.6
   test_extractor_embed_coerce_5060.py: 0.6
+  # #8746: 5 tests, local wall 1.8 s (measured at the #8746 review head,
+  # 2026-10-18). A NEW file has no CI junit measurement (a file that never ran
+  # cannot appear in an artifact), so this is the pre-merge estimate; refresh it
+  # from the first post-merge run that includes the file. Hermetic — no DB, no
+  # network: the writer tests use tmp_path and the wiring pin parses
+  # `tests/conftest.py` with `ast`. (The pin that every suite-session job DUMPS
+  # the artifact is a DIFFERENT file —
+  # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak,
+  # which is the one that reads the two workflows; nothing here reads YAML.)
+  # So this estimate does not move with
+  # box load. Registration and weight are different guards, and only one is
+  # enforced: `--integrity` reports a `durations` key with no surface entry as
+  # unclassified, while fast-pool coverage is checked against a 0.90 floor
+  # (#3400), so one omitted weight can still pass. Measured at this head the
+  # pool is 824/914 = 90.15%, and dropping THIS entry leaves 823/914 = 90.04%
+  # with `duration_coverage_issues` still empty — one unmeasured file of margin
+  # (822/914 = 89.93% would red). Add a weight for every new fast file rather
+  # than trusting it to red.
+  test_graph_delete_hygiene_report.py: 1.8
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
   # #4492: added by a PR, so no CI reading exists yet (`--refresh-durations`
@@ -6180,6 +6288,19 @@ durations:
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
   test_orchestrator_harness.py: 23.3
+  # #8093: unmeasured — a file ADDED BY A PR has no CI junit measurement (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a
+  # local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit
+  # value models the leg that carries the file.
+  #
+  # Do NOT restate a floor figure here. This row is registered for the SURFACE (a
+  # docs-only diff runs `tier1` only) and for the shard layout; the durations
+  # coverage ratio it also nudges is a property of the whole fast pool, which every
+  # origin/main merge changes — the same trap the #4387 row above records, where a
+  # restated figure re-staled for three review rounds. If you need the number, run
+  # `ci_selection.duration_coverage_issues()` at YOUR head; do not quote this file.
+  test_8093_registry_namespace_doc.py: 2.0
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

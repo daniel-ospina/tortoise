@@ -937,6 +937,43 @@ class WorkspaceMap(dict):
         self.error = error
 
 
+def open_window_count() -> int | None:
+    """How many cmux windows are open, or ``None`` when the answer is unreadable.
+
+    WHY THIS IS NOT A LINE COUNT. ``cmux list-windows`` prints a TABLE: an ``ID …``
+    header row first, then one row per window. Counting non-blank LINES therefore
+    reports ``n+1``, so a healthy single-window box reads as ``saw 2`` and the
+    workspace reconciliation is INERT — it fails open, every lane goes unmeasured, and
+    the collision pre-flight's claim gate answers INCOMPLETE for every candidate, so
+    the backlog never refills and the cell dispatches nothing. Measured 2026-10-18 on
+    a live cell: ``lanes=0`` behind a 198-candidate pool, with
+    ``fleet-state: workspace reconciliation is INERT (fail-open): could not confirm a
+    single cmux window (saw 2)``.
+
+    ``--json`` is preferred: it is a documented array and its LENGTH is the count, with
+    no header to strip. The text form is kept as a fallback and skips the header row
+    explicitly (by matching the literal ``ID`` column heading, not by "skip line 1",
+    which would also swallow a real window if the format ever loses the header).
+    """
+    out = _run(["cmux", "list-windows", "--json"], timeout=30)
+    if out.strip():
+        try:
+            data = json.loads(out)
+        except Exception:
+            data = None
+        if isinstance(data, list):
+            return len(data)
+        if isinstance(data, dict) and isinstance(data.get("windows"), list):
+            return len(data["windows"])
+    text = _run(["cmux", "list-windows"], timeout=30)
+    if not text.strip():
+        return None
+    rows = [ln for ln in text.splitlines() if ln.strip()]
+    if rows and rows[0].lstrip().startswith("ID"):
+        rows = rows[1:]
+    return len(rows)
+
+
 def cmux_workspaces() -> dict[str, dict[str, Any]]:
     out = _run(["cmux", "list-workspaces", "--json"], timeout=45)
     # SCOPE — this command lists ONE window. Its own help says "List workspaces in
@@ -946,12 +983,18 @@ def cmux_workspaces() -> dict[str, dict[str, Any]]:
     # say why, rather than retiring lanes that are alive in another window. The
     # fleet is single-window today (the canonical publisher makes the same
     # assumption); this guard is what stops that assumption being load-bearing.
-    windows = _run(["cmux", "list-windows"], timeout=30)
-    open_windows = [ln for ln in windows.splitlines() if ln.strip()]
-    if len(open_windows) != 1:
+    n_windows = open_window_count()
+    if n_windows is None:
         return WorkspaceMap(
             error=(
-                f"could not confirm a single cmux window (saw {len(open_windows)}); the "
+                "could not count the open cmux windows (unreadable answer); the workspace "
+                "list is per-window, so absence is not evidence"
+            )
+        )
+    if n_windows != 1:
+        return WorkspaceMap(
+            error=(
+                f"could not confirm a single cmux window (saw {n_windows}); the "
                 "workspace list is per-window, so absence is not evidence"
             )
         )

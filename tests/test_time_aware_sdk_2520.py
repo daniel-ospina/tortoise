@@ -245,7 +245,7 @@ def _ku_sdk(future_text: str = _FUTURE):
         + "_" + uuid.uuid4().hex[:10])
     old = os.environ.get("TORTOISE_DB_URI")
     os.environ["TORTOISE_DB_URI"] = uri
-    sdk = TortoiseSDK(namespace="ku8487_" + uuid.uuid4().hex[:8])
+    sdk = TortoiseSDK(namespace="test_ku8487_" + uuid.uuid4().hex[:8])
     try:
         ids = {}
         for name, text in (("ended", _ENDED), ("current", _CURRENT),

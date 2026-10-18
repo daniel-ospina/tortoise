@@ -14,6 +14,9 @@ copies narrow:
   APPROVE side is pinned for every declared residue family;
 * every NAMED prefix constant on the declared surface is tied to the register
   BY OBJECT IDENTITY, and a new named constant fails this file;
+* an OFF-SURFACE consumer of the vocabulary (`tests/_live_utils.py`) imports
+  the canonical symbol instead of restating it, and its gate consults the LIVE
+  canonical set — a narrowing of `_SERVER_WIPE_PREFIXES` must narrow it too;
 * the AST pin for AC3 — the opt-in legacy sweep (Task 3) has NO default call
   site.
 
@@ -24,11 +27,13 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import tests._embedded as embedded
 
 REPO = Path(__file__).resolve().parent.parent
 
+from tests import _live_utils  # noqa: E402
 from tests._embedded import (  # noqa: E402
     _DIVERGENCE_REGISTER,
     _LEGACY_RESIDUE_PREFIXES,
@@ -161,8 +166,10 @@ def test_the_default_graph_refusal_is_isolated_from_the_owned_refusal():
 def test_a_sixth_copy_of_the_vocabulary_fails_here():
     """AC1's enforcement, SCOPE: NAMED prefix constants on the declared surface.
 
-    The declared surface is `tests/_embedded.py`, `tortoise/sdk.py`, and
-    `tortoise/projection/__init__.py`. The scanner matches any named constant
+    The declared surface is `tests/_embedded.py`, `tortoise/sdk.py`,
+    `tortoise/projection/__init__.py`, and `tests/_live_utils.py` (added with
+    #8746's `drop_test_graph`, whose fail-closed delete gate must not become a
+    fifth NAMED copy of the vocabulary). The scanner matches any named constant
     ending in `PREFIXES`, at any indentation (`^\\s*…`) and with either `=` or
     a `:` annotation, so an indented or annotated constant is caught too.
     OUT OF SCOPE: numeric-suffixed or differently-named constants
@@ -174,7 +181,7 @@ def test_a_sixth_copy_of_the_vocabulary_fails_here():
     """
     seen = set()
     for rel in ("tests/_embedded.py", "tortoise/sdk.py",
-                "tortoise/projection/__init__.py"):
+                "tortoise/projection/__init__.py", "tests/_live_utils.py"):
         src = (REPO / rel).read_text()
         for m in re.finditer(r"^\s*([A-Za-z_][A-Za-z_0-9]*PREFIXES)\s*[:=]", src, re.M):
             seen.add(m.group(1))
@@ -187,6 +194,57 @@ def test_a_sixth_copy_of_the_vocabulary_fails_here():
         f"{sorted(set(_DIVERGENCE_REGISTER) - seen)} — it would pass vacuously")
     unregistered = {n for n in seen if n not in _DIVERGENCE_REGISTER}
     assert unregistered == set(), f"prefix constant(s) not in the register: {unregistered}"
+
+
+def test_the_routed_delete_helper_consults_the_live_canonical_set(monkeypatch):
+    """#8746 review P2: `drop_test_graph`'s gate is the CANONICAL set, not a copy.
+
+    `tests/_live_utils.py::drop_test_graph` gates an IRREVERSIBLE
+    ``GRAPH.DELETE`` on a prefix family. A NAMED local restatement of
+    ``_SERVER_WIPE_PREFIXES`` would sit outside every drift guard, and the
+    unsafe drift direction is the one nobody notices: when the canonical set is
+    NARROWED (as ``#7795`` deliberately narrowed it), the copy stays broad and
+    the helper keeps deleting a family the canonical GRAPH.LIST set no longer
+    authorises — fail-OPEN on the delete gate.
+
+    So narrow the canonical symbol only and require the helper to REFUSE. On
+    the restated copy this fails: ``test_*`` still passes its own gate and
+    reaches the guard's presence read.
+    """
+    calls: list[tuple] = []
+
+    class _Db:
+        def list_graphs(self):
+            calls.append(("list_graphs",))
+            return []
+
+    proj = SimpleNamespace(graph_name="test_review_p2_canonical_ab12cd34", db=_Db())
+    # Snapshot/restore the session record: this test DRIVES a refusal, and a
+    # synthetic refusal must not fork into a real run's
+    # `tempdir-hygiene-end.json` section (#7735 `_discard_tolerated_leaks`
+    # precedent; #8746 review r3 P3, artifact name corrected in r6 P3 — the record
+    # rides the artifact the session finalizer already dumps, NOT a graph-delete-
+    # specific file, which this PR deliberately did not create).
+    snapshot = _live_utils.graph_delete_events()
+    # PRECONDITION — the canonical set admits this name, so the gate OPENS and
+    # the guard's presence read is what answers (the graph is absent → False).
+    # Without this the refusal below could pass for the wrong reason.
+    assert _live_utils.drop_test_graph(proj) is False
+    assert calls and all(c == ("list_graphs",) for c in calls), (
+        "the gate refused a name the canonical set authorises — the "
+        "precondition of this test is broken, so it would pass vacuously")
+    calls.clear()
+    assert _live_utils.graph_delete_events() == snapshot  # absent → not recorded
+    monkeypatch.setattr(embedded, "_SERVER_WIPE_PREFIXES", ("tortoise_test",))
+    try:
+        assert _live_utils.drop_test_graph(proj) is False
+        assert calls == [], (
+            "drop_test_graph reached the delete path for a name the canonical "
+            "_SERVER_WIPE_PREFIXES no longer authorises — its prefix gate is a "
+            "COPY of the vocabulary, which is fail-OPEN on an irreversible "
+            "GRAPH.DELETE (#8746 review P2)")
+    finally:
+        _live_utils._restore_graph_delete_events(snapshot)
 
 
 # ── AC3 AST pin (Task 1 establishes the helper; Task 3 wires it up) ────────
