@@ -112,13 +112,6 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # code resolves, which is the one thing these tests must not do. Same
     # prod-coupled class as test_agent_signup / test_cohort_cost_cap.
     "test_7677_create_org_retry_idempotent.py": {"registry": "prod-coupled"},
-    # #4721/#8979: the ``reg`` fixture opens ``TortoiseSDK(namespace="registry")``
-    # and ``_get_registry()`` to seed the Team/APIKey nodes the rotate-claim race
-    # writes against — the literal IS the canonical control-plane namespace PROD
-    # code resolves (``_make_sdk(namespace="registry")`` throughout tortoise/),
-    # so a ``test_*`` rename would seed a graph the claim never touches. Same
-    # ``prod-coupled`` class as test_commit_endpoint / test_billing.
-    "test_rotate_key.py": {"registry": "prod-coupled"},
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
     "test_billing.py": {"registry": "prod-coupled"},
     "test_cli_serve.py": {"registry": "prod-coupled"},

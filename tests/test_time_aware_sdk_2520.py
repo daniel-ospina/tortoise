@@ -245,12 +245,7 @@ def _ku_sdk(future_text: str = _FUTURE):
         + "_" + uuid.uuid4().hex[:10])
     old = os.environ.get("TORTOISE_DB_URI")
     os.environ["TORTOISE_DB_URI"] = uri
-    # ``test_``-prefixed namespace (#2817 build fix): the markers gate
-    # (tests/test_markers.py::test_namespace_literals_guard_passing_or_routed)
-    # refuses an un-routed non-test namespace literal, and this one is
-    # test-constructed — the unique DB URI above is what isolates the run, so
-    # the prefix is free and the guard's rename route is the honest one.
-    sdk = TortoiseSDK(namespace="test_ku8487_" + uuid.uuid4().hex[:8])
+    sdk = TortoiseSDK(namespace="ku8487_" + uuid.uuid4().hex[:8])
     try:
         ids = {}
         for name, text in (("ended", _ENDED), ("current", _CURRENT),
