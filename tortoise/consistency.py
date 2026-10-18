@@ -3318,26 +3318,41 @@ def recover_from_log(events_dir: str, projection) -> dict:
     from tortoise.log import (
         EventLog,
         TornTailResurrectionError,
+        read_for_replay,
         refuse_torn_tail_revival,
     )
 
     log = EventLog(log_path)
     try:
-        events = log.read_all()
+        # #5612: SALVAGE read. This is the recovery entry point the journal
+        # exists for, so a damaged mid-file line must not make it refuse
+        # forever — the skipped lines are counted and classified below, and
+        # the #3316 refusal still fires (before any fold) when the loss could
+        # revive removed state.
+        events = read_for_replay(log)
     except OSError as e:
         return {"recovered": False, "log_points": 0, "db_points": 0,
                 "reason": f"event log unreadable: {e}"}
     except ValueError as e:
-        # Mid-file corruption. Replaying the surviving records would produce a
-        # graph that contradicts the journal, so this is untrustworthy rather
-        # than tolerable — and it must be refused BEFORE the replay, since a
-        # verdict after the mutation cannot un-apply it.
+        # DEFENSIVE since #5612: a salvage read does not raise for a damaged
+        # line (it skips and counts it, and the #3316 refusal below decides).
+        # Kept because a reader other than `EventLog` — an injected one in a
+        # test, or a future format gate — can still refuse to parse, and
+        # replaying the surviving records would produce a graph that
+        # contradicts the journal. It must be refused BEFORE the replay, since
+        # a verdict after the mutation cannot un-apply it.
         return {"recovered": False, "log_points": 0, "db_points": 0,
                 "reason": (f"refusing to replay {files[0]}: {e} — the graph "
                            "was NOT rebuilt")}
     if not events:
         return {"recovered": False, "log_points": 0, "db_points": 0,
                 "reason": "event log empty or unreadable — nothing to recover"}
+
+    # #5612: the mid-file lines the salvage read had to skip. Its own tally and
+    # its own clause (below): it is neither crash damage (`torn`) nor a fold
+    # refusal, and folding it into either would name a cause that is false for
+    # the records it describes.
+    corrupt = getattr(log, "corrupt_line_count", 0)
 
     # #3316: a torn TRAILING record whose loss can REVIVE state is not the
     # data-LOSS direction the tear tolerance was written for. A truncated
@@ -3352,8 +3367,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
         try:
             refuse_torn_tail_revival(revival)
         except TornTailResurrectionError as e:
+            # #5612: state the skipped count in the refusal too — the operator
+            # needs to know how much of the journal the reader consumed
+            # without replaying, not only which type it could not prove
+            # harmless.
+            _skipped = (f" [{corrupt} mid-file line(s) skipped by the "
+                        f"salvage read]" if corrupt else "")
             return {"recovered": False, "log_points": len(events),
-                    "db_points": 0, "reason": f"{files[0]}: {e}"}
+                    "db_points": 0, "reason": f"{files[0]}: {e}{_skipped}"}
 
     torn = log.torn_trailing_count
 
@@ -3618,6 +3639,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
             first_refusal,
         )
     extra = f" ({torn} skipped)" if torn else ""
+    if corrupt:
+        # #5612: NEVER silent. A salvage read that skipped a damaged mid-file
+        # line replayed the records around it, so the recovery SUCCEEDED over a
+        # journal it could only partly read — the one thing an operator must
+        # not have to infer from silence.
+        extra += (f" ({corrupt} corrupt mid-file line(s) SKIPPED — the record "
+                  f"{'it' if corrupt == 1 else 's'} could not be parsed and "
+                  f"{'is' if corrupt == 1 else 'are'} NOT in this graph)")
     if refused:
         extra += f" ({refused} refused by the numeric domain)"
     if identity_skipped:

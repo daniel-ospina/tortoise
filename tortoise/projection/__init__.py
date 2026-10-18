@@ -6703,7 +6703,12 @@ class InMemoryProjection:
         # #3316: the same refusal as the Falkor engines — a dropped torn
         # trailing removal record must not be folded away into a projection
         # that serves the removed state as current.
-        events = log.read_all()
+        # #5612: SALVAGE read. A replay engine must not refuse forever over a
+        # damaged line it cannot repair: a malformed mid-file line is skipped
+        # and COUNTED, and `torn_tail_revival_records` classifies it below, so
+        # the #3316 refusal still fires when the loss could revive state.
+        from tortoise.log import read_for_replay
+        events = read_for_replay(log)
         _refuse_revival_torn_tail(
             getattr(log, "torn_tail_revival_records", lambda: [])())
         # #7936: the BATCH fold, so the non-Point belief index is filled too —
@@ -8931,7 +8936,11 @@ class FalkorProjection(
         # then PROVE the replay can recreate every episodic Point BEFORE the
         # wipe. #2943: verifying only after the wipe turns a durability bug
         # into permanent data loss, so the proof has to precede the mutation.
-        events = list(log.read_all())
+        # #5612: SALVAGE read — a mid-file damaged line is skipped and counted
+        # rather than bricking recovery, and the #3316 refusal below still
+        # fires when the skipped loss could revive removed state.
+        from tortoise.log import read_for_replay
+        events = list(read_for_replay(log))
         # #3316: refuse BEFORE the wipe when the journal's torn tail cannot be
         # proven harmless — replaying without a dropped removal resurrects
         # removed state, and a registry-only/synthetic log object may not
@@ -9315,7 +9324,7 @@ class FalkorProjection(
         # value from a previous call.
         self._rebuild_wiped = False
         import os  # noqa: I001
-        from tortoise.log import EventLog
+        from tortoise.log import EventLog, read_for_replay
 
         # L1 (#2944): fail the structural precondition FIRST — a caller that
         # did not opt in must not reach the #548 snapshot, the log parse, or
@@ -9393,7 +9402,10 @@ class FalkorProjection(
                 log_point_ids: set[str] = set()
                 for fname in sorted(os.listdir(log_dir)):
                     if fname.endswith('.jsonl'):
-                        for ev in EventLog(os.path.join(log_dir, fname)).read_all():
+                        # #5612: salvage — a damaged line must not abort this
+                        # pre-wipe probe over a graph that is still intact.
+                        for ev in read_for_replay(EventLog(os.path.join(
+                                log_dir, fname))):
                             if ev.get("type") in ("PointAdded", "OperatorAdded"):
                                 p = ev.get("point", {})
                                 if isinstance(p, dict) and p.get("id"):
@@ -9684,7 +9696,12 @@ class FalkorProjection(
         for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
                 file_log = EventLog(os.path.join(log_dir, fname))
-                chunk = file_log.read_all()
+                # #5612: SALVAGE read — `rebuild_all` is the tool the journal
+                # exists for, so ONE damaged line must not make it refuse
+                # forever. The skipped lines are counted on `file_log` and the
+                # #3316 refusal below still fires when their loss could revive
+                # removed state — before the wipe, as before.
+                chunk = read_for_replay(file_log)
                 # #3316: same refusal as `rebuild`/`recover_from_log`, before
                 # the wipe below.
                 _refuse_revival_torn_tail(

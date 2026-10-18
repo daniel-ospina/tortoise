@@ -638,7 +638,15 @@ def test_inmemory_rebuild_refuses_a_torn_removal_tail():
 def test_recover_from_log_refuses_mid_file_corruption():
     """The reader swap in ``recover_from_log``: a malformed MID-FILE line is
     refused (the old local loop dropped any malformed line anywhere), and the
-    refusal precedes the replay, so nothing from the journal is applied."""
+    refusal precedes the replay, so nothing from the journal is applied.
+
+    #5612 moved the refusal ONE step: a salvage read now SKIPS the damaged
+    line and COUNTS it instead of raising, and the #3316 classifier refuses
+    the replay for it (an unreadable type cannot be proven harmless). The
+    invariant this test exists for is unchanged — nothing is replayed, and the
+    reason names the damage AND the skipped count — so it is asserted on the
+    refusal that now carries it.
+    """
     tmp = _mk_tmp()
     db_path = os.path.join(tmp, "midfile_corrupt.db")
     _write_journal(
@@ -652,7 +660,8 @@ def test_recover_from_log_refuses_mid_file_corruption():
         proj.g.query("MATCH (n) DETACH DELETE n")
         result = recover_from_log(tmp, proj)
         assert result["recovered"] is False, result
-        assert "malformed line 2" in result["reason"], result
+        assert "cannot be proven harmless" in result["reason"], result
+        assert "1 mid-file line(s) skipped by the salvage read" in result["reason"], result
         total = proj.g.query(
             "MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert total == 0, "records were replayed despite mid-file corruption"
