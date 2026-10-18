@@ -911,7 +911,7 @@ def test_direct_route_non_point_endpoints_still_rejected(sdk):
     # the two Source cells report the graph item label, the point cell its own
     assert any("got a Source endpoint" in m for m in msgs), msgs
     assert any("got a Source item" in m for m in msgs), msgs
-    assert any("got a operator-shaped point item" in m for m in msgs), msgs
+    assert any("got an operator-shaped point item" in m for m in msgs), msgs
     # the bundle-local Event cell is no longer among them (#7925)
     assert not any("evtL" in m for m in msgs), msgs
     # Phase 2 is defense-in-depth: the same bundle raises, never a partial write
@@ -1216,7 +1216,7 @@ def test_direct_route_operator_shaped_entity_item_rejected_phase1(sdk, spelling)
     }
     viols = sdk._validate_bundle(bundle)
     msgs = [v["message"] for v in viols]
-    assert any("got a operator-shaped entity item" in m for m in msgs), msgs
+    assert any("got an operator-shaped entity item" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="operator-shaped entity item"):
         sdk.ingest(bundle)
@@ -1362,9 +1362,9 @@ def test_pre_existing_operator_shaped_holder_rejected_phase1(sdk):
     }
     viols = sdk._validate_bundle(bundle)
     msgs = [v["message"] for v in viols]
-    assert any("existing name holder is operator-shaped" in m for m in msgs), msgs
+    assert any("merge target is operator-shaped" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
-                       match="existing name holder is operator-shaped"):
+                       match="merge target is operator-shaped"):
         sdk.ingest(bundle)
     # ZERO mutation — no point committed, no second Subject minted
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
@@ -1493,10 +1493,10 @@ def test_operator_null_does_not_clear_operator_shape_rejected_phase1(
     }
     viols = sdk._validate_bundle(bundle)
     msgs = [v["message"] for v in viols]
-    assert any("existing name holder is operator-shaped" in m
+    assert any("merge target is operator-shaped" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError,
-                       match="existing name holder is operator-shaped"):
+                       match="merge target is operator-shaped"):
         sdk.ingest(bundle)
     # ZERO mutation — the point never committed, the holder is unchanged
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
@@ -1868,7 +1868,7 @@ def test_operator_shaped_holder_with_array_status_is_refused_in_phase1(sdk):
                          "reify": True}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
-    assert any("operator" in m and "holder" in m for m in msgs), msgs
+    assert any("merge target is operator-shaped" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
@@ -2006,3 +2006,194 @@ def test_single_carrier_declared_terminal_status_is_still_dropped(sdk):
     assert sdk.ingest(bundle)["created"]["connections"] == 1
     assert sdk._get_proj().g.query(
         "MATCH (o:Object {name:'Solo'}) RETURN o.status").result_set == [["live"]]
+
+
+# ── shared name whose CANONICAL carrier exists (#7925 review round 6) ────────
+#
+# The guard reads the axes of the node the WRITE lands on. Since #8864/#8902 the
+# fold keys its merge on the record's own `id` once a name has 2+ carriers, and
+# every ingest entity item's id IS `ids.entity_name_id(label, name)` — so with
+# 2+ carriers the item still LANDS on a carrier holding that canonical id
+# (ON MATCH); it mints only when no carrier holds it. Branching on the carrier
+# count alone therefore failed OPEN here (Phase 1 `[]`, then Phase2Error with
+# the earlier point committed) and OVER-REJECTED the declared-status direction.
+
+
+def _canonical(label: str, name: str) -> str:
+    from tortoise.ids import entity_name_id
+
+    return entity_name_id(label, name)
+
+
+def _two_carriers(sdk, canonical_status: str | None = "live", **extra) -> None:
+    """2 carriers: one holding the canonical id, one decoy."""
+    props = "" if canonical_status is None else f", status:'{canonical_status}'"
+    for k, v in extra.items():
+        props += f", {k}:{v}"
+    sdk._get_proj().g.query(
+        f"CREATE (:Object {{id:'{_canonical('Object', 'Acme')}', "
+        f"name:'Acme'{props}}})")
+    sdk._get_proj().g.query(
+        "CREATE (:Object {id:'decoy-1', name:'Acme', status:'live'})")
+
+
+def test_shared_name_canonical_carrier_terminal_status_is_refused(sdk):
+    """A terminal CANONICAL carrier is the merge target — refuse it in Phase 1."""
+    _two_carriers(sdk, "superseded")
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Acme"},
+            {"ref": "b", "type": "object", "name": "Beta"},
+        ],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("terminal Object" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+
+
+def test_shared_name_canonical_carrier_operator_is_refused(sdk):
+    """The operator axis is read from the merge target, not from any carrier."""
+    _two_carriers(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) SET o.is_operator = true",
+        params={"id": _canonical("Object", "Acme")},
+    )
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Acme"},
+            {"ref": "b", "type": "object", "name": "Beta"},
+        ],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("whose merge target is operator-shaped" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+
+
+def test_shared_name_canonical_carrier_array_status_is_refused(sdk):
+    """An array status on the merge target is the TypeError the guard predicts."""
+    _two_carriers(sdk)
+    sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) SET o.status = ['retracted']",
+        params={"id": _canonical("Object", "Acme")},
+    )
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Acme"},
+            {"ref": "b", "type": "object", "name": "Beta"},
+        ],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("cannot be evaluated" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+
+
+def test_shared_name_canonical_carrier_declared_terminal_is_dropped(sdk):
+    """The other direction: a declaration that MERGES is dropped, not refused.
+
+    With the canonical carrier present and live, the item lands on it and
+    `status` is written ON CREATE only, so the declaration never reaches the
+    node — `create_direct_edge` writes the edge. Refusing this bundle rejected a
+    write the primitives perform.
+    """
+    _two_carriers(sdk, "live")
+    bundle = {
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Acme",
+             "status": "retracted"},
+            {"ref": "b", "type": "object", "name": "Beta"},
+        ],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    assert sdk._validate_bundle(bundle) == []
+    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    assert sdk._get_proj().g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status",
+        params={"id": _canonical("Object", "Acme")},
+    ).result_set == [["live"]]
+
+
+def test_shared_name_distinct_nodes_are_not_a_self_edge(sdk):
+    """Two refs to a name that MINTS are two different nodes, not one endpoint.
+
+    The merged-name self-edge guard keys on `(label, name)`; with 2+ carriers and
+    no canonical carrier both items mint their own node, so the edge between them
+    is a real edge (`create_direct_edge` writes it). The guard over-rejected it.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (:Subject {id:'carrier-1', name:'Gamma', status:'live'})")
+    sdk._get_proj().g.query(
+        "CREATE (:Subject {id:'carrier-2', name:'Gamma', status:'live'})")
+    bundle = {
+        "connections": [
+            {"from": "carrier-2", "to": "carrier-1", "operator": "IMPL"},
+        ],
+    }
+    assert sdk._validate_bundle(bundle) == []
+    assert sdk.ingest(bundle)["created"]["connections"] == 1
+
+
+def test_second_same_name_item_declaring_array_is_refused(sdk):
+    """A shared name mints PER ITEM, so the second item's array is stored too.
+
+    The mint check used to be keyed per NAME (`_seen_mints`), so only the first
+    same-name item was examined and a second one declaring an array slipped past
+    Phase 1 into the mid-write `TypeError`.
+    """
+    for i in (1, 2):
+        sdk._get_proj().g.query(
+            f"CREATE (:Object {{id:'decoy-{i}', name:'Acme', status:'live'}})")
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [
+            {"ref": "a", "type": "object", "name": "Acme"},
+            {"ref": "b", "type": "object", "name": "Acme",
+             "status": ["retracted"]},
+        ],
+        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("an array is stored verbatim" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0
+
+
+def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
+    """`_endpoint_is_terminal` PREDICTS `create_direct_edge`'s own test.
+
+    If either side moves, Phase 1 either predicts a raise that never happens or
+    accepts an endpoint the primitive raises on mid-write. This drives both
+    surfaces over one fixture so the pairing is a detector, not a comment.
+    """
+    term = sdk.create_subject("Term", status="superseded")["id"]
+    live = sdk.create_object("Live")["id"]
+    # Phase 1 predicts the refusal of the direct route …
+    msgs = [v["message"] for v in sdk._validate_bundle({
+        "connections": [{"from": term, "to": live, "operator": "IMPL"}],
+    })]
+    assert any("terminal" in m and "superseded" in m for m in msgs), msgs
+    # … and the primitive is what refuses it.
+    with pytest.raises(ValueError, match="terminal"):
+        sdk.create_direct_edge("IMPL", term, live)
+    # A reified pair takes `create_operator`, which tolerates the terminal node —
+    # so neither surface refuses it, and Phase 1 must not either.
+    assert sdk._validate_bundle({
+        "connections": [{"from": live, "to": term, "operator": "IMPL",
+                         "reify": True}],
+    }) == []

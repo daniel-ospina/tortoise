@@ -3964,6 +3964,11 @@ _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
                        "event": "Event", "document": "Source"}
 
 
+def _indefinite(phrase: str) -> str:
+    """``a``/``an`` + ``phrase`` — the messages read as sentences, and "got a
+    Object/Event endpoint" was both wrong and a wrong diagnosis (#7925)."""
+    return f"{'an' if phrase[:1].lower() in 'aeiou' else 'a'} {phrase}"
+
 def _bundle_entity_name_outcomes(
     bundle: dict,
 ) -> dict[tuple[str, str], tuple[str | None, bool, bool, str | None]]:
@@ -14640,8 +14645,13 @@ class TortoiseSDK:
     # mid-write inside ingest(). Consumed by BOTH `_validate_bundle` (Phase 1
     # — collects ALL violations, zero mutation) and ingest()'s write path
     # (Phase 2 — defense-in-depth raises). The SAME helper emits the SAME
-    # message in both phases, so Phase-1/2 parity holds by construction
-    # (asserted by the parity unit test).
+    # message in both phases, so the classes these helpers own are covered in
+    # BOTH phases by construction (asserted by the parity unit test). It is a
+    # coverage statement about the helpers, NOT a universal: `_sanitize_props`
+    # refuses more than this gate owns (a caller-supplied `id`, the belief props
+    # `credibility`/`ep_alpha`/`ep_beta`/`baseline_*`), so those still pass
+    # Phase 1 and raise in step 2/3 with the earlier items committed — the
+    # #8755 residual named in `_check_endpoints`.
     #
     # CYCLE-25 (ontology v3.8): pointKind `statement` is THE write kind;
     # legacy kinds are write-compat-only; `event` is REJECTED (episodic
@@ -15439,49 +15449,46 @@ class TortoiseSDK:
 
     def _entity_name_holders(
         self, label: str, name: str,
-    ) -> tuple[bool, str | None, str | None, str | None, int]:
+    ) -> tuple[bool, str | None, str | None, str | None, int, bool]:
         """``(exists_by_name, terminal_holder_id, operator_holder_id,
-        unevaluable_status_holder_id, carrier_count)`` for a bundle-local entity
-        ref (#7925) — the entity sibling of
+        unevaluable_status_holder_id, carrier_count, merges)`` for a
+        bundle-local entity ref (#7925) — the entity sibling of
         :meth:`_find_terminal_dedup_hit`, and it exists for the same reason:
         the bundle-local endpoint guard has to resolve the endpoint the WRITER
         will use, or the guard fails open and the endpoint becomes a mid-write
         raise on a partially-mutated graph.
 
-        ``:Subject``/``:Object`` are keyed by NAME **only while the name has a
-        single carrier** — the projection MERGEs by name and
-        ``ids.entity_name_id`` makes the ``(label, name)`` id deterministic so
-        that merge is idempotent — while a Point is keyed by content. Hence a
-        name probe here, a content/dedup probe there.
+        ⛔ ``merges`` and the three axes are LOAD-BEARING and they are read from
+        the node the write will actually LAND ON, not from "any holder". Since
+        #8864/#8902 the fold picks its merge key from the carrier count
+        (``merge_key = "id" if name_is_shared else "name"``), so:
 
-        ⛔ ``carrier_count`` is load-bearing, not diagnostic. Since #8864/#8902
-        the fold keys the MERGE on the record's OWN ``id`` once a name has 2+
-        carriers, so a bundle item naming a shared name MINTS a node on its own
-        id instead of merging onto a holder. That inverts both halves of this
-        guard, and getting it wrong fails OPEN in the exact #2062 class this
-        gate exists to close (measured at the merged head: two live carriers,
-        an item declaring ``status='retracted'`` → Phase 1 ``[]``, then
-        ``Phase2Error`` with the minted terminal node left behind):
+          * **one carrier (or none)** — the merge is keyed on NAME, so the item
+            lands on that holder (or mints) and the holder's axes decide; a
+            declared status is dropped by ``ON CREATE``-only status writes;
+          * **2+ carriers** — the merge is keyed on the record's own ``id``,
+            which for every ingest entity item IS ``ids.entity_name_id(label,
+            name)``. When a carrier already holds that canonical id the item
+            still lands on it (``ON MATCH``), so THAT node's axes decide — not
+            the other carriers'; when no carrier holds it, the item MINTS a
+            node on its own id and inherits NO holder axis, and its declared
+            status is what gets stored.
 
-          * with ONE carrier the merge lands on that node, which keeps its OWN
-            status (measured), so a declared status is dropped — the holder's
-            axes decide, and a declared terminal status must NOT reject;
-          * with 2+ carriers the item mints, so ITS declared status applies
-            (the holder's terminal/operator/unevaluable axes do not), and the
-            declared value must be refused here rather than in step 4.
+        Reading the axes from "any carrier" or from "none of them" both fail:
+        the first over-rejects (another carrier's terminal status is not the
+        endpoint), the second fails OPEN in the exact #2062 class this gate
+        exists to close (measured: the canonical carrier terminal → Phase 1
+        ``[]``, then ``Phase2Error`` with the earlier point committed).
 
-        Callers must therefore read ``carrier_count`` together with each axis;
-        the axes are meaningful only on the single-carrier (name-merge) branch.
-        The terminal predicate is the shared ``live._terminal_expression``
-        Cypher builder (#3142), so this guard and the Point leg cannot disagree
-        about what "terminal" means.
+        So the axes returned here are the MERGE TARGET's, and are ``None`` when
+        the item mints; ``merges`` says which of the two happened. Callers must
+        branch on ``merges`` rather than on ``carrier_count``.
 
         ``operator_holder_id`` is the same test on the OTHER axis (#7925 review
-        round 3): on the single-carrier branch an operator-shaped holder is not
-        a connection endpoint on any route either, so a ref merging onto it
-        aborts in step 4 after step 3 committed. It cannot be folded into the
-        terminal query (that one is status-scoped), so the rows are read once
-        and classified here.
+        round 3): an operator-shaped merge target is not a connection endpoint
+        on any route either, so a ref merging onto it aborts in step 4 after
+        step 3 committed. It cannot be folded into the terminal query (that one
+        is status-scoped), so the rows are read once and classified here.
 
         The three axes are INDEPENDENT and returned together (#7925 review
         round 4): a holder can be operator-shaped AND carry an unevaluable
@@ -15491,6 +15498,10 @@ class TortoiseSDK:
         passed Phase 1 and killed step 4 with the earlier items committed
         (measured). Each consumer reads its own index, so filling them all
         cannot make one arm shadow another.
+
+        The terminal predicate is the shared ``live._terminal_expression``
+        Cypher builder (#3142), so this guard and the Point leg cannot disagree
+        about what "terminal" means.
         """
         proj = self._get_proj()
         rows = proj.g.query(
@@ -15500,22 +15511,32 @@ class TortoiseSDK:
             params={"name": name},
         ).result_set
         if not rows:
-            return False, None, None, None, 0
+            return False, None, None, None, 0, False
+        # The node the item lands on: the sole carrier, or — once the name is
+        # shared — the carrier that already holds the deterministic id the fold
+        # merges on. No such carrier ⇒ the item MINTS and no holder axis applies.
+        canonical = _entity_name_id(label, name)
+        target = (
+            rows[0] if len(rows) <= 1
+            else next((r for r in rows if r[0] == canonical), None)
+        )
+        if target is None:
+            return True, None, None, None, len(rows), False
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
         # e.g. an operator-shaped holder with an array status lost the operator
         # refusal and killed step 4). Axis 4 (unevaluable status) is computed
         # here rather than in Cypher because the terminal expression simply does
         # not match an array, so no query-level predicate can see it.
-        _terminal_id = _operator_id = _bad_status_id = None
-        for holder_id, _term, _op, _status in rows:
-            if _bad_status_id is None and _status_is_stored_unhashable(_status):
-                _bad_status_id = holder_id
-            if _terminal_id is None and _term:
-                _terminal_id = holder_id
-            if _operator_id is None and _op:
-                _operator_id = holder_id
-        return True, _terminal_id, _operator_id, _bad_status_id, len(rows)
+        _holder_id, _term, _op, _status = target
+        return (
+            True,
+            _holder_id if _term else None,
+            _holder_id if _op else None,
+            _holder_id if _status_is_stored_unhashable(_status) else None,
+            len(rows),
+            True,
+        )
 
     def _endpoint_not_id_addressed(self, index: int, v: str,
                                    label: str, node_id: object) -> dict:
@@ -15732,11 +15753,11 @@ class TortoiseSDK:
         # probe is a graph read — resolve each (label, name) once.
         holders: dict[
             tuple[str, str],
-            tuple[bool, str | None, str | None, str | None, int],
+            tuple[bool, str | None, str | None, str | None, int, bool],
         ] = {}
 
         def _name_holders(elabel: str, name: str) \
-                -> tuple[bool, str | None, str | None, str | None, int]:
+                -> tuple[bool, str | None, str | None, str | None, int, bool]:
             key = (elabel, name)
             if key not in holders:
                 holders[key] = self._entity_name_holders(elabel, name)
@@ -15753,16 +15774,19 @@ class TortoiseSDK:
         #     a non-string status there and `create_subject`'s writer raises, so
         #     nothing is ever stored; including it produced two diagnoses of one
         #     defect, the second naming a mechanism that cannot happen.
-        #   * an item whose name already has a single HOLDER is skipped: the
-        #     merge does not overwrite an existing node's status (it is
-        #     projection-owned for `:Object`), so the declaration is dropped and
-        #     the writer accepts it — the HOLDER's own array status is caught by
-        #     the direct-route leg below (`bad_status`), which is where the raise
-        #     would actually come from. A SHARED name (2+ carriers) is NOT
-        #     skipped: #8864/#8902 key that merge on the item's own id, so the
-        #     item mints and its declared array IS stored (measured against the
-        #     merged head — see ``_entity_name_holders``).
-        _seen_mints: set[tuple[str, str]] = set()
+        #   * an item whose ref MERGES onto a holder is skipped: the merge does
+        #     not overwrite an existing node's status (it is projection-owned
+        #     for `:Object`), so the declaration is dropped and the writer
+        #     accepts it — the HOLDER's own array status is caught by the
+        #     direct-route leg below (`bad_status`), which is where the raise
+        #     would actually come from. An item that MINTS (a shared name whose
+        #     canonical id no carrier holds) is NOT skipped: #8864/#8902 key that
+        #     merge on the item's own id, so its declared array IS stored.
+        #
+        # Scoped PER ITEM, not per name: with 2+ carriers every item mints its
+        # own node, so a second same-name item's array is stored too and a
+        # per-name `seen` set would skip it (that second item is exactly the one
+        # a per-name pre-scan cannot speak for).
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
@@ -15782,16 +15806,16 @@ class TortoiseSDK:
                     # (an unguarded `in set()` here raised TypeError straight
                     # out of `_validate_bundle` — review round 4).
                     continue
-                _key = (_elabel, _name)
-                if _key in _seen_mints:
-                    continue
-                _seen_mints.add(_key)
-                _existing, _hit, _op, _bad, _carriers = _name_holders(
+                _existing, _hit, _op, _bad, _carriers, _merges = _name_holders(
                     _elabel, _name)
-                if _existing and _carriers <= 1:
+                if _merges:
                     continue
-                _mint = name_outcomes.get(
-                    _key, (None, False, False, None))[0]
+                # The item mints on its OWN id, so the status it carries is the
+                # one stored: read it from the item, not from a per-name
+                # pre-scan (which is the FIRST item's status and would both miss
+                # a later item's array and charge an earlier item for it).
+                _mint = _item_effective_status(
+                    item, _item_flatten_depth(item, "entities"))
             if not _status_is_stored_unhashable(_mint):
                 continue
             violations.append({
@@ -15863,11 +15887,11 @@ class TortoiseSDK:
                                 tainted_by_bundle = _op_val
                             else:
                                 _h = _name_holders(elabel, ep_name)
-                                # Only the single-carrier (name-merge) branch
-                                # lands on the holder: a shared name keys the
-                                # merge on the item's own id, so the item mints
-                                # its own node and inherits no holder axis.
-                                operator_shaped = _h[4] <= 1 and _h[2] is not None
+                                # The axes are the MERGE TARGET's, and are None
+                                # when the item mints its own node (a shared
+                                # name whose canonical id no carrier holds), so
+                                # no carrier-count branch is needed here.
+                                operator_shaped = _h[2] is not None
                     plain_point = section == "points" and not operator_shaped
                     epistemic_entity = section == "entities" \
                         and elabel in self._INGEST_ENDPOINT_LABELS \
@@ -15885,8 +15909,8 @@ class TortoiseSDK:
                                        f"{elabel} whose bundle item (no "
                                        f"ref) is operator-shaped")
                             else:
-                                got = (f"{elabel} whose existing name "
-                                       f"holder is operator-shaped")
+                                got = (f"{elabel} whose merge target is "
+                                       f"operator-shaped")
                             if not operator_shaped:
                                 got = f"{elabel or 'entity'} item"
                         else:
@@ -15896,7 +15920,8 @@ class TortoiseSDK:
                             "message": f"ingest: connections[{i}] bundle-local "
                                        f"endpoint {v!r} must be a "
                                        f"{self._INGEST_ENDPOINT_CONTRACT} "
-                                       f"endpoint — got a {got}",
+                                       f"endpoint — got "
+                                       f"{_indefinite(got)}",
                         })
                 else:
                     info = node_info.get(v)
@@ -15963,13 +15988,14 @@ class TortoiseSDK:
                             or info["label"] not in self._INGEST_ENDPOINT_LABELS:
                         got = (f"operator {info['label']}"
                                if info["is_operator"]
-                               else info["label"] or "unknown node type")
+                               else (info["label"] or "unknown node type"))
                         violations.append({
                             "section": "connections", "index": i,
                             "message": f"ingest: connections[{i}] endpoint "
                                        f"{v!r} must be a "
                                        f"{self._INGEST_ENDPOINT_CONTRACT} "
-                                       f"endpoint — got a {got} endpoint",
+                                       f"endpoint — got "
+                                       f"{_indefinite(got)} endpoint",
                         })
                     elif route == "direct" and not _status_is_evaluable(
                             info["status"]):
@@ -16024,6 +16050,15 @@ class TortoiseSDK:
                     ep_name = info.get("name")
                 if ep_label not in ("Subject", "Object") \
                         or not isinstance(ep_name, str) or not ep_name:
+                    continue
+                # A shared name whose canonical id NO carrier holds makes every
+                # item naming it mint its own node (#8864/#8902 key that merge on
+                # the record's own id), so two such refs are DISTINCT endpoints,
+                # not a self-edge. Measured over-rejection: the same edge written
+                # directly by `create_direct_edge` was refused here. `merges` is
+                # the same answer `_entity_name_holders` gives the other arms.
+                _h = _name_holders(ep_label, ep_name)
+                if _h[4] >= 2 and not _h[5]:
                     continue
                 first_ref = merged.setdefault((ep_label, ep_name), v)
                 if first_ref != v:
@@ -16107,20 +16142,21 @@ class TortoiseSDK:
                     name_merge = False
                     if elabel in ("Subject", "Object") \
                             and isinstance(name, str) and name:
-                        exists, hit, _, bad_status, carriers = _name_holders(
+                        exists, hit, _, bad_status, _carriers, merges = _name_holders(
                             elabel, name)
-                        # #8864/#8902: the merge is keyed on NAME only while the
-                        # name has ONE carrier. With 2+ carriers the fold keys
-                        # on the record's own `id`, so the bundle item MINTS its
-                        # own node: the holder's axes (terminal / operator /
-                        # unevaluable status) do not apply to it, and the status
-                        # it declares does. Read the axes only on the
-                        # single-carrier branch, or the guard fails open
-                        # (declared terminal suppressed → mid-write raise) in
-                        # one direction and over-rejects in the other.
-                        name_merge = exists and carriers <= 1
-                        if not name_merge:
-                            hit = bad_status = None
+                        # #8864/#8902: the fold keys the merge on NAME while the
+                        # name has ONE carrier, and on the record's own `id` once
+                        # it has 2+. Every ingest entity item's id IS
+                        # `ids.entity_name_id(label, name)`, so with 2+ carriers
+                        # the item still LANDS on a carrier holding that
+                        # canonical id (ON MATCH) and only MINTS when none does.
+                        # `merges` is that answer and the axes above are the
+                        # merge target's — so a merge reads the target's
+                        # terminal/unevaluable axes, while a mint keeps its own
+                        # declared status. Branching on the carrier count instead
+                        # fails open on the first case and over-rejects on the
+                        # second (both measured).
+                        name_merge = merges
                         # The operator axis is settled by the label gate above
                         # (`tainted_by_bundle`), and the `outdated` flag
                         # bundle-wide at the top of this check, so neither is
@@ -16186,8 +16222,8 @@ class TortoiseSDK:
                                 f"{elabel} declares status {declared!r}, and "
                                 + ("the name merge applies status at MINT, so "
                                    if name_merge or not exists else
-                                   "a shared name (#8864) is minted on the "
-                                   "item's own id, so ")
+                                   "the item mints its own node on its id "
+                                   "(shared name, #8864), so ")
                                 + "new direct edges to terminal endpoints "
                                   "are rejected (#2422/#7925)")
                         else:
@@ -16278,13 +16314,13 @@ class TortoiseSDK:
                     or info_i["label"] not in self._INGEST_ENDPOINT_LABELS:
                 got = (f"operator {info_i['label']}"
                        if info_i["is_operator"]
-                       else info_i["label"] or "unknown node type")
+                       else (info_i["label"] or "unknown node type"))
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] endpoint "
                                f"{v!r} must be a "
                                f"{self._INGEST_ENDPOINT_CONTRACT} "
-                               f"endpoint — got a {got} endpoint",
+                               f"endpoint — got {_indefinite(got)} endpoint",
                 })
             elif route == "direct" and not _status_is_evaluable(
                     info_i["status"]):
@@ -16439,8 +16475,12 @@ class TortoiseSDK:
         as {section, index, message} (aggregated, never fail-fast).
         Mode-invariant — runs identically for granularity='bulk' and
         'granular'. Consumes the same shared check helpers as ingest()'s
-        Phase-2 defense-in-depth raises, so Phase 1 catches every violation
-        class Phase 2 can raise (asserted by the parity unit test).
+        Phase-2 defense-in-depth raises, so every class those helpers own is
+        caught here too (asserted by the parity unit test). It does NOT cover
+        the `_sanitize_props` reject set beyond the keys this gate owns — a
+        caller-supplied `id` or the belief props pass Phase 1 and raise in step
+        2/3 after earlier items committed (#8755, named in
+        `_check_endpoints`).
         """
         violations: list[dict] = []
         for section in ("sources", "points", "entities"):
@@ -16949,9 +16989,10 @@ class TortoiseSDK:
                 existed = []  # Document records are append-only — never deduped
             else:
                 raise Phase2Error(
-                    f"ingest: entities[{i}] type must be subject|object|event|"
-                    f"document, got {etype!r}"
-                , batch_id=batch_id)
+                    f"ingest: entities[{i}] type must be "
+                    f"{'|'.join(_ENTITY_ITEM_LABELS)}, got {etype!r}",
+                    batch_id=batch_id,
+                )
             if ref:
                 _register_ref(ref, canonical, "entities")
             ids["entities"].append(canonical)
@@ -17610,6 +17651,12 @@ class TortoiseSDK:
                     f"create_direct_edge: endpoint {pid!r} is an operator — "
                     f"direct edges connect plain epistemic nodes only"
                 )
+            # Mirror of `_endpoint_is_terminal` (the ingest guards' prediction
+            # of THIS test): if either half of this composition moves, Phase 1
+            # starts predicting a raise that never happens (under-refusal) or
+            # keeps accepting an endpoint this raises on (mid-write). Keep the
+            # two in step; `tests/test_ingest_event_endpoint.py` drives both
+            # surfaces over one fixture.
             if status in TERMINAL_EXCLUDED_STATUSES or outdated:
                 marker = "outdated" if outdated and (
                     status not in TERMINAL_EXCLUDED_STATUSES) else (status or "live")
@@ -28853,7 +28900,7 @@ class TortoiseSDK:
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
-                f"subject, object, event, document")
+                f"{', '.join(_ENTITY_ITEM_LABELS)}")
         # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
         # `extractedFrom` is a recognised prop on this door — it rides the
         # generic passthrough and is stored on the node.

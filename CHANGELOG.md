@@ -36,7 +36,11 @@ primitives accept.
   way the WRITER does — a nested `props={"status": …}`/`props={"outdated": …}`
   spelling counts, not just the top-level key — and covers an append-only
   `type:"event"` item too, whose `status`/`outdated` would otherwise be stored
-  verbatim and refused only mid-write.
+  verbatim and refused only mid-write. It resolves the node the WRITER actually
+  reaches: on a SHARED name (#8864) the fold keys on the canonical id, which
+  still MATCHES the carrier holding it — so that node's axes decide and a
+  declared status is dropped, and only an item that mints inherits its own
+  declaration.
 
 ### A url-keyed `:Source` is a visible neighbour, identified by its url (#8538)
 

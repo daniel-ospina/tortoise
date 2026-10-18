@@ -239,22 +239,30 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > exclusions stand, and the endpoint-KIND gate (#8499) continues to choose the STRUCTURE
 > (a Point-bearing pair is reified; Object↔Object and the other non-Point pairs keep the direct edge).
 >
-> ⚠️ **Three exclusions were WIDENED, not held** (measured against the merge-base `c7ae5c9ed`;
-> fail-closed over-rejection where noted, and pinned by `tests/test_ingest_event_endpoint.py`):
+> ⚠️ **Three exclusions were WIDENED, not held** (measured against the merge-base `c7ae5c9ed`,
+> which predates #8864/#8902 — the merge-key change below, so the holder rows are read against
+> their post-#8864 meaning; fail-closed over-rejection where noted, and pinned by
+> `tests/test_ingest_event_endpoint.py`):
 >
 > - an operator-shaped **entity item** is refused in both spellings — the top-level `is_operator`
 >   AND `props: {is_operator: …}`, which the one-level read used to accept (no behaviour change in
 >   the engine: the `props` spelling reaches the same `SET n += $extra` write);
-> - an **existing operator-shaped name holder** is refused, and so is an operator-shaped
->   same-name item elsewhere in the bundle (that item's extra-props write taints the merged node);
+> - an operator-shaped **merge target** is refused, and so is an operator-shaped same-name item
+>   whose extra-props write taints it. The target is the node the WRITE lands on, not "any
+>   holder": one carrier ⇒ the name merge lands on it (`ON MATCH`), while a name with 2+
+>   carriers folds on the record's own `id` (#8864/#8902), so the item lands on the carrier that
+>   already holds the deterministic `(label, name)` id, and MINTS its own node when none does —
+>   the case where no holder axis applies and the item's own declared status is what is stored;
 > - the `gated` row-9 status read and Phase 2's draft default now read at the WRITE DOOR's fold
 >   depth, so a double-wrapped `props: {props: {status: …}}` is refused / kept draft respectively —
 >   previously the point could be born LIVE under `gated` (a fail-open, not an over-rejection).
 >
-> The operator-shaped exclusion is an **ingest admission rule, not a primitive contract**:
-> `create_operator` accepts an operator-shaped endpoint, and `weights.py` prices operator-targeting
+> The operator-shaped exclusion is an **ingest admission rule, not a `create_operator` contract**:
+> that primitive accepts an operator-shaped endpoint, and `weights.py` prices operator-targeting
 > edges. `ingest()` refuses it because a bundle is a whole-graph write whose failure mode is a
-> partial mutation.
+> partial mutation. On the DIRECT route the same exclusion is the primitive's own contract
+> (`create_direct_edge` refuses an operator endpoint outright), so nothing there is a candidate
+> to reopen.
 >
 > **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
 > §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
