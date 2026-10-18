@@ -615,3 +615,29 @@ class TestToolContract:
         assert payload["tiers_evaluated"] == 1
         assert payload["tiers_published"] == 2
         assert payload["verdict"] == "REACHABLE"
+
+    def test_a_repeated_tier_cannot_switch_the_subset_guard_off(
+            self, capsys, synthetic_book):
+        """⛔ The scope decision must be SET-based, not row-count-based.
+
+        `--tier` is appendable and rows are not deduped, so before this pin a
+        caller repeating one tier `len(published)` times inflated the row count
+        until `published > len(rows)` was false — and a ONE-tier run printed
+        "every published tier can deliver" and reported `tiers_evaluated` equal
+        to the published count. That is the overclaim the subset guard exists to
+        prevent, reached through the guard itself.
+        """
+        synthetic_book({"good": _tier(allowance=1_000, cap=3_000),
+                        "bad": _tier(allowance=1_000, cap=500)})
+        mod = self._tool()
+        assert mod.main(["--nodes-per-op", "2", "--tier", "good",
+                         "--tier", "good"]) == 0
+        out = capsys.readouterr().out
+        assert "every EVALUATED tier (1 of 2 published)" in out, out
+        assert "every published tier can deliver" not in out, out
+
+        mod.main(["--nodes-per-op", "2", "--tier", "good", "--tier", "good",
+                  "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["tiers_evaluated"] == 1
+        assert payload["tiers_published"] == 2

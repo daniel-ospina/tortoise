@@ -179,12 +179,18 @@ def _print_table(rows: list[dict], nodes_per_op: float, source: str,
     overclaim this tool exists to refuse (see the measured-lower-bound path
     below, which qualifies its verdict for the same reason).
     """
-    subset = published is not None and published > len(rows)
+    # ‼ SET-based, not row-count-based: `--tier` is appendable and the rows are
+    # not deduped, so a repeated tier inflated `len(rows)` until the subset
+    # guard switched itself off and a ONE-tier run printed "every published
+    # tier can deliver" (measured on the live book with `--tier free` x5).
+    # The count that decides the scope is the count of DISTINCT tiers measured.
+    distinct = len({r["tier"] for r in rows})
+    subset = published is not None and published > distinct
     if subset:
-        scope = (f"EVALUATED tier{'s' if len(rows) != 1 else ''} "
-                 f"({len(rows)} of {published} published)")
+        scope = (f"EVALUATED tier{'s' if distinct != 1 else ''} "
+                 f"({distinct} of {published} published)")
     else:
-        scope = ("published tier" if len(rows) == 1 else "published tiers")
+        scope = ("published tier" if distinct == 1 else "published tiers")
     print(f"nodes per billed write op (r): {nodes_per_op:g}   [{source}]")
     print()
     head = (f"{'tier':<6} {'allowance':>10} {'node cap':>10} {'cap/allw':>9} "
@@ -263,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             # print free's figures under the requested name.
             ap.error(f"unknown tier(s) {unknown}; the price book publishes "
                      f"{published}")
-    tiers = args.tier or published
+    tiers = list(dict.fromkeys(args.tier)) if args.tier else published
 
     if args.nodes_per_op is not None:
         if not math.isfinite(args.nodes_per_op) or args.nodes_per_op < 0:
@@ -275,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "source": "stated", "nodes_per_op": args.nodes_per_op,
                 "tiers": rows,
-                "tiers_evaluated": len(rows),
+                "tiers_evaluated": len({r["tier"] for r in rows}),
                 "tiers_published": len(published),
                 "verdict": "REACHABLE" if reachable else "UNREACHABLE",
             }, indent=2))
@@ -335,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "source": "ledger", "org": args.org, "ledger": yield_view,
                 "tiers": rows,
-                "tiers_evaluated": len(rows),
+                "tiers_evaluated": len({r["tier"] for r in rows}),
                 "tiers_published": len(published),
                 "lower_bound": True,
                 "verdict": ("REACHABLE AT THE RECORDED LOWER BOUND "
