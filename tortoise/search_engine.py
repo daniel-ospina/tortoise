@@ -2612,6 +2612,15 @@ def _beta_mean(alpha: float, beta: float) -> float:
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     """Fetch EP confidence breakdown for a batch of Point IDs.
 
+    #7927 KNOWN DIVERGENCE, deliberate: this read is ``:Point``-anchored (the
+    id anchor below AND the evidence reads), while ``ep.get_contested_claims``
+    and the rankers now sweep the four epistemic labels (#7813). A MEASURED
+    :Subject/:Object/:Event belief is therefore reported there and reads as
+    having NO EP state here. Its only search call site additionally gates on
+    ``entity_type == "point"``. Widening it is a separate read surface outside
+    #7927's six surfaces — do not "harmonize" it by analogy; decide first
+    which surface an entity's belief belongs on.
+
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
 
     Issue #2206 contract — ``EpBreakdown.confidence_mean`` is THE point's

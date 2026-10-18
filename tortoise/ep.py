@@ -1798,7 +1798,10 @@ class TortoiseEP:
         # variance is the WIDTH OF THE DECLARED PRIOR, not a measured
         # contention, and it reads ``contested=False`` on every other
         # canonical surface (annotate_ep_batch / why / rankers /
-        # ``sdk._review_prune``). Applying the 0.04 posterior bar to a prior
+        # ``sdk._review_prune`` — of which annotate_ep_batch and why are
+        # themselves ``:Point``-anchored, so for an ENTITY the agreement below
+        # is untestable; see the per-label gate note further down). Applying
+        # the 0.04 posterior bar to a prior
         # width listed the same node as contested here while those four read
         # it unmeasured — the residual #2206/#3276-class disagreement THIS
         # gate closes (an explicitly declared prior wider than the bar, e.g.
@@ -1839,6 +1842,17 @@ class TortoiseEP:
         # nothing would ever measure them (`_stale_first_claims` and
         # ``_affected_claims`` reach claims, not structurally-only entities).
         # So an entity lists only once EP has ACTUALLY measured it.
+        #
+        # RECORDED ENTITY DIVERGENCES (so the "agreement" claimed above is not
+        # read as covering them). A MEASURED :Subject/:Object/:Event belief
+        # lists HERE and cannot list on: ``sdk._review_prune`` (``MATCH
+        # (n:Point)``, noted in place), ``why.py``'s cyphers (``:Point``-only,
+        # noted in place at the ranking read that depends on them), and
+        # ``search_engine.annotate_ep_batch`` (``:Point``-anchored for both the
+        # id anchor and the evidence reads, additionally gated at its only
+        # search call site by ``entity_type == "point"``). Each is a separate
+        # read surface outside #7927's six; do NOT "harmonize" one of them by
+        # analogy without deciding which surface the entity belongs on.
         #
         # NON-OPERATOR predicate (review, P2 — two reviewers). ``is_operator``
         # ALONE now lies on the Point leg: the pre-#7927 form was a bare

@@ -14070,6 +14070,13 @@ class FalkorProjection(
         ("Object", "id", "RANGE"),
         ("Object", "name", "RANGE"),
         ("Event", "eventId", "RANGE"),
+        # #7927: ``:Event(id)`` must be REQUIRED, not merely created — the
+        # exact #8400 trap three entries above. Every epistemic read anchors a
+        # swept node on ``id`` (``live.epistemic_labels_of``, the ranker
+        # sweeps, the BFS frontier legs); without this entry a pre-#7927 graph
+        # reads current, the sweep is skipped forever, and the Event leg stays
+        # the full-label scan this index removes.
+        ("Event", "id", "RANGE"),
         ("Source", "id", "RANGE"),
         ("Source", "url", "RANGE"),
         ("Source", "canonicalUrl", "RANGE"),
