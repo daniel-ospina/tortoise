@@ -39,13 +39,27 @@ export const PACK_STATUS_LABEL = Object.freeze({
   available: 'Available',
 })
 
-// Consequence copy, verbatim from #2728's UX outline. Disable is the primary
-// verb (disable-first): it preserves the data and stops new mints; removal is
-// the stronger statement and is described as such.
+// Consequence copy for #2728. Disable is the primary verb (disable-first);
+// removal is the stronger statement and is described as such.
+//
+// ⚠️ What the copy may NOT claim: the resolution contract
+// (`pack_state.resolved_pack_set`, marker present) is
+// `active records ∪ the namespaces already in the graph's data` — a NAMESPACE
+// set, not a kind set. `compile_vocab(installed_namespaces=…)` and the
+// extractor's kind index both admit EVERY kind of an admitted namespace, so a
+// pack with ANY data here is re-admitted whole: it stays classifiable and its
+// kinds stay writable even for kinds that have never appeared in this graph.
+// Only a namespace with NO data here is genuinely silenced
+// (docs/EXPANSION_PACKS.md: "the data leg is what keeps historical points
+// writable after a pack is disabled"). So both verbs are phrased at NAMESPACE
+// granularity — an unconditional "stops new classification into this pack's
+// kinds" is false for exactly the packs the second half of the sentence is
+// about, and a KIND-granular qualifier ("kinds it has no memories of yet")
+// would be false too, for the same reason.
 export const PACK_CONSEQUENCE = Object.freeze({
   enable: "New extraction on this graph can mint this pack's kinds.",
-  disable: 'Stops new classification into this pack\u2019s kinds. Memories already extracted stay searchable.',
-  remove: 'This pack is no longer approved for this graph. Memories already extracted from it are kept.',
+  disable: 'Stops new classification into packs this graph holds no memories from yet; kinds already here stay searchable and writable.',
+  remove: 'This pack leaves the approved set for this graph. Kinds already here stay searchable and writable, and no memory is deleted.',
   add: "New extraction on this graph can mint this pack's kinds.",
   unconfigured: 'This graph has never been configured, so it still uses the full pack catalog. Adding or removing a pack here pins this graph to the set you save.',
 })

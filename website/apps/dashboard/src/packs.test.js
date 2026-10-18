@@ -391,10 +391,37 @@ test('consequence copy: one vocabulary, each verb names what happens to existing
   }
   // The #2361 vocab anchor is DECIDED: the graph's contents are "memories" on
   // user-facing surfaces, never "points". The consequence copy is user-facing.
-  assert.match(PACK_CONSEQUENCE.disable, /Memories already extracted stay searchable/)
   assert.doesNotMatch(PACK_CONSEQUENCE.disable, /\bpoints?\b/)
   assert.doesNotMatch(PACK_CONSEQUENCE.remove, /\bpoints?\b/)
-  assert.match(PACK_CONSEQUENCE.remove, /no longer approved/)
+  // The verbs must describe the RESOLUTION CONTRACT, not a stronger promise:
+  // `pack_state.resolved_pack_set` (marker present) is
+  // `active ∪ the namespaces already in the graph's data` — a NAMESPACE set,
+  // consumed whole by both the write gate (compile_vocab) and the extraction
+  // classifier, so every kind of an admitted namespace stays classifiable.
+  // "Stops new classification into this pack's kinds." is false for precisely
+  // the packs whose existing memories the next clause is about, and a
+  // KIND-granular qualifier would be false for the same reason — the copy must
+  // speak in PACKS (namespaces), which is what the gates actually decide.
+  //
+  // FAIL-ON (pre-fix): the copy read "Stops new classification into this
+  // pack’s kinds. Memories already extracted stay searchable." — the two
+  // assertions below red on that unqualified full stop and on the missing
+  // namespace-level qualification.
+  assert.match(PACK_CONSEQUENCE.disable, /holds no memories from yet/,
+    'disable must be qualified at NAMESPACE granularity: a pack with any data here is re-admitted whole and stays classifiable')
+  assert.doesNotMatch(PACK_CONSEQUENCE.disable, /kinds\.\s/,
+    'no unconditional "stops new classification into this pack’s kinds."')
+  assert.match(PACK_CONSEQUENCE.disable, /kinds already here stay searchable and writable/)
+  // …and the qualification must NOT be kind-scoped: a pack with any data is
+  // re-admitted whole, so "kinds this graph has no memories of yet" is false.
+  assert.doesNotMatch(PACK_CONSEQUENCE.disable, /kinds (this|the) graph\b/)
+  // Same overclaim on the stronger verb: removal does not delete memories and
+  // does not stop classifying kinds the graph already holds — it takes the
+  // namespace out of the APPROVED set.
+  assert.match(PACK_CONSEQUENCE.remove, /leaves the approved set/)
+  assert.doesNotMatch(PACK_CONSEQUENCE.remove, /no longer approved/,
+    'removal is not "unapproved data": the data leg keeps the namespace writable')
+  assert.match(PACK_CONSEQUENCE.remove, /no memory is deleted/)
   assert.equal(PACK_STATUS_LABEL.disabled, 'Off',
     'disable-first: the row verb is Off, not "uninstalled"')
 })

@@ -66,6 +66,18 @@ surfaces:
   # `test_7809_hosted_prewarm_warmup_flag.py <- tortoise/hosted_api.py`). The
   # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #2728 review P2: DUAL-REGISTERED with `core` (line ~2688) for the same
+  # reason as #7809. `tests/test_pack_selection_by_graph.py` pins
+  # `hosted_api._packs_payload` / `_pack_catalog_rows` / `_graph_packs_view` —
+  # and `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERN match that
+  # REPLACES the `core` fallback. Measured before this arm:
+  # `--changed-files tortoise/hosted_api.py` → surfaces=['api','onboarding']
+  # with `test_pack_selection_by_graph.py` ABSENT, so the five tests pinning the
+  # add-list / `catalog_ok` / `source` shaping — the code a follow-up edit is
+  # most likely to touch — would not run at all. Keep the `core` entry too: the
+  # state-model half lives in `tortoise/pack_state.py`, which does select `core`
+  # today, and `--integrity` requires every file to carry a classification.
+  - test_pack_selection_by_graph.py
   # #7951 (remaining doors) / review P1: the write-door INVENTORY is
   # DUAL-REGISTERED with `core` (below) AND with every surface whose exact
   # SOURCE_PATTERN match can REPLACE the `core` fallback for a file the

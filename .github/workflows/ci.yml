@@ -1460,7 +1460,29 @@ jobs:
             echo "::error::cannot derive the client wheel's shared modules"
             exit 1
           fi
-          BAD="$(unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/' | \
+          # The wheel's entry list comes from the stdlib, not `unzip` — the
+          # ubuntu-latest image this repo runs on is a self-hosted box with no
+          # `unzip` (packaging-smoke went red on exactly that), and python is
+          # guaranteed by the setup-python step above. ONE line on purpose: a
+          # `python -c 'a\nb'` form hands CPython a literal backslash-n, which
+          # raises SyntaxError — the lister then emits nothing and the grep
+          # gate below goes VACUOUS (empty input, empty `BAD`), i.e. fail-open.
+          wheel_entries() {
+            python -c 'import glob, zipfile; [print(n) for w in sorted(glob.glob("dist-client/*.whl")) for n in zipfile.ZipFile(w).namelist()]'
+          }
+          # One read, and its EXIT STATUS is checked: a lister that lists one
+          # wheel then raises on a second (a stale extra .whl left in
+          # dist-client/) prints the good entries before failing, so testing the
+          # output for emptiness alone would pass on a partial read.
+          CLIENT_WHEEL_ENTRIES="$(wheel_entries)" || {
+            echo "::error::cannot list the client wheel's entries — refusing to pass a vacuous whitelist check"
+            exit 1
+          }
+          if [ -z "$CLIENT_WHEEL_ENTRIES" ]; then
+            echo "::error::the client wheel's entry list is EMPTY — refusing to pass a vacuous whitelist check"
+            exit 1
+          fi
+          BAD="$(printf '%s\n' "$CLIENT_WHEEL_ENTRIES" | grep -E '^(tortoise|tortoise_client)/' | \
             grep -vE "^tortoise/(__init__|${SHARED_RE})\\.py$" | \
             grep -vE '^tortoise_client/(__init__|__main__|cli)\.py$' || true)"
           if [ -n "$BAD" ]; then
@@ -1468,7 +1490,7 @@ jobs:
             echo "$BAD"
             exit 1
           fi
-          unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/'
+          printf '%s\n' "$CLIENT_WHEEL_ENTRIES" | grep -E '^(tortoise|tortoise_client)/'
           echo "wheel content OK — thin driver only"
       - name: Acceptance gate (clean venv, client only)
         run: bash client/verify_client.sh
@@ -1494,11 +1516,33 @@ jobs:
         run: python -m build
       - name: Wheel content check — tortoise/packs shipped
         run: |
-          MANIFEST_COUNT="$(unzip -Z1 dist/*.whl | grep -cE '^tortoise/packs/[^/]+/manifest\.yaml$' || true)"
-          [ "$MANIFEST_COUNT" -ge 1 ] || { echo "::error::wheel ships no pack manifests"; unzip -Z1 dist/*.whl | grep tortoise/packs || true; exit 1; }
-          tar tzf dist/*.tar.gz | grep -q 'tortoise/packs/__init__.py' \
-            || { echo "::error::sdist missing tortoise/packs/__init__.py (MANIFEST.in)"; exit 1; }
-          echo "wheel/sdist pack content OK"
+          # Read the archives with the stdlib, NOT `unzip`: this job's runner
+          # image has no `unzip` binary, which is the whole of the packaging-
+          # smoke red ("unzip: command not found" → "wheel ships no pack
+          # manifests" while the wheel itself was fine). The interpreter is
+          # guaranteed by the setup-python step above, so this check no longer
+          # depends on a binary the image may not carry.
+          python - <<'EOF'
+          import glob, sys, tarfile, zipfile
+
+          entries = [n for w in sorted(glob.glob("dist/*.whl"))
+                     for n in zipfile.ZipFile(w).namelist()]
+          manifests = [e for e in entries
+                       if e.startswith("tortoise/packs/")
+                       and e.count("/") == 3 and e.endswith("/manifest.yaml")]
+          if not manifests:
+              print("::error::wheel ships no pack manifests")
+              print("\n".join(e for e in entries if e.startswith("tortoise/packs")))
+              sys.exit(1)
+
+          sdist = [n for t in sorted(glob.glob("dist/*.tar.gz"))
+                   for n in tarfile.open(t).getnames()]
+          if not any(n.endswith("tortoise/packs/__init__.py") for n in sdist):
+              print("::error::sdist missing tortoise/packs/__init__.py (MANIFEST.in)")
+              sys.exit(1)
+
+          print(f"wheel/sdist pack content OK ({len(manifests)} pack manifest(s))")
+          EOF
       - name: Clean-venv pack smoke (bound derived from installed constant)
         run: |
           python -m venv /tmp/packsmoke

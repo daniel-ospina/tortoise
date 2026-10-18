@@ -14,9 +14,17 @@
 // Each assertion below is therefore anchored on the CALL SITE — the JSX block
 // or function body that actually produces the behavior — and the file asserts
 // its own anchors are non-vacuous, so a rename reds this file instead of
-// silently passing over an empty slice. The rendered-behavior guard for this
-// surface is the dashboard e2e lane (tests/e2e/test_graphs_management.py
-// harness), which needs a built bundle and browser servers.
+// silently passing over an empty slice.
+//
+// ⚠️ NOTHING GUARDS THE RENDERED BEHAVIOUR TODAY, and this header must not say
+// otherwise (pinned by the last test below). `tests/e2e/test_graphs_management.py`
+// — the "dashboard e2e lane" an earlier revision of this header named as the
+// rendered-behaviour guard — contains no pack / Configured-packs case at all,
+// and this PR adds none: that lane needs wrangler plus a built bundle, an
+// opt-in follow-up, as the PR body states. So "open → render → turn off →
+// remove → add → save" is covered by (a) the pure derivations in packs.test.js
+// and (b) the wiring pins here, and by NOTHING that executes the component. Do
+// not read a green run of this file as rendered coverage.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -340,4 +348,27 @@ test('#2728: no client-side pack catalog is invented (the server owns it)', () =
   }
   assert.doesNotMatch(packsJs, /DEFAULT_STARTER|STARTER_PACKS/,
     'the starter set is server-side state; the surface must not carry a second copy')
+})
+
+test('#2728: the header states the real residual — no e2e lane covers this surface', () => {
+  // FAIL-ON (pre-fix): the header asserted "The rendered-behavior guard for
+  // this surface is the dashboard e2e lane (tests/e2e/test_graphs_management.py
+  // harness)". That lane has no Configured-packs case, so the one paragraph
+  // written to disclose the residual was itself the false claim — the exact
+  // failure the paragraph exists to prevent.
+  const self = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const header = self.slice(0, self.indexOf("import { test }"))
+  assert.ok(header.length > 500, 'the header slice is suspiciously small')
+  assert.doesNotMatch(header, /rendered-behavior guard for this surface is/i,
+    'the header must not name a lane as this surface\u2019s rendered-behaviour guard')
+  assert.match(header, /NOTHING GUARDS THE RENDERED BEHAVIOUR TODAY/,
+    'the real residual must be stated, not merely deleted')
+  // …and the claim above is TRUE of the lane it names: that file carries no
+  // pack / Configured-packs case. If a browser case is ever added there, this
+  // reds and the header gets to name it again.
+  const e2e = readFileSync(
+    join(SRC, '..', '..', '..', '..', 'tests', 'e2e', 'test_graphs_management.py'), 'utf8')
+  assert.match(e2e, /def test_/, 'the e2e module read must be non-empty')
+  assert.doesNotMatch(e2e, /configured packs|packs-modal|packs-graph-select|\/packs\b/i,
+    'tests/e2e/test_graphs_management.py gained a packs case — name it in the header')
 })

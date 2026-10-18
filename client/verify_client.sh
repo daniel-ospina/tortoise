@@ -48,6 +48,24 @@ echo "== Gate 0: wheel content — whitelist (thin driver only) =="
 SHARED_MODULES="$(bash "$SCRIPT_DIR/shared_modules.sh")"
 ALLOWED_TORTOISE="__init__.py $(printf '%s' "$SHARED_MODULES" | tr '\n' ' ')"
 ALLOWED_TORTOISE_CLIENT="__init__.py __main__.py cli.py"
+# The wheel's entry list comes from the stdlib, NOT `unzip` (this repo's CI image
+# has no `unzip` binary — the #8972 packaging-smoke red), and it is CAPTURED
+# BEFORE the loop rather than read through a process substitution: `done < <(…)
+# ` swallows the reader's failure under `set -euo pipefail`, so a missing or
+# failing lister would leave BAD_ENTRIES empty and this gate would print "OK
+# wheel whitelist" over a wheel whose contents were never read — fail-open on
+# the one check that keeps engine modules out of the thin client.
+ENTRIES="$(python3 - "$WHEEL" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    print("\n".join(z.namelist()))
+PY
+)" || { echo "FAIL cannot read $WHEEL's entry list (is python3 present?)" >&2; exit 1; }
+CLIENT_ENTRIES="$(printf '%s\n' "$ENTRIES" | grep -E '^(tortoise|tortoise_client)/' || true)"
+if [[ -z "$CLIENT_ENTRIES" ]]; then
+    echo "FAIL $WHEEL carries no tortoise/ or tortoise_client/ entries — nothing to whitelist-check" >&2
+    exit 1
+fi
 BAD_ENTRIES=()
 while IFS= read -r entry; do
     case "$entry" in
@@ -64,7 +82,7 @@ while IFS= read -r entry; do
             fi
             ;;
     esac
-done < <(unzip -Z1 "$WHEEL" | grep -E '^(tortoise|tortoise_client)/' | sort)
+done < <(printf '%s\n' "$CLIENT_ENTRIES" | sort)
 if [[ ${#BAD_ENTRIES[@]} -gt 0 ]]; then
     echo "FAIL wheel ships entries outside the client allowlist:" >&2
     printf '  - %s\n' "${BAD_ENTRIES[@]}" >&2

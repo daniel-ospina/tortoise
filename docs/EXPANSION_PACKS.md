@@ -377,8 +377,11 @@ not be read"* — never as the claim that everything is already on the graph.
 > `src/packs.js` holds the status grouping, the add-list diff, the PUT body and
 > the per-failure classification, so the surface cannot drift from the route's
 > semantics (the server's `removed` is never sent as an input status — omission
-> is what removes). `configured: false` is stated in words rather than a count,
-> because such a graph still resolves to the whole catalog.
+> is what removes). `configured: false` is stated in words, with the resolved
+> set's count qualified in parentheses beside them, because such a graph still
+> resolves to the whole catalog: "Not configured yet — the full catalog applies
+> (2 active packs · 1 off)" — the count describes the rows the payload carries,
+> never a bare number a reader could mistake for the enforced set.
 
 ## Chains
 
