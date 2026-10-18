@@ -2793,13 +2793,19 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
       reached from the operator, so no index applies — and its non-operator
       test admits an ABSENT ``is_operator`` (a ``:Object``/``:Event`` carries
       no such property; the ``= false`` spelling excluded every one of them).
-      That non-operator test is the whole of ``_is_claim`` on BOTH legs — i.e.
-      it also excludes ``op_type`` non-null — so a HYBRID node (``op_type`` set,
-      ``is_operator`` absent/false) is not a peer on either leg: it is an
-      operator, and operator→operator is R4 on #8996, the same undecided
-      question an operator anchor raises. This read is the STRICT answer to
-      "is a hybrid a claim?"; ``sdk._dedup_match_clauses`` keeps the lenient
-      one on purpose (a dedupe must not drop a node it was asked about).
+      ``_is_claim`` is that non-operator test PLUS ``op_type IS NULL`` — the
+      strict form ``sdk._operator_scope_clauses`` calls the CANONICAL
+      non-operator predicate. A node carrying ``op_type`` is therefore an
+      OPERATOR on both legs, and operator→operator is R4 on #8996, the same
+      undecided question an operator anchor raises.
+      The one divergence is narrow and deliberate: ``sdk._find_point_by_content``
+      documents a HYBRID that EXPLICITLY declares ``is_operator = false`` AND
+      carries ``op_type`` (a shape nothing rejects on write) and keeps it a
+      claim, because a dedupe must not drop a node it was asked about. An
+      ABSENT ``is_operator`` hybrid is excluded by BOTH sites — that helper's
+      second clause ``op_type IS NULL OR is_operator = false`` evaluates NULL
+      there — so the two agree on that arm and diverge only on the
+      explicit-false one.
     * the OPERATOR keeps its ``:Point`` label (ONTOLOGY §5 — a re-typing plan
       that moves an operator is refused) but is identified by
       ``is_operator = true OR op_type IS NOT NULL``, the #943 parity every other
@@ -2849,10 +2855,15 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     #           shape ``tortoise_list_batch`` reports as ``direct_edge`` — read
     #           as having NO relationships at all, from both endpoints.
     #
-    # `_is_claim` is the "is a claim" predicate the rest of this tree uses
-    # (`_window_closure`, `_reachable_claim_count`): an operator is not a peer,
-    # and an operator's own typed edge `(op)-[:IMPL]->(claim)` would otherwise
-    # be reported as a relationship that does not exist between claims.
+    # `_is_claim` is the STRICT "is a claim" predicate — the form
+    # `sdk._operator_scope_clauses` calls CANONICAL, carried by
+    # `_window_closure`'s direct-edge hop. NOT every sibling is strict:
+    # `_reachable_claim_count` (its anchor scan AND its edged scan) and
+    # `sdk._dedup_match_clauses` both carry a LENIENT form, under which an
+    # `op_type` node still counts as a claim. That fork is pre-existing and is
+    # not resolved here; this read takes the strict form because an operator is
+    # not a peer, and an operator's own typed edge `(op)-[:IMPL]->(claim)`
+    # would otherwise be reported as a relationship between claims.
     #
     # It is applied to THREE positions, and the third is a NARROWING, not a
     # refactor:
@@ -2921,10 +2932,12 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
 
     try:
         rows: list = []
-        # A node carries exactly ONE of the four labels (re-typing refuses a
-        # multi-label node), so a row cannot legitimately arrive twice; the
-        # `seen` set only keeps a graph/mock that answers every per-label query
-        # identically from multiplying the payload.
+        # A MULTI-labelled anchor (`:Point:Object`) IS returned once per
+        # matching label — `dream.py` records it ("the per-label sweep returns
+        # a multi-labelled node once per matching label"). Both legs project
+        # label-independent columns, so such an anchor's rows are identical and
+        # `seen` collapses them: the set is load-bearing, not belt-and-braces
+        # for a misbehaving mock.
         #
         # The key is TOTAL: `mechanism`/`predicate` are graph-authored free-form
         # properties (`op.op_type`, `*.label`), so a replayed-JSONL diagnostic
@@ -2965,6 +2978,15 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
             related_id = row[4]
             related_kind = row[5] or ""
             related_content = row[6] or ""
+            if not isinstance(related_content, str):
+                # A replayed-JSONL diagnostic can leave a non-string here — the
+                # same class the dedupe key above is made total for. FalkorDB
+                # stores a NUMBER as a property (arrays slice fine; a map is
+                # refused on write), and `42[:200]` raises TypeError. This loop
+                # is still inside ONE handler, so that would empty the WHOLE
+                # batch — #6971's failure-reads-as-emptiness class, two lines
+                # under the key fix. Render it; do not drop the row.
+                related_content = str(related_content)
             n_idx = row[7] if len(row) > 7 else None
             other_idx = row[8] if len(row) > 8 else None  # noqa: F841
 

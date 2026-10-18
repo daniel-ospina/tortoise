@@ -25536,6 +25536,14 @@ class TortoiseSDK:
         `:Event` peer reports `""`. `""` therefore means "this peer's layer
         exposes no `status`", and it is now reached by LOOKING at the peer's
         label rather than by never asking.
+
+        A THIRD meaning is `""`: the sweep leg for that peer's label FAILED
+        (a raise is logged and skipped, so the other labels' statuses survive —
+        the per-label isolation below). The failures are not distinguishable
+        from "no lifecycle state" in this value; labelling them is R1 on #8996.
+        A peer can therefore be PRESENT in the payload with `""` because its
+        label's status leg died, which is exactly the conflation the widening
+        above was added to end — stated rather than left to be rediscovered.
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
@@ -25563,7 +25571,17 @@ class TortoiseSDK:
                         "label — the other labels' statuses are kept",
                         exc_info=True)
                     continue
-            statuses = {row[0]: row[1] or "" for row in rows}
+            try:
+                statuses = {row[0]: row[1] or "" for row in rows}
+            except Exception:
+                # A malformed status row must not turn an ADVISORY annotation
+                # into a whole-read failure on this public method (D1: a
+                # decoration never fails the read). Monotone with the sweep:
+                # a bad row can only fail to add.
+                _logger.warning(
+                    "related_status rows malformed — statuses left blank",
+                    exc_info=True)
+                statuses = {}
         for e in entries:
             e["related_status"] = statuses.get(e.get("related_id"), "")
         return entries

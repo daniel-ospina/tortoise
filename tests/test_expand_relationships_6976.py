@@ -590,14 +590,31 @@ def test_unhashable_peer_text_does_not_empty_the_batch(sdk):
     rendered, not raise: an unhashable key raises into the enclosing handler and
     empties the batch for EVERY point — the failure-reads-as-emptiness class this
     very reader had to be fixed for (#6971/#6976).
+
+    The same class sits one line lower, on ``related_content[:200]``: a NUMBER
+    is hashable (so the key never sees it) and is storable as a property, but it
+    is not sliceable — so it is the arm that separates "the key is total" from
+    "the row survives". Both are pinned here. (A map cannot be stored as a
+    property at all, and an array slices fine, so neither can reach it.)
     """
     hub = _point(sdk, "INCIDENT-53 with malformed neighbours")
     good = _point(sdk, "a well-formed peer of incident 53")
     list_content = _point(sdk, "a peer whose text is a list")
-    op = sdk.create_operator("IMPL", hub, [good, list_content], label="addresses")
+    num_content = _point(sdk, "a peer whose text is a number")
+    op = sdk.create_operator(
+        "IMPL", hub, [good, list_content, num_content], label="addresses")
     _graph(sdk).query(
         "MATCH (n:Point) WHERE n.id = $id SET n.content = ['a', 'b']",
         params={"id": list_content},
+    )
+    # A NUMBER is the harder arm: the dedupe key renders it (so the key never
+    # raises), but `related_content` is still sliced (`[:200]`) inside the ONE
+    # enclosing handler, and `42[:200]` raises TypeError — which would empty the
+    # whole batch exactly as the unhashable key did. A list slices fine, so it
+    # could never catch it.
+    _graph(sdk).query(
+        "MATCH (n:Point) WHERE n.id = $id SET n.content = 42",
+        params={"id": num_content},
     )
     _graph(sdk).query(
         "MATCH (op:Point) WHERE op.id = $oid SET op.label = ['x', 'y']",
@@ -606,9 +623,9 @@ def test_unhashable_peer_text_does_not_empty_the_batch(sdk):
 
     entries = sdk.expand_relationships(hub)
     related = {e["related_id"] for e in entries}
-    assert {good, list_content} <= related, (
-        "a list-valued peer text / operator label emptied the relationship "
-        f"read — got {entries!r}"
+    assert {good, list_content, num_content} <= related, (
+        "a list/dict-valued peer text or operator label emptied the "
+        f"relationship read — got {entries!r}"
     )
 
 
