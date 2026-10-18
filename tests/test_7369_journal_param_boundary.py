@@ -1439,3 +1439,91 @@ def test_a_map_key_is_judged_by_the_KEY_encoding_not_the_value_predicate():
         assert _map_key_ok(key) is True, key
     for key in ("", "a`b", "a\x00b"):
         assert _map_key_ok(key) is False, key
+
+
+def test_an_unwritable_id_is_skipped_when_the_name_is_SHARED(tmp_path, caplog):
+    """#8864 review P2: the id-keyed branch makes `$id` a MERGE KEY — gate it.
+
+    Pre-#8864 `$id` only ever reached the engine as a property VALUE, which the
+    parameter boundary nulls (so ``coalesce($id, n.id)`` kept the stored id and
+    the record still folded). Once the name is carried by two or more nodes the
+    fold keys on the record's own ``id`` instead, and a merge key is
+    deliberately FORWARDED untouched — a null one is its own abort. So an
+    unwritable id (NUL / lone surrogate, reachable through a foreign journal
+    line or ``add_object(id=...)``) reached ``MERGE … {id:$key}`` and the
+    engine raised ``Failed to parse query parameter 'key' value`` out of
+    ``apply()`` / a replay pass with no per-event ``try/except`` — i.e. after
+    ``_wipe_all_nodes``.
+
+    Measured on the pre-fix branch: the traceback below was a raise, not a skip.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "shared.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
+        proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
+        proj.g.query("CREATE (s:Subject {id:'sub-1', name:'Bob', status:'live'})")
+        proj.g.query("CREATE (s:Subject {id:'sub-2', name:'Bob', status:'live'})")
+
+        caplog.set_level(logging.WARNING)
+        proj.apply({"type": "ObjectRegistered", "id": "bad\x00id",
+                    "name": "Acme", "objectKind": "company", "status": "live"})
+        proj.apply({"type": "SubjectAdded", "id": "bad\x00sub",
+                    "name": "Bob"})
+
+        assert sorted(
+            r[0] for r in proj.g.query(
+                "MATCH (o:Object) RETURN o.id").result_set
+        ) == ["decoy-1", "decoy-2"], (
+            "the record was not skipped — a carrier moved, or the fold aborted"
+        )
+        assert sorted(
+            r[0] for r in proj.g.query(
+                "MATCH (s:Subject) RETURN s.id").result_set
+        ) == ["sub-1", "sub-2"]
+    finally:
+        sdk.close()
+
+    # ...and the skip is REPORTED, naming the identity that failed.
+    assert "Object carries a id (MERGE key)" in caplog.text, caplog.text
+    assert "Subject carries a id (MERGE key)" in caplog.text, caplog.text
+
+
+def test_an_unwritable_id_on_a_shared_name_does_not_abort_the_rebuild(tmp_path):
+    """The end-to-end obligation: a REPLAY survives it, after the wipe.
+
+    ``rebuild_all``'s pass-1a/1b carry no per-event ``try/except``, so a raise
+    from this branch lands after ``_wipe_all_nodes`` — the graph is left wiped
+    or half-built. Two carriers of one name are built the only way a journal can
+    build them (two renames onto the same name), then a registration of that
+    name arrives carrying an unwritable id.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    records = [
+        {"type": "ObjectRegistered", "id": "obj-1", "name": "Other1",
+         "objectKind": "company", "status": "live"},
+        {"type": "ObjectRegistered", "id": "obj-2", "name": "Other2",
+         "objectKind": "company", "status": "live"},
+        {"type": "EntityMutated", "label": "Object", "id": "obj-1",
+         "op": "rename", "state": {"name": "Acme"}},
+        {"type": "EntityMutated", "label": "Object", "id": "obj-2",
+         "op": "rename", "state": {"name": "Acme"}},
+        {"type": "ObjectRegistered", "id": "bad\x00id", "name": "Acme",
+         "objectKind": "company", "status": "live"},
+    ]
+    (events / "events.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+    )
+
+    sdk = TortoiseSDK(str(tmp_path / "j7369b.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) RETURN o.id ORDER BY o.id").result_set
+        assert [r[0] for r in rows] == ["obj-1", "obj-2"], (
+            "the replay did not complete with both same-name carriers intact"
+        )
+    finally:
+        sdk.close()

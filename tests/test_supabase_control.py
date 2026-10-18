@@ -77,7 +77,7 @@ from tortoise.supabase_control import (
     owner_user_id,
 )
 
-from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
+from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane, rpc_call_named
 
 # ── Fixtures / helpers ──────────────────────────────────────────────────────
 
@@ -1824,7 +1824,7 @@ class TestTask8Helpers:
             "p_tier": "free", "p_max_users": 1, "p_max_graphs": 1,
             "p_ops_allowance": 10000, "p_graph_size_cap": 10000,
         })
-        assert fake.rpc_calls[0][0] == "provision_team"
+        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
         assert any(t["id"] == "team-new-1" for t in fake.tables["organizations"])
         mem = [m for m in fake.tables["org_memberships"]
                if m["org_id"] == "team-new-1"]

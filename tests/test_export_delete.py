@@ -36,7 +36,7 @@ from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tests._verdict import verdict_client
-from tests.fake_control_plane import FakeControlPlane
+from tests.fake_control_plane import FakeControlPlane, rpc_call_named
 from tests.test_supabase_control import (
     FREE_TEAM, TOKEN, _key_row, _membership_row,
 )
@@ -1127,7 +1127,7 @@ class TestDashboardCreatedTeamRoundTrip:
         body = r.json()
         org_id = body["org_id"]
         assert body["graph_name"] == f"org_{org_id}"  # Indicator 1
-        fn, p = fake.rpc_calls[0]
+        fn, p = rpc_call_named(fake, "provision_team")
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{org_id}"
         # data-plane write (the real write path: namespace=org_id)
