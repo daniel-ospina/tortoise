@@ -401,19 +401,68 @@ done
 # instructions (it auto-loads per session; there is NO skills-declaration
 # syntax in AGENTS.md). Emit a Tortoise block so every session knows when and
 # how to use the graph — idempotent (marker-delimited replace).
+#
+# #3429: the block is VERSIONED. The markers make a re-run idempotent, but
+# nothing made a STALE block DETECTABLE — and a repo provisioned before the
+# text changed keeps re-reading the old block forever, because the file is
+# someone else's and the installer is the only thing that rewrites it. The
+# version line is inside the marker window, so the replace below refreshes it
+# too. BUMP `AGENTS_BLOCK_VERSION` whenever the block's text changes; the
+# upgrade path needs nothing else.
+AGENTS_BLOCK_VERSION="2"
+
 emit_codex_agents_block() {
   local file="AGENTS.md"
   local ms="<!-- tortoise:start -->"
   local me="<!-- tortoise:end -->"
-  local tmpdir block pre post target
-  tmpdir="$(mktemp -d)" || return 1
+  local tmpdir block pre post target staged
+  tmpdir="$(mktemp -d)" || {
+    echo "  ✗ AGENTS.md — could not create a scratch directory — nothing was changed" >&2
+    echo "  (skills above ARE installed; only the AGENTS.md block was not upgraded — exit 3)" >&2
+    exit 3
+  }
   block="$tmpdir/block"; pre="$tmpdir/pre"; post="$tmpdir/post"
+  # ── PRE-STATE: read BEFORE anything is written (after the write the file
+  # always looks current). The decision uses the SAME line-anchored test the
+  # replace uses; a near-anchor or mangled marker is MALFORMED, because treating
+  # it as absent made the state `none`, which APPENDS — duplicating the block
+  # with the stale copy first, and then every later run compared the appended
+  # pair against itself and reported "already current".
+  #
+  # FAIL-CLOSED, EXPLICITLY: this function is called as `emit … || { exit 3; }`,
+  # and bash does NOT apply `errexit` to any command inside a function invoked in
+  # that context. Every step that can fail is therefore checked by hand — an
+  # unchecked `awk`/`cat` failure used to end in a SUCCESS report over an
+  # untouched file, which is the harm this whole change exists to end.
+  local state="" prev_version="" same_bytes=0
+  local state_kind="" c_start c_startline c_end c_endline
+  local c_near_s c_near_e c_mangled_s c_mangled_e c_fence_open
+  _emit_fail() {
+    # ONE place that cleans up and fails. It EXITS rather than returning: a
+    # `cmd || helper` list is itself an errexit-exempt context, so a helper that
+    # merely returns 1 lets the next statement run — which is how an internal
+    # read failure ended in a SUCCESS report over an untouched file.
+    echo "  ✗ AGENTS.md — $1" >&2
+    echo "  (skills above ARE installed; only the AGENTS.md block was not upgraded — exit 3)" >&2
+    rm -rf "$tmpdir"
+    exit 3
+  }
+  local ms_re="^${ms}\r?$" me_re="^${me}\r?$"
+  local ms_ws me_ws
+  # NB: `tr` failing here silently disables the mangled-marker detector (both
+  # whitespace-stripped markers become ""), which reverts the duplicate-block
+  # path — so it is checked like everything else, not assumed.
+  ms_ws="$(printf '%s' "$ms" | tr -d '[:space:]')" || _emit_fail "could not prepare marker matching — nothing was changed"
+  me_ws="$(printf '%s' "$me" | tr -d '[:space:]')" || _emit_fail "could not prepare marker matching — nothing was changed"
+  [ -n "$ms_ws" ] && [ -n "$me_ws" ] || _emit_fail "could not prepare marker matching — nothing was changed"
   # Resolve a symlinked AGENTS.md (monorepos point AGENTS.md at a shared
   # file) — refresh the TARGET, never clobber the link.
   target="$file"
   [ -L "$file" ] && target="$(readlink "$file")"
+
   printf '%s\n' \
 "${ms}
+<!-- tortoise:block v${AGENTS_BLOCK_VERSION} -->
 # Tortoise — agent memory (this project is connected to Tortoise Cloud)
 - If the Tortoise MCP tools are available in this session (search/query/health +
   graph-write tools) and these skills (how-to-use-tortoise, tortoise-decide,
@@ -421,40 +470,282 @@ emit_codex_agents_block() {
   being asked to: after a decision or a research finding, file it; search the graph
   before answering from memory; say plainly when nothing relevant is stored.
 - When the user says \"Set up Tortoise\", follow the onboarding instructions at
-  $SKILLS_BASE/tortoise-onboarding/SKILL.md. Write the MCP config, restart the
-  client so the new session reads it, then verify with tortoise_health before
-  reporting done. Onboarding is delivered as INSTRUCTIONS, not as an installed
-  skill.
+  $SKILLS_BASE/tortoise-onboarding/SKILL.md. Write the MCP config FIRST, then
+  restart the client so the new session reads it — the server is loaded at
+  session start, so the rest of THIS session cannot see it. Only in that NEW
+  session run the verify with tortoise_health, and report done from there.
+  Onboarding is delivered as INSTRUCTIONS, not as an installed skill.
 - First-time MCP calls may prompt for approval — tortoise_health and the read tools
   are safe to allow.
-${me}" > "$block"
+${me}" > "$block" || _emit_fail "could not build the new block text — nothing was changed"
+
   if [ -f "$target" ]; then
-    if grep -qF "$ms" "$target" && grep -qF "$me" "$target"; then
-      # In-place replace between the markers (idempotent refresh) — never
-      # touches content outside the marked block. Markers must sit on their
-      # own line (tolerating a trailing CR) so content merely mentioning the
-      # marker text is preserved.
-      : > "$pre"; : > "$post"
-      awk -v ms="$ms" -v me="$me" -v pre="$pre" -v post="$post" '
-        BEGIN { inmarker = 0; ended = 0 }
-        $0 ~ ("^" ms "\r?$") { inmarker = 1; next }
-        inmarker && $0 ~ ("^" me "\r?$") { inmarker = 0; ended = 1; next }
-        { if (ended) print > post; else if (!inmarker) print > pre }
-      ' "$target"
-      # cp -p first preserves the file's mode (a 0600 AGENTS.md stays 0600)
-      # and ownership; cat then overwrites content in place.
-      cp -p "$target" "$target.tmp"
-      cat "$pre" "$block" "$post" > "$target.tmp"
-      mv "$target.tmp" "$target"
-    else
-      printf '\n\n' >> "$target"
-      cat "$block" >> "$target"
-    fi
+    # ONE pass decides WHERE the block is, and every reader/writer below obeys
+    # its line numbers. Counting with fences but then locating the window with a
+    # fence-blind scan is how the fenced-example feature deleted a user's
+    # documentation and then dumped a duplicate block outside any marker: the
+    # state said "paired" while the writers latched onto the FIRST anchored
+    # markers in the file, which were the example's.
+    state="$(LC_ALL=C awk -v ms="$ms" -v me="$me" -v msws="$ms_ws" -v mews="$me_ws" \
+                 -v msre="$ms_re" -v mere="$me_re" '
+      # NEAR: the marker ALONE on the line once whitespace/BOM is stripped, but
+      # not matching the anchored form (indented, trailing space, BOM).
+      function near(line, m,   p, pre, post) {
+        p = index(line, m)
+        if (p == 0) return 0
+        pre = substr(line, 1, p - 1); post = substr(line, p + length(m))
+        gsub(/[ \t\r]/, "", pre); gsub(/[ \t\r]/, "", post)
+        # Strip the UTF-8 BOM as BYTES: under a UTF-8 locale `\357` is the
+        # CHARACTER U+00EF, so the escape-based strip silently did nothing and the
+        # documented "BOM-prefixed" cause could never print.
+        if (substr(pre, 1, 3) == sprintf("%c%c%c", 239, 187, 191)) pre = substr(pre, 4)
+        return (pre == "" && post == "")
+      }
+      # MANGLED: a marker with different INTERNAL spacing and nothing else on the
+      # line — a broken marker, not prose about one.
+      function stripped(line,   x) { x = line; gsub(/[ \t\r]/, "", x); return x }
+      function classify(line, nr,   sw) {
+        if (line ~ msre) { starts++; if (!startline) startline = nr; return }
+        if (line ~ mere) { ends++;   if (!endline)   endline   = nr; return }
+        if (near(line, ms)) { nearstart++; return }
+        if (near(line, me)) { nearend++;   return }
+        sw = stripped(line)
+        if (sw != "" && sw == msws) mangledstart++
+        else if (sw != "" && sw == mews) mangledend++
+      }
+      BEGIN { starts = ends = nearstart = nearend = mangledstart = mangledend = 0; fence = ""; flen = 0 }
+      # The FENCE RUN on this line, or "": CommonMark opens a fence with three or
+      # more backticks OR tildes (indented at most 3 spaces) and closes it only
+      # with a run of the SAME character at least as long. A parity toggle on
+      # "three backticks" is not this: `~~~` was not a fence at all (so an example
+      # in one was DELETED and reported as an upgrade), and a 4-backtick fence
+      # around a 3-backtick example closed at the wrong line.
+      function fence_run(line,   m) {
+        if (!match(line, /^ {0,3}(`{3,}|~{3,})/)) return ""
+        m = substr(line, RSTART, RLENGTH)
+        sub(/^ +/, "", m)
+        return m
+      }
+      # A CLOSING fence carries nothing after the run but spaces/tabs. Trailing
+      # text is legal only on the OPENING fence, so a language-tagged line INSIDE a
+      # fence is content — treating it as a close ended the fence early, counted the
+      # rest of the example, and produced a false "ran twice" whose remedy deletes
+      # the real block plus the documentation.
+      function fence_close(line,   m) {
+        if (!match(line, /^ {0,3}(`{3,}|~{3,})[ \t\r]*$/)) return ""
+        m = substr(line, RSTART, RLENGTH)
+        gsub(/[ \t\r]/, "", m)
+        return m
+      }
+      { lines[NR] = $0 }
+      { fr = fence_run($0)
+        if (fence == "") {
+          if (fr != "") { fence = substr(fr, 1, 1); flen = length(fr); fstart = NR; next }
+        } else {
+          # Inside a fence nothing is content — including a shorter run of the same
+          # character and a run of the OTHER character (a nested example).
+          if (fr != "" && fence_close($0) != "" && substr(fr, 1, 1) == fence && length(fr) >= flen) {
+            for (i = fstart; i < NR; i++) closed[i] = 1
+            fence = ""
+          }
+          next
+        } }
+      { classify($0, NR) }
+      END {
+        # An UNCLOSED fence would hide every real marker below it, and "no
+        # markers" means APPEND — one more copy per run. Fall back to the
+        # fence-blind pass (the pre-#3429 behaviour, which replaced the real
+        # block correctly) instead of treating an unterminated fence as content.
+        # Recount ONLY the lines the fence pass skipped and never revisited: those
+        # inside the fence that is still open. A properly CLOSED fence stays
+        # skipped — recounting the whole file treated a documented example as the
+        # block, replacing it (measured), or hard-refused a file with no duplicate
+        # at all while advising the user to delete their documentation.
+        fenceopen = 0
+        if (fence != "") {
+          fenceopen = 1
+          starts = ends = nearstart = nearend = mangledstart = mangledend = 0
+          startline = endline = 0
+          for (i = 1; i <= NR; i++) if (!closed[i]) classify(lines[i], i)
+        }
+        # ONE clean pair wins even if OTHER lines carry near/mangled markers: they
+        # are outside its window, so the split preserves them verbatim. Refusing
+        # them treated a 4-space-indented documentation example (CommonMark allows
+        # that as a code block too) as a "duplicate" and its remedy deleted it.
+        if (starts == 1 && ends == 1 && startline < endline) {
+          printf "paired|1|%d|1|%d|0|0|0|0|%d\n", startline, endline, fenceopen; exit
+        }
+        if (starts + ends + nearstart + nearend + mangledstart + mangledend == 0) {
+          printf "none|0|-|0|-|0|0|0|0|%d\n", fenceopen; exit
+        }
+        # Per-marker counts, so the message and the remedy agree with each other:
+        # `c_end` (anchored only) used to say "there is no end line" while the
+        # line it was printed under reported a mangled one.
+        printf "malformed|%d|%s|%d|%s|%d|%d|%d|%d|%d\n", starts, (startline ? startline : "-"), ends, (endline ? endline : "-"), nearstart, nearend, mangledstart, mangledend, fenceopen
+      }' "$target")" || _emit_fail "could not read $target (unreadable, or not a regular file) — nothing was changed"
+    IFS='|' read -r state_kind c_start c_startline c_end c_endline \
+      c_near_s c_near_e c_mangled_s c_mangled_e c_fence_open <<EOF
+$state
+EOF
   else
-    cat "$block" > "$target"
+    state_kind="none"
+  fi
+
+  case "$state_kind" in
+    paired|none) : ;;
+    malformed)
+      local s_side=$(( ${c_start:-0} + ${c_near_s:-0} + ${c_mangled_s:-0} ))
+      local e_side=$(( ${c_end:-0} + ${c_near_e:-0} + ${c_mangled_e:-0} ))
+      echo "  ✗ AGENTS.md — the Tortoise block markers are MALFORMED" >&2
+      echo "      start markers: ${c_start:-0} (first at line ${c_startline:--}), end markers: ${c_end:-0} (first at line ${c_endline:--})" >&2
+      [ $(( ${c_near_s:-0} + ${c_near_e:-0} )) -gt 0 ] && \
+        echo "      ${c_near_s:-0} start / ${c_near_e:-0} end marker line(s) are the marker ALONE but indented, trailing-spaced, or BOM-prefixed." >&2
+      [ $(( ${c_mangled_s:-0} + ${c_mangled_e:-0} )) -gt 0 ] && \
+        echo "      ${c_mangled_s:-0} start / ${c_mangled_e:-0} end line(s) carry a marker that is not exactly the expected text (internal spacing, or an invisible character)." >&2
+      echo "      expected exactly ONE ${ms} before exactly ONE ${me}, each alone on its line." >&2
+      echo "      NOT rewritten: appending would leave the stale block in place, and a replace" >&2
+      echo "      would have to guess which copy is yours." >&2
+      if [ "${c_fence_open:-0}" = "1" ]; then
+        echo "      An UNTERMINATED code fence is hiding part of this file, so the markers" >&2
+        echo "      cannot be told apart from an example. Close the fence (or delete the" >&2
+        echo "      fence line) and re-run; nothing was written." >&2
+        rm -rf "$tmpdir"
+        echo "  (skills above ARE installed; only the AGENTS.md block was not upgraded — exit 3)" >&2
+        exit 3
+      elif [ "$s_side" -ge 2 ] && [ "$e_side" -ge 1 ]; then
+        echo "      Usual cause: an older installer ran twice. Delete from the FIRST start marker" >&2
+        echo "      through the LAST end marker (all copies), then re-run." >&2
+      elif [ "$s_side" -ge 1 ] && [ "$e_side" -eq 0 ]; then
+        echo "      No end marker was found (in any form). Add the ${me} line after the block," >&2
+        echo "      or delete the start marker, then re-run." >&2
+      elif [ "$e_side" -ge 1 ] && [ "$s_side" -eq 0 ]; then
+        echo "      No start marker was found (in any form). Add the ${ms} line before the block," >&2
+        echo "      or delete the end marker, then re-run." >&2
+      else
+        echo "      Fix the marker lines so exactly one clean pair remains, then re-run." >&2
+      fi
+      rm -rf "$tmpdir"
+      echo "  (skills above ARE installed; only the AGENTS.md block was not upgraded — exit 3)" >&2
+      exit 3
+      ;;
+    *)
+      _emit_fail "could not determine the block state (installer bug) — nothing was changed"
+      ;;
+  esac
+
+
+  # A block written INSIDE an unterminated fence renders as code and is never read
+  # by the agent it was written for. The write is what the pre-#3429 installer did,
+  # so it is not refused — but it must not be silent.
+  if [ "${c_fence_open:-0}" = "1" ] && [ "$state_kind" != "malformed" ]; then
+    echo "  ⚠ AGENTS.md has an UNTERMINATED code fence — the Tortoise block will be written" >&2
+    echo "    inside it and read as code, not as instructions. Close the fence and re-run." >&2
+  fi
+
+  if [ "$state_kind" = "paired" ]; then
+    # The version is read INSIDE the window, and any token is captured (not just
+    # digits) so a mangled version is reported as mangled instead of as
+    # "unversioned". The byte comparison decides "already current": a version
+    # line is evidence of ORDER, never proof that the text matches.
+    prev_version="$(awk -v s="$c_startline" -v e="$c_endline" '
+      NR >= s && NR <= e && match($0, /tortoise:block v[^ ]* -->/) {
+        v = substr($0, RSTART, RLENGTH)
+        sub(/^tortoise:block v/, "", v); sub(/ -->$/, "", v); print v; exit
+      }' "$target")" || _emit_fail "could not read the block's version — nothing was changed"
+
+    awk -v s="$c_startline" -v e="$c_endline" 'NR >= s && NR <= e' "$target" > "$tmpdir/window" \
+      || _emit_fail "could not extract the existing block — nothing was changed"
+    # Line-ending-insensitive: a file whose markers match and whose only
+    # difference is CRLF is not a TEXT change (and rewriting it while saying
+    # "updated text" would be a false report). Only a CR immediately before the
+    # newline is ignored — a CR inside a line is real content, so it still counts.
+    #
+    # Normalise into REAL FILES and check each step: a failing process
+    # substitution yields two EMPTY streams, `cmp` then reports them EQUAL, and
+    # the block would be left stale while reporting "already current" — the one
+    # place where an error read as the strongest success claim in the function.
+    if cmp -s "$tmpdir/window" "$block"; then
+      same_bytes=1
+    else
+      sed "s/\r\$//" "$tmpdir/window" > "$tmpdir/window.lf" \
+        || _emit_fail "could not normalise the existing block — nothing was changed"
+      sed "s/\r\$//" "$block" > "$tmpdir/block.lf" \
+        || _emit_fail "could not normalise the new block — nothing was changed"
+      if cmp -s "$tmpdir/window.lf" "$tmpdir/block.lf"; then same_bytes=1; fi
+    fi
+  fi
+
+  if [ "$state_kind" = "paired" ] && [ "$same_bytes" -eq 0 ]; then
+    # In-place replace between the markers — never touches content outside them.
+    : > "$pre" || _emit_fail "could not prepare the rewrite — nothing was changed"
+    : > "$post" || _emit_fail "could not prepare the rewrite — nothing was changed"
+    # The map was computed from an earlier read. In this fleet AGENTS.md is exactly
+    # the kind of file another process may write, and a stale line number makes the
+    # split delete the wrong lines while every command still succeeds — so the pair
+    # is re-asserted here, in the same pass that cuts the file.
+    awk -v s="$c_startline" -v e="$c_endline" -v pre="$pre" -v post="$post" \
+        -v msre="$ms_re" -v mere="$me_re" '
+      NR == s && $0 !~ msre { print "the start marker moved while it was being rewritten" > "/dev/stderr"; exit 9 }
+      NR == e && $0 !~ mere { print "the end marker moved while it was being rewritten" > "/dev/stderr"; exit 9 }
+      NR < s { print > pre }
+      NR > e { print > post }' "$target" \
+      || _emit_fail "could not split the file around the block — nothing was changed"
+    # Stage through an UNPREDICTABLE name in the SAME directory (so the write is
+    # same-filesystem and the `mv` stays atomic). A predictable `$target.tmp` is
+    # the #4327 threat model this script already applies to the skill payloads: a
+    # planted symlink at that name made `cp` follow it and clobber an arbitrary
+    # file, then `mv` turned AGENTS.md into a link to it.
+    staged="$(mktemp "$(dirname "$target")/.tortoise-agents.XXXXXX")" \
+      || _emit_fail "could not stage a temp file next to $target — nothing was changed"
+    # cp -p first preserves the file's mode (a 0600 AGENTS.md stays 0600) and
+    # ownership; cat then overwrites content in place.
+    cp -p "$target" "$staged" || { rm -f "$staged"; _emit_fail "could not copy $target — nothing was changed"; }
+    if ! cat "$pre" "$block" "$post" > "$staged"; then
+      rm -f "$staged"
+      _emit_fail "could not write the staged file — the original is untouched"
+    fi
+    mv "$staged" "$target" || { rm -f "$staged"; _emit_fail "could not replace $target — the original is untouched"; }
+  elif [ "$state_kind" = "none" ]; then
+    if [ -f "$target" ]; then
+      printf '\n\n' >> "$target" || _emit_fail "could not append to $target"
+      cat "$block" >> "$target" || _emit_fail "could not append the block to $target (partially written — re-run after checking the file)"
+    else
+      cat "$block" > "$target" || _emit_fail "could not create $target"
+    fi
   fi
   rm -rf "$tmpdir"
-  echo "  ✓ AGENTS.md — Tortoise standing instructions refreshed/created"
+
+  # ── REPORT: derived from what was WRITTEN and what was there before, never
+  # from the version token alone.
+  local v="$AGENTS_BLOCK_VERSION"
+  # `-lt`/`-gt` on an out-of-range integer ERROR and fall through, which turned a
+  # downgrade into "refreshed (same version…)". Anything that is not a plain
+  # decimal inside int64 range is reported as not comparable, never as current.
+  local prev_cmp=""
+  case "$prev_version" in
+    '') prev_cmp="unversioned" ;;
+    *[!0-9]*) prev_cmp="not-a-number" ;;
+    *) if [ "${#prev_version}" -le 18 ]; then prev_cmp="$prev_version"; else prev_cmp="too-large"; fi ;;
+  esac
+  if [ "$state_kind" = "paired" ] && [ "$same_bytes" -eq 1 ]; then
+    echo "  ✓ AGENTS.md — Tortoise block v$v (already current)"
+  elif [ "$state_kind" = "none" ]; then
+    echo "  ✓ AGENTS.md — Tortoise standing instructions created (block v$v)"
+  elif [ "$prev_cmp" = "unversioned" ]; then
+    echo "  ✓ AGENTS.md — Tortoise block upgraded (unversioned → v$v)"
+  elif [ "$prev_cmp" = "not-a-number" ]; then
+    echo "  ✓ AGENTS.md — Tortoise block written at v$v (the file's version \"v$prev_version\" is not a number this installer can compare)"
+  elif [ "$prev_cmp" = "too-large" ]; then
+    echo "  ✓ AGENTS.md — Tortoise block written at v$v (the file's version \"v$prev_version\" is too large to compare safely)"
+  elif [ "$prev_cmp" -lt "$v" ]; then
+    echo "  ✓ AGENTS.md — Tortoise block upgraded v$prev_version → v$v"
+  elif [ "$prev_cmp" -gt "$v" ]; then
+    # A pinned/cached/rolled-back installer must not silently DOWNGRADE a
+    # project's standing instructions, still less call it an upgrade.
+    echo "  ✓ AGENTS.md — Tortoise block written at v$v (the file had v$prev_version: this installer is OLDER than the block it replaced)"
+  else
+    echo "  ✓ AGENTS.md — Tortoise block refreshed (v$v — same version, updated text)"
+  fi
 }
 
 # Verify the target dir — we KNOW where we wrote, so this is a local check.
@@ -544,7 +835,13 @@ if [ ${#missing[@]} -eq 0 ]; then
   # (other harnesses have their own memory mechanisms; a stray AGENTS.md
   # would change every agent's behavior in this project).
   if [ "$HARNESS" = "codex" ]; then
-    emit_codex_agents_block
+    # #3429: a refusal is a REAL failure, but the SKILLS are already installed
+    # and their banner has printed. Exit 3 separates "AGENTS.md was not upgraded"
+    # from "the install broke", and the line below says which.
+    emit_codex_agents_block || {
+      echo "  (skills above ARE installed; only the AGENTS.md block was not upgraded — exit 3)" >&2
+      exit 3
+    }
   fi
 else
   echo ""
