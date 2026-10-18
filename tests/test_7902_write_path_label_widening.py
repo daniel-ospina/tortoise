@@ -713,3 +713,59 @@ def test_full_coverage_includes_point_reachable_non_point_neighbour(sdk):
     assert 0.0 <= result["coverage"] <= 1.0, (
         f"coverage={result['coverage']} — the full-mode denominator trails "
         "the widened affected set")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# The dirty-MARK half widens in lockstep (#7505 review P1)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _belief(sdk: TortoiseSDK, node_id: str) -> tuple:
+    rows = sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) RETURN n.ep_alpha, n.ep_beta, "
+        "n.posterior_alpha, n.posterior_beta",
+        params={"id": node_id}).result_set
+    return tuple(rows[0]) if rows else ()
+
+
+def test_mitigation_reaches_an_operator_whose_inputs_are_not_points(sdk):
+    """#7505 review (P1): a mitigation must move belief on an operator whose
+    inputs are ALL non-`:Point` labels.
+
+    #7902/#7853 widened the READ half — `_affected_claims`' operator-seed query
+    and `_affected_factors` Batch 2 both admit `:Subject`/`:Object`/`:Event`
+    inputs — so such an operator is EP-live and its factors write posteriors.
+    The dirty-MARK half has to widen in lockstep, because a mitigation write
+    reaches that factor ONLY through `_reverse_bfs_neighbors`' claim query:
+    `(m)-[:IMPL]->(op)` is a neutral link, so `mid` on its own admits nothing
+    (#5566's rule). Left `:Point`-only, `claim_ids` is EMPTY for this operator,
+    `mid` is the only dirty root, the next pass is a clean no-op
+    (`diagnostic == 'no_factors'`) and the mitigated strength silently stops
+    moving the Object's posterior — the exact half-widening hazard #7902
+    documents, on a write path instead of a read path.
+
+    Measured (Object posterior alpha): 1.262738 → 1.140587 with the widened
+    claim query, 1.262738 → 1.262738 without it. It also pins that fixing the
+    propagation keeps the #7505 property: no permanent dirty root survives the
+    converged pass that consumed the mitigation.
+    """
+    sub = _node(sdk, "Subject", "sub-7505-mit")
+    obj = _node(sdk, "Object", "obj-7505-mit")
+    op = sdk.create_operator("IMPL", sub, [obj])
+    # Converged baseline first: the operator write's own marking must not be
+    # what the mitigated pass consumes.
+    assert sdk.compute_confidence(require_calibration=False)
+    before = _belief(sdk, obj)
+    assert before and before != (None, None, None, None), (
+        "the non-Point factor must have written a posterior first")
+
+    mid = sdk.mitigate_operator(op["id"], "weaker than it looks",
+                                strength=0.5)["id"]
+    sdk.compute_confidence(require_calibration=False)
+    after = _belief(sdk, obj)
+    assert after != before, (
+        "a mitigation on an operator with non-:Point inputs must still reach "
+        f"its factor — Object belief did not move: {before} -> {after}")
+
+    # #7505: propagation must not come back as a permanent dirty root.
+    assert mid not in sdk._dirty_roots
+    assert sdk.dream_health_check()["stale_backlog"] == 0
