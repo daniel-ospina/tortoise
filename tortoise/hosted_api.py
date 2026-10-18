@@ -36972,6 +36972,13 @@ async def billing_reconcile(request: Request):
             return JSONResponse(
                 status_code=503,
                 content={"status": "enumeration_incomplete",
+                         # The refusal has SEVERAL legs and they want opposite
+                         # responses: an unreadable control plane clears on
+                         # retry, while a missing enumeration seam or a LOWER
+                         # BOUND page never does. A fixed detail string threw
+                         # that distinction away and sent every operator down
+                         # the retry path, so the leg is carried verbatim.
+                         "reason": redact_error(exc),
                          "detail": "the fleet enumeration could not be "
                                    "confirmed complete — refusing to report a "
                                    "partial pass as clean"})

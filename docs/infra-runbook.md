@@ -499,8 +499,14 @@ customer's writes) and a `direction`:
 no server-side one, so the caller publishes its patience), when the endpoint
 answers `503 enumeration_incomplete` (the pass could not certify the WHOLE
 fleet, so it compared an unknown fraction and refuses to report that as clean),
-when the response cannot be read as a summary, when any org `failed` to
-reconcile, when any org is `unrepaired`, or when any `drift` row went `up`.
+when it answers `503 reconcile_stuck` (a previous pass has held the reconcile
+lock past its staleness bound and is presumed wedged — the fleet is NOT being
+reconciled and retrying will not help; the lock clears when that pass ends or
+the process restarts), when the response cannot be read as a summary, when any
+org `failed` to reconcile, when any org is `unrepaired`, or when any `drift` row
+went `up`. The 503 body carries a `reason` naming which leg refused: an
+UNREADABLE control plane clears on retry, while a lower-bound page or a missing
+enumeration seam does not — read it before retrying.
 The page leg sources `.github/scripts/telegram-send.sh`, so the job starts with
 `actions/checkout` — a hosted runner's workspace is empty otherwise, and the
 source would fail before `tg_send` ran (a page step that can never deliver).

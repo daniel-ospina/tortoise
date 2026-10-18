@@ -2635,17 +2635,19 @@ class TestReconcileSweep:
         # The bound is not a free knob, and it is bounded in BOTH directions.
         # Below: it must stay well clear of the driver's own client ceiling
         # (``curl -m 600`` in the cron step) or a HEALTHY long pass gets libelled
-        # "presumed WEDGED" and pages on a working fleet. Above: it must stay
-        # inside the 24 h cadence, or a genuinely wedged pass answers 202 to
-        # every run, the scheduled branch exits 0, and the page NEVER fires —
-        # the silent direction, and the one a "raise it to be safe" edit takes.
+        # "presumed WEDGED" and pages on a working fleet. Above: it must not
+        # reach the daily cadence at all — at a bound near 24 h a pass wedged at
+        # 04:43 is still inside it when the next fire arrives, so that run
+        # answers 202, the scheduled branch exits 0, and the fleet goes a
+        # further cycle unreconciled and unpaged. Half the cadence keeps a
+        # missed fire for any schedule jitter while still paging on the next.
         assert ha._BILLING_RECONCILE_STALE_S >= 3600.0, (
             "the staleness bound must keep a wide margin over the driver's "
             "600 s client ceiling, or a healthy long pass pages as wedged"
         )
-        assert ha._BILLING_RECONCILE_STALE_S < 86400.0, (
-            "the staleness bound must stay inside the daily cadence, or a "
-            "wedged pass is never paged at all"
+        assert ha._BILLING_RECONCILE_STALE_S <= 43200.0, (
+            "the staleness bound must stay at or below HALF the daily "
+            "cadence, or a wedged pass silences the next cycle's page"
         )
 
         # A hold inside the bound is the documented benign overlap.
@@ -2688,6 +2690,11 @@ class TestReconcileSweep:
             headers={"Authorization": "Bearer internal-test-key"})
         assert r.status_code == 503, r.text
         assert r.json()["status"] == "enumeration_incomplete"
+        # The refusal has SEVERAL legs and only some clear on retry (an
+        # unreadable control plane does; a lower-bound page and a missing
+        # enumeration seam do not). A fixed detail string threw that away and
+        # sent every operator down the retry path, so the leg must be carried.
+        assert "CERTIFIED complete" in r.json().get("reason", ""), r.text
 
 
 class TestLifespanStartup:

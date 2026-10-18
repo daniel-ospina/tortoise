@@ -27,7 +27,10 @@ name: billing-reconcile-cron
 #     causes want OPPOSITE responses:
 #       - `enumeration_incomplete`: the pass could not certify the WHOLE fleet,
 #         so it compared an unknown fraction of it and refuses to report that as
-#         clean — RETRY once the control plane is readable.
+#         clean. This arm has SEVERAL legs and only some clear on retry:
+#         unreadable control plane (retry helps), a lower-bound page, or a
+#         missing `query_all`/`query_with_total` seam (retry never helps). The
+#         body's `reason` names which one — read it before retrying.
 #       - `reconcile_stuck`: a previous pass has held the reconcile lock past
 #         its staleness bound and is presumed WEDGED — the fleet is NOT being
 #         reconciled, and retrying will NOT help (the lock clears when that pass
@@ -208,7 +211,7 @@ jobs:
             exit 1
           fi
           if [ "$status" = "503" ]; then
-            # The endpoint answers 503 for TWO different causes and they need
+            # The endpoint answers 503 for THREE different causes and they need
             # OPPOSITE responses. Naming the wrong one sends the operator to
             # check a control plane that is fine, while the real cause (a dead
             # pass holding the lock until the process restarts) goes unsaid.
@@ -218,7 +221,7 @@ jobs:
                 echo "::error::billing reconcile is STUCK (HTTP 503 reconcile_stuck) — a previous pass has held the lock past the staleness bound and is presumed wedged. The fleet is NOT being reconciled, and the lock clears only when that pass ends or the process restarts; retrying will NOT help."
                 ;;
               enumeration_incomplete)
-                echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair, retry once the control plane is readable"
+                echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair. The body's reason names the leg: an UNREADABLE control plane clears on retry, while a LOWER-BOUND page or a MISSING enumeration seam does not."
                 ;;
               *)
                 # Do NOT guess. Claiming a cause we did not read is the same
