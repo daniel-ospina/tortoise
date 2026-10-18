@@ -54,12 +54,21 @@ WHAT THIS PINS
    scan, NOT a reachability analysis: an exit on the `not story` side of the
    call's own `if story:` guard is deliberately outside it, because S4 is
    already gated off on that path and the exit is therefore not an S4 bypass.
+5. The successor family: the `G5 record` and the design marker keep their
+   measured halves (the fold's stages are present but flag-gated OFF, and
+   neither can emit a candidate a coverage check found missing), the
+   `check_batch` / `classify_items` return-key ALLOW-LISTs still contain no
+   item-carrying signal, and `apply_vet`'s ONE append path is the Rule-4 entity
+   restore from `prior` — never a narrative-sourced candidate.
 
 NOT promised: line numbers. The doc's own rule is that the symbol is
 authoritative and the number a convenience; this file resolves symbols and
 behaviour, never offsets.
 
-Static, stdlib-only, no network / DB / graph.
+Mostly static and stdlib-only. Two tests are BEHAVIOURAL: they import the
+shipped modules in-process (`tortoise.vet_gate`, `tortoise.extractor_v2`) and
+call them, because the claims they pin are about what those functions DO, not
+about their text. Neither import touches the network, the DB or the graph.
 """
 
 from __future__ import annotations
@@ -1327,7 +1336,13 @@ def _return_dict_key_sets(path: Path, func_name: str) -> list[set[str]]:
 
 
 def _successor_clause_violations(doc: str) -> list[str]:
-    """The record's successor clause — the measured half, not the obligation."""
+    """The record's successor clause — the measured half, not the obligation.
+
+    Every literal below pins a claim the #8955 review found overstated, so the
+    fix cannot silently revert to the broader sentence: the flags that gate the
+    two stages, the COVERAGE half that only detects, and the Rule-4 restore that
+    makes an unqualified "only REMOVES" false.
+    """
     problems: list[str] = []
     if SUCCESSOR_ABSENT not in doc:
         problems.append(
@@ -1342,6 +1357,20 @@ def _successor_clause_violations(doc: str) -> list[str]:
          "the record must name the gate's symbol that cannot add (removal-only)"),
         ("classify_items",
          "the record must name the classifier's symbol that labels only"),
+        ("TORTOISE_VET",
+         "both stages are wired in behind flags that default OFF, so the "
+         "record must not present them as running shipped stages"),
+        ("TORTOISE_CLASSIFY_LATER",
+         "the classify pass is flag-gated too; naming one flag reads as a "
+         "single off-switch for both"),
+        ("coverage signal",
+         "VET acts (it records DISCARD); only its COVERAGE half reports and "
+         "never acts, and an unqualified 'VET only detects' contradicts the "
+         "record's own removal sentence"),
+        ("Rule 4",
+         "`apply_vet` has one append path — the Layer-1 entity restore — so an "
+         "unqualified 'only removes' is falsifiable in a single grep and must "
+         "name its exception"),
         ("can ADD",
          "the record must state the removal pre-condition as a stage that can "
          "ADD a candidate — not a stage that reviews or labels one"),
@@ -1354,9 +1383,15 @@ def _successor_clause_violations(doc: str) -> list[str]:
 def _marker_successor_violations(marker: str) -> list[str]:
     problems: list[str] = []
     for required, why in (
-        ("NOT the test that the successor has",
+        ("NOT the test that the successor exists",
          "the marker must warn that the fold's stages existing is not the "
-         "successor landing — this is the misreading that deletes a live stage"),
+         "successor — this is the misreading that deletes a live stage"),
+        ("TORTOISE_VET",
+         "the marker must say the stages are flag-gated OFF, not running"),
+        ("coverage signal",
+         "only VET's coverage half detects; the stage itself discards"),
+        ("Rule 4",
+         "the marker's 'only removes' must name the Layer-1 restore exception"),
         ("can ADD",
          "the marker must state the removal pre-condition as a stage that can "
          "ADD a candidate"),
@@ -1366,25 +1401,131 @@ def _marker_successor_violations(marker: str) -> list[str]:
     return problems
 
 
-def test_the_design_folds_s4_into_s2_2_and_s2_3():
+#: §4.0's purpose table — the record's STATED basis, and the only scope that
+#: makes the fold check non-vacuous. `FOLD_STATEMENT` occurs TWICE in the
+#: document (this table's S2.2 VET row and §S2.2 Level 2's coverage bullet), so a
+#: document-wide read stays green when THIS row loses the clause — the same
+#: defect `_marker_block`'s docstring records the #8601 review proving.
+PURPOSE_ANCHOR = "### 4.0 What each step is FOR"
+PURPOSE_END = "### 4.1 The step list"
+#: The row §4.0 gives S4's purpose to. S2.3 CLASSIFY has NO fold clause there:
+#: its row assigns the SURVIVING candidate its pack kind, so the S2.3 half of
+#: the record is named by the record itself, never by this table.
+VET_ROW_ANCHOR = "| **S2.2 VET** |"
+
+
+def _purpose_table(text: str | None = None) -> str:
+    """§4.0's purpose-test table alone — sliced, not the whole document."""
+    source = DOC.read_text(encoding="utf-8") if text is None else text
+    start = source.find(PURPOSE_ANCHOR)
+    assert start != -1, (
+        f"§4.0 is gone ({PURPOSE_ANCHOR!r} not found) — the fold the G5 record "
+        "derives its basis from has moved, so re-derive the record (#8500)")
+    end = source.find(PURPOSE_END, start)
+    assert end != -1, (
+        f"§4.0's end marker {PURPOSE_END!r} is gone — the table can no longer "
+        "be delimited, and an undelimited slice is a document-wide read")
+    return source[start:end]
+
+
+def _purpose_row(row_anchor: str, text: str | None = None) -> str:
+    """ONE row of §4.0's table, the way `_value_gate_row` scopes its row."""
+    table = _purpose_table(text)
+    start = table.find(row_anchor)
+    assert start != -1, (
+        f"§4.0 no longer has a {row_anchor!r} row — that row is the record's "
+        "basis for S4's removal, so re-derive the record (#8500)")
+    return table[start:table.find("\n", start)]
+
+
+def _fold_violations(text: str | None = None) -> list[str]:
+    """The fold, read from the §4.0 ROW rather than from the document."""
+    row = _purpose_row(VET_ROW_ANCHOR, text)
+    return [] if FOLD_STATEMENT in row else [
+        "§4.0's S2.2 VET row no longer gives the step the coverage question "
+        f"({FOLD_STATEMENT!r}) — the G5 record's basis moved, so re-derive the "
+        "record rather than keeping a claim about a fold that no longer exists "
+        "(#8500). The phrase still occurs at §S2.2 Level 2, which is why a "
+        "document-wide read could not see this."
+    ]
+
+
+def test_the_design_gives_s2_2_vet_the_coverage_question():
     """The record's read of §4.0 is the basis on which S4's removal is even
     contemplated. If the design re-assigns that purpose, the record is stale in
     a way its own ordering obligation hides (the obligation is about a successor
     the design no longer names).
+
+    Scoped to the `| **S2.2 VET** |` row, and named for what it checks: §4.0
+    carries NO S4↔S2.3 statement (its S2.3 row assigns a SURVIVING candidate its
+    pack kind), so the S2.3 half of the record is the record's own reading, not
+    a §4.0 fact this test could pin.
     """
-    assert FOLD_STATEMENT in _flat_doc(), (
-        "§4.0's purpose row no longer gives S2.2 VET the coverage question "
-        f"({FOLD_STATEMENT!r}) — the G5 record's 'folded into S2.2/S2.3' basis "
-        "moved, so re-derive the record rather than keeping a claim about a fold "
-        "that no longer exists (#8500)."
-    )
+    problems = _fold_violations()
+    assert not problems, "; ".join(problems)
+
+
+def test_the_fold_read_is_scoped_to_the_purpose_row():
+    """Non-vacuity for the fold read, on the REAL document.
+
+    `FOLD_STATEMENT` has two independent homes (§4.0's row and §S2.2 Level 2), so
+    the document-wide check this replaces stayed GREEN on exactly the mutation
+    its own failure message advertises — dropping the clause from §4.0 while
+    §S2.2 keeps it. That is the vacuous-prose-check shape the #8601 review
+    already proved once in this file.
+    """
+    doc = DOC.read_text(encoding="utf-8")
+    assert not _fold_violations(doc), (
+        "the unmutated §4.0 row must be clean, or the mutation below cannot be "
+        "attributed to it")
+    assert doc.count(FOLD_STATEMENT) >= 2, (
+        "the phrase must still have more than one home for the scoping to be "
+        "the thing under test; if it lives only in §4.0, say so and this "
+        "mutation becomes redundant")
+    row = _purpose_row(VET_ROW_ANCHOR, doc)
+    mutated = doc.replace(row, row.replace(FOLD_STATEMENT, "accounted for"), 1)
+    assert mutated != doc, "the mutation did not apply — re-point it at the row"
+    assert _fold_violations(mutated), (
+        "deleting the coverage clause from §4.0's S2.2 VET row MUST red this "
+        "check — a document-wide read stayed green here because §S2.2's "
+        "Level-2 bullet still carries the phrase")
+
+
+def test_the_marker_states_no_delivery_state_even_after_a_reflow():
+    """The marker lives in a DESIGN document, and
+    `tests/test_extractor_v4_citation_rot.py`'s delivery-state arm
+    (`_delivery_hits`) is applied PER LINE.
+
+    A reflow is a meaning-preserving edit this document set treats as normal, so
+    a passage that stays clean only because a sentence is split across two
+    source lines is one editorial pass away from a reported 'delivery state'
+    whose message names the changelog policy rather than anything that changed.
+    The passage therefore must not depend on a line break to stay out of that
+    arm — which is what the pre-fix wording (`… the successor has` / `landed.`)
+    did.
+    """
+    from tests.test_extractor_v4_citation_rot import _delivery_hits
+
+    assert not _delivery_hits(_marker_block()), (
+        "the drift marker states a delivery state — a design document states "
+        "the design, and the passage reads clean or red independently of how it "
+        "is wrapped")
+    # Non-vacuity: the probe CAN fire, and this is the shape the pre-fix wording
+    # produced once joined onto one line.
+    assert _delivery_hits("is NOT the test that the successor has landed"), (
+        "the reflow probe cannot fire at all, so the assertion above is vacuous")
 
 
 def test_vet_coverage_is_a_detector_and_cannot_gap_fill():
-    """S2.2 VET is the design's named successor half. Measured: it REPORTS
-    coverage, and only fires in the degenerate zero-candidate case — it cannot
-    emit the item a gap is missing. Pinned behaviourally, because the record's
-    claim is about what the gate can DO, not about a docstring.
+    """S2.2 VET is the design's named successor half. Measured: its COVERAGE
+    signal REPORTS, and only fires in the degenerate zero-candidate case — it
+    cannot emit the item a gap is missing. Pinned behaviourally, because the
+    record's claim is about what the gate can DO, not about a docstring.
+
+    Extends `tests/test_vet_gate_5005.py::test_coverage_suspect_only_on_the_
+    unambiguous_loss`, which owns the narrative-less direction; the genuinely
+    new half here is the PARTIAL-coverage case (it must NOT fire) and the
+    `points`/`events` sections.
     """
     from tortoise import vet_gate as vg
 
@@ -1415,8 +1556,23 @@ def test_vet_coverage_is_a_detector_and_cannot_gap_fill():
 
 
 def test_apply_vet_cannot_emit_an_item():
-    """The removal-only half, pinned as a SET relation so it cannot pass
-    vacuously: `apply_vet` may drop items, never introduce one."""
+    """The removal-only half, pinned as a SET relation over a prior-LESS list so
+    it cannot pass vacuously: with no `prior` handed in, `apply_vet` may drop
+    items, never introduce one.
+
+    Scoped to `prior=None` deliberately — that is the only configuration in
+    which the subset relation holds. The function's ONE append path is Rule 4's
+    Layer-1 entity RESTORE, which needs a `prior` removal pool; the second half
+    below pins what that restore may add (an entity an EARLIER pass discarded,
+    never a candidate the narrative yielded). The record's conclusion survives
+    because of exactly that: a restore cannot fire from a coverage gap, since it
+    needs a surviving candidate to reference the name.
+
+    Extends `tests/test_vet_gate_5005.py::test_apply_vet_removes_only_explicit_
+    discard` (nothing dropped AND nothing added for KEEP/NOOP/MERGE/no-decision)
+    and `::test_cross_pass_reference_restores_entity_and_payload_validates` (the
+    restore leg, owned there) rather than re-asserting either.
+    """
     from tortoise import vet_gate as vg
 
     def texts(el):
@@ -1433,9 +1589,9 @@ def test_apply_vet_cannot_emit_an_item():
     before = texts(el)
     kept, _w = vg.apply_vet(el, {})
     assert set(texts(kept)) <= set(before), (
-        "`apply_vet` introduced an item with no verdict — the gate is not "
-        "removal-only any more, so it CAN gap-fill and the G5 record's successor "
-        "claim is false"
+        "`apply_vet` introduced an item with no verdict and NO `prior` — the "
+        "gate is not removal-only any more, so it CAN gap-fill and the G5 "
+        "record's successor claim is false"
     )
     assert set(texts(kept)) == set(before), (
         "with NO decisions nothing may be dropped (fail-open) — otherwise the "
@@ -1451,6 +1607,47 @@ def test_apply_vet_cannot_emit_an_item():
         "the DISCARD fixture must remove something, or this test proves nothing "
         "about apply_vet's removal half"
     )
+
+    # The ONE permitted addition: Rule 4's restore from `prior`. It re-emits an
+    # entity an EARLIER pass discarded, because a SURVIVING candidate references
+    # it — which is why the record's "no shipped stage can emit a candidate a
+    # coverage check found missing" survives: the restored item comes from the
+    # removal pool, not from the narrative.
+    restored_item = {"name": "pytest", "kind": "core:tool"}
+    refs = {
+        "entities": [{"name": "the plan doc", "kind": "core:other"}],
+        "points": [{"content": "pytest is slow", "pointKind": "statement",
+                    "about_entities": ["pytest"]}],
+        "events": [], "operators": [],
+    }
+    refs_before = texts(refs)
+    with_prior, prior_warnings = vg.apply_vet(
+        refs, {}, prior={"removed_entities": {"pytest": restored_item}})
+    added = set(texts(with_prior)) - set(refs_before)
+    assert added == {("entities", vg._item_text("entities", restored_item))}, (
+        "a prior-carrying apply_vet may add EXACTLY the restored item and "
+        f"nothing else — it added {sorted(added)}. An addition sourced from "
+        "anywhere but `prior` is the gap-filling successor the G5 record says "
+        "does not exist"
+    )
+    assert any("restored" in w for w in prior_warnings), (
+        "the restore must be REPORTED, or it is an invisible emission")
+
+    # …and it cannot conjure the name: with a pool that removed something ELSE
+    # the same reference adds nothing, because the restore reads `prior`'s
+    # entity entries, never the narrative. (The pool is non-empty so the
+    # early-return branch is not what is being measured.)
+    empty_pool, empty_warnings = vg.apply_vet(
+        refs, {},
+        prior={"removed_texts": {"some earlier discarded point"},
+               "removed_entities": {}})
+    assert set(texts(empty_pool)) <= set(refs_before), (
+        "the restore sourced an item from a pool that never held it — it is "
+        "reading something other than the earlier pass's removals, i.e. it "
+        "can gap-fill from the narrative")
+    assert any("cannot be restored" in w for w in empty_warnings), (
+        "an unrestorable reference must be reported rather than silently "
+        "dropped or silently invented")
 
 
 def test_classify_labels_and_never_adds_items():

@@ -80,18 +80,26 @@ so it must not be deleted on the strength of the design doc alone; a lane that
 needs the precedence settled asks the owner on **#8500**.
 
 ⚠️ THE SUCCESSOR HAS NOT LANDED — and *"S2.2 and S2.3 already exist in the
-code"* is NOT the test that it has. §4.0 folded S4's purpose into S2.2 VET
-(*"did we account for everything the narrative said?"*) and S2.3 CLASSIFY, and
-both stages DO ship (``extract_session_v2`` runs ``_vet_gate.apply_vet`` and
-``kind_classifier.classify_items``). So "the fold's stages are present" reads as
-"the successor landed" — while the fold's REMEDY half is unimplemented in both:
+code"* is NOT the test that it has. §4.0 gives S2.2 VET the coverage question
+S4's removal relies on (*"did we account for everything the narrative said?"*),
+and S2.3 CLASSIFY is the fold's other half as this record counts it. Both
+stages are present in the tree (``_vet_gate.apply_vet``,
+``kind_classifier.classify_items``) and both are wired into
+``extract_session_v2`` behind flags that DEFAULT OFF (``TORTOISE_VET``,
+``TORTOISE_CLASSIFY_LATER``), so on the default arm neither has run at all.
+Presence is not sufficiency either: the fold's REMEDY half is unimplemented in
+both.
 
-  * S2.2 VET only DETECTS, and only in one degenerate case. ``check_batch``'s
-    coverage signals are "reported, never acted on": ``coverage_suspect``
-    fires only when a non-empty narrative produced ZERO candidates, and
-    ``apply_vet`` only REMOVES (``OUTCOMES`` = KEEP/NOOP/DISCARD/MERGE, with
-    MERGE recorded-not-applied, #5006). Nothing there can EMIT an item a
-    coverage check found missing.
+  * VET's coverage signal only DETECTS, and only in one degenerate case.
+    ``check_batch``'s coverage signals are "reported, never acted on":
+    ``coverage_suspect`` fires only when a non-empty narrative produced ZERO
+    candidates. The gate itself does act — it records ``DISCARD`` verdicts and
+    ``apply_vet`` removes them — but VET only REMOVES, never adding a candidate
+    the NARRATIVE did not yield: the one append path is the Layer-1 entity
+    RESTORE from ``prior`` (``vet_gate.py`` Rule 4), which re-emits an entity an
+    EARLIER pass discarded, needs a surviving candidate to reference the name,
+    and so cannot fire from a coverage gap. (``OUTCOMES`` =
+    KEEP/NOOP/DISCARD/MERGE, with MERGE recorded-not-applied, #5006.)
   * S2.3 CLASSIFY only LABELS: ``classify_items`` returns ``assignments`` (a
     kind per EXISTING id) and ``_apply_classify_kinds`` writes that kind onto an
     item already in the list. It adds none.

@@ -623,16 +623,21 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 > half and states it *must not absorb* other work, and it contains no reference to `S4`. **Never delete
 > `run_s4` on the strength of this document alone.**
 >
-> ⚠️ **"S2.2 VET and S2.3 CLASSIFY already exist in the code" is NOT the test that the successor has
-> landed.** §4.0 folds S4's purpose into those two steps and both do ship (`_vet_gate.apply_vet`,
-> `kind_classifier.classify_items`), so a lane can read the fold as already executed. It is not: the
-> fold's **remedy** half is unimplemented in both. VET only **detects** coverage (`check_batch`'s
-> `coverage_suspect` — *"reported, never acted on"*, and only for a narrative that produced **zero**
-> candidates) and only **removes** (`apply_vet`; `OUTCOMES` = KEEP/NOOP/DISCARD/MERGE, `MERGE`
-> recorded-not-applied — `#5006`). CLASSIFY only **labels** (`classify_items` returns a kind per
-> **existing** id; `_apply_classify_kinds` adds no item). So **no shipped stage can emit a candidate a
-> coverage check found missing** — removing `run_s4` today DELETES gap-filling instead of relocating
-> it. The pre-condition for removal is a stage that can ADD; building it is the migration deliverable.
+> ⚠️ **"S2.2 VET and S2.3 CLASSIFY already exist in the code" is NOT the test that the successor
+> exists.** §4.0 gives S2.2 VET the coverage question whose answer S4's removal relies on, and both
+> stages are present in the tree (`_vet_gate.apply_vet`, `kind_classifier.classify_items`) — but both
+> are wired into `extract_session_v2` **behind flags that default OFF** (`TORTOISE_VET`,
+> `TORTOISE_CLASSIFY_LATER`), so on the default arm neither has run at all; and presence is not
+> sufficiency, because the fold's **remedy** half is unimplemented in both. VET's **coverage signal**
+> only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
+> narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
+> entity RESTORE from `prior` (`vet_gate.py` **Rule 4**), which re-emits an entity an EARLIER pass
+> discarded, needs a surviving candidate to reference it, and never sources a new candidate from the
+> narrative (`OUTCOMES` = KEEP/NOOP/DISCARD/MERGE, `MERGE` recorded-not-applied — `#5006`). CLASSIFY
+> only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
+> item). So **no shipped stage can emit a candidate a coverage check found missing** — removing
+> `run_s4` today DELETES gap-filling instead of relocating it. The pre-condition for removal is a stage
+> that can ADD; building it is the migration deliverable.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
