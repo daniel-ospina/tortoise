@@ -5894,10 +5894,13 @@ durations:
   # CALL times summed to ~1.7 s locally (0.70 + 0.53 + 0.14 + 0.04). The
   # per-test `setup` bodies are the embedded lane's shared cold-start (measured
   # 0.2-22 s across runs and mostly one-time), which the packer's per-file
-  # weight must not double-count. Both halves are load-bearing: the surface
-  # entry alone leaves `durations` coverage under the floor and
-  # `tools/ci_selection.py --integrity` reds (#4348 trap), and a durations entry
-  # with no surface registration leaves the file unclassified. Refresh from the
+  # weight must not double-count. Registration and weight are different guards,
+  # and only one is enforced: `tools/ci_selection.py --integrity` reports a
+  # `durations` key with no surface entry as unclassified, while fast-pool
+  # coverage is checked against a 0.90 floor (#3400), so one omitted weight can
+  # still pass. Measured at the #8746 head: 824/914 = 90.15%, and dropping this
+  # entry leaves 823/914 = 90.04% with `duration_coverage_issues` still empty.
+  # Refresh from the
   # first post-merge run that includes it.
   test_connector_oauth_flow.py: 2.5
   test_cypher_regex_guard_3595.py: 0.2
@@ -5916,10 +5919,14 @@ durations:
   # tests/test_tmpdir_hygiene.py::test_suite_jobs_surface_the_tolerated_leak,
   # which is the one that reads the two workflows; nothing here reads YAML.)
   # So this estimate does not move with
-  # box load. Both halves are load-bearing: the surface entry alone leaves
-  # durations coverage under the floor and `tools/ci_selection.py --integrity`
-  # reds (#4348 trap), and a durations entry with no surface registration leaves
-  # the file unclassified.
+  # box load. Registration and weight are different guards, and only one is
+  # enforced: `--integrity` reports a `durations` key with no surface entry as
+  # unclassified, while fast-pool coverage is checked against a 0.90 floor
+  # (#3400), so one omitted weight can still pass. Measured at this head the
+  # pool is 824/914 = 90.15%, and dropping THIS entry leaves 823/914 = 90.04%
+  # with `duration_coverage_issues` still empty — one unmeasured file of margin
+  # (822/914 = 89.93% would red). Add a weight for every new fast file rather
+  # than trusting it to red.
   test_graph_delete_hygiene_report.py: 1.8
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
