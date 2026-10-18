@@ -2187,9 +2187,10 @@ def test_drop_test_graph_refuses_the_shared_uri_default_graph(monkeypatch):
         proj = _FakeProj("tortoise_test_matrix")
         assert _live_utils.drop_test_graph(proj) is False
         assert proj.db.calls == [], proj.db.calls
-        # NARROWING CONTROL: one character away from the refused name is a
-        # per-run name again — so the refusal above is the DEFAULT-graph arm
-        # firing, not the prefix arm refusing the whole family.
+        # NARROWING CONTROL — for the PREFIX arm only (the mint-shape arm
+        # refuses `tortoise_test_matrix` too, so this proves nothing about the
+        # DEFAULT-graph arm; the discriminating case is the mint-shaped URI
+        # default further down).
         per_run = _FakeProj("tortoise_test_matrix_7f3a9c21")
         assert _live_utils.drop_test_graph(per_run) is False
         assert per_run.db.calls, (

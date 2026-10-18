@@ -437,10 +437,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # derives the default graph name from `tests/_embedded._uri_default_graph_name()`,
     # which reads TORTOISE_DB_URI from the environment with NO injection seam —
     # so the env control IS the test input, and the URI's PATH
-    # (`/tortoise_test_matrix`) is the whole assertion: the name is inside the
+    # (`/tortoise_test_matrix`) is the assertion: the name is inside the
     # canonical `tortoise_test` family (so the prefix gate admits it) yet must
-    # still be refused, and the narrowing control one character away proves the
-    # refusal came from this arm and not the prefix. The `delenv` case is the
+    # still be refused. That refusal ALONE attributes nothing — the mint-shape
+    # arm refuses it too — so the discrimination comes from a second probe whose
+    # URI DEFAULT is itself a mint-shaped name (`/test_proj125_ab12cd34`):
+    # refused with `db.calls == []`, then ADMITTED once the URI points
+    # elsewhere. The `delenv` case is the
     # URI-LESS lane (live_proj runs there too, since it skips on a TCP probe):
     # with no URI the default-graph arm cannot fire at all, so the same test
     # pins the MINT-SHAPE arm that closes the class — a shared fixed name is
