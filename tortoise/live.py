@@ -412,6 +412,47 @@ def epistemic_label_queries(template: str) -> list[str]:
     return [template.replace("{label}", label) for label in EPISTEMIC_LABELS]
 
 
+def epistemic_labels_of(graph, ids) -> list[str]:
+    """Epistemic labels PRESENT among ``ids`` — one batched query per label.
+
+    ``graph`` is the Falkor graph handle (``projection.g``), not the
+    projection wrapper.
+
+    The NARROWING half of an id-anchored read (#7927): rather than running
+    every id-anchored query once per label, resolve which labels actually
+    occur and sweep only those. A Point-only id set (the overwhelming
+    majority of EP reads) costs ONE query, not four.
+
+    Resolution is FIRST-WINS in ``EPISTEMIC_LABELS`` order (Point first — the
+    hot path) and MULTI-LABEL AWARE: a ``:Point:Object`` node
+    (``update_point``'s promote arm mints one) resolves as ``Point`` and is
+    still matched by a ``(n:Point)``-anchored query, so keeping either of its
+    labels is correct. Only labels that actually resolved one of ``ids`` are
+    returned, and the scan stops as soon as every id is accounted for.
+
+    Returns at least ``EPISTEMIC_LABELS[0]`` so a caller's anchored query still
+    runs for an id matching no epistemic label — exactly the pre-widening
+    shape, which found nothing for such an id.
+    """
+    queries = dict(zip(
+        EPISTEMIC_LABELS,
+        epistemic_label_queries(
+            "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"),
+        strict=True))
+    unresolved = list(dict.fromkeys(ids))
+    present: list[str] = []
+    for label in EPISTEMIC_LABELS:
+        if not unresolved:
+            break
+        rows = graph.query(
+            queries[label], params={"ids": unresolved}).result_set
+        found = {r[0] for r in rows} & set(unresolved)
+        if found:
+            present.append(label)
+            unresolved = [i for i in unresolved if i not in found]
+    return present or [EPISTEMIC_LABELS[0]]
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # #7852 — the Layer-1 direction vocabulary: the model's four values, plus the
 # two legacy aliases that remain readable.

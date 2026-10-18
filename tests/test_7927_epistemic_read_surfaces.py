@@ -41,6 +41,7 @@ import pytest
 from tortoise.analyze import _bfs_select_operators
 from tortoise.audit import audit_graph
 from tortoise.ep import TortoiseEP
+from tortoise.live import EPISTEMIC_LABELS, epistemic_labels_of
 from tortoise.ranking import (
     W4_CONTESTED_BOOST,
     GapsRanker,
@@ -51,6 +52,22 @@ from tortoise.ranking import (
 from tortoise.sdk import TortoiseSDK
 
 NON_POINT_LABELS = ["Subject", "Object", "Event"]
+
+
+class _CountingProjection:
+    """Projection proxy that records every Cypher the reads under test issue."""
+
+    def __init__(self, proj):
+        self._proj = proj
+        self.queries: list[str] = []
+
+    @property
+    def g(self):
+        return self
+
+    def query(self, cypher, params=None):
+        self.queries.append(cypher)
+        return self._proj.g.query(cypher, params=params)
 
 
 @pytest.fixture
@@ -67,35 +84,73 @@ def _point(sdk: TortoiseSDK, content: str = "a point claim") -> str:
 
 
 def _node(sdk: TortoiseSDK, label: str, node_id: str, *,
-          content: str | None = None, **props) -> str:
-    """Create a bare epistemic node of ``label`` (:Subject/:Object/:Event).
+          name: str | None = None, **props) -> str:
+    """Create a bare epistemic node in its PRODUCTION write shape.
 
-    Written directly (not through the entity write API) so the test pins the
-    LABEL handling of the READ surfaces, not the separately-covered write
-    surface. ``content`` AND ``name`` carry the text: the surfaces read
-    ``n.content`` (contested claims) and ``n.label``/``n.content``
-    (counter-claim resolution) depending on which one they touch.
+    :Subject carries ``(id, name, subjectKind, status)``; :Object carries
+    ``(id, name, objectKind, title, status)``; :Event carries ``(id, eventId,
+    eventKind, startedAt, name)`` and no ``status``. NONE of them carries
+    ``content`` (``create_entity`` rejects belief props) — so a fixture that
+    hand-writes ``content`` would hide exactly the defect these tests exist to
+    catch: a surface reading a text property the label never stores. Written
+    directly (not through the entity API) so the test pins the READ surfaces,
+    not the separately-covered write surface.
     """
-    text = content if content is not None else node_id
-    params = {"id": node_id, "text": text}
-    extra = ""
-    if props:
-        extra = " ".join(f", {k}:${k}" for k in props)
-        params.update(props)
+    text = name if name is not None else node_id
+    params = {"id": node_id, "name": text}
+    # Defaults are the PRODUCTION shape per label; a caller may override any of
+    # them (e.g. ``status='draft'``) without producing a duplicate map key.
+    props = dict(props)
+    if label == "Object":
+        props.setdefault("title", text)
     if label == "Event":
-        sdk._get_proj().g.query(
-            "CREATE (e:Event {id:$id, eventId:$id, eventKind:'test', "
-            "startedAt:'2026-01-01T00:00:00Z', status:'live', "
-            "content:$text, name:$text" + extra + "})",
-            params=params,
-        )
+        props.setdefault("eventId", node_id)
+        props.setdefault("eventKind", "test")
+        props.setdefault("startedAt", "2026-01-01T00:00:00Z")
     else:
-        sdk._get_proj().g.query(
-            f"CREATE (n:{label} {{id:$id, status:'live', content:$text, "
-            f"name:$text{extra}}})",
-            params=params,
-        )
+        props.setdefault("status", "live")
+    assign = ", ".join(f"{k}:${k}" for k in props)
+    params.update(props)
+    sdk._get_proj().g.query(
+        f"CREATE (n:{label} {{id:$id, name:$name, {assign}}})", params=params
+    )
     return node_id
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Perf contract — the widening must not cost 4× on a Point-only read
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_present_label_resolution_keeps_a_point_only_read_cheap(sdk):
+    """``live.epistemic_labels_of`` narrows the sweep to the labels actually
+    present: a Point-only id set resolves in ONE query (not four — the
+    unconditional sweep took the #395 AC5 zone from ~0.73s to ~1.50s), a mixed
+    set resolves only the labels it contains, and an id matching no epistemic
+    label still runs the Point leg (the pre-widening shape)."""
+    p = _point(sdk)
+    n = _node(sdk, "Subject", "resolve-1")
+    counter = _CountingProjection(sdk._get_proj())
+
+    assert epistemic_labels_of(counter, [p]) == ["Point"]
+    assert len(counter.queries) == 1, counter.queries
+
+    counter.queries.clear()
+    assert set(epistemic_labels_of(counter, [p, n])) == {"Point", "Subject"}
+    assert len(counter.queries) == 2, counter.queries
+
+    counter.queries.clear()
+    assert epistemic_labels_of(counter, ["no-such-epistemic-node"]) == ["Point"]
+    assert len(counter.queries) == len(EPISTEMIC_LABELS), counter.queries
+
+
+def test_ranker_read_costs_one_anchored_query_for_point_ids(sdk):
+    """The ranker sweep is resolution + ONE anchored read for a Point-only id
+    set — the recall/rerank latency contract, pinned so the widening cannot
+    quietly become four reads per result set."""
+    p = _point(sdk)
+    counter = _CountingProjection(sdk._get_proj())
+    GraphRanker(projection=counter)._fetch_point_signals([p])
+    assert len(counter.queries) == 2, counter.queries
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -178,15 +233,50 @@ def test_sdk_select_subgraph_admits_every_non_point_anchor(sdk):
 @pytest.mark.parametrize("label", NON_POINT_LABELS)
 def test_contested_claims_lists_non_point_belief(sdk, label):
     """Beta(2,2) variance is 0.05 > the 0.04 bar: a MEASURED, wide belief of
-    any epistemic label is contested. Two independent narrowings hid it — the
-    ``:Point`` scan label AND ``n.is_operator = false`` (a non-Point has no
-    ``is_operator`` at all, so the predicate dropped it by NULL)."""
+    any epistemic label is contested. Three independent narrowings hid it — the
+    ``:Point`` scan label, ``n.is_operator = false`` (a non-Point has no
+    ``is_operator``, so the predicate dropped it by NULL), and the text read
+    (``n.content`` only — entities store ``name``)."""
     n = _node(sdk, label, f"contested-{label.lower()}",
+              name=f"a wide {label} belief",
               posterior_alpha=2.0, posterior_beta=2.0)
 
     listed = {c["id"]: c for c in sdk._get_ep().get_contested_claims()}
     assert n in listed, f":{label} belief with variance 0.05 was not listed"
     assert listed[n]["variance"] > 0.04
+    assert listed[n]["content"] == f"a wide {label} belief", listed[n]
+
+
+def test_contested_claims_does_not_flood_the_report_with_unmeasured_entities(sdk):
+    """The unmeasured-MUST-list rule is the CLAIM rule (:169 pin) and stays for
+    ``:Point`` — but an entity has no persisted prior unless EP measured it
+    (``create_entity`` rejects belief props), and Beta(1,1) sits at the MAXIMUM
+    variance 1/12. Listing those would put every Subject/Object/Event on the
+    graph permanently at the top of a report that exists to discriminate, and
+    nothing would ever measure them. So a MEASURED entity lists, an unmeasured
+    one does not — while an unmeasured Point still does."""
+    sdk._get_proj().g.query("CREATE (p:Point {id:'unmeasured-point', status:'live', content:'unmeasured claim'})")
+    for label in NON_POINT_LABELS:
+        _node(sdk, label, f"unmeasured-{label.lower()}")
+
+    ids = {c["id"] for c in sdk._get_ep().get_contested_claims()}
+    assert "unmeasured-point" in ids, "the :169 claim pin (unmeasured lists) regressed"
+    for label in NON_POINT_LABELS:
+        assert f"unmeasured-{label.lower()}" not in ids, (
+            f"an unmeasured :{label} flooded the contested report")
+
+
+def test_contested_claims_lists_a_multi_labelled_node_once(sdk):
+    """``:Point:Object`` is a real minted shape (``update_point``'s promote
+    arm). Both label sweeps return it, so the merged set must collapse on id —
+    before the collapse the same node listed twice, which no consumer expects."""
+    sdk._get_proj().g.query(
+        "CREATE (n:Point:Object {id:'multi-1', status:'live', "
+        "content:'a promoted claim', name:'a promoted claim', "
+        "posterior_alpha:2.0, posterior_beta:2.0})")
+
+    rows = [c for c in sdk._get_ep().get_contested_claims() if c["id"] == "multi-1"]
+    assert len(rows) == 1, f"multi-labelled node listed {len(rows)} times"
 
 
 def test_contested_claims_still_lists_points_and_orders_by_variance(sdk):
@@ -262,13 +352,16 @@ def test_contested_relevance_reads_non_point_target_and_counter_claim(sdk):
     row did not exist at all."""
     target = _node(sdk, "Object", "w4-target")
     counter = _node(sdk, "Subject", "w4-counter",
-                    content="the cache rollback is the safer default")
+                    name="the cache rollback is the safer default")
     proj = sdk._get_proj()
     proj.g.query(
         "MATCH (a {id:$a}), (b {id:$b}) MERGE (a)-[r:NAND]->(b) SET r.idx = 1",
         params={"a": counter, "b": target},
     )
 
+    # The counter-claim stores its text in ``name`` (production shape), so the
+    # read must resolve it there — the old ``content``-only chain fell through
+    # to ``c.label`` and the boost never fired for an entity conflict.
     boosts = resolve_contested_relevance(proj, [target], "cache rollback")
     assert boosts == {target: W4_CONTESTED_BOOST}
 
@@ -279,7 +372,7 @@ def test_contested_relevance_reads_non_point_nand_input_source(sdk):
     dropped and the operator's conflict goes silent."""
     target = _node(sdk, "Subject", "w4-op-target")
     source = _node(sdk, "Subject", "w4-op-source",
-                   content="flocking zebra finch behavior is social")
+                   name="flocking zebra finch behavior is social")
     proj = sdk._get_proj()
     proj.g.query(
         "CREATE (op:Point {id:'w4-op', is_operator:true, op_type:'NAND', "
@@ -366,7 +459,7 @@ def test_bfs_selector_uses_the_shared_label_helpers():
 
 def test_contested_claims_uses_the_shared_label_helper():
     src = inspect.getsource(TortoiseEP.get_contested_claims)
-    assert "epistemic_label_queries(" in src
+    assert "EPISTEMIC_LABELS" in src
     assert "MATCH (n:Point)" not in src
 
 
