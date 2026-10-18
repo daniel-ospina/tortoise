@@ -76,12 +76,19 @@ explicit error the caller can act on"). ``restore_graph_key``:
                             ACCEPTS a connection
    ``LIVENESS_UNMEASURED``  restore overran ``bound_s``; PINGs unanswered  the BLOCK is
                             (or one ANSWERED slowly) and liveness was      measured; blocked
-                            NEVER probed (no ``listening`` callable)       vs dead is NOT
+                            NOT measured: no ``listening`` callable, or    vs dead is NOT
+                            one that raised / returned ``None``
    ``INSTANCE_GONE``        restore overran ``bound_s``; port REFUSED      the process died
                                                                            (cause not proved)
    ``CALLER_STALL``         restore overran ``bound_s`` but EVERY PING      the caller is stuck,
                             answered — the serving thread cannot be        not the engine
                             inside a rebuild while that is true
+   ``FAILED``               the RESTORE call itself raised; its own        the graph key was
+                            error is RE-RAISED unchanged, with this        ALREADY DELETED — the
+                            observation attached as a ``__notes__``        graph is gone, and the
+                            entry                                          payload in the caller's
+                                                                           hands is the only
+                                                                           copy left
    ``UNMEASURED``           the witness produced nothing it can trust:     nothing is known about
                             zero samples inside the window, or a           the instance — this is
                             NON-transport witness failure (WRONGPASS,       NOT a green, and not
@@ -104,7 +111,13 @@ explicit error the caller can act on"). ``restore_graph_key``:
    ``GraphRestoreSilentError`` (``ALIVE_BUT_SILENT``, ``LIVENESS_UNMEASURED``) /
    ``GraphRestoreLostError`` (``INSTANCE_GONE``) / ``GraphRestoreStalledError``
    (``CALLER_STALL``), whose messages carry the measurement and the recovery
-   instruction.
+   instruction. ``FAILED`` raises nothing of its own — the caller's error is re-raised
+   unchanged — and it is in this table for the opposite reason: its CONSEQUENCE is the
+   worst one here. The sequence is ``dump()`` → ``delete()`` → ``restore()``, so by the
+   time the RESTORE raises the graph key is ALREADY DELETED and the payload exists only
+   in the caller's hands. Omitting it left that run described by the served/unmeasured
+   text, which could tell the operator the instance "served through the restore" on the
+   one run that lost the graph (#8827 review).
 
    ``LIVENESS_UNMEASURED`` exists because the block and the DEATH are told apart by the
    transport probe alone (#8827 review): with ``listening`` omitted, an overrun that
@@ -255,6 +268,32 @@ _WITNESS_TRANSPORT_ERRORS = frozenset(
 )
 
 
+def _instrument_failures(error_names: tuple[str, ...]) -> tuple[str, ...]:
+    """The witness failure names that are NOT transport-level — empty means none.
+
+    POLARITY IS THE WHOLE POINT (#8827 review). "No fault" must be the POSITIVE claim:
+    a run is unattributable only when EVERY failure is a transport error, so ONE
+    non-transport name disqualifies it. The previous test asked the opposite question —
+    ``not (set(errors) & _WITNESS_TRANSPORT_ERRORS)``, i.e. "is this set DISJOINT from
+    transport" — so a MIXED set (``TimeoutError`` from a blocked engine alongside
+    ``AuthenticationError`` from the witness) answered "pure transport": the auth
+    failure was dropped from the verdict, and the run was published as a trustworthy
+    ``BLOCKED`` / do-not-retry while the one error an operator needed was surfaced
+    nowhere.
+
+    Names are compared CONCRETELY — the witness records ``type(exc).__name__``, never an
+    ``isinstance`` walk: ``redis.exceptions.AuthenticationError`` SUBCLASSES
+    ``ConnectionError``, so a subclass test would smuggle an auth failure into the very
+    transport set it must never join.
+
+    A module-level function rather than a method because the driver and
+    :attr:`RestoreObservation.witness_fault` must not be able to drift: they carry the
+    SAME claim — the status the caller switches on, and the account it reads — and they
+    were two copies of one expression before this (#8827 review).
+    """
+    return tuple(name for name in error_names if name not in _WITNESS_TRANSPORT_ERRORS)
+
+
 @dataclass(frozen=True)
 class RestoreObservation:
     """What ``restore_graph_key`` measured, including the parts that are not its own.
@@ -313,7 +352,15 @@ class RestoreObservation:
     #: other consequence of the split (which error is raised, whether the recovery probe
     #: runs) already keys on this flag; publishing it puts the measurement in the data.
     restore_returned: bool
+    #: The free-text reason behind ``error``/``status`` — the restore's own error on
+    #: ``FAILED``, the unmeasured reason on ``UNMEASURED``, or what the liveness probe did
+    #: on an overrun.
     error: str | None = None
+    #: Set when the caller's ``listening`` probe RAISED. A probe that cannot answer is
+    #: ``instance_listening is None`` — "could not measure", never a refusal — so this
+    #: field is what lets the account say that instead of claiming no probe was supplied
+    #: (#8827 review).
+    liveness_error: str | None = None
 
     @property
     def silent(self) -> bool:
@@ -326,11 +373,11 @@ class RestoreObservation:
 
         A transport error (timeout, reset, refused) is the instance not answering. Anything
         else — ``WRONGPASS``, a DNS ``gaierror``, a bug in the probe — is the INSTRUMENT
-        failing, and an outage measured that way cannot be attributed to the engine.
+        failing, and an outage measured that way cannot be attributed to the engine. ONE
+        such failure is enough, even when transport failures appear in the same set: see
+        :func:`_instrument_failures` (#8827 review).
         """
-        return bool(self.witness_errors) and not (
-            set(self.witness_errors) & _WITNESS_TRANSPORT_ERRORS
-        )
+        return bool(_instrument_failures(self.witness_errors))
 
     @property
     def measured(self) -> bool:
@@ -373,6 +420,7 @@ class RestoreObservation:
             "instance_listening": self.instance_listening,
             "restore_returned": self.restore_returned,
             "error": self.error,
+            "liveness_error": self.liveness_error,
         }
 
     def sentence(self) -> str:
@@ -432,6 +480,28 @@ class RestoreObservation:
             f"{self.witness_max_latency_ms:.0f} ms)."
         )
 
+    def _liveness_unmeasured_text(self) -> str:
+        """What ``LIVENESS_UNMEASURED`` may say about the probe — and only that.
+
+        The account used to read *"no transport probe was supplied (pass ``listening=...``)"*
+        on every arm, which is a false statement about a probe the caller DID supply and
+        that RAISED, and about one that returned ``None`` ("could not measure"). Both
+        select this status (#8827 review).
+        """
+        if self.liveness_error is not None:
+            return (
+                f"LIVENESS WAS NOT MEASURED: {self.liveness_error}, so this account "
+                f"cannot tell a BLOCKED process from a DEAD one, and it makes no claim "
+                f"either way."
+            )
+        return (
+            "LIVENESS WAS NOT MEASURED: no transport probe supplied an answer (omit "
+            "``listening`` and there is none; pass ``listening=tcp_is_listening(host, "
+            "port)`` and a probe that returns ``None`` could not measure), so this "
+            "account cannot tell a BLOCKED process from a DEAD one, and it makes no "
+            "claim either way."
+        )
+
     def diagnosis(self) -> str:
         """The actionable, multi-sentence account used as the exception message.
 
@@ -449,6 +519,23 @@ class RestoreObservation:
         rather than left in a field nobody reads.
         """
         verdict = self._verdict_line()
+        if self.status == FAILED:
+            # FIRST, and above every witness branch: the graph is gone, which outranks any
+            # reading. There was no FAILED branch at all (#8827 review), so this run —
+            # the only one whose consequence is a LOST GRAPH — fell through to the
+            # served/unmeasured text and could be described as an instance that "served
+            # through the restore".
+            return (
+                f"{verdict} The RESTORE call itself FAILED ({self.error}). The graph was "
+                f"NOT restored: the driver's own ``delete()`` ran BEFORE the RESTORE, so "
+                f"the graph key is ALREADY DELETED from the instance and the only copy "
+                f"of the payload is the one in the caller's hands. Do not exit and do "
+                f"not discard that payload — re-issue the RESTORE from it before doing "
+                f"anything else, then decide whether the refusal (a ``BUSYKEY``-class "
+                f"error, an index rebuild error, a dropped connection) needs a different "
+                f"recovery. A PING will not tell you any of this: the instance is fine "
+                f"and the KEY is missing."
+            )
         if self.status == CALLER_STALL:
             # Every witness PING answered: the instance WAS serving, so the story is
             # not "blocked engine" and saying it was would send the operator to the
@@ -494,14 +581,14 @@ class RestoreObservation:
             return (
                 f"{verdict} {best}. That is the #7846 BLOCK measured from the witness "
                 f"side — the instance did not answer normally during the restore. "
-                f"LIVENESS WAS NOT MEASURED: no transport probe was supplied (pass "
-                f"``listening=tcp_is_listening(host, port)``), so this account cannot "
-                f"tell a BLOCKED process from a DEAD one, and it makes no claim either "
-                f"way. Do not retry (a retry re-blocks the instance for another full "
-                f"rebuild), and do not restart on this alone: probe the port and PING "
-                f"on a separate connection yourself — a REFUSED port means the process "
-                f"is gone and needs a restart; an ACCEPTED one means blocked, so wait "
-                f"and re-probe."
+                f"{self._liveness_unmeasured_text()} Do not retry (a retry re-blocks the "
+                f"instance for another full rebuild), and do not restart on this alone: "
+                f"probe the port and PING on a separate connection yourself — a REFUSED "
+                f"port means the process is gone and needs a restart; an ACCEPTED one "
+                f"means blocked, so wait and re-probe. Either way the KEY is what you are "
+                f"recovering: the graph key was DELETED before the RESTORE, so confirm it "
+                f"exists again (``GRAPH.LIST`` / an ``EXISTS``-class check) with the "
+                f"restored node count — a live instance with no key is still a lost graph."
             )
         if self.status == UNMEASURED or self.witness_fault or not self.witness_samples:
             # The instrument failed, or it never got a reading. Neither is the block, and
@@ -514,7 +601,9 @@ class RestoreObservation:
                 f"than ``bound_s + witness_join_s`` never returns a sample at all, so "
                 f"give the witness client a short timeout (below ``bound_s``), fix its "
                 f"credentials/route if the failure above names them, then re-probe the "
-                f"instance with a PING on a separate connection."
+                f"instance with a PING on a separate connection — and confirm the graph "
+                f"KEY is back (``GRAPH.LIST`` / an ``EXISTS``-class check), because a "
+                f"PING says the instance is up, not that the RESTORE took."
             )
         if self.witness_failures:
             # `instance_listening is None` on the overrun path is LIVENESS_UNMEASURED and
@@ -539,8 +628,11 @@ class RestoreObservation:
                 f"signature (the vector index is rebuilt on the serving thread, so the "
                 f"whole instance is off the air for the rebuild). Do not retry: a retry "
                 f"re-blocks the instance for another full rebuild. The abandoned restore "
-                f"may still complete — check with a PING on a separate connection before "
-                f"restarting anything."
+                f"may still complete, and a PING cannot tell you whether it did — the "
+                f"graph key was DELETED before the RESTORE. Check the KEY: that it exists "
+                f"again (``GRAPH.LIST`` / an ``EXISTS``-class check) and that its node "
+                f"count is the restored one, before restarting anything. A PING answers "
+                f"only whether the instance is up."
             )
         if self.witness_max_latency_ms >= self.blocked_latency_ms:
             # Measured, no PING went unanswered — but a slow ANSWERED one IS the block,
@@ -556,8 +648,12 @@ class RestoreObservation:
                 f"serving normally. This is the #7846 block measured from inside its own "
                 f"duration — not load (a loaded server answers, only slower than this) "
                 f"and not the caller. Do not retry: a retry re-blocks the instance for "
-                f"another full rebuild. The abandoned restore may still complete — check "
-                f"with a PING on a separate connection before restarting anything."
+                f"another full rebuild. The abandoned restore may still complete, and a "
+                f"PING cannot tell you whether it did — the graph key was DELETED before "
+                f"the RESTORE. Check the KEY: that it exists again (``GRAPH.LIST`` / an "
+                f"``EXISTS``-class check) and that its node count is the restored one, "
+                f"before restarting anything. A PING answers only whether the instance "
+                f"is up."
             )
         # Measured, every PING answered, no slow one: nothing was wrong with the instance.
         return (
@@ -767,7 +863,10 @@ def restore_graph_key(
     witness produced no reading a verdict may rest on). ``UNMEASURED`` is RETURNED
     here when the restore returned; it is the same status that RAISES
     ``GraphRestoreSilentError`` when the restore overran, so a missing exception is not
-    evidence of a measurement — ``observation.measured`` is.
+    evidence of a measurement — ``observation.measured`` is. A run whose RESTORE
+    RAISED is published as ``FAILED``, and that observation is attached to the
+    caller's own error rather than replacing it (see ``Raises``): its account is the
+    one that says the graph key was ALREADY DELETED (#8827 review).
 
     ``bound_s`` bounds the ``restore`` call, NOT ``dump``/``delete``: those two run
     inline on the caller's thread here, before the worker starts, so their only limit
@@ -793,7 +892,9 @@ def restore_graph_key(
             PING answered — the instance was serving, so the stall is the caller's.
         BaseException: whatever ``restore`` itself raised, re-raised unchanged with
             the observation attached as a ``__notes__`` entry (its own error is
-            already loud; this driver does not replace it).
+            already loud; this driver does not replace it). That observation's status
+            is ``FAILED``: ``dump()``/``delete()`` already ran, so the graph key is
+            gone and the payload is the only copy left.
 
     ``ping`` must own its OWN connection. The restore runs on a daemon worker thread
     and is ABANDONED at ``bound_s`` — never joined to completion — so the RESTORE call
@@ -890,9 +991,14 @@ def restore_graph_key(
     # retry" told the operator to act on a fabricated engine verdict, so the outage
     # is refused rather than blamed on the engine (#8827 review).
     witness_errors = tuple(sorted(witness.unanswered_errors))
-    witness_fault = bool(witness_errors) and not (
-        set(witness_errors) & _WITNESS_TRANSPORT_ERRORS
-    )
+    # ONE shared helper, also used by `RestoreObservation.witness_fault`: the status the
+    # caller switches on and the account it reads are the same claim, and while this test
+    # was written out twice the two were free to disagree (#8827 review). The polarity is
+    # "ANY non-transport failure disqualifies", never "the set is disjoint from
+    # transport" — the latter read a MIXED fault as pure transport and published a
+    # do-not-retry BLOCKED over the caller's auth error.
+    instrument_failures = _instrument_failures(witness_errors)
+    witness_fault = bool(instrument_failures)
     # A witness fault is not a block, and a run with no reading is not a green either.
     if witness_fault:
         blocked = False
@@ -904,7 +1010,7 @@ def restore_graph_key(
     if witness_fault:
         unmeasured_reason = (
             "the WITNESS failed on a NON-transport error "
-            f"({', '.join(witness_errors)}), so its silence measures the instrument, "
+            f"({', '.join(instrument_failures)}), so its silence measures the instrument, "
             "not the engine — this is NOT evidence of the #7846 blocked-engine "
             "signature"
         )
@@ -950,9 +1056,14 @@ def restore_graph_key(
         )
         logger.info("graph-key restore finished: %s", observation.sentence())
         if error is not None:
-            # Keep the caller's own error type; the observation becomes a note.
+            # Keep the caller's own error type; the observation becomes a note. The
+            # ACCOUNT is attached too, because ``FAILED`` is the one status whose
+            # consequence is a LOST GRAPH and its account is the only text that says the
+            # key is already DELETED — reachable nowhere else once the caller's error is
+            # re-raised (#8827 review).
             with contextlib.suppress(AttributeError):
                 error.add_note(observation.sentence())
+                error.add_note(observation.diagnosis())
             raise error
         if observation.status == UNMEASURED:
             logger.warning(
@@ -977,11 +1088,26 @@ def restore_graph_key(
     # `bool(probe)` would turn the tri-state probe's `None` ("could not measure")
     # back into `False` ("refused"), and `False` selects INSTANCE_GONE — telling the
     # operator to restart a healthy box. `None` must survive to the status decision.
+    #
+    # The probe is CALLER-supplied code and is called UNGUARDED before this fix (#8827
+    # review): `listening=lambda: client.ping() is True` — the natural way to wire a
+    # command-level probe — raises when the block it is meant to measure is happening,
+    # and the raw exception escaped HERE, after `delete()` had already removed the graph
+    # key and after the restore worker had been abandoned. The caller lost the typed
+    # error and the observation was never published or logged. A probe that cannot
+    # ANSWER is not a refusal: it is `instance_listening is None`, the driver's own
+    # "could not measure", which selects LIVENESS_UNMEASURED and makes no death claim.
+    liveness_error: str | None = None
     if listening is None:
         instance_listening: bool | None = None
     else:
-        probe = listening()
-        instance_listening = probe if probe is None else bool(probe)
+        try:
+            probe = listening()
+        except Exception as exc:  # a probe that cannot answer is "not measured"
+            instance_listening = None
+            liveness_error = f"the liveness probe FAILED ({type(exc).__name__}: {exc})"
+        else:
+            instance_listening = probe if probe is None else bool(probe)
     # Re-measure HERE: the probe (and the witness join above) is time the caller spent
     # waiting for this answer, so `elapsed_s` must include it or the published
     # caller-held time is short by exactly the tail the overrun path adds (#8827
@@ -1019,6 +1145,13 @@ def restore_graph_key(
         # was never taken, on the DEFAULT configuration (#8827 review). The status is its
         # own so the message can carry only what was measured.
         status = LIVENESS_UNMEASURED if instance_listening is None else ALIVE_BUT_SILENT
+    overrun_reason = "restore did not return within the bound"
+    if unmeasured_reason is not None and instance_listening is not False:
+        overrun_reason = f"{overrun_reason}; {unmeasured_reason}"
+    if liveness_error is not None:
+        # The observation must say WHY liveness is missing, or the account has to claim
+        # no probe was supplied about the probe the caller watched fail (#8827 review).
+        overrun_reason = f"{overrun_reason}; {liveness_error}"
     observation = RestoreObservation(
         graph=graph,
         status=status,
@@ -1036,11 +1169,8 @@ def restore_graph_key(
         blocked_latency_ms=blocked_latency_ms,
         instance_listening=instance_listening,
         restore_returned=False,
-        error=(
-            f"restore did not return within the bound; {unmeasured_reason}"
-            if unmeasured_reason is not None and instance_listening is not False
-            else "restore did not return within the bound"
-        ),
+        error=overrun_reason,
+        liveness_error=liveness_error,
     )
     logger.error("graph-key restore overran its bound: %s", observation.sentence())
     if observation.status == CALLER_STALL:

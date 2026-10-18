@@ -34,6 +34,8 @@ from tortoise.graph_key_restore import (
     ALIVE_BUT_SILENT,
     BLOCKED,
     CALLER_STALL,
+    DEFAULT_BLOCKED_LATENCY_MS,
+    FAILED,
     INSTANCE_GONE,
     LIVENESS_UNMEASURED,
     SERVED,
@@ -1140,3 +1142,267 @@ def test_the_module_states_the_UNMEASURED_split_and_the_WHOLE_caller_held_ceilin
             assert any("raise" in s.lower() for s in split), (
                 f"the module never says an OVERRUN unmeasured run RAISES: {split}"
             )
+
+
+def test_a_MIXED_witness_fault_is_not_published_as_a_trustworthy_block() -> None:
+    """F1, #8827 review: ``witness_fault`` asked the wrong question about a MIXED set.
+
+    ``witness_fault`` read ``bool(errors) and not (set(errors) & _WITNESS_TRANSPORT_ERRORS)``
+    — "is this set DISJOINT from transport" — so a run that saw a ``TimeoutError`` from a
+    blocked engine *and* an ``AuthenticationError`` from the witness answered "pure
+    transport". The auth failure was then dropped from the verdict entirely: on the
+    completed path the run was published as a trustworthy ``BLOCKED``, and on the overrun
+    path it raised "It is a BLOCKED server … Do not retry" while naming no auth error at
+    all. The polarity is now "ANY non-transport failure disqualifies".
+
+    Pre-fix this fails on every arm: ``witness_fault`` is ``False``, the statuses are
+    ``BLOCKED`` / ``ALIVE_BUT_SILENT``, and the auth error appears in no message.
+    """
+    from redis.exceptions import AuthenticationError
+
+    def mixed_ping() -> None:
+        # Both at once, which is the realistic shape: the instance is blocked (so the
+        # PING times out) AND the caller's credential expired on the witness connection.
+        if int(time.perf_counter() * 1000) % 2:
+            raise TimeoutError("witness PING went unanswered")
+        raise AuthenticationError("WRONGPASS invalid username-password pair")
+
+    # (a) COMPLETED path: the restore returned, so there is nothing to hang on — the run
+    # must be an instrument report, not a block verdict.
+    completed = restore_graph_key(
+        **_call(),
+        restore=lambda _payload: "OK",
+        ping=mixed_ping,
+        bound_s=5.0,
+        poll_interval_s=_POLL_S,
+    )
+    assert "AuthenticationError" in completed.witness_errors, "the premise was not built"
+    assert "TimeoutError" in completed.witness_errors, "the premise was not built"
+    assert completed.witness_fault is True, (
+        "a mixed witness fault read as pure transport — the auth failure was dropped from "
+        f"the verdict: {completed.witness_errors}"
+    )
+    assert completed.status == UNMEASURED, (
+        f"a run whose witness also failed on auth was published as {completed.status!r}"
+    )
+    assert "AuthenticationError" in completed.diagnosis(), (
+        f"the account does not surface the auth failure: {completed.diagnosis()}"
+    )
+    assert "served through the restore" not in completed.diagnosis()
+
+    # (b) OVERRUN path: pre-fix this raised "It is a BLOCKED server … Do not retry", which
+    # is the instruction an operator acts on.
+    def never_returns(_payload):
+        time.sleep(1.0)
+        return "OK"
+
+    with pytest.raises(GraphRestoreSilentError) as raised:
+        restore_graph_key(
+            **_call(),
+            restore=never_returns,
+            ping=mixed_ping,
+            bound_s=0.2,
+            witness_join_s=0.2,
+            poll_interval_s=_POLL_S,
+            listening=lambda: True,
+        )
+    overran = raised.value.observation
+    assert overran.witness_fault is True
+    assert overran.status == UNMEASURED
+    assert overran.measured is False
+    message = str(raised.value)
+    assert "It is a BLOCKED server" not in message, (
+        f"the engine was blamed for the witness's own auth failure: {message}"
+    )
+    assert "INSTRUMENT FAULT" in message
+    assert "AuthenticationError" in message
+
+
+def test_a_liveness_probe_that_RAISES_is_a_typed_error_not_the_raw_exception() -> None:
+    """F2, #8827 review: the caller-supplied probe was called UNGUARDED.
+
+    ``listening=lambda: client.ping() is True`` is the natural way to wire a command-level
+    probe, and it raises exactly when the block it is meant to measure is happening. The
+    raw exception escaped the driver AFTER ``delete()`` had removed the graph key and
+    after the restore worker had been abandoned: the caller got their own ``RuntimeError``
+    instead of the observation, and nothing was published or logged.
+
+    A probe that cannot answer is not a refusal — it is "could not measure", which is
+    ``instance_listening is None`` / ``LIVENESS_UNMEASURED``, never ``INSTANCE_GONE``.
+    Pre-fix this fails: the ``RuntimeError`` propagates out of ``restore_graph_key``.
+    """
+    instance = _FakeInstance()
+    instance.blocked.set()  # the block IS measured; the liveness reading is what fails
+
+    def never_returns(_payload):
+        time.sleep(1.0)
+        return "OK"
+
+    def probe_that_cannot_answer() -> bool:
+        raise RuntimeError("ping() blew up in the caller's probe")
+
+    with pytest.raises((GraphRestoreSilentError, GraphRestoreLostError)) as raised:
+        _observe(
+            instance,
+            never_returns,
+            bound_s=0.2,
+            witness_join_s=0.2,
+            listening=probe_that_cannot_answer,
+        )
+
+    observation = raised.value.observation
+    assert observation.instance_listening is None, (
+        "a probe that raised was read as a REFUSAL, which selects INSTANCE_GONE and tells "
+        "the operator to restart a healthy box"
+    )
+    assert observation.status == LIVENESS_UNMEASURED
+    assert observation.liveness_error is not None
+    assert "RuntimeError" in observation.liveness_error
+    assert observation.error is not None and "probe FAILED" in observation.error, (
+        f"the observation does not say why liveness is missing: {observation.error!r}"
+    )
+    assert observation.as_dict()["liveness_error"] == observation.liveness_error
+    message = str(raised.value)
+    assert "the liveness probe FAILED" in message, (
+        f"the account does not say the probe could not answer: {message}"
+    )
+    assert "no transport probe supplied an answer" not in message, (
+        f"the account claims no probe was supplied about the probe the caller watched "
+        f"fail: {message}"
+    )
+
+
+def test_a_FAILED_restore_says_the_graph_key_was_already_DELETED() -> None:
+    """F3, #8827 review: ``FAILED`` had no branch, no table row and no contract entry.
+
+    It is the one status whose consequence is a LOST GRAPH — the sequence is
+    ``dump()`` → ``delete()`` → ``restore()``, so when the RESTORE raises the key is
+    already gone and the payload exists only in the caller's hands. With no branch it fell
+    through to the served/unmeasured text, which on a run whose witness saw nothing wrong
+    read "…so the instance served through the restore": the exact opposite of what
+    happened, on the one channel an operator acts on.
+
+    Pre-fix this fails: ``FAILED`` is not in the module's state table, the account says
+    the instance served, and the note attached to the caller's error carries no account
+    at all.
+    """
+
+    class _EngineSaysNo(RuntimeError):
+        pass
+
+    instance = _FakeInstance()
+
+    def refuses(_payload):
+        raise _EngineSaysNo("BUSYKEY destination key already exists")
+
+    with pytest.raises(_EngineSaysNo) as raised:
+        _observe(instance, refuses, bound_s=5.0)
+
+    notes = getattr(raised.value, "__notes__", [])
+    assert any("status=failed" in note for note in notes), (
+        f"the observation was not attached to the engine's error: {notes!r}"
+    )
+    account = "\n".join(notes)
+    assert "ALREADY DELETED" in account, (
+        f"the FAILED account does not say the graph key was already deleted: {account!r}"
+    )
+    assert "only copy" in account, (
+        f"the FAILED account does not say the payload is the only copy left: {account!r}"
+    )
+    assert "re-issue the restore" in account.lower(), (
+        f"the FAILED account gives the operator no recovery: {account!r}"
+    )
+    assert "served through the restore" not in account, (
+        f"the run that lost the graph is described as an instance that served: {account!r}"
+    )
+
+    # The account is reachable in its own right, for a caller that logs the observation.
+    observation = RestoreObservation(
+        graph="i7846",
+        status=FAILED,
+        bound_s=5.0,
+        elapsed_s=0.01,
+        restore_s=0.01,
+        payload_bytes=32,
+        witness_samples=3,
+        witness_failures=0,
+        witness_errors=(),
+        silent_ms=0.0,
+        silence_started_s=None,
+        silence_ended_s=None,
+        witness_max_latency_ms=1.0,
+        blocked_latency_ms=DEFAULT_BLOCKED_LATENCY_MS,
+        instance_listening=None,
+        restore_returned=True,
+        error="_EngineSaysNo: BUSYKEY",
+    )
+    assert observation.status == FAILED
+    assert "ALREADY DELETED" in observation.diagnosis()
+    assert "served through the restore" not in observation.diagnosis()
+
+    # ... and the contract states it, where a caller reads the statuses.
+    table = " ".join((tortoise.graph_key_restore.__doc__ or "").split())
+    assert "``FAILED``" in table, "the module's state table still omits FAILED"
+    driver_doc = " ".join((restore_graph_key.__doc__ or "").split())
+    assert "FAILED" in driver_doc, (
+        "restore_graph_key's contract never says a raising RESTORE is published as FAILED"
+    )
+
+
+def test_the_recovery_instruction_names_the_KEY_not_only_a_PING() -> None:
+    """F4, #8827 review: the recovery instruction answered the wrong question.
+
+    Both blocked/silent accounts ended with "check with a PING on a separate connection
+    before restarting anything". At that moment the graph key has ALREADY been deleted, so
+    a PING reply says the server is up — not that the restore completed. An operator
+    following it literally leaves the graph missing. The check that answers the question is
+    a key-level one (``GRAPH.LIST`` / an ``EXISTS``-class check), plus the restored node
+    count for a completed-but-silent run; a PING is only the liveness half.
+
+    Pre-fix this fails on both assertions: the account names no key check and offers the
+    PING as the thing to check.
+    """
+    instance = _FakeInstance()
+
+    def restore(_payload):
+        instance.blocked.set()
+        time.sleep(0.3)
+        instance.blocked.clear()
+        return "OK"
+
+    observation = _observe(instance, restore, bound_s=5.0)
+    assert observation.status == BLOCKED
+    account = observation.diagnosis()
+    assert "GRAPH.LIST" in account and "EXISTS" in account, (
+        f"the blocked account never names a key-level check: {account}"
+    )
+    assert "node count" in account, (
+        f"the blocked account never says to confirm the restored node count: {account}"
+    )
+    assert "check with a PING" not in account, (
+        f"the account still offers a PING as the check to perform: {account}"
+    )
+    # The same wording is carried by the overrun/silent arm; both must stay consistent.
+    silent = RestoreObservation(
+        graph="i7846",
+        status=LIVENESS_UNMEASURED,
+        bound_s=5.0,
+        elapsed_s=5.0,
+        restore_s=5.0,
+        payload_bytes=32,
+        witness_samples=6,
+        witness_failures=4,
+        witness_errors=("TimeoutError",),
+        silent_ms=200.0,
+        silence_started_s=0.1,
+        silence_ended_s=None,
+        witness_max_latency_ms=900.0,
+        blocked_latency_ms=DEFAULT_BLOCKED_LATENCY_MS,
+        instance_listening=None,
+        restore_returned=False,
+    )
+    silent_account = silent.diagnosis()
+    assert "GRAPH.LIST" in silent_account and "EXISTS" in silent_account, (
+        f"the silent/overrun account never names a key-level check: {silent_account}"
+    )
+    assert "check with a PING on a separate connection before restarting" not in silent_account
