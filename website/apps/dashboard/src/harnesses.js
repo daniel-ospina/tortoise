@@ -315,8 +315,9 @@ export const CLAUDE_CAPTURE_NOTE = `${captureInstallNote({
 
 // #3575: the Pi capture-INSTALL step — the in-repo extension that makes Pi
 // sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.pi (the setup
-// prompt) and HARNESS_CAPTURE_INSTALL.pi (the Memory-sources inline row) so
-// the two surfaces can never drift. It is the one IN-REPO capture seam with no
+// prompt — reference-only since #3802) and HARNESS_CAPTURE_INSTALL.pi (rendered
+// ONLY by the Settings mount's collapsed manual-install disclosure, #3513 §2)
+// so the two surfaces can never drift. It is the one IN-REPO capture seam with no
 // consent gate (see captureInstallNote above). The agent-infra `reflect-hook` is
 // the SECOND producer and lives outside this repo: it uploaded on key presence
 // alone until agent-infra `7e77470e4` (2026-10-16, #803) put both recorders on
@@ -357,8 +358,10 @@ tortoise sessions import --harness pi --file <session.jsonl>`
 
 // #3818: the Codex capture-INSTALL step — the in-repo SessionEnd hook that
 // makes Codex sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.codex
-// (the setup prompt) and HARNESS_CAPTURE_INSTALL.codex (the Memory-sources
-// inline row) so the two surfaces can never drift. The registration is
+// (the setup prompt — reference-only since #3802) and
+// HARNESS_CAPTURE_INSTALL.codex (rendered ONLY by the Settings mount's collapsed
+// manual-install disclosure, never inline in the shared row, #3513 §2) so the two
+// surfaces can never drift. The registration is
 // HOME-scoped ($CODEX_HOME/hooks.json): verified live against Codex CLI
 // 0.154.0, a project-local .codex/hooks.json fires nothing. Codex runs a hook
 // only once it is trusted; the CLI's SessionEnd budget is ~1 s, so the shipped
@@ -388,9 +391,11 @@ chmod +x "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
 # Or just run: tortoise install codex`
 
 // #3819: the Cursor capture-INSTALL step — the in-repo sessionEnd hook that
-// makes LOCAL Cursor desktop-editor sessions land in Tortoise Cloud. Shown in
-// the Memory-sources inline row; the connect-wizard step (HARNESS_STEPS.cursor)
-// carries the same disclosure. The registration is HOME-scoped
+// makes LOCAL Cursor desktop-editor sessions land in Tortoise Cloud. Rendered
+// ONLY by the Settings mount's collapsed manual-install disclosure — never
+// inline in the shared row (#3513 §2) — and the connect-wizard step
+// (HARNESS_STEPS.cursor) carries the same disclosure. The registration is
+// HOME-scoped
 // (`~/.cursor/hooks.json`, Cursor's own user-scoped hook source; Cursor
 // has NO config-dir env var — `CURSOR_HOME` does not exist) — a
 // project-local `.cursor/hooks.json` is gated on workspace trust. Cursor's
@@ -431,8 +436,14 @@ tortoise install cursor
 //   * the agent PROMPT — `wizardPrompts.js` `wizardPromptText` (the dashboard
 //     never shows `claude mcp add`; it hands the agent "Add Tortoise MCP at
 //     <url>"), pinned against the RENDERED value in `wizardPrompts.test.js`;
-//   * `HARNESS_CAPTURE_INSTALL` — the Memory-sources capture row in `main.jsx`,
-//     the copy a user actually pastes for session capture (#1728 / #3754);
+//   * `HARNESS_CAPTURE_INSTALL` — the per-harness session-capture recipe. Its
+//     only render site is the Settings mount's collapsed `details.manual-install`
+//     disclosure in `harnessStatusCard.jsx` (the row itself lives there, not in
+//     `main.jsx`) — NOT the copy a user pastes for capture any more (#3513 §2).
+//     The wizard mount renders `CAPTURE_INSTALL_POINTER` instead, and the
+//     install itself runs in the agent prompt (`wizardPromptText` →
+//     `ONBOARDING_INSTRUCTIONS` → the served `tortoise-onboarding/SKILL.md` §5,
+//     `tortoise install <harness>`; #1728 / #3754 / #3517);
 //   * `website/docs.html` — the public install commands for a manual setup.
 // So an edit to a SHIPPED behavior in this block must be mirrored to the
 // carrier above, and the test asserting that behavior must assert the carrier
@@ -603,10 +614,17 @@ export const HARNESS_CONTINUE_LABEL = {
   chatgpt: "I've connected it — Continue →",
 }
 
-// #1728 Slice 3 (Task 16): the session-CAPTURE install steps shown INLINE in
-// the Memory-sources rows when a harness is install-pending (extracted from
-// HARNESS_INSTALL so the row shows only the capture step, not the full MCP
-// setup). claude = in-repo hooks install; pi = extension copy-install.
+// #1728 Slice 3 (Task 16): the per-harness session-CAPTURE install steps
+// (extracted from HARNESS_INSTALL so a reader sees only the capture step, not
+// the full MCP setup). claude = in-repo hooks install; pi = extension
+// copy-install.
+// #3513 §2: these are NO LONGER rendered INLINE in the Memory-sources row. The
+// shared row renders the POINTER on every surface, and only the SETTINGS mount
+// renders these steps, collapsed, inside its `details.manual-install`
+// disclosure (a Settings-first user has no other path to them). A reader who
+// never opens it is not pointed at the recipe at all — the agent prompt
+// installs the recorder (epic #1714 decision #2; see captureStatus.js
+// CAPTURE_INSTALL_POINTER for the live carrier).
 export const HARNESS_CAPTURE_INSTALL = {
   claude: `${CLAUDE_CAPTURE_NOTE}
 # Install from your Tortoise checkout:

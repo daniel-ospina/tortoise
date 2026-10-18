@@ -79,6 +79,25 @@ from pathlib import Path
 
 import yaml
 
+# #4828: the served-identity helpers below — `_code_digest`, `_attribute_digest`,
+# `_served_attributes` AND `_component_fingerprint` — are DELIBERATE duplicates of the same
+# helpers in `tools/surface-guard.py`, and this duplication must NOT be "tidied" into a
+# shared module. CI pins the guard to the base ref by OVERWRITING that one file in the PR's
+# tree, so a module it imported would be PR-authored — a PR could then hand the gate that
+# measures it a digest returning the baseline's recorded values, and the expansion gate
+# would go green on a real surface change (#4606, #5132). What holds the copies together
+# instead is `tests/test_surface_manifest.py`:
+# `test_the_two_drivers_agree_on_the_served_identity_helpers` (code parity, all four),
+# `test_both_drivers_fingerprint_the_same_component_identically` and
+# `test_the_attribute_encoding_is_pinned_to_measured_values` — a change applied to ONE copy
+# reds there. Edit BOTH, or it reds. The inventory is FOUR: `_frontmatter` is legitimately
+# divergent (different exception types per side) and `main()` is not shared. That net is
+# armed for a `tools/`-only diff by the `tools/ci_selection.py::CORE_ALSO` entries for both
+# driver paths (pinned by
+# `tests/test_ci_selection.py::test_surface_tools_change_selects_core_not_tier1`); without
+# them `tools/` is swallowed by `NON_PYTHON_PREFIXES` and a driver-only diff selects no
+# surface at all, so `tests/test_surface_manifest.py` (a `slow_files` member) never runs.
+
 
 def _code_digest(code) -> str:
     """Move-invariant, implementation-complete digest of a code object.

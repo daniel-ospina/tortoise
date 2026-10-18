@@ -129,7 +129,7 @@ class EventAPI:
         if operator is None and isinstance(content, str) and content:
             vec = None
             try:
-                from .embeddings import encode_for_store, stamp_journal_embedding
+                from .embeddings import encode_for_row, stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100
                 # #5148: the seam MODULE is unimportable AT THIS MOMENT. Note
                 # what this does NOT claim: `tortoise.embeddings` is imported
@@ -147,7 +147,7 @@ class EventAPI:
                 stamp_journal_embedding = None
             if stamp_journal_embedding is not None:
                 try:
-                    vec = encode_for_store(
+                    vec = encode_for_row(
                         content,
                         getattr(self.projection, "required_embedding_dim", None))
                 except Exception:  # noqa: BLE001, RUF100

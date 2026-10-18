@@ -13,17 +13,38 @@
 // same text, a mid-file swallow, CSS hiding the fragment).
 //
 // So the row is now an ordinary component with a NARROW prop surface (`state`,
-// `sessionsOn`, `wizardHarness` — no effects, no fetches, no app state), which
-// the DOM lane (`harnessDisclosureDom.test.jsx`, vitest + jsdom, `npm run
-// test:dom`) renders and asserts: presence, absence, exact text, the
+// `sessionsOn`, `wizardHarness`, `surface` — no effects, no fetches, no app
+// state), which the DOM lane (`harnessDisclosureDom.test.jsx`, vitest + jsdom,
+// `npm run test:dom`) renders and asserts: presence, absence, exact text, the
 // alert/name-group linkage, and — because the config loads `index.css` into the
 // document — that no rule HIDES it. The static tripwire stays as the cheap
 // accretion guard it is, and no longer carries claims a source pattern cannot
 // honour.
 //
 // `main.jsx` imports this module and renders it where the inline block used to
-// be; the DOM output is unchanged. Copy still lives in `harnesses.js` /
-// `captureStatus.js` — this module renders helpers' returns and authors none.
+// be. The #4915 extraction itself changed nothing a user could see; the DOM
+// output changed later, in #3513 §2 (below) — the row now renders the POINTER
+// where the recipe was, plus a collapsed disclosure on the Settings surface. So
+// "the DOM output is unchanged" was true of the extraction and is NOT true of
+// this file today. Copy still lives in `harnesses.js` / `captureStatus.js` —
+// this module renders their values (`HARNESS_CAPTURE_INSTALL`,
+// `CAPTURE_INSTALL_POINTER`, `CAPTURE_MANUAL_INSTALL_LABEL`) and authors none.
+//
+// #3513 §2 — THE `surface` PROP, AND WHY THE RECIPE IS NOT THE SHARED ROW'S.
+// Epic #1714's settled decision #2 (do not re-litigate): "The install runs in
+// the agent prompt … the dashboard owns STATUS + the off-switch: the WIZARD
+// mount never carries the recipe, while the SETTINGS mount may carry a
+// collapsed manual-install disclosure, a Settings-first user having no other
+// path to it." So the row renders status + `CAPTURE_INSTALL_POINTER` on every
+// surface, and the manual recipe ONLY on `surface="settings"`, inside a
+// collapsed `<details>`. The recipe is not deleted — the agent prompt consumes
+// it — but a shared row that renders it unconditionally gives the user TWO
+// install surfaces that can disagree, which is the defect #3517's
+// agent-prompt-install decision exists to remove.
+//
+// The default is `'wizard'` deliberately (fail-closed): a caller that does not
+// declare a surface must not publish the manual path, and every site that fails
+// to declare one is a wizard. Only the Settings mount opts in by name.
 import {
   HARNESS_CAPTURE_INSTALL,
   HARNESS_CAPTURE_REASON,
@@ -32,13 +53,15 @@ import {
   HARNESS_ORDER,
 } from './harnesses.js'
 import {
+  CAPTURE_INSTALL_POINTER,
+  CAPTURE_MANUAL_INSTALL_LABEL,
   captureErrorForHarness,
   captureStatusForHarness,
   captureStatusLabelForHarness,
   harnessAttributionForHarness,
 } from './captureStatus.js'
 
-export function HarnessStatusCard({ state, sessionsOn, wizardHarness }) {
+export function HarnessStatusCard({ state, sessionsOn, wizardHarness, surface = 'wizard' }) {
   const status = (h) => captureStatusForHarness(state, h)
   const lastError = (h) => captureErrorForHarness(state, h)
   // #3700: the per-row harness attribution — rendered beside the harness name.
@@ -95,8 +118,47 @@ export function HarnessStatusCard({ state, sessionsOn, wizardHarness }) {
               {supported && <span className="capture-state">{captureStatusLabelForHarness(state, h)}</span>}
             </div>
             {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
+            {/* #3513 §2: the POINTER, not the recipe. Rendered in the slot the
+                inline recipe used to occupy (recording on, nothing observed
+                yet) — the state where a user needs to know HOW the recorder
+                gets installed, answered with the path that actually installs
+                it: the agent prompt. */}
             {supported && st === 'install-pending' && sessionsOn && (
-              <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
+              <p className="dim small">{CAPTURE_INSTALL_POINTER}</p>
+            )}
+            {/* The Settings mount is the ONE recorded exception (epic decision
+                #2). It renders the manual recipe COLLAPSED and UNCONDITIONALLY
+                — regardless of install state and of the recording switch —
+                because a Settings-first user who never saw the agent prompt
+                would otherwise be pointed at a prompt they never saw, and a
+                redundant disclosure is strictly better than an orphaned
+                pointer. A collapsed <details> is not a second install surface:
+                it cannot disagree with the prompt until the user opens it. */}
+            {surface === 'settings' && supported && (
+              <details className="manual-install">
+                {/* #3513 §2 (review): the summary is a native tab stop with its
+                    own accessible name, and this mount renders one per
+                    supported harness — four controls announcing the identical
+                    "Install manually" unless it names its OWN row. The label
+                    is copy (captureStatus.js), not a literal, so the rendered
+                    value keeps one home and the DOM lane asserts the constant.
+                    `aria-labelledby` therefore lists BOTH ids: the LABEL
+                    first, then the name group the row already mints for the
+                    alert's `aria-describedby`. Name-from-author REPLACES
+                    name-from-content (HTML-AAM), so referencing the row group
+                    ALONE silently discards the visible text: the control stops
+                    saying what it does, and WCAG 2.5.3 (Label in Name) fails
+                    because the name no longer CONTAINS the label a speech-input
+                    user has to say. Joining them keeps the action ("Install
+                    manually") AND the identity (which harness it installs) —
+                    the shape the trash rows already use (`main.jsx`:
+                    `aria-label={`Trash, ${n} items`}`). */}
+                <summary className="dim small"
+                         aria-labelledby={`manual-install-label-${h} harness-note-${h}`}>
+                  <span id={`manual-install-label-${h}`}>{CAPTURE_MANUAL_INSTALL_LABEL}</span>
+                </summary>
+                <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
+              </details>
             )}
             {/* #3700: the alert's description is the row's name group
                 (name + disclosure). */}
