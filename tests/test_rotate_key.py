@@ -21,10 +21,15 @@ surface of the #4355 scoping comment, class by class:
   T7  concurrent rotate of one row              → the conditional-revoke CLAIM
       admits one winner; a loser rolls back and 409s
 
-Supabase lane (FakeControlPlane) — the hosted E2E suite covers the registry
-lane. Session-authentication is used where a test needs more than one live
-credential (the anon org's derived tier caps `max_api_keys` at 1) or needs to
-exercise the owner/admin session gates.
+Supabase lane (FakeControlPlane) is the default for this file. The registry
+lane is covered here too, but only where a defect is LANE-SPECIFIC: the
+concurrent-claim race (T7) has two implementations — the Supabase PATCH and the
+Cypher twin in `hosted_api._claim_key_revocation` — so each is raced against its
+own store (#4721). Everything else is asserted on the Supabase lane, and the
+hosted E2E suite (`tests/e2e/hosted/test_02_free_tier_limits.py`) covers the
+registry lane end-to-end. Session-authentication is used where a test needs
+more than one live credential (the anon org's derived tier caps `max_api_keys`
+at 1) or needs to exercise the owner/admin session gates.
 """
 from __future__ import annotations
 
@@ -843,3 +848,243 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/team/keys answered" in message
+
+
+# ── T7, registry lane: the CYPHER twin's claim, raced ───────────────────────
+# `test_concurrent_rotate_of_one_row_admits_exactly_one` above races the
+# Supabase claim (`claim_api_key_revocation`, a conditional PATCH). The
+# registry/selfhost lane uses the Cypher twin in
+# `hosted_api._claim_key_revocation` — `MATCH … WHERE k.revoked_at IS NULL SET
+# … RETURN k.id` — and NOTHING raced it: this file is Supabase-only (the
+# autouse `_env` fixture above) and the hosted E2E covers cap-neutrality and
+# the non-occupying refusal but not the concurrent claim. "Believed correct"
+# is not the standard a rotate claim is held to (#4721).
+
+_REG_SDKS: list = []
+
+
+@pytest.fixture
+def reg_client(_env, monkeypatch):
+    """A hosted REST client on the REGISTRY lane (embedded temp DB).
+
+    `_env` is requested explicitly, not assumed: it is autouse and pins
+    `TORTOISE_CONTROL_PLANE=supabase` at setup, so this fixture runs AFTER it
+    and undoes exactly that (the fixture ordering, not luck, is what makes the
+    lane switch deterministic). `patched_tortoise_sdk` binds every no-path SDK
+    construction to one temp embedded DB (the #1497/#1950 anchor rules).
+    """
+    import tempfile
+
+    from tests._http_fixtures import patched_tortoise_sdk
+
+    for var in ("TORTOISE_CONTROL_PLANE", "SUPABASE_URL",
+                "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patched_tortoise_sdk(os.path.join(tmpdir, "rotate-registry.db")),
+    ):
+        try:
+            with TestClient(app) as tc:
+                yield tc
+        finally:
+            while _REG_SDKS:
+                try:  # noqa: SIM105
+                    _REG_SDKS.pop().close()
+                except Exception:
+                    pass
+
+
+@pytest.fixture
+def reg():
+    """The registry graph handle (kept alive past the test — #1588)."""
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(namespace="registry")
+    _REG_SDKS.append(sdk)
+    return sdk._get_registry()
+
+
+def _reg_seed_org(reg, org_id: str, *, max_api_keys: int = 5) -> None:
+    """One Team with headroom above the cap gate.
+
+    The cap must NOT decide this race: the loser's admission check runs after
+    the winner's insert, so at a cap of 2 it would 402 before ever reaching the
+    claim — and then an UNCONDITIONAL claim would still pass the assertion. 5
+    keeps the gate out of the way so the CLAIM is the deciding write (the same
+    reason the Supabase twin uses the `solo` tier).
+    """
+    reg.query(
+        "CREATE (t:Team {id:$id, name:$id, tier:'free', max_api_keys:$mak})",
+        params={"id": org_id, "mak": max_api_keys},
+    )
+
+
+def _reg_seed_key(reg, org_id: str, key_id: str, *, token: str | None = None,
+                  created_via: str = "provisioned",
+                  revoked_at: str | None = None) -> None:
+    """A registry APIKey node. `token` makes it AUTHENTICABLE (real
+    salt:hash + its 10-char prefix, the shape `get_current_org` scans for); no
+    `scopes`/`delegation_depth` props → `legacy_full_access`, i.e. the owner
+    class `_require_keys_manage` admits."""
+    from tortoise.auth import hash_api_key
+
+    reg.query(
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp, "
+        "created_at:$ca, revoked_at:$ra, expires_at:null, created_via:$cv})",
+        params={
+            "id": key_id, "tid": org_id,
+            "kh": hash_api_key(token) if token else "salt:unused",
+            "kp": token[:10] if token else "tt_unseen_",
+            "ca": datetime.now(UTC).isoformat(),
+            "ra": revoked_at, "cv": created_via,
+        },
+    )
+
+
+def _reg_live(reg, org_id: str) -> list[str]:
+    rows = reg.query(
+        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN k.id",
+        params={"tid": org_id},
+    ).result_set
+    return sorted(r[0] for r in rows)
+
+
+def _reg_revoked(reg, key_id: str):
+    rows = reg.query(
+        "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at", params={"id": key_id},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def test_registry_lane_concurrent_rotate_of_one_row_admits_exactly_one(
+        reg_client, reg):
+    """T7 on the CYPHER twin: two real clients rotating the SAME registry node
+    simultaneously. Both are held at the claim write, so both have already
+    proved the row live and minted their replacements — then the conditional
+    `SET … WHERE k.revoked_at IS NULL` decides. Exactly one 200, one 409, and
+    the live count is where it started.
+
+    Non-vacuity: the rendezvous is what makes the claim the deciding write. On
+    the registry lane the claim is a single `graph.query`, so the barrier wraps
+    that call; dropping the `WHERE k.revoked_at IS NULL` guard (an
+    unconditional SET returning the row) makes BOTH calls claim and this
+    assertion fails with two 200s.
+    """
+    org_id = "team-4721r"
+    target = "key_target_4721"
+    caller_token = "tt_caller_4721_signin"
+    _reg_seed_org(reg, org_id)
+    _reg_seed_key(reg, org_id, "key_caller_4721", token=caller_token)
+    _reg_seed_key(reg, org_id, target)
+
+    before = _reg_live(reg, org_id)
+    assert before == ["key_caller_4721", target], before
+
+    gate = threading.Barrier(2, timeout=60)
+    # Both threads must actually ARRIVE at the claim: if the barrier timed out
+    # (or only one thread ever ran the claim), the broken wait raises into the
+    # caller's `except Exception` and produces a 409 that looks exactly like a
+    # lost claim — a false pass. Counting the waiters makes the race itself an
+    # assertion, not an assumption.
+    claim_waiters: list[int] = []
+    from tortoise.sdk import TortoiseSDK as _SDK
+
+    real_get_registry = _SDK._get_registry
+    claim_marker = "SET k.revoked_at = $now RETURN k.id"
+
+    class _RendezvousAtClaim:
+        """Delegating proxy: waits for BOTH threads on the CLAIM statement
+        only, then performs the real write. Only SCHEDULING is wrapped — the
+        predicate under test is untouched."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def query(self, cypher, *args, **kwargs):
+            if claim_marker in cypher:
+                claim_waiters.append(1)
+                gate.wait(timeout=60)
+            return self._inner.query(cypher, *args, **kwargs)
+
+    def _patched_get_registry(self, *a, **kw):
+        return _RendezvousAtClaim(real_get_registry(self, *a, **kw))
+
+    from unittest import mock
+
+    results: list = [None, None]
+    errors: list = []
+
+    def _worker(i: int) -> None:
+        try:
+            results[i] = _rotate(reg_client, target, _auth(caller_token))
+        except BaseException as e:
+            errors.append(e)
+
+    with mock.patch.object(_SDK, "_get_registry", _patched_get_registry):
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in (0, 1)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+    assert not errors, errors
+    assert not any(t.is_alive() for t in threads), (
+        "a rotate thread never returned — the claim rendezvous deadlocked"
+    )
+    statuses = sorted(r.status_code for r in results)
+    assert statuses == [200, 409], [(r.status_code, r.text) for r in results]
+    assert len(claim_waiters) == 2, (
+        "both rotates must reach the CLAIM write — otherwise the two requests "
+        "serialized and the claim was never the deciding write"
+    )
+
+    # The claim, not the cap gate, decided: the loser reached the claim (it
+    # minted a replacement and compensated it) rather than 402ing earlier.
+    loser = next(r for r in results if r.status_code == 409)
+    assert "rolled back" in loser.json()["detail"], (
+        "the loser must be the CLAIM refusal (replacement rolled back), not the "
+        f"non-occupying refusal: {loser.json()['detail']}"
+    )
+
+    winner = next(r for r in results if r.status_code == 200)
+    after = _reg_live(reg, org_id)
+    assert len(after) == len(before), (
+        f"a rotate racing a rotate must leave the live count unchanged: {after}"
+    )
+    assert target not in after, "the winner's claim revoked the displaced row"
+    assert winner.json()["id"] in after, (
+        "the winner's replacement is the live row that replaced it"
+    )
+    assert winner.json()["replaced_revoked"] is True
+    assert _reg_revoked(reg, target) is not None, (
+        "the winner's claim must have revoked the displaced row"
+    )
+    assert _reg_revoked(reg, winner.json()["id"]) is None, (
+        "the winner's replacement must be the live one"
+    )
+
+
+def test_registry_lane_claim_refuses_a_row_already_revoked(reg_client, reg):
+    """The registry twin's other half: an unconditional SET would still pass
+    the race above whenever the two calls serialize, so pin the CONDITION — a
+    second claim on an already-revoked row reports False (nothing matched) and
+    the rotate refuses 409 without leaving an orphan live replacement."""
+    from tortoise.hosted_api import _claim_key_revocation
+
+    org_id = "team-4721s"
+    target = "key_target_4721s"
+    prior = datetime.now(UTC).isoformat()
+    _reg_seed_org(reg, org_id)
+    _reg_seed_key(reg, org_id, target, revoked_at=prior)
+
+    now = datetime.now(UTC).isoformat()
+    assert _claim_key_revocation(org_id, target, now) is False, (
+        "a claim on a revoked row must report NO match — that boolean IS the "
+        "claim"
+    )
+    assert _reg_revoked(reg, target) == prior, (
+        "a losing claim must not overwrite the winner's revoked_at"
+    )

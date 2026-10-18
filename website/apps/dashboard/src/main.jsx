@@ -7315,6 +7315,25 @@ function claimIntentInFlight() {
       if (e.status === 402) {
         setCapNotice(rotateCapNoticeFrom(e.message, team, teamHasUpgrade(team)))
         setError('')
+      } else if (typeof e.status === 'number' && e.status >= 400 && e.status < 500) {
+        // #4721: a DEFINITE 4xx refusal is not a lost response — the reply is
+        // in hand, and it is the server's OWN account of what happened to this
+        // request. Both rotate 409s are known, deterministic outcomes: the
+        // lost-claim race says the replacement was ROLLED BACK, and the
+        // non-occupying refusal says nothing was minted at all. Running the
+        // ambiguous branch on either one is a lie in the page: the re-read
+        // finds the target row `revoked_at` set (the row really is dead — a
+        // concurrent revoke or rotate killed it), so the completed-rotate copy
+        // fires and tells the user a replacement exists whose value cannot be
+        // shown. None does. Before #4355's single call this branch was
+        // `setError(e.message)`, and that is exactly what a definite refusal
+        // should keep: the server's precise detail. No reload on this path —
+        // the refresh owns the same `error` slot and would overwrite the one
+        // message that says why the rotate was refused (the #8249 ordering
+        // hazard). Statuses that are NOT a 4xx reply — no status at all (a
+        // network failure: fetch never produced a response) or a 5xx — stay
+        // genuinely ambiguous and keep the disclosure below.
+        setError(e.message)
       } else {
         // #4355: any other failure may be a LOST RESPONSE, not a lost
         // request. The server creates the replacement and then revokes the
