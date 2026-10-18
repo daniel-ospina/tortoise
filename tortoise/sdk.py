@@ -3227,8 +3227,9 @@ class _WriteNotLanded(Exception):
 
 
 def _landed_at_least_one(result) -> bool:
-    """Witness for a statement suffixed ``RETURN count(n)``: >= 1 node matched.
+    """Witness for an aggregate whose row's VALUE counts matched nodes: >= 1.
 
+    Covers both suffixes in use — ``RETURN count(n)`` and ``RETURN count(*)``.
     ``count()`` always yields one row, so the row's VALUE is the answer — an
     empty ``result_set`` would mean the statement did not run at all.
     """
@@ -5703,7 +5704,10 @@ class TortoiseSDK:
         ``annotate_operator``'s four properties do not multiply it.
 
         ``witness`` (#8854 review P1): an optional ``result -> bool`` callback
-        answering "did this statement apply to at least one node?". It is
+        answering "did this statement do what it was asked to do?" — AT LEAST
+        ONE for a single-target write, ALL-OF-N for a multi-target one
+        (``witness=bool`` over the per-key loop: EVERY key must match; the tag
+        sync: every wanted name must be present). It is
         consulted ONLY once this call has seen a GRAPH-REPLACED abort
         (``armed_abort``, latched on the first one) — that is the only family in
         which a zero-match re-issue can mean "not replayed yet" rather than
@@ -5712,9 +5716,15 @@ class TortoiseSDK:
         unchanged, and a LATER one cannot disarm it. On exhaustion the abandoned
         abort is re-raised. A first attempt is never consulted, so verbs that
         return a benign empty result (``update_point`` on a missing id) keep
-        that contract. Statements a witness guards must therefore RETURN
-        something observable (``RETURN count(n)`` / ``RETURN r``); a bare
-        ``SET`` has no row to testify with.
+        that contract.
+
+        A witness for a multi-statement ``fn`` whose own return value is not a
+        landing proof (the tag arm: ``_sync() -> None``) may instead CONSULT THE
+        GRAPH — the only requirement is that it answers that question and
+        mutates nothing. A witness reading the STATEMENT's result needs one to
+        exist: such statements must RETURN something observable
+        (``RETURN count(n)`` / ``RETURN r``), since a bare ``SET`` has no row to
+        testify with.
 
         Retry budget (#7405 P2-2). This inner loop owns the write refusals
         (graph-replaced / write-lock / MISCONF) with ``retries=3`` (~7-14 s) and
@@ -5744,7 +5754,6 @@ class TortoiseSDK:
         # attempt, so `self._proj` is the live authoritative handle. A None still
         # answers False (`_graph_exists`), so the graph-abort family fails LOUD.
         attempts = 0
-        state_gated = False
         # The FIRST graph-replaced abort, LATCHED (#8854 review round 3 P1).
         # A single "last abort" slot is overwritten by EVERY retryable abort, so
         # gating the witness on it let a write-slot abort that arrived AFTER a
@@ -5777,7 +5786,7 @@ class TortoiseSDK:
             nonlocal attempts
             attempts += 1
             if attempts > 1:
-                if state_gated and graph_abort is not None and not _probe():
+                if graph_abort is not None and not _probe():
                     # Raise the LATCHED graph abort, never the most recent one:
                     # after a write-slot abort landed, the latest abort is a
                     # message telling the caller to retry a graph that is gone
@@ -5807,7 +5816,7 @@ class TortoiseSDK:
             return result
 
         def _predicate(exc: BaseException) -> bool:
-            nonlocal state_gated, armed_abort, graph_abort
+            nonlocal armed_abort, graph_abort
             if isinstance(exc, _WriteNotLanded):
                 # Nothing applied, so a re-issue is definitionally safe — and
                 # the graph-state question was already answered when the
@@ -5822,7 +5831,6 @@ class TortoiseSDK:
             if keep and graph_abort_family(exc):
                 if graph_abort is None:
                     graph_abort = exc
-                state_gated = True
                 if witness is not None and armed_abort is None:
                     # `_WriteNotLanded` is intentionally NOT latched here:
                     # it is arm-neutral.
@@ -10749,7 +10757,7 @@ class TortoiseSDK:
         # abort converges on the caller's tag list.
         if "tags" in props:
             # `sweep_orphans` is passed only from the SECOND attempt on
-            # (#8854 review P2). The orphan-`:Tag` GC normally keys off the
+            # (#8854 review P3). The orphan-`:Tag` GC normally keys off the
             # edges THIS invocation deleted, and a retry re-invokes the whole
             # helper — after an abort that landed the `DELETE r` before the GC
             # statement, the re-read finds nothing stale and the GC would be
@@ -10784,13 +10792,7 @@ class TortoiseSDK:
             # a `MERGE` that matches nothing is not an error.
             #
             # The requested names are DEDUPED for the count only; the value
-            # handed to `_sync_tags` is the caller's own, unchanged. A
-            # NON-ARRAY value (a number/dict, outside the public signature but
-            # tolerated and pinned by
-            # `test_update_non_list_tags_no_crash`) derives no edges BY DESIGN
-            # (#8333 owns that), so it must not be witnessed against a count —
-            # `None` makes the witness vacuous there instead of inventing a
-            # non-landing on a write that was never asked to make edges.
+            # handed to `_sync_tags` is the caller's own, unchanged.
             _sync_raw_tags = props["tags"] or []
             # DEDUPE for the count only. A list is witnessed whenever its entries
             # are HASHABLE, which is the condition `dict.fromkeys` actually
@@ -10814,7 +10816,9 @@ class TortoiseSDK:
                 # A NON-ARRAY value (a number/dict, outside the public signature
                 # but tolerated and pinned by `test_update_non_list_tags_no_crash`)
                 # derives no edges BY DESIGN (#8333 owns that), so it must not be
-                # witnessed against a count.
+                # witnessed against a count — `None` makes the witness vacuous
+                # there instead of inventing a non-landing on a write that was
+                # never asked to make edges.
                 _sync_wanted = None
 
             def _sync() -> None:
@@ -12243,6 +12247,36 @@ class TortoiseSDK:
         # `WHERE n.status = 'draft'` predicate against unchanged state and lands
         # exactly once; if a concurrent promote won the CAS instead, the empty
         # result set is the already-existing "raced" branch below, unchanged.
+        # The witness separates THOSE two from the third case — a re-issue that
+        # lands nothing because the rebuild has not replayed the node yet —
+        # which would otherwise be read as `not_draft` by that branch and
+        # consumed as a real refusal (`review_verdicts.keep()` rolls its review
+        # stamps back on `blocked`).
+        def _cas_witness(result) -> bool:
+            """A zero-row CAS re-issue, classified by the node's STATUS.
+
+            - absent → False: the rebuild has not replayed the node, so a
+              re-issue cannot apply and the abort must surface on exhaustion.
+              A `not_draft` verdict here would name a state nobody observed.
+            - present, status ``draft`` / ``None`` → False: that does NOT
+              explain a zero row (the CAS predicate would have matched it), so
+              the re-issue simply has not been replayed; keep retrying rather
+              than manufacture a refusal for a point that is still promotable.
+            - present, any other status → True: a concurrent promote (or a
+              terminal transition) genuinely won the CAS, and the `raced`
+              branch below reads the real status and answers accurately.
+            """
+            if result.result_set:
+                return True
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.status",
+                params={"id": point_id},
+            ).result_set
+            if not rows:
+                return False
+            status_now = rows[0][0]
+            return status_now is not None and status_now != 'draft'
+
         r = self._graph_write_with_retry(
             lambda: proj.g.query(
                 "MATCH (n:Point {id:$id}) WHERE n.status = 'draft' "
@@ -12251,6 +12285,7 @@ class TortoiseSDK:
                 params={"id": point_id, "now": now},
             ),
             what="promote_point CAS SET",
+            witness=_cas_witness,
         )
         if not r.result_set:
             # Raced with a concurrent promote — re-read and report the outcome.

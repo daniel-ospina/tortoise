@@ -93,6 +93,10 @@ _TAG_GC_NEEDLE = "WHERE NOT (t)<-[:TAGGED]-() DELETE t"
 _INVALIDATE_STAMP_NEEDLE = "SET n.outdated = true"
 _INVALIDATE_CORRECTS_NEEDLE = "MERGE (a)-[:CORRECTS]->(b)"
 _RETRACT_CAS_NEEDLE = "SET n.status = 'retracted'"
+# ``promote_point``'s CAS is the ONLY writer gated on the literal draft status
+# (``update_point``'s promote arms guard on ``IS NULL OR = 'draft'``), so this
+# fragment identifies it alone.
+_PROMOTE_POINT_CAS_NEEDLE = "WHERE n.status = 'draft' "
 
 
 class _AbortOnceGraph:
@@ -1120,6 +1124,79 @@ class _AbortOnceThenTerminalise:
 
     def __getattr__(self, name):
         return getattr(self._real, name)
+
+
+class _AbortOnceThenOutdated:
+    """Abort once AND flag the point ``outdated`` — a rebuild replaying an
+    ``invalidate_point``.
+
+    ``invalidate_point`` sets the legacy ``outdated`` FLAG and leaves ``status``
+    alone, so the point stays ``live`` while ``_terminal_excluded`` excludes it
+    from the retract CAS. A re-issued CAS therefore matches nothing and the
+    witness has to read terminality off the FLAG — reading only the status would
+    report a graph replacement for a point the graph itself calls dead.
+    """
+
+    def __init__(self, real, needle: str, victim: str) -> None:
+        self._real = real
+        self._needle = needle
+        self._victim = victim
+        self.matching = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query(
+                    "MATCH (n:Point {id:$id}) SET n.outdated = true",
+                    params={"id": self._victim})
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_retract_of_an_OUTDATED_node_still_raises_already_terminal(
+        tmp_path, monkeypatch):
+    """Terminality is the FLAG as well as the status, on the retried route.
+
+    ``_terminal_excluded`` excludes ``outdated=true`` (the flag
+    ``invalidate_point`` sets instead of a status), so an invalidated-but-live
+    point's CAS matches nothing on the re-issue. Reading terminality off
+    ``status`` alone would take the sentinel path and surface the GRAPH abort
+    after the full 7-14 s budget — naming a replaced graph for a point the
+    caller can see is dead, which is the false diagnosis this PR removes.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "outdatedrace")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _AbortOnceThenOutdated(proj.g, _RETRACT_CAS_NEEDLE, pid)
+        proj.g = proxy
+
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.retract_point(pid)
+
+        assert proxy.matching >= 2, "the aborted CAS was never re-issued"
+        proj.g = proxy._real
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+            params={"id": pid}).result_set[0]
+        assert row[1] is True, "fixture precondition: the flag must be set"
+        assert row[0] != "retracted", (
+            "the raise must not be papering over a write: the status moved, "
+            f"saw {row[0]!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
 
 
 def test_retract_that_lost_the_race_still_raises_already_terminal(
@@ -2235,17 +2312,49 @@ def test_the_object_arm_refuses_a_reissue_that_lands_nothing(
             sdk.close()
 
 
+def test_a_promote_point_cas_that_lands_nothing_is_not_a_not_draft_verdict(
+        tmp_path, monkeypatch):
+    """A non-landing re-issue must not be reported as the node's STATE.
+
+    ``promote_point``'s CAS is retried, so its empty re-issue is ambiguous: a
+    lost race (the node moved on) or a rebuild that has not replayed it (the
+    node is absent). Without a witness the `raced` branch reads the absent node
+    as ``{'blocked': True, 'reason': 'not_draft'}`` — a state verdict for a
+    point nobody observed — and ``review_verdicts.keep()`` consumes ``blocked``
+    as a lost race, rolling back a review write that had already landed.
+    """
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+    sdk = _sdk(tmp_path, "promotepointlanding")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortThenUnreplay(proj.g, _PROMOTE_POINT_CAS_NEEDLE, victim=pid)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.promote_point(pid)
+
+        assert proxy.vanished, "fixture precondition: the Point must be gone"
+        assert proxy.matching >= 2, (
+            "the aborted CAS was never re-issued — the witness was never consulted")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
         tmp_path, monkeypatch):
     """A promote whose re-issue matched nothing is classified by STATUS.
 
     An empty row set is NOT automatically a non-landing on this arm: the witness
     reads the node's status, and a status-only promote on a node the replay landed
-    LIVE is the #1088 idempotent no-op — a success, pinned by
-    `test_a_status_only_promote_on_an_already_live_node_is_idempotent`. What must
-    stay loud is the node that is ABSENT, which is what this fixture builds: the
-    rebuild has not replayed it, so the re-issue cannot apply and the graph abort
-    surfaces.
+    LIVE is the #1088 idempotent no-op — a success, pinned on THIS arm by
+    `test_a_live_status_only_OBJECT_promote_writes_through_no_other_slot`. What
+    must stay loud is the node that is ABSENT, which is what this fixture builds:
+    the rebuild has not replayed it, so the re-issue cannot apply and the graph
+    abort surfaces.
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
@@ -2265,6 +2374,48 @@ def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
         assert proxy.vanished, "fixture precondition: the Point must be gone"
         assert proxy.matching >= 2, (
             "the aborted statement was never re-issued — the witness was never consulted")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_live_status_only_OBJECT_promote_writes_through_no_other_slot(
+        tmp_path, monkeypatch):
+    """The ``:Object`` arm's status-only no-op reaches no write after the CAS.
+
+    The ``:Object`` promote is a SEPARATE statement from the ``:Point`` one
+    (it carries the version bump), so its post-write early return is a separate
+    branch and the ``:Point`` twin does not cover it. Without that return the
+    no-op falls through to the tail, where ``_mark_dirty`` spends BOTH of its
+    wrapped slots and advances the graph-wide EP epoch — persisting ``ep_dirty``
+    and journaling revisions — for a promote that applied nothing.
+    """
+    sdk = _sdk(tmp_path, "objpromotedirty")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
+        proxy = _PromoteLosesTheRace(proj.g, _OBJECT_PROMOTE_NEEDLE, pid)
+        proj.g = proxy
+        seen: list[str] = []
+        original = sdk._graph_write_with_retry
+
+        def counting(fn, *, what, witness=None):
+            seen.append(what)
+            return original(fn, what=what, witness=witness)
+
+        monkeypatch.setattr(sdk, "_graph_write_with_retry", counting)
+
+        out = sdk.update_point(pid, status="live")  # must NOT raise
+
+        assert proxy.flipped, "fixture precondition: the node must have gone live"
+        assert seen == ["update_point SET (Object promote)"], (
+            "a status-only :Object promote that matched nothing must not reach "
+            f"`_mark_dirty`'s slots: saw {seen}")
+        assert out["status"] == "live", (
+            "the no-op still answers with the node, like the probe path: "
+            f"saw {out.get('status')!r}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
