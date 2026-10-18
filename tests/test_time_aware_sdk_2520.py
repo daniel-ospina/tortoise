@@ -736,6 +736,9 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
         "tools/fusion_formula_ab.py": False,
         "tools/ask_pool_admission_probe.py": False,
         "tools/longmem_eval/retrieve.py": False,
+        # #8487 review round 7, P2: the capture-time prior leg re-owns the
+        # order (rows accumulate into id-keyed dicts, consumed as a SET).
+        "tortoise/extractor_v2.py": False,
         # Mirror the ask lane: must measure/replay the shipped reader.
         "tools/ask_recall_bench.py": None,
         "tools/gen_ask_transcripts.py": None,
@@ -769,3 +772,45 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
             if got != want:
                 problems.append(f"{rel}: _valid_time_rerank={got!r}, want {want!r}")
     assert not problems, "\n".join(problems)
+
+
+def test_the_capture_prior_leg_opts_out_of_the_selection():
+    """FAIL VALUE: S3's capture-time prior leg inheriting the read-path
+    valid-time selection (#8487 review round 7, P2).
+
+    ``tortoise/extractor_v2.py::_fts_rows`` is the same shape as
+    ``_review_pool`` / ``_resolve_subgraph_seed``: ``search_graph`` accumulates
+    its rows into id-keyed dicts (order discarded) and link-before-create /
+    supersession resolution consumes them as a SET — at ``limit=3``, and on the
+    one path that PERSISTS the resulting prior. Leaving the selection on could
+    only move WHICH ids survive that 3-wide cut.
+
+    Reachable: ``_fts_rows`` is called directly with a recording stub, so the
+    kwargs asserted are the exact ones a live call sends. Pre-fix the kwarg is
+    absent (``kwargs.get(...) is None``), so this test fails on pre-fix code.
+    """
+    from tortoise import extractor_v2
+
+    class _Recorder:
+        def __init__(self):
+            self.calls: list[tuple[str, dict]] = []
+
+        def tortoise_fts_query(self, query, **kwargs):
+            self.calls.append((query, kwargs))
+            return []
+
+    sdk = _Recorder()
+    for entity_type in ("point", "object", "subject", "event"):
+        extractor_v2._fts_rows(sdk, entity_type, "billing ledger now")
+    assert len(sdk.calls) == 4, sdk.calls
+    problems = [
+        f"entity_type={entity_type}: _valid_time_rerank="
+        f"{kwargs.get('_valid_time_rerank')!r} (kwargs: {sorted(kwargs)})"
+        for (_q, kwargs), entity_type in zip(sdk.calls,
+                                             ("point", "object", "subject", "event"),
+                                             strict=True)
+        if kwargs.get("_valid_time_rerank") is not False
+    ]
+    assert not problems, (
+        "the capture prior leg re-owns its order and must opt out of the "
+        "valid-time selection:\n" + "\n".join(problems))

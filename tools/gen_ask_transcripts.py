@@ -146,7 +146,14 @@ def _render_user_message(sdk: TortoiseSDK, question: str,
     # (that would stop mirroring the lane).
     hits = sdk.tortoise_fts_query(question, limit=caps["limit"],
                                   pool_size=caps["pool_size"],
-                                  include_terminal=True)
+                                  include_terminal=True,
+                                  # #8487 (review round 7, P2): the same instant
+                                  # the assembled context and the rendered user
+                                  # message below are stamped with — the
+                                  # committed transcript must replay the
+                                  # selection as of the question's date, not as
+                                  # of the day it is regenerated.
+                                  query_date=question_date)
     annotated = sdk.annotate_ask_hits(hits)
     from tortoise.retrieval import ask_session_key, dedup_pool
     # The lane's OWN key. Using the default (``session_key_of``) would re-derive

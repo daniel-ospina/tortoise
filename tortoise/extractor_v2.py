@@ -2242,6 +2242,23 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
                                   # surfaced result — recording it would count
                                   # candidates the caller never sees (f HIGH).
                                   _record_reads=False,
+                                  # #8487 (review round 7, P2): S3's rows are
+                                  # accumulated into id-keyed dicts by
+                                  # ``search_graph`` (order DISCARDED) and consumed
+                                  # as a prior SET by link-before-create /
+                                  # supersession resolution — so this leg re-owns
+                                  # its order and must opt out of the read-path
+                                  # valid-time selection, exactly like
+                                  # ``_review_pool`` / ``_resolve_subgraph_seed``.
+                                  # The only thing that selection could still do
+                                  # here is move which ids survive the ``limit``
+                                  # cut (3 on this leg, the tightest window in the
+                                  # product), and this is the CAPTURE path — the
+                                  # one place a wrong prior is persisted, not
+                                  # merely displayed. No-op for the non-Point legs
+                                  # (the selection is gated on
+                                  # ``entity_type == "point"``).
+                                  _valid_time_rerank=False,
                                   **extra)
     out = []
     for r in rows or []:

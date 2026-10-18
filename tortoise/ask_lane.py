@@ -553,6 +553,15 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
                 question, limit=caps["limit"],
                 pool_size=caps["pool_size"], include_terminal=True,
                 leg_trace=leg_trace,
+                # #8487 (review round 7, P2): the SAME instant this lane
+                # renders in the reader header and returns as
+                # ``question_date`` — the valid-time selection is a read-side
+                # ordering decision, so it must be taken as of the asked
+                # date, not as of the wall clock at read time (the module's
+                # own hazard note). With ``time_aware`` at its default False
+                # ``query_date`` reaches ONLY that selection (the dense anchor
+                # is gated behind ``time_aware``).
+                query_date=question_date,
                 keep_numeric=keep_numeric,
                 search_keys_prf=search_keys_prf,
                 fusion_weights=fusion_weights,

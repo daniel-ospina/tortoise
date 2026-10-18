@@ -252,8 +252,15 @@ def _retrieve_pipeline(sdk, question: str, *, limit: int, item_cap: int,
     )
     # #8487: NO valid-time opt-out here — this mirrors the ask lane and must
     # measure the shipped reader (see the module docstring's recorded decision).
+    # ``query_date`` is threaded for the same reason the opt-out is withheld:
+    # the selection is part of the shipped order, so the bench must take it as
+    # of the QUESTION's date (``assemble_context`` below already renders that
+    # date). Leaving it unset selects as of the wall clock, which reorders the
+    # same question across a ``validTo`` boundary and breaks the
+    # re-baseline-then-compare rule in the module docstring.
     hits = sdk.tortoise_fts_query(
         question, limit=limit, pool_size=None, include_terminal=True,
+        query_date=question_date or None,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf,
         fusion_weights=fusion_weights, fusion_k=fusion_k)
     annotated = sdk.annotate_ask_hits(hits)
@@ -289,9 +296,11 @@ def _measure_question(sdk, question: dict, *, keep_numeric: bool,
     q = question["question"]
     gold = set(_gold_turn_ids(question))
     # pool@120 — the full fused pool (pool floor = 120; limit=120 returns it)
-    # #8487: no valid-time opt-out — measures the shipped reader.
+    # #8487: no valid-time opt-out — measures the shipped reader, at the
+    # question's own instant (the same date the pipeline arm renders below).
     pool_hits = sdk.tortoise_fts_query(
         q, limit=120, pool_size=None, include_terminal=True,
+        query_date=question.get("question_date") or None,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf,
         fusion_weights=fusion_weights, fusion_k=fusion_k)
     pool_ids = [h["id"] for h in pool_hits]

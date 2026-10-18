@@ -22124,7 +22124,13 @@ class TortoiseSDK:
         #     is an unmeasured change to two product surfaces;
         #   * ``tools/fusion_formula_ab.py`` / ``tools/ask_pool_admission_probe``
         #     (a controlled measurement that must stay comparable to its own
-        #     recorded numbers).
+        #     recorded numbers);
+        #   * ``tortoise/extractor_v2.py::_fts_rows`` (#8487 review round 7, P2)
+        #     — S3's capture-time prior leg: ``search_graph`` accumulates the
+        #     rows into id-keyed dicts (order discarded) and link-before-create
+        #     / supersession resolution consumes them as a SET, at ``limit=3``.
+        #     A pre-cut composition change there is unmeasured and lands on the
+        #     WRITE path, so it opts out at its own call site.
         # The ASK lane and its mirrors (``tools/ask_recall_bench.py``,
         # ``tools/gen_ask_transcripts.py``) keep it ON: they measure/replay the
         # shipped reader, so they must include the selection.
@@ -22176,8 +22182,17 @@ class TortoiseSDK:
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
         (the product's DEFAULT_POOL_SIZE = 120, #1947/G2). pool_size/floor
         only raise the candidate window (str_limit); the RETURNED limit is
-        unchanged — truncation at result_ids[:limit] precedes EP
-        decoration, so a deeper pool has zero decoration cost. pool_size
+        unchanged — truncation at result_ids[:limit] precedes EP decoration,
+        so a deeper pool has zero cost for the RETURNED page's EP decoration.
+        ONE exception (#8487 review round 7, P3): a Point read with temporal
+        intent runs the valid-time SELECTION before that cut, so it reads
+        epistemic state over the pre-cut pool (up to pool_size) — one wider
+        ``OPTIONAL MATCH``-joined state read, capped by
+        ``search_engine._DECORATION_TIMEOUT_MS`` (200 ms). That read fails
+        OPEN: past the budget the selection is skipped and the leg records
+        ``reason="state_read_incomplete"`` with ``degraded=False``, so a very
+        deep pool on a temporal query can silently DECLINE the selection
+        rather than fail the read. pool_size
         is an EXACT override: a value below limit*2 LOWERS the pool to
         pool_size (the env floor only raises — max(limit*2, floor)).
         #1348. Resolution is the product's

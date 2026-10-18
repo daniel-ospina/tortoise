@@ -613,3 +613,28 @@ def test_future_valid_to_is_not_demoted_with_a_named_date():
     # …and the presence fallback WOULD have demoted it, which is why the
     # read path always resolves a date.
     assert is_stale_entry(states["scheduled_end"], question_date=None) is True
+
+
+def test_env_example_declares_the_valid_time_kill_switch():
+    """FAIL VALUE: the operator kill switch is advertised (PR body/plan doc)
+    but discoverable nowhere — ``.env.example`` IS this repo's env contract
+    (``TORTOISE_POOL_FLOOR``, the comparable read-path depth knob, is declared
+    there). Mirrors ``tests/test_embedded_durability_claim.py``'s #2879 test
+    for the previous comparable flag: *the flag must be visible to
+    self-hosters*. Reachable: the pre-fix ``.env.example`` has zero
+    occurrences of the name, so the grep finds nothing to assert against."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    env = (root / ".env.example").read_text()
+    assert VALIDITY_RERANK_ENV in env, (
+        f"{VALIDITY_RERANK_ENV} (default ON, #8487) is the operator switch "
+        "that restores pre-#8487 relevance order but is not declared in "
+        ".env.example"
+    )
+    declared = [line for line in env.splitlines()
+                if line.strip().startswith(f"# {VALIDITY_RERANK_ENV}=")
+                or line.strip().startswith(f"{VALIDITY_RERANK_ENV}=")]
+    assert declared, (
+        f"{VALIDITY_RERANK_ENV} must be shown as a commented assignment "
+        "(the example form an operator copies), not just named in prose")
