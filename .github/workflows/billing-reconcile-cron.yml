@@ -346,6 +346,21 @@ jobs:
                     "response contract changed, so a clean pass cannot be told "
                     "from an unverified one; failing closed")
               sys.exit(1)
+          # The counters are coerced to DIGITS before use. Two defects die here:
+          # a value carrying a newline could forge a workflow command from this
+          # printer (the same forgery `show_body` indents away), and a STRING count
+          # would pass the truthiness tests below while `checked == 0` silently
+          # stopped matching.
+          def _count(value, name):
+              digits = "".join(ch for ch in str(value) if ch.isdigit())
+              if digits == "":
+                  print(f"::error::reconcile summary field {name} is not a number "
+                        "- the response contract changed; failing closed")
+                  sys.exit(1)
+              return int(digits)
+          data = dict(data)
+          for _k in ("checked", "repaired", "unchanged", "unverified", "skipped"):
+              data[_k] = _count(data.get(_k), _k)
           drift_up = [d for d in data["drift"] if d.get("direction") == "up"]
           failed = data["failed"]
           unrepaired = data["unrepaired"]
@@ -357,15 +372,16 @@ jobs:
           )
           print(summary)
           if data["unverified"]:
-              # Not a failure: no active subscription could be established. TWO
-              # causes land here (Stripe named none, or the customer lookup
-              # failed), so this line must not assert which. Loud anyway — an
-              # org stored as billed that nothing could verify against a live
-              # subscription is a person someone should look at.
-              print(f"::warning::{data['unverified']} org(s) are stored as billed "
-                    "but could not be verified against an active Stripe "
-                    "subscription (Stripe named none, or the customer lookup "
-                    "failed) — not downgraded, review them")
+                # Not a failure: no active subscription could be established.
+                # THREE causes land here - Stripe named none, the customer lookup
+                # failed, or the pricing ladder could not be read - so this line must
+                # not assert which, and must not claim the orgs are billed (the third
+                # cause means we do not KNOW).
+                print(f"::warning::{data['unverified']} org(s) could not be verified "
+                      "against an active Stripe subscription (Stripe named none, the "
+                      "customer lookup failed, or pricing.json could not be read) - not "
+                      "downgraded, review them; if pricing.json is unreadable, every "
+                      "org lands here")
           if data["checked"] == 0:
               # Loud, never fatal. The enumeration is CERTIFIED complete before
               # this point (an uncertifiable one raises and 500s), so 0 means a

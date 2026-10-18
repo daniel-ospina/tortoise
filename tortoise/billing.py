@@ -1019,18 +1019,6 @@ def _paid_tier_floor(tier: str | None) -> int | None:
         return None
 
 
-def _is_paid_tier(tier: str | None) -> bool:
-    """Whether a stored ``tier`` PROVABLY claims more entitlement than Free.
-
-    ``False`` is NOT the same claim as "unpaid": it also covers "the ladder
-    could not be read". It must never decide a bucket on its own — use
-    ``_tier_claim`` wherever the difference between *unpaid* and *unknown*
-    matters. It does in ``reconcile_subscriptions``, where reading unknown as
-    unpaid files a possibly-paying org under "nothing to verify".
-    """
-    return _tier_claim(tier) == "paid"
-
-
 def _tier_claim(tier: str | None) -> str:
     """What a stored ``tier`` CLAIMS — ``"paid"``, ``"unpaid"`` or ``"unknown"``.
 
@@ -1205,12 +1193,15 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
       had nothing to verify. Counted so a silent enumeration shrink is visible
     - ``repaired`` / ``unchanged`` — stored tier changed / did not
     - ``unverified`` — no active Stripe subscription could be established for
-      an org whose stored tier is PAID — i.e. one that claims more entitlement
-      than Free (``_is_paid_tier``; ``reconcile_org`` reports ``action:
-      "noop"``). TWO causes land here and the counter does not distinguish
-      them: Stripe ANSWERED and named no active subscription, or the customer
-      LIST failed and the org was deliberately left alone (a provider error is
-      not a verdict). Counting it SEPARATELY from ``unchanged`` because nothing
+      an org whose stored tier claims PAID — more entitlement than Free — or
+      whose claim could not be decided at all (``_tier_claim``; ``reconcile_org``
+      reports ``action: "noop"``). THREE causes land here and the counter does
+      not distinguish them: Stripe ANSWERED and named no active subscription,
+      the customer LIST failed and the org was deliberately left alone (a
+      provider error is not a verdict), or the pricing ladder itself could not
+      be READ (#750.8) so whether the tier is paid is UNKNOWN. The last is
+      counted here rather than in ``skipped`` on purpose: an unreadable ladder
+      is not evidence that a stored ``pro`` org pays nothing. Counting it SEPARATELY from ``unchanged`` because nothing
       was verified against a subscription: folding it into ``unchanged`` would
       report an unexamined org as verified-clean, which is exactly the
       read-only-reconciler failure the ``unrepaired`` guard exists to catch.

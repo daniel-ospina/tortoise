@@ -1753,6 +1753,70 @@ class TestBillingReconcileDriverVerdicts:
                 "a payload line was emitted as a workflow annotation:\n"
                 f"{emitted}")
 
+    def test_a_reshaped_summary_counter_fails_closed_and_cannot_forge(self):
+        """#8904 review P2: the 200 arm printed payload scalars RAW.
+
+        `checked` went into the summary and was compared with `== 0` without a
+        type check, so a string count printed as-is and skipped the empty-fleet
+        warning — a reshaped response passed as a clean pass. A value carrying a
+        newline could also emit a real workflow command from THIS printer, the
+        forgery `show_body` indents away. Counters are now coerced to digits and
+        a non-numeric one fails closed.
+        """
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        def _run(summary):
+            body = json.dumps(summary).encode()
+
+            class _Handler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    n = int(self.headers.get("Content-Length") or 0)
+                    if n:
+                        self.rfile.read(n)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *a):
+                    pass
+
+            srv = HTTPServer(("127.0.0.1", 0), _Handler)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                step = _billing_steps()["Run billing reconcile pass"]["run"]
+                proc = subprocess.run(
+                    ["bash", "-c", step],
+                    env={
+                        "PATH": "/usr/local/bin:/usr/bin:/bin",
+                        "INTERNAL_API_URL": f"http://127.0.0.1:{srv.server_port}",
+                        "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                        "HOME": "/tmp",
+                        "EVENT_NAME": "schedule",
+                    },
+                    capture_output=True, text=True, timeout=120,
+                )
+            finally:
+                srv.shutdown()
+                srv.server_close()
+            return proc, proc.stdout + proc.stderr
+
+        base = {"checked": 1, "repaired": 0, "unchanged": 0, "unverified": 0,
+                "skipped": 0, "drift": [], "failed": [], "unrepaired": [],
+                "alerted": 0}
+
+        # A non-numeric counter must fail the run, not pass as a clean one.
+        proc, out = _run({**base, "checked": "lots"})
+        assert proc.returncode == 1, f"a reshaped counter passed: {out}"
+        assert "checked" in out and "not a number" in out, out
+
+        # A newline inside a counter must not become a workflow command.
+        proc, out = _run({**base, "unverified": "1\n::error::FORGED-BY-PAYLOAD"})
+        for line in out.splitlines():
+            assert not line.startswith("::error::FORGED-BY-PAYLOAD"), out
+
     def test_a_wedged_reconcile_is_named_stuck_not_enumeration_incomplete(self):
         """#8904 round 4: the two named 503 statuses want OPPOSITE responses.
 

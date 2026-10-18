@@ -482,13 +482,18 @@ customer's writes) and a `direction`:
   incomplete `product/pricing.json`, #750.8). That is a **config fault, not a
   no-op**: an unrecognised tier is NOT this case, it resolves to Free's cap and
   ranks normally. Never paged; investigate the pricing file.
-- `unverified` — the org's stored tier is PAID (it claims more entitlement than
-  Free) but no active subscription could be established for it. Two causes land
-  here and the counter does not distinguish them: Stripe answered and named no
-  active subscription, or the customer lookup itself failed (a provider error is
-  not a verdict, so the org is left alone). Nothing was verified against a
-  subscription, so this is NOT `unchanged` — and it is deliberately not
-  auto-downgraded either. Counted and logged loudly; a non-zero number is a
+- `unverified` — no active subscription could be established for an org whose
+  stored tier claims PAID entitlement, **or whose claim could not be decided at
+  all**. Three causes land here and the counter does not distinguish them:
+  Stripe answered and named no active subscription; the customer lookup itself
+  failed (a provider error is not a verdict, so the org is left alone); or the
+  pricing ladder could not be READ (#750.8), which makes "is this tier paid?"
+  UNKNOWN rather than "no" — an unread file is not evidence that a stored `pro`
+  org pays nothing, so it is counted here instead of `skipped`. In that third
+  case EVERY org with a Stripe binding lands here at once: a large single-day
+  jump is `product/pricing.json`, not a mass cancellation. Nothing was verified
+  against a subscription, so this is NOT `unchanged` — and it is deliberately
+  not auto-downgraded either. Counted and logged loudly; a non-zero number is a
   person to look at.
 - `skipped` — nothing to reconcile: no `subscription_id` / `stripe_customer_id`
   at all, **or** a Stripe customer binding whose stored `tier` is at or below
