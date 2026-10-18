@@ -4359,7 +4359,7 @@ tier1:
 # were wrong — 28 of the 64 leg files carried an `# unmeasured` placeholder, and
 # several CI-era rows had rotted. Half of that hypothesis held: the map WAS stale
 # (see the measurement below). The other half did not. On the CI-measured weights
-# the two legs were 17.98m / 19.82m — a 1.10:1 split, not a 1.76:1 one — so the
+# the two legs were 17.98m / 19.90m — a 1.11:1 split, not a 1.76:1 one — so the
 # packer was not the problem the reported median implied, and the shard's wall
 # time is dominated by the POOL, not by how it is cut. This is #6137's lesson
 # arriving from the other side: the packer was fine, part of its input was stale,
@@ -4381,7 +4381,7 @@ tier1:
 # a factor that differs per file. The clearest case is `test_index_cli.py`:
 # 338.0s of local CPU for 25.0s of CI test time (13.5x). A 13.5x over-estimate on
 # one file moved it to the head of the LPT queue and produced a split that was
-# WORSE than the one it replaced (CI-measured 20.82m vs the original 19.82m).
+# WORSE than the one it replaced (CI-measured 20.82m vs the original 19.90m).
 #
 # The authoritative instrument was already in the repo: the junit artifacts the
 # slow legs upload (that is what `tools/ci_timing.py` exists for, #5050). Every
@@ -4409,12 +4409,16 @@ tier1:
 # near-right, and it was the LOCAL re-measurement that was wrong.
 #
 # THE SPLIT is the LPT pack of that map into two legs of 18.945m / 18.933m — and
-# the honest framing of what that buys: the legs it REPLACES measure 17.98m /
-# 19.82m on the same junit (a 1.10:1 split, not the 1.76:1 this block originally
-# claimed from the invalid instrument), so the re-cut is worth 19.82 -> 18.94m on
-# the critical leg, -4.4%. The ceiling is arithmetic and is the real answer to
-# "why not 25%": a perfectly balanced split of a 37.88m pool is 18.94m, and the
-# original split was already within 0.9m of it. Re-balancing cannot cut the
+# the honest framing of what that buys, stated against BOTH baselines because they
+# answer different questions:
+#   vs the legs this PR actually REPLACES (main's, i.e. #9035's cut):
+#       17.06m / 20.82m  ->  18.95m / 18.93m   critical leg -1.88m, -9.0%
+#   vs the legs that stood BEFORE #9035 (the pre#9017 pair):
+#       17.98m / 19.90m  ->  18.95m / 18.93m   critical leg -0.96m, -4.8%
+#   and #9035's cut had itself made that leg 0.92m WORSE than the pair it replaced.
+# The ceiling is arithmetic and is the real answer to "why not 25%": a perfectly
+# balanced split of the 37.88m pool is 18.94m, and the pre#9017 split was already
+# within 0.97m of it. Re-balancing cannot cut the
 # critical path much further; only removing WORK from the pool can — which is why
 # the two tooling fixes in this change (a memoized AST parse in
 # `tools/surface_manifest.py`, two pre-filtered whole-tree scans in
@@ -4425,6 +4429,10 @@ tier1:
 # workflow's drift guard pins the union to `slow_files - carve_out`. NOTHING was
 # deleted, moved off the pre-merge gate, or re-marked: all 65 files still run on
 # a PR, with the same nodeids.
+# #2008 review: the epic-1976 capstone report's claim guard (`core` above) — doc-text
+# and section scans plus three source-file reads, no DB, so a docs-only PR must run it
+# here.
+- test_capstone_1976_report_claims.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:
@@ -4984,20 +4992,14 @@ durations:
   test_tortoise_client.py: 1.7
   eval/retrieval/test_run.py: 63.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 20.3
   test_4314_inert_hooks.py: 20.1
-  # #2125: NEW file — no CI junit measurement exists yet, so it carried the local
-  # embedded-lane reading for that turn under the `# unmeasured` convention above
   test_platform_seams.py: 85.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.6
-  # #2125: NEW file — no CI junit measurement exists yet, so it carried the local
-  # embedded-lane reading for that turn under the `# unmeasured` convention above
-  # (37.0s for the whole module, the real-reflex leg dominating; the CI reading is
-  # usually larger). #9017 re-measured it at 5.2s of CPU on 2026-10-18 (the row
-  # below is the authority; the 27.6 on the test_platform_seams row belongs to
-  # that file, not to this one) —
-  # the note's own figure is superseded, not contradicted: 37.0 was WALL on an
-  # embedded lane, and CPU on a loaded host is a different column. Refresh from
-  # the first post-merge run that includes it. Do NOT
-  # drop the row: an unregistered new test file reds `integrity_problems`, which is
-  # how this row was found (#4348 trap).
+  # #2125: NEW file — no CI junit measurement existed when it was added, so it
+  # carried the local embedded-lane reading under the `# unmeasured` convention
+  # (37.0s for the whole module, the real-reflex leg dominating). #9017 replaced
+  # that with CI junit (2.6s), so the note's figure is superseded, not
+  # contradicted: 37.0 was WALL on an embedded lane. Do NOT drop the row: an
+  # unregistered new test file reds `integrity_problems`, which is how it was
+  # found (#4348 trap).
   test_framework_middleware.py: 2.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.2
   test_2952_degraded_read.py: 0.4
   test_quota.py: 11.8
