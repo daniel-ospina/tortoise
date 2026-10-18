@@ -15340,8 +15340,8 @@ class FalkorProjection(
             # doubles keep intercepting.
             if not skip_embedding:
                 try:
-                    from tortoise.embeddings import encode_for_store
-                    emb = (encode_for_store(
+                    from tortoise.embeddings import encode_for_row
+                    emb = (encode_for_row(
                         new_content, self.required_embedding_dim)
                         if new_content else None)
                     params["embedding"] = emb  # None = wipe stale embedding for empty content

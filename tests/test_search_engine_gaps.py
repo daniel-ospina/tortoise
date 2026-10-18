@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
+from tortoise.live import EPISTEMIC_LABELS  # #6976: the per-label anchor sweep
 from tortoise.search_engine import (
     fallback_tfidf,
     degradation_chain,
@@ -1533,13 +1534,24 @@ class TestGetRelationships:
         assert result == {"p9": []}
 
     def test_query_receives_ids_param_and_operator_edge_patterns(self):
-        """Cypher covers IMPL|NAND|hasPart operator edges + ids param."""
+        """Cypher covers IMPL|NAND|hasPart operator edges + ids param.
+
+        #6976: the anchor is swept ONCE PER EPISTEMIC LABEL (id-anchored, so
+        each keeps its (label, id) range index) and neither endpoint of the
+        expansion is narrowed to `:Point` — a re-typed endpoint or a hub on its
+        own layer must not read as isolated.
+        """
         graph = SimpleMockGraph(result_set=[])
         get_relationships(graph, ["p1", "p2"])
-        cypher, params, _kw = graph.query_calls[0]
-        assert params == {"ids": ["p1", "p2"]}
-        assert "IMPL|NAND|hasPart" in cypher
-        assert "is_operator:true" in cypher
+        assert len(graph.query_calls) == len(EPISTEMIC_LABELS)
+        for label, (cypher, params, _kw) in zip(EPISTEMIC_LABELS,
+                                               graph.query_calls):
+            assert f"MATCH (n:{label})" in cypher
+            assert params == {"ids": ["p1", "p2"]}
+            assert "IMPL|NAND|hasPart" in cypher
+            assert "(other:Point)" not in cypher
+            assert "is_operator:true" not in cypher
+            assert "WITH n" in cypher
 
 
 # ── filter_by_relationship / filter_by_traversal_predicate (#148) ───────────
