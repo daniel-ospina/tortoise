@@ -58,14 +58,17 @@ WHAT THIS PINS
    measured halves (the fold's stages are present but flag-gated OFF, and
    neither can emit a candidate a coverage check found missing), the
    `check_batch` / `classify_items` return-key ALLOW-LISTs still contain no
-   item-carrying signal, and `apply_vet`'s ONE append path is the Rule-4 entity
-   restore from `prior` — never a narrative-sourced candidate.
+   item-carrying signal, `apply_vet`'s ONE append path is the Rule-4 entity
+   restore from `prior` — never a narrative-sourced candidate — and the
+   conclusion stays scoped to the FOLD (`run_s4` is itself a shipped stage that
+   emits the candidates the folded stages cannot, so "no shipped stage" is
+   false and self-refuting).
 
 NOT promised: line numbers. The doc's own rule is that the symbol is
 authoritative and the number a convenience; this file resolves symbols and
 behaviour, never offsets.
 
-Mostly static and stdlib-only. Two tests are BEHAVIOURAL: they import the
+Mostly static and stdlib-only. Three tests are BEHAVIOURAL: they import the
 shipped modules in-process (`tortoise.vet_gate`, `tortoise.extractor_v2`) and
 call them, because the claims they pin are about what those functions DO, not
 about their text. Neither import touches the network, the DB or the graph.
@@ -1266,6 +1269,11 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 FOLD_STATEMENT = "did we account for everything the narrative said?"
 #: The clause that closes the "S2.2/S2.3 exist ⇒ successor landed" misreading.
 SUCCESSOR_ABSENT = "THE SUCCESSOR HAS NOT LANDED"
+#: The SCOPE the successor conclusion must carry. `run_s4` is itself a shipped
+#: stage that emits exactly the candidates a coverage check found missing, so an
+#: unqualified "no shipped stage can emit …" universal denies the capability its
+#: own next clause says is lost by deleting the stage (#8955 review).
+CONCLUSION_SCOPE = "folds S4's purpose into"
 
 #: `check_batch`'s DOCUMENTED signals (its docstring: coverage + abstraction).
 #: An ALLOW-LIST, because the successor's first appearance would be a new,
@@ -1340,8 +1348,9 @@ def _successor_clause_violations(doc: str) -> list[str]:
 
     Every literal below pins a claim the #8955 review found overstated, so the
     fix cannot silently revert to the broader sentence: the flags that gate the
-    two stages, the COVERAGE half that only detects, and the Rule-4 restore that
-    makes an unqualified "only REMOVES" false.
+    two stages, the COVERAGE half that only detects, the Rule-4 restore that
+    makes an unqualified "only REMOVES" false, and the SCOPE that makes the
+    conclusion's universal true of the FOLD rather than of every shipped stage.
     """
     problems: list[str] = []
     if SUCCESSOR_ABSENT not in doc:
@@ -1374,6 +1383,11 @@ def _successor_clause_violations(doc: str) -> list[str]:
         ("can ADD",
          "the record must state the removal pre-condition as a stage that can "
          "ADD a candidate — not a stage that reviews or labels one"),
+        (CONCLUSION_SCOPE,
+         "the conclusion must be scoped to the FOLD (and its successor), not "
+         "to every shipped stage: `run_s4` IS a shipped stage that emits the "
+         "candidates a coverage check found missing, so the unqualified "
+         "universal denies the capability its own dash clause says is lost"),
     ):
         if required not in doc:
             problems.append(f"the record lost {required!r}: {why}")
@@ -1395,6 +1409,10 @@ def _marker_successor_violations(marker: str) -> list[str]:
         ("can ADD",
          "the marker must state the removal pre-condition as a stage that can "
          "ADD a candidate"),
+        (CONCLUSION_SCOPE,
+         "the marker's conclusion must be scoped to the FOLD (and its "
+         "successor): `run_s4` is a shipped stage that emits the missing "
+         "candidates, so 'no shipped stage' is false and self-refuting"),
     ):
         if required not in marker:
             problems.append(f"the drift marker lost {required!r}: {why}")
@@ -1719,6 +1737,21 @@ def test_the_successor_checks_red_on_the_mutations_they_exist_to_catch():
         "inverting the trap sentence (existing stages ARE the evidence the "
         "successor landed) must red the check"
     )
+    # The SCOPE reverting to the unqualified universal. `run_s4` is a shipped
+    # stage that emits exactly the candidates a coverage check found missing, so
+    # "no shipped stage" makes the record deny (and then, after the dash, assert
+    # the loss of) the same capability — falsifiable in one grep, which is the
+    # shape `_successor_clause_violations` exists to catch.
+    unqualified = source.replace(
+        f"no stage the design {CONCLUSION_SCOPE}", "no shipped stage")
+    assert unqualified != source, (
+        "the scope mutation did not apply — re-point it at the record's "
+        "conclusion sentence")
+    assert _successor_clause_violations(_module_docstring(unqualified)), (
+        "an unqualified 'no shipped stage' universal MUST red this check: "
+        "`run_s4` is the shipped gap-filler, so the unscoped sentence "
+        "contradicts its own next clause"
+    )
 
     marker = _marker_block()
     assert not _marker_successor_violations(marker), (
@@ -1729,6 +1762,15 @@ def test_the_successor_checks_red_on_the_mutations_they_exist_to_catch():
     assert _marker_successor_violations(_marker_block(stripped)), (
         "the marker's removal pre-condition must be pinned: weakening 'can ADD' "
         "to 'can review' restores exactly the misreading it exists to stop"
+    )
+    unscoped = doc_source.replace(
+        f"no stage the design {CONCLUSION_SCOPE}", "no shipped stage")
+    assert unscoped != doc_source, (
+        "the marker scope mutation did not apply — re-point it at the "
+        "marker's conclusion sentence")
+    assert _marker_successor_violations(_marker_block(unscoped)), (
+        "the marker's conclusion must stay scoped to the FOLD — an unqualified "
+        "'no shipped stage' is falsified by `run_s4` itself"
     )
 
     # The ALLOW-LIST checks — the shape a successor would FIRST appear in. Both

@@ -635,8 +635,11 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 > discarded, needs a surviving candidate to reference it, and never sources a new candidate from the
 > narrative (`OUTCOMES` = KEEP/NOOP/DISCARD/MERGE, `MERGE` recorded-not-applied — `#5006`). CLASSIFY
 > only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
-> item). So **no shipped stage can emit a candidate a coverage check found missing** — removing
-> `run_s4` today DELETES gap-filling instead of relocating it. The pre-condition for removal is a stage
+> item). So **no stage the design folds S4's purpose into — and no successor stage — can emit a
+> candidate a coverage check found missing** (`run_s4` is today's gap-filler and does exactly that) —
+> removing `run_s4` today DELETES gap-filling instead of relocating it. The universal is scoped to the
+> FOLD on purpose: an unqualified "no shipped stage" would deny the very capability the dash clause
+> says is lost, since `run_s4` *is* a shipped stage. The pre-condition for removal is a stage
 > that can ADD; building it is the migration deliverable.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 >

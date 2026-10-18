@@ -104,11 +104,16 @@ both.
     kind per EXISTING id) and ``_apply_classify_kinds`` writes that kind onto an
     item already in the list. It adds none.
 
-So no shipped stage performs S4's gap review-and-fill: deleting ``run_s4``
-today loses that capability outright rather than relocating it. The removal
-pre-condition is a stage that can ADD a candidate a coverage check found
-missing — building it is the migration deliverable, and the absence of that
-stage is pinned by ``tests/test_extractor_v4_s4_stage_claims.py``.
+So **no stage the design folds S4's purpose into — and no successor stage —
+performs S4's gap review-and-fill**: ``run_s4`` is today's gap-filler, and
+deleting it loses that capability outright rather than relocating it. (The
+universal is scoped to the FOLD on purpose: ``run_s4`` itself IS a shipped
+stage and it emits exactly the candidates the folded stages cannot, so an
+unqualified "no shipped stage" denies the very capability its own next clause
+says is lost.) The removal pre-condition is a stage that can ADD a candidate a
+coverage check found missing — building it is the migration deliverable, and
+the absence of that stage is pinned by
+``tests/test_extractor_v4_s4_stage_claims.py``.
 
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
