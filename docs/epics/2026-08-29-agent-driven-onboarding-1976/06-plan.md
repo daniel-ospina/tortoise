@@ -638,11 +638,11 @@ Dedup once per org (analytics.py pattern); dashboard + server records; no thresh
 **Steps:** run universal command per harness.
 **Assert:** 4 CLI harnesses self-install (config written correctly — validated by re-read); 2 manual harnesses receive correct teach-human steps; connection verified via tortoise_health; harness-connected checkpoint set; **install skill contracts: SKILL.md exists at the defined path, reads OnboardingState; AGENT_ONBOARDING.md archived — exactly ONE live onboarding script** (P2 fix — M8 asserted, a two-live-scripts regression must fail this test); **decide-protocol availability: SKILL.md's generic MCP-tool decide protocol (options→criteria→findings→EP ranking via existing tortoise MCP tools) produces a ranking on each of the 6 harnesses WITHOUT the local tortoise-decide skill file** (P2 fix — I-4's provisioning claim actually tested).
 
-### DE2E-6 — Graph-held resumption [1,2,10] — E2E-6
+### DE2E-6 — Graph-held resumption [surfaces 1,2,9,10] — E2E-6
 
 **Setup:** (a) org where agent connected but no decide (incomplete, NEW flow); (b) legacy org with jsonb onboarding_state pre-seeded (for backfill assertions).
-**Steps:** re-enter via Settings Setup guide; run backfill on (b).
-**Assert:** resumes at "first decision" (never restarts); state read from OnboardingState node (not jsonb) for FLOW keys; Setup guide card renders same state; **legacy backfill: (b)'s jsonb → node is a no-op on re-run; grandfathered orgs keep onboarding_complete; operational keys (github_*, session_recording) still read from jsonb and work** (P1 fix — backfill now actually tested).
+**Steps:** re-enter via Settings Setup guide; re-enter via the Overview Continue-setup card (surface 9 — the scope's second door); run backfill on (b).
+**Assert:** resumes at "first decision" (never restarts); state read from OnboardingState node (not jsonb) for FLOW keys; Setup guide card renders same state (the counted N-of-M checklist, surface 10); **the Overview next action renders the SAME graph-held state as one next step + a CTA into the guide — never a second, independently-tracked checklist of its own, because `completed_steps` is a read projection and never a second store** (P1 fix — surface 9's re-entry door is asserted, not only cited); **legacy backfill: (b)'s jsonb → node is a no-op on re-run; grandfathered orgs keep onboarding_complete; operational keys (github_*, session_recording) still read from jsonb and work** (P1 fix — backfill now actually tested).
 
 ### DE2E-7 — Invite fusion [12] — E2E-7 (most failure-prone)
 

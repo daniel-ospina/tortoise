@@ -129,6 +129,15 @@ at least one surface, and every one of the 17 surfaces is reachable from at leas
 | E2E-11 capture disclosure | 11 |
 | E2E-12 cross-W journey | 1-17 (all) |
 
+Surface **14 (onboarding telemetry)** is the one surface with no E2E scenario of its own, and this is stated
+deliberately rather than left to the catch-all: its W11 events (`onboarding_seed_complete`, `onboarding_decide_complete`)
+fire at the seed and decide write paths that **E2E-1** and **E2E-12** walk, so only the **E2E-12** row covers it. Every
+other surface is named by at least one *specific* row — `tests/test_test_design_1992_traceability.py`
+(`test_every_surface_is_exercised_by_a_specific_e2e_row`) splices the `1-17 (all)` catch-all out before comparing, so a
+row that loses a surface fails instead of hiding behind the catch-all, and surface 14 is the single documented exception.
+The plan's `DE2E-N` headers copy these cells (`06-plan.md` §7) and the same module pins them
+(`test_the_plans_de2e_surface_refs_are_the_maps_e2e_rows`).
+
 ## Verification Checklist (for child issues)
 
 | Surface | Test Layer | Expected Verification |

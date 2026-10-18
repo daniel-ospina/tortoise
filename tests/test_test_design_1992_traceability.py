@@ -77,7 +77,13 @@ the invariants that were being checked by hand are checked here instead:
 
 Every surface is also exercised by at least one high-level E2E row (the E2E-side
 reverse direction) — a surface no scenario touches has no scenario that would
-catch its regression.
+catch its regression. **The catch-all row is spliced out before that comparison,
+and the one exception is stated in the map itself:** `E2E-12 cross-W journey |
+1-17 (all)` expands to the whole surface set, so including it made the first
+version of the assertion true by construction — it stayed green with every
+specific row deleted. Surface **14 (onboarding telemetry)** is the documented
+exception: its W11 events fire at the seed/decide write paths that E2E-1 and
+E2E-12 walk, so no scenario of its own exists.
 
 NON-VACUITY
 -----------
@@ -86,10 +92,15 @@ docstring names the pre-fix text; check 10 additionally replays the exact
 self-contradicting sentence through the guard in-suite). Checks 1-3 are the
 standing invariants the earlier cycles established, check 9 is a parser-shape
 guard and check 7 is a guard whose detector is proved non-blind — guard rails,
-not defect pins. The pre-fix blobs are replayed by pointing this module's pure
-functions at them (`git show <sha>:<path>`), which is how the non-vacuity claims
-were measured; reverting the four docs to `fe06e3a98` fails checks 10 and 11
-(five tests) and nothing else.
+not defect pins. The E2E reverse direction is a **pre-fix defect pin** once its
+catch-all is spliced out: surface 14 is then the only uncovered surface, and the
+`E2E-6` surface set is pinned against the plan's own `DE2E-6` header too
+(`test_the_plans_de2e_surface_refs_are_the_maps_e2e_rows`), because the plan
+declares those refs are copied from this map and this PR is what
+desynchronised them. The pre-fix blobs are replayed by pointing this module's
+pure functions at them (`git show <sha>:<path>`), which is how the non-vacuity
+claims were measured; reverting the four docs to `fe06e3a98` fails checks 10 and
+11 (five tests) and nothing else.
 Static: doc-text scans plus one file read per doc. No network, DB or graph.
 """
 
@@ -103,6 +114,7 @@ ROOT = Path(__file__).resolve().parent.parent
 EPIC = ROOT / "docs" / "epics" / "2026-08-29-agent-driven-onboarding-1976"
 DOC = EPIC / "04-test-design.md"
 SCOPE = EPIC / "03-scope.md"
+PLAN = EPIC / "06-plan.md"
 UX = EPIC / "05-ux-decisions.md"
 
 # `03-scope.md` §4 E2E-6 is the AUTHORITY for which re-entry doors exist:
@@ -237,6 +249,25 @@ def _e2e_rows() -> dict[str, set[int]]:
             else:
                 numbers.add(int(chunk))
         out[m.group(1)] = numbers
+    return out
+
+
+def _plan_de2e_surfaces() -> dict[str, set[int]]:
+    """`E2E-N` → the surfaces `06-plan.md`'s `### DE2E-N … [surfaces …]` header
+    cites. `06-plan.md:609` declares those refs are copied from the map."""
+    out: dict[str, set[int]] = {}
+    for line in PLAN.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^### DE2E-(\d+)\b.*?\[([^\]]+)\]\s*—\s*E2E-\d+", line)
+        if not m:
+            continue
+        numbers: set[int] = set()
+        for chunk in re.findall(r"\d+\s*-\s*\d+|\d+", m.group(2)):
+            if "-" in chunk:
+                lo, hi = (int(p) for p in chunk.split("-"))
+                numbers.update(range(lo, hi + 1))
+            else:
+                numbers.add(int(chunk))
+        out[f"E2E-{m.group(1)}"] = numbers
     return out
 
 
@@ -430,17 +461,127 @@ def test_every_surface_is_reachable_from_a_capability():
         f"surfaces cited by no capability: {sorted(set(_surfaces()) - cited)}")
 
 
-def test_every_surface_is_exercised_by_at_least_one_e2e_row():
-    """The E2E-side reverse direction: a surface no high-level scenario walks has
-    no scenario that would catch its regression.
+#: Surfaces the map documents as covered ONLY by the catch-all
+#: `E2E-12 cross-W journey | 1-17 (all)` row. The exception is stated in
+#: `04-test-design.md` (pinned by
+#: `test_the_catch_all_only_exception_is_stated_in_the_map`), not only here.
+CATCH_ALL_ONLY_SURFACES = {14}
 
-    This replaces an assertion that was implied by the capability-direction check
-    above (`{n for c in ...} <= set(_surfaces())` holds whenever the union equals
-    the surface set) and could never fail independently while reading as a second
-    direction."""
-    exercised = set().union(*_e2e_rows().values())
-    assert exercised == set(_surfaces()), (
-        f"surfaces no E2E row exercises: {sorted(set(_surfaces()) - exercised)}")
+
+def _uncovered_by_specific_e2e_rows(
+    rows: dict[str, set[int]], surfaces: set[int]
+) -> set[int]:
+    """Surfaces no row names EXCEPT the catch-all.
+
+    The catch-all (`E2E-12 … | 1-17 (all)`) expands to the whole surface set, so
+    leaving it in the union makes the reverse direction true BY CONSTRUCTION:
+    the first version asserted `union(rows) == surfaces`, which stayed green with
+    every specific row deleted — and on the pre-fix map. Splicing it out is what
+    turns the assertion into a second direction."""
+    specific = {k: v for k, v in rows.items() if v != surfaces}
+    if not specific:
+        return set(surfaces)
+    return set(surfaces) - set().union(*specific.values())
+
+
+def test_every_surface_is_exercised_by_a_specific_e2e_row():
+    """The E2E-side reverse direction: a surface no scenario walks has no
+    scenario that would catch its regression.
+
+    PRE-FIX GUARD (found on the review AFTER the first fix): the assertion was
+    `union(_e2e_rows().values()) == set(_surfaces())`, which the `E2E-12 cross-W
+    journey | 1-17 (all)` row satisfies unconditionally. It was green on the
+    pre-fix map and would stay green if every specific row were deleted, so it
+    read as a second direction while carrying no information. The catch-all is
+    spliced out; the only surface left uncovered is the one exception the map
+    states — surface 14 (telemetry), whose W11 events fire at the seed/decide
+    write paths E2E-1 and E2E-12 walk."""
+    surfaces = set(_surfaces())
+    uncovered = _uncovered_by_specific_e2e_rows(_e2e_rows(), surfaces)
+    assert uncovered == CATCH_ALL_ONLY_SURFACES, (
+        "surfaces no specific E2E row exercises: "
+        f"{sorted(uncovered - CATCH_ALL_ONLY_SURFACES)} (the documented "
+        f"catch-all-only exception is {sorted(CATCH_ALL_ONLY_SURFACES)})")
+
+
+def test_the_specific_e2e_guard_rejects_a_table_whose_only_coverage_is_the_catch_all():
+    """Receipt for the vacuity fix, driven through the same helper.
+
+    The pre-fix assertion PASSED on both of these states. Post-fix the first is
+    rejected outright, and the second (a specific row reverted to the pre-fix
+    `E2E-6 | 1, 2, 10`) is caught by the per-surface assertion above."""
+    surfaces = set(_surfaces())
+    rows = _e2e_rows()
+    catch_all = {k: v for k, v in rows.items() if v == surfaces}
+    assert catch_all, "no catch-all row parsed — this receipt would be vacuous"
+    assert _uncovered_by_specific_e2e_rows(catch_all, surfaces) == surfaces, (
+        "with only the catch-all present the guard must see EVERY surface "
+        "uncovered — that is exactly the state the old assertion passed")
+    assert _uncovered_by_specific_e2e_rows(rows, surfaces) == CATCH_ALL_ONLY_SURFACES, (
+        "the real table leaves only the documented exception uncovered")
+
+
+def test_the_catch_all_only_exception_is_stated_in_the_map():
+    """The exception belongs in the document a reader consults, not only in this
+    module's constant: without it, `14` reads as a dropped row instead of the
+    one surface with no scenario of its own."""
+    paragraphs = [
+        p for p in re.split(r"\n\s*\n", DOC.read_text(encoding="utf-8"))
+        if "catch-all" in p.lower()
+    ]
+    assert paragraphs, (
+        "the map must state which surface only the E2E-12 catch-all covers")
+    assert any("telemetry" in p.lower() and "14" in p for p in paragraphs), (
+        "the exception paragraph must name surface 14 (onboarding telemetry) — "
+        "the guard's CATCH_ALL_ONLY_SURFACES is that paragraph's copy, and a "
+        "silent exception is the drift this module exists to remove")
+
+
+def test_the_plans_de2e_surface_refs_are_the_maps_e2e_rows():
+    """PRE-FIX: `06-plan.md` read `### DE2E-6 — Graph-held resumption
+    [1,2,10]` while the map says `1, 2, 9, 10`. The plan declares those refs are
+    copied "from `04-test-design.md`" (L609) and 11 of its 12 headers matched, so
+    this PR changed the one row that was in sync and left the plan on the old
+    value — two answers for "which surfaces does E2E-6 exercise?" in the document
+    the map's footer names as its first consumer, with no guard reading it."""
+    mapped = _e2e_rows()
+    planned = _plan_de2e_surfaces()
+    assert planned, "could not parse any `### DE2E-N … [surfaces …]` header"
+    assert set(planned) == set(mapped), (
+        f"the plan's DE2E rows are {sorted(planned)} but the map's E2E rows are "
+        f"{sorted(mapped)}")
+    for key in sorted(mapped):
+        assert planned[key] == mapped[key], (
+            f"{key}: the plan's DE2E header cites {sorted(planned[key])} but the "
+            f"map's E2E row is {sorted(mapped[key])}")
+
+
+def test_de2e6_exercises_the_surface_9_door_it_cites():
+    """A citation with nothing behind it is the defect the bracket pin above
+    catches structurally; this catches it substantively.
+
+    PRE-FIX: DE2E-6 cited `1,2,10` and its Steps/Assert exercised only the
+    Settings door ("re-enter via Settings Setup guide"; "Setup guide card
+    renders same state"), so the failure mode surface 9's Key Failure Modes
+    names — an Overview next action rendering a second, independently-tracked
+    checklist — had no assertion anywhere in the implementation-ready E2E. If
+    this prose is rewritten, keep the door and the no-second-list assertion in
+    it: that is what makes the surface-9 citation true."""
+    lines = PLAN.read_text(encoding="utf-8").splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("### DE2E-6 ")), None)
+    assert start is not None, "the plan's `### DE2E-6` header is gone"
+    end = next(
+        (i for i, ln in enumerate(lines[start + 1 :], start + 1)
+         if ln.startswith("### ")), len(lines))
+    block = "\n".join(lines[start:end]).lower()
+    assert "overview" in block, (
+        "DE2E-6 cites surface 9 (the Overview re-entry door) but never steps "
+        "through it — the citation would be decorative")
+    assert "one next step" in block and "never a second" in block, (
+        "DE2E-6 must assert the Overview door's shape (one next step + a CTA, "
+        "never a second, independently-tracked checklist) — otherwise the "
+        "failure mode surface 9's Key Failure Modes names is unasserted")
 
 
 def test_capability_rows_are_the_scopes_rows_in_order():
@@ -461,7 +602,7 @@ def test_capability_rows_are_the_scopes_rows_in_order():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4-8: the defect pins (each fails on the pre-fix document)
+# 4-9: the defect pins and the parser/projection guards beside them
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_a_capability_row_cites_every_surface_its_rationale_names():
@@ -639,6 +780,10 @@ def test_the_ux_decision_row_the_map_cites_no_longer_claims_a_dismissible_list()
         + "\n- ".join(conflicts) + "\nrow: " + live)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 10: every dismissal claim names its DOOR (the row, and the receipt)
+# ═══════════════════════════════════════════════════════════════════════
+
 def test_the_dismissal_door_guard_rejects_the_one_sentence_contradiction():
     """Non-vacuity, and the RECEIPT for why the previous guard was too narrow.
 
@@ -673,7 +818,7 @@ def test_the_dismissal_door_guard_rejects_the_one_sentence_contradiction():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 10-12: the superseded mirror claim, reconciled everywhere it survived
+# 11: the superseded mirror claim, reconciled everywhere it survived
 # ═══════════════════════════════════════════════════════════════════════
 
 #: The pre-fix wording. It named no door, so it read as licensing the
