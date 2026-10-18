@@ -1003,6 +1003,15 @@ surfaces:
   # — they fall through to `core` — so without that arm a webhook_delivery-only
   # change would run no guard at all.
   - test_webhook_delivery.py
+  # #8098: the scheduled retry sweep — the TRIGGER the delivery layer lacked
+  # (an idle tenant's backoff had nothing to notice it elapsed). The sweep's
+  # arm site, its task registration and the never-raise/off-loop dispatch
+  # wrapper all live in `tortoise/hosted_api.py` (an exact `api`
+  # SOURCE_PATTERN), so this arm runs the lifecycle pins on a hosted change.
+  # DUAL-REGISTERED with `core` (below) for the same reason as #2081 above:
+  # the due predicate and its cost gate live in `tortoise/webhook_delivery.py`,
+  # which matches no named surface and falls through to `core`.
+  - test_8098_webhook_retry_sweep.py
   # #3520: the per-session EXTRACTION status (`{status, extractor,
   # outcome_known}`) on BOTH hosted session read surfaces, the `last_error`
   # agreement on the 2xx path, and the appended-at-the-END column positions.
@@ -3308,6 +3317,12 @@ surfaces:
   # engine's contract tests on that diff. Dual-registered under `api` (above)
   # for `tortoise/hosted_api.py`, which is an exact `api` match.
   - test_webhook_delivery.py
+  # #8098: the sweep's cheap gate (`webhook_delivery.due_subscription_count`)
+  # is the ONE predicate the dispatcher also reads, so it must ride a
+  # `webhook_delivery.py`-only diff: that file matches no named SOURCE_PATTERN
+  # and selects `core`. Dual-registered under `api` (above) for the hosted
+  # lifecycle half (the arm site, the task tuple, the dispatch wrapper).
+  - test_8098_webhook_retry_sweep.py
   # #3520: the `core` half of the dual registration documented at the `api`
   # entry — `tortoise/session_projection.py` (the extraction vocabulary and
   # `session_extraction_status`, the ONE derivation every read surface calls)
@@ -4968,6 +4983,7 @@ durations:
   test_7405_update_point_writes.py: 2.0  # #7405/#8737: same #3400 flat default as the row above and for the same reason — a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_5509_name_keyed_identity_reads.py: 138.6  # #5509 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it is hand-added here — and WITHOUT this row the durations map drops to 89.98% coverage (799/888), below the 90% floor, which is how #8874's merge of main 46185aba9 first surfaced it. MEASURED on this host 2026-10-17 in the #8874 worktree on a private tools/test_lane.py docker container reached via TORTOISE_DB_URI: pytest session total, 16 tests, "16 passed in 138.63s". WHAT THE NUMBER IS: the session total, NOT what the refresher computes (it sums the textual `--durations=15` block from a CI log, a LOWER bound). Refresh from the first post-merge push run that includes it.
   test_8864_shared_name_merge_key.py: 2.0  # #8864: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Local reading on this host (embedded carve-out lane, 8 tests): "8 passed in 5.82s" — the session total, which is conftest/DB setup the #3400 method attributes to no file; NOT substituted for a CI weight. Refresh from the first post-merge run that includes it.
+  test_8098_webhook_retry_sweep.py: 8.8  # #8098 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-18 at the PR head AFTER the LAST review fixes (embedded carve-out lane, **56 tests**, `--junitxml`): sum of testcase/@time ranged **7.25s** on a quiet host to **24.65s** with the fleet loading this box, max single test 1.65-6.90s (`test_every_test_the_plan_cites_exists`, which rglobs `tests/`). The reading is re-derived with the COUNT at every revision, never carried forward (the neighbouring #3429 row states the same convention): earlier revisions of this row read 39, 48, 49, 51, 53 and 55 tests as the file grew. The 8.8 WEIGHT is deliberately left alone: it is the shard packer's input, and keeping the higher of the readings means a file whose per-test sum is dominated by one cold-lane test is never under-weighted, so do not "correct" it down without a CI junit measurement. Required for the durations half as well as the surface half (#4348 trap): MEASURED this turn, WITHOUT this row `tools/ci_selection.py --integrity` reds the durations coverage floor (the file is in the fast pool, so an absent row also packs it at the flat 2.0s default). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_installer_agents_block_3429.py: 12.8  # #3429 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention. MEASURED on this host 2026-10-18 on a private tools/test_lane.py container, TWO consecutive runs, sum of testcase/@time over ALL 42 tests: 11.95s and 13.58s — the reading is re-derived with the count at every revision, never carried forward (earlier rows here said 4.53s/4, 5.8s/10, 7.2s/15, 9.0s/20, 14.4s/25, 20.4s/30, 20.9s/35 and 18.6s/40 as the review added cases; the count and the sum move together, and this spread shows the host load, not the tests). The file drives the REAL installer in a temp HOME/project, so it is subprocess-bound, not DB-bound. NOTE: the sum is per-test durations; WALL-CLOCK under a loaded fleet has measured 2.8x this. Refresh from the first post-merge push run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_backup_watcher_health.py: 0.2

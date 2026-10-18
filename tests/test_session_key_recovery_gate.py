@@ -584,6 +584,50 @@ class TestOwnerAdminGateOutage:
         assert exc.status_code == 503
         assert exc.detail.get("error_code") == "control_plane_unavailable"
 
+    def test_registry_anchor_connect_failure_503(self, monkeypatch):
+        """The anchor's OWN connect failure must land inside the 503 map too.
+
+        ``_registry_anchor()`` binds EAGERLY in URI mode (it returns the cached
+        ``_registry_probe_sdk()``, whose ``_get_proj()`` IS the connect — #8098),
+        so the first registry access of a process raises from the ANCHOR CALL,
+        not from the first query. Resolved one line above the ``try``, that
+        failure skipped ``_raise_503_if_cp_outage`` and reached the global
+        handler as a raw 500, falsifying the #2380 outage contract stated three
+        lines above the code (review finding at 5c7c046).
+
+        The patched anchor RAISES — it does not return a handle whose query
+        raises — which is the whole point: the two tests above pin the query
+        position, so neither of them can tell where the anchor is resolved.
+        """
+        monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+        def _boom():
+            raise RuntimeError("registry connect failed (simulated)")
+
+        monkeypatch.setattr(ha, "_registry_anchor", _boom)
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(_require_owner_admin(_U1, "team-r"))
+        exc = ei.value
+        assert exc.status_code == 503
+        assert exc.detail.get("error_code") == "control_plane_unavailable"
+
+    def test_registry_anchor_non_outage_error_not_wrapped(self, monkeypatch):
+        """Control for the test above: moving the anchor inside the try must
+        not turn a dialect/schema bug raised from there into a 503."""
+        monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+        def _boom():
+            raise ValueError("dialect drift")
+
+        monkeypatch.setattr(ha, "_registry_anchor", _boom)
+        with pytest.raises(ValueError) as ei:
+            asyncio.run(_require_owner_admin(_U1, "team-r"))
+        assert "dialect drift" in str(ei.value)
+
     def test_registry_membership_read_redis_family_503(self, monkeypatch):
         """The falkordb/redis client's REAL transport family (incl.
         InvalidResponse — a garbage/version-skewed reply) degrades to 503
