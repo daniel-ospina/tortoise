@@ -540,10 +540,17 @@ def _classifier_text(raw: bytes) -> str:
 # appends to (at most the live graphs), and is deliberately never pruned: a lock
 # a waiter already holds a reference to cannot be identified from the map, so
 # evicting one could hand two threads two different locks for one path and
-# silently drop the serialisation this block exists for. The state is
-# reinitialised in a FORKED CHILD (see ``_reinit_append_locks_after_fork``): a
-# lock held by another thread at ``fork()`` time has no owner on the other side,
-# so inheriting it would wedge the child on its first append for ever.
+# silently drop the serialisation this block exists for. The THREAD-lock state
+# is reinitialised in a FORKED CHILD (see ``_reinit_append_locks_after_fork``):
+# a lock held by another thread at ``fork()`` time has no owner on the other
+# side, so inheriting it would wedge the child on its first append for ever.
+# WHAT THAT DOES NOT COVER, stated so it is not overclaimed: a child forked
+# while a thread is INSIDE an append inherits a reference to the same OPEN FILE
+# DESCRIPTION, so the parent's ``flock`` stays held until the CHILD exits (an
+# advisory lock is released at the last close, not the first). That window is
+# fork-during-append, which nothing under ``tortoise/`` does today; closing the
+# child's inherited copies is the remaining half, and bounding the journal's
+# growth is #9025.
 _APPEND_LOCKS: dict[str, threading.Lock] = {}
 _APPEND_LOCKS_GUARD = threading.Lock()
 # BOUNDED cross-process wait. A peer that holds the lock and is wedged (SIGSTOP,
@@ -589,6 +596,9 @@ def _reinit_append_locks_after_fork() -> None:
     Clearing is safe in the child precisely because only the forking thread
     survives: no peer can be holding one of these locks there. The same remedy
     is already registered in ``tortoise/embedded_lifecycle.py``.
+
+    The child's inherited OPEN FILE DESCRIPTORS are out of scope here — see the
+    ``_APPEND_LOCKS`` block for what that leaves open.
     """
     global _APPEND_LOCKS_GUARD
     _APPEND_LOCKS.clear()
@@ -597,8 +607,7 @@ def _reinit_append_locks_after_fork() -> None:
 
 
 # POSIX only: Windows has no ``fork``, so there is nothing to reinitialise.
-_FORK_HOOK_REGISTERED = hasattr(os, "register_at_fork")
-if _FORK_HOOK_REGISTERED:                    # pragma: no branch - platform
+if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
     os.register_at_fork(after_in_child=_reinit_append_locks_after_fork)
 
 

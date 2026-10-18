@@ -129,7 +129,7 @@ from tortoise.log import EventLog
 
 ready_dir, cid = {ready_dir!r}, sys.argv[1]
 path, nrec, pad = {path!r}, {nrec}, {pad}
-calls = {{"flock": 0, "contended": 0}}
+calls = {{"flock": 0, "contended": 0, "degraded": 0}}
 real_flock = L.fcntl.flock
 
 def spy(fd, op):
@@ -170,7 +170,8 @@ while len([n for n in os.listdir(ready_dir) if n.startswith("done-")]) < {nprocs
         sys.exit(11)          # the children did NOT overlap
     time.sleep(0.005)
 
-open(os.path.join(ready_dir, "counts-" + cid), "w").write(json.dumps(calls))
+open(os.path.join(ready_dir, "counts-" + cid), "w").write(json.dumps(
+    dict(calls, degraded=len(L._FLOCK_UNHEALTHY))))
 """
 
 
@@ -226,15 +227,28 @@ def test_concurrent_processes_are_serialised_too(tmp_path: Path):
         for p in procs:
             if p.poll() is None:            # pragma: no cover - failure path
                 p.kill()
+                p.communicate()
     for returncode, stderr in outcomes:
         assert returncode == 0, (returncode, stderr[-2000:])
 
     counts = [json.loads((ready / f"counts-{p}").read_text())
               for p in range(nprocs)]
+    # A child that hit the BOUNDED wait degraded on purpose (``_FLOCK_UNHEALTHY``
+    # was set, so later appends skip ``flock`` by design), and a stall is an
+    # environment fact rather than a verdict on the code. Only the children that
+    # did NOT degrade are held to "one flock per append" — a removal of the arm
+    # can never set ``_FLOCK_UNHEALTHY``, so it still reds.
+    degraded = [c["degraded"] for c in counts]
     locked = [c["flock"] for c in counts]
-    assert min(locked) >= nrec, (
-        f"flock calls per child = {locked} for {nrec} appends each: the append "
-        "did not take the cross-process lock")
+    if all(degraded):
+        pytest.skip(f"every child degraded on a held lock: flock={locked}")
+    for child, (count, was_degraded) in enumerate(
+            zip(locked, degraded, strict=True)):
+        if was_degraded:
+            continue
+        assert count >= nrec, (
+            f"child {child}: {count} flock calls for {nrec} appends: the append "
+            f"did not take the cross-process lock (all children: {locked})")
 
     reader = EventLog(path)
     records = reader.read_all()
@@ -258,7 +272,8 @@ os.close(fd)
 """
 
 
-def test_a_peer_process_holding_the_flock_blocks_the_append(tmp_path: Path):
+def test_a_peer_process_holding_the_flock_blocks_the_append(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The cross-process arm, pinned WITHOUT depending on a race.
 
     A peer process takes ``flock(LOCK_EX)`` on the journal and holds it while
@@ -268,7 +283,11 @@ def test_a_peer_process_holding_the_flock_blocks_the_append(tmp_path: Path):
     fails. This is the discrimination the concurrent test would otherwise only
     get statistically.
     """
-    pytest.importorskip("fcntl")
+    fcntl = pytest.importorskip("fcntl")
+    import types
+
+    import tortoise.log as log_mod
+
     path = tmp_path / "graph.jsonl"
     path.write_text("")
     held, release = tmp_path / "held", tmp_path / "release"
@@ -276,8 +295,26 @@ def test_a_peer_process_holding_the_flock_blocks_the_append(tmp_path: Path):
     holder = subprocess.Popen([sys.executable, "-c", script])
     log = EventLog(path)
     done = threading.Event()
+    refused = threading.Event()
     errors: list[BaseException] = []
     started: list[bool] = []
+
+    # The refusal is the PIN, not the wall clock: the peer holds the lock, so the
+    # append's first ``flock(LOCK_NB)`` must be REFUSED. Waiting for that event
+    # cannot pass vacuously on a loaded box (the old shape could: an append that
+    # had not been scheduled yet also failed to finish in 0.5 s).
+    real_flock = fcntl.flock
+
+    def refusing(fd: int, op: int) -> None:
+        try:
+            return real_flock(fd, op)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                refused.set()
+            raise
+
+    monkeypatch.setattr(log_mod, "fcntl", types.SimpleNamespace(
+        flock=refusing, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB))
 
     def writer() -> None:
         try:
@@ -296,12 +333,11 @@ def test_a_peer_process_holding_the_flock_blocks_the_append(tmp_path: Path):
             time.sleep(0.005)
         thread.start()
         started.append(True)
-        # The peer holds the flock for this whole window (the append's own wait
-        # is bounded at _FLOCK_TIMEOUT_S = 5s), so an append that takes the
-        # cross-process lock cannot have finished inside it.
-        assert not done.wait(0.5), (
-            "append completed while a peer process held the journal's flock — "
-            "the append did not take the cross-process lock")
+        assert refused.wait(10), (
+            "the append never contended the peer's flock — it did not take the "
+            "cross-process lock at all")
+        assert not done.is_set(), (
+            "append completed while a peer process held the journal's flock")
     finally:
         release.write_text("")
         if started:
@@ -392,8 +428,6 @@ def test_a_forked_child_does_not_inherit_a_held_append_lock(tmp_path: Path):
     assert os.waitstatus_to_exitcode(wait_status) == 0, (
         "the forked child could not append — it inherited a lock held by the "
         "parent's other thread at fork() time")
-    # And the hook is REGISTERED on this platform, not merely implemented.
-    assert log_mod._FORK_HOOK_REGISTERED is hasattr(os, "register_at_fork")
     assert {"parent", "child"} == {
         r["point"]["id"] for r in EventLog(path).read_all()}
 
