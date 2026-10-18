@@ -872,6 +872,21 @@ def test_the_state_reaches_str_for_an_OSError_too() -> None:
             f"{type(exc).__name__} still carries the loss only in __notes__: {str(exc)!r}"
         )
 
+    # A MESSAGE-ONLY OSError subclass (`strerror is None`, message in `args[0]`) must keep
+    # its own text: replacing it destroys the cause a caller needs to tell "engine dead"
+    # (#8270) from "index missing", which is worse than the note-only state this fixes.
+    for exc in (OSError("engine died"), TimeoutError("timed out"),
+                ConnectionResetError("reset by peer")):
+        original = str(exc)
+        _append_state_to_message(exc, "the index is MISSING")
+        assert original in str(exc), (
+            f"{type(exc).__name__} lost its own message, so the caller cannot tell what "
+            f"actually failed: {original!r} -> {str(exc)!r}"
+        )
+        assert "the index is MISSING" in str(exc), (
+            f"{type(exc).__name__} did not gain the index state: {str(exc)!r}"
+        )
+
     errno_exc = OSError(111, "Connection refused")
     _append_state_to_message(errno_exc, "state")
     assert errno_exc.errno == 111, (
@@ -888,9 +903,9 @@ def test_a_blank_properties_cell_names_NO_property_and_a_repeat_names_ONE() -> N
     module documents, defeated by an empty cell.
 
     A cell that REPEATS a name must collapse to ONE definition: two identical definitions
-    would issue the same DROP twice, which the engine refuses (a shape this module documents),
-    aborting the restore AFTER the index was already dropped. ``same_index_definitions`` is
-    set-based, so the read-back could not catch it either.
+    would issue the same `DROP` twice; the result of that second `DROP` is UNMEASURED — no
+    artifact in this repo records it — so it must simply not be issued.
+    ``same_index_definitions`` is set-based, so the read-back could not catch it either.
     """
     for cell in ("", " ", b""):
         rows = [["Point", cell, "{age: [RANGE]}", "{}", "english", "[]", "NODE",

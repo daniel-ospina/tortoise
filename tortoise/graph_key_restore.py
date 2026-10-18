@@ -2226,28 +2226,36 @@ def _append_state_to_message(exc: BaseException, state: str) -> None:
     a new wrapper type would trade a real contract for the message.
 
     WHICH SHAPES ARE REACHED, stated because ``__str__`` is not args-derived for every
-    class. Two are handled: an ``OSError`` (through ``errno``/``strerror``, which is what
-    ITS ``__str__`` renders) and a plain single-string message. A structured ``(int, str)``
-    exception is DECLARED RESIDUAL and deliberately left alone — rewriting its ``args``
-    damages the evidence without moving ``str(exc)``, which is worse than the note-only
-    state it started in (``subprocess.CalledProcessError`` is the measured example: its
-    ``__str__`` renders ``returncode``/``cmd``, so rewriting ``args[1]`` would put the index
-    state into a ``cmd`` that never ran).
+    class. Two are handled: an ``OSError`` — through ``errno``/``strerror``, which is what
+    ITS ``__str__`` renders, or through ``args[0]`` when it is a MESSAGE-ONLY subclass such
+    as ``TimeoutError`` (its text is preserved and appended to, never replaced) — and a plain
+    single-string message. A structured ``(int, str)`` exception is DECLARED RESIDUAL and
+    deliberately left alone — rewriting its ``args`` damages the evidence without moving
+    ``str(exc)``, which is worse than the note-only state it started in
+    (``subprocess.CalledProcessError`` is the measured example: its ``__str__`` renders
+    ``returncode``/``cmd``, so rewriting ``args[1]`` would put the index state into a ``cmd``
+    that never ran).
     """
     if isinstance(exc, OSError):
         # A dead or unreachable engine raises exactly this family (`ConnectionRefusedError`,
         # `socket.gaierror`) — the failure this module calls "the process died" (#8270) — so
         # leaving it untouched re-opened the note-only defect one level down.
-        # `OSError.__str__` renders `errno`/`strerror`, NOT `args` (whose length never
-        # exceeds 2 for any legal positional form): the attributes are what must move.
-        strerror = exc.strerror
-        exc.strerror = f"{strerror}\n{state}" if isinstance(strerror, str) else state
+        # `OSError.__str__` renders `errno`/`strerror`, NOT `args`, so the attributes are what
+        # must move. But a MESSAGE-ONLY subclass (`TimeoutError("timed out")`,
+        # `ConnectionResetError("reset by peer")`) has `strerror is None` and carries its
+        # message in `args[0]`: that message must be PRESERVED and appended to, never
+        # REPLACED, or the caller loses the cause it needs to tell "engine dead" (#8270)
+        # from "index missing" — the exact distinction this module exists to draw.
+        text = exc.strerror if isinstance(exc.strerror, str) else None
+        if text is None and exc.args and isinstance(exc.args[0], str):
+            text = exc.args[0]
         errno = exc.errno
         if errno is None and exc.args and isinstance(exc.args[0], int):
-            # A bare `OSError(111)` leaves `strerror` None; fill it so the state has
-            # somewhere to land instead of staying note-only.
+            # A bare `OSError(111)` leaves `strerror` None and errno in `args[0]`; fill both
+            # so the state has somewhere to land instead of staying note-only.
             errno = exc.args[0]
             exc.errno = errno
+        exc.strerror = f"{text}\n{state}" if text else state
         exc.args = (errno, exc.strerror) if errno is not None else (exc.strerror,)
         return
     if len(exc.args) == 1 and isinstance(exc.args[0], str):
