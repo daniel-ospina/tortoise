@@ -96,10 +96,22 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
   org_id: string,   // references Team.id
   name: string,      // display name (default graph: "default")
   kind: string,      // "default" | "custom"
-  namespace: string, // FalkorDB tenant namespace (the DEFAULT graph's ns
-                     // IS the team namespace team_<name>; customs =
-                     // team_<org_id>_<gid> — the graph SWITCHER/contexts
-                     // ride this)
+  namespace: string, // FalkorDB tenant namespace. The DEFAULT graph's ns IS
+                     // the org namespace — the stored `Team.graph_name`:
+                     // `org_{org_id}` on the hosted Supabase-lane provision
+                     // paths (provision/register/signup/create_org),
+                     // `org_{name}` (spaces → `_`) on the registry lane's
+                     // `sdk.org_create` — which is ALSO a hosted path (selfhost
+                     // uvicorn `POST /v1/organizations`,
+                     // `_create_org_registry_lane`), so "hosted" alone does not
+                     // decide the shape; the lane does. Customs =
+                     // `org_{org_id}_{gid}`
+                     // (`_graph_create` / `_provision_graph`) — the graph
+                     // SWITCHER/contexts ride this. `team_*` is the LEGACY
+                     // pre-#3543 prefix: still recognised by the tombstone
+                     // purge and the legacy graph-name resolution, never
+                     // rewritten by a migration, and never derived for a
+                     // newly minted graph
   status: string,    // "active" | "deleted" (tombstone; list filters)
   recording: boolean?,  // C6 #2115 / #2302 / #2650 session_recording override —
                      // true/false = per-graph override; NULL = inherit the
@@ -122,7 +134,8 @@ Default-graph semantics (the no-migration contract):
 - The default graph is **graph 0** — the team's pre-epic namespace. It is
   DERIVED, never materialized into a tenant data store: supabase mode reads
   `teams.graph_name`; registry mode has a `kind='default'` Graph node whose
-  namespace IS the team namespace. **No backfill, no data move.**
+  namespace IS that stored `graph_name` (the org namespace — `org_{org_id}` /
+  `org_{name}`, see the `:Graph` cell above). **No backfill, no data move.**
 - **No per-graph keys (epic #2083 C7 follow-up, #2306):** the default graph
   is NOT key-bindable in either lane — graph-bound mints 404 on the
   kind='default' node/row (`_ensure_graph_exists`). Consequently the

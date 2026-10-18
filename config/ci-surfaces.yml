@@ -1101,6 +1101,31 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #8093: the `:Graph.namespace` cell of `docs/registry-graph-schema.md` vs the
+  # namespace the code derives (`acl_graph_users._graph_namespace`,
+  # `sdk._graph_create`, `hosted_api._provision_graph` / `_org_graph_name`).
+  # The cell is the input another lane derives an ACL key pattern from
+  # (`docs/authorization-architecture.md` §2.1), and it had gone stale on BOTH
+  # shapes after the #3543 `team_` → `org_` rename.
+  #
+  # `tier1` (below) is the LOAD-BEARING registration; this one is secondary, the
+  # same dual-registration idiom as the `test_7818_ontology_record.py` /
+  # `test_8474_ontology_record.py` doc pins. `tier1` is in EVERY PR selection
+  # (`files = set(tier1)` on the match path, the whole selection on the
+  # docs-only early return, `"ALL"` on full), so the pin runs on a docs-only
+  # diff — the exact change class that re-stales the cell — and on a code diff.
+  #
+  # Do NOT re-read this entry as "`core` covers the code-side diffs": it does
+  # not. `tortoise/hosted_api.py` and `tortoise/acl_graph_users.py` are BOTH
+  # exact `api` SOURCE_PATTERNS matches, so an either-file-only diff selects
+  # `api` and REPLACES the `core` fallback (`core` is added only in the
+  # `if not found:` branch; `CORE_ALSO` is the separate post-match addition and
+  # lists neither file), and `tortoise/sdk.py` is a SHARED_MODULE → full
+  # matrix. Those diffs reach this pin through `tier1`, never through `core`.
+  # The rule is stated the same way near the top of `core`, in the #2969 entry
+  # (`test_socket_bound_not_multiplied_2969.py`) — cite it by name, not by
+  # offset: a line count here rots with every insertion between the two.
+  - test_8093_registry_namespace_doc.py
   # #5612: concurrent journal appends are serialised and the recovery read
   # salvages a damaged mid-file line. `tortoise/log.py` matches no
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
@@ -4214,6 +4239,7 @@ surfaces:
   # (#2938).
   - test_session_schema_3554.py
 tier1:
+- test_8093_registry_namespace_doc.py  # #8093: `docs/registry-graph-schema.md` §Graph namespace cell vs the derived namespace (hermetic doc↔code pin; a docs-only diff runs tier1 only) — dual-registered with `core`
 - test_cli_serve.py
 - test_config.py
 - test_crypto.py
@@ -6174,6 +6200,19 @@ durations:
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
   test_orchestrator_harness.py: 23.3
+  # #8093: unmeasured — a file ADDED BY A PR has no CI junit measurement (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a
+  # local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit
+  # value models the leg that carries the file.
+  #
+  # Do NOT restate a floor figure here. This row is registered for the SURFACE (a
+  # docs-only diff runs `tier1` only) and for the shard layout; the durations
+  # coverage ratio it also nudges is a property of the whole fast pool, which every
+  # origin/main merge changes — the same trap the #4387 row above records, where a
+  # restated figure re-staled for three review rounds. If you need the number, run
+  # `ci_selection.duration_coverage_issues()` at YOUR head; do not quote this file.
+  test_8093_registry_namespace_doc.py: 2.0
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py
