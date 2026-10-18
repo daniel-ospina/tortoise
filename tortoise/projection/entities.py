@@ -91,6 +91,17 @@ def _name_holder_count(g, label: str, name: str) -> int:
 
     Cost: one index seek — ``Object.name`` / ``Subject.name`` are range-indexed
     (``_RANGE_INDEX_LABEL_PROPS``).
+
+    ⛔ This counts the GRAPH, and the graph has MORE carrier sources than the
+    journal models read (#8864 review P2): explicit-id writers, connector
+    writers, and the name-STUBs ``_event_plain_merge`` / ``_mint_subject_stub``
+    mint during replay. Those models now materialise the mention-stub half
+    (``projection._event_mentioned_name_stubs``) because an undercount there
+    puts them on the opposite MERGE-key branch and they bury an id the graph
+    keeps; ``edges._mint_subject_stub`` is still unmodelled (#8907). A future
+    carrier source must therefore be taught to the models as well — counting
+    the graph is right HERE (the MERGE sees every node), and the models are the
+    side that must catch up.
     """
     return len(all_name_holder_ids(g, label, name))
 
@@ -3659,8 +3670,10 @@ class _EntityHandlers:
         sid = ev.get("id")
         name = ev.get("name", "")
         # #7369: `name` is the MERGE KEY (`MERGE (s:Subject {name:$name})`), and
-        # a null/refused key aborts the replay. `sid` is only a property value,
-        # so it is left to the parameter boundary. Function-local import — the
+        # a null/refused key aborts the replay. `sid` is only a property value
+        # on the SINGLE-carrier path, so there it is left to the parameter
+        # boundary; on the shared-name path it becomes the MERGE key and is
+        # gated below (#8864 review P2). Function-local import — the
         # module-level cycle-avoidance pattern this file already uses.
         from tortoise.projection import _log_identity_skip, _writable_id
         # Split so the reporter names the identity that ACTUALLY failed: a
@@ -3672,6 +3685,24 @@ class _EntityHandlers:
             return
         if not _writable_id(name):
             _log_identity_skip("Subject", name, "name (MERGE key)")
+            return
+        # #8864: WHICH key identifies this record — see the long note at the
+        # MERGE below. Computed here, before the side effects, because the
+        # branch decides whether `sid` is a MERGE KEY (a merge key is never
+        # nulled by the parameter boundary, so it must be gated by the FOLD).
+        carriers = _name_holder_count(self.g, "Subject", name)
+        name_is_shared = carriers > 1
+        if name_is_shared and not _writable_id(sid):
+            # ⛔ The boundary deliberately FORWARDS a MERGE key untouched (a
+            # null key is its own abort: `Cannot merge node using null property
+            # value`), so an unwritable `sid` would reach the engine and raise
+            # `Failed to parse query parameter 'key' value` out of `apply()` /
+            # a replay pass that carries no per-event `try/except` — i.e. AFTER
+            # ``_wipe_all_nodes``. Pre-#8864 `$id` was only ever a property
+            # VALUE there (nulled by the boundary, so `coalesce` kept the
+            # stored id); promoting it to the key is what re-opens that class,
+            # so the FOLD must skip-and-report exactly as it does for `name`.
+            _log_identity_skip("Subject", sid, "id (MERGE key)")
             return
         # Compute embedding for Subject name (#7845)
         embedding = None
@@ -3717,9 +3748,9 @@ class _EntityHandlers:
         # them: duplicate-id corruption, after which every id-keyed read folds
         # two distinct entities into one result set. The record's id IS the
         # identity (#3590 R1), so an ambiguous name never has to be resolved to
-        # fold the record — it just stops being the key.
-        carriers = _name_holder_count(self.g, "Subject", name)
-        name_is_shared = carriers > 1
+        # fold the record — it just stops being the key. (`carriers` is read
+        # above, before the embedding work, because the branch also decides
+        # whether `sid` needs the `_writable_id` gate.)
         if name_is_shared:
             logger.warning(
                 "projection: %d Subject carriers already hold the name %r — "
@@ -3800,6 +3831,15 @@ class _EntityHandlers:
         if not _writable_id(name):
             _log_identity_skip("Object", name, "name (MERGE key)")
             return
+        # #8864: which key identifies this record — see the note at the MERGE
+        # below. Computed here, before the side effects, because the branch
+        # decides whether `oid` is a MERGE KEY (never nulled by the parameter
+        # boundary, so the FOLD must gate it — see `_upsert_subject`).
+        carriers = _name_holder_count(self.g, "Object", name)
+        name_is_shared = carriers > 1
+        if name_is_shared and not _writable_id(oid):
+            _log_identity_skip("Object", oid, "id (MERGE key)")
+            return
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
         # Compute embedding from name (#7845)
@@ -3836,8 +3876,8 @@ class _EntityHandlers:
         # `ON MATCH` id write stamp ONE id onto EVERY one of them, i.e.
         # duplicate-id corruption: two distinct entities then answer every
         # id-keyed read as one. See `_upsert_subject` for the shared rationale.
-        carriers = _name_holder_count(self.g, "Object", name)
-        name_is_shared = carriers > 1
+        # (`carriers` is computed with the gates above so the branch can also
+        # decide whether `oid` needs the `_writable_id` gate.)
         if name_is_shared:
             logger.warning(
                 "projection: %d Object carriers already hold the name %r — "

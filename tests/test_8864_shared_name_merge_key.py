@@ -211,3 +211,106 @@ class TestFoldSeam:
             assert len(set(ids)) == len(ids), ids
         finally:
             sdk.close()
+
+
+class TestReplayModelsSeeTheMentionStubs:
+    """The two Python models of the fold must count the SAME carriers as the graph.
+
+    #8864 made the MERGE-key branch depend on the CARRIER COUNT, so a carrier a
+    model cannot see puts it on the OPPOSITE branch from every real graph. The
+    models (`journal_object_surviving_keys`, `journal_epistemic_existence`) read
+    registrations; `_event_plain_merge` is a second, registration-free carrier
+    source that also runs on replay — a mention's `object`/`subject`/`uses[]`
+    name MERGEs a name-stub (`ON CREATE SET n.id=$id`, deterministic #7936 id).
+
+    Skipping that mint made the model BURY a carrier the graph keeps, i.e. it
+    refused a fold `rebuild_all` performs — the fail-CLOSED direction these
+    readers exist to avoid. Each case below reproduces the shape end to end and
+    compares the model against the replayed graph, so it cannot pass on models
+    that undercount.
+    """
+
+    def test_a_mention_minted_OBJECT_stub_is_a_carrier_in_both_models(self, tmp_path):
+        from tortoise.projection import (
+            _EXISTENCE_EXISTS,
+            _existence_state,
+            journal_epistemic_existence,
+            journal_object_surviving_keys,
+        )
+
+        name = "Acme"
+        stub = _entity_name_id("Object", name)
+        events = [
+            # Mints `(stub, name)` — a carrier with NO registration record.
+            {"type": "EventRecorded", "eventId": "ev-1",
+             "event": {"eventId": "ev-1", "eventKind": "mentioned",
+                       "object": name}},
+            {"type": "ObjectRegistered", "id": "obj-x", "name": "Other"},
+            # Now TWO nodes carry "Acme" — but only the model that SAW the stub
+            # knows that, and that is what picks the MERGE key.
+            {"type": "EntityMutated", "label": "Object", "id": "obj-x",
+             "op": "rename", "state": {"name": name}},
+            {"type": "ObjectRegistered", "id": stub, "name": name},
+        ]
+
+        sdk = TortoiseSDK(str(tmp_path / "g.db"))
+        try:
+            proj = sdk._get_proj()
+            for rec in events:
+                proj.apply(rec)
+            graph_ids = sorted(_ids(_nodes(proj, "Object")))
+        finally:
+            sdk.close()
+
+        assert graph_ids == sorted([stub, "obj-x"]), graph_ids
+
+        survivors, _names = journal_object_surviving_keys(events)
+        assert sorted(survivors) == graph_ids, (
+            "journal_object_surviving_keys disagrees with the replayed graph — "
+            f"model={sorted(survivors)} graph={graph_ids}"
+        )
+        boundary = journal_epistemic_existence(events)
+        assert _existence_state(
+            *boundary[("Object", "obj-x")], len(events) - 1,
+        ) == _EXISTENCE_EXISTS, (
+            "journal_epistemic_existence buried 'obj-x', which the graph still "
+            f"carries: {boundary[('Object', 'obj-x')]}"
+        )
+
+    def test_a_mention_minted_SUBJECT_stub_is_a_carrier_in_the_boundary(self, tmp_path):
+        from tortoise.projection import (
+            _EXISTENCE_EXISTS,
+            _existence_state,
+            journal_epistemic_existence,
+        )
+
+        name = "Bob"
+        stub = _entity_name_id("Subject", name)
+        events = [
+            {"type": "EventRecorded", "eventId": "ev-1",
+             "event": {"eventId": "ev-1", "eventKind": "mentioned",
+                       "subject": name}},
+            {"type": "SubjectAdded", "id": "sub-x", "name": "Other"},
+            {"type": "EntityMutated", "label": "Subject", "id": "sub-x",
+             "op": "rename", "state": {"name": name}},
+            {"type": "SubjectAdded", "id": stub, "name": name},
+        ]
+
+        sdk = TortoiseSDK(str(tmp_path / "g.db"))
+        try:
+            proj = sdk._get_proj()
+            for rec in events:
+                proj.apply(rec)
+            graph_ids = sorted(_ids(_nodes(proj, "Subject")))
+        finally:
+            sdk.close()
+
+        assert graph_ids == sorted([stub, "sub-x"]), graph_ids
+
+        boundary = journal_epistemic_existence(events)
+        assert _existence_state(
+            *boundary[("Subject", "sub-x")], len(events) - 1,
+        ) == _EXISTENCE_EXISTS, (
+            "journal_epistemic_existence buried 'sub-x', which the graph still "
+            f"carries: {boundary[('Subject', 'sub-x')]}"
+        )

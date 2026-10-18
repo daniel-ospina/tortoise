@@ -1821,10 +1821,13 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                         (label, _merge_key), set())
                     if len(_live) > 1:
                         # The key ALREADY has >1 live carrier (a rename
-                        # collision). A MERGE re-ids exactly one of them and
-                        # the journal does not say which, so keep them all —
-                        # failing OPEN here is the only choice that cannot
-                        # refuse a node the graph still holds.
+                        # collision). Since #8864 the graph stops keying on
+                        # that name entirely — it merges on the record's own
+                        # `id` (`_name_holder_count`), so NO carrier is re-id'd
+                        # and all of them survive. Keeping them all is
+                        # therefore both the graph's behaviour and the only
+                        # choice that cannot refuse a node the graph still
+                        # holds (fail OPEN, never closed).
                         _live.add(eid)
                     else:
                         _live.clear()
