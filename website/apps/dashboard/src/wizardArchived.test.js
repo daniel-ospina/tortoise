@@ -227,9 +227,10 @@ function orFallbacks(ast) {
 /**
  * The live welcome card's span, read from the AST: from its `div.welcome-head`
  * element to the archived block that follows it. BOTH bounds are asserted here,
- * once — an unresolved END is what turns a window into the rest of the file, and
- * an unresolved START what turns it into an empty slice, and either way every pin
- * that uses the window certifies a region it does not name.
+ * once — an unresolved END is what turns a window into the rest of the file, an
+ * unresolved START what turns it into an empty slice, and an END inside the card
+ * what turns a negative pin into an inspection of the wrong region; either way
+ * every pin that uses the window certifies a region it does not name.
  *
  * #3726 cycle 6: existence is not CONTAINMENT, and the END used to be a TEXT
  * sentinel searched on the RAW source — comments included. `main.jsx` already
@@ -247,11 +248,12 @@ function welcomeCardWindow(ast) {
   assert.equal(heads.length, 1,
     'the welcome-head card must resolve exactly once (a pin over an empty or unbounded window is a false green)')
   const start = heads[0].start
+  const cardEnd = heads[0].end
   const end = archivedGateStart(ast)
   assert.notEqual(end, -1,
     'the archived-block boundary must resolve (an unresolved end makes the window the rest of the file)')
-  assert.ok(end > start,
-    'the archived-block boundary must FOLLOW the card (an end at or before the start makes the window empty, and every pin over an empty window certifies nothing)')
+  assert.ok(end > cardEnd,
+    'the archived block must come AFTER the live card element — a gate that resolves INSIDE the card ends the window inside the region it certifies, and a label after it is invisible')
   return { start, end }
 }
 
@@ -600,6 +602,17 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate
   ])
   assert.throws(() => welcomeCardWindow(parseModule(bangGate)), /exactly one archived gate/,
     'a negated copy of the gate is still a second gate node')
+  // 5. A SINGLE gate RELOCATED inside the card (the outer one removed) keeps the count
+  //    at one and still resolves — so the count alone is not enough. The gate must sit
+  //    BELOW the card element; otherwise the window ends inside the region it certifies
+  //    and any label after it is invisible.
+  const movedGate = [
+    '<div className="welcome-head">',
+    '  {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (<p className="wizard-title">{wizardSteps[wizardStep]}</p>)}',
+    '</div>',
+  ].join('\n')
+  assert.throws(() => welcomeCardWindow(parseModule(movedGate)), /AFTER the live card/,
+    'a gate INSIDE the card must fail LOUD — the window would end inside the region it certifies')
 })
 
 test('#3726 falsifiability: the <h1> pin is selected by class and names every override', () => {
