@@ -4216,17 +4216,26 @@ class _EntityHandlers:
             # and because the gate can only move the hash to a value it does
             # not already hold, running BOTH folds over one url cannot
             # double-bump (the second sees stored == $ch).
-            "    s.contentHash=CASE "
-            "        WHEN $ch IS NULL OR $ch = '' THEN s.contentHash "
-            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
-            "             OR s.contentHash <> $ch THEN $ch "
-            "        ELSE s.contentHash END, "
+            # ⛔ ORDER IS LOAD-BEARING (#8870): Cypher applies SET items LEFT TO
+            # RIGHT, and each item sees the values the EARLIER items just wrote.
+            # `version` must therefore be computed BEFORE `contentHash`, while
+            # `s.contentHash` still holds the STORED hash — otherwise the
+            # `s.contentHash <> $ch` test reads the hash this very clause just
+            # installed, is always false, and the version can never advance past
+            # its first value. Measured before this fix:
+            # `['sha-v2', 1]` where the pair should be `['sha-v2', 2]`
+            # (`tests/test_projection.py::test_document_version_counter_advances_with_the_hash`).
             "    s.version=CASE "
             "        WHEN $ch IS NULL OR $ch = '' THEN coalesce(s.version, 1) "
             "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
             "             OR s.contentHash <> $ch "
             "             THEN coalesce(s.version, 0) + 1 "
             "        ELSE coalesce(s.version, 1) END, "
+            "    s.contentHash=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN s.contentHash "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch THEN $ch "
+            "        ELSE s.contentHash END, "
             # D10 B3 (adversarial): the three-argument coalesce gives a
             # document node a NON-NULL kind on CREATE. `$dk` is Cypher null
             # for an explicit `document_kind: null` (ingest's YAML `type:`
