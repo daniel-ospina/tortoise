@@ -438,15 +438,23 @@ what the org pays. The only server-side evidence of the price is the org's
 
 **Repair the FLEET now** (internal key required). There is no per-org route:
 this reconciles **every** billed org, and a run already in flight answers `202
-{"status": "already_running"}` having done nothing.
+{"status": "already_running"}` having done nothing — **unless** that run has
+held the lock past the staleness bound, in which case it is presumed wedged and
+answers `503 {"status": "reconcile_stuck"}` instead. 202 is a benign overlap
+(the next scheduled run retries); `reconcile_stuck` is **not retryable** — wait
+for the pass to end or restart the process.
 
 ```bash
 # --max-time is required, not decoration: /v1/internal/ is prefix-exempt from
 # the 10s transport-wait bound (hosted_api.py, the exemption's own comment), so
 # without it this hangs with nothing printed — in exactly the situation you run
-# it. `-f` turns a 4xx/5xx into an error instead of printing the error body as
-# if it were a summary; the bound sizes the pass (N orgs x a Stripe round-trip).
-curl -sS -f --max-time 600 -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
+# it. `--fail-with-body` (NOT bare `-f`) turns a 4xx/5xx into a non-zero exit
+# while STILL printing the body: this route answers TWO named 503s with
+# opposite remedies (`reconcile_stuck` = wait/restart; `enumeration_incomplete`
+# = read `reason`), and `-f` prints no body at all, so the operator's very first
+# 503 would not say which one they have. The bound sizes the pass
+# (N orgs x a Stripe round-trip).
+curl -sS --fail-with-body --max-time 600 -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" | jq .
 ```
 
@@ -457,6 +465,70 @@ instead (the route cannot target a single org):
 # Supabase/control-plane mode: sdk may be None (the org row is authoritative).
 python -c 'from tortoise.billing import reconcile_org; import sys; print(reconcile_org(None, sys.argv[1]))' "$ORG_ID"
 ```
+
+**Which subscription the pass mirrors when the org holds more than one** (the
+rule that decides between them, so it is not re-diagnosed as a bug): the stored
+`subscription_id` is authoritative for **identity**, never for the current
+entitlement. An INACTIVE one, and one that is `cancel_at_period_end`, is a
+pointer to **check against the customer**, not to trust — mirroring a stale
+pointer on sight is the #8895 P1. The customer's subscriptions then decide, in
+this order: a live (`active`/`trialing`) one beats a merely-`past_due` one; and
+within the live ones a newer, not-ending subscription replaces an ENDING one
+**only when it is ranked at or above it** on the same node-cap ladder the drift
+row reports. A subscription with `cancel_at_period_end` is still **in force** —
+the customer has paid it through `current_period_end`, and cancelling is not a
+refund — so an org that adds a cheaper subscription inside that window keeps
+the higher tier until the period ends, and only then drops. When a
+still-in-force cap **cannot be read** (a price rotated out of
+`STRIPE_PRICE_IDS`, a ladder missing a required limit key) that sub is kept for
+the same reason — and because a subscription that cannot be RANKED cannot be
+mirrored in either shape named here (both raise before any write), the org
+lands in `failed` with its stored tier untouched and the run reds: loud, never
+a silent downgrade. That covers an unrankable sibling in the same ending set
+too, which is why a red run can appear for an org whose new subscription would
+not even have been a downgrade.
+
+**A red run naming a price id or `pricing.json`: fix the CATALOG, never the
+tier.** `STRIPE_PRICE_IDS` holds exactly one id per (tier, interval), so putting
+a retired id back **overwrites** the id that slot holds now: the orgs sitting on
+the displaced id then red in their turn, and — if the id is the MONTHLY one —
+that plan's Upgrade CTA starts offering the retired price. Before touching the
+slot, list the subscriptions currently on that id in Stripe (filter by the
+price): restore the id only when nothing is on it. If something is, do not swap
+— moving a live subscription's price is a money-moving, prorating action on an
+org that has already paid through `current_period_end`, so it needs the billing
+owner, not the runbook. A `failed` row whose error names `pricing.json` (a
+missing limit key) has the same remedy as `direction: null`: fix the ladder.
+
+Note that a cap which is present but `null` is returned by `tier_limits` as-is
+— it ranks as unreadable and still mirrors, so it does not raise: the run can
+green, and can even record a `repaired` tier change nobody proved (#8943). And
+in the **Actions** log `failed[].org_id` is a stable fingerprint (`org-…`), not
+the real id — the JSON payload carries the real one; re-fetch it with the curl
+at the top of this section unchanged (it carries `--max-time 600` and
+`--fail-with-body`), remembering that a fresh POST starts a NEW pass, so expect
+`202 already_running` / `503 reconcile_stuck` as documented. The same `failed`
+row appears when this arm **withholds an upgrade**: the newer subscription is
+pricier in Stripe, but the pass cannot see that — with the kept sub unreadable
+the comparison never runs. When instead only the **newer** sub's cap cannot be
+read, the still-in-force one is mirrored normally: the row is `unchanged` when
+the store already held that tier (the usual case) and an ordinary `repaired`
+when it had drifted — an UP drift still pages and reds as always. That
+candidate is not applied and nothing is logged about it, and it does not
+self-heal: when it later becomes the only live subscription the pass reds for
+it until the catalog is fixed. All of this is the **cadence's** guarantee, not
+the system's, and the `customer.subscription.updated` webhook can defeat it
+BEFORE the next pass: the handler applies provider truth for the subscription
+its event names — a new, cheaper one included, and the stored pointer too —
+at any time. Nothing in the cadence undoes that: the rewritten pointer reads as
+current, so the next pass mirrors the cheaper subscription and reports
+`unchanged` and the ending one is never listed. Restoring the tier needs an
+operator (a per-org reconcile with the pointer back) or a later event; the
+missing rank guard on that path is #8942. A **genuine** cancellation still
+downgrades the moment Stripe says so: with no live subscription at the customer
+there is nothing to prefer and the stored one is mirrored. A customer lookup
+that **fails** is neither — the org is left alone and counted `unverified`
+(paid tier) or `skipped` (unpaid).
 
 A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
 `alerted` / `failed` / `unrepaired` and one `drift` row per repaired org, each
@@ -474,17 +546,46 @@ customer's writes) and a `direction`:
   incomplete `product/pricing.json`, #750.8). That is a **config fault, not a
   no-op**: an unrecognised tier is NOT this case, it resolves to Free's cap and
   ranks normally. Never paged; investigate the pricing file.
-- `unverified` — the org's stored tier is PAID (it claims more entitlement than
-  Free) but Stripe answered with NO active subscription. Nothing was verified
-  against a subscription, so this is NOT `unchanged` — and it is deliberately
-  not auto-downgraded either. Counted and logged loudly; a non-zero number is a
-  person to look at.
+- `unverified` — no active subscription could be established for an org whose
+  stored tier claims PAID entitlement, **or whose claim could not be decided at
+  all**. Three causes land here and the counter does not distinguish them:
+  Stripe answered and named no active subscription; the customer lookup itself
+  failed (a provider error is not a verdict, so the org is left alone); or the
+  pricing ladder could not be READ (#750.8), which makes "is this tier paid?"
+  UNKNOWN rather than "no" — an unread file is not evidence that a stored `pro`
+  org pays nothing, so it is counted here instead of `skipped`. In that third
+  case the counter does not decide the cause, and the Actions warning cannot
+  either — it deliberately enumerates all three. The DISCRIMINATOR IS THE
+  PER-ORG SERVER LOG LINE ("the customer lookup failed" / "the pricing ladder
+  could not be read" / "(Stripe named none, or the customer lookup failed)").
+  Two shapes, and only ONE of them reaches a RED run:
+  - orgs whose repair path reads the ladder raise inside
+    `mirror_subscription` (`KeyError: pricing.json tier … missing required
+    limit keys`, or `JSONDecodeError` / `FileNotFoundError` /
+    `AttributeError` for a malformed, missing, or wrongly-shaped file), land
+    in `failed`, and redden the run with rows naming the error — so a broken
+    pricing file is NOT a silent no-op;
+  - orgs with no resolvable ACTIVE subscription take the `noop` arm, land in
+    `unverified`, and never fail the run — that much is true of all three
+    causes, which is why `unverified` alone is three-way: ladder, fleet-wide
+    customer-LIST failure, or a Stripe key pointed at the wrong account.
+
+  A fleet of only the second kind shows a jump in `unverified`, no `failed`
+  rows, and exit 0 — read the per-org line before touching
+  `product/pricing.json`. All three mean "nothing was verified", never a mass
+  cancellation.
+  Nothing was verified against a subscription, so this is NOT `unchanged` —
+  and it is deliberately not auto-downgraded either. Counted and logged
+  loudly; a non-zero number is a person to look at.
 - `skipped` — nothing to reconcile: no `subscription_id` / `stripe_customer_id`
-  at all, **or** a Stripe customer binding that never became a paid
-  subscription (every abandoned checkout leaves one — `hosted_api` persists
-  `stripe_customer_id` before the checkout session — and its `tier` is at or
-  below Free's cap, so there is no entitlement to verify). Routine; not a
-  symptom.
+  at all, **or** a Stripe customer binding whose stored `tier` is at or below
+  Free's cap — there is no entitlement to verify. The usual cause is an
+  abandoned checkout (every abandoned checkout leaves a binding — `hosted_api`
+  persists `stripe_customer_id` before the checkout session), but it is not the
+  only one: an unpaid-tier org whose active subscription could not be checked at
+  all (the customer lookup failed) also lands here. Routine in that nothing is
+  written and nothing is owed — but only because leaving it alone is free, not
+  because Stripe was heard from.
 - `unrepaired` — Stripe resolved a tier the store did NOT end up holding. That
   is a broken repair, not a clean pass; treat it as an incident.
 - `checked` / `repaired` / `unchanged` / `failed` — as named: orgs with a
@@ -499,8 +600,20 @@ customer's writes) and a `direction`:
 no server-side one, so the caller publishes its patience), when the endpoint
 answers `503 enumeration_incomplete` (the pass could not certify the WHOLE
 fleet, so it compared an unknown fraction and refuses to report that as clean),
-when the response cannot be read as a summary, when any org `failed` to
-reconcile, when any org is `unrepaired`, or when any `drift` row went `up`.
+when it answers `503 reconcile_stuck` (a previous pass has held the reconcile
+lock past its staleness bound and is presumed wedged — the fleet is NOT being
+reconciled and retrying will not help; the lock clears when that pass ends or
+the process restarts), when the response cannot be read as a summary, when any
+org `failed` to reconcile, when any org is `unrepaired`, or when any `drift` row
+went `up`. The `enumeration_incomplete` body carries a `reason` naming which leg
+refused (a partial page, a lower-bound page, or a missing enumeration seam) —
+the lower-bound and missing-seam legs are structural, so retrying does not
+repair them, while a partial page is usually a row inserted or deleted MID-WALK
+and certifies on the next run, so retry that leg once before treating it as
+structural; the
+`reconcile_stuck` body carries `status` + `detail` and NO `reason`. A control
+plane OUTAGE is a different path: `query_all` raises a bare `RuntimeError` the
+endpoint does not catch, so it arrives as an unnamed 500 with no reason at all.
 The page leg sources `.github/scripts/telegram-send.sh`, so the job starts with
 `actions/checkout` — a hosted runner's workspace is empty otherwise, and the
 source would fail before `tg_send` ran (a page step that can never deliver).

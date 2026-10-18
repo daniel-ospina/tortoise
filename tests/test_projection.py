@@ -760,6 +760,18 @@ def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
         assert any("undeclared list props" in r.getMessage()
                    and "custom_list" in r.getMessage()
                    for r in caplog.records), caplog.text
+        # #8018: the report must name the POLICY as the cause. This payload DOES
+        # carry `custom_list`, so blaming the payload sends the next reader
+        # hunting a journalling gap that does not exist (#3817 lost a detour to
+        # exactly that). Pin both halves: the true cause is present AND the false
+        # one is gone.
+        denied = [r.getMessage() for r in caplog.records
+                  if "custom_list" in r.getMessage()
+                  and "dropped" in r.getMessage()]
+        assert denied, caplog.text
+        for msg in denied:
+            assert "policy drop, not a journal gap" in msg, msg
+            assert "not restorable from the payload" not in msg, msg
     finally:
         pass  # shared session projection — module helper owns close
 
@@ -780,8 +792,143 @@ def test_falkor_point_deny_list_drop_is_reported(caplog):
             proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
                    for r in caplog.records), caplog.text
+        # #8018: `reason` IS in the payload (api.add_point(..., reason=...)), so
+        # the old "not restorable from the payload" clause was false here too.
+        denied = [r.getMessage() for r in caplog.records
+                  if "deny-listed" in r.getMessage()
+                  and "reason" in r.getMessage()]
+        assert denied, caplog.text
+        for msg in denied:
+            assert "policy drop, not a journal gap" in msg, msg
+            assert "not restorable from the payload" not in msg, msg
     finally:
         pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_deny_report_names_its_source(caplog):
+    """#8018 review: TWO sources feed the deny-drop report and their causes
+    DIFFER, so each arm must name its own — and neither may speak for the
+    other, nor claim what this writer cannot see.
+
+    A journal-carried value is one the record itself supplies, so only the
+    writer's POLICY refuses it. A graph-only id has no journaled CREATION, so
+    its value arrived on the #548 pre-wipe snapshot — which is all the flag
+    proves: "the journal never carries EP state" is false (`consistency.py`
+    `_JOURNAL_RESTORABLE_DENY`: `posterior_alpha`/`posterior_beta` fold from
+    `ConfidenceChanged`) and "this id has no journal record" is false for a
+    promote-only id (see the sibling test). So neither text may assert them.
+
+    Both arms run in ONE rebuild, sharing the key `reason`, so this also pins
+    the de-dup key: it is `(source, key)`, not the bare key. With the bare key
+    the synthetic arm (which sorts first) suppressed the journal arm's report
+    and only the wrong-cause text survived. Pre-fix this test fails on BOTH
+    counts — no source is named, and the snapshot text claims "not a journal
+    gap"."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    api, log = _api()
+    api.add_point("denied prop", provenance("d.txt", [0, 5], "q"),
+                  reason="because")
+    proj = FalkorProjection(_tmp("deny_source.db"), graph_name="test")
+    try:
+        # Graph-only: no journal record for this id on that log dir, so the
+        # #548 snapshot is its ONLY carrier. Same deny key as the journaled
+        # point above, plus the EP-state key the report used to misattribute.
+        proj.g.query(
+            "CREATE (n:Point {id:'go-ep', content:'y', pointKind:'statement', "
+            "is_operator:false, status:'live', reason:'r', "
+            "posterior_alpha:2.0})")
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
+        denied = [r.getMessage() for r in caplog.records
+                  if "deny-listed" in r.getMessage()]
+        snapshot_arm = [m for m in denied if "pre-wipe graph SNAPSHOT" in m]
+        journal_arm = [m for m in denied if "IS the journal record" in m]
+        assert journal_arm, caplog.text
+        assert snapshot_arm, caplog.text
+        # The journal arm keeps the corrected attribution #8018 asked for.
+        for msg in journal_arm:
+            assert "'reason'" in msg, msg
+            assert "policy drop, not a journal gap" in msg, msg
+        # The snapshot arm must NOT re-mint the false half — and must not make
+        # the stronger claim the source flag cannot support.
+        assert any("'reason'" in m for m in snapshot_arm), caplog.text
+        assert any("'posterior_alpha'" in m for m in snapshot_arm), caplog.text
+        for msg in snapshot_arm:
+            low = msg.lower()
+            # The snapshot arm names the payload's SOURCE — that is all the
+            # flag proves (#8018 review round 3). The POINT's journal coverage
+            # may not be denied: the round-1 phrasing ("NO journal record") and
+            # the round-2 one ("the id has no journaled creation") are both
+            # pinned here, so a reword cannot silently re-mint the claim.
+            assert "not a journal gap" not in low, msg
+            assert "no journal record" not in low, msg
+            assert "no journaled creation" not in low, msg
+            # ...and the scoped statement must still be there, so deleting the
+            # report cannot satisfy the negatives above vacuously.
+            assert "pre-wipe graph snapshot" in low, msg
+            assert "not a journal record" in low, msg
+    finally:
+        proj.close()
+
+
+def test_falkor_rebuild_deny_report_does_not_deny_the_journal_for_a_promoted_point(
+        caplog):
+    """#8018 review round 2: the snapshot arm may say the PAYLOAD is not a
+    journal record — never that the POINT has no journal record.
+
+    `from_prewipe_snapshot` is derived from `log_point_ids`, which counts only
+    `PointAdded`/`OperatorAdded`. So an id whose ONLY record is a promote
+    snapshot — the #6239 capture-lane shape, and any `promote_point` on a point
+    restored from a sidecar — still gets a #548 synthetic event WHILE its
+    promote fold replays the same deny-listed keys out of the journal. Both
+    arms then report the same key in one pass, so a snapshot text that claimed
+    "NO journal record" would contradict the journal text beside it, in the
+    very diagnostic #8018 is about."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    log = EventLog(_tmp("events.jsonl"))
+    pid = "promote-only-8018"
+    log.append({"type": "PointPromoted", "initiated_by": "capture",
+                "projection_version": 2,
+                "point": {"id": pid, "content": "promoted", "status": "live",
+                          "pointKind": "statement", "reason": "because",
+                          "posterior_alpha": 2.0}})
+    proj = FalkorProjection(_tmp("deny_promote.db"), graph_name="test")
+    try:
+        proj.g.query(
+            "CREATE (n:Point {id:$id, content:'promoted', "
+            "pointKind:'statement', is_operator:false, status:'live', "
+            "reason:'because', posterior_alpha:2.0})", params={"id": pid})
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
+        denied = [r.getMessage() for r in caplog.records
+                  if "deny-listed" in r.getMessage()]
+        snapshot_arm = [m for m in denied if "pre-wipe graph SNAPSHOT" in m]
+        journal_arm = [m for m in denied if "IS the journal record" in m]
+        # The promote fold DOES carry these keys out of the journal...
+        assert journal_arm, caplog.text
+        # ...and the #548 arm reports the same keys in the same pass, so its
+        # text must not deny the journal.
+        assert snapshot_arm, caplog.text
+        for msg in snapshot_arm:
+            low = msg.lower()
+            # Id-level denial is forbidden in EITHER phrasing: this id's own
+            # `PointPromoted` record is a journaled creation
+            # (`_JOURNAL_CREATING_EVENT_TYPES`), and its promote fold reports
+            # the same keys in this same pass. Only the payload's source may be
+            # named (#8018 review round 3).
+            assert "not a journal gap" not in low, msg
+            assert "no journal record" not in low, msg
+            assert "no journaled creation" not in low, msg
+            assert "pre-wipe graph snapshot" in low, msg
+            assert "not a journal record" in low, msg
+    finally:
+        proj.close()
 
 
 def test_falkor_rebuild_preserves_nested_list_prop_on_object_layer():
@@ -957,33 +1104,45 @@ def test_falkor_rebuild_resets_deny_warning_between_passes(caplog):
     projection instance (`rebuild_all`'s reset). Black-box: only `rebuild_all`
     is exercised, so removing `self._deny_drop_warned = set()` from
     `rebuild_all` leaves this RED (the live-write suppression swallows the
-    pass's report) while the single-pass test above stays green."""
+    pass's report) while the single-pass test above stays green.
+
+    #8018 review round 2: the collision is pinned on the JOURNAL arm's key.
+    Both the live write and the replayed record are journal payloads, so both
+    occupy `(False, 'reason')` — the reset is the ONLY thing that makes the
+    second report appear. The pre-round-2 version used a GRAPH-ONLY point, and
+    with the source in the de-dup key the live write held `(False, 'reason')`
+    while the #548 arm asked about `(True, 'reason')`: the two never collided,
+    so the test stayed green with the reset deleted and stopped pinning it."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
     import logging
     proj = FalkorProjection(_tmp("deny_reset.db"), graph_name="test")
     try:
         # A live (door-3) write carrying a deny-listed prop: warns once and
-        # leaves the key in `_deny_drop_warned`.
+        # leaves `(False, 'reason')` in `_deny_drop_warned`.
         proj.apply({"type": "PointAdded",
                     "point": {"id": "live-1", "content": "x",
                               "reason": "r"}})
         assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
                    for r in caplog.records), "live-write precondition failed"
+        assert (False, "reason") in proj._deny_drop_warned, (
+            "precondition: the live write must occupy the JOURNAL arm's "
+            "de-dup key, or this test cannot detect a missing reset")
         # Clear so only the REBUILD pass's records are inspected — otherwise the
         # live warning above satisfies the assertion and the test is vacuous.
         caplog.clear()
-        # A graph-only point carrying the SAME deny-listed key survives the
-        # #548 pre-wipe snapshot and is replayed through the Point writer.
-        proj.g.query(
-            "CREATE (n:Point {id:'go-1', content:'y', pointKind:'statement', "
-            "is_operator:false, status:'live', reason:'r'})")
+        # A JOURNAL-recorded point carrying the SAME deny-listed key: the replay
+        # reports it on the same `(False, 'reason')` key, so only the per-pass
+        # reset can let the second report through.
+        api, log = _api()
+        api.add_point("replayed denied prop", provenance("d.txt", [0, 5], "q"),
+                      reason="r")
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_reset_"), confirm_destructive=True)
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         hits = [r.getMessage() for r in caplog.records
                 if "deny-listed" in r.getMessage()
-                and "reason" in r.getMessage()]
+                and "'reason'" in r.getMessage()]
         assert hits, ("per-pass deny report was suppressed by the earlier live "
                       "write — rebuild_all must reset the warned set"
                       + caplog.text)

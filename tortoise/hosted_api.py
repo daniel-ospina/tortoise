@@ -35888,13 +35888,58 @@ def _billing_email_like(value: object) -> bool:
     return bool(local) and bool(domain)
 
 
-def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
+def _billing_owner_email(org_id: str) -> str | None:
+    """The org's OWN address in the Supabase lane: the ACTIVE OWNER's verified
+    user email (#4508). Fail-soft — ``None`` on any error.
+
+    Why not ``organizations.email``: #1765 demoted that column to a stale-prone
+    contact field (``claim_membership`` no longer writes it), and it is
+    populated ONLY by the lanes that pass ``p_email`` to the ``provision_team``
+    RPC — ``/v1/register`` and the Edge Function. Every SESSION-lane create
+    (``create_org``, the onboarding sub-org, the new-org checkout webhook)
+    passes no ``p_email``, so the column is NULL exactly where a session
+    member is the one clicking Upgrade. The owner's USER email is the property
+    #1765 promoted, and the oauth lane already prefers it over the column when
+    it builds the same org dict (``oauth._owner_email_or``).
+
+    Two calls, both inside the threaded checkout body that is already talking
+    to Stripe: a control-plane membership read plus a GoTrue admin GET — a
+    revenue-path latency cost, so ``_billing_checkout_sync`` calls this ONLY
+    when step 1 of the chain cannot answer (``organizations.email`` is not
+    email-shaped). The guard here is LOAD-BEARING, not defensive padding —
+    ``owner_email`` swallows the admin-API transport error but its
+    ``owner_user_id`` control-plane read is outside that guard, so a
+    control-plane failure would otherwise escape as a 500 on an upgrade the
+    member is entitled to. Caught here, the chain simply degrades to the
+    #4504 session fallback.
+    """
+    from tortoise.supabase_control import get_control_plane, owner_email
+    try:
+        value = owner_email(get_control_plane(), org_id)
+    except Exception:  # degrade, never block a checkout
+        return None
+    return value.strip() if _billing_email_like(value) else None
+
+
+def _billing_customer_email(sdk: TortoiseSDK | None, org: dict,
+                            *, owner_email: str | None = None) -> str:
     """Resolve the billing email via the fallback chain (review fix 1):
 
     1. ``Org.email`` — set at /v1/register (self-service orgs); the resolved
        org dict carries it in BOTH lanes (registry Team node / Supabase orgs
        row) and is read as the ``t.email`` twin (#4640: Supabase mode passes
        ``sdk=None`` — the registry graph is deleted post-#669).
+    1b. The ACTIVE OWNER's verified user email (#4508) — the Supabase-lane
+       twin of 1, but only where step 1 of the chain cannot answer: the
+       ``organizations.email`` column is NULL **or not email-shaped** (a
+       session-lane create leaves it NULL; #1765 leaves stale contact values
+       on the others, and ``_billing_email_like`` is what rejects those). The
+       caller gates the READ on that same ``_billing_email_like`` predicate
+       (``_billing_checkout_sync``), so an org whose step 1 answers never pays
+       for the control-plane + GoTrue round-trips. Inserted AFTER 1 so the
+       landed precedence keeps holding, and BEFORE 2/3 so a non-owner member
+       clicking **Upgrade** can never bind their own personal address as the
+       org's Stripe customer.
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
@@ -35931,6 +35976,15 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict) -> str:
     # the t.email that read returns, so this is a selfhost no-op.
     if _billing_email_like(org.get("email")):
         return org["email"].strip()
+    # #4508: the org's owner — the Supabase-lane answer for an org whose
+    # ``organizations.email`` is NULL (every session-created org; see
+    # ``_billing_owner_email``). Additive: it sits after ``Org.email`` so
+    # #4640's precedence is untouched, and before the key-creator/session
+    # links because it is the org's identity rather than a per-request
+    # caller's. ``owner_email`` (the parameter) is only ever resolved in the
+    # Supabase lane — selfhost passes None and the chain is byte-identical.
+    if _billing_email_like(owner_email):
+        return owner_email.strip()
     # #4727: the control-plane twin of step 2's "key used for THIS request"
     # link. The two registry reads below never run in Supabase mode
     # (``sdk is None``), so a provision-path org whose ``organizations.email``
@@ -36027,7 +36081,31 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     if status in _BILLING_ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="team already has an active subscription")
 
-    email = _billing_customer_email(sdk, org)
+    # #4508: the org's own address, resolved BEFORE the chain so the
+    # per-member session fallback is never preferred over the owner's. Only
+    # the Supabase lane can answer it (a control-plane read); the registry
+    # lane's ``t.email`` is step 1 of the chain itself.
+    #
+    # #8931 review (P2): gate the read on the condition that makes it USABLE.
+    # Step 1 of the chain returns on ``org["email"]`` (the ``organizations.email``
+    # column, which ``_session_user_org`` stamps), so for the majority lane —
+    # ``/v1/register`` and Edge-Function orgs — resolving it first bought a
+    # control-plane ``org_memberships`` read plus a synchronous GoTrue admin
+    # GET (``timeout=10.0``, supabase_control.py) whose value was discarded.
+    # This is a pure short-circuit: step 1 is re-checked inside
+    # ``_billing_customer_email``, so precedence and outcomes are unchanged.
+    # Every case that CONSUMES the value still resolves it — an org whose
+    # column is NULL, including the backfill case (a stored
+    # ``stripe_customer_id`` with an empty ``customer_email``) — so nothing
+    # depends on the gate. The review's alternative shape (a lazy zero-arg
+    # resolver threaded into the chain) is equivalent; this one keeps the
+    # precedence decision in the single place that already owns it.
+    owner_addr = (
+        _billing_owner_email(org_id)
+        if supabase_mode and not _billing_email_like(org.get("email"))
+        else None
+    )
+    email = _billing_customer_email(sdk, org, owner_email=owner_addr)
     try:
         client = StripeClient()
         if stored_customer_id:  # noqa: SIM108
@@ -37008,6 +37086,21 @@ async def webhooks_stripe(request: Request):
 # #4262 removed.
 _BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
 
+#: How long an in-flight pass may hold the lock before it is presumed WEDGED
+#: rather than merely slow (a hung provider socket has no client-side timeout).
+#: The lock deliberately outlives the request so a cancelled request cannot let a
+#: second pass run over the same fleet — but that means a wedged pass would
+#: otherwise hold it forever, and the driver's scheduled branch treats the 202
+#: "benign overlap" as success, which would silence the daily page permanently.
+#: Past this bound the endpoint answers a FAILURE instead, so the run reds.
+#: The bound is SIX TIMES the driver's own 600 s client ceiling — the pass
+#: deliberately outlives the request and ``reconcile_subscriptions`` has no
+#: fleet-size cap, so a bound sized to the request would libel a healthy long
+#: pass — while staying far inside the 24 h cadence, so a genuinely wedged pass
+#: cannot hide past the next cycle.
+_BILLING_RECONCILE_STALE_S = 3600.0
+_BILLING_RECONCILE_STARTED_AT: float | None = None
+
 
 @app.post("/v1/internal/billing/reconcile")
 async def billing_reconcile(request: Request):
@@ -37028,6 +37121,11 @@ async def billing_reconcile(request: Request):
     channel by the reconciler itself. A concurrent run returns **202**
     ``{"status": "already_running"}`` and does NO work (the next scheduled run
     retries; nothing queues) — a caller must not read 202 as a completed pass.
+    ⛔ UNLESS the in-flight pass has held the lock past
+    ``_BILLING_RECONCILE_STALE_S``: then it answers **503**
+    ``{"status": "reconcile_stuck"}`` instead, because that pass is presumed
+    WEDGED and retrying will not help (wait for it to end or restart the
+    process). 202 is the benign overlap; 503 ``reconcile_stuck`` is the alarm.
 
     Fails CLOSED on an uncertifiable enumeration — **503**
     ``{"status": "enumeration_incomplete"}`` — so the daily driver's red run is
@@ -37037,10 +37135,33 @@ async def billing_reconcile(request: Request):
     _check_internal(request)
     from tortoise.billing import BillingEnumerationError, reconcile_subscriptions
 
+    global _BILLING_RECONCILE_STARTED_AT
     if _BILLING_RECONCILE_INFLIGHT.locked():
+        started = _BILLING_RECONCILE_STARTED_AT
+        if (started is not None
+                and (time.monotonic() - started) > _BILLING_RECONCILE_STALE_S):
+            _logger.error(
+                "billing reconcile: the in-flight pass has held the lock for "
+                "over %.0fs — presumed WEDGED, not merely slow; the fleet is "
+                "not being reconciled", _BILLING_RECONCILE_STALE_S)
+            return JSONResponse(
+                status_code=503,
+                content={"status": "reconcile_stuck",
+                         "detail": "a previous pass has held the lock past the "
+                                   "staleness bound and is presumed wedged — "
+                                   "the fleet may be unreconciled"})
         return JSONResponse(status_code=202,
                             content={"status": "already_running"})
-    async with _BILLING_RECONCILE_INFLIGHT:
+    await _BILLING_RECONCILE_INFLIGHT.acquire()
+    _BILLING_RECONCILE_STARTED_AT = time.monotonic()
+    # The lock is handed to the PASS when one is handed off to a worker thread
+    # (``_release_when_finished``), and released by this ``finally`` only for a
+    # path that never handed one off. Releasing on cancellation would let the
+    # driver's retry start a SECOND pass over the same fleet while the first is
+    # still writing: the 202 guard would then describe a pretence rather than a
+    # fact (#8895 review P2).
+    handed_off = False
+    try:
         from tortoise.supabase_control import is_supabase_enabled
 
         # #4726 discipline: in Supabase mode the pass must NEVER construct a
@@ -37050,17 +37171,36 @@ async def billing_reconcile(request: Request):
         try:
             if is_supabase_enabled():
                 sdk = None
-                result = await asyncio.to_thread(reconcile_subscriptions, None)
             else:
                 sdk = await asyncio.to_thread(_registry_sdk)
-                try:
-                    # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
-                    # rides a worker hand-off so it cannot hold the single uvicorn
-                    # event loop (the #2988/#3498 class).
-                    result = await asyncio.to_thread(reconcile_subscriptions, sdk)
-                finally:
+
+            def _release_when_finished(_f: asyncio.Future) -> None:
+                # Close first, then hand the lock back: these are ONE unit. A
+                # second pass must never start while the SDK this pass writes
+                # through is still open — the original defect, in reverse.
+                global _BILLING_RECONCILE_STARTED_AT
+                if sdk is not None:
                     with suppress(Exception):
                         sdk.close()
+                _BILLING_RECONCILE_STARTED_AT = None
+                with suppress(Exception):
+                    _BILLING_RECONCILE_INFLIGHT.release()
+
+            # ⛔ ``asyncio.to_thread`` cannot cancel its thread, so the SDK must
+            # NOT be closed from this request's ``finally``: a cancelled request
+            # (the driver's 600 s ceiling, a client disconnect) would close the
+            # projection mid-pass and lose every repair not yet committed, while
+            # the summary went nowhere (#8895 review P2). Close on COMPLETION.
+            fut = asyncio.ensure_future(
+                # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
+                # rides a worker hand-off so it cannot hold the single uvicorn
+                # event loop (the #2988/#3498 class).
+                asyncio.to_thread(reconcile_subscriptions, sdk))
+            handed_off = True
+            fut.add_done_callback(_release_when_finished)
+            # Shield: cancelling the REQUEST must not cancel a pass that is
+            # already writing. The callback above still runs on completion.
+            result = await asyncio.shield(fut)
         except BillingEnumerationError as exc:
             # The pass refuses to reconcile a fleet it cannot certify COMPLETE.
             # That is not a request error — it is "the source is unavailable or
@@ -37075,10 +37215,29 @@ async def billing_reconcile(request: Request):
             return JSONResponse(
                 status_code=503,
                 content={"status": "enumeration_incomplete",
+                         # The refusal has three legs (a partial page, a
+                         # LOWER-BOUND page, a missing enumeration seam) and a
+                         # fixed detail string threw the distinction away. ⛔ Do
+                         # not flatten them the other way either: the
+                         # LOWER-BOUND and missing-seam legs are STRUCTURAL,
+                         # while a PARTIAL page is usually a row inserted or
+                         # deleted mid-walk and certifies on the next walk. The
+                         # leg is carried as the redacted exception text —
+                         # ``redact_error`` prepends the class name and
+                         # truncates, so a distinguishing tail must come early
+                         # in any future message. (A control-plane OUTAGE is a
+                         # different path: ``query_all`` raises a bare
+                         # RuntimeError, which this handler does not catch.)
+                         "reason": redact_error(exc),
                          "detail": "the fleet enumeration could not be "
                                    "confirmed complete — refusing to report a "
                                    "partial pass as clean"})
-    return result
+        return result
+    finally:
+        if not handed_off:
+            _BILLING_RECONCILE_STARTED_AT = None
+            with suppress(Exception):
+                _BILLING_RECONCILE_INFLIGHT.release()
 
 
 # ── OAuth 2.1 for remote MCP (#524) ─────────────────────────────────────

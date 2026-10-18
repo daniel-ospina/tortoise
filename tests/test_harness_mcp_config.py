@@ -167,6 +167,48 @@ class TestWizardCopyParity:
         assert "codex mcp add" in html
         assert "TORTOISE_API_KEY" in html
 
+    def test_pi_capture_note_does_not_call_the_second_producer_ungated(self):
+        """#3512/#8900: the dashboard's Pi copy surface carried the pre-#803 claim.
+
+        ``HARNESS_CAPTURE_INSTALL.pi`` is a source module users never read raw,
+        but it is the copy surface this file guards, and its header comment still
+        said the agent-infra ``reflect-hook`` is "the other ungated producer".
+        agent-infra ``7e77470e4`` (2026-10-16, #803) closed that: both recorders
+        now share ``extensions/shared/capture-gate.ts``, which uploads only on an
+        explicit ``"cloud": true`` in the operator config *and* a key. A stale
+        comment here is how the next lane re-derives a divergence that is closed
+        at source — the same defect class #3512 exists to correct, on a surface
+        the README guard cannot see (this file is selected by
+        ``website/apps/dashboard/src/``, not by ``tortoise/pi-hooks/``).
+
+        Mutation: restore "the other ungated producer" in ``harnesses.js`` — this
+        REDs; drop the ``capture-gate.ts`` reference — this REDs.
+
+        **Only the phrasing that actually lived in THIS file is asserted here.**
+        The sibling stale claim — "credential presence alone" — never appeared in
+        ``harnesses.js`` at all (measured: ``git show
+        origin/main:website/apps/dashboard/src/harnesses.js | grep -c`` = 0).
+        The copies this record retires are in ``tortoise/pi-hooks/README.md`` and
+        the shipped artifact's header, and are pinned there by
+        ``test_pi_capture_disposition.py::test_the_second_producers_gate_is_recorded_as_it_now_stands``;
+        the copies it deliberately does **not** reach — ``.env.example``,
+        ``docs/quickstart-cloud.md``, ``tortoise/onboarding/SKILL.md`` and its
+        served mirror — are tracked by #8900.
+        Carrying it in this file's stale-phrase list would be an assertion that
+        can never RED on any version of this file — a false PASS, which is the
+        one thing the sibling suite refuses to ship: ``tests/test_capture_install.py``
+        states the discipline ("A test that cannot RED is a false PASS and does
+        not belong here").
+        """
+        html = self.HARNESSES.read_text(encoding="utf-8")
+        assert "the other ungated producer" not in html, (
+            "the Pi copy surface still describes the pre-#803 gate: reflect-hook "
+            "requires an explicit `cloud: true` since agent-infra 7e77470e4 "
+            "(2026-10-16, #803)")
+        assert "capture-gate.ts" in html, (
+            "the Pi copy surface must name the shared egress gate both "
+            "agent-infra recorders now use, not a bare 'ungated' claim")
+
 
 class TestClaudeHookTimeouts:
     """#3754: every shipped Claude Code capture snippet must pin a per-hook
