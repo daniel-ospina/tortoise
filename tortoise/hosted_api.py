@@ -2937,17 +2937,19 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # `bool`, or a non-integral float) makes the head fall back to
 # `MATCH (e:GraphEvent) RETURN max(e.seq)` — the label aggregate the steady path
 # deliberately avoids — so a broken graph pays a scan per pass, and it keeps
-# paying it: `next_seq` refuses the non-number/negative/bool classes and leaves
-# them unchanged, and a non-integral float is bumped into another non-integral
-# value (`2.9` -> `3.9`, re-issuing a seq: the #4653 class). Repair is the
-# rebuild leg's — `event_store.reestablish_watermark` coerces a negative or a
-# non-integral float to the events' max seq (measured: `2.9` and `-1` both become
-# `3`), and refuses a string or bool counter AFTER the write, so those two have no
-# repair path and the fallback above is permanent for them. The alternative
-# reading of that counter (as 0) made every subscription look caught up, so the
-# graph was never dispatched again — silently. Over-admitting a broken graph is
-# the cheap side of that asymmetry. See `webhook_delivery.event_head_seq`'s
-# docstring.
+# paying it. Three classes, only one of which self-heals (all MEASURED):
+# `next_seq` REFUSES a non-number, a `bool` and a negative and leaves them
+# unchanged; a non-integral float is bumped instead (`2.9` -> `3.9`, re-issuing a
+# seq: the #4653 class) but `reestablish_watermark` only clears it when the
+# events' max EXCEEDS it (at `max = 3` it preserves `3.9` and returns a truncated
+# `3` — a false repair); and a rebuild never gets to a negative at all, because
+# `capture_watermark` raises before the wipe. So no class has a reliable automatic
+# repair path. The alternative reading of that counter (as 0) made every
+# subscription look caught up, so the graph was never dispatched again — silently.
+# Over-admitting a broken graph is the cheap side of that asymmetry; the ONE case
+# where it is not a cheap no-op (a fractional `:GraphEvent.seq` the cursor can
+# never reach) is stated in `webhook_delivery.event_head_seq`'s docstring and
+# tracked with the cursor write in #9032.
 #
 # ⛔ THE "answered yes" HALF IS THE WHOLE POINT (#8098 review F1/F3). The gate
 # is TWO clauses — due by TIME *and* behind the stream — because the temporal
@@ -2973,9 +2975,13 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # ORG PER PASS at the 60 s default: ~4N/min against the SAME control plane the
 # auth path uses. Two things a reader must not have to infer:
 #
-#   * the identical walk already runs HOURLY (`.github/scripts/registry-cron.sh`
-#     -> POST /v1/internal/backups/sweep). This sweep is that walk at 60x the
-#     cadence, and it is bounded by nothing but the fleet size.
+#   * a similar walk already runs HOURLY (`.github/scripts/registry-cron.sh`
+#     -> POST /v1/internal/backups/sweep) — but NOT the identical one, and the
+#     difference runs the wrong way: the hourly endpoint enumerates ELIGIBLE orgs
+#     (`backup_sweep.enumerate_eligible_orgs`: tier != free AND backup_enabled),
+#     while this one enumerates EVERY org (`enumerate_orgs`). So the load here is
+#     60x the cadence over a strict SUPERSET of that population, and it is bounded
+#     by nothing but the fleet size.
 #   * because the walk is SERIAL, once ~4N round trips exceed the interval the
 #     knob's liveness bound degrades silently: "a retry resumes within <= one
 #     interval of `next_attempt_at`" becomes "within <= one pass duration". The

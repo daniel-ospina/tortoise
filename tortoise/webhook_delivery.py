@@ -590,24 +590,42 @@ def event_head_seq(graph) -> int:
     priced the corrupt path as "one SDK open" — it is not). The fallback is the
     aggregate over ``:GraphEvent`` the opening paragraph exists to avoid on the
     steady path, so an UNTRUSTWORTHY graph pays it on every pass, and the counter
-    does not become trustworthy on its own. What the write side does, MEASURED:
+    does not become trustworthy on its own. What the write side actually does,
+    MEASURED — the three classes behave differently and only one self-heals:
 
-    * a non-number or a ``bool`` is REFUSED by ``next_seq`` and left unchanged,
-      and the rebuild repair leg (``event_store.reestablish_watermark``) refuses
-      it AFTER the write too — ``'5'`` and ``True`` both raise "the monotone
-      clause only compares numbers … preserved rather than replaced". So these
-      two classes have NO repair path, and the fallback above is permanent for
-      them;
-    * a NEGATIVE and a non-integral float are neither refused nor left alone:
-      ``next_seq`` will bump them (``2.9`` → ``3.9``, handing out a seq that an
-      existing ``:GraphEvent`` already holds — the #4653 collision), and
-      ``reestablish_watermark`` REPAIRS both by coercing them to the events'
-      ``max(:GraphEvent.seq)`` (``2.9`` and ``-1`` both become ``3``). A rebuild
-      therefore clears the recurring fallback for those two.
+    * a non-number, a ``bool`` AND a negative are REFUSED by ``next_seq`` and
+      left unchanged (the negative fails its ``prev >= 0`` grant test — a graph
+      holding one cannot emit at all). ``reestablish_watermark`` refuses the
+      non-number/bool AFTER the write ("the monotone clause only compares
+      numbers … preserved rather than replaced"), and a rebuild never reaches a
+      negative in the first place: ``capture_watermark`` — the pre-wipe read —
+      raises "the live :GraphEventMeta.last_seq is -1, outside the event-store
+      integer domain", so the rebuild ABORTS instead of repairing it. **None of
+      these three has an automatic repair path**, and this fallback is permanent
+      for them;
+    * only a NON-INTEGRAL FLOAT is bumped by ``next_seq`` (``2.9`` → ``3.9``,
+      handing out a seq an existing ``:GraphEvent`` already holds — the #4653
+      collision), and ``reestablish_watermark`` reports it repaired only when the
+      events' max exceeds it: with ``max(:GraphEvent.seq) = 3`` and a counter of
+      ``3.9`` the monotone clause PRESERVES ``3.9`` while the read-back truncates
+      and RETURNS ``3`` — a false repair. So even this class clears only below
+      the events' max.
 
-    Over-admitting a broken graph once per interval is the cheap side of the
-    asymmetry, and it beats silently never dispatching the graph again. A
-    too-LARGE counter is left alone for that same asymmetry — it over-admits too.
+    ⛔ THE ONE CASE THIS FIX'S OVER-ADMISSION IS NOT A CHEAP NO-OP. Every
+    unbounded admission ``_BEHIND_PREDICATE`` enumerates costs one SDK open and
+    one no-op dispatch. A :GraphEvent row whose ``seq`` is FRACTIONAL is not that:
+    the head here is ``ceil(max_seq)``, but ``_mark_delivered`` writes the cursor
+    as ``int(seq)``, so the cursor can never reach the head. MEASURED on three
+    events with the last rewritten to ``3.5``: head 4, pass 1 delivers 3
+    (cursor → 3), and passes 2, 3, … each RE-DELIVER the same event, staying due
+    forever. That is bounded only by the at-least-once contract (a re-post
+    carries the same stable delivery id, so an idempotent consumer dedupes it),
+    not by anything here. The remedy is the cursor write, tracked with the rest
+    of it in #9032; no shipped writer mints a fractional ``seq``, so this needs a
+    hand-written or restored row.
+
+    A too-LARGE counter is left alone for that same asymmetry — it over-admits
+    too, and clamping it would stall deliveries.
     """
 
     def _as_seq(raw) -> int | None:
