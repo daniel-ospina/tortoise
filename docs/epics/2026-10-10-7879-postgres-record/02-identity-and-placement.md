@@ -505,6 +505,8 @@ The full per-property table (**216 rows from the `#7955` pass, plus the 5 `#2782
 | `_graph_id` | D | `_POINT_DENY` / projection replay bookkeeping | never a payload prop | replay bookkeeping |
 | `reason` | D | `_POINT_DENY` (D4) | deny-listed | dropped by design |
 
+> **Where the money value lives — the Point-only asymmetry is DELIBERATE (#2782).** The five rows above are `Point` properties **and** typed columns on `public.point` (`amount_minor bigint`, `currency text`, `minor_unit_exponent integer`, `verbatim text`, `as_of date`; `supabase/migrations/20261018000001_record_point_money_value_2782.sql`). On `Object` and `Event` the same five keys are still carried in the **open-set `props` JSONB tail** — no typed column, no integer enforcement — so `tortoise/money.py`'s rule ("a value is a flat field on the entity that owns it") holds semantically while the *record* is stricter for one label only. That gap is **recorded here, not hidden**: typed columns for `public.object`/`public.event` are separate work, not a step this row set forgot. ⚠️ **A reader must not conclude from the absence of rows in the `Object` (§Semantic) and `Event` (§Episodic) sections that the money shape is Point-specific** — it is not; only the column half is.
+
 ### Epistemic — operators / edges
 
 ## Edges / operators (IMPL/NAND/INPUT/references/extractedFrom/mitigated_by/about*) — 19 properties (PRIMARY 13 · DERIVED/VOLATILE 4 · UNRESOLVED 2)

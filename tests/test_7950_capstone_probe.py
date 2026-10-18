@@ -25,6 +25,7 @@ here rather than left to a live run that CI cannot perform.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util as _ilu
 from pathlib import Path
 
@@ -135,6 +136,64 @@ def test_a_foreign_property_on_an_existing_node_is_a_field_mismatch():
     report = reconcile_views(truth, cache)
     assert report.field_mismatches == 1
     assert report.extra_in_cache == 0  # the KEY is on both sides — value-only
+
+
+# ── the probes' hardcoded record-migration lists stay in step ─────────────
+
+_PROBE_MIGRATION_LISTS = (
+    # (file, constant) — the two LIVE lists (both are applied to a throwaway
+    # Postgres) plus the chain probe's dead duplicate.
+    (_REPO_ROOT / "docs" / "evidence" / "7950-capstone" / "probes"
+     / "e2e_postgres_bootstrap.py", "MIGRATIONS"),
+    (_REPO_ROOT / "docs" / "evidence" / "7983-cost-magnitudes" / "probes"
+     / "record_read_cost.py", "MIGRATIONS"),
+    (_PROBE, "RECORD_MIGRATIONS"),
+)
+
+
+def _migration_list(path: Path, name: str) -> list[str]:
+    """A probe's hardcoded list, read with `ast` rather than by importing it.
+
+    `e2e_postgres_bootstrap.py` and `record_read_cost.py` import `psycopg2` at
+    module scope (the optional `postgres` extra), so importing them here would
+    put a DB driver in a pin that must stay DB-free. `ast.literal_eval` reads the
+    constant without executing a line of the module.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(getattr(target, "id", None) == name for target in node.targets):
+            return list(ast.literal_eval(node.value))
+    raise AssertionError(f"{path} no longer defines {name}")
+
+
+def test_every_probe_applies_the_record_migrations_the_shipped_read_uses():
+    """The probes cannot silently apply a schema the projection has moved past.
+
+    Both live probes apply their hardcoded list to a throwaway Postgres and then
+    drive the SHIPPED projection, whose `table_columns()` is read from
+    `record_projection.RECORD_MIGRATIONS` **on disk**. A forward migration
+    missing from a probe list therefore stands up a database older than the
+    INSERT the projection emits: `public.point` without #2782's
+    `amount_minor`/`currency`/… fails every money-bearing point INSERT with
+    `UndefinedColumn`, and until it does the probe measures a record one
+    migration behind — the "record poorer than the graph" failure the migration
+    exists to close. #8976 review P3: the migration header enumerates the schema
+    readers that must SEE these columns, and these copies were not carried
+    through.
+
+    Equality, not containment: a stale EXTRA entry is the same defect from the
+    other side (a migration the shipped read does not use).
+    """
+    from tortoise.record_projection import RECORD_MIGRATIONS
+
+    for path, name in _PROBE_MIGRATION_LISTS:
+        assert _migration_list(path, name) == list(RECORD_MIGRATIONS), (
+            f"{path.relative_to(_REPO_ROOT)}::{name} disagrees with "
+            "record_projection.RECORD_MIGRATIONS — the probe would apply a "
+            "different record schema than the projection writes against"
+        )
 
 
 def test_placeholder_maps_cannot_see_a_field_mutation():

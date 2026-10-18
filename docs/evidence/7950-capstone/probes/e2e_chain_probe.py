@@ -37,6 +37,11 @@ RECORD_MIGRATIONS = [
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
     "20261014000001_record_subject_props_no_derived.sql",
+    # Kept in step with `e2e_postgres_bootstrap.py` (whose list actually applies
+    # them) even though nothing here reads this constant today: a dead copy that
+    # is allowed to drift becomes a live lie the moment it is re-lit (#8976 P3).
+    # Pinned by `tests/test_7950_capstone_probe.py`.
+    "20261018000001_record_point_money_value_2782.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")

@@ -197,6 +197,26 @@ _ADDED_COLUMN_RE = re.compile(
 )
 
 
+def columns_in_create_body(body: str) -> set[str]:
+    r"""The column names declared in ONE `CREATE TABLE` body, matched PER LINE.
+
+    `_COL_RE` is anchored `^\s{4}` and compiled **without** `re.MULTILINE`, so
+    running it over a whole multi-line body can only ever match at index 0 —
+    where the body starts with `\n`, so the 4-whitespace run is followed by a
+    space rather than a name. The result is the EMPTY set for every input, which
+    turns any `assert col not in base_cols` built on it into an unfalsifiable
+    assertion (exactly the #8976 review P3 defect). Splitting into lines here
+    means no caller can re-introduce that.
+    """
+    cols: set[str] = set()
+    for line in body.splitlines():
+        m = _COL_RE.match(line)
+        if not m or m.group(1).upper() in _NON_COLUMN_HEADS:
+            continue
+        cols.add(m.group(1).strip('"'))
+    return cols
+
+
 def parse_sql_columns() -> dict[str, set[str]]:
     """Every table's property columns, read from the migrations on disk.
 
@@ -209,13 +229,7 @@ def parse_sql_columns() -> dict[str, set[str]]:
         r"CREATE TABLE IF NOT EXISTS public\.(\w+)\s*\((.*?)\n\);", text, re.S
     ):
         name, body = block.group(1), block.group(2)
-        cols: set[str] = set()
-        for line in body.splitlines():
-            m = _COL_RE.match(line)
-            if not m or m.group(1).upper() in _NON_COLUMN_HEADS:
-                continue
-            cols.add(m.group(1).strip('"'))
-        tables[name] = cols
+        tables[name] = columns_in_create_body(body)
     for block in _ALTER_ADD_COLUMN_RE.finditer(text):
         name, body = block.group(1), block.group(2)
         if name not in tables:
@@ -396,7 +410,12 @@ def test_a_forward_migration_adds_the_money_columns_and_the_read_sees_them():
     )
     body = re.search(r"CREATE TABLE IF NOT EXISTS public\.point\s*\((.*?)\n\);", base, re.S)
     assert body, "public.point is no longer created by 20261012000003"
-    base_cols = {m.group(1).strip('"') for m in _COL_RE.finditer(body.group(1))}
+    base_cols = columns_in_create_body(body.group(1))
+    assert base_cols, (
+        "the base CREATE TABLE read produced NO columns — an empty `base_cols` "
+        "makes `col not in base_cols` unfalsifiable, so the anti-cheat half of "
+        "this pin would be dead (#8976 review P3)"
+    )
     columns = parse_sql_columns()["point"]
     for col in MONEY_COLUMNS:
         assert col not in base_cols, (
@@ -406,6 +425,36 @@ def test_a_forward_migration_adds_the_money_columns_and_the_read_sees_them():
         assert col in columns, (
             f"point.{col} is missing from the schema read — the ALTER TABLE … ADD "
             "COLUMN form is not parsed, so every money row reads MISSING COLUMN"
+        )
+
+
+def test_the_base_table_guard_can_see_a_column_moved_into_the_base_table():
+    r"""The anti-cheat clause above is falsifiable (#8976 review P3).
+
+    `test_a_forward_migration_adds_the_money_columns_and_the_read_sees_them`
+    asserts `col not in base_cols`, which is only meaningful if `base_cols` can
+    ever CONTAIN one of the five columns. The pre-fix read ran `_COL_RE`
+    (anchored `^\s{4}`, no `re.MULTILINE`) over the WHOLE multi-line body, where
+    `^` matches at index 0 only — so it always returned the empty set, and the
+    exact mutation its docstring names (moving the money columns into
+    `20261012000003`'s `CREATE TABLE`) still passed.
+
+    This performs that mutation in memory, per column, and requires the read to
+    see it — so the guard really can fire.
+    """
+    base = (
+        REPO_ROOT / "supabase" / "migrations" / "20261012000003_record_epistemic.sql"
+    ).read_text(encoding="utf-8")
+    body = re.search(r"CREATE TABLE IF NOT EXISTS public\.point\s*\((.*?)\n\);", base, re.S)
+    assert body, "public.point is no longer created by 20261012000003"
+    point_body = body.group(1)
+    assert columns_in_create_body(point_body), "the base read sees no columns at all"
+    for col in MONEY_COLUMNS:
+        doctored = f"{point_body}\n    {col} bigint,"
+        assert col in columns_in_create_body(doctored), (
+            f"`{col}` injected into the base CREATE TABLE is invisible to the "
+            "guard, so `assert col not in base_cols` cannot fail and the ALTER "
+            "parse is not really proven"
         )
 
 
