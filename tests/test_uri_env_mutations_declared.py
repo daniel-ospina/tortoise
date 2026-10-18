@@ -110,6 +110,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_audit.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #7983: the read ledger's default path is keyed by the STORE TARGET (URI +
+    # graph name), so this test drives two different URIs and the unset case to
+    # prove two graphs on one host do not pool into a single ledger. The
+    # setenv/delenv IS the point — the assertion is about WHICH ledger path the
+    # key resolves to — and the fixture-param monkeypatch auto-restores (no leak).
+    "test_read_ledger.py": [r'monkeypatch\.(?:setenv|delenv)\(\s*"TORTOISE_DB_URI"'],
     # #2291 battery campaign (hermetic per-run store tests force the
     # embedded lane; the delenv IS the point — a URI redirect would fold
     # graphs per test):

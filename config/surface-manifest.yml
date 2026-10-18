@@ -536,7 +536,7 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
-  served_from: tortoise/mcp_server.py:7dc2585e3d3af508
+  served_from: tortoise/mcp_server.py:4d385cebbe4c5170
   served_attributes: 7a717e4e60ce3bfa
   family: memory
   family_rank: 1

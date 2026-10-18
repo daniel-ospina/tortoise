@@ -180,6 +180,10 @@
     ],
     "drive": [
       [
+        "billing-reconcile-cron.yml",
+        "drive"
+      ],
+      [
         "registry-backup-cron.yml",
         "drive"
       ]
@@ -515,7 +519,7 @@
       ]
     ]
   },
-  "gate_digest": "bad4fd2c28f57eed9702c8c0c1f6a3c846d41c31bbdd63a620c10d43d8621b28",
+  "gate_digest": "18e575b8f791e1c66477466705e5eed688446db47d4f33cf960d50d155e19b2f",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -539,5 +543,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-17T14:27:38Z"
+  "verified_at": "2026-10-17T22:47:29Z"
 }

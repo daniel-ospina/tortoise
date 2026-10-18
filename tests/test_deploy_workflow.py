@@ -1317,3 +1317,321 @@ def test_drift_report_seam_carries_the_gates_own_report():
     assert "--drift-report" in alert.get("run", ""), (
         "the alert step must pass the report path as --drift-report"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The billing-reconcile driver's VERDICT table (#8878)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `billing-reconcile-cron.yml` is the only thing that compares a paying org's
+# stored tier against Stripe on a cadence, and its EXIT CODE is the page. Its
+# verdicts were documented in a header comment and verified by hand, which made
+# them exactly as durable as the comment: a later edit could turn "a billed org
+# failed to reconcile" into a green run with every required check still green —
+# a false PASS in the one component whose whole job is to alert.
+#
+# So the table is asserted here, by RUNNING the step's own `run:` script against
+# a stub server that returns each response shape. Deliberately in this file (the
+# repo's workflow-semantics home, already collected by CI) rather than a new
+# harness surface: no new required check, no .mergify change.
+
+_BILLING_WORKFLOW = (
+    Path(__file__).resolve().parent.parent
+    / ".github" / "workflows" / "billing-reconcile-cron.yml"
+)
+
+
+def _billing_steps() -> dict[str, dict]:
+    doc = yaml.safe_load(_BILLING_WORKFLOW.read_text(encoding="utf-8"))
+    steps: dict[str, dict] = {}
+    for job in doc["jobs"].values():
+        for step in job.get("steps", []):
+            if step.get("name"):
+                steps[step["name"]] = step
+    return steps
+
+
+_CLEAN = {
+    "checked": 1, "repaired": 0, "unchanged": 1, "unverified": 0,
+    "skipped": 0, "drift": [], "unrepaired": [], "failed": [],
+}
+
+
+def _billing_case(**overrides):
+    payload = dict(_CLEAN)
+    payload.update(overrides)
+    return payload
+
+
+#: (case, http status, body, expected exit code, why, trigger)
+#:
+#: The TRIGGER is part of a 202's verdict, not decoration: the endpoint answers
+#: 202 `already_running` for a concurrent pass, which its docstring calls benign
+#: (nothing queues; the next scheduled run retries). A SCHEDULED run that lands
+#: inside an operator's manual pass is therefore a no-op, not an incident — while
+#: a `workflow_dispatch` that did no work must not look like a completed pass.
+#: Default trigger is `schedule` (the cadence this job exists for).
+_BILLING_VERDICTS = [
+    ("clean", 200, _billing_case(), 0,
+     "a clean pass is green"),
+    ("drift-down", 200, _billing_case(
+        repaired=1, unchanged=0,
+        drift=[{"org_id": "o1", "direction": "down"}]), 0,
+     "a late downgrade is Stripe truth arriving late, not a customer short-changed"),
+    ("drift-unrankable", 200, _billing_case(
+        repaired=1, unchanged=0,
+        drift=[{"org_id": "o2", "direction": None}]), 0,
+     "an unrankable pair is not provably an upgrade, so it must never page"),
+    ("drift-up", 200, _billing_case(
+        repaired=1, unchanged=0,
+        drift=[{"org_id": "o3", "direction": "up"}]), 1,
+     "a paying org WAS under-delivered — this is #8878's own symptom"),
+    ("failed", 200, _billing_case(
+        unchanged=0,
+        failed=[{"org_id": "o4", "error": "StripeAPIError: boom"}]), 1,
+     "a billed org could not be reconciled; a pass that verified nothing is not clean"),
+    ("unrepaired", 200, _billing_case(
+        unchanged=0,
+        unrepaired=[{"org_id": "o5", "expected_tier": "pro"}]), 1,
+     "a read-only reconciler is a BROKEN reconciler"),
+    ("renamed-field", 200,
+     {k: v for k, v in _CLEAN.items() if k != "unverified"}, 1,
+     "a response that omits a summary field must fail closed, never read as clean"),
+    ("not-json", 200, "<html>502 Bad Gateway</html>", 1,
+     "a body that is not a summary cannot verify anything"),
+    ("http-500", 500, {"detail": "boom"}, 1,
+     "a non-200 is a failed pass"),
+    ("already-running-scheduled", 202, {"status": "already_running"}, 0,
+     "a scheduled run overlapping a manual pass is benign — nothing queues and "
+     "the next scheduled run retries; paging it would be a false billing incident"),
+    ("already-running-dispatched", 202, {"status": "already_running"}, 1,
+     "a DISPATCHED run that did NO work must not read as a completed pass",
+     "workflow_dispatch"),
+    ("enumeration-incomplete", 503,
+     {"status": "enumeration_incomplete", "detail": "not certified"}, 1,
+     "a pass that could not certify the whole fleet compared an unknown "
+     "fraction of it — never a clean pass"),
+]
+
+#: Every field the verdict keys on. Shared by the workflow's check and the
+#: rename case above, so adding a field cannot leave one of them behind.
+_BILLING_SUMMARY_FIELDS = (
+    "checked", "repaired", "unchanged", "unverified", "skipped",
+    "drift", "unrepaired", "failed",
+)
+
+
+class TestBillingReconcileDriverVerdicts:
+    """#8878: the driver's exit code IS the page — pin every verdict."""
+
+    def test_the_verdict_table_is_complete(self):
+        """A response missing ANY field the verdict reads must be a failure.
+
+        Guards the guard: if the workflow stopped requiring a field, the
+        ``renamed-field`` case below could still exit non-zero by accident (a
+        later ``data[...]`` raises KeyError) while the run's own message blamed
+        the wrong thing. So the contract is parsed from the ``required = {...}``
+        literal rather than grepped for — a bare substring search also matches
+        the unrelated ``if data["unverified"]:`` line and would pass while the
+        field had been dropped from the required set.
+        """
+        script = _billing_steps()["Run billing reconcile pass"]["run"]
+        match = re.search(r"required\s*=\s*\{(.*?)\}", script, re.S)
+        assert match is not None, (
+            "the driver no longer states a required-field set — a summary that "
+            "omits a field would read as a clean pass"
+        )
+        declared = set(re.findall(r'"([a-z_]+)"', match.group(1)))
+        assert declared == set(_BILLING_SUMMARY_FIELDS), (
+            f"the driver requires {sorted(declared)} but its verdict reads "
+            f"{sorted(_BILLING_SUMMARY_FIELDS)} — a summary omitting "
+            f"{sorted(set(_BILLING_SUMMARY_FIELDS) - declared)} would read as clean"
+        )
+
+    @pytest.mark.parametrize(
+        "case,status,body,expected,why,trigger",
+        [(*case, "schedule") if len(case) == 5 else case
+         for case in _BILLING_VERDICTS],
+        ids=[c[0] for c in _BILLING_VERDICTS],
+    )
+    def test_exit_code_matches_the_documented_verdict(
+            self, case, status, body, expected, why, trigger):
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        payload = body if isinstance(body, str) else json.dumps(body)
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *a):  # silence the default stderr trace
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_port
+            script = _billing_steps()["Run billing reconcile pass"]["run"]
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "INTERNAL_API_URL": f"http://127.0.0.1:{port}",
+                    "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                    "HOME": "/tmp",
+                    # The workflow binds this from `${{ github.event_name }}`;
+                    # the 202 verdict depends on it (see _BILLING_VERDICTS).
+                    "EVENT_NAME": trigger,
+                },
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert proc.returncode == expected, (
+            f"driver verdict for {case!r} was exit {proc.returncode}, expected "
+            f"{expected} — {why}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+
+    def test_unset_secret_fails_before_calling_the_endpoint(self):
+        """A missing INTERNAL_API_URL/FASTAPI_INTERNAL_KEY is a red run.
+
+        Otherwise the request goes nowhere, curl fails with a DNS error the
+        reader has to decode, and the cause (unconfigured secrets) is invisible.
+        """
+        import subprocess
+
+        script = _billing_steps()["Run billing reconcile pass"]["run"]
+        for missing in ("INTERNAL_API_URL", "FASTAPI_INTERNAL_KEY"):
+            env = {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "HOME": "/tmp",
+                "INTERNAL_API_URL": "http://127.0.0.1:1",
+                "FASTAPI_INTERNAL_KEY": "test-internal-key",
+            }
+            env.pop(missing)
+            proc = subprocess.run(["bash", "-c", script], env=env,
+                                  capture_output=True, text=True, timeout=60)
+            assert proc.returncode != 0, f"an unset {missing} read as a pass"
+            assert "::error::" in proc.stdout + proc.stderr
+
+    def test_a_failed_run_pages_telegram(self):
+        """The header says the job "PAGES". A red run alone is not a page.
+
+        This asserts the delivery leg exists and is wired to the failing paths
+        (``if: failure()``) using the repo's single Telegram sender — AND that
+        the sender can actually be sourced, which is the half that was missing:
+        string-presence alone is satisfied by a workflow whose page step dies
+        on `. .github/scripts/telegram-send.sh` because the runner never
+        checked the repo out. ``test_the_page_step_can_succeed`` below proves
+        the file is on the runner; this test pins the wiring.
+        """
+        page = _billing_steps().get("Page on failure")
+        assert page is not None, (
+            "no failure step — the run would be red only in the Actions tab, "
+            "which is not a page"
+        )
+        assert page.get("if") == "failure()", (
+            f"the page step must run on every failing path (if: {page.get('if')!r})"
+        )
+        run = page.get("run", "")
+        assert ".github/scripts/telegram-send.sh" in run, (
+            "the page must use the repo's ONE Telegram sender (#4574)"
+        )
+        assert "tg_send" in run
+        env = page.get("env") or {}
+        assert "TELEGRAM_BOT_TOKEN" in env and "TELEGRAM_CHAT_ID" in env, (
+            "the page step must bind both Telegram secrets in env: (#4361)"
+        )
+
+
+def _live_script_refs(job: dict) -> list[str]:
+    """Step names in ``job`` whose ``run:`` sources a repo script, LIVE.
+
+    Comment lines are stripped first: naming a script inside a comment (the
+    ``ai-review-gate.yml`` shape) delivers nothing and must not be read as a
+    dependency, or the guard below would demand a pointless checkout.
+    """
+    refs: list[str] = []
+    for step in job.get("steps") or []:
+        body = str(step.get("run", ""))
+        live = "\n".join(
+            line for line in body.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        if re.search(r"(^|[\s;.])`?\.github/scripts/", live):
+            refs.append(step.get("name") or step.get("uses") or "<unnamed>")
+    return refs
+
+
+_WORKFLOWS_DIR = (
+    Path(__file__).resolve().parent.parent / ".github" / "workflows"
+)
+
+
+class TestWorkflowScriptDependenciesAreOnTheRunner:
+    """A `run:` that sources `.github/scripts/<x>` needs a checkout first.
+
+    A GitHub-hosted runner's ``$GITHUB_WORKSPACE`` starts EMPTY; only
+    ``actions/checkout`` puts the repo there. A step that sources a repo script
+    without checking out dies on the ``.`` builtin — and under
+    ``set -euo pipefail`` it dies BEFORE whatever the step was supposed to do,
+    so the step's real work (delivering a page, recording a verdict) silently
+    never happens while every string-presence assertion about it still passes.
+
+    Scope: EVERY job of EVERY workflow file, so the class cannot come back in a
+    new driver. Jobs that only NAME a script in a comment are excluded (see
+    ``_live_script_refs``).
+    """
+
+    @staticmethod
+    def _cases() -> list[tuple[str, str, list[str], bool]]:
+        cases = []
+        for path in sorted(_WORKFLOWS_DIR.glob("*.yml")):
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(doc, dict):
+                continue
+            for job_name, job in (doc.get("jobs") or {}).items():
+                if not isinstance(job, dict):
+                    continue
+                refs = _live_script_refs(job)
+                if not refs:
+                    continue
+                checked_out = any(
+                    "actions/checkout" in str(s.get("uses", ""))
+                    for s in job.get("steps") or []
+                )
+                cases.append((path.name, job_name, refs, checked_out))
+        return cases
+
+    @pytest.mark.parametrize(
+        "workflow,job,refs,checked_out",
+        _cases(),
+        ids=[f"{w}::{j}" for w, j, _refs, _co in _cases()],
+    )
+    def test_a_job_sourcing_a_repo_script_checks_out_first(
+            self, workflow, job, refs, checked_out):
+        assert checked_out, (
+            f"{workflow} job {job!r} sources a repo script from {refs} but "
+            "never runs `actions/checkout` — $GITHUB_WORKSPACE is empty on a "
+            "hosted runner, so the source fails and the step's output is "
+            "never produced (#8878: the 'PAGES' leg could never fire)"
+        )
+
+    def test_the_case_list_is_not_empty(self):
+        """Guards the guard: a broken glob would empty the parametrization."""
+        cases = self._cases()
+        assert cases, "no workflow job sources a repo script — the glob broke"
+        assert any(w == "billing-reconcile-cron.yml" for w, _j, _r, _c in cases), (
+            "the billing reconcile driver must be among the covered jobs"
+        )
