@@ -395,15 +395,22 @@ test('#3575: capture support is derived from the seam, and every supported harne
     const artifact = HARNESS_CAPTURE_SEAM[h]
     assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
     // #3802: the claim must be satisfied by the surface a user RECEIVES.
-    // `HARNESS_CAPTURE_INSTALL[h]` is the Memory-sources capture row (main.jsx),
-    // which renders for every supported harness — all four live copies name
-    // their seam on their own. `HARNESS_INSTALL[h]` is deliberately NOT OR'd in:
-    // it renders only inside the archived `LEGACY_WIZARD_ARCHIVED` block, so the
-    // old OR made this capability claim satisfiable by copy no user can see.
-    const surface = HARNESS_CAPTURE_INSTALL[h] || ''
+    // `HARNESS_CAPTURE_INSTALL[h]` is the recipe the SETTINGS mount renders,
+    // collapsed, inside its `details.manual-install` disclosure
+    // (`harnessStatusCard.jsx`) — a Settings-first user's only path to it. It is
+    // NOT a row in `main.jsx`: since #3513 §2 the shared capture row renders
+    // `CAPTURE_INSTALL_POINTER` on every surface and `main.jsx` has zero reads of
+    // this constant, so the recipe is not "the copy a user actually pastes" —
+    // the agent prompt installs the recorder (`tortoise install <h>`, served
+    // onboarding §5). All four live copies name their seam on their own.
+    // `HARNESS_INSTALL[h]` is deliberately NOT OR'd in: it renders only inside
+    // the archived `LEGACY_WIZARD_ARCHIVED` block, so the old OR made this
+    // capability claim satisfiable by copy no user can see.
+    const recipe = HARNESS_CAPTURE_INSTALL[h] || ''
     assert.ok(
-      surface.includes(artifact),
-      `HARNESS_CAPTURE_INSTALL.${h} — the capture row a user receives — must install its declared seam ${artifact}`,
+      recipe.includes(artifact),
+      `HARNESS_CAPTURE_INSTALL.${h} — the recipe the Settings manual-install disclosure renders — ` +
+        `must install its declared seam ${artifact}`,
     )
   }
 })
@@ -412,7 +419,8 @@ test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () =
   const pi = HARNESS_INSTALL.pi(KEY)
   assert.match(pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
   assert.match(pi, /\.pi\/agent\/extensions/)
-  // the Memory-sources inline row installs the SAME seam (one shared constant)
+  // the Settings disclosure renders the SAME seam (one shared constant) — the
+  // shared row itself carries only the pointer (#3513 §2)
   assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
   assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
 })
