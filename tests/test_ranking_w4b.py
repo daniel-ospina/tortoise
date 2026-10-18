@@ -7,8 +7,9 @@ S7 (ranking.py scoring surface) + S8 (batch EP reads) over both rankers:
   alpha/beta) is NOT contested);
 * the scored boost applies ONLY under the W4 flag (TORTOISE_W4_ENRICHMENT)
   AND a query AND a conflict RELEVANT to the query (significant-token
-  overlap with the NAND-side counter-claim, resolved in ONE batch read —
-  no N+1);
+  overlap with the NAND-side counter-claim, resolved in ONE batch read
+  PER EPISTEMIC LABEL (#7927) — constant in the number of results, never
+  one read per result);
 * flag-off / no-query / irrelevant-conflict runs are byte-identical to the
   pre-W4-b ranking (R11 golden-ordering regression);
 * E2E-1 ranking-participation: the contested twin outranks its uncontested
@@ -23,6 +24,7 @@ import tempfile
 
 import pytest
 
+from tortoise.live import EPISTEMIC_LABELS
 from tortoise.ranking import (
     CONTESTED_VARIANCE_THRESHOLD,
     W4_CONTESTED_BOOST,
@@ -33,6 +35,12 @@ from tortoise.ranking import (
     resolve_contested_relevance,
 )
 from tortoise.sdk import TortoiseSDK
+
+# #7927: the relevance read sweeps the four epistemic labels (§7813), so it
+# issues ONE query per label. That count is constant in the number of
+# contested ids — the S8 guard is "never one query per result", which the
+# assertions below keep pinning by comparing the count across result-set sizes.
+_LABEL_SWEEP_READS = len(EPISTEMIC_LABELS)
 
 
 def _beta_variance(a: float, b: float) -> float:
@@ -119,14 +127,22 @@ class _FakeProjection:
 
 class TestBatchResolution:
     def test_single_batch_query_for_many_contested(self):
+        """O(1) in the number of contested ids: the SAME read count for 1 id
+        and for N ids (one read per epistemic label, #7927) — never one read
+        per result."""
+        one = _FakeProjection(counter_claims=[
+            ("p1", "the cache rollback is the safer default"),
+        ])
+        resolve_contested_relevance(one, ["p1"], "cache rollback")
+        assert one.nand_query_count == _LABEL_SWEEP_READS
+
         fake = _FakeProjection(counter_claims=[
             ("p1", "the cache rollback is the safer default"),
             ("p2", "cache rollback versioning adds nothing"),
             ("p3", "unrelated weather claim"),
         ])
         boosts = resolve_contested_relevance(fake, ["p1", "p2", "p3"], "cache rollback")
-        # One query for N > 1 contested ids — never per-result.
-        assert fake.nand_query_count == 1
+        assert fake.nand_query_count == one.nand_query_count  # never per-result
         assert boosts == {"p1": W4_CONTESTED_BOOST, "p2": W4_CONTESTED_BOOST}
 
     def test_no_ids_or_no_query_short_circuits(self):
@@ -257,7 +273,7 @@ class TestGraphRankerBoost:
         ranker = GraphRanker(projection=fake)
         monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
         ranker.rerank(_twin_results(), query="zebra finch social behavior")
-        assert fake.nand_query_count == 1
+        assert fake.nand_query_count == _LABEL_SWEEP_READS
 
     def test_budget_cap_skips_claims_beyond_why_budget(self, monkeypatch):
         """The resolution budget mirrors why.py's W4_MAX_CONFLICTS: a
@@ -304,7 +320,7 @@ class TestGraphRankerBoost:
         ranked = ranker.rerank(_twin_results(), query="zebra finch social behavior")
         by_id = {r["id"]: r["graph_ranking"] for r in ranked}
         assert "w4_contested_boost" not in by_id["twin_hot"]
-        assert fake.nand_query_count == 1
+        assert fake.nand_query_count == _LABEL_SWEEP_READS
 
     def test_graph_boost_cap_keeps_invariant_at_max(self, monkeypatch):
         """The [0, 1] graph_boost invariant: a contested point near the
@@ -354,7 +370,7 @@ class TestGraphRankerBoost:
         monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
         ranked = ranker.rerank(_twin_results(), query="zebra finch social behavior")
         # No crash; the non-str claim matches nothing and the boost is inert.
-        assert fake.nand_query_count == 1
+        assert fake.nand_query_count == _LABEL_SWEEP_READS
         assert all("w4_contested_boost" not in r["graph_ranking"] for r in ranked)
 
     def test_irrelevant_conflict_is_ranked_noise_free(self, monkeypatch):

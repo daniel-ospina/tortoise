@@ -3390,6 +3390,7 @@ from tortoise.live import (  # noqa: E402
     VACUITY_BELIEF,
     _live_only,
     _terminal_excluded,
+    epistemic_disjunction,  # #7927: graph-wide SVBP factor read
 )
 from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 
@@ -15845,9 +15846,20 @@ class FalkorProjection(
         # whose inputs all retract becomes degenerate and is excluded below).
         # #780: draft claims never appear as inputs; draft operators' edges
         # are excluded too.
+        # #7927: DEPRECATED SURFACE, WIDENED NOT DELETED. This graph-wide
+        # SVBP extractor has no PRODUCTION caller (the interactive path runs
+        # the local affected closure, #395) but it does have live callers —
+        # ``graph-scripts/profile_395_local_ep.py`` and the EP draft-filter
+        # tests — so retirement is deferred rather than half-done here. While
+        # it exists it must agree with the engine: ``c`` is a TRAVERSAL
+        # position, so the claim an operator consumes may be a
+        # :Subject/:Object/:Event belief (§7813). The operator side stays
+        # :Point (every operator is a Point). The four-label predicate comes
+        # from ``live.epistemic_disjunction``, never a hand-spelled literal.
         input_rows = self.g.query(
-            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.is_operator = true "
+            f"AND {epistemic_disjunction('c')} "
             f"AND {_terminal_excluded('c.status')} "
             f"{draft_c} {draft_o} "
             "RETURN o.id, c.id "

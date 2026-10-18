@@ -20907,7 +20907,7 @@ class TortoiseSDK:
                          include_draft: bool = False,
                          stats: dict | None = None
                          ) -> tuple[list[str], set[tuple[str, str, str]]]:
-        """BFS subgraph selection from anchor Points — A9 return contract.
+        """BFS subgraph selection from anchor epistemic nodes — A9 return contract.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
         Returns ``(operator_ids, factor_anchors)`` — the operator Point IDs
@@ -20918,12 +20918,20 @@ class TortoiseSDK:
         to operator nodes, GATE-2 Q3). With include_draft=False (default,
         #780) draft anchors, operators and frontier points are excluded.
 
+
         ``stats`` (#6211): OPTIONAL out-parameter, filled by the selector with
         ``truncated`` / ``operators_seen`` / ``operators_used`` / ``op_cap``.
         The return tuple is unchanged, so every existing caller (the dreamer,
         the calibration scope probe) is unaffected; only a caller that does not
         own the operator cap passes it — ``compute_confidence`` — which needs
         the cap in its RESULT, not on stderr.
+
+
+        #7927: an anchor may be any of ``live.EPISTEMIC_LABELS``
+        (:Point/:Subject/:Object/:Event, owner ruling #7813) — the widening
+        lives in the shared selector, so this surface inherits it rather than
+        re-spelling a label predicate (pinned by
+        ``tests/test_7927_epistemic_read_surfaces.py``).
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()

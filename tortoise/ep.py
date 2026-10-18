@@ -1816,17 +1816,33 @@ class TortoiseEP:
         # keeps its deliberate listing. See ``sdk._review_prune`` for the
         # sibling scan that ALSO requires measurement.
         from .search_engine import ep_prior_only_cypher
-        rows = self.g.query(
-            "MATCH (n:Point) "
-            "WHERE n.is_operator = false "
+        # #7927: ``n`` is the SUBJECT of this scan — contested claims are
+        # enumerated GRAPH-WIDE (no id anchor to index), so the four-label
+        # sweep comes from ``live.epistemic_label_queries``: one label-anchored
+        # scan per label (each label keeps its own scan instead of degenerating
+        # into a bare all-node walk), never a hand-spelled label literal.
+        # ``is_operator`` must admit UNSET as well as false — a
+        # :Subject/:Object/:Event carries no ``is_operator`` at all, so the old
+        # ``= false`` dropped every non-Point belief by NULL rather than by the
+        # predicate it states.
+        template = (
+            "MATCH (n:{label}) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
             f"  AND {_terminal_excluded('n.status')} "
             f"  AND NOT {ep_prior_only_cypher('n')} "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
-            "WHERE v > $t RETURN n.id, n.content, a, b, v ORDER BY v DESC",
-            params={"t": variance_threshold},
-        ).result_set
+            "WHERE v > $t RETURN n.id, n.content, a, b, v"
+        )
+        rows: list = []
+        for _q in epistemic_label_queries(template):
+            rows.extend(self.g.query(
+                _q, params={"t": variance_threshold}).result_set)
+        # A per-label ``ORDER BY`` cannot order the MERGED set, and Cypher row
+        # order across four queries never decides an order — sort here,
+        # variance-descending with an id tiebreak for determinism.
+        rows.sort(key=lambda r: (-float(r[4]), str(r[0])))
         return [{"id": r[0], "content": r[1], "alpha": r[2],
                  "beta": r[3], "variance": r[4]} for r in rows]
 

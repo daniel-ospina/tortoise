@@ -36,7 +36,28 @@ from .search_engine import (  # noqa: E402, RUF100
     CONTESTED_VARIANCE_THRESHOLD,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
 )
-from .live import is_draft_status, is_terminal_status  # #2490: terminal rows are never contested; #2598: the draft predicate
+from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
+    epistemic_disjunction,  # #7927: traversal-position widening
+    epistemic_label_queries,  # #7927: id-anchored widening
+    is_draft_status,
+    is_terminal_status,
+)
+
+
+def _query_label_sweep(projection, template: str, params: dict) -> list:
+    """Run an ID-ANCHORED template once per epistemic label, merge rows.
+
+    #7927: every ranker signal read below is anchored on a RESULT id
+    (``n.id IN $ids``), and a result may be a :Subject/:Object/:Event belief
+    (§7813). The anchored node keeps its LABEL — the per-(label, property)
+    index — and the four-label sweep comes from
+    ``live.epistemic_label_queries``; a hand-spelled label list or a bare
+    ``MATCH (n {id:$x})`` (no label → full scan) is the bug this replaces.
+    """
+    rows: list = []
+    for _q in epistemic_label_queries(template):
+        rows.extend(projection.g.query(_q, params=params).result_set)
+    return rows
 
 logger = logging.getLogger(__name__)
 
@@ -180,25 +201,32 @@ def resolve_contested_relevance(
             from .why import W4_MAX_CONFLICTS as _claim_budget
         except Exception:  # pragma: no cover — defensive
             _claim_budget = 2
-        rows = projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = _query_label_sweep(
+            projection,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "AND (n.is_operator = false OR n.is_operator IS NULL) "
             # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the
             # id predicate at the re-binding MATCH below (foreign rows).
             "WITH n "
-            "MATCH (c:Point)-[r:NAND]->(n) "
-            "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
+            "MATCH (c)-[r:NAND]->(n) "
+            "OPTIONAL MATCH (src)-[ri:INPUT]->(c) "
+            # #7927: ``src`` is a TRAVERSAL position reached from ``c`` — a
+            # NAND operator's idx-0 counter-argument may itself be a
+            # :Subject/:Object/:Event belief.
+            f"  WHERE {epistemic_disjunction('src')} "
             "WITH n, c, r, src, ri "
             "WHERE c.id <> n.id AND (src.id IS NULL OR src.id <> n.id) AND ("
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
             "  (c.is_operator = false OR c.is_operator IS NULL)) "
+            # #7927: ``c`` is the NANDer — the counter-claim is epistemic too.
+            f"AND {epistemic_disjunction('c')} "
             "AND " + _exclude_status_clause("c") + " "
             "RETURN n.id, coalesce(src.id, c.id), "
             "  coalesce(src.content, c.label, c.content, ''), "
             "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
             "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)",
-            params={"ids": contested_ids},
-        ).result_set
+            {"ids": contested_ids},
+        )
         # Severity-then-id selection mirrors why.py's _assemble_conflicts:
         # a NANDer with persisted EP mean >= 0.6 is a high-severity dispute
         # and ranks above medium ones; ids break the tie deterministically
@@ -469,7 +497,10 @@ class GraphRanker:
         # to 0.5 and ranked a 0.75-prior claim as unmeasured while every
         # other surface read 0.75.
         cypher = (
-            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n:{label}) WHERE n.id IN $ids "
+            # #7927: label-swept — a :Subject/:Object/:Event belief carries the
+            # same persisted EP prior and degree as a Point (the OPERATOR side
+            # stays :Point: every operator is a Point, `create_operator`).
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-(:Point {is_operator: true}) "
             "WITH n, count(r) AS degree "
             "RETURN n.id, coalesce(n.confidence, "
@@ -484,7 +515,8 @@ class GraphRanker:
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)"
         )
-        rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
+        rows = _query_label_sweep(
+            self.projection, cypher, {"ids": ids})
         out = {}
         for row in rows:
             pid = row[0]
@@ -824,7 +856,7 @@ class StateRanker:
         if not ids:
             return {}
         cypher = (
-            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-() "
             "WITH n, count(r) AS ep_degree "
             "OPTIONAL MATCH (n)-[a:aboutSubject|aboutObject|aboutAction|"
@@ -837,7 +869,8 @@ class StateRanker:
             "  ep_degree + about_degree AS degree, "
             "  n.status, coalesce(n.outdated, false)"
         )
-        rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
+        rows = _query_label_sweep(
+            self.projection, cypher, {"ids": ids})
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep, degree = (
@@ -874,7 +907,10 @@ class StateRanker:
         about_types = "|".join(ABOUT_EDGE_TYPES)
         rows = self.projection.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
-            "OPTIONAL MATCH (p:Point)-[a:" + about_types + "]->(o) "
+            # #7927: ``p`` is a TRAVERSAL position — the belief an Object is
+            # measured by may be any epistemic label, not only a Point.
+            "OPTIONAL MATCH (p)-[a:" + about_types + "]->(o) "
+            f"  WHERE {epistemic_disjunction('p')} "
             "WITH o, count(a) AS about_degree, collect(DISTINCT p.id) AS pids "
             "RETURN o.id, about_degree, pids",
             params={"ids": ids},
@@ -1140,19 +1176,23 @@ class GapsRanker:
         patterns would drop one of two same-type edges — P0 fix)."""
         if not ids:
             return {}
-        rows = self.projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = _query_label_sweep(
+            self.projection,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "OPTIONAL MATCH (op:Point {is_operator:true})-[r1:IMPL|NAND]->(n) "
             "  WHERE coalesce(r1.idx, 1) = 0 "
-            "OPTIONAL MATCH (n)-[r2:IMPL|NAND]->(m:Point) "
-            "  WHERE m.is_operator = false "
+            "OPTIONAL MATCH (n)-[r2:IMPL|NAND]->(m) "
+            # #7927: ``m`` is a TRAVERSAL position — a :Subject/:Object/:Event
+            # carries no ``is_operator``, so admit UNSET as well as false.
+            "  WHERE (m.is_operator IS NULL OR m.is_operator = false) "
+            f"    AND {epistemic_disjunction('m')} "
             "RETURN n.id, "
             "  count(DISTINCT CASE WHEN type(r1) = 'IMPL' THEN r1 END) AS op_load_impl, "
             "  count(DISTINCT CASE WHEN type(r1) = 'NAND' THEN r1 END) AS op_load_nand, "
             "  count(DISTINCT CASE WHEN type(r2) = 'IMPL' THEN r2 END) AS direct_load_impl, "
             "  count(DISTINCT CASE WHEN type(r2) = 'NAND' THEN r2 END) AS direct_load_nand",
-            params={"ids": ids},
-        ).result_set
+            {"ids": ids},
+        )
         return {
             row[0]: {
                 "outgoing_impl": int(row[1]) + int(row[3]),
@@ -1168,27 +1208,31 @@ class GapsRanker:
         (contention — never support)."""
         if not ids:
             return {}
-        rows = self.projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = _query_label_sweep(
+            self.projection,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "OPTIONAL MATCH (op:Point {is_operator:true, op_type:'IMPL'})-[r3:IMPL]->(n) "
             "  WHERE coalesce(r3.idx, 0) >= 1 "
             "OPTIONAL MATCH (s)-[r4:IMPL]->(n) "
-            "  WHERE (s:Point AND s.is_operator = false) "
-            "     OR (s:Event) "
+            # #7927: ``s`` is a TRAVERSAL position — admit the four labels and
+            # treat an UNSET ``is_operator`` (:Subject/:Object/:Event) as a
+            # non-operator claim, exactly as the old ``(s:Event)`` arm did.
+            f"  WHERE (s.is_operator IS NULL OR s.is_operator = false) "
+            f"    AND {epistemic_disjunction('s')} "
             "OPTIONAL MATCH (n)-[r5:extractedFrom]->(src:Source) "
             "OPTIONAL MATCH (opn:Point {is_operator:true, op_type:'NAND'})-[r6:NAND]->(n) "
             "  WHERE coalesce(r6.idx, 1) >= 1 "
             "OPTIONAL MATCH (s2)-[r7:NAND]->(n) "
-            "  WHERE (s2:Point AND s2.is_operator = false) "
-            "     OR (s2:Event) "
+            f"  WHERE (s2.is_operator IS NULL OR s2.is_operator = false) "
+            f"    AND {epistemic_disjunction('s2')} "
             "RETURN n.id, "
             "  count(DISTINCT r3) AS op_support, "
             "  count(DISTINCT r4) AS direct_support, "
             "  count(DISTINCT r5) AS source_count, "
             "  count(DISTINCT r6) AS op_nand, "
             "  count(DISTINCT r7) AS direct_nand",
-            params={"ids": ids},
-        ).result_set
+            {"ids": ids},
+        )
         return {
             row[0]: {
                 "incoming_impl": int(row[1]) + int(row[2]),
@@ -1204,15 +1248,16 @@ class GapsRanker:
         """EP posterior mean + contested — same read as StateRanker."""
         if not ids:
             return {}
-        rows = self.projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = _query_label_sweep(
+            self.projection,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)",
-            params={"ids": ids},
-        ).result_set
+            {"ids": ids},
+        )
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep = row[0], float(row[1]), float(row[2]), bool(row[3])
