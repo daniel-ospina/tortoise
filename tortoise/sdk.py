@@ -20818,7 +20818,9 @@ class TortoiseSDK:
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
                          direction: str = "both",
-                         include_draft: bool = False) -> tuple[list[str], set[tuple[str, str, str]]]:
+                         include_draft: bool = False,
+                         stats: dict | None = None
+                         ) -> tuple[list[str], set[tuple[str, str, str]]]:
         """BFS subgraph selection from anchor Points — A9 return contract.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
@@ -20829,12 +20831,19 @@ class TortoiseSDK:
         selection; the ≥2-live-endpoints derived-liveness predicate applies
         to operator nodes, GATE-2 Q3). With include_draft=False (default,
         #780) draft anchors, operators and frontier points are excluded.
+
+        ``stats`` (#6211): OPTIONAL out-parameter, filled by the selector with
+        ``truncated`` / ``operators_seen`` / ``operators_used`` / ``op_cap``.
+        The return tuple is unchanged, so every existing caller (the dreamer,
+        the calibration scope probe) is unaffected; only a caller that does not
+        own the operator cap passes it — ``compute_confidence`` — which needs
+        the cap in its RESULT, not on stderr.
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()
-        ops, anchors_out = _bfs_select_operators(proj, anchors, max_hops=max_hops,
-                                                 rel_filter=rel_filter, direction=direction,
-                                                 include_draft=include_draft)
+        ops, anchors_out = _bfs_select_operators(
+            proj, anchors, max_hops=max_hops, rel_filter=rel_filter,
+            direction=direction, include_draft=include_draft, stats=stats)
         return list(ops), anchors_out
 
     def compute_confidence(self, factors=None, evidence=None,
@@ -20846,11 +20855,31 @@ class TortoiseSDK:
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
+        FACTOR-SELECTION REPORT (#6211) — always present:
+        ``truncated``, ``operators_seen``, ``operators_used``.
+
+          * ``truncated`` — True when this result was computed over a REDUCED
+            topology: the BFS operator selection hit its cap (``operators_used``
+            < ``operators_seen``) OR the affected-claim expansion was cut short
+            by the #395 degeneration guard. False means the run consumed every
+            factor its selection found. A caller that must not rank on a partial
+            topology reads THIS, not ``converged``: before #6211 a capped pass
+            returned ``converged: true`` and nothing in the result said a cap
+            had been hit, so a confident number computed over a truncated
+            factor set was indistinguishable from a full-graph ranking.
+          * ``operators_seen`` — operators the selection COLLECTED.
+          * ``operators_used`` — operators the run actually consumed.
+
+        ``operators_seen > operators_used`` names the operator cap specifically
+        (the default cap is 200 — the value is not re-stated here because a
+        caller that owns a budget passes its own). Both are 0 on the no-arg
+        dirty-root path, which selects NO operators (its only bound is the
+        affected-claim guard, still reported through ``diagnostic``).
+
         Two diagnostics can accompany the result, both ABSENT when they do not
-        apply (so the key-set above is the ordinary shape): ``diagnostic`` —
-        one of ``truncated`` (#395 degeneration guard), ``no_factors`` /
-        ``no_dirty_roots`` (nothing to run), ``factors_skipped``; and
-        ``skipped_factors`` — one structured record per factor EP DROPPED
+        apply: ``diagnostic`` — one of ``truncated`` (#395 degeneration guard),
+        ``no_factors`` / ``no_dirty_roots`` (nothing to run), ``factors_skipped``;
+        and ``skipped_factors`` — one structured record per factor EP DROPPED
         before it could be consumed (#6105: a draft/terminal endpoint stripped
         the operator below 2 participating inputs, or a directional operator
         lost its idx-0 source). ``converged`` speaks only for the factors the
@@ -20889,6 +20918,22 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         ep = self._get_ep()
+        # #6211: the FACTOR-SELECTION REPORT this call returns. `truncated` is
+        # True when the result was computed over a reduced topology — the BFS
+        # operator selection hit its cap, or the #395 affected-claim guard cut
+        # the expansion short. Both are reported because both make the same
+        # number untrustworthy, and a caller that must not rank on a partial
+        # topology should not have to know which one happened to fire.
+        selection: dict = {"operators_seen": 0, "operators_used": 0,
+                           "truncated": False}
+
+        def _report(result: dict, *, guard_truncated: bool = False) -> dict:
+            """Attach the #6211 factor-selection report to a result dict."""
+            result["truncated"] = bool(selection["truncated"] or guard_truncated)
+            result["operators_seen"] = selection["operators_seen"]
+            result["operators_used"] = selection["operators_used"]
+            return result
+
         # Hydrate evidence from graph-persisted baselines (survives SDK restarts)
         self._hydrate_evidence()
         # Apply source-based credibility inheritance (with recency modulation #122)
@@ -20911,7 +20956,13 @@ class TortoiseSDK:
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
             if not operator_ids:
-                return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
+                return _report({"iterations": 0, "converged": True,
+                                "confidences": {}, "diagnostic": "no_factors"})
+            # No BFS selection ran: the caller supplied the factor set, so the
+            # 200-operator cap does not apply to it. seen == used, truncated
+            # False — reported rather than omitted so the shape is uniform.
+            selection["operators_seen"] = len(operator_ids)
+            selection["operators_used"] = len(operator_ids)
             if require_calibration:
                 self._ensure_calibrated(
                     "compute_confidence",
@@ -20928,14 +20979,14 @@ class TortoiseSDK:
             # through BOTH the selector and ep.run.
             operator_ids, _factor_anchors = self._select_subgraph(
                 anchors, max_hops=max_hops, rel_filter=rel_filter,
-                direction=direction)
+                direction=direction, stats=selection)
             for (src, tgt, _t) in _factor_anchors:
                 operator_ids.append(src)
                 operator_ids.append(tgt)
             operator_ids = list(dict.fromkeys(operator_ids))
             if not operator_ids:
-                return {"iterations": 0, "converged": True, "confidences": {},
-                        "diagnostic": "no_factors"}
+                return _report({"iterations": 0, "converged": True,
+                                "confidences": {}, "diagnostic": "no_factors"})
             if require_calibration:
                 # #7739: scope = the run's consumed set for the selection just
                 # computed. Anchors the run consumes are already in it (they
@@ -20967,8 +21018,8 @@ class TortoiseSDK:
             self._hydrate_dirty_roots()
             roots = list(self._dirty_roots)
             if not roots:
-                return {"iterations": 0, "converged": True, "confidences": {},
-                        "diagnostic": "no_dirty_roots"}
+                return _report({"iterations": 0, "converged": True,
+                                "confidences": {}, "diagnostic": "no_dirty_roots"})
             # Bounded fail-safe pass (dream, max_hops=2) FIRST — preserves the
             # dirty-clear/retry lifecycle (#85); then the exact local pass
             # (max_hops=None). Roots are captured BEFORE the dream so the
@@ -20991,8 +21042,9 @@ class TortoiseSDK:
             iterations, converged = ep.run(roots, max_hops=None,
                                            evidence=run_evidence)
             if not ep._last_affected and not ep._last_truncated:
-                return {"iterations": iterations, "converged": converged,
-                        "confidences": {}, "diagnostic": "no_factors"}
+                return _report({"iterations": iterations, "converged": converged,
+                                "confidences": {}, "diagnostic": "no_factors"},
+                               guard_truncated=ep._last_truncated)
         confidences = {}
         proj = self._get_proj()
         # #395 (delta C): the write-back set == the run set — consume
@@ -21039,8 +21091,9 @@ class TortoiseSDK:
                         self._emit_event(
                             "ConfidenceChanged", id=cid,
                             confidence=confidences[cid]["mean"])
-        result = {"iterations": iterations, "converged": converged,
-                  "confidences": confidences}
+        result = _report({"iterations": iterations, "converged": converged,
+                          "confidences": confidences},
+                         guard_truncated=ep._last_truncated)
         # #395: the degeneration guard never aborts the interactive path — it
         # proceeds with the capped set and reports the diagnostic.
         if ep._last_truncated:

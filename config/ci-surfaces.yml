@@ -1088,6 +1088,12 @@ surfaces:
   - test_read_ledger.py
   - test_5509_name_keyed_identity_reads.py
   - test_7925_route_parity.py
+  # #6211: `tortoise/ep.py` and `tortoise/sdk.py` match no SOURCE_PATTERN, so
+  # a change to either falls to `core` — and the cap being read out of
+  # `compute_confidence`'s result is an sdk.py contract. Dual-registered with
+  # `ep` (which owns the `tortoise/analyze.py` cap these tests assert against).
+  - test_6211_ep_result_shape.py
+  - test_6211_ep_scale.py
   # #8864: the shared-name MERGE-key guard — the write-side twin of #5509/#3633.
   # `_upsert_object`/`_upsert_subject` (tortoise/projection/entities.py) key the
   # MERGE on the NAME, so a name held by 2+ carriers made `ON MATCH` stamp ONE
@@ -3364,6 +3370,16 @@ surfaces:
   - test_ep_draft_filter.py
   - test_ep_dirty_persist.py
   - test_ep_local_395.py
+  # #6211: EP at the graph's own scale — the 200-operator selection cap made
+  # VISIBLE in `compute_confidence`'s result, and the timed-out affected-
+  # subgraph hop typed (`EPSubgraphHopError`). The cap lives in
+  # `tortoise/analyze.py` (an `ep` SOURCE_PATTERN), so an analyze.py-only
+  # change must run the guards that read the cap out of the result —
+  # dual-registered with `core`, which is where `tortoise/ep.py` and
+  # `tortoise/sdk.py` changes fall (the #2938 convention: a matched surface
+  # REPLACES the core fallback, so neither arm alone covers both edits).
+  - test_6211_ep_result_shape.py
+  - test_6211_ep_scale.py
   - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   # #2500: the pre-#2490 terminal-EP backfill guard. Dual-registered with
@@ -4906,6 +4922,12 @@ durations:
   test_body_cap_sweep.py: 3.6
   test_agent_signup_idempotency.py: 3.5
   test_ep_local_395.py: 22.0
+  # #6211: locally measured on this host, docker lane, `--durations` sum of the
+  # file (shape: 10 tests / 7.6 s; scale: 4 tests / 10.7 s incl. the 3,353-claim
+  # fixture build). Both are PR-ADDED files, so the push-to-main sweep cannot
+  # have measured them yet — see the #3514 note above.
+  test_6211_ep_result_shape.py: 8.0
+  test_6211_ep_scale.py: 11.0
   test_round_trip_parity.py: 0.8
   test_longmem_rerank.py: 6.3
   test_pack_manifest_store_extraction.py: 5.2

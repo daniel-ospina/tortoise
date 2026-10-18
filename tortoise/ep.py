@@ -11,6 +11,8 @@ from __future__ import annotations  # noqa: I001
 import logging
 import math
 import random
+import re
+import time
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
 from .live import (
@@ -41,6 +43,94 @@ logger = logging.getLogger(__name__)
 _EP_GUARD_FULL_GRAPH_FRACTION = 0.5
 _EP_GUARD_FRONTIER_CAP = 200
 _EP_GUARD_MIN_GRAPH_CLAIMS = 500
+
+
+try:  # redis-py is a hard dependency of the graph lane; guard anyway (#6211)
+    from redis.exceptions import RedisError as _RedisError
+    from redis.exceptions import ResponseError as _ResponseError
+except Exception:  # pragma: no cover - import-environment guard
+    class _ResponseError(Exception):  # type: ignore[no-redef]
+        """Stand-in when redis-py is unavailable (nothing to catch)."""
+
+    class _RedisError(Exception):  # type: ignore[no-redef]
+        """Stand-in when redis-py is unavailable (nothing to catch)."""
+
+
+#: A hop whose query the graph engine ABORTED on its own timeout. Matching on
+#: the message is the only signal the engine gives: FalkorDB reports a timeout
+#: as a generic ``ResponseError: Query timed out`` (measured, TIMEOUT=1000 on
+#: falkordb/falkordb:latest), indistinguishable from a syntax/permission error
+#: except by text. Wrapped narrowly on purpose — see
+#: :meth:`TortoiseEP._hop_query` for why a non-timeout ``ResponseError`` is
+#: re-raised untouched.
+_QUERY_TIMEOUT_RE = re.compile(r"query\s+timed\s+out|query\s+timeout",
+                               re.IGNORECASE)
+
+
+class EPSubgraphHopError(_ResponseError):
+    """A hop of the affected-claim BFS could not complete (#6211).
+
+    WHY THIS EXISTS. At the graph's own scale the hop query is the part of an
+    EP pass that dies. Measured on a 3,353-claim / 160,000-edge graph: the
+    two-hop bridge ``MATCH (n)<-[r]-(op:Point)-[r2]->(m) WHERE n.id IN $ids``
+    takes 2.7 s on a second-hop frontier, so on an engine with the 1,000 ms
+    default query timeout the pass aborts after 1.1 s with
+    ``redis.exceptions.ResponseError: Query timed out`` — a bare, hop-less
+    error that escapes ``compute_confidence`` and tells the caller nothing
+    about WHERE the pass stopped. A caller could not even distinguish "this
+    graph is too big for one hop" from "this query was malformed".
+
+    This class carries the hop identity so the failure is *addressable*: a
+    caller can bound the hop (smaller seeds / fewer hops), report which hop
+    was unaffordable, or retry that hop alone.
+
+    COMPATIBILITY. It subclasses ``redis.exceptions.ResponseError`` (the
+    exception the engine actually raised), so every existing
+    ``except ResponseError:`` clause — including the retry classifier in
+    ``tortoise/retry.py`` — keeps catching it exactly as before. This is an
+    additive typing, not a changed contract.
+
+    Attributes:
+        hop:           BFS hop index within this ``_affected_claims`` call:
+                       ``0`` is the SEED neighbourhood (the same two-hop
+                       pattern, run once over the seeds BEFORE the loop — so
+                       it is usually the first query that can die), and
+                       ``1..max_hops`` are the loop's hops.
+        phase:         which half of the hop failed — ``"seed_neighbourhood"``
+                       (hop 0), ``"operator_bridge"`` (the operator-mediated
+                       two-hop pattern), or ``"direct_edge"`` (the
+                       operator-less IMPL|NAND hop).
+        frontier_size: how many claim ids the failed hop was expanding FROM.
+                       This is the quantity that drives the hop's cost, so it
+                       is the number an operator needs to bound the pass.
+        elapsed_s:     wall time the failed query consumed before the engine
+                       aborted it (``None`` when unknown).
+    """
+
+    def __init__(self, *, hop: int, phase: str, frontier_size: int,
+                 elapsed_s: float | None = None, detail: str = "") -> None:
+        self.hop = hop
+        self.phase = phase
+        self.frontier_size = frontier_size
+        self.elapsed_s = elapsed_s
+        self.detail = detail
+        took = "" if elapsed_s is None else f" after {elapsed_s:.2f}s"
+        message = (
+            f"EP affected-subgraph BFS: hop {hop} ({phase}) could not complete"
+            f"{took} over a {frontier_size}-claim frontier — the graph engine "
+            f"aborted the hop query (query timed out). The affected-claim "
+            f"expansion is incomplete: narrow the pass (fewer seeds or fewer "
+            f"max_hops) or raise the engine's query TIMEOUT."
+        )
+        if detail:
+            message = f"{message} [engine: {detail}]"
+        super().__init__(message)
+
+
+def _is_query_timeout(exc: BaseException) -> bool:
+    """True when *exc* is the engine's own query-timeout abort."""
+    return isinstance(exc, _RedisError) and bool(
+        _QUERY_TIMEOUT_RE.search(str(exc)))
 
 
 class TortoiseEP:
@@ -108,10 +198,37 @@ class TortoiseEP:
         self._run_ep_version: int = -1
         self._flush_skipped: bool = False
 
-    def _graph_ep_version(self) -> int:
-        """Current graph-wide EP epoch (the :EpMeta node's ep_version).
+    def _hop_query(self, cypher: str, params: dict, *, hop: int, phase: str,
+                   frontier_size: int) -> list:
+        """Run one affected-subgraph hop query, typing an engine timeout (#6211).
 
-        0 on a graph that has never dirtied EP (no EpMeta node yet)."""
+        A hop that the engine ABORTS on its own timeout used to escape as a
+        bare ``redis.exceptions.ResponseError: Query timed out`` — no hop, no
+        frontier size, indistinguishable from a malformed query. Here it becomes
+        :class:`EPSubgraphHopError`, which says WHICH hop failed and over how
+        large a frontier, while remaining a ``ResponseError`` subclass so every
+        existing ``except`` clause (and ``tortoise/retry.py``'s classifier) is
+        unaffected.
+
+        ONLY timeouts are wrapped, deliberately. A ``ResponseError`` that is not
+        a timeout (WRONGTYPE, a malformed recipe, a permission refusal) is a
+        DIFFERENT failure — it is not "this hop was too big", the remedy is not
+        "narrow the pass", and ``retry.py`` classifies some of them (MISCONF,
+        write-lock, graph-abort) into retry arms that a rewriting wrapper would
+        hide behind a new message. Those re-raise untouched.
+        """
+        started = time.perf_counter()
+        try:
+            return self.g.query(cypher, params=params).result_set
+        except _ResponseError as exc:
+            if not _is_query_timeout(exc):
+                raise
+            raise EPSubgraphHopError(
+                hop=hop, phase=phase, frontier_size=frontier_size,
+                elapsed_s=time.perf_counter() - started, detail=str(exc),
+            ) from exc
+
+    def _graph_ep_version(self) -> int:
         rows = self.g.query(
             "MATCH (m:EpMeta) RETURN m.ep_version").result_set
         if not rows:
@@ -1078,8 +1195,10 @@ class TortoiseEP:
                         f"AND {_live_only('m.status', include_draft)} "
                         "RETURN DISTINCT n.id, m.id"
                     ):
-                        nbr_rows.extend(self.g.query(
-                            _qn, params={"ids": list(frontier)}).result_set)
+                        nbr_rows.extend(self._hop_query(
+                            _qn, {"ids": list(frontier)}, hop=hops,
+                            phase="operator_bridge",
+                            frontier_size=len(frontier)))
                     for _nid, mid in nbr_rows:
                         if mid not in affected:
                             affected.add(mid)
@@ -1112,8 +1231,10 @@ class TortoiseEP:
                         "AND b.op_type IS NULL "
                         "RETURN DISTINCT a.id, b.id"
                     ):
-                        dir_rows.extend(self.g.query(
-                            _qa, params={"ids": list(frontier)}).result_set)
+                        dir_rows.extend(self._hop_query(
+                            _qa, {"ids": list(frontier)}, hop=hops,
+                            phase="direct_edge",
+                            frontier_size=len(frontier)))
                     for _aid, bid in dir_rows:
                         if bid not in affected:
                             affected.add(bid)
@@ -1247,8 +1368,13 @@ class TortoiseEP:
         queries = [template.replace("{label}", label)]
         rows: list = []
         for _q in queries:
-            rows.extend(self.g.query(
-                _q, params={"ids": list(node_ids)}).result_set)
+            # #6211: this is the SEED neighbourhood — the expansion that runs
+            # before the BFS loop makes its first hop (hop index 0). It is the
+            # same two-hop pattern, so it is the same failure: on a dense graph
+            # it is the FIRST query that can exceed the engine's query timeout.
+            rows.extend(self._hop_query(
+                _q, {"ids": list(node_ids)}, hop=0,
+                phase="seed_neighbourhood", frontier_size=len(node_ids)))
         return [r[0] for r in rows]
 
     def _affected_factors(self, affected_claims: set[str],

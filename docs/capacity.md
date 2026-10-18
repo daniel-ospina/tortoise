@@ -211,7 +211,8 @@ curve, and one of those guards has a **measured failure threshold**.
 | Dimension | Value | Source |
 |---|---|---|
 | EP affected-claim frontier guard (new **claims** per hop) | **200** (`_EP_GUARD_FRONTIER_CAP`) | `tortoise/ep.py` |
-| Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning | `tortoise/analyze.py` |
+| Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning — and reported in the caller's RESULT as `truncated` / `operators_seen` / `operators_used` since #6211 | `tortoise/analyze.py` |
+| EP affected-subgraph hop that the engine aborts on its own query timeout | raised as **`EPSubgraphHopError`** (a `ResponseError` subclass) carrying the hop index, phase and frontier size (#6211) | `tortoise/ep.py` |
 | EP degenerate-run guard | fires when the pass has collected **≥ 50%** of the graph's claims, on graphs of **≥ 500** claims | `tortoise/ep.py` |
 | Dreaming per-pass window budget (stale-first) | **200** operators (`TORTOISE_DREAM_WINDOW_BUDGET`) | `tortoise/dream.py` |
 | Dreaming full-mode operator cap (`dream_all`) | **200,000** (`max_total_operators`) | `tortoise/dream.py` |
@@ -233,6 +234,31 @@ This is why the frontier guard exists, and why it is a *bound* rather than an
 optimisation: the guard trades an exact closure for staying inside the store's
 query budget. The graph instruction to "add your findings as you go" is what
 surfaced it — the writes succeeded and the calibration could not run.
+
+**What #6211 changed (the reporting half).** Two of the three failure modes are
+now visible to a programmatic caller instead of to a human reading stderr:
+
+* The 200-operator cap travels in `compute_confidence`'s **result**
+  (`truncated`, `operators_seen`, `operators_used`). Before it, a capped pass
+  and a full-graph pass both returned `{iterations, converged, confidences}` with
+  `converged: true` — a published ranking with 0.0067 margins came from a capped
+  pass and nothing in the result said so. The cap itself is deliberately NOT
+  raised: the truncated topology is the honest problem, not the bound.
+* A hop the engine aborts on its own query timeout raises `EPSubgraphHopError`
+  (still a `redis.exceptions.ResponseError`, so existing handlers are
+  unaffected), naming the hop index, the phase (`seed_neighbourhood` /
+  `operator_bridge` / `direct_edge`) and the frontier size it was expanding from.
+  Measured on a 3,353-claim / 160,000-edge graph with the engine's 1,000 ms
+  timeout posture: the bridge query aborted after **1.00 s** over a
+  **188–257-claim** frontier, and the pass failed after 1.1–2.9 s.
+* **Still open — the clearing path.** `ep_dirty` is cleared only by the dreaming
+  adapters' `_sweep_dirty_roots` (epoch-guarded, convergence-gated, and scoped to
+  the pass's `affected` set). The targeted fast path
+  (`compute_confidence(factors=…)` / `compute_confidence(anchors=…)`) never runs
+  it: measured, a converged targeted pass over three freshly-written claims left
+  all three `ep_dirty`, while a no-arg pass on the same graph cleared them. So a
+  writer that follows the documented "compute confidence for my claims" call has
+  **no** API that clears its own flags — #6211's second failure mode, still open.
 
 ### The full-mode cap is a refusal, not a silent truncation
 
