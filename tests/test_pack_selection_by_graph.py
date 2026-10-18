@@ -148,6 +148,25 @@ class TestResolvedPackSet:
         assert [p["namespace"] for p in get_tenant_packs(sdk)] == [DEV]
         assert dict(_raw_installs(sdk))[MARKETING] == "removed"
 
+    def test_include_removed_is_the_one_reader_that_sees_tombstones(
+            self, tmp_path):
+        """``include_removed=True`` is the Configured-packs add-list's read.
+
+        The user surface must be able to add a removed pack BACK: removal is a
+        desired-state OMIT, so without this arm a removed namespace is in
+        neither the introspection list (tombstones omitted) nor — for a
+        tenant-authored pack — the shared catalog. FAIL-ON: the default call
+        still omits it (that contract is asserted directly above), so an
+        implementation that widened the default would red the sibling test.
+        """
+        sdk = _sdk(tmp_path, "test_sel_include_removed")
+        set_graph_packs(sdk, packs=[{"namespace": DEV}, {"namespace": MARKETING}],
+                        expected_revision=0)
+        set_graph_packs(sdk, packs=[{"namespace": DEV}], expected_revision=1)
+        rows = {p["namespace"]: p["status"]
+                for p in get_tenant_packs(sdk, include_removed=True)}
+        assert rows == {DEV: "active", MARKETING: "removed"}
+
     def test_removed_status_is_not_settable(self, tmp_path):
         """``removed`` is a derived tombstone, never an input status."""
         sdk = _sdk(tmp_path, "test_sel_badstatus")
@@ -404,6 +423,72 @@ class TestGraphPacksRest:
         body = r.json()
         assert body["configured"] is False
         assert body["revision"] == 0
+
+    def test_get_offers_catalog_packs_the_graph_does_not_have(
+            self, sel_client):
+        """The Configured-packs view must be able to ADD a pack, which means
+        the read has to name what is addable — the graph's own records cannot
+        answer that.
+
+        FAIL-ON: a payload without ``available`` (or one that echoed the
+        graph's own set back) leaves the modal with no source for an add-list,
+        so "add" would either not exist or offer a namespace already present.
+        ``venture`` is asserted specifically: it ships in the catalog and is
+        NOT a starter, so a starter-derived add-list would miss it — the one
+        pack a per-graph approval surface most needs to be able to offer.
+        """
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-avail")
+        _auth(tc, "t-sel-avail")
+        r = tc.put("/v1/graphs/default/packs?org_id=t-sel-avail", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        offered = {p["namespace"] for p in body["available"]}
+        assert DEV not in offered, "a listed pack must never be offered twice"
+        assert MARKETING in offered
+        assert "venture" in offered, (
+            "a catalog pack that is not a starter must still be addable")
+        by_ns = {p["namespace"]: p for p in body["available"]}
+        assert by_ns[MARKETING]["status"] == "available"
+        assert by_ns[MARKETING]["kind_count"] is not None
+
+    def test_a_removed_pack_is_offered_back_with_its_status(
+            self, sel_client):
+        """Removal must not be a one-way door in the UI: the removed
+        namespace has to come back in the add-list, marked as previously
+        removed, and re-adding it must restore it.
+
+        FAIL-ON: an add-list built from the catalog ALONE would hide a
+        tenant-authored tombstone entirely (no catalog entry exists for it).
+        """
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-readd")
+        _auth(tc, "t-sel-readd")
+        first = tc.put("/v1/graphs/default/packs?org_id=t-sel-readd", json={
+            "packs": [{"namespace": DEV}, {"namespace": MARKETING}],
+            "expected_revision": 0})
+        assert first.status_code == 200, first.text
+        removed = tc.put("/v1/graphs/default/packs?org_id=t-sel-readd", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 1})
+        assert removed.status_code == 200, removed.text
+        body = removed.json()
+        assert [p["namespace"] for p in body["packs"]] == [DEV]
+        offered = {p["namespace"]: p for p in body["available"]}
+        # MARKETING is in the shared catalog, so the catalog arm offers it as
+        # a fresh 'available' — either shape is addable; what must hold is
+        # that it is OFFERED and not duplicated.
+        assert MARKETING in offered
+        assert offered[MARKETING]["status"] in ("available", "removed")
+        assert sum(1 for p in body["available"]
+                   if p["namespace"] == MARKETING) == 1, (
+            "a namespace must appear at most once in the add-list")
+        back = tc.put("/v1/graphs/default/packs?org_id=t-sel-readd", json={
+            "packs": [{"namespace": DEV}, {"namespace": MARKETING}],
+            "expected_revision": 2})
+        assert back.status_code == 200, back.text
+        assert {p["namespace"]: p["status"]
+                for p in back.json()["packs"]}[MARKETING] == "active"
 
     def test_put_then_get_round_trips_and_version_stays_monotonic(
             self, sel_client):

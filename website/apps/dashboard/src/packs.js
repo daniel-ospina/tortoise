@@ -1,0 +1,274 @@
+// packs.js — #2728 Configured packs: the pure derivations behind the Settings
+// home and the Configured-packs modal.
+//
+// main.jsx has no component harness (the dashboard's runner is
+// `node --test src/*.test.js`), so every decision the pack surface makes that
+// can be a pure function lives HERE and is unit-tested in packs.test.js. The
+// render/wiring half is pinned separately by packsModalTripwire.test.js.
+//
+// Server contract (GET/PUT /v1/graphs/{graph_id}/packs, verified on 9c2137470):
+//   GET → {graph_id, revision, configured,
+//          packs: [{namespace, name, version, tier, description, status,
+//                   source, installed_at, kind_count}],
+//          available: [{namespace, name, version, tier, description,
+//                       kind_count, status: 'available'|'removed'}]}
+//   PUT body → {packs: [{namespace, status: 'active'|'disabled'}],
+//               expected_revision: <int, REQUIRED>}
+//   `status: 'removed'` is NEVER an input — omission from `packs` is what
+//   tombstones a namespace, which is why the draft is the whole desired set.
+//
+// `configured: false` is NOT "no packs": it means the graph was never
+// explicitly configured, so it still resolves to the legacy catalog union
+// (#2714 indicator 3). The surface says that in words — a user must not read
+// "5 packs listed" as "5 packs enforced".
+
+// The Settings home's heading id. #3890's deep-link contract
+// (resolveSectionHash/focusDeepLinkTarget) works off `settings-*-heading`, so
+// the id is what makes the home addressable from elsewhere in the app.
+export const PACK_SETTINGS_SECTION_ID = 'settings-packs-heading'
+
+// One sentence per status, shared by the table and the consequence note — ONE
+// vocabulary, so the row's badge and the copy under the table cannot drift.
+export const PACK_STATUS_LABEL = Object.freeze({
+  active: 'Active',
+  disabled: 'Off',
+  removed: 'Removed',
+  available: 'Available',
+})
+
+// Consequence copy, verbatim from #2728's UX outline. Disable is the primary
+// verb (disable-first): it preserves the data and stops new mints; removal is
+// the stronger statement and is described as such.
+export const PACK_CONSEQUENCE = Object.freeze({
+  enable: "New extraction on this graph can mint this pack's kinds.",
+  disable: 'Stops new classification into this pack\u2019s kinds. Memories already extracted stay searchable.',
+  remove: 'This pack is no longer approved for this graph. Memories already extracted from it are kept.',
+  add: "New extraction on this graph can mint this pack's kinds.",
+  unconfigured: 'This graph has never been configured, so it still uses the full pack catalog. Adding or removing a pack here pins this graph to the set you save.',
+})
+
+function asRows(body) {
+  return Array.isArray(body && body.packs) ? body.packs : []
+}
+
+function asAvailable(body) {
+  return Array.isArray(body && body.available) ? body.available : []
+}
+
+// `kind_count` is best-effort server-side (a registry failure omits it). Never
+// render NaN, never render a fabricated 0 — `null` is the honest "unknown".
+export function kindCountLabel(n) {
+  if (n == null || Number.isNaN(Number(n))) return '—'
+  const v = Number(n)
+  return `${v} kind${v === 1 ? '' : 's'}`
+}
+
+// Source of the install: 'starter' (shipped, seeded) vs anything else
+// ('custom'/'manual'). The modal distinguishes them because "remove" means
+// something different for a shipped namespace than for one the team authored.
+export function sourceLabel(source) {
+  const s = String(source || '').toLowerCase()
+  if (s === 'starter') return 'Starter'
+  if (s === 'custom') return 'Custom'
+  return 'Manual'
+}
+
+// Rows for the table: status-first (a pack that is OFF must not hide below the
+// fold), then namespace. Name is display-only.
+export function packRows(body) {
+  const rank = { active: 0, disabled: 1 }
+  return asRows(body)
+    .slice()
+    .sort((a, b) => {
+      const ra = rank[a && a.status] != null ? rank[a.status] : 2
+      const rb = rank[b && b.status] != null ? rank[b.status] : 2
+      if (ra !== rb) return ra - rb
+      return String(a.namespace).localeCompare(String(b.namespace))
+    })
+    .map((p) => ({
+      namespace: p.namespace,
+      name: p.name || p.namespace,
+      version: p.version == null ? '—' : String(p.version),
+      status: p.status === 'disabled' ? 'disabled' : 'active',
+      statusLabel: PACK_STATUS_LABEL[p.status === 'disabled' ? 'disabled' : 'active'],
+      source: p.source || 'starter',
+      sourceLabel: sourceLabel(p.source),
+      kindCount: p.kind_count == null ? null : Number(p.kind_count),
+      kindCountLabel: kindCountLabel(p.kind_count),
+      description: p.description || '',
+    }))
+}
+
+// Add-list: what the user may add. A namespace already listed is never
+// offered (the PUT is a full replace, so a duplicate would be a no-op at best
+// and a 422 duplicate-namespace at worst). A tombstone keeps its 'removed'
+// marker so the row can say "was removed" instead of pretending it is new.
+export function addablePacks(body) {
+  const listed = new Set(asRows(body).map((p) => p.namespace))
+  return asAvailable(body)
+    .filter((p) => p && p.namespace && !listed.has(p.namespace))
+    .slice()
+    .sort((a, b) => String(a.namespace).localeCompare(String(b.namespace)))
+    .map((p) => ({
+      namespace: p.namespace,
+      name: p.name || p.namespace,
+      version: p.version == null ? '—' : String(p.version),
+      kindCountLabel: kindCountLabel(p.kind_count),
+      wasRemoved: p.status === 'removed',
+      label: `${p.name || p.namespace} (${p.namespace})${p.status === 'removed' ? ' — was removed' : ''}`,
+    }))
+}
+
+// "2 of 6 packs on this graph" — the count line. `configured === false` is
+// stated as a caveat, never as an equivalent state: an unconfigured graph
+// resolves to the catalog union, so a count here would misdescribe what the
+// graph actually enforces.
+export function packCountLine(body) {
+  const rows = asRows(body)
+  const active = rows.filter((p) => p.status !== 'disabled').length
+  const off = rows.length - active
+  const parts = [`${active} active pack${active === 1 ? '' : 's'}`]
+  if (off) parts.push(`${off} off`)
+  const line = parts.join(' \u00b7 ')
+  return body && body.configured === false
+    ? `Not configured yet \u2014 the full catalog applies (${line}).`
+    : `${line}.`
+}
+
+// The graph selector's option order: the DEFAULT graph first (it is the
+// organization's original graph and the one every team has), then custom
+// graphs by name. Mirrors the Graphs tab's default-first convention.
+export function selectorGraphs(graphs) {
+  const rows = Array.isArray(graphs) ? graphs.filter((g) => g && g.graph_id) : []
+  const isDefault = (g) => g.kind === 'default'
+  return rows.slice().sort((a, b) => {
+    const da = isDefault(a) ? 0 : 1
+    const db = isDefault(b) ? 0 : 1
+    if (da !== db) return da - db
+    return String(a.name || a.graph_id).localeCompare(String(b.name || b.graph_id))
+  })
+}
+
+// Which graph the home selects on mount: the default graph when the org has
+// one, else the first row. `null` = the org has no graphs at all (the home
+// then renders its empty state instead of a dead selector).
+export function defaultPacksGraphId(graphs) {
+  const rows = selectorGraphs(graphs)
+  return rows.length ? rows[0].graph_id : null
+}
+
+export function graphLabel(graph) {
+  if (!graph) return 'this graph'
+  return graph.name || graph.graph_id
+}
+
+// ── the draft (what the user is about to save) ────────────────────────────
+//
+// The API is a FULL desired-state replace, so the modal cannot PATCH one row:
+// it holds the complete set and PUTs it. That is also what makes "remove" a
+// real edit rather than a hidden DELETE, and what makes one save one audit
+// record with one revision bump.
+
+export function draftFromBody(body) {
+  return packRows(body).map((r) => ({ namespace: r.namespace, status: r.status }))
+}
+
+export function draftStatus(draft, namespace) {
+  const row = (draft || []).find((d) => d.namespace === namespace)
+  return row ? row.status : null
+}
+
+// Toggle active <-> disabled. A namespace not in the draft is a no-op (the
+// pending `status` must never be invented client-side).
+export function toggleDraftStatus(draft, namespace) {
+  return (draft || []).map((d) => (d.namespace === namespace
+    ? { ...d, status: d.status === 'disabled' ? 'active' : 'disabled' }
+    : d))
+}
+
+export function removeFromDraft(draft, namespace) {
+  return (draft || []).filter((d) => d.namespace !== namespace)
+}
+
+export function addToDraft(draft, namespace) {
+  if (!namespace) return draft || []
+  if ((draft || []).some((d) => d.namespace === namespace)) return draft || []
+  return [...(draft || []), { namespace, status: 'active' }]
+}
+
+// One PUT body. `expected_revision` is required by the server; passing it
+// through from the LAST READ is the whole optimistic-concurrency contract —
+// a caller that forgot it would get a 422, which is why this function takes
+// the revision as an argument rather than defaulting it to 0.
+export function packSaveBody(draft, revision) {
+  return {
+    packs: (draft || []).map((d) => ({
+      namespace: d.namespace,
+      status: d.status === 'disabled' ? 'disabled' : 'active',
+    })),
+    expected_revision: Number(revision) || 0,
+  }
+}
+
+// Dirty check so the Save button is honest (a no-op PUT keeps the revision —
+// but a UI that offers "Save" when nothing changed invites a pointless audit
+// record and a needless conflict window).
+export function draftIsDirty(body, draft) {
+  const before = packSaveBody(draftFromBody(body), body && body.revision)
+  const after = packSaveBody(draft, body && body.revision)
+  const key = (b) => b.packs.map((p) => `${p.namespace}:${p.status}`).sort().join('|')
+  return key(before) !== key(after)
+}
+
+// ── error states ──────────────────────────────────────────────────────────
+//
+// The modal must render a DISTINCT state per failure, never one generic banner:
+// a 409 is reload-and-retry (the set moved under you), a 403 is read-only (your
+// role), a 503 is the catalog being unavailable (transient, retry later), and a
+// 404 means the graph is gone (close the modal). The machine-readable code is
+// read from `err.code` (main.jsx's api() promotes a structured detail's `code`)
+// or from `err.status`.
+export const PACK_ERROR_KINDS = Object.freeze(['conflict', 'forbidden', 'unavailable', 'missing', 'error'])
+
+export function packErrorState(err) {
+  const status = err && err.status
+  const code = (err && err.code) || ''
+  if (code === 'PACK_SET_REVISION_CONFLICT' || status === 409) {
+    return {
+      kind: 'conflict',
+      message: 'This graph\u2019s packs changed since you opened this dialog. Reload to see the current set, then make your change again.',
+    }
+  }
+  if (code === 'GRAPH_SCOPED_TEAM_SURFACE' || status === 403) {
+    return {
+      kind: 'forbidden',
+      message: 'Only an owner or admin can change this graph\u2019s packs.',
+    }
+  }
+  if (status === 404) {
+    return {
+      kind: 'missing',
+      message: 'This graph no longer exists \u2014 it may have been deleted.',
+    }
+  }
+  if (status === 503 || status === 429) {
+    return {
+      kind: 'unavailable',
+      message: 'The pack catalog is unavailable right now. Try again in a moment.',
+    }
+  }
+  return {
+    kind: 'error',
+    message: (err && err.message) || 'Couldn\u2019t load this graph\u2019s packs.',
+  }
+}
+
+// A retained-revision save can succeed while the graph's set was ALREADY
+// changed by an out-of-band writer (see docs/EXPANSION_PACKS.md: the marker
+// does not move for `POST /v1/packs/manifests` or import restore). The modal
+// therefore re-reads after a save and says so when the revision it saved is
+// not the revision it now sees.
+export function revisionMovedAfterSave(savedRevision, body) {
+  if (!body || body.revision == null) return false
+  return Number(body.revision) !== Number(savedRevision)
+}

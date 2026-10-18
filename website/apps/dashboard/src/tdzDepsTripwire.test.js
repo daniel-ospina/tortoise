@@ -404,6 +404,9 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   "",
   "",
   "currentOrgId",
+  // #2728: the Configured-packs home's summary read (Settings tab + the
+  // selected graph + the graph list that supplies the initial default).
+  "tab, packsHomeGraphId, graphs, currentOrgId",
   "overviewDataComplete, overviewAnnounced",
   "tab, welcomeMode, team",
   "overviewSkeletonLive, frameStale",

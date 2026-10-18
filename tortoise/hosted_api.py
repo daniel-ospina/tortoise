@@ -18929,28 +18929,52 @@ async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | Non
     return None
 
 
-def _pack_kind_counts() -> dict[str, int]:
-    """#2728 — namespace → declared kind count, for the Configured-packs view.
+def _pack_catalog_rows() -> dict[str, dict]:
+    """#2728 — the shared catalog, as Configured-packs rows.
 
     Best-effort: the catalog is read-only for tenants and a registry failure
-    must DEGRADE the view (count omitted), never 503 a read.
+    must DEGRADE the view (counts omitted, add-list empty), never 503 a read
+    that already has the graph's own pack set in hand.
     """
     try:
         from tortoise.domain_loader import _get_registry
         reg = _get_registry()
         packs = getattr(reg, "packs", None) or {}
-        return {
-            ns: (len(p.object_kinds) + len(p.event_kinds) + len(p.point_kinds))
-            for ns, p in packs.items()
-        }
     except Exception:
         return {}
+    out: dict[str, dict] = {}
+    for ns, p in packs.items():
+        try:
+            out[ns] = {
+                "namespace": ns,
+                "name": getattr(p, "name", ns),
+                "version": getattr(p, "version", None),
+                "tier": getattr(p, "tier", "free"),
+                "description": getattr(p, "description", "") or "",
+                "kind_count": (len(getattr(p, "object_kinds", ()) or ())
+                               + len(getattr(p, "event_kinds", ()) or ())
+                               + len(getattr(p, "point_kinds", ()) or ())),
+            }
+        except Exception:  # noqa: BLE001 — one odd pack must not blank the list
+            continue
+    return out
 
 
 def _graph_packs_view(gsdk) -> tuple[dict, list[dict]]:
-    """Read the per-graph state in ONE thread hop (blocking DB reads)."""
+    """Read the per-graph state in ONE thread hop (blocking DB reads).
+
+    ``include_removed=True`` keeps TOMBSTONED namespaces in the row list so
+    the Configured-packs view can offer a removed pack back. Removal is not a
+    one-way door in the UI: it is a full desired-state replace, so a namespace
+    missing from the client's next PUT would otherwise be unreachable (the
+    introspection list deliberately omits tombstones, and a TENANT-authored
+    pack is not in the shared catalog either — so neither list would carry
+    it). ``_packs_payload`` splits the rows into the visible set and the
+    add-list.
+    """
     from tortoise.pack_state import get_tenant_packs, resolved_pack_set
-    return resolved_pack_set(gsdk).to_dict(), get_tenant_packs(gsdk)
+    return (resolved_pack_set(gsdk).to_dict(),
+            get_tenant_packs(gsdk, include_removed=True))
 
 
 def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
@@ -18966,15 +18990,44 @@ def _graph_packs_view_for(namespace: str) -> tuple[dict, list[dict]]:
     return _graph_packs_view(_make_sdk(graph_name=namespace))
 
 
-def _packs_payload(graph_id: str, resolved: dict, packs: list[dict]) -> dict:
-    counts = _pack_kind_counts()
+def _packs_payload(graph_id: str, resolved: dict,
+                   rows: list[dict]) -> dict:
+    """Shape the read for the Configured-packs view.
+
+    ``packs`` is the graph's approved set (``active``/``disabled``);
+    ``available`` is what the user may ADD: the shared catalog plus this
+    graph's own tombstones, minus namespaces already listed. Keeping the two
+    in one response is what lets the modal render an honest add-list without
+    a second round trip — and lets a REMOVED pack be added back.
+    """
+    catalog = _pack_catalog_rows()
+    packs = [p for p in rows if p.get("status") != "removed"]
+    removed = [p for p in rows if p.get("status") == "removed"]
+    listed = {p["namespace"] for p in packs}
     for p in packs:
-        p["kind_count"] = counts.get(p["namespace"])
+        meta = catalog.get(p["namespace"]) or {}
+        p["kind_count"] = meta.get("kind_count")
+        if not p.get("description"):
+            p["description"] = meta.get("description", "")
+    # Add-list: catalog rows first (the shipped vocabulary), then the graph's
+    # own tombstones so a tenant-authored pack is re-addable too. A tombstone
+    # that IS in the catalog is already offered by the catalog arm.
+    available = [dict(row, status="available")
+                 for ns, row in sorted(catalog.items()) if ns not in listed]
+    seen = {row["namespace"] for row in available}
+    for row in sorted(removed, key=lambda r: r["namespace"]):
+        if row["namespace"] in listed or row["namespace"] in seen:
+            continue
+        meta = catalog.get(row["namespace"]) or {}
+        available.append({**row, "status": "removed",
+                          "kind_count": meta.get("kind_count"),
+                          "description": meta.get("description", "")})
     return {
         "graph_id": graph_id,
         "revision": resolved["revision"],
         "configured": resolved["configured"],
         "packs": packs,
+        "available": available,
     }
 
 
@@ -19013,14 +19066,14 @@ async def _graph_packs_read(graph_id: str, org_id: str, key_ctx: dict) -> dict:
                         "message": "A graph-scoped key can only read its own "
                                    "graph's packs."})
     try:
-        resolved, packs = await asyncio.to_thread(
+        resolved, rows = await asyncio.to_thread(
             _graph_packs_view_for, namespace)
     except Exception:
         _logger.exception("pack read failed for team %s graph %s",
                           org_id, graph_id)
         raise HTTPException(status_code=503,
                             detail="Pack catalog unavailable") from None
-    return _packs_payload(graph_id, resolved, packs)
+    return _packs_payload(graph_id, resolved, rows)
 
 
 @app.get("/v1/graphs/{graph_id}/packs")
@@ -19095,7 +19148,7 @@ async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
         UnknownPackNamespace,
     )
     try:
-        resolved, packs = await asyncio.to_thread(_write)
+        resolved, rows = await asyncio.to_thread(_write)
     except PackRevisionConflict as exc:
         raise HTTPException(
             status_code=409,
@@ -19128,22 +19181,27 @@ async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
 
     # One audit record per change, mirroring the key-lane convention
     # (actor = the key's owner, detail.via = 'api_key') so a key-driven write
-    # is attributable and never reads as a human session action.
+    # is attributable and never reads as a human session action. The detail is
+    # the graph's APPROVED set as the user sees it (a namespace's absence from
+    # one record and presence in its neighbour is what a removal looks like —
+    # ``removed`` rows are tombstones the read carries only for the add-list).
     if key_ctx.get("key_id"):
         actor = key_ctx.get("created_by")
         detail = {"via": "api_key", "key_id": key_ctx.get("key_id"),
                   "revision": resolved["revision"],
-                  "packs": [{"namespace": p["namespace"],
-                             "status": p["status"]} for p in packs]}
+                  "packs": [{"namespace": r["namespace"],
+                             "status": r["status"]} for r in rows
+                            if r["status"] != "removed"]}
     else:
         actor = key_ctx.get("session_user_id")
         detail = {"via": "session", "revision": resolved["revision"],
-                  "packs": [{"namespace": p["namespace"],
-                             "status": p["status"]} for p in packs]}
+                  "packs": [{"namespace": r["namespace"],
+                             "status": r["status"]} for r in rows
+                            if r["status"] != "removed"]}
     await _async_audit(request, org_id, "graph_packs_update",
                        resource_type="graph", resource_id=graph_id,
                        actor_user_id=actor, detail=detail)
-    return _packs_payload(graph_id, resolved, packs)
+    return _packs_payload(graph_id, resolved, rows)
 
 
 @app.put("/v1/graphs/{graph_id}/packs")
