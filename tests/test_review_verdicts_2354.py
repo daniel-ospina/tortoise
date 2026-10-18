@@ -582,25 +582,40 @@ def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
     )
 
 
-def _proxied_projection(sdk, monkeypatch, *, fail_on=None, reverse_fanout=False):
+# Markers of the id fan-out read's RETURN shape. Keyed on the projection rather
+# than on whole-statement equality with the shared constant: an added
+# `ORDER BY`/`WHERE` must not silently disable the adversarial ordering below.
+_FANOUT_MARKERS = ("n.is_operator", "coalesce(n.outdated")
+
+
+def _proxied_projection(sdk, monkeypatch, *, fail_on=None, worst_order=False):
     """Route every ``sdk._get_proj()`` read through a proxy for ONE statement.
 
     ``fail_on`` makes the statement whose Cypher contains that substring raise;
-    ``reverse_fanout`` reverses the row order of the id fan-out read. Both are
-    used to pin behaviour a healthy single-node graph cannot express: the
-    graph's row order is NOT a contract (#7822), so an order-independent answer
-    has to be measured against a deliberately adversarial order.
+    ``worst_order`` re-orders the id fan-out read's rows so every non-live row
+    precedes the live ones. Both are used to pin behaviour a healthy single-node
+    graph cannot express: the graph's row order is NOT a contract (#7822), so an
+    order-independent answer has to be measured against a deliberately
+    adversarial order — and the order is FORCED here, never inherited from the
+    server followed by a reversal (a reversal only produces the worst order when
+    the server happens to return the live row first).
+
+    Returns the proxy; ``proxy.g.reordered`` counts the fan-out reads it
+    re-ordered, so a test can prove its own adversary was applied.
     """
     real = sdk._get_proj()
 
     class _G:
+        reordered = 0
+
         def query(self, cypher, params=None, **kwargs):
             if fail_on is not None and fail_on in cypher:
                 raise RuntimeError("graph unavailable")
             res = real.g.query(cypher, params=params, **kwargs)
-            if reverse_fanout and cypher.strip() == LIFECYCLE_FANOUT_QUERY.strip():
-                return types.SimpleNamespace(
-                    result_set=list(reversed(list(res.result_set))))
+            if worst_order and all(m in cypher for m in _FANOUT_MARKERS):
+                self.reordered += 1
+                return types.SimpleNamespace(result_set=sorted(
+                    res.result_set, key=lambda row: row[1] == "live"))
             return res
 
     class _P:
@@ -610,7 +625,9 @@ def _proxied_projection(sdk, monkeypatch, *, fail_on=None, reverse_fanout=False)
         def __getattr__(self, name):
             return getattr(real, name)
 
-    monkeypatch.setattr(sdk, "_get_proj", lambda: _P())
+    proxy = _P()
+    monkeypatch.setattr(sdk, "_get_proj", lambda: proxy)
+    return proxy
 
 
 def test_an_unreadable_classification_read_leaves_the_review_write_alone(
@@ -673,16 +690,20 @@ def test_a_failed_rollback_logs_and_does_not_mask_the_promote_error(
 
 def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
         sdk, monkeypatch):
-    """ANY live node carrying the id means the CAS landed (#7822).
+    """A verdict read off ``rows[0]`` would be server-row-order dependent (#7822).
 
     Point ids are NOT unique — ``create_point(..., id=X)`` twice is a tested,
     graph-reachable shape — and a bare ``MATCH (n:Point {id:$id})`` binds every
-    node carrying the id. A verdict read off ``rows[0]`` is therefore
-    server-row-order dependent, and in THIS path the wrong answer is
-    destructive: it erases the review stamps of a promotion that landed. The
-    duplicate is minted from inside the failing tail so the pre-write reads
-    (which are single-node by construction here) cannot see it, and the fan-out
-    read's rows are reversed so the worst order is the one measured.
+    node carrying the id. Reading only the first row therefore makes the answer
+    depend on which node the server happens to return first, and in THIS path
+    the wrong answer is destructive: it erases the review stamps of a promotion
+    that landed. The scan is over the whole fan-out instead.
+
+    The duplicate is minted from inside the failing tail so the pre-write reads
+    (which are single-node by construction here) cannot see it, and the proxy
+    FORCES the worst order — every non-live row ahead of the live ones — rather
+    than reversing whatever the server returned, so the order that would defeat
+    a first-row read is the one measured, on every run.
     """
     _seed_candidate(sdk, "rv-a", "rv-prior")
     proj = sdk._get_proj()
@@ -695,16 +716,21 @@ def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
         raise RuntimeError("post-CAS tail failed")
 
     monkeypatch.setattr(sdk, "_mark_dirty", boom)
-    _proxied_projection(sdk, monkeypatch, reverse_fanout=True)
+    proxy = _proxied_projection(sdk, monkeypatch, worst_order=True)
 
     with pytest.raises(RuntimeError, match="post-CAS"):
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
 
+    assert proxy.g.reordered == 1, (
+        "the adversarial order must be applied to the fan-out read, or this "
+        "test silently stops testing row-order independence")
     rows = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, n.temporal_reviewed "
         "ORDER BY n.status", params={"id": "rv-a"}).result_set
+    assert sorted(r[0] for r in rows) == ["live", "retracted"], (
+        f"fixture precondition: the duplicate sibling must exist and this "
+        f"CAS must land (rows {rows!r})")
     live = [r for r in rows if r[0] == "live"]
-    assert live, f"fixture precondition: the CAS must land (rows {rows!r})"
     assert live[0][1] == "merge", (
         "a landed promotion keeps its review stamp whatever row order the "
         f"duplicate id returns: saw {live[0][1]!r} (rows {rows!r})")

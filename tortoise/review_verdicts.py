@@ -384,42 +384,56 @@ class VerdictLayer:
             prior_reviewed = props.get("reviewed")
 
             def _promotion_landed() -> bool:
-                """True when the promotion CAS already landed.
+                """Whether the promotion should be TREATED as landed.
 
                 ``promote_point`` answers ``already_live`` for a node that was
                 live BEFORE its CAS — it returns, it does not raise — so in the
-                cases this handler exists for, a raise reaching here with a
-                live node is a promotion that landed and whose tail then
-                failed. EVERY step after the CAS can raise (``_mark_dirty``, a
-                retried write that can exhaust; the post-CAS quarantine
-                re-check's ``batch_status`` read; the ``alreadyDecided`` dedup
-                wire, a ``ValueError`` when the prior is deleted between
-                promote_point's own check and that call; the temporal
-                NAND/supersede block, where only ``ValueError`` is caught, so a
-                graph abort escapes; the incident-operator promote; the
-                ``PointPromoted`` emit), and all of them leave the node live.
-                Rolling the review write back there is the INVERSE of the
-                #2354 limbo: the node is live and can never be promoted again
-                (``promote_point`` will only ever answer ``already_live``), its
-                ``merge`` stamp is destroyed, and the candidate is re-surfaced
-                — for a temporal candidate ``sweep()``, which filters on the
-                stamp and not on status, re-examines it and (above the
-                auto-accept bar) journals a SECOND ``DedupeRecorded`` for one
-                logical merge.
+                cases this handler exists for, a raise with a live node is a
+                promotion that landed and whose tail then failed. EVERY step of
+                the landed tail can raise, and all of them leave the node live:
+                ``_mark_dirty`` (a retried write that can exhaust); the
+                post-CAS quarantine re-check's ``batch_status`` read; the
+                ``alreadyDecided`` wire, whose two graph reads are uncaught and
+                which also raises ``ValueError`` when the prior is deleted
+                between promote_point's own check and that call; the temporal
+                NAND/supersede block, which catches only ``ValueError``, so a
+                graph abort escapes; the incident-operator promote; and the
+                ``PointPromoted`` emit. Rolling the review write back there is
+                the INVERSE of the #2354 limbo: the node is live and can never
+                be promoted again (``promote_point`` will only ever answer
+                ``already_live``), its ``merge`` stamp is destroyed, and the
+                candidate is re-surfaced — for a temporal candidate ``sweep()``,
+                which filters on the stamp and not on status, re-examines it and
+                (above the auto-accept bar) journals a SECOND ``DedupeRecorded``
+                for one logical merge.
+
+                The answer is deliberately CONSERVATIVE, not a proof: a live
+                node carrying the id may be a promotion under the same id that
+                is already live rather than this call's. Treating that as
+                landed is the safe direction because the rollback is itself
+                fan-out-wide (a bare ``MATCH … SET``), so guessing "not landed"
+                could erase the stamps of the node that DID land; a candidate
+                stranded by the wrong guess (this CAS did not land, a sibling
+                live) is recoverable by re-issuing ``keep``.
 
                 Scanned over the WHOLE id fan-out (#7822): point ids are not
                 unique, every lifecycle writer's bare ``MATCH … SET`` binds
                 every node carrying the id, and a verdict read off ``rows[0]``
                 is server-row-order dependent — here that would erase the stamp
                 of a landed promotion whenever a duplicate sibling happened to
-                be returned first. ANY live node carrying the id means the CAS
-                landed.
+                be returned first. Only the literal ``status`` column is
+                consulted: the CAS writes ``status='live'`` and nothing else
+                that this asks about, so an ``is_operator``, ``outdated`` or
+                statusless sibling neither counts as landed nor is filtered
+                out of the scan.
 
                 An unreadable graph reads as landed: a rollback that cannot be
                 verified must not be risked against stamps that are correct,
                 and the limbo it would otherwise leave is recoverable by
-                re-issuing ``keep`` (``reviewDecision`` is unset and
-                ``approve_merge`` is idempotent) whereas erasing a landed
+                re-issuing ``keep`` (``reviewDecision`` is unset, and
+                ``approve_merge`` is idempotent for a temporal candidate whose
+                stamp still matches — a content candidate re-stamps and
+                journals a further ``DedupeRecorded``) whereas erasing a landed
                 promotion's stamps is not.
                 """
                 try:
@@ -427,13 +441,17 @@ class VerdictLayer:
                         LIFECYCLE_FANOUT_QUERY,
                         params={"id": candidate_id},
                     ).result_set
+                    # Indexed, not unpacked: the shape is owned by a SHARED
+                    # constant that may grow a column, and an unpack error here
+                    # would replace the promote error this whole block exists
+                    # to preserve.
+                    return any(row[1] == "live" for row in rows)
                 except Exception:
                     logger.warning(
                         "review rollback skipped: could not read %r after a "
                         "failed promote — leaving the review stamps in place",
                         candidate_id, exc_info=True)
                     return True
-                return any(status == "live" for _op, status, _outdated in rows)
 
             def _roll_back_review_write() -> None:
                 # Roll the review write back so the candidate is NOT left
