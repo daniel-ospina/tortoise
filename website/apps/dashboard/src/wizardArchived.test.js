@@ -24,6 +24,8 @@ const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
 // the live welcome card's window is derived once and shared. A pin that re-parsed
 // per assertion also re-DERIVED its window per assertion, which is how two pins end
 // up disagreeing about which region they watch.
+/** The ready copy's own text — what identifies the element that CARRIES it. */
+const READY_COPY = "You're set up in"
 const SRC_AST = parseModule(src)
 const SRC_JSX = jsxElements(SRC_AST)
 /** `jsxElements` over a SOURCE string — the entry point for the synthetics below. */
@@ -63,11 +65,17 @@ function hasClass(cls, name) {
  * `''`) or into the rest of the file.
  *
  * RESIDUAL, stated rather than hidden: a `className` that is NOT statically
- * resolvable (a template with expressions, a spread, a `cn()` helper) is not
- * enumerated, so an in-card label spelled `className={'wizard-title' + suffix}`
- * would still evade the negative pin. That is the same residual
- * `wizardRenderedCopy.js::staticClassName` states for the prose census — the
- * static case is pinned here, the rendered case there.
+ * resolvable (a template with EXPRESSIONS, a spread, a `cn()` helper) is not
+ * enumerated, so an in-card label spelled
+ * `className={`wizard-title ${wizardStep}`}` evades the negative pin. Measured:
+ * planting exactly that inside the live card leaves this file green.
+ *
+ * #3726 cycle 4 (P2): the previous wording claimed the mitigation lived "there", in
+ * `wizardRenderedCopy.js::staticClassName`. It does not — that census enumerates
+ * only the `PROSE` families (`p.wizard-caption`, `p.wizard-note`, `pre.snippet`);
+ * `wizard-title` is in no family, so the RENDERED case is pinned NOWHERE. Tracked
+ * as a follow-up (#8917): the fix is a render-level assertion on the live welcome
+ * card, not another source scan.
  */
 function jsxElements(ast) {
   const out = []
@@ -244,16 +252,25 @@ function orFallbacks(ast) {
  * is asserted.
  */
 function welcomeCardWindow(ast) {
+  // #3726 cycle 4 (P1): the window's START is the CARD, not the head. Anchoring it
+  // to `div.welcome-head` (8370) left the card's own first 33 lines (8337-8369)
+  // outside every consumer, so a `wizard-title` placed there — above the
+  // provisioning/error fork, and therefore rendered in ALL THREE card states — redded
+  // nothing (measured). The head is now required to sit INSIDE the card it belongs to.
+  const cards = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-card'))
+  assert.equal(cards.length, 1,
+    'the welcome CARD (div.welcome-card) must resolve exactly once — it is the region every in-card pin certifies')
   const heads = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
   assert.equal(heads.length, 1,
-    'the welcome-head card must resolve exactly once (a pin over an empty or unbounded window is a false green)')
-  const start = heads[0].start
-  const cardEnd = heads[0].end
+    'the welcome-head block must resolve exactly once (a pin over an empty or unbounded window is a false green)')
+  assert.ok(heads[0].start > cards[0].start && heads[0].end < cards[0].end,
+    'the welcome-head block must sit INSIDE the welcome card — otherwise the window starts wherever a class happens to be')
+  const start = cards[0].start
   const end = archivedGateStart(ast)
   assert.notEqual(end, -1,
     'the archived-block boundary must resolve (an unresolved end makes the window the rest of the file)')
-  assert.ok(end > cardEnd,
-    'the archived block must come AFTER the live card element — a gate that resolves INSIDE the card ends the window inside the region it certifies, and a label after it is invisible')
+  assert.ok(end > heads[0].end,
+    'the archived block must come AFTER the live card\'s `div.welcome-head` content — a gate that resolves inside it ends the window inside the region it certifies, and a label after it is invisible')
   return { start, end }
 }
 
@@ -302,22 +319,85 @@ function archivedGateStart(ast) {
 }
 
 /**
- * The fallback values of the ready-copy `shownOrgName || '<fallback>'` sites INSIDE
- * the live welcome card, in file order.
+ * Does `gate` RENDER the archived block — is it the condition that guards a JSX
+ * subtree (`GATE && (<jsx/>)`, or `GATE ? (<jsx/>) : …`)?
+ *
+ * #3726 cycle 4 (P3): this used to be a text slice over the gate's own span
+ * (`/^[\s)]*&&\s*\(/`), so a COMMENT inside the expression
+ * (`{A && B /* A0 rollback gate *\/ && (`) redded the pin — prose affecting a pin,
+ * which is the defect class this PR removes. Read from the AST, comments and
+ * parentheses cannot matter.
+ */
+function gateRendersArchivedBlock(ast, gate) {
+  const jsxish = (n) => !!n && (n.type === 'JSXElement' || n.type === 'JSXFragment')
+  let renders = false
+  walk(ast.program, (node, parent) => {
+    if (renders || node !== gate || !parent) return
+    if (parent.type === 'LogicalExpression' && parent.operator === '&&'
+      && parent.left === gate && jsxish(parent.right)) renders = true
+    if (parent.type === 'ConditionalExpression' && parent.test === gate
+      && jsxish(parent.consequent)) renders = true
+  })
+  return renders
+}
+
+/**
+ * Every JSX element in `ast` with its source span, INCLUDING elements that carry no
+ * `className` — the copy-carrying element is found by its TEXT, not by a class.
+ */
+function jsxAll(ast) {
+  const out = []
+  walkNodes(ast, (node) => {
+    if (node.type !== 'JSXElement') return
+    const name = node.openingElement.name
+    out.push({ tag: name?.type === 'JSXIdentifier' ? name.name : null, start: node.start, end: node.end, node })
+  })
+  return out.sort((a, b) => a.start - b.start)
+}
+
+/**
+ * The static text held by a JSX subtree — element text, string literals and template
+ * quasis (no expressions). Used to find the element that CARRIES a piece of copy.
+ */
+function subtreeText(node) {
+  const parts = []
+  walk(node, (n) => {
+    if (n.type === 'JSXText') parts.push(n.value)
+    if (n.type === 'StringLiteral') parts.push(n.value)
+    if (n.type === 'TemplateElement') parts.push(n.value.cooked ?? n.value.raw)
+  })
+  return parts.join('')
+}
+
+/**
+ * The fallback values of the ready-copy `shownOrgName || '<fallback>'` sites that
+ * sit inside the element CARRYING the ready copy, in file order.
  *
  * #3726 cycle 5 (P1): the pin used to collect every `x || <string>` in the 12k-line
  * module and assert that ONE of them was `'your organization'`. main.jsx has three
  * such sites — the welcome ready copy this test exists for, plus two
  * "Continue setting up" headings in a DIFFERENT card — so deleting the ready-copy
  * fallback stayed GREEN while the assertion message still claimed the ready copy
- * was pinned. Anchored on all three axes: the left operand is the org variable, the
- * fallback is a static string (any quoting, any spacing), and the site is in the
- * card. A `||` elsewhere cannot satisfy it.
+ * was pinned.
+ *
+ * #3726 cycle 4 (P2): anchoring on the card WINDOW was still an existential — any
+ * in-card `shownOrgName || '<static>'` satisfied it, rendered or not, so deleting
+ * the real fallback and planting `{false && <span>{shownOrgName || 'your
+ * organization'}</span>}` inside the card stayed green (measured; the live ready
+ * copy then rendered `You're set up in . Next, choose…`). The pin is now anchored to
+ * the copy itself: the `||` must sit inside the element whose own subtree holds the
+ * `You're set up in` text, which a decoy in the same card cannot reach.
  */
 function readyCopyOrgFallbacks(ast) {
   const { start, end } = welcomeCardWindow(ast)
+  const carriers = jsxAll(ast).filter((e) => e.start > start && e.start < end
+    && subtreeText(e.node).includes(READY_COPY))
+  // The MINIMAL carriers: an ancestor of the copy's element also holds the text, and
+  // accepting ancestors would let a decoy anywhere in the card through.
+  const minimal = carriers.filter((e) => !carriers.some((o) => o !== e && o.start > e.start && o.end < e.end))
   return orFallbacks(ast)
-    .filter((f) => f.left === 'shownOrgName' && f.start > start && f.start < end)
+    .filter((f) => f.left === 'shownOrgName'
+      && minimal.some((e) => f.start > e.start && f.start < e.end))
     .map((f) => f.value)
 }
 
@@ -355,8 +435,8 @@ test('legacy #1643 wizard render is gated behind the ARCHIVED flag (never render
   const gates = archivedGates(SRC_AST)
   assert.equal(gates.length, 1,
     'the legacy wizard is gated by exactly ONE `LEGACY_WIZARD_ARCHIVED && welcomeOriented` expression (a second makes the card-window boundary ambiguous)')
-  assert.match(src.slice(gates[0].end), /^[\s)]*&&\s*\(/,
-    'that gate RENDERS the archived block (`&& (`) — it is not a bare comparison')
+  assert.ok(gateRendersArchivedBlock(SRC_AST, gates[0]),
+    'that gate RENDERS the archived block — it is not a bare comparison, and a comment inside it cannot affect this')
   assert.ok(/const LEGACY_WIZARD_ARCHIVED\s*=\s*false/.test(src),
     'LEGACY_WIZARD_ARCHIVED is false (never rendered)')
 })
@@ -513,14 +593,16 @@ test('#3726 falsifiability: the legacy-label pin reads the ARRAY, not copy that 
 test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate and ignores prose', () => {
   // Two ways the ONE guarded span in this file can stop naming the live card.
   const card = (block) => [
-    '<div className="welcome-head">',
+    '<div className="welcome-card">',
+    '  <div className="welcome-head">',
     ...block,
-    '  <h1 className="welcome-title">{wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg })}</h1>',
-    '  <p>You are set up</p>',
+    '    <h1 className="welcome-title">{wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg })}</h1>',
+    '    <p>You are set up</p>',
+    '  </div>',
+    '  {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (',
+    '    <p className="wizard-title">{wizardSteps[wizardStep]}</p>',
+    '  )}',
     '</div>',
-    '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (',
-    '  <p className="wizard-title">{wizardSteps[wizardStep]}</p>',
-    ')}',
   ].join('\n')
   // 1. The sentinel is GONE: `indexOf` is -1 and the pre-fix `slice(start, -1)` was
   //    the rest of the file — a pin watching a region it does not name.
@@ -559,7 +641,6 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate
     '  {LEGACY_WIZARD_ARCHIVED ? (<p className="wizard-title">{wizardSteps[wizardStep]}</p>) : null}',
   ])
   const ternaryAst = parseModule(ternaryInCard)
-  const ternaryHead = jsxElements(ternaryAst).find((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
   const ternaryWindow = welcomeCardWindow(ternaryAst)
   // Independent of `end > start` (which the helper already asserts): the TERNARY's
   // own flag read must sit BEFORE the boundary, i.e. the boundary is the archived
@@ -571,8 +652,14 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate
       && n.test.name === 'LEGACY_WIZARD_ARCHIVED') ternaryFlag = n.test.start
   })
   assert.ok(ternaryFlag > -1, 'the synthetic really plants a flag-guarded ternary inside the card')
-  assert.ok(ternaryWindow.end > ternaryFlag,
-    'the ternary is NOT the gate: the boundary resolves at the archived gate below the card, past the label it guards')
+  // Independent of the helper's own ordering check: the ternary is NOT a gate, so the
+  // file still has exactly ONE and the boundary is not the conditional's test.
+  assert.equal(archivedGates(ternaryAst).length, 1,
+    'a flag-guarded TERNARY is not a gate — the reader must not count it')
+  assert.notEqual(archivedGates(ternaryAst)[0].start, ternaryFlag,
+    'the boundary is the archived `&&` gate, not the ternary\'s test expression')
+  assert.ok(ternaryWindow.start < ternaryFlag,
+    'the ternary sits inside the window, so its label would be SEEN by the in-card pin')
   assert.deepEqual(
     jsxElements(ternaryAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > ternaryWindow.start && e.start < ternaryWindow.end).length,
     1,
@@ -607,8 +694,10 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate
   //    BELOW the card element; otherwise the window ends inside the region it certifies
   //    and any label after it is invisible.
   const movedGate = [
-    '<div className="welcome-head">',
-    '  {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (<p className="wizard-title">{wizardSteps[wizardStep]}</p>)}',
+    '<div className="welcome-card">',
+    '  <div className="welcome-head">',
+    '    {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (<p className="wizard-title">{wizardSteps[wizardStep]}</p>)}',
+    '  </div>',
     '</div>',
   ].join('\n')
   assert.throws(() => welcomeCardWindow(parseModule(movedGate)), /AFTER the live card/,
@@ -650,7 +739,10 @@ test('#3726 falsifiability: the in-card title pin fires on EVERY className spell
   for (const className of ["'wizard-title'", '\"wizard-title\"', '`wizard-title`', "'wizard-title extra'"]) {
     const synthetic = [
       'export const Card = () => (',
-      '  <div className="welcome-head">',
+      '  <div className="welcome-card">',
+      '    <div className="welcome-head">',
+      '      <h1 className="welcome-title">ready</h1>',
+      '    </div>',
       `    <p className={${className}}>{wizardSteps[wizardStep]}</p>`,
       '  </div>',
       ')',
@@ -713,7 +805,10 @@ test('#3726 falsifiability: the ready-copy pin is anchored to the welcome card, 
   // fallback while an unrelated card keeps the same `|| 'your organization'`.
   const card = (ready) => [
     'export const Card = () => (',
-    '  <div className="welcome-head">',
+    '  <div className="welcome-card">',
+    '    <div className="welcome-head">',
+    '      <h1 className="welcome-title">ready</h1>',
+    '    </div>',
     `    <p>You're set up in <strong>${ready}</strong></p>`,
     '  </div>',
     ')',
@@ -877,9 +972,13 @@ function deadFlags(ast) {
   walk(ast.program, (node, parent) => {
     if (node.type !== 'VariableDeclarator' || node.id.type !== 'Identifier') return
     if (!(node.init && node.init.type === 'BooleanLiteral' && node.init.value === false)) return
-    let declaration = parent
-    while (declaration && declaration.type !== 'VariableDeclaration') declaration = parent
-    if (!declaration || declaration.kind !== 'const') return
+    // A VariableDeclarator's parent is ALWAYS a VariableDeclaration in a Babel AST, so
+    // this used to be a climb that could not make progress (it reassigned `parent`,
+    // spinning forever on any other holder). Asserted instead of looped: a future
+    // non-declarator holder fails LOUD rather than hanging the suite.
+    assert.equal(parent?.type, 'VariableDeclaration',
+      `${node.id.name} is not held by a VariableDeclaration — the reachability scan classifies const vs let/var from that parent`)
+    if (parent.kind !== 'const') return
     assert.equal(counts.get(node.id.name), 1,
       `${node.id.name} has ${counts.get(node.id.name)} declarators — the reachability scan follows ONE binding, `
       + 'so a second (a shadow) would be mis-attributed; refusing to guess which one a read means')
