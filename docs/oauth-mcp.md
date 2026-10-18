@@ -346,7 +346,7 @@ the dated review. The ruling requires the number to be visible, so the count is
 an operator endpoint:
 
 ```bash
-curl -sH "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
+curl -s -m 20 -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" \
   https://<api-host>/v1/internal/oauth/clients/count
 ```
 

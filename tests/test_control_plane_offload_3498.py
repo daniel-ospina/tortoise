@@ -925,10 +925,16 @@ def test_best_effort_refusal_is_distinguishable_from_a_bound_miss(monkeypatch):
     )
 
 
-#: Ops whose helper is documented BEST-EFFORT / never-raise: an offload failure
-#: must be swallowed, never a 503. Keep in sync with the `best_effort=True`
-#: sites; the structural test below fails if one loses the flag.
-_NEVER_RAISE_OPS = frozenset({
+#: Ops whose `_cp_offload` call is BEST-EFFORT: an OFFLOAD failure (a refused
+#: submission, or a wait bound that expired) must never map onto the seam's
+#: fail-closed 503. Membership is NOT a claim that the helper cannot raise —
+#: most members are documented never-raise, but a site is also best-effort when
+#: it converts ANY failure into its own fail-soft body (that is
+#: `oauth_clients_count`'s case: its handler catches, logs and serves
+#: `status="unavailable"`). Keep in sync with the `best_effort=True` sites; the
+#: structural test below fails if one loses the flag, and pins this set to
+#: EXACTLY the best-effort sites.
+_BEST_EFFORT_OPS = frozenset({
     "update_last_used", "analytics_event", "github_repos_count",
     # #4456: ``notify_billing_event`` is documented never-raise
     # (tortoise/notify.py). Routing it through the seam gives it a NEW failure
@@ -949,12 +955,11 @@ _NEVER_RAISE_OPS = frozenset({
     # fail-soft ``status="unavailable"`` body — ruling C rejected a cap, so the
     # number's whole job is to stay observable, and a 503 from the seam would
     # gate the one reader the ruling depends on. The helper itself does raise
-    # (``query_with_total`` wraps an ``httpx.Client``), so the site catches and
-    # logs it; ``best_effort`` only stops an OFFLOAD failure (bound miss /
-    # saturated pool) from mapping onto the fail-closed 503 in addition — the
-    # same polarity as ``data_source_demand_read`` above. Declared here rather
-    # than left undeclared because this test's second assertion pins the set to
-    # EXACTLY the best-effort sites: an undeclared site reds it (#8839).
+    # (``query_with_total`` wraps an ``httpx.Client``), so the handler catches
+    # and logs it; ``best_effort`` keeps an OFFLOAD failure on that same
+    # fail-soft polarity. It differs from ``data_source_demand_read`` above only
+    # in being a best-effort READ rather than a never-raise helper, which is why
+    # this set is named for the flag and not for the helper (#8839).
     "oauth_clients_count",
 })
 
@@ -963,7 +968,10 @@ def test_never_raise_offload_sites_pass_best_effort():
     """Structural guard for the review's "telemetry must not gate auth" fix:
     every `_cp_offload` wrapping a never-raise helper carries
     ``best_effort=True``, AND the set of best-effort ops is exactly the declared
-    never-raise set — so a rename/deletion cannot hollow the guard out.
+    set — so a rename/deletion cannot hollow the guard out. The declared set is
+    the BEST-EFFORT one, which is wider than "never-raise helpers": a site
+    whose own handler converts any failure into a fail-soft body belongs here
+    too, and that is what a raising helper at a best-effort site looks like.
     """
     import ast
 
@@ -986,15 +994,15 @@ def test_never_raise_offload_sites_pass_best_effort():
         marked = isinstance(best_effort, ast.Constant) and best_effort.value is True
         if marked:
             best_effort_ops.add(op.value)
-        if op.value in _NEVER_RAISE_OPS and not marked:
+        if op.value in _BEST_EFFORT_OPS and not marked:
             offenders.append((call.lineno, op.value))
     assert not offenders, (
         "never-raise offload site(s) missing best_effort=True: "
         f"{offenders} — telemetry must not be able to fail auth"
     )
-    assert best_effort_ops == _NEVER_RAISE_OPS, (
-        "the best-effort op set drifted from the declared never-raise set: "
-        f"sites use {sorted(best_effort_ops)}, declared {sorted(_NEVER_RAISE_OPS)}"
+    assert best_effort_ops == _BEST_EFFORT_OPS, (
+        "the best-effort op set drifted from the declared best-effort set: "
+        f"sites use {sorted(best_effort_ops)}, declared {sorted(_BEST_EFFORT_OPS)}"
     )
 
 

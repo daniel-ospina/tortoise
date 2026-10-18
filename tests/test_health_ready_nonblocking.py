@@ -328,9 +328,13 @@ def _on_loop_nested_names(node: ast.AST) -> set[str]:
 #: review). ``rpc`` / ``rpc_value`` are the same class.
 #:
 #: ``query_with_total`` (#2853) joined the set the same way: `_iter_registered_orgs`
-#: calls it from a SYNC `def`, so it was invisible as an on-loop hazard until
-#: the `oauth_clients` count endpoint lifted the call into an `async def` body.
-#: A blocking method the guard cannot name is a spelling it cannot see.
+#: calls it from a SYNC `def`, so it was invisible as an on-loop hazard. What
+#: membership covers is a DIRECT call lexically inside an `async def` — the walk
+#: is an AST name match, so a call in a NESTED `def` that is handed to an offload
+#: boundary (as the `oauth_clients` count endpoint does) stays invisible here.
+#: That site is pinned BEHAVIOURALLY instead
+#: (`tests/test_oauth_clients_count_2853.py::test_the_read_runs_off_the_event_loop`),
+#: not by this guard — do not read membership as coverage of it.
 _CP_METHOD_NAMES = frozenset({"query", "rpc", "rpc_value", "query_with_total"})
 
 #: The receiver convention this detector recognises, and NOTHING else. ``cp`` is

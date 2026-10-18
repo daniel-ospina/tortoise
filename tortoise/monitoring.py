@@ -1952,8 +1952,12 @@ CONTROL_PLANE_OFFLOAD_LATENCY = Histogram(
 # ``best_effort=True`` sites all share the ``telemetry`` pool with
 # irreconcilable consequences per op (``billing_notify`` is an UNRECOVERABLE
 # drop; ``data_source_demand_read`` degrades to a user-visible 503;
-# ``update_last_used`` / ``analytics_event`` / ``github_repos_count`` are
-# display-and-telemetry only). A rising refusal rate at pool granularity
+# ``oauth_clients_count`` (#2853) degrades to the fail-soft
+# ``status="unavailable"`` body, so the ONE number ruling C made mandatory goes
+# blind while the control plane is healthy — that route logs the refusal on its
+# own unavailable path; ``update_last_used`` / ``analytics_event`` /
+# ``github_repos_count`` are display-and-telemetry only). A rising refusal rate
+# at pool granularity
 # cannot tell an operator whether payments are being lost or a display
 # counter is stale, so every site stays blind in exactly the way #5328
 # describes — the op is known only to the bounded ``_CP_OFFLOAD_RECORDS``

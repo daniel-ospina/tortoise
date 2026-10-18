@@ -134,11 +134,17 @@ def test_the_read_runs_off_the_event_loop(client, counts):
 @pytest.mark.parametrize("undelivered", [None, "OFFLOAD_REFUSED"])
 def test_an_offload_that_never_ran_the_read_is_not_a_count(
         client, counts, monkeypatch, undelivered):
-    """The seam can fail to deliver (wait bound missed / pool refused).
+    """The seam can deliver no RESULT (wait bound expired / pool refused).
 
-    "We could not ask" is not a number: the body must stay `unavailable` with
-    no `count`, exactly like a read that raised — otherwise a bound miss
-    renders as a confident zero and retires the ruling it exists to inform.
+    Neither outcome is a number: the body must stay `unavailable` with no
+    `count`, exactly like a read that raised — otherwise a bound miss renders
+    as a confident zero and retires the ruling it exists to inform. The two legs
+    are pinned together because both are `unavailable` with no `count`, but the
+    BODY must tell them apart (#4456): a REFUSED submission never ran, while a
+    `None` bound miss abandoned only the await and the worker may still be
+    running the read. The stub here returns the sentinel WITHOUT invoking the
+    read, so `calls == []` holds on both legs and asserts only that no number
+    was produced — not that the read never ran in the `None` case.
     """
     refused = (ha_mod.OFFLOAD_REFUSED if undelivered == "OFFLOAD_REFUSED"
                else None)
@@ -154,7 +160,11 @@ def test_an_offload_that_never_ran_the_read_is_not_a_count(
     assert r.status_code == 200
     assert body["status"] == "unavailable"
     assert "count" not in body
-    assert counts["calls"] == [], "the read never ran, so there is no number"
+    if undelivered == "OFFLOAD_REFUSED":
+        assert "never ran" in body["reason"], body["reason"]
+    else:
+        assert "wait bound expired" in body["reason"], body["reason"]
+    assert counts["calls"] == [], "no number was produced, so there is no count"
 
 
 # ── the absence, which must NOT look like zero ───────────────────────────────
@@ -172,6 +182,26 @@ def test_an_unstated_total_is_unavailable_and_carries_no_count(client, counts):
         "would read as 'nothing has accumulated' and retire the ruling"
     )
     assert body["reason"]
+
+
+def test_an_empty_table_is_a_real_zero_and_not_unavailable(client, counts):
+    """`0` is a LEGITIMATE count and must not be folded into "unknown".
+
+    `query_with_total` returns `0` for an empty table (`Content-Range: */0`),
+    so a handler that guards on truthiness (`if not total:`) would report
+    `unavailable` forever on a deployment where nothing has accumulated — the
+    mirror image of the confident-zero bug, and just as wrong. Both directions
+    of the falsy-vs-`None` polarity are pinned: `None` → unavailable (above),
+    `0` → `status="ok"` with `count: 0` here.
+    """
+    counts["rows"], counts["total"] = [], 0
+
+    r = client.get(_PATH, headers=_HEADERS)
+
+    body = r.json()
+    assert r.status_code == 200
+    assert body["status"] == "ok"
+    assert body["count"] == 0
 
 
 def test_a_failed_read_is_unavailable_and_carries_no_count(client, counts):

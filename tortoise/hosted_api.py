@@ -16912,9 +16912,13 @@ async def oauth_clients_count(request: Request):
     """How many `oauth_clients` registrations are stored — the number #2853's ruling C watches.
 
     Operator-only (``_check_internal``), read-only. The count covers the WHOLE
-    table — DCR registrations, CIMD rows, and operator-issued /
-    ``oauth_anthropic_creds`` rows alike — because the ruling's question is how
-    many stored registrations accumulate, not how many came from one producer.
+    table — every DCR registration, every CIMD row, and any row an operator
+    inserts directly — because the ruling's question is how many stored
+    registrations accumulate, not how many came from one producer. Credentials
+    the provider holds instead of storing here (the ``oauth_anthropic_creds``
+    alternative in ``docs/oauth-mcp.md``, which is not implemented in this repo)
+    are NOT rows, so they are deliberately not part of this number: adding them
+    would be a count that is not the count.
 
     Ruling C (owner @daniel-ospina, 2026-10-13) accepted that ``oauth_clients``
     grows without limit: **no prune, no expiry, no cap**. The ruling makes THIS
@@ -16957,11 +16961,26 @@ async def oauth_clients_count(request: Request):
         # for the whole round trip, which is exactly what #2988 measured
         # ("every route in the process timed out"). `_cp_offload` is this
         # module's seam for control-plane I/O from an async body (its sibling
-        # `retention_cohort` offloads through `_run_off_loop`); `best_effort`
-        # because this endpoint's contract is the fail-soft `unavailable`
-        # body — a 503 from the seam would gate the operator reading it.
+        # `retention_cohort` offloads through `_run_off_loop`).
+        #
+        # `pool="telemetry"` is STATED, not inherited: `best_effort=True` alone
+        # would silently reroute this call there via `_cp_offload`'s
+        # `effective_pool`, and the choice is load-bearing. An operator probe
+        # must not hold an AUTH worker — this is a full-table COUNT on the one
+        # table ruling C accepted as unbounded, and the auth lane's failure mode
+        # is a total outage. The documented trade-off of that pool applies: it
+        # is shared with telemetry writes, so a saturated backlog can render
+        # this `unavailable` while the control plane is healthy. A visible,
+        # logged refusal is the right failure for a probe; auth capacity is not.
+        #
+        # `best_effort` so the seam's OWN failure reaches the caller as a value
+        # instead of a 503: `_cp_offload` then returns `OFFLOAD_REFUSED` (the
+        # submission never ran) or `None` (the wait bound expired — the worker
+        # may still be running it), which are reported apart below. Helper
+        # exceptions still propagate (#3498) and are caught by the fail-soft arm.
         read = await _cp_offload(
-            _read_count, op="oauth_clients_count", best_effort=True,
+            _read_count, op="oauth_clients_count", pool="telemetry",
+            best_effort=True,
         )
     except Exception as exc:  # fail soft, never a confident 0
         # The HTTP body deliberately carries only the exception TYPE (an operator
@@ -16979,25 +16998,41 @@ async def oauth_clients_count(request: Request):
             "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
         }
     if read is None or read is OFFLOAD_REFUSED:
-        # The offload seam never delivered a read (its wait bound expired, or
-        # the pool REFUSED the submission), so `query_with_total` did not run.
-        # "We could not ask" is not a count: same fail-closed body as a read
-        # that raised, because the ruling's one requirement is a number that
-        # MEANS what it says.
+        # The offload delivered no RESULT, and the two seam outcomes here are
+        # NOT the same event (#4456): a REFUSED submission never ran, while a
+        # wait bound that expired abandons only the AWAIT — the worker that
+        # picked the submission up runs `query_with_total` to completion, so the
+        # read may be running at this instant. Neither is a count, but saying
+        # "did not run" would be false in exactly the incident this endpoint
+        # exists to report, so the body names the outcome actually observed.
+        refused = read is OFFLOAD_REFUSED
         _logger.warning(
-            "oauth clients count: control plane read did not run (offload "
-            "unavailable or refused)",
+            "oauth clients count: offload delivered no result (%s)",
+            "submission refused — the read never ran" if refused
+            else "wait bound expired — the read may still be running",
         )
         return {
             "status": "unavailable",
             "reason": (
-                "control plane read did not run (offload unavailable or "
-                "refused); an unasked count is not a count"
+                "the offload refused the read, so it never ran; an unasked "
+                "count is not a count"
+                if refused else
+                "the offload's wait bound expired before the read returned; a "
+                "count that was not collected is not a count"
             ),
             "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
         }
     _rows, total = read
     if total is None:
+        # No server-side number is an INFRASTRUCTURE state — the server stopped
+        # stating `Content-Range`, or `count_exact` stopped being sent — not a
+        # quiet "no rows", so it leaves a trace like the two arms above. An
+        # operator reading only the body cannot tell this from a healthy empty
+        # deployment, and this is the branch that would otherwise fire silently.
+        _logger.warning(
+            "oauth clients count: control plane stated no total (no "
+            "Content-Range total); reporting unavailable rather than 0",
+        )
         return {
             "status": "unavailable",
             "reason": (
@@ -37106,8 +37141,9 @@ async def billing_reconcile(request: Request):
 # the owner's ruling C on 2026-10-13, and is not left to lapse quietly: growth
 # of `oauth_clients` is ACCEPTED as an unbounded condition — no prune, no
 # expiry, no cap — and the ruling makes the row count observable rather than
-# optional ("watch it" is empty without a number). See
-# `GET /v1/internal/oauth/clients/count` below. Revisit only on the ruling's
+# optional ("watch it" is empty without a number) — served by
+# `oauth_clients_count` (`GET /v1/internal/oauth/clients/count`, defined
+# earlier in this module). Revisit only on the ruling's
 # own triggers, held in `_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS`. The #1677
 # in-process-store half of this limitation is unchanged by that ruling.
 #
