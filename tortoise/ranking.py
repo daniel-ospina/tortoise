@@ -286,12 +286,19 @@ def resolve_contested_relevance(
                 "content": str(content or ""),
                 "mean": mean,
                 "claim_id": claim_id,
+                "nid": claim_nid,
             }
         boosts: dict[str, float] = {}
         for pid, claims in pending.items():
             chosen = sorted(
                 claims.values(),
-                key=lambda c: (0 if c["mean"] >= 0.6 else 1, c["claim_id"]))
+                # ``claim_id`` is NOT unique (see live.EPISTEMIC_ID_KEYS), so
+                # the internal id is the tiebreak — without it the budgeted
+                # subset, and therefore the boost, was decided by Cypher row
+                # order (measured: the same three-claim tie group boosted
+                # forward and did not boost reversed).
+                key=lambda c: (0 if c["mean"] >= 0.6 else 1, c["claim_id"],
+                               c["nid"]))
             texts = [c["content"] for c in chosen[:_claim_budget]]
             if _query_touches_conflict(query, texts):
                 boosts[pid] = W4_CONTESTED_BOOST

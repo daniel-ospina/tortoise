@@ -118,6 +118,47 @@ class _FakeProjection:
         return self._Rows(self.point_rows)
 
 
+def test_conflict_subset_is_not_decided_by_row_order_under_a_collision():
+    """The budgeted subset must be deterministic even when claim identities
+    COLLIDE.
+
+    ``claim_id`` is not unique (``live.EPISTEMIC_ID_KEYS``: the guarded-merge
+    suffix branch and the #8879 cross-key shape both collide), so a tie group
+    of three claims sharing one id, with a budget of two, was resolved by
+    Cypher ROW ORDER — the docstring promises it is not. Measured before the
+    internal-id tiebreak: the same graph boosted forward and did not boost
+    reversed.
+    """
+    from tortoise.ranking import resolve_contested_relevance
+
+    class _Colliding:
+        """Three claims, ONE shared ``claim_id``, distinct internal ids."""
+
+        def __init__(self, order):
+            self.order = order
+            self.g = self
+
+        class _Rows:
+            def __init__(self, rows):
+                self.result_set = rows
+
+        def query(self, cypher, params=None):
+            rows = [
+                ("p1", "shared-claim", 1001, "an unrelated weather note", 1.0, 1.0),
+                ("p1", "shared-claim", 1002, "another unrelated note", 1.0, 1.0),
+                ("p1", "shared-claim", 1003, "the cache rollback is safer", 1.0, 1.0),
+            ]
+            if self.order == "reversed":
+                rows = list(reversed(rows))
+            return self._Rows(rows)
+
+    fwd = resolve_contested_relevance(_Colliding("forward"), ["p1"], "cache rollback")
+    rev = resolve_contested_relevance(_Colliding("reversed"), ["p1"], "cache rollback")
+    assert fwd == rev, (
+        "the boost depends on ROW ORDER — the subset is not deterministic: "
+        f"forward={fwd} reversed={rev}")
+
+
 # ── Unit: batch relevance resolution (S8 N+1 guard) ────────────────────────
 
 class TestBatchResolution:

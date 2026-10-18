@@ -459,19 +459,6 @@ def epistemic_identity(alias: str) -> str:
         f"{alias}.{key}" for key in EPISTEMIC_ID_KEYS) + ")"
 
 
-def epistemic_identity_key(node: dict) -> str | None:
-    """The key (an ``EPISTEMIC_ID_KEYS`` member) that ``node`` carries, or None.
-
-    ``node`` is a property map as returned by the graph. The KEY is needed — not
-    just the value — wherever a repair has to be rendered as a pattern: matching
-    ``(m {id: <a value that came from eventId>})`` addresses nothing, and
-    matching on the coalesced value alone equates two different properties and
-    can address an unrelated node (#7927).
-    """
-    for key in EPISTEMIC_ID_KEYS:
-        if node.get(key) is not None:
-            return key
-    return None
 
 
 def epistemic_disjunction(alias: str) -> str:

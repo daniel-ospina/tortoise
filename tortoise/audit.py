@@ -229,24 +229,39 @@ def _count(proj, query: str, params: dict | None = None) -> int:
     return r.result_set[0][0] if r.result_set else 0
 
 
-def _node_pattern(alias: str, keys: dict[str, object]) -> str | None:
-    """``(m {id:…, eventId:…})`` — a pattern naming the NODE, never a value.
+def _node_pattern(proj, alias: str, keys: dict[str, object]) -> str | None:
+    """``(m {id:…, eventId:…})`` — a pattern naming EXACTLY ONE node, or None.
 
-    Every key the node actually carries is rendered, so two DISTINCT nodes that
-    happen to share one key value cannot both match: measured, two Events
-    carrying ``id='coll-x'`` (``_event_guarded_merge``'s suffix branch leaves
-    ``id`` at the candidate while ``eventId`` takes the suffix) both matched a
-    single-key ``(m {id:'coll-x'})``, so one issue's repair repaired the other's
-    edge — the same overreach the key-agnostic form had, one level down.
+    Rendering every key the node carries is necessary but NOT sufficient: a
+    property pattern with FEWER keys matches a SUPERSET of nodes, and the
+    common case is exactly that — every ``:Point``/``:Subject``/``:Object`` is
+    id-only, so ``(m {id:'shared'})`` also matches an ``:Event`` that happens to
+    carry the same ``id`` value. Measured: a Point and an Event sharing one id,
+    both targets of one legacy edge — the Point's repair deleted BOTH edges and
+    minted a ``mitigated_by`` for a pair the issue does not describe.
 
-    ``None`` when the node carries no key at all: there is then nothing to name
-    it by, and the caller must refuse rather than widen.
+    Two nodes with IDENTICAL property maps are indistinguishable to any property
+    pattern, so the "names one node" property cannot be derived from the shape
+    of the keys — it has to be READ BACK. The pattern is verified against the
+    graph and the repair is REFUSED unless it resolves to exactly one node: the
+    alternative (anchoring on ``id(n)``) is exact but internal ids do not
+    survive ``GRAPH.COPY``/rebuild, so a stale one emits a silent no-op — the
+    failure this module's repairs exist to remove.
+
+    ``None`` when the node carries no key at all, or when the rendered pattern
+    is ambiguous. The caller refuses rather than widening.
     """
     present = {k: v for k, v in keys.items() if v is not None}
     if not present:
         return None
     rendered = ", ".join(f"{k}:{_quoted(v)}" for k, v in present.items())
-    return f"({alias} {{{rendered}}})"
+    pattern = f"({alias} {{{rendered}}})"
+    try:
+        rows = proj.g.query(
+            f"MATCH {pattern} RETURN count({alias})").result_set
+    except Exception:  # an unverifiable repair is a refused one
+        return None
+    return pattern if rows and rows[0][0] == 1 else None
 
 
 def _quoted(value: object) -> str:
@@ -536,7 +551,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # re-anchored as an ``id``, so this is the place ``epistemic_identity``
         # IS right (unlike an id-keyed frontier, #8538).
         "RETURN DISTINCT sup.id, sup.content, type(r), "
-        f"{epistemic_identity('active')}, id(active) "
+        f"{epistemic_identity('active')}, active.id "
         f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
@@ -553,11 +568,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ``_quoted(None)`` renders the literal ``'None'`` — a phantom
             # identity that can even address a real node whose id is "None", so
             # an unaddressable endpoint contributes NO clause rather than one.
+            # ``tortoise_supersede`` resolves BY ``id``, so naming the
+            # coalesced value would hand it a value that is not an id (failing)
+            # or its TWIN (colliding). The clause is therefore display-only when
+            # the identity is not the node's own ``id``.
             fix=(f"Remove edges into {_quoted(sup_id)}" + (
                 f" or mark {_quoted(active_id)} as superseded too"
-                if active_id is not None else "")),
+                if (active_id is not None and active_id == active_nid_value)
+                else (f" then supersede the node displayed as {_quoted(active_id)}"
+                      if active_id is not None else ""))),
         )
-        for sup_id, sup_content, edge_type, active_id, _active_nid in rows4
+        for sup_id, sup_content, edge_type, active_id, active_nid_value in rows4
     ], count4)
 
     # ── 5. impl_instead_of_nand (low, advisory heuristic) ──────────
@@ -606,7 +627,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     )
     patterns5 = [re.compile(rf"\b{re.escape(kw)}\b") for kw in CONTRADICTION_KEYWORDS]
     issues5: list[AuditIssue] = []
-    seen5: set[tuple[str, str]] = set()
+    seen5: set[tuple[int, int]] = set()
     count5 = 0
     for src_id, tgt_id, tgt_content, src_nid, tgt_nid in rows5:
         low = (tgt_content or "").lower()
@@ -641,8 +662,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             issues5.append(AuditIssue(
                 issue_type="impl_instead_of_nand",
                 severity="low",
-                node_id=str(src_id),
-                detail=(f"IMPL edge {src_id} → '{str(tgt_content)[:80]}' "
+                # A None id must not be rendered as the literal "None": that is
+                # a phantom identity that can address a real node whose id is
+                # "None" if a consumer feeds ``node_id`` back into a lookup.
+                node_id=(str(src_id) if src_id is not None else "<no id>"),
+                detail=(f"IMPL edge {src_id if src_id is not None else '<no id>'} "
+                        f"→ '{str(tgt_content)[:80]}' "
                         f"(keyword: '{hit}') — verify whether NAND applies{suffix}"),
                 fix=fix,
             ))
@@ -751,7 +776,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         and two parallel direct edges between one pair share a single message
         slot (``ep._affected_factors``) — the repair must not mint the second.
         """
-        target = _node_pattern("m", {"id": m_id, "eventId": m_eid})
+        target = _node_pattern(proj, "m", {"id": m_id, "eventId": m_eid})
         if target is None:
             return "", (" — the endpoint carries neither `id` nor `eventId`, so "
                         "no statement can address it; repair by hand")

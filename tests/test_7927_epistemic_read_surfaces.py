@@ -1096,9 +1096,24 @@ def test_legacy_repair_names_the_node_not_a_colliding_value(sdk):
               if i.issue_type == "legacy_mitigates_edge"
               and i.node_id == "coll-repair-op"]
     assert len(legacy) == 2, f"expected one issue per edge, got {len(legacy)}"
-    assert len({i.fix for i in legacy}) == 2, (
-        "two distinct endpoints produced the SAME repair — it names a value, "
-        f"not the node, so it repairs both edges: {[i.fix for i in legacy]}")
+    # A repair must resolve to EXACTLY ONE node — verified against the graph,
+    # not inferred from the keys it happens to carry. The id-ONLY twin's
+    # single-key pattern matches both endpoints, so it is REFUSED rather than
+    # emitted as an overreaching statement.
+    emitted = [i for i in legacy if i.fix]
+    refused = [i for i in legacy if not i.fix]
+    assert refused, (
+        "the ambiguous endpoint's pattern was emitted anyway: "
+        f"{[i.fix for i in legacy]}")
+    for issue in refused:
+        assert "repair by hand" in issue.detail, (
+            f"the refusal is unexplained: {issue.detail!r}")
+    for issue in emitted:
+        pattern = issue.fix.split("-[r:mitigates]->")[1].split(" DELETE")[0]
+        matched = proj.g.query(
+            f"MATCH {pattern} RETURN count(m)").result_set[0][0]
+        assert matched == 1, (
+            f"a repair matches {matched} nodes: {issue.fix!r}")
 
 
 def test_impl_conversion_repair_refuses_an_endpoint_without_an_id(sdk):
@@ -1143,3 +1158,46 @@ def test_superseded_repair_never_names_a_nonexistent_identity(sdk):
     for issue in issues:
         assert "None" not in issue.fix, (
             f"the repair names a phantom identity: {issue.fix!r}")
+
+
+def test_legacy_repair_refuses_when_its_pattern_is_ambiguous(sdk):
+    """Rendering MORE keys is necessary but not sufficient.
+
+    A property pattern with FEWER keys matches a SUPERSET of nodes, and the
+    common case is exactly that: every ``:Point`` is id-only, so
+    ``(m {id:'shared'})`` also matches an ``:Event`` carrying the same ``id``
+    value. Measured before the count check: the Point's repair deleted BOTH
+    legacy edges and minted a ``mitigated_by`` for a pair the issue does not
+    describe. "Names one node" cannot be derived from the key shape — two nodes
+    with identical maps are indistinguishable — so it is READ BACK, and an
+    ambiguous pattern is refused.
+    """
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'amb-op', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    proj.g.query("CREATE (p:Point {id:'shared-x', content:'id-only twin', "
+                 "status:'live', pointKind:'statement'})")
+    proj.g.query("CREATE (e:Event {id:'shared-x', eventId:'shared-x', "
+                 "eventKind:'test', name:'two-key twin'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'amb-op'}), (p:Point {id:'shared-x'}) "
+        "MERGE (op)-[:mitigates]->(p)")
+    proj.g.query(
+        "MATCH (op:Point {id:'amb-op'}), (e:Event {eventId:'shared-x'}) "
+        "MERGE (op)-[:mitigates]->(e)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == "amb-op"]
+    assert len(legacy) == 2, f"expected one issue per edge, got {len(legacy)}"
+    for issue in legacy:
+        if issue.fix == "":
+            assert "repair by hand" in issue.detail, (
+                f"the refusal is unexplained: {issue.detail!r}")
+            continue
+        pattern = issue.fix.split("-[r:mitigates]->")[1].split(" DELETE")[0]
+        matched = proj.g.query(
+            f"MATCH {pattern} RETURN count(m)").result_set[0][0]
+        assert matched == 1, (
+            "an emitted repair is ambiguous — it would rewrite an edge the "
+            f"issue does not describe: {issue.fix!r} (matches {matched})")
