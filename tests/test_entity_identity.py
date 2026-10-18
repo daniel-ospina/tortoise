@@ -938,8 +938,8 @@ _ALLOWED_KEYED = {
         # `tortoise/vector_write.py::clear_embedding`, whose MATCH pattern is
         # built at runtime and passed as an argument, so this #3633 sweep cannot
         # see it. The read is dispositioned in that module's seam.
-        'self._persist_extra_props( "MATCH (n:Subject {name: $name})", {"name": name}, ev, self._SUBJECT_HANDLED, )': 1,
-        'self._persist_extra_props( "MATCH (n:Object {name: $name})", {"name": name}, ev, self._OBJECT_HANDLED, )': 1,
+        'self._persist_extra_props( "MATCH (n:Subject {id: $id})" if name_is_shared else "MATCH (n:Subject {name: $name})", {"id": sid} if name_is_shared else {"name": name}, ev, self._SUBJECT_HANDLED, )': 1,
+        'self._persist_extra_props( "MATCH (n:Object {id: $id})" if name_is_shared else "MATCH (n:Object {name: $name})", {"id": oid} if name_is_shared else {"name": name}, ev, self._OBJECT_HANDLED, )': 1,
         # #2729: the pack-declared fold dispatcher. `_fold_object_status`
         # MATCHes the Event's target by NAME (the prop the event carries) and
         # guards on the declaring kind, case-folded + form-widened

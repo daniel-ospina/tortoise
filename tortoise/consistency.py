@@ -54,6 +54,10 @@ from datetime import datetime, timezone
 
 from .cypher_guard import tolerates_altered_numbers
 from .exceptions import UnrepresentableNumberError
+
+# #8864 review P1: the stub carrier's id is the SHARED deterministic mint
+# (`_event_plain_merge` / `_upsert_object` both use it), never a re-derivation.
+from .ids import entity_name_id
 from .projection import (
     _CANONICAL_ENTITY_LABELS,
     _ENTITY_ID_PROP,
@@ -63,6 +67,7 @@ from .projection import (
     _annotator_value_ok,
     _apply_one,
     _creation_entity_id_from_record,
+    _event_mentioned_name_stubs,
     _hard_deleted_any,
     _journal_forward_reference,
     _load_prewipe_snapshot,
@@ -1821,10 +1826,13 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                         (label, _merge_key), set())
                     if len(_live) > 1:
                         # The key ALREADY has >1 live carrier (a rename
-                        # collision). A MERGE re-ids exactly one of them and
-                        # the journal does not say which, so keep them all —
-                        # failing OPEN here is the only choice that cannot
-                        # refuse a node the graph still holds.
+                        # collision). Since #8864 the graph stops keying on
+                        # that name entirely — it merges on the record's own
+                        # `id` (`_name_holder_count`), so NO carrier is re-id'd
+                        # and all of them survive. Keeping them all is
+                        # therefore both the graph's behaviour and the only
+                        # choice that cannot refuse a node the graph still
+                        # holds (fail OPEN, never closed).
                         _live.add(eid)
                     else:
                         _live.clear()
@@ -1839,6 +1847,40 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 # its id. The existing key and carriers are therefore PRESERVED;
                 # popping them hid the later collapse from the guard (review
                 # round 7, P1).
+            if t == "EventRecorded":
+                # #8864 review P1: this record is the SECOND carrier source, and
+                # it runs on replay too. `_event_plain_merge` MERGEs a
+                # name-STUB for the mention's `subject` / `object` (unless
+                # `objectType` is `Document`) / every `uses[]` name, writing a
+                # DETERMINISTIC id `ON CREATE` only (#7936). The stub is a real
+                # graph carrier that this fold could not see, so the carrier
+                # COUNT below — the thing the graph's MERGE-key branch is
+                # decided by (`_name_holder_count`) — undercounted: a name whose
+                # only OTHER carrier was a registration took the name-keyed
+                # (collapsing) branch here while the graph, holding a stub as
+                # well, keys on the record's own `id` and moves NOTHING. The
+                # stub carrier was then evicted from `carriers_by_name`, and the
+                # state-op guard below recorded a `state-op-miss` for an id the
+                # graph still holds — a fail-CLOSED refusal of a legal journal
+                # (`recover_from_log` refuses to open, `rebuild` parity
+                # fail-loud, `backup.restore`'s `assert_no_non_folded`).
+                # The two read-side models got exactly this seeding in the same
+                # review round (`journal_epistemic_existence`,
+                # `journal_object_surviving_keys`); `_fold_journal` is the third
+                # model of one fold and must not read a different carrier table.
+                # `edges._mint_subject_stub` remains the unmodelled source
+                # (#8914) — recorded in `_event_mentioned_name_stubs`.
+                for _stub_label, _stub_name in _event_mentioned_name_stubs(ev):
+                    if _stub_label not in _NAME_MERGE_LABELS:
+                        continue
+                    _stub_carriers = carriers_by_name.setdefault(
+                        (_stub_label, _stub_name), set())
+                    if _stub_carriers:
+                        # `MERGE … {name:$name}` matched an existing carrier, so
+                        # the stub id (an `ON CREATE` write) does NOT land and
+                        # no carrier moves. Same rule the fold applies.
+                        continue
+                    _stub_carriers.add(entity_name_id(_stub_label, _stub_name))
             name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
                 rec["name"] = name

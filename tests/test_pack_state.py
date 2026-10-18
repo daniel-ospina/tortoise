@@ -25,6 +25,7 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 import pytest  # noqa: I001
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import rpc_call_named
 from tests._verdict import require_answered
 from tortoise.pack_state import (
     DEFAULT_STARTER_PACKS, ensure_tenant_packs, get_tenant_packs,
@@ -503,7 +504,32 @@ class TestProvisioningHooks:
             "email": "founder@example.com", "password": "hunter2secret"})
         assert r.status_code == 200, r.text
         org_id = r.json()["org_id"]
-        assert fake.rpc_calls[0][0] == "provision_team"
+        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
+        sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
+        rows = _read_installs(sdk)
+        assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
+
+    def test_provision_pin_survives_a_boot_sweep_rpc(self, supabase_client):
+        """#4816: the provision pin must not depend on INDEX.
+
+        ``_run_boot_sweeps`` is armed as a task at boot and its metering repair
+        calls ``get_control_plane().rpc("metering_repair_period_bounds", …)``
+        (#4241). In this fixture that control plane IS the fake, so the sweep's
+        RPC can land before the request's own — which is why
+        ``test_create_team_activates_packs_supabase_mode`` failed about 1 run in
+        4 and never reproduced alone. Seeding the sweep's call makes the race
+        deterministic: this test reddens an index-based pin every time.
+        """
+        from tortoise.hosted_api import app, get_current_user
+        tc, fake, db_path = supabase_client
+        # Exactly what the boot sweep records when it wins the race.
+        fake.rpc_calls.append(("metering_repair_period_bounds", {}))
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _U1, "email": "user-1@example.com"}
+        r = tc.post("/v1/organizations", json={"name": "acme"})
+        assert r.status_code == 200, r.text
+        org_id = r.json()["org_id"]
+        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
         sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
@@ -517,7 +543,7 @@ class TestProvisioningHooks:
         r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
         org_id = r.json()["org_id"]
-        assert fake.rpc_calls[0][0] == "provision_team"
+        assert rpc_call_named(fake, "provision_team")[0] == "provision_team"
         sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
