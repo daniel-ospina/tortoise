@@ -3150,6 +3150,68 @@ class TestValueVerbSpan2684:
         assert ("span_start" in pt) == ("span_end" in pt)
         assert pt["span_end"] > pt["span_start"] >= 0
 
+    # ── a VERBATIM quote is not yet an address to the VALUE ─────────────
+
+    def test_a_value_free_quote_gets_no_span_and_is_REPORTED(self):
+        """The quote can be verbatim and still OMIT the point's value (the
+        model quoted the context sentence; the number lives elsewhere in the
+        turn). Stamping those offsets hands a consumer text that holds no
+        value, and a consumer cannot tell it apart from a real value span —
+        an enumerate-then-sum numerator would read zero as if it had been
+        resolved. So: no span, and a REPORTED class."""
+        edus = [{"index": 0, "role": "user",
+                 "text": "We shipped 300 units in March and it went well "
+                         "overall. Next up is April."}]
+        r = v2.execute_embed(
+            self._embed("we shipped 300 units",
+                        quote="it went well overall."),
+            {}, session_id="s1", edus=edus)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] == 0     # anchored verbatim, not the band
+        assert "span_start" not in pt and "span_end" not in pt
+        assert any("the quoted text carries no value" in w
+                   for w in r["warnings"]), r["warnings"]
+        # the two ABSENCE classes are distinct — this is not the band route
+        assert not any("token-overlap band" in w for w in r["warnings"])
+
+    def test_every_stamped_span_addresses_text_that_CARRIES_a_value(self):
+        """ACCEPTANCE (the invariant this slice exists for): whenever a span is
+        stamped, re-reading the addressed text yields a value. Pinned over the
+        forms the value engine reads differently — the worded magnitude, the
+        numeric-separator amount, the clock — because a gate that dropped
+        THOSE would remove the address exactly where the span is the only
+        carrier of the value (#2817)."""
+        cases = [
+            ("the user's 5K best is 27:12", "my 5K best is 27:12"),
+            ("we ingested twelve million events",
+             "we ingested twelve million events for Halcyon"),
+            ("the crate weighed 1,234 kg", "the crate weighed 1,234 kg today"),
+            ("the invoice was $1,200,000", "the invoice was $1,200,000 net"),
+            ("the TTL is 2 hours", "the TTL is 2 hours, unchanged"),
+        ]
+        for content, quote in cases:
+            edus = [{"index": 0, "role": "user", "text": quote}]
+            r = v2.execute_embed(self._embed(content, quote=quote),
+                                 {}, session_id="s1", edus=edus)
+            pt = r["payload"]["points"][0]
+            assert "span_start" in pt, (content, r["warnings"])
+            addressed = quote[pt["span_start"]:pt["span_end"]]
+            assert v2._carries_value(addressed), (content, addressed)
+            assert addressed.lower() in " ".join(quote.lower().split())
+            assert not any("carries no value" in w for w in r["warnings"])
+
+    def test_a_value_free_quote_on_a_value_free_point_is_silent(self):
+        """The new absence class must not fire where nothing was ever
+        claimed: a non-value-bearing point keeps its pre-change payload AND
+        its pre-change warnings (no new noise on the value-free majority)."""
+        r = v2.execute_embed(
+            self._embed("the team prefers intervals",
+                        quote="maybe try intervals"),
+            {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert "span_start" not in pt and "span_end" not in pt
+        assert not any("carries no value" in w for w in r["warnings"])
+
 
 # ── The orchestrator (mock model, no LLM) ──────────────────────────────────
 

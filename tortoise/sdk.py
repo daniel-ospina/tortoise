@@ -6930,6 +6930,18 @@ class TortoiseSDK:
         word is persisted as the ``credibility`` Point property. Real sources
         attached later can carry the claim above the word through ordinary
         inheritance.
+
+        PROVENANCE ADVISORY (#8171): a fresh claim written with NO source and
+        NO provenance returns ``advisories: [{code: 'no_source', node_id,
+        message, advisory: true}]`` — a transient key on the write RESULT (never
+        a node property, never journaled), absent whenever the write is
+        sourced. It is ADVISORY ONLY: the Point has already landed, nothing is
+        refused, and stored state is unchanged. A claim is sourced here when it
+        carries a declared or ``session_id``-inferred ``extractedFrom`` (this
+        door materializes the ``:Source`` and the edge) or an authored
+        ``credibility`` word (which #398 rules IS a source). The message names
+        the cheap fix — ``extractedFrom='session:<id>'`` for an assertion the
+        writer itself originates.
         """
         self._validate_kind(kind)
         _coerce_props(props)
@@ -7802,13 +7814,59 @@ class TortoiseSDK:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),
                                       record_committed=bool(_record_committed))
-        if _source_change_notices:
-            # #5516: the notice is TRANSIENT — it rides the write result the
+        # ── #8171: the write-time provenance advisory, CLAIM door ────────
+        # The ruling: an agent asserting something without research is a WEAK
+        # source, and the source is the agent-session transcript. `audit`'s
+        # `missing_sourceKind` check is the SAME predicate, evaluated POST HOC
+        # (it can never change what the writer does next), and #8171 wired it
+        # at write time on the entity doors — but the door that actually
+        # creates CLAIMS (Points) reported nothing, so "a claim created with
+        # no source and no provenance" was never told to its writer. MEASURED
+        # before this: `create_point('statement', text)` returned the plain
+        # snapshot with no `advisories` key at all.
+        #
+        # ADVISORY ONLY — it rides the write result on a COPY, exactly like the
+        # #5516 `source_change_notices` below: the journaled snapshot and every
+        # later `get_point` stay free of it, the write has already LANDED, and
+        # nothing here raises, refuses or changes what was stored.
+        #
+        # What counts as SOURCED, and why each silence is justified:
+        #   - `extractedFrom` (declared, or inferred from `session_id` by the
+        #     #3263 path above) — materialized by THIS door into a `:Source`
+        #     and an `extractedFrom` edge. That is the remedy the advisory
+        #     names, so it must silence the note.
+        #   - an authored WORD (`credibility=`) — #398 rules the author's word
+        #     IS a source (the weak evidence body `_stamp_authored_word`
+        #     records). Advising a writer who declared their basis would be
+        #     wrong, not merely noisy.
+        # A bare point-level `sourceKind` does NOT silence it: it is a legacy
+        # annotation with no link behind it (the same measured finding that
+        # removed the `sourceKind` bypass from `_provenance_advisory` —
+        # `extracted_from_inert` exists because a declared-but-unwired ref is
+        # worse than none), and `audit`'s own check treats "no sourceKind AND
+        # no extractedFrom edge" as the gap, so neither field is provenance on
+        # its own.
+        _provenance_notes: dict = {}
+        if not props.get("extractedFrom") and credibility is None:
+            # A `session_id` that could not name a Source is the one case where
+            # the plain message would be misleading: say why it did not help.
+            _point_sid_hint = (
+                " (A `session_id` was supplied but is not a non-empty string, "
+                "so no source could be derived from it — pass a string "
+                "`session_id`, or `extractedFrom='session:<session_id>'`.)"
+                if _session_id is not None else ""
+            )
+            _provenance_notes = self._no_source_advisory(
+                pid, hint=_point_sid_hint)
+        if _source_change_notices or _provenance_notes:
+            # #5516 / #8171: both are TRANSIENT — they ride the write result the
             # writer sees, on a COPY, so the journaled snapshot above and every
-            # later `get_point` stay free of it. Present only when a Source
-            # actually changed: an unchanged-source write's result is byte-
-            # identical to before this feature.
-            return {**_snapshot, "source_change_notices": _source_change_notices}
+            # later `get_point` stay free of them. A write that carries neither
+            # notice returns byte-identical to before these features.
+            _extra = dict(_provenance_notes)
+            if _source_change_notices:
+                _extra["source_change_notices"] = _source_change_notices
+            return {**_snapshot, **_extra}
         return _snapshot
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -12124,13 +12182,35 @@ class TortoiseSDK:
         # emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER, §4.4) so a
         # transfer×emission crash cannot leave the stale descriptor in the
         # JSONL while the live edge moves.
+        # #8622: the OTHER endpoint may carry ANY of the four epistemic
+        # labels (#7902 / owner ruling #7813 — a direct IMPL/NAND is explicitly
+        # allowed to connect any two of :Point/:Subject/:Object/:Event). The
+        # transfer legs therefore anchor each endpoint on the label that
+        # actually resolved it; a hardcoded ``:Point`` on the far endpoint
+        # matched NOTHING, so the MERGE was a constrained no-op and the
+        # delete-leg below removed the ORIGINAL edge — the transfer silently
+        # DESTROYED the edge live, and the replay (which received the same
+        # endpoint contract) dropped it too. ``labels(t)`` rides the same
+        # traversal, so no extra round trip is spent resolving the far node.
+        def _epistemic_label(node_id: str) -> str | None:
+            """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
+            for _label in EPISTEMIC_LABELS:
+                found_row = proj.g.query(
+                    f"MATCH (n:{_label} {{id:$id}}) RETURN ID(n) LIMIT 1",
+                    params={"id": node_id},
+                ).result_set
+                if found_row:
+                    return _label
+            return None
+
+        new_label = _epistemic_label(new_id) if new_id else None
         for direction in ("out", "in"):
             if direction == "out":
                 dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             else:
                 dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             rows = proj.g.query(dq, params={"old_id": old_id}).result_set
             # Filter: exclude edges whose OTHER endpoint is an operator Point
             # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
@@ -12151,6 +12231,14 @@ class TortoiseSDK:
             rows = plain
             for row in rows:
                 rtype, r, tid, rid = row[0], row[1], row[2], row[3]
+                # #8622: the label that ACTUALLY carries the far endpoint, in
+                # EPISTEMIC_LABELS order (Point-first) — the same first-wins
+                # order ``create_direct_edge``'s probe uses, so the write and
+                # the transfer can never disagree about a multi-labelled node.
+                _row_labels = set(row[4] or ()) if len(row) > 4 else set()
+                tid_label = next(
+                    (lbl for lbl in EPISTEMIC_LABELS if lbl in _row_labels),
+                    None)
                 # FalkorDB returns an Edge object — read its properties.
                 rdict = dict(r.properties) if hasattr(r, "properties") else {}
                 if tid == new_id:
@@ -12198,25 +12286,36 @@ class TortoiseSDK:
                 # Two-step MERGE (FalkorDB quirk — same as create_direct_edge):
                 # MATCH the existing nodes, then MERGE the edge between them
                 # (never creates duplicate nodes; collapses to one edge).
-                if direction == "out":
-                    mq = (f"MATCH (new:Point {{id:$new_id}}), "
-                          f"(t:Point {{id:$tid}}) "
-                          f"MERGE (new)-[nr:{rtype}]->(t)")
-                else:
-                    mq = (f"MATCH (t:Point {{id:$tid}}), "
-                          f"(new:Point {{id:$new_id}}) "
-                          f"MERGE (t)-[nr:{rtype}]->(new)")
-                proj.g.query(mq, params={"new_id": new_id, "tid": tid})
-                _keep = {k: v for k, v in rdict.items()
-                         if k in ("direction", "confidence", "weight",
-                                  "label", "batch_id")}
-                proj.g.query(
-                    f"MATCH (a:Point {{id:$a}})-[r:{rtype}]->"
-                    f"(b:Point {{id:$b}}) SET r += $attrs",
-                    params={"a": (tid if direction == "in" else new_id),
-                            "b": (new_id if direction == "in" else tid),
-                            "attrs": _keep},
-                )
+                # #8622: anchor BOTH endpoints on their resolved labels. An
+                # unresolvable label means the endpoint is not an epistemic
+                # node (a raw/legacy edge the write path itself refuses), so
+                # the transfer cannot be performed — the delete-leg below still
+                # runs, mirroring the pre-#7902 "no such endpoint" outcome
+                # WITHOUT the silent hope that a :Point match existed.
+                if new_label is not None and tid_label is not None:
+                    if direction == "out":
+                        mq = (f"MATCH (new:{new_label} {{id:$new_id}}), "
+                              f"(t:{tid_label} {{id:$tid}}) "
+                              f"MERGE (new)-[nr:{rtype}]->(t)")
+                    else:
+                        mq = (f"MATCH (t:{tid_label} {{id:$tid}}), "
+                              f"(new:{new_label} {{id:$new_id}}) "
+                              f"MERGE (t)-[nr:{rtype}]->(new)")
+                    proj.g.query(mq, params={"new_id": new_id, "tid": tid})
+                    _keep = {k: v for k, v in rdict.items()
+                             if k in ("direction", "confidence", "weight",
+                                      "label", "batch_id")}
+                    if direction == "out":
+                        _a_label, _b_label = new_label, tid_label
+                    else:
+                        _a_label, _b_label = tid_label, new_label
+                    proj.g.query(
+                        f"MATCH (a:{_a_label} {{id:$a}})-[r:{rtype}]->"
+                        f"(b:{_b_label} {{id:$b}}) SET r += $attrs",
+                        params={"a": (tid if direction == "in" else new_id),
+                                "b": (new_id if direction == "in" else tid),
+                                "attrs": _keep},
+                    )
                 # Delete the OLD edge by its internal id (precision),
                 # constrained to the old point's incident edges (REVIEW-FIX
                 # P2: never graph-wide — internal ids may be reused).
@@ -14006,20 +14105,20 @@ class TortoiseSDK:
                 # The healed legacy mitigation carries the recorded #2199
                 # default too (same birth fact `create_point` records).
                 self._stamp_authored_word(mid, system_default=True)
-            # The OPERATOR is the dirty root here, not the mitigation: EP reads
-            # the changed strength off the operator's factor, and only a
-            # seeded operator pulls its inputs into the affected set. The
-            # CREATE path below marks exactly this pair ([mid, id]); the
-            # update path must match it. Marking `[mid]` alone is no longer a
-            # dead end — `_reverse_bfs_neighbors` now matches the mitigation
-            # back-link direction too — but the pair is what this path is
-            # specified to mark, and it does not depend on that helper's
-            # shape. The in-process flow hides a missing mark behind the
-            # operator's own creation-time ep_dirty flag; `ep_dirty` is
+            # #7505: mark the MITIGATION only — NOT the operator. What the
+            # re-mitigation needs is the operator's INPUTS recomputed, and
+            # `_reverse_bfs_neighbors` already returns them as claims through
+            # the mitigation back-link branch `(m)-[:IMPL]->(op)` (#6599). The
+            # operator id itself is not a factor participant, so no converged
+            # pass can subtract it from `_dirty_roots` (that is #2422's class),
+            # and marking it pinned `_auto_dream_mode()` to 'local' forever on
+            # every mitigation. The in-process flow hid the missing mark behind
+            # the operator's own creation-time ep_dirty flag; `ep_dirty` is
             # deliberately NOT journaled (#5166), so a rebuilt/replayed graph
-            # has no such mask and a re-mitigation would silently not move
-            # confidence. (#5566 review P2.)
-            self._mark_dirty([mid, id])
+            # has no such mask — the INPUT marks are what carry the
+            # re-mitigation, and they are computed, not assumed (#5566 review
+            # P2).
+            self._mark_dirty([mid])
             return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
@@ -14078,7 +14177,12 @@ class TortoiseSDK:
         else:
             self._stamp_authored_word(mid, system_default=True)
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
-        self._mark_dirty([mid, id])
+        # #7505: `[mid]` only — same reasoning as the update path above. `mid`
+        # reaches the operator's inputs through the reverse-BFS back-link
+        # branch and is itself swept as a neutral link (it forms no factor);
+        # the OPERATOR is deliberately not marked, because an operator root is
+        # not sweepable and would pin the dream mode to 'local'.
+        self._mark_dirty([mid])
         # #548: emit events for rebuild parity
         self._emit_event("PointAdded", point=self.get_point(mid))
         # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
@@ -19538,17 +19642,28 @@ class TortoiseSDK:
         """Sweep a converged pass's affected claims from BOTH the in-memory
         dirty set and the graph flags (#1163).
 
+        The sweep set is the run's ``affected`` claims PLUS the roots no pass
+        can ever sweep (:meth:`_unsweepable_dirty_roots`, #7505). The second
+        term is not a retention relaxation: those roots are invisible to the
+        ``affected`` rule by CONSTRUCTION (they form no factor, so
+        ``_affected_claims`` can never admit them), so subtracting only
+        ``affected`` retains them for the life of the graph — the defect
+        #7505 records. Roots the pass did NOT reach for any other reason
+        (capped, truncated, non-converged — the W4 retention of #1243) are
+        still never swept.
+
         The graph sweep is epoch-guarded: a flag stamped at a NEWER epoch
         than ``run_ep`` (the pass's world-view snapshot) is never cleared —
         a concurrent process re-marked it dirty mid-run and its marking
         must survive. ``run_ep=None`` (single-process callers without a
         snapshot) clears unconditionally.
         """
-        self._dirty_roots -= affected
-        self._reset_retry_state(affected)
-        if not affected:
+        swept = set(affected) | self._unsweepable_dirty_roots(affected)
+        self._dirty_roots -= swept
+        self._reset_retry_state(swept)
+        if not swept:
             return
-        ids = list(affected)
+        ids = list(swept)
         if run_ep is None:
             self._get_proj().g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
@@ -19562,6 +19677,120 @@ class TortoiseSDK:
                 "SET n.ep_dirty = null, n.ep_dirty_at = null",
                 params={"ids": ids, "run_ep": run_ep},
             )
+
+    def _unsweepable_dirty_roots(self, affected: set[str]) -> set[str]:
+        """Dirty roots that NO pass can ever clear: the NEUTRAL-LINK ones — a
+        node that has an ``IMPL|NAND`` edge but participates in no EP factor,
+        so ``_affected_claims`` can never admit it (#7505).
+
+        ``_sweep_dirty_roots``' only clearing rule is SUBTRACT the run's
+        ``affected`` set, and ``TortoiseEP._affected_claims`` admits exactly
+        two shapes: an operator's INPUT (``(op)-[:IMPL|NAND]->(c)`` — the
+        direction ``_affected_factors`` reads, #5566) and an endpoint of an
+        operator-less ``IMPL|NAND`` edge (#888 W5). A node that has an
+        ``IMPL|NAND`` edge but is neither can never appear in ``affected``, so
+        every converged pass retains it forever. That is the #2422
+        terminal-point class — `_mark_dirty` excludes terminal points from the
+        persist WHERE for precisely this reason — and this is the same
+        exclusion for the NEUTRAL-LINK class (#5025): an edge that forms no
+        factor must not make a node a dirty root.
+
+        MEASURED (#7505, head): after `mitigate_operator` the mitigation
+        point ``mid`` carries a persisted ``ep_dirty`` that no pass cleared —
+        its only edge is ``(m)-[:IMPL]->(op)``, a reverse-only IMPL that
+        #6599 correctly keeps out of ``affected``. ``_dirty_roots`` grew one
+        permanent entry per mitigation, ``dream_health_check()``'s
+        ``stale_backlog`` could not drain, and every mitigation pinned
+        ``_auto_dream_mode()`` to 'local'.
+
+        THREE CLASSES ARE DELIBERATELY EXEMPT — this is not "drop every root
+        the pass did not reach":
+
+        * AN OPERATOR. It does form a factor, so dropping it on convergence
+          is sound only if the pass provably ran that factor — and it may not
+          have: an explicit-k pass is truncated at the operator cap
+          (``op_cap``, #1241), and #6211 is exactly a converged pass that did
+          not cover every factor. Nor is ``affected`` a witness: stale-first
+          and full passes report the UNION of their per-batch affected sets,
+          so one operator's two inputs can sit in different batches without
+          its factor ever running. The only sound witness is the run's own
+          factor-operator set, which the sweep is not given. So
+          `mitigate_operator` stops MAKING the operator a root instead (its
+          inputs are already reached through the mitigation back-link branch
+          of `_reverse_bfs_neighbors`, #6599) — see that call site. A root an
+          operator still acquires from the `update_point` write family
+          (`invalidate_point` refuses operators) therefore remains a
+          permanently unsweepable root, exactly as it was before #7505; that
+          residual is tracked, not silently assumed away.
+        * A ROOT WITH **NO** ``IMPL|NAND`` EDGE AT ALL (an isolated claim).
+          Its pass computes nothing (the #3139 ``no_ep_factors`` legitimate
+          no-op), so sweeping its flag would be a no-op sweeping its own
+          backlog — the exact failure #3139 forbids. It is retained, as
+          before; that is a different decision (#6211 territory), not this
+          issue's.
+        * A NON-``:Point`` ROOT — the #7927 pinned gap: never graph-persisted,
+          never selected by the dream BFS. Left EXACTLY as it was, so this fix
+          neither widens nor silently tidies that boundary.
+
+        The residue is classified with three batched queries, and ONLY the
+        roots the ``affected`` subtraction did not clear are examined — a pass
+        whose every root was a claim issues none at all.
+        """
+        candidates = set(self._dirty_roots) - set(affected)
+        if not candidates:
+            return set()
+        proj = self._get_proj()
+        ids = sorted(candidates)
+        # The classification is :Point-only, exactly like the rest of the dirty
+        # lifecycle (`_mark_dirty`'s persist, `_hydrate_dirty_roots`,
+        # `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`).
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "RETURN n.id, (n.is_operator = true OR n.op_type IS NOT NULL)",
+            params={"ids": ids},
+        ).result_set
+        points = {r[0] for r in rows}
+        # An OPERATOR is retained (see above) — its factor can be recomputed by
+        # a later pass even though the operator itself is not an affected
+        # claim. `op_type` is the legacy operator marker (#2205/#3139 form).
+        participants = {r[0] for r in rows if r[1]}
+        # (1) an operator's INPUT. Direction is load-bearing: a mitigation
+        # points AT an operator (``(m)-[:IMPL]->(op)``), so it is the operator
+        # that would match here, never ``m``.
+        participants |= {r[0] for r in proj.g.query(
+            "MATCH (o:Point)-[:IMPL|NAND]->(n:Point) "
+            "WHERE n.id IN $ids "
+            "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
+            "RETURN DISTINCT n.id",
+            params={"ids": ids},
+        ).result_set}
+        # (2) the two facts the remaining classes need from the edges, in ONE
+        # sweep: does the candidate have an IMPL|NAND edge at all (the class
+        # boundary — an isolated claim has none and is retained), and is that
+        # edge's far endpoint a PLAIN node (the operator-less direct-edge
+        # admission of #888 W5; a mitigation's far endpoint is the OPERATOR,
+        # which is what keeps it out of `affected` and is measured here).
+        # The far endpoint is ANY epistemic label, not `(d:Point)`: #7902/
+        # #7853 widened the direct-edge admission in `_affected_claims` and
+        # `_affected_factors` Batch 3 past Point->Point, so a `:Point` whose
+        # only plain neighbour is a `:Subject` is a factor participant and must
+        # not be classified unsweepable. The id-anchored half stays `:Point`
+        # because the candidate universe above is `:Point`-only.
+        edge_rows = proj.g.query(
+            "MATCH (n:Point)-[:IMPL|NAND]-(d) "
+            f"WHERE n.id IN $ids AND {epistemic_disjunction('d')} "
+            "RETURN DISTINCT n.id, "
+            "((d.is_operator IS NULL OR d.is_operator = false) "
+            "AND d.op_type IS NULL) AS d_plain",
+            params={"ids": ids},
+        ).result_set
+        edge_bearing = {r[0] for r in edge_rows}
+        # A direct-edge factor needs a plain FAR endpoint; the near endpoint's
+        # plainness is guaranteed for every non-operator candidate (an
+        # operator is already in `participants`). The #2205/#3139
+        # index-independent form is used for the far endpoint.
+        participants |= {r[0] for r in edge_rows if r[1]}
+        return (points & edge_bearing) - participants
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
@@ -19602,9 +19831,26 @@ class TortoiseSDK:
                 op_ids.append(r[0])
         claim_ids: list[str] = []
         if op_ids:
+            # #7505 (review P1): the operator's INPUTS are widened to ANY
+            # epistemic label, exactly as the READ half was (#7902/#7853:
+            # `_affected_claims`' op-seed query and `_affected_factors`
+            # Batch 2 both widen `c`). This query is the only path by which a
+            # mitigation write reaches the operator's factor — `(m)-[:IMPL]->
+            # (op)` is a neutral link, so `mid` alone admits nothing — and a
+            # `:Point`-only spelling silently drops every operator whose inputs
+            # are non-`:Point` labels: the pass becomes a clean no-op
+            # (`diagnostic='no_factors'`) and a mitigated strength stops moving
+            # belief. Measured on an `IMPL` from a `:Subject` to an `:Object`:
+            # a 0.5 mitigation left the target's posterior at 1.262738 instead
+            # of 1.140587. The operator side stays id-anchored, so the id index
+            # still anchors the traversal. Non-`:Point` ids this returns enter
+            # the in-memory mirror only (`_mark_dirty`'s persist/prune are
+            # `:Point`-anchored — the #7927 gap), which is the same shape
+            # `create_operator(inputs=[…:Subject…])` already has.
             rows = proj.g.query(
-                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
-                "WHERE op.id IN $oids RETURN DISTINCT c.id",
+                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c) "
+                f"WHERE op.id IN $oids AND {epistemic_disjunction('c')} "
+                "RETURN DISTINCT c.id",
                 params={"oids": op_ids},
             ).result_set
             claim_ids = [r[0] for r in rows]
@@ -19872,7 +20118,9 @@ class TortoiseSDK:
             local: {mode, iterations, converged, affected_claims,
                     budget_used, coverage} — converged retained for the
                     dirty-root logic (roots covered by the affected set are
-                    cleared; roots outside stay dirty for a later dream).
+                    cleared; roots outside stay dirty for a later dream —
+                    except a NEUTRAL-LINK root, which no pass can ever cover
+                    and is cleared instead, #7505).
             stale-first: {mode, batches, converged_all, converged,
                     affected_claims, budget_used, coverage} — converged =
                     this pass's window-level convergence (drives the
@@ -20151,8 +20399,11 @@ class TortoiseSDK:
 
         Dirty-root clearing keeps the #395-era retention semantics (roots in
         the affected set are cleared; roots OUTSIDE the dreamed subgraph
-        stay dirty for a later dream; an empty affected set subtracts
-        nothing) — the non-convergence divergence is owned by 903-C5.
+        stay dirty for a later dream) — the non-convergence divergence is
+        owned by 903-C5. The one addition is #7505: a NEUTRAL-LINK root (one
+        that has an ``IMPL|NAND`` edge but forms no EP factor, so no pass can
+        ever put it in an affected set) is cleared too, because retaining it
+        would retain it forever (:meth:`_unsweepable_dirty_roots`).
         """
         anchors = list(self._dirty_roots)
         if not anchors:
@@ -20214,9 +20465,10 @@ class TortoiseSDK:
         mirrors the pass's seed expansion and liveness predicates (#6597), so
         ``affected ⊆ closure``; a budget-bounded pass simply reports < 1.0.
         The dirty-root logic is driven from the window-level ``converged``
-        flag: a converged pass clears the affected roots; a failed pass clears
-        nothing (W4 retention — non-converged regions reselect via the window
-        union).
+        flag: a converged pass clears the affected roots (plus the
+        NEUTRAL-LINK roots no pass could ever reach — #7505, see
+        `_sweep_dirty_roots`); a failed pass clears nothing (W4 retention —
+        non-converged regions reselect via the window union).
         """
         result = dreamer.dream_window(budget=budget, max_hops=max_hops,
                                      warm_start=warm_start)
@@ -20274,8 +20526,9 @@ class TortoiseSDK:
         # P2-review (#1243): a CONVERGED full pass resolves every reachable
         # region — clear the affected roots' retry state so a later failed
         # window pass cannot surface an already-converged region as
-        # stale_unresolved, and prune deleted-point zombies. #1163: the
-        # guarded sweep stands down when the stale-run guard fired (a
+        # stale_unresolved (the shared sweep also clears the NEUTRAL-LINK roots
+        # no pass can reach — #7505), and prune deleted-point zombies. #1163:
+        # the guarded sweep stands down when the stale-run guard fired (a
         # concurrent process re-marked dirty mid-pass).
         if result.get("converged_all", False) and not getattr(
                 dreamer, "_last_flush_skipped", False):
@@ -29364,6 +29617,29 @@ class TortoiseSDK:
     # `session:<id>` ref for what the writer itself asserts).
     _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {"document": "Source"}
 
+    #: The ONE `no_source` sentence — one home, so the entity doors and the
+    #: claim door cannot drift into advising different fixes (#8171).
+    _NO_SOURCE_MESSAGE: ClassVar[str] = (
+        "No source and no provenance on this write. If it is something YOU "
+        "are asserting, source it from the session that produced it with "
+        "extractedFrom='session:<session_id>' (registered as "
+        "sourceKind=agentSession) — an unsourced assertion carries whatever "
+        "credibility its wording implies."
+    )
+
+    def _no_source_advisory(self, node_id: str | None, *, hint: str = "") -> dict:
+        """The `no_source` advisory payload, with an optional door-specific hint.
+
+        ADVISORY ONLY — the caller adds it to a write RESULT; nothing here
+        raises, refuses or changes what was stored (#8171).
+        """
+        return {"advisories": [{
+            "code": "no_source",
+            "node_id": node_id,
+            "message": self._NO_SOURCE_MESSAGE + hint,
+            "advisory": True,
+        }]}
+
     def _provenance_advisory(self, node: dict, props: dict,
                              *, entity_type: str | None = None) -> dict:
         """Advisory for a provenance gap this door can report.
@@ -29477,19 +29753,7 @@ class TortoiseSDK:
         # unprovenanced write. There is now no branch here: only a materialized
         # `extractedFrom` counts.
         node_id = node.get("id") or node.get("eventId")
-        return {"advisories": [{
-            "code": "no_source",
-            "node_id": node_id,
-            "message": (
-                "No source and no provenance on this write. If it is "
-                "something YOU are asserting, source it from the session "
-                "that produced it with extractedFrom='session:<session_id>' "
-                "(registered as sourceKind=agentSession) — an unsourced "
-                "assertion carries whatever credibility its wording implies."
-                + _sid_hint
-            ),
-            "advisory": True,
-        }]}
+        return self._no_source_advisory(node_id, hint=_sid_hint)
 
     # ── Write nudges (epic #888 W2 — nudge, don't enforce) ───────────
 
