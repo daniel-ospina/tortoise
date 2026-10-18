@@ -5978,8 +5978,10 @@ class TortoiseSDK:
             return bool(proj.g.execute_command("EXISTS", str(name)))
         except Exception:  # noqa: BLE001, RUF100 — a failed probe is not a rebuild
             _logger.warning(
-                "graph-existence probe failed for %r; refusing to retry the "
-                "aborted write (a silent success is worse than a loud miss)",
+                "graph-existence probe failed for %r; the write is not "
+                "retried and any #7357 exhaustion message reports the "
+                "graph state as UNKNOWN (a silent success is worse than a "
+                "loud miss)",
                 name, exc_info=True)
             return None
 
