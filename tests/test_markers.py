@@ -71,6 +71,14 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_graph_storage.py": {"registry": "prod-coupled"},  # #5331 — the byte-meter fixture seeds an org through the registry namespace (the literal is the namespace PROD resolves; same class as test_cross_tenant_read_isolation)
+    # The `reg` fixture (the two T7 registry-lane cases; the rest of the file
+    # is Supabase-lane) reads the graph handle `_reg_seed_org` / `_reg_seed_key`
+    # seed through `TortoiseSDK(namespace="registry")._get_registry()`, and the
+    # rotate-key path under test resolves that same canonical namespace
+    # (`_make_sdk(namespace="registry")`). A `test_*` rename would seed a
+    # different graph than the code under test reads. Same `prod-coupled` class
+    # as test_cohort_cost_cap / test_onboarding_state_cas.
+    "test_rotate_key.py": {"registry": "prod-coupled"},
     # #2728: `_seed_org` / `_seed_member` seed the Team + Graph/Membership
     # control-plane nodes through the CANONICAL `registry` namespace the new
     # per-graph pack routes resolve (`_resolve_graph_data_namespace` reads the

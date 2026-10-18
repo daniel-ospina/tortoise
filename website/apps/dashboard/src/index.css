@@ -1068,6 +1068,16 @@ input::placeholder, textarea::placeholder {
 }
 .integration-modal h3 { margin: 0 0 8px; font-size: 16px; }
 .integration-modal p { margin: 0 0 8px; font-size: 13px; line-height: 1.5; }
+/* #3514: the coming-soon dialog's post-action status region. ONE LINE IS
+   RESERVED (a real `min-height`, and the region is never `display: none`d while
+   empty) so a status appearing cannot shove the `.wizard-actions` buttons out
+   from under a pointer that is already travelling to them — a moving target
+   during a `loading` state is the defect this prevents. A SINGLE-line status
+   (sending / failed) therefore costs no shift; the recorded state's second line
+   (the click count) still adds one, and that is a settled reading rather than
+   the moment a control moves under the pointer. */
+.integration-demand-status { margin: 0 0 10px; min-height: 1.5em; }
+.integration-demand-status p { margin: 0 0 4px; }
 .data-sources { display: flex; flex-direction: column; gap: 12px; }
 .harness-statuses { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .harness-status {
