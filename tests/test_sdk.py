@@ -1457,12 +1457,18 @@ class TestExplicitDraftIsHonoured1088:
     or ``update_point(status="live")``) may do that.
 
     Non-vacuous because the pre-#1088 code did the opposite on every path
-    pinned here: a non-decide kind defaulted to 'draft', and each promotion
-    clause moved an explicitly-drafted source to live.
+    pinned here — with ONE exception, named rather than counted: the four
+    decide-part parameters of ``test_create_point_defaults_to_live`` were born
+    live already (#2199), so they are a BIRTH-STATUS pin for the universal
+    ruling (#6107's acceptance rail asks for them), not evidence for the
+    inversion. ``statement`` is the only discriminating parameter, and it is
+    the one the pre-#1088 code defaulted to 'draft'.
     """
 
-    @pytest.mark.parametrize("kind", ["statement", "decision", "option",
-                                     "criterion", "evidence"])
+    @pytest.mark.parametrize("kind", [
+        "statement",   # the DISCRIMINATING case: draft pre-#1088
+        "decision", "option", "criterion", "evidence",   # live pre-#1088
+    ])
     def test_create_point_defaults_to_live(self, sdk, kind):
         # 'statement' is NOT in DECIDE_PART_KINDS ({decision, option,
         # criterion, evidence}), so the pre-#1088 code defaulted it to

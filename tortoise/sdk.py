@@ -6901,7 +6901,10 @@ class TortoiseSDK:
         LIVE is the default (#1088): a point created WITHOUT an explicit
         ``status`` is live — not draft — whatever its kind. Draft is opt-in:
         pass ``status="draft"`` and it is honoured (no promotion clause,
-        ingest fold, or operator edge will move it to live).
+        ingest fold, or operator edge will move it to live; the ONE scoped
+        exception is a point the capture pass MINTS — it promotes the drafts
+        it created itself, keyed on ``promotion_ids``, and never one it merely
+        folded onto).
 
         Decision parts (#2199) — pointKind in {decision, option, criterion,
         evidence} created WITHOUT an explicit status — land LIVE (not draft)
@@ -7082,8 +7085,13 @@ class TortoiseSDK:
         # is honoured. "Was status given?" is decided BEFORE the pop so an
         # explicit status (the capture/extraction paths pass status="draft" +
         # extractedFrom, or an agent staging a draft deliberately) is explicit
-        # BY CONSTRUCTION and keeps full manual control. Precedent: #2199 did
-        # exactly this for the decide-part kinds.
+        # BY CONSTRUCTION and keeps full manual control — with ONE scoped
+        # exception: a point the command itself MINTS. The capture pass
+        # promotes the drafts IT created (``promotion_ids``), never a folded
+        # or pre-existing draft (#1088), so "explicit draft is never moved
+        # live" is true of a point this write did NOT mint, not of a capture's
+        # own extracted claims. Precedent: #2199 did exactly this for the
+        # decide-part kinds.
         #
         # OVERRIDES: the fail-closed create posture of #344/#1212 (a
         # non-decide kind defaulted to status='draft', so a plainly-created
