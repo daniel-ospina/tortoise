@@ -70,10 +70,6 @@ DOC_URL = "doc-set-order-7362"
 SRC_URL = "https://example.test/set-order-7362"
 GH_URL = "https://github.com/test/repo/issues/42"
 
-#: ``s.contentHash`` as a whole property (never ``s.contentHashish``).
-_READ = re.compile(r"\bs\.contentHash\b")
-#: The WRITE of it — ``=`` not followed by another ``=`` (``<>`` / ``==``).
-_WRITE = re.compile(r"\bs\.contentHash\b\s*=(?!=)")
 #: A ``SET`` list may be introduced bare (``… SET …``) or per arm.
 _SET_OPEN = re.compile(r"\b(?:ON CREATE |ON MATCH )?SET\b")
 #: A clause keyword that ENDS the current ``SET`` list.
@@ -164,35 +160,63 @@ def _set_items(body: str):
     return items
 
 
-#: A ``SET`` ITEM that assigns ``s.contentHash``. Anchored at the item's start,
-#: so the ``=`` comparisons INSIDE another item's CASE (``s.contentHash = ''``,
-#: ``s.contentHash <> $ch``) are never mistaken for the assignment.
-_ITEM_WRITE = re.compile(r"\s*s\.contentHash\s*=(?!=)")
+
 
 
 def _order_violations(statement: str) -> list[str]:
     """Every ``SET`` item in ``statement`` that reads the hash AFTER it is written."""
+    return _same_clause_violations(statement, only="contentHash")
+
+
+#: A ``SET`` ITEM that assigns ANY ``s.<prop>``. Anchored at the item's start, so
+#: a comparison inside another item's CASE (``s.x = ''``, ``s.x <> $v``) is never
+#: mistaken for an assignment.
+_ITEM_ASSIGN = re.compile(r"\s*s\.(\w+)\s*=(?!=)")
+
+
+def _same_clause_violations(
+    statement: str, *, only: str | None = None
+) -> list[str]:
+    """Every ``SET`` item that READS a property an EARLIER item in the same list writes.
+
+    The ``contentHash`` case above is the instance that broke production (#7362),
+    but the hazard is the whole rule, not that one property: on a left-to-right
+    engine an item that reads ``s.<p>`` sees whatever an earlier item just put
+    there, whether ``<p>`` is the version hash, a title, or a search text. The
+    ``_searchText`` fallback ``coalesce($st, s._searchText, s.title)`` is exactly
+    that — it reads ``s.title``, and when it sat BELOW the ``s.title`` write it
+    fell back to the title that same clause had just installed on one engine and
+    the stored title on the other (#8870 review).
+
+    An item reading the property IT assigns is fine: its right-hand side is
+    evaluated against the pre-write record on both engines, so
+    ``s.contentHash = coalesce(s.contentHash, $h)`` is not a violation.
+    """
     violations: list[str] = []
     for keyword, body in _set_lists(statement):
         items = _set_items(body)
-        write_items = [i for i, (_s, _e, text) in enumerate(items)
-                       if _ITEM_WRITE.match(text)]
-        if not write_items:
-            continue
-        first_write = min(write_items)
+        written: dict[str, int] = {}
         for i, (_s, _e, text) in enumerate(items):
-            if i in write_items or i <= first_write:
-                continue
-            for read in _READ.finditer(text):
+            assign = _ITEM_ASSIGN.match(text)
+            for read in re.finditer(r"\bs\.(\w+)\b", text):
+                prop = read.group(1)
+                if only is not None and prop != only:
+                    continue
+                if assign and assign.group(1) == prop:
+                    continue  # its own right-hand side: pre-write on both engines
+                if prop not in written:
+                    continue
                 violations.append(
-                    f"{keyword}: item {i} of the SET list READS `s.contentHash` "
-                    f"at offset {read.start()} of its own text, AFTER the item "
-                    f"that WRITES it (item {first_write}) — on a left-to-right "
-                    f"engine (falkordb 6.x) that read sees the hash the same "
-                    f"clause just installed, so its guarded branch never "
-                    f"fires.\n  … {text.strip()[:180]} …"
+                    f"{keyword}: item {i} of the SET list READS `s.{prop}` AFTER "
+                    f"item {written[prop]} WROTE it — on a left-to-right engine "
+                    f"(falkordb 6.x, the production backend) that read sees the "
+                    f"value the same clause just installed, so its guarded "
+                    f"branch never fires."
+                    f"\n  … {text.strip()[:180]} …"
                 )
                 break
+            if assign:
+                written.setdefault(assign.group(1), i)
     return violations
 
 
@@ -362,3 +386,105 @@ def test_the_order_detector_flags_the_pre_fix_shapes():
         "DELETE old"
     )
     assert _order_violations(sweep) == [], sweep
+
+
+# ── the SAME rule, for any property (not just the hash) ──────────────
+
+def test_the_document_search_text_is_not_computed_from_the_title_it_writes(proj):
+    """`_upsert_document` (#8870 review P2): `_searchText` must precede `s.title`.
+
+    Its last-resort fallback READS `s.title`, so with the item below the title
+    write a text-less re-emit fell back to the title that same clause had just
+    installed on a left-to-right engine (`'https://example.test/doc-title2'`)
+    and to the STORED title on the other — one clause, two answers, chosen by
+    the backend. This is the same read-after-write rule as the hash, which is
+    why the detector below is generalised rather than duplicated.
+    """
+    with _capture(proj) as recorder:
+        _drive_document(proj)
+    statements = [q for q in recorder.queries if "s.documentKind=coalesce($dk" in q]
+    assert statements, "the document writer emitted no upsert statement"
+    for statement in statements:
+        assert _same_clause_violations(statement) == [], (
+            "a same-clause read-after-write survives in the document writer — on "
+            "a left-to-right engine the read sees the value the clause just "
+            "installed:\n" + "\n".join(_same_clause_violations(statement))
+        )
+
+
+def test_the_writers_have_no_other_same_clause_read_after_write(proj):
+    """Standing guard for the whole class, over every statement the writers emit."""
+    drivers = (_drive_document, _drive_upsert_source, _drive_connector)
+    offenders: list[str] = []
+    for drive in drivers:
+        with _capture(proj) as recorder:
+            drive(proj)
+        for statement in recorder.queries:
+            for violation in _same_clause_violations(statement):
+                offenders.append(f"{drive.__name__}: {violation}")
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_the_generalised_detector_flags_the_search_text_shape():
+    """Non-vacuous: the pre-fix `_searchText`-below-`title` shape REDS.
+
+    Without this the generalised rule could be satisfied by a detector that no
+    longer matches anything — the failure mode of every regex guard.
+    """
+    pre_fix = (
+        "MERGE (s:Source {url:$id}) SET "
+        "s.title=coalesce($title, s.title), "
+        "s._searchText=coalesce($st, s._searchText, s.title), "
+        "s.updatedAt=$now"
+    )
+    violations = _same_clause_violations(pre_fix)
+    assert len(violations) == 1, violations
+    assert "s._searchText" in violations[0] or "s.title" in violations[0], violations
+
+    # The FIXED order: reading the title BEFORE writing it is not a violation.
+    post_fix = (
+        "MERGE (s:Source {url:$id}) SET "
+        "s._searchText=coalesce($st, s._searchText, s.title), "
+        "s.title=coalesce($title, s.title), "
+        "s.updatedAt=$now"
+    )
+    assert _same_clause_violations(post_fix) == [], post_fix
+
+    # An item reading the property it assigns is its own right-hand side — the
+    # pre-write record on both engines, so never a violation.
+    own_rhs = (
+        "MERGE (s:Source {url:$id}) SET "
+        "s.title=coalesce($title, s.title), "
+        "s._searchText=coalesce($st, s._searchText)"
+    )
+    assert _same_clause_violations(own_rhs) == [], own_rhs
+
+
+def test_the_capability_probe_agrees_with_the_engine_it_measures(proj):
+    """The probe the live pin gates on must agree with a DIRECT measurement.
+
+    The live pin skips when the probe says the engine reads pre-write values, so
+    a probe that lied in either direction would either run vacuously or skip on an
+    engine that could have shown the defect. This asserts the CONTRACT — the
+    probe's verdict equals a bare control clause's ordinal on the SAME engine —
+    rather than naming the backend: the `proj` fixture follows
+    `TORTOISE_DB_URI`, and a lane pointing it at a left-to-right backend must not
+    fail a test about the embedded one. In the hermetic carve-out lane (no URI)
+    the fixture IS the embedded backend, and its PRE-write answer is what makes
+    `test_8870_version_anchor_write_order.py` skip there instead of greening.
+    """
+    from tests.test_8870_version_anchor_write_order import (
+        SET_ORDER_LEFT_TO_RIGHT,
+        SET_ORDER_PRE_WRITE,
+        _probe_set_order,
+    )
+
+    proj.g.query("CREATE (n:_ProbeControl7362 {a: 0})")
+    try:
+        proj.g.query("MATCH (n:_ProbeControl7362) SET n.a = 1, n.b = n.a")
+        raw = proj.g.query("MATCH (n:_ProbeControl7362) RETURN n.b").result_set
+    finally:
+        proj.g.query("MATCH (n:_ProbeControl7362) DELETE n")
+    direct = (SET_ORDER_LEFT_TO_RIGHT if raw and raw[0][0] == 1
+              else SET_ORDER_PRE_WRITE)
+    assert _probe_set_order(proj) == direct

@@ -14,7 +14,8 @@ about write order:
 
 That asymmetry is why the bug survived: its pins ran on the second kind, could
 not be red, and were green. A green bought from an engine that cannot observe
-the failure is not evidence.
+the failure is not evidence — and a LIVE engine is not automatically a CAPABLE
+one, which is why reachability is not the gate below.
 
 So this file does two things, and BOTH are load-bearing:
 
