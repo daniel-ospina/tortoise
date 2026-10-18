@@ -230,16 +230,48 @@ function orFallbacks(ast) {
  * unresolved END is what turns a window into the rest of the file, and an
  * unresolved START what turns it into an empty slice, and either way every pin
  * that uses the window certifies a region it does not name.
+ *
+ * #3726 cycle 6: existence is not CONTAINMENT, and the END used to be a TEXT
+ * sentinel searched on the RAW source — comments included. `main.jsx` already
+ * carries a note INSIDE the card that names the flag (L9262, "NEVER rendered while
+ * LEGACY_WIZARD_ARCHIVED is false"), so widening that note by two characters
+ * (` && …`) would resolve the END EARLY, shrink the window past the copy it
+ * watches, and leave `deepEqual(inCardTitles, [])` passing over the shrunken
+ * region — the same false-green shape as the `indexOf`-returns-`-1` defect this PR
+ * closes. The boundary is therefore read from the AST (`archivedGateStart`), where
+ * prose cannot forge it, and its ORDER is asserted.
  */
 function welcomeCardWindow(source, ast) {
   const heads = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
   assert.equal(heads.length, 1,
     'the welcome-head card must resolve exactly once (a pin over an empty or unbounded window is a false green)')
   const start = heads[0].start
-  const end = source.indexOf('LEGACY_WIZARD_ARCHIVED &&', start)
+  const end = archivedGateStart(ast, start)
   assert.notEqual(end, -1,
     'the archived-block boundary must resolve (an unresolved end makes the window the rest of the file)')
+  assert.ok(end > start,
+    'the archived-block boundary must FOLLOW the card (an end at or before the start makes the window empty, and every pin over an empty window certifies nothing)')
   return { start, end }
+}
+
+/**
+ * Source offset of the archived block that ENDS the live welcome card: the first
+ * `LEGACY_WIZARD_ARCHIVED` REFERENCE after `start`, read from the AST. `-1` when
+ * there is none.
+ *
+ * Comments are NOT AST nodes, so a comment inside the card that mentions the flag
+ * cannot resolve this boundary early — which a raw `source.indexOf(…)` sentinel
+ * could not promise. The flag's own `const` declaration sits at `main.jsx:3675`,
+ * BEFORE the card, so the first reference after `start` is the archived gate.
+ */
+function archivedGateStart(ast, start) {
+  let found = -1
+  walkNodes(ast, (node) => {
+    if (node.type !== 'Identifier' || node.name !== 'LEGACY_WIZARD_ARCHIVED') return
+    if (node.start <= start) return
+    if (found === -1 || node.start < found) found = node.start
+  })
+  return found
 }
 
 /**
@@ -377,9 +409,31 @@ test('#3726 falsifiability: the legacy-label pin reads the ARRAY, not copy that 
   // only inside the legacy array — so the pre-fix pin was NOT vacuous for
   // `You're set`. What it could not survive is the change this issue is about:
   // re-quoting the array without touching one character of the copy.
+  // #3726 cycle 6 (P1): the demonstration below is confined to a SYNTHETIC source.
+  // Asserting the escaped sequence against the LIVE `src` was itself the defect
+  // this issue exists to remove: `You\'re set` occurs only inside the legacy array
+  // (main.jsx:3666), so a PURE RE-QUOTE of that array — dropping the escape and
+  // switching the delimiters, not one character of the copy — redded that
+  // assertion with a message about a PRE-FIX needle while the real pin above
+  // stayed green. The false red simply moved out of the pin and into its own
+  // falsifiability test. Every other falsifiability test in this file feeds
+  // synthetics only, for the same reason.
   const mainNeedle = "You\\'re set"
-  assert.ok(src.includes(mainNeedle),
-    "the pre-fix needle resolves against the real source — it is the legacy array's own spelling")
+  const asShipped = [
+    'const wizardSteps = [',
+    "  'Connect your tool',",
+    "  'Memory sources',",
+    "  'Your agent\\'s toolkit',",
+    "  'Seed your graph',",
+    "  'You\\'re set',",
+    ']',
+  ].join('\n')
+  assert.ok(asShipped.includes(mainNeedle),
+    'the pre-fix needle matched the array in its ORIGINAL (escaped) spelling')
+  assert.deepEqual(legacyWizardLabels(parseModule(asShipped)), {
+    declarators: 1,
+    labels: ["Connect your tool", "Memory sources", "Your agent's toolkit", "Seed your graph", "You're set"],
+  }, 'the synthetic is the legacy array as shipped (same five labels), so the re-quote below is the same input the pin reads')
   const requoted = [
     'const wizardSteps = [',
     '  "Connect your tool",',
@@ -412,6 +466,49 @@ test('#3726 falsifiability: the legacy-label pin reads the ARRAY, not copy that 
     'the normalised needle matches live copy and a comment — the false green this pin must not have')
   assert.deepEqual(legacyWizardLabels(parseModule(liveCopyOnly)), { declarators: 0, labels: null },
     'the AST pin finds no legacy array, so the same source reddens instead')
+})
+
+test('#3726 falsifiability: the welcome-card window fails LOUD on a missing end bound and ignores prose', () => {
+  // Two ways the ONE guarded span in this file can stop naming the live card.
+  const card = (block) => [
+    '<div className="welcome-head">',
+    ...block,
+    '  <h1 className="welcome-title">{wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg })}</h1>',
+    '  <p>You are set up</p>',
+    '</div>',
+    '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (',
+    '  <p className="wizard-title">{wizardSteps[wizardStep]}</p>',
+    ')}',
+  ].join('\n')
+  // 1. The sentinel is GONE: `indexOf` is -1 and the pre-fix `slice(start, -1)` was
+  //    the rest of the file — a pin watching a region it does not name.
+  const unmarked = card([]).replace(
+    '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (', '{someOtherFlag && (')
+  assert.throws(() => welcomeCardWindow(unmarked, parseModule(unmarked)), /must resolve/,
+    'an unresolved end must fail LOUD, not widen the window to the rest of the file')
+  // 2. The boundary still RESOLVES but a note INSIDE the card names the flag — the
+  //    live shape of this hazard: main.jsx:9262 already mentions
+  //    `LEGACY_WIZARD_ARCHIVED` in a comment inside the card, two characters short
+  //    of forging the text sentinel. The raw-`indexOf` form is fooled; the AST read
+  //    is not, because a comment is not a node.
+  const notedInCard = card([
+    '  {/* NEVER rendered while LEGACY_WIZARD_ARCHIVED && welcomeOriented */}',
+    '  <p className="wizard-title">{wizardSteps[wizardStep]}</p>',
+  ])
+  const notedAst = parseModule(notedInCard)
+  const notedHead = jsxElements(notedAst).find((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
+  const forgedEnd = notedInCard.indexOf('LEGACY_WIZARD_ARCHIVED &&', notedHead.start)
+  assert.ok(forgedEnd > notedHead.start && forgedEnd < archivedGateStart(notedAst, notedHead.start),
+    'the comment really is EARLIER than the archived gate — the sentinel the pre-fix reader searched is inside the card')
+  assert.deepEqual(
+    jsxElements(notedAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > notedHead.start && e.start < forgedEnd),
+    [],
+    'the raw-indexOf window is EMPTY, so `deepEqual(inCardTitles, [])` passed with the forbidden label sitting in the card')
+  const { start, end } = welcomeCardWindow(notedInCard, notedAst)
+  assert.deepEqual(
+    jsxElements(notedAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > start && e.start < end).length,
+    1,
+    'the AST boundary ignores the prose, so the in-card label is still SEEN and the negative pin reddens')
 })
 
 test('#3726 falsifiability: the <h1> pin is selected by class and names every override', () => {
