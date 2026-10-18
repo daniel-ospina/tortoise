@@ -8,6 +8,16 @@ delenvs the URI constructs embedded and passes green — O1/T1's "≥90% on
 docker" math then counts it as docker-covered while it never touches the
 server (the #942 vacuity vector, cycle-8 P1-3).
 
+SCOPE (#9061): every test module in the tree, at any depth —
+`tests/**/test_*.py` (1076 modules as of 2026-10-18). It used to be
+`tests/test_*.py` plus `tests/e2e/test_*.py`, which left
+`tests/longmem_eval/`, `tests/e2e/auth/`, `tests/e2e/hosted/`, `tests/eval/…`,
+`tests/bench/` and `tests/mini_beir/` outside a guard whose whole purpose is
+to notice a mutation wherever it is written: 72 modules and 7 live mutation
+sites were unscanned while it reported green. `test_the_scan_is_recursive`
+pins the coverage so a later "simplify" back to a flat glob reds instead of
+going quiet.
+
 Lane intents:
   DELIBERATE_URI            — the site intentionally forces the docker lane
                               (module-level live probes, docker-lane fixture
@@ -86,10 +96,32 @@ import ast
 import io
 import re
 import tokenize
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _TESTS_ROOT = Path(__file__).resolve().parent
 _REPO_ROOT = _TESTS_ROOT.parent
+
+
+def _iter_test_module_paths() -> list[Path]:
+    """Every test module in the tree, at ANY depth (#9061).
+
+    A non-recursive `glob("test_*.py")` plus `e2e/` covered 1003 of the 1075
+    test modules and stated no boundary, so `tests/longmem_eval/`,
+    `tests/e2e/auth/`, `tests/e2e/hosted/`, `tests/eval/…`, `tests/bench/` were
+    all silently outside a guard whose whole purpose is to notice a mutation
+    wherever it is written. It also made the census's guarantee depend on a
+    filename's directory, which nothing enforces.
+
+    Recursive by construction, and `test_the_scan_is_recursive` pins that so a
+    later "simplify" cannot quietly restore the blind spot.
+    """
+    return sorted(_TESTS_ROOT.glob("**/test_*.py"))
+
+
+def _scan_key(path: Path) -> str:
+    """The declaration key for *path*: `tests/`-relative, so a subdirectory
+    file cannot share a declaration with a same-named top-level one."""
+    return path.relative_to(_TESTS_ROOT).as_posix()
 
 # ── DELIBERATE_URI_MUTATIONS (cycle-8 P1-3) ─────────────────────────────────
 # dict[file, list[regex]] — every mutation line in `file` must match at least
@@ -470,6 +502,33 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.setenv\(\s*$',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # ── #9061: sites the census did not previously scan at all. Keys are
+    #    `tests/`-relative because these live in a subdirectory, so they can
+    #    never share a declaration with a top-level file of the same name.
+    # The module-level LIVE-PROBE pattern the census docstring documents
+    # ("save-restore: `_old_uri = os.environ.get(...)` captured and assigned
+    # BACK in a finally"): `_PROBE_GRAPH` is installed before the import-time
+    # FTS probe runs and the `finally` puts the saved `_OLD_URI` back. The
+    # restore sites are declared as well as the set, because the census counts
+    # every matching line — that is what makes the pairing auditable rather
+    # than assumed. DELIBERATE_URI (the probe needs a THROWAWAY graph name, not
+    # the embedded lane); the `monkeypatch` site is the function-scoped `sdk`
+    # fixture, auto-undone at teardown.
+    "longmem_eval/test_assembly_arm.py": [
+        r'os\.environ\["TORTOISE_DB_URI"\]\s*=',
+        r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
+    # beat a stale `TORTOISE_DB_URI`, so the stale value is set to a DIFFERENT
+    # endpoint and then the store's own `_temporary_env_var` proves the scoped
+    # value wins and is restored. MIXED INTENT: the `setenv`s are
+    # DELIBERATE_URI (the stale env IS the input); the `delenv` is
+    # DELIBERATE_EMBEDDED_LANE — it establishes the no-stale-URI baseline that
+    # the first arm asserts against. All function-scoped `monkeypatch`, so no
+    # lane flip can leak into a later module.
+    "longmem_eval/test_vector_arm.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
@@ -552,25 +611,36 @@ def _exempt_stems() -> frozenset[str]:
 
 
 def _uri_mutation_sites():
-    """Yield (file_name, line_number, line) for every mutation site in a
+    """Yield (key, line_number, line) for every mutation site in a
     NON-allowlist (migrated) test file. The executable census — the plan's
     Step 1 grep is the enumeration, this is its machine form."""
     exempt = _exempt_stems()
-    for f in sorted(_TESTS_ROOT.glob("test_*.py")) \
-            + sorted((_TESTS_ROOT / "e2e").glob("test_*.py")):
+    for f in _iter_test_module_paths():
         if f.stem in exempt:
             continue
         src = f.read_text(encoding="utf-8")
         for m in _MUTATION_RE.finditer(src):
             line = src.count("\n", 0, m.start()) + 1
-            yield f.name, line, src.split("\n")[line - 1].strip()
+            yield _scan_key(f), line, src.split("\n")[line - 1].strip()
 
 
 def _is_declared(fname: str, line: str) -> bool:
     """The declaration-guard matching logic (factored for pinning): a
     mutation line is declared when the file's DELIBERATE_URI_MUTATIONS
-    entry exists and at least one declared regex matches the line."""
+    entry exists and at least one declared regex matches the line.
+
+    *fname* is a `tests/`-relative key (`longmem_eval/test_vector_arm.py`) or,
+    for a top-level module, its bare name — both are accepted so the 99
+    existing entries did not need rewriting. `test_declaration_keys_are_
+    unambiguous` reds if a bare name ever matches more than one module."""
     declared = DELIBERATE_URI_MUTATIONS.get(fname)
+    if declared is None:
+        # Back-compat: the 99 pre-#9061 entries are keyed by BARE NAME (the old
+        # scan yielded `f.name`). A subdirectory module therefore still matches
+        # its bare-name entry — sound only because
+        # `test_declaration_keys_are_unambiguous` reds if one bare name stands
+        # for two modules.
+        declared = DELIBERATE_URI_MUTATIONS.get(PurePosixPath(fname).name)
     return bool(declared) and any(re.search(p, line) for p in declared)
 
 
@@ -593,10 +663,80 @@ def test_uri_mutations_declared_files_exist():
     """The table's file keys must resolve to real test modules — a typo'd
     key silently exempts nothing (and the guard's missing-file red would be
     the only signal)."""
+    scanned = {_scan_key(p) for p in _iter_test_module_paths()}
+    scanned_names = {p.name for p in _iter_test_module_paths()}
     for fname in DELIBERATE_URI_MUTATIONS:
-        assert (_TESTS_ROOT / fname).exists() \
-            or (_TESTS_ROOT / "e2e" / fname).exists(), \
+        assert fname in scanned or fname in scanned_names, \
             f"DELIBERATE_URI_MUTATIONS key {fname!r} is not a test module"
+
+
+def test_the_scan_is_recursive():
+    """#9061: the census must see EVERY directory, not `tests/` + `tests/e2e/`.
+
+    Pins the coverage itself, because the guard's only failure mode when it
+    narrows is silence: 72 modules and 7 mutation sites were outside it while
+    it reported green. Each path below is one that a non-recursive glob misses;
+    the assertion is about the SCAN, so it stays true no matter which of them
+    later gain or lose a mutation.
+    """
+    scanned = {_scan_key(p) for p in _iter_test_module_paths()}
+    for required in ("longmem_eval/test_assembly_arm.py",
+                     "longmem_eval/test_vector_arm.py",
+                     "e2e/auth/test_bff_flow.py"):
+        assert required in scanned, (
+            f"the census scan does not reach {required!r} — the glob stopped "
+            f"covering the tree (#9061)")
+
+
+def test_declaration_keys_are_unambiguous():
+    """A bare-name key must match exactly ONE module.
+
+    Keys are looked up by `tests/`-relative path, but the 99 pre-#9061 entries
+    are bare names. A bare name that matches two modules (e.g. a top-level file
+    and an `e2e/` twin) would let a declaration written for one silently
+    authorize the other — the same "green for the wrong reason" failure the
+    census exists to catch, one level up.
+    """
+    by_name: dict[str, list[str]] = {}
+    for p in _iter_test_module_paths():
+        by_name.setdefault(p.name, []).append(_scan_key(p))
+    ambiguous = {k: v for k, v in by_name.items() if len(v) > 1}
+    offenders = sorted(k for k in DELIBERATE_URI_MUTATIONS if k in ambiguous)
+    assert not offenders, (
+        "bare-name declaration key(s) matching more than one module — key "
+        "them by their tests/-relative path instead: "
+        + "; ".join(f"{k} -> {ambiguous[k]}" for k in offenders))
+
+
+def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
+    """#9061: the restoration guard's fast-path must not skip the bare-instance
+    check, which does not depend on the URI string.
+
+    The guard skips a module that mentions neither `TORTOISE_DB_URI` nor a bare
+    `pytest.MonkeyPatch()` — that skip is what makes scanning the whole tree
+    affordable (296s -> 78s for this test). A URI-ONLY skip is wrong: a fixture
+    that sets some OTHER variable through a bare MonkeyPatch and never calls
+    `.undo()` leaks exactly like the #2062 pop did, and its source contains no
+    URI at all. So the fixture below is a real violation with no URI in it — if
+    the skip is ever narrowed back to the URI alone, this reports nothing and
+    the test reds.
+    """
+    src = (
+        "import pytest\n"
+        "\n\n"
+        "@pytest.fixture\n"
+        "def port_fixture():\n"
+        "    mp = pytest.MonkeyPatch()\n"
+        '    mp.setenv("TORTOISE_TEST_DOCKER_PORT", "1234")\n'
+        "    yield\n"
+    )
+    assert "TORTOISE_DB_URI" not in src, "the fixture must contain no URI string"
+    violations = _restoration_violations([("synthetic_no_uri.py", src)])
+    assert violations, (
+        "a fixture-created bare MonkeyPatch() with no .undo() must be reported "
+        "even when the file contains no TORTOISE_DB_URI — the cost skip must "
+        "not gate the URI-agnostic check (#9061)")
+    assert "undo" in " ".join(violations), violations
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -923,6 +1063,22 @@ def _restoration_violations(files) -> list[str]:
     """
     violations: list[str] = []
     for fname, src in files:
+        # #9061: a file that mentions NEITHER the URI nor a bare MonkeyPatch
+        # cannot hold a violation of either check, and `_scope_map` (tokenize
+        # plus a per-line bracket scan) is the whole cost of this guard: run on
+        # every module it took 296s for 1003 files and 415s+ for 1076, i.e. 4s
+        # from the 300s per-test timeout. Cost must scale with the SITES, not
+        # with the size of the tree.
+        #
+        # BOTH strings are required here: the bare-instance check below
+        # (`pytest.MonkeyPatch()` without `.undo()`) is URI-AGNOSTIC — a fixture
+        # that sets TORTOISE_TEST_DOCKER_PORT through a bare MonkeyPatch has no
+        # `TORTOISE_DB_URI` in its source and still leaks if it never undoes. A
+        # URI-only skip would have silently stopped looking at 4 modules that
+        # use `pytest.MonkeyPatch(` today (no violation among them yet — a
+        # latent hole is exactly what this file exists to prevent).
+        if "TORTOISE_DB_URI" not in src and not _MONKEYPATCH_INST_RE.search(src):
+            continue
         lines = src.split("\n")
         scopes = _scope_map(src)
         # leak-scope raw sites: (lineno, scope_kind, scope_name)
@@ -1067,10 +1223,9 @@ def _non_exempt_test_files():
     """(name, src) for every scan-relevant test module (same census as the
     declaration guard — carve-outs and this task's own files exempt)."""
     exempt = _exempt_stems()
-    for f in sorted(_TESTS_ROOT.glob("test_*.py")) \
-            + sorted((_TESTS_ROOT / "e2e").glob("test_*.py")):
+    for f in _iter_test_module_paths():
         if f.stem not in exempt:
-            yield f.name, f.read_text(encoding="utf-8")
+            yield _scan_key(f), f.read_text(encoding="utf-8")
 
 
 def test_uri_mutations_restored():
