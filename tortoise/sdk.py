@@ -25539,11 +25539,13 @@ class TortoiseSDK:
 
         A THIRD meaning is `""`: the sweep leg for that peer's label FAILED
         (a raise is logged and skipped, so the other labels' statuses survive —
-        the per-label isolation below). The failures are not distinguishable
-        from "no lifecycle state" in this value; labelling them is R1 on #8996.
-        A peer can therefore be PRESENT in the payload with `""` because its
-        label's status leg died, which is exactly the conflation the widening
-        above was added to end — stated rather than left to be rediscovered.
+        the per-label isolation below), or that peer's own status row was
+        malformed (skipped per row, so the other rows survive). Neither is
+        distinguishable from "no lifecycle state" in this value; labelling them
+        is R1 on #8996. A peer can therefore be PRESENT in the payload with `""`
+        because its label's status leg died, which is exactly the conflation the
+        widening above was added to end — stated rather than left to be
+        rediscovered.
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
@@ -25571,17 +25573,21 @@ class TortoiseSDK:
                         "label — the other labels' statuses are kept",
                         exc_info=True)
                     continue
-            try:
-                statuses = {row[0]: row[1] or "" for row in rows}
-            except Exception:
-                # A malformed status row must not turn an ADVISORY annotation
-                # into a whole-read failure on this public method (D1: a
-                # decoration never fails the read). Monotone with the sweep:
-                # a bad row can only fail to add.
-                _logger.warning(
-                    "related_status rows malformed — statuses left blank",
-                    exc_info=True)
-                statuses = {}
+            for row in rows:
+                try:
+                    statuses[row[0]] = row[1] or ""
+                except Exception:
+                    # A malformed status row must not turn an ADVISORY
+                    # annotation into a whole-read failure on this public method
+                    # (D1: a decoration never fails the read). Per ROW, not per
+                    # comprehension: one bad row may cost exactly one peer,
+                    # never every peer — which is what a single dict-comprehension
+                    # under one handler would do (measured: rows
+                    # [("p1", "live"), (["x"], "live")] → {} → p1 loses "live").
+                    _logger.warning(
+                        "related_status row malformed — that peer's status is "
+                        "left blank, the rest are kept", exc_info=True)
+                    continue
         for e in entries:
             e["related_status"] = statuses.get(e.get("related_id"), "")
         return entries

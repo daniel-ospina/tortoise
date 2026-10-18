@@ -44,6 +44,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from types import SimpleNamespace
+
 import pytest
 
 from tortoise.cypher_guard import _predicate_drop_barrier
@@ -487,6 +489,58 @@ def test_one_failing_label_does_not_discard_the_other_labels(sdk):
             assert peer in {e["related_id"] for e in out[anchor]}
 
 
+class _MalformedRowGraph:
+    """Pass-through graph that appends ONE malformed row to a label's sweep."""
+
+    def __init__(self, inner, extra_on: str):
+        self._inner = inner
+        self._extra_on = f"MATCH (n:{extra_on})"
+        self._status_sweep = "RETURN n.id, n.status"
+
+    def query(self, cypher, params=None, timeout=None):
+        res = self._inner.query(cypher, params=params, timeout=timeout)
+        if self._extra_on in cypher and self._status_sweep in cypher:
+            # row[0] is a LIST — unhashable as a dict key. Appended AFTER the
+            # real rows, so the good peer's row is already in the batch.
+            rows = [*res.result_set, (["x"], "live")]
+            return SimpleNamespace(result_set=rows)
+        return res
+
+
+def test_one_malformed_status_row_costs_one_peer_not_all(sdk):
+    """A bad status ROW must cost one peer, not the whole map.
+
+    The status map is built by a loop over accumulated rows, and that loop was a
+    single dict comprehension inside one handler: an unhashable ``row[0]`` raised
+    BEFORE the dict was bound, so every peer — including the ones whose rows were
+    well formed — reported ``""``. Per-row, a malformed row can only fail to add,
+    which is the property the query-leg isolation claims.
+
+    Discriminating: with the comprehension restored, the good peer's ``"live"``
+    is lost even though its own row was fine.
+    """
+    hub = _point(sdk, "INCIDENT-56 statuses through a malformed row")
+    peer = _point(sdk, "a peer whose status must survive a bad sibling row")
+    sdk.create_operator("IMPL", hub, [peer])
+
+    class _Proj:
+        g = _MalformedRowGraph(_graph(sdk), "Point")
+
+    real_get_proj = sdk._get_proj
+    sdk._get_proj = lambda: _Proj()
+    try:
+        entries = sdk.expand_relationships(hub)
+    finally:
+        sdk._get_proj = real_get_proj
+
+    by_related = {e["related_id"]: e for e in entries}
+    assert peer in by_related, f"the read itself was lost: {entries!r}"
+    assert by_related[peer]["related_status"] == "live", (
+        "one malformed status row blanked a peer whose own row was well "
+        f"formed: {by_related[peer]!r}"
+    )
+
+
 def test_one_failing_label_does_not_blank_every_related_status(sdk):
     """Same isolation for the ``related_status`` sweep in the SDK."""
     hub = _point(sdk, "INCIDENT-55 statuses through a flaky engine")
@@ -608,10 +662,11 @@ def test_unhashable_peer_text_does_not_empty_the_batch(sdk):
         params={"id": list_content},
     )
     # A NUMBER is the harder arm: the dedupe key renders it (so the key never
-    # raises), but `related_content` is still sliced (`[:200]`) inside the ONE
-    # enclosing handler, and `42[:200]` raises TypeError — which would empty the
-    # whole batch exactly as the unhashable key did. A list slices fine, so it
-    # could never catch it.
+    # raises), but `related_content` is still sliced (`[:200]`) while the rows are
+    # being PROCESSED, so `42[:200]` raises TypeError with entries already
+    # appended — the loss is a silent PARTIAL read (every row after the bad one
+    # vanishes, for every point in the batch), which is harder to notice than
+    # the key's empty answer. A list slices fine, so it could never catch it.
     _graph(sdk).query(
         "MATCH (n:Point) WHERE n.id = $id SET n.content = 42",
         params={"id": num_content},

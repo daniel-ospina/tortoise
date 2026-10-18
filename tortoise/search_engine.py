@@ -2798,14 +2798,16 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
       non-operator predicate. A node carrying ``op_type`` is therefore an
       OPERATOR on both legs, and operator→operator is R4 on #8996, the same
       undecided question an operator anchor raises.
-      The one divergence is narrow and deliberate: ``sdk._find_point_by_content``
-      documents a HYBRID that EXPLICITLY declares ``is_operator = false`` AND
-      carries ``op_type`` (a shape nothing rejects on write) and keeps it a
-      claim, because a dedupe must not drop a node it was asked about. An
-      ABSENT ``is_operator`` hybrid is excluded by BOTH sites — that helper's
-      second clause ``op_type IS NULL OR is_operator = false`` evaluates NULL
-      there — so the two agree on that arm and diverge only on the
-      explicit-false one.
+      The dedupe site diverges narrowly and deliberately:
+      ``sdk._find_point_by_content`` documents a HYBRID that EXPLICITLY declares
+      ``is_operator = false`` AND carries ``op_type`` (a shape nothing rejects on
+      write) and keeps it a claim, because a dedupe must not drop a node it was
+      asked about. An ABSENT ``is_operator`` hybrid is excluded by BOTH of those
+      sites — that helper's second clause ``op_type IS NULL OR is_operator =
+      false`` evaluates NULL there — so the two agree on that arm. The three
+      sites therefore differ in three ways, and none of it is resolved here:
+      this read admits NO hybrid, ``_find_point_by_content`` admits the
+      explicit-false one, and ``_reachable_claim_count`` admits both.
     * the OPERATOR keeps its ``:Point`` label (ONTOLOGY §5 — a re-typing plan
       that moves an operator is refused) but is identified by
       ``is_operator = true OR op_type IS NOT NULL``, the #943 parity every other
@@ -2982,10 +2984,14 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
                 # A replayed-JSONL diagnostic can leave a non-string here — the
                 # same class the dedupe key above is made total for. FalkorDB
                 # stores a NUMBER as a property (arrays slice fine; a map is
-                # refused on write), and `42[:200]` raises TypeError. This loop
-                # is still inside ONE handler, so that would empty the WHOLE
-                # batch — #6971's failure-reads-as-emptiness class, two lines
-                # under the key fix. Render it; do not drop the row.
+                # refused on write), and `42[:200]` raises TypeError. That is
+                # WORSE than the key's failure, not equal to it: the key raises
+                # during collection (nothing appended yet → an empty answer),
+                # but this raises during PROCESSING, so the rows before it are
+                # kept and every row after it is lost — for every point in the
+                # batch. A silent PARTIAL read, which reads as "this peer has no
+                # relationship" rather than as a failure (#6971's class, in its
+                # harder shape). Render it; do not drop the row.
                 related_content = str(related_content)
             n_idx = row[7] if len(row) > 7 else None
             other_idx = row[8] if len(row) > 8 else None  # noqa: F841
