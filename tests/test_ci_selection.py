@@ -3676,6 +3676,62 @@ def test_flat_default_claim_check_is_not_vacuous():
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
 
 
+def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
+    """#9003 review (P2): a NEW file's first weight is the flat default, not a local timing.
+
+    The `durations` header above `durations:` prescribes `DEFAULT_FAST_WEIGHT` for a file
+    no sweep has collected yet (the #3419 `test_venture_pack.py` precedent) because a
+    weight is a SHARD-LAYOUT input: a locally-measured number decides which files share
+    a shard, so it must not be hand-picked. The #2818 row shipped a measured-on-this-box
+    4.9 first, under a comment that CLAIMED the flat-default convention it violated — and
+    the guard above could not see it, because the claim sat on the comment lines PRECEDING
+    the row rather than on its tail. Pinned by name here: the row is MARGIN on the
+    coverage floor, not the floor itself (`duration_coverage_issues()` is count-based and
+    passes either way — 90.01% without the row, 90.12% with it), so its MAGNITUDE must be
+    the flat default while its absence is a derivation to re-run, not an automatic red.
+    """
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
+    row = "test_pack_value_declarations_2818.py"
+    durations = load_manifest()["durations"]
+    assert row in durations, (
+        "the #2818 row is missing from `durations` — its presence is the margin the "
+        "#3400 coverage floor has (90.01% without it, still above the 0.90 floor, so "
+        "treat its absence as a finding to re-derive, not an automatic red)")
+    # Scoped to the UNMEASURED state on purpose: once a sweep collects the file,
+    # `tools/ci_timing.py::render_refreshed_manifest` rewrites the value and CLEARS a
+    # tail that LEADS with the `# unmeasured` marker (that is how the #3419/#2788
+    # precedent rows work), and this pin must not then fail on a legitimate CI
+    # measurement. The marker is read exactly the way the refresher reads it — by its
+    # leading token — so the two cannot disagree: any OTHER trailing comment is
+    # preserved verbatim by the refresh, including one that mentions the word later.
+    if not _ROW_LEADS_WITH_UNMEASURED.match(
+            _durations_row_tail("test_pack_value_declarations_2818.py")):
+        assert durations[row] > 0, (
+            f"{row} carries a non-positive weight {durations[row]}s — a sweep has "
+            "collected the file, so its value must be a real measurement")
+        return
+    assert durations[row] == DEFAULT_FAST_WEIGHT, (
+        f"{row} carries {durations[row]}s, but a NEW file's first weight is the flat "
+        f"{DEFAULT_FAST_WEIGHT}s default until a CI sweep collects it. Do not substitute "
+        "a local timing: a weight is a shard-layout input, so a number that does not "
+        "model CI decides which files run together (#3419, #9003 review).")
+
+
+# The refresher clears a `# unmeasured` marker by its LEADING TOKEN (see
+# `tools/ci_timing.py::render_refreshed_manifest`), so the pin below reads it the
+# same way rather than by substring.
+_ROW_LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
+
+
+def _durations_row_tail(key: str) -> str:
+    """The tail comment of a `durations:` row, or "" when the row is absent."""
+    for line in cs.MANIFEST.read_text(encoding="utf-8").splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is not None and m.group("key") == key:
+            return m.group("tail")
+    return ""
+
+
 def test_duration_coverage_guard_backwards_compatible():
     """#3400: an absent/empty durations map is never a hard failure."""
     from tools.ci_selection import duration_coverage_issues

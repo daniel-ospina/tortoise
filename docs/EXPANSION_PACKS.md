@@ -49,6 +49,11 @@ ontology:
           - {id: stg_draft,  label: Draft,  order: 1, slot: entry}
           - {id: stg_active, label: Active, order: 2, slot: active}
           - {id: stg_done,   label: Done,   order: 3, slot: terminal, outcome: won}
+      values:                  # #2818: the value properties this kind carries
+        - name: committedAmountMinor   # BARE name (no namespace)
+          valueKind: money             # money|percent|multiple|duration|quantity
+          required: true
+          cardinality: one             # optional: one (default) | many
   relations:                 # epistemic edge declarations (IMPL/NAND)
     - predicate: groundedIn
       mechanism: IMPL
@@ -193,14 +198,14 @@ verdict exists to remove.
 
 ## The extractor contract — how a pack reaches the engine
 
-**The value brief is the only seam.** `compile_value_brief()` (`tortoise/value_extractor.py`) compiles the installed manifests — every `packs/*/manifest.yaml`, plus the hosted `/v1/packs/manifests` overlay — into the **value brief**: `{namespaced kind: {description, nearMisses}}` plus each pack's `ontology.memory_granularity`. Everything domain-specific the extractor can be offered arrives through that one compiled artefact. The engine holds the pipeline mechanics and the core ontology; it holds no pack's domain.
+**The value brief is the only seam.** `compile_value_brief()` (`tortoise/value_extractor.py`) compiles the installed manifests — every `packs/*/manifest.yaml`, plus the hosted `/v1/packs/manifests` overlay — into the **value brief**: `{namespaced kind: {description, nearMisses, values?}}` plus each pack's `ontology.memory_granularity`. (`values` is the #2818 per-kind value-field declaration; the key is present only for a kind that declares one — see "Per-kind value fields" below.) Everything domain-specific the extractor can be offered arrives through that one compiled artefact. The engine holds the pipeline mechanics and the core ontology; it holds no pack's domain.
 
 The brief is compiled **per graph**: pass `installed_namespaces` and only the namespaces that graph has installed contribute kinds or granularity (the #2714 APPROVAL gate). The core vocabulary is never gated.
 
 | stage | what it reads |
 |---|---|
 | **S1 NARRATE** | the brief's `memory_granularity` only — one pack-authored input, rendered by `_granularity_text()` |
-| **S2 MAP / S4 REVIEW** | the master list: the brief's pack `kindDefs` **description only**, the core sections, `memory_granularity`, and the engine-side chains |
+| **S2 MAP / S4 REVIEW** | the master list: the brief's pack `kindDefs` **description** (plus a declared `values` segment, #2818), the core sections, `memory_granularity`, and the engine-side chains |
 | **S3 SEARCH** | nothing pack-authored — it derives FTS queries from the S2 embed list and the story, and carries no kind vocabulary |
 | **the closed-kind gate** | `_object_kind_forms()` / `_event_kind_forms()` — the master's kind forms **plus** the packs' declared `objectKinds`/`documentKinds`/`eventKinds` |
 
@@ -210,7 +215,7 @@ The brief is compiled **per graph**: pass `installed_namespaces` and only the na
 
 With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2/S4 prompt entirely (`_render_master_core_only`); the post-extraction kind classifier then assigns the pack kind.
 
-**Pack kinds reach the master list by namespace, not by an allowlist.** Every brief key that is neither `core:`-namespaced nor `memory_granularity` is a pack kind (`_build_master_from_brief()`). #5165 removed the hardcoded `PACK_NS` tuple that had to be edited before a new pack could install — the brief's own key set is the authority. `nearMisses` are carried on the brief but are **not** rendered into the S2/S4 prompt — they are consumed by the post-extraction kind index (`kind_index.py`, `kind_classifier.py`).
+**Pack kinds reach the master list by namespace, not by an allowlist.** Every brief key that is neither `core:`-namespaced nor `memory_granularity` is a pack kind (`_build_master_from_brief()`). #5165 removed the hardcoded `PACK_NS` tuple that had to be edited before a new pack could install — the brief's own key set is the authority. `nearMisses` are carried on the brief but are **not** rendered into the S2/S4 prompt — they are consumed by the post-extraction kind index (`kind_index.py`, `kind_classifier.py`). A declared `values` (#2818) is the opposite case: it IS rendered into the S2/S4 prompt, and is kept OUT of the kind index.
 
 **Two engine-side enumerations remain. They are the exceptions to "no domain in the engine", and they are named here rather than left implicit:**
 
@@ -308,6 +313,69 @@ a miss is reported only for the event's **explicit** `object`.
 The terminal-status guard is unchanged: a `superseded`/`deprecated`/`archived`/`retracted` Object is
 never resurrected by any fold (#2164/#3309). Objects are name-keyed, so a state change that is a
 **new** thing is a supersession, not a fold.
+
+## Per-kind value fields — pack-declared value properties (#2818)
+
+A kind can declare which **value properties it carries**, so a domain pack can say *"a
+`fundingTranche` carries `committedAmountMinor` as a money value"* instead of that fact being
+hardcoded in engine code:
+
+```yaml
+kindDefs:
+  fundingTranche:
+    description: A tranche of a financing round
+    values:
+      - name: committedAmountMinor
+        valueKind: money        # money | percent | multiple | duration | quantity
+        required: true
+      - name: trancheLabel
+        valueKind: quantity
+        cardinality: many       # one (default) | many
+```
+
+- **`values` is a CLOSED, validated declaration — not an open props bag.** Each entry may carry
+  exactly `name`, `valueKind`, `required` (bool, default `false`) and `cardinality`
+  (`one` | `many`, default `one`). An unknown entry key, an unknown `valueKind`, a non-list
+  `values`, a duplicate `name`, or a **namespaced** name is a validation **error** with a message
+  naming the offending entry — the pack is isolated exactly as for any other bad `kindDefs` key.
+  The vocabulary and shape rules live in `tortoise/pack_values.py` (one home); `PackRegistry._validate`
+  calls them, so `tortoise pack validate`, CI and the hosted tenant install all read the same rule.
+- **`valueKind` is WS-C's value *shape*, never a storage type.** `money` is a shape over
+  `amountMinor` + `currency` + `minorUnitExponent`, `percent` is `basisPoints`, and so on. The
+  scalar storage type of the underlying props is the value model's business (#2782/#2817), not
+  this declaration's.
+- **Property names are BARE** (`committedAmountMinor`, never `venture:committedAmountMinor`): the
+  pack namespaces its kinds, not its properties (WS-B OD2). A declared name must be a bare
+  identifier — letters, digits and underscores, not starting with a digit — because it is rendered
+  raw into the prompt; a colon, whitespace or punctuation is refused.
+- **The declaration reaches the extraction prompt.** `compile_value_brief()` carries a declared
+  kind's `values` on its brief entry, and the S2/S4 master renders the kind as
+  `- venture:fundingTranche — A tranche of a financing round [values: committedAmountMinor(money,
+  required), trancheLabel(quantity, many)]`. The shared S2/S4 rule slot also states the policy:
+  keep a declared value EXACT, use the declared name, and never invent a field or a value kind.
+  With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary leaves the S2/S4 prompt
+  (`_render_master_core_only`) and the value declarations leave with it — the post-extraction
+  classifier assigns the kind in that mode, so a namespaced pack kind must not reappear through its
+  declarations.
+- **It does NOT reach the classification index.** `compile_kind_index_spec()` reads
+  `description`/`synonyms`/`examples`/`nearMisses`; rendering value schemas into the index `text`
+  would rotate `kind_index.cache_key_for` on every install and silently re-embed the whole kind
+  index. A test pins the index spec byte-identical with and without a declaration.
+- **A props-less pack renders byte-identically.** The brief key is absent when a kind declares
+  nothing, so the brief, the master's `pack_kinds` section and every rendered prompt are
+  byte-for-byte what they were before #2818 for the entire shipped catalog (the master gains one
+  empty `pack_values` section — the same always-present shape as `pack_hints`; a test pins the
+  renders and all six starter packs still validate unchanged).
+- **The hosted overlay carries it too.** Unlike `statuses`/`folds` (catalog-only — a tenant
+  manifest never enters a `PackRegistry`), `values` is compiled by the same loop in
+  `compile_value_brief(tenant_manifests=…)`, so a hosted tenant pack's declaration reaches its own
+  graph's prompt. It is a prompt-facing declaration, not a catalog-index declaration.
+
+**What this declaration does NOT do yet.** It declares and renders; it stores nothing. The write
+path for a declared value field is #2782, and the shape's companion props (`currency`,
+`minorUnitExponent`, …) plus the reserved-name guard belong to the core property register
+(WS-A `POINT_PROPS` / WS-C D12), which is not in code yet. Declaring a shape is therefore necessary
+but not sufficient to make a value durable — see #2818's residuals.
 
 ## Per-graph pack selection (#2728)
 
