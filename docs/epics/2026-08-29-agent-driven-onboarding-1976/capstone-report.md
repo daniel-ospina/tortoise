@@ -28,7 +28,7 @@ This epic's deploy surface is **web dashboard + hosted API + served agent skill*
 | 1 | One-sitting first-run (north star) | S1, S3, S7, S8, S17 | `test_dashboard_onboarding.py` (40 passed) + state/seed suites | ✅ PASS (browser walk, local preview) |
 | 2 | Overview calm | S9 | browser walk + `website/apps/dashboard/src/overviewSettings.test.js` (8/8) | ✅ PASS — 3 elements, zero toggles, Settings present in the rendered nav |
 | 3 | Org-name capture | S3 | `test_one_free_org_entitlement.py`, `test_free_team_entitlement.py` + wizard | ✅ PASS |
-| 4 | Ontology-precise seed | S7, S8 | `test_onboarding_seed.py`, `test_onboarding_seed_endpoint.py` | ⚠️ PASS with a load-sensitive 504 (deviation D1) |
+| 4 | Ontology-precise seed | S7, S8 | `test_onboarding_seed.py`, `test_onboarding_seed_endpoint.py` | ⚠️ **PARTIAL** — 53 of 54 pass; one test has never passed under load (D1). Its graph-state assertions do hold on a quiet host |
 | 5 | Agent install across harnesses | S5, S6 | `test_installer_agents_block_3429.py`, `test_served_skills.py`, `test_served_skill_byte_parity.py`, `test_installer_preserves_foreign_skill_content.py` | ✅ PASS |
 | 6 | Graph-held state resumption | S1, S2 | `test_onboarding_state*.py` (6 files) | ✅ PASS |
 | 7 | Invite fusion (most failure-prone) | S12 | `test_invite_fusion_http.py`, `test_invites_http.py`, `test_invites_email_http.py` | ✅ PASS |
@@ -42,11 +42,11 @@ E2E-1 and E2E-12 are **walked in a browser**; the other ten are verified through
 
 The evidence behind E2E-2 is split, and the two halves are not interchangeable: the **render** claims — exactly 3 elements against a closed whitelist, zero feature toggles, and the Settings nav button with its handler — are asserted in `website/apps/dashboard/src/overviewSettings.test.js`, a source-scan suite over `main.jsx` whose negative guards each carry a non-vacuity check. `tests/test_onboarding_w4_settings.py` is the **server** leg of the same contract (5 tests: the `PATCH /v1/onboarding/state` toggle round-trip and the graph-node exclusion) and cannot observe a render. Run of the render suite, at this head: `cd website/apps/dashboard && node --test src/overviewSettings.test.js` → **8 passed**.
 
-**Surfaces: 17 of 17 exercised at their assigned *automated* layer; 16 green; 1 that has never passed under load; 2 whose manual leg was not run.** Stated precisely, because "verified" is a claim about a sha and about a pass:
+**Surfaces: 17 of 17 exercised at their assigned *automated* layer; 16 green; 1 that has never passed under load; 3 whose manual leg was not fully run.** Stated precisely, because "verified" is a claim about a sha and about a pass:
 
 - **Which sha:** batches **A and B** ran at the anchor commit `fbc1d96d5` — surfaces **1, 2, 7, 11, 14, 15, 16**; batches **C, D and the browser walk E** ran at `180fe6fd3` — surfaces **3, 4, 5, 6, 8, 12, 13, 17**. Three surfaces need stating rather than grouping: **surface 9's evidence is entirely at `180fe6fd3`** (the render suite plus the capture — batch B's `w4_settings` run cannot see a render), so it belongs to the second group; **surface 10 is split** — its server leg (`test_onboarding_w4_settings.py`) is batch B at `fbc1d96d5`, its render leg (`overviewSettings.test.js`) and the capture are at `180fe6fd3`. **Surface 16 is split too**: its suite (`test_onboarding_variants.py`) is batch B at the anchor, while its copy-sweep capture and the D3 re-run are at `180fe6fd3`. (Surface 4's evidence is the fork-card specs inside `test_dashboard_onboarding.py`, i.e. the browser walk, so it is a `180fe6fd3` surface.) Three commits separate the two heads, and **their file lists are the justification** for reading one batch's result at the other head: `180fe6fd3` touches only `tests/test_onboarding_endpoints.py` (+26 lines, the embedder pin); `a89120529` touches `config/rest-surface-inventory.yml` + `tests/test_rest_surface_inventory.py`; `9c2137470` touches 18 files — 5 under `tortoise/` (`sdk`, `time_aware`, `extractor_v2`, `ask_lane`, `env_truthy`), 5 tests (`test_time_aware_2520`, `test_time_aware_sdk_2520`, `test_ask_retrieval_budget`, `test_extractor_v2`, `test_env_truthy`), 5 `tools/` scripts (the retrieval/eval benches and probes), plus `.env.example`, one `docs/` plan doc and one fixture under `tests/fixtures/`. **None of those 18 files is in batches A/B's file lists** (state ×6, seed ×2, w4_settings, variants, w6_capture_disclosure, capture_disclosure_template, w11, selfhost_w12), which is what licenses the cross-head comparison — checked per file, not asserted as "nothing touching onboarding". The per-batch file lists in lane conditions let any batch be re-derived at either head. The **browser walk — the evidence for the epic's own UI claims — is all at `180fe6fd3`**.
 - **Which pass:** **surface 7 (seed) has never passed under load** — one of its 54 tests returns a 504 wait-budget error (D1, 5/5 reproductions, green in 9.08 s on a quiet host). Surface 11 (capture disclosure) failed one test in a batch and passed alone (D2). **Surface 16** also failed one test in batch B — `test_installer_dist_is_a_build_artifact_not_a_committed_mirror` (D3) — and passed on a re-run at `180fe6fd3` (1 passed in 12.36 s) after the stale build output was replaced by a fresh one.
-- **Which layer was not reached:** surfaces 5 and 15 each carry a **manual** leg in the test-design map that this run did not execute (their automated layers are green) — see the rows.
+- **Which layer was not reached:** **three** surfaces carry a **manual** leg in the test-design map that this run did not fully execute — 5 (install across six harnesses), 15 (a hand-driven self-hosted install), and 16 (the manual copy sweep, which the desktop capture only *partly* covers). Their automated layers are green — see the rows.
 
 Two things are **outside** the 17 and are not counted in that number, each named with its evidence: five e2e modules whose failures are **not** one cause (deviation D4 — three of them are recorded by CI itself as stale against the #3501 BFF-session seam and the #4054 auth-origin move and are deliberately unwired; one is a CI-run spec; one cannot render from this Pages root — per-spec mechanism in the D4 row), and the **W11 funnel read** (indicator 5 / A0 gate data — hosted capture returns 402, so the events of the sessions that would populate the funnel are never posted). Surface 14 is the telemetry *machinery*, and that is verified; the funnel *read* is a different artifact and is not.
 
@@ -72,7 +72,7 @@ Commands below ran from `.worktrees/capstone-2008-1976` (clean checkout of the v
 | 13 Builder catalog | Unit + integration + contract | `test_capabilities_endpoint.py`, `test_capability_catalog.py` | ✅ PASS |
 | 14 Onboarding telemetry | Integration + regression | `test_onboarding_telemetry_w11.py` | ✅ PASS |
 | 15 Self-hosted onboarding | Integration + **manual** | `test_onboarding_selfhost_w12.py` | ✅ integration PASS · ⚠️ **manual leg not executed** (a real self-hosted install was not driven by hand this run) |
-| 16 Wizard shrink + copy sweep | hosted-e2e + manual | `test_onboarding_variants.py` + screenshot ("Your Organization is live") | ⚠️ PASS — 1 test in this file (the dist guard, D3) failed at `fbc1d96d5` and passed on re-run at `180fe6fd3`; **proven** a stale-build artifact, not a code defect. Its **manual/browser leg is the copy-sweep capture** (indicator 4's table), taken at `180fe6fd3` — so this surface is split across the two heads, and its manual leg *was* run, as a capture |
+| 16 Wizard shrink + copy sweep | hosted-e2e + manual | `test_onboarding_variants.py` + screenshot ("Your Organization is live") | ⚠️ PASS — 1 test in this file (the dist guard, D3) failed at `fbc1d96d5` and passed on re-run at `180fe6fd3`; **proven** a stale-build artifact, not a code defect. Manual leg **partly** covered: the capture shows the copy sweep, not every shrink variant — so surface 16's evidence spans both heads, the suite at `fbc1d96d5` and the capture plus the D3 re-run at `180fe6fd3` |
 | 17 Cross-W full journey | hosted-e2e + walk-through | `test_dashboard_onboarding.py` — **40 passed** | ✅ PASS |
 
 **Totals, stated so the arithmetic can be checked:** **654 in-scope passed** (200 + 121 + 123 + 170 + 40) **plus 22 out-of-scope in batch F = 676** across the batches below (200 + 121 + 123 + 170 + 40 + 22), and **1 skipped**, which is also batch F's. Failures split by scope: **3 in-scope failures** — batch A's 1 (D1) and batch B's 2 (D2, D3), each named and reproduced — plus **batch F's 40 failures, which are D4 and outside the epic's 17 surfaces**, listed separately rather than netted into the in-scope count. Batch F also contributes the single skip, so it is counted for passes and skips but not folded into the in-scope failure tally.
@@ -88,7 +88,7 @@ E   40 passed             dashboard onboarding e2e (browser)
 F   22 passed, 40 failed, 1 skipped   welcome / ship-test / gate / identity / login  (D4)
 ```
 
-## The browser walk (E2E-1, E2E-12, surfaces 9, 10, 16)
+## The browser walk (E2E-1, E2E-12; surfaces 3, 4, 9, 10, 16, 17)
 
 Built from the verified commit and served the way the suite's own docstring prescribes:
 
@@ -157,14 +157,15 @@ satisfaction, and the ratio is stated rather than implied:
 | `dashboard-desktop.png` (1440×900) | S9 degraded state | "Could not load your organizations — try again" with a contact link |
 | `dashboard-mobile.png` (390×844) | S9 degraded state | the same at the mobile breakpoint |
 
-**Surfaces with no capture:** surface 4 (fork card) — asserted by
+**UI surfaces exercised but not captured:** surface 4 (fork card) — asserted by
 `test_first_timer_wizard_build_fork_records_no_catalog_presented` (`test_dashboard_onboarding.py:1314`:
 `cap["checkpoint"] == [{"fork": "build"}]`, the fork is the only checkpoint the dashboard writes) and
 `test_resume_door_lands_on_the_fork_card_instead_of_org_create` (`:1367`), with the set-once write pinned in
 `test_dashboard_gate.py:405-408` (`fork_payloads == [{"fork": "self"}]`) and the first-org arm in
-`tests/e2e/hosted/test_14_onboarding_journey.py:65` (`st["fork"] is None`) — but no image; surface 11 (capture
-disclosure) — asserted, no image; surfaces 1–3, 5–8, 12–15, 17 are not
-UI surfaces in this deploy, so a screenshot is not the assigned evidence for them.
+`tests/e2e/hosted/test_14_onboarding_journey.py:65` (`st["fork"] is None`); surface 11 (capture disclosure —
+asserted); surface 3 (org-create, driven by the wizard's org-create specs in the same walk); and surface 17 (the
+full journey, driven by the 40 walked specs). All four were exercised in the browser; none has an image.
+Surfaces 1, 2, 5–8, 12–15 are not UI surfaces in this deploy, so a screenshot is not the assigned evidence for them.
 
 ## A0 gate data (indicator 5) — NOT captured, and the reason is a hard external limit
 
@@ -198,7 +199,7 @@ naming what failed (D5 below — an observation, not a defect, because the copy 
 | **D2** | `test_onboarding_w6_capture_disclosure.py::TestDeleteDuringCapture::test_no_orphaned_receipt_under_concurrent_delete` failed in the 6-file batch and **passed alone** (133 s) | batch B + isolated re-run | Load-sensitive; re-run green. Not written off — D1 is the same mechanism |
 | **D3** | **PROVEN, single variable.** `test_onboarding_variants.py::test_installer_dist_is_a_build_artifact_not_a_committed_mirror` compares a built `dist/` copy against `public/` **when `dist/` exists**. In the hub checkout: `dist/install-tortoise-skills.sh` is dated **28 Sep**, `public/` is dated **18 Oct** (it gained the `#4643` "WHICH REPO AUTHORS WHAT" header), so they disagree and the test reds. In a checkout built from the same lineage, `dist/` == `public/` byte-for-byte and the test passes | `ls -lT` on both files (28 Sep vs 18 Oct); `diff dist public` shows exactly the missing `#4643` header; `cmp -s` in the fresh worktree → identical; the same test re-run in that worktree → **1 passed in 12.36 s** | **Environment artifact, proven not a main defect** — one variable (the age of an ignored build output), measured on both sides. It is also a genuine trap worth knowing: **any lane that built the dashboard once will red this test the next time `public/` changes on main**, with a message that blames "a BUILT dist copy" rather than naming the remedy (`rerun the dashboard build` — which is the remedy, and it is in the assertion text) |
 | **D4** | (batch F) `tests/e2e/{test_welcome_page,test_ship_test_onboarding,test_dashboard_gate,test_dashboard_identity,test_session_login_flow}.py` → 22 passed, 40 failed, **1 skipped** over the **63 collected cases** (`--collect-only` per module: welcome 11, ship-test 8, gate 19, identity 22, login 3 — the same 63 the pass/fail/skip tally accounts for) | first failure: expected `https://tortoise.premiselabs.co/auth`, actual `http://127.0.0.1:8790/auth` | **Not one cause, and not "this lane had no prod session".** Per module: (a) `test_welcome_page.py` **cannot render here** — its own docstring records that `/welcome` is not served by this Pages root (#8826, #4054) and lives in the dashboard Pages project, so no `wrangler pages dev` preview of `website/` can produce it; (b) `test_dashboard_identity.py` (**21/22**), `test_dashboard_gate.py` (**15/19**) and `test_session_login_flow.py` (**3/3**) are recorded **by CI itself** as *stale against the #3501 BFF-session seam and the #4054 auth-origin move*, which is why that job deliberately does not wire them (`.github/workflows/ci.yml:2104-2120`, evidence on #4221) — their failure here is that known stale class, not a missing session; the first failure's expected/actual pair is exactly what a `__AUTH_BASE_URL` seam that did not take effect looks like, and `test_dashboard_gate.py:116-141` shows the prod origin is an *asserted redirect target served from the local :8788 preview* (#2744), never a required login; (c) `test_ship_test_onboarding.py` **is wired into CI's `dashboard-e2e` leg** (`.github/workflows/ci.yml:2121-2129`), i.e. it is run against the same two-origin local harness this lane built, so it is CI-runnable by construction rather than needing the deployed host. **Not recorded, and not claimed:** the lane captured the aggregate only, so which of the 40 failures belongs to which module was not preserved; (c) is therefore recorded as *un-derived* rather than explained. All five are **outside #1976's 17** because they test auth/identity/gate surfaces the epic does not change — but that is the scope argument, and for (a)–(c) it is the *only* one |
-| **D5** | The dashboard's degraded state says "Could not load your organizations — try again" without naming what failed | `dashboard-desktop.png` | Observation, not a defect: the copy is actionable and honest. Filed as an observation only — the surface map asks for a degraded state, not a diagnosis |
+| **D5** | The dashboard's degraded state says "Could not load your organizations — try again" without naming what failed | `dashboard-desktop.png` | Observation, not a defect and **not filed** as an issue: the copy is actionable and honest, and the surface map asks for a degraded state, not a diagnosis. Recorded here only |
 | **D6** | The anti-behavior **"fork triggers billing/upgrade demand"** (`04-test-design.md` S4) has **no covering test** — filed as **#8998**: `test_dashboard_onboarding.py` hardcodes `subscription_status: "active"` and never varies the plan, so the "never a billing gate" property is asserted in the design docs but not proven by any suite | `rg -n "billing\|subscription_status" tests/e2e/test_dashboard_onboarding.py` → only the `active` mock at `:211` | **Gap, not a regression.** The card's own copy and flow contain no billing reference, so nothing suggests the behavior is broken — but a future change could introduce one and every current test would stay green. This is the single concrete test-coverage gap this capstone found |
 
 ## Proud test (#2008's sixth element) — PARTIAL, with each criterion graded
@@ -228,6 +229,14 @@ proud test is therefore **not claimed as passed**, which is why this report does
 
 ## Residuals carried forward (not this capstone's to close)
 
+- **D4** (five e2e modules; each module's mechanism is the one the D4 row assigns it) has **no
+  single owner**. None of it is closed by "get a production session": `test_welcome_page` cannot render from this Pages
+  root at all (#8826/#4054) and belongs in the dashboard Pages project's own suite; `test_dashboard_identity`,
+  `test_dashboard_gate` and `test_session_login_flow` are **stale** against the #3501 BFF-session seam and the #4054
+  auth-origin move, and CI deliberately does not wire them — their real home is the update tracked on **#4221**, not a
+  session; `test_ship_test_onboarding` **is** run by CI's `dashboard-e2e` leg, and its per-module result in this lane was
+  not captured, so there is nothing to chase until someone re-runs that module in the harness. Recorded here so D4 is not
+  mistaken for covered by the green 40/40 above.
 - **#1992** (the surface map itself) is still open — its artifact is delivered in the issue; closing it is bookkeeping.
 - **#9001** (filed 2026-10-18, OPEN) carries the D1 residual: the seed endpoint's transport wait-budget 504 under load,
   with the budget-vs-endpoint-latency question as its objective. **#8000** — where this report originally parked it —
@@ -268,7 +277,7 @@ proud test is therefore **not claimed as passed**, which is why this report does
 
 **PASS for the epic's own surfaces, with the coverage stated exactly.** 17 of 17 surfaces were exercised at their
 assigned **automated** layer and **16 are green**; the one that is not — surface 7, the seed endpoint — has never passed under load
-(D1). Two surfaces carry a **manual leg this run did not execute** (5 and 15, both green at their automated layers), and
+(D1). Three surfaces carry a **manual leg this run did not fully execute** (5, 15 and 16; all green at their automated layers), and
 the batches covering surfaces 1, 2, 7, 11, **10's server leg**, 14–16 ran at the anchor commit `fbc1d96d5`, while the browser walk and
 the remaining suites (surfaces 3–6, 8, 9, 12, 13, 17 — plus surface 10's render leg and surface 16's capture) ran at `180fe6fd3` — see the sha
 grouping above. All 12 high-level E2E scenarios are covered with
@@ -290,8 +299,8 @@ which are a different set and are mapped below:
 
 | #2008 verification indicator | Status |
 |---|---|
-| 1 — every high-level E2E walked with evidence | **partial**: **2 of 12 walked in a browser** (E2E-1, E2E-12); the other ten are verified through their assigned suites. The indicator's verb is "walked", and the page above says "walked" is not claimed for a pytest-driven scenario — so "covered" is not substituted for "walked". Graded partial for the same reason indicators 3–5 are; re-walking the remaining ten is what would move it to met |
-| 2 — every integration surface through its assigned layer | **partial**: 17/17 exercised at the **automated** layer, but **16 green** — surface 7 has never passed under load (D1) — and surfaces 5 and 15 each carry an **unexecuted manual leg** that their map row assigns. So 17/17 were not verified through *their assigned* layer |
+| 1 — every high-level E2E walked with evidence | **partial**: **2 of 12 walked in a browser** (E2E-1, E2E-12); the other ten are verified through their assigned suites. The indicator's verb is "walked", and this report's own rule is that "walked" is not claimed for a pytest-driven scenario — so "covered" is not substituted for it. Re-walking the remaining ten is what would move it to met |
+| 2 — every integration surface through its assigned layer | **partial**: 17/17 exercised at the **automated** layer, but **16 green** — surface 7 has never passed under load (D1) — and surfaces 5, 15 and 16 each carry an **unexecuted or partly-covered manual leg** that their map row assigns. So 17/17 were not verified through *their assigned* layer |
 | 3 — logs + DB state at each step | **partial**: graph state is asserted at suite granularity (Subject/label counts, the Overview digest's `_point_count`), not captured as a per-step transcript |
 | 4 — screenshots per surface | **partial**: 4 captures covering surfaces 9, 10, 16 and the degraded state; the fork card (4) and capture disclosure (11) are asserted, not captured |
 | 5 — A0 gate data (friction + W11 funnel) | **partial**: friction observations delivered; the funnel read is blocked by the hosted-capture 402 |
