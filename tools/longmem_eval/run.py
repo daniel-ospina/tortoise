@@ -82,7 +82,11 @@ from tortoise.model_adapters import (
 # #2969: the PRODUCT parser owns the socket-timeout vocabulary — the eval
 # reuses it (and its product-knob fallback) so the run diagnostic reports the
 # exact effective bound the graph client will be built with.
-from tortoise.projection import _resolve_socket_timeout, _socket_timeouts
+from tortoise.projection import (
+    _EMBEDDED_RETRY_COUNT,
+    _resolve_socket_timeout,
+    _socket_timeouts,
+)
 
 # #2578 (Task 1): the product-verbatim abstained-phrases classifier — the
 # measurement gate's raw reader_refusal marker uses EXACTLY the vocabulary
@@ -168,6 +172,7 @@ from .server_posture import (
 from .stall_guard import (
     DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
     DEFAULT_EVAL_SOCKET_TIMEOUT_S,
+    ENV_EMBEDDED_SOCKET_TIMEOUT,
     ENV_SOCKET_CONNECT_TIMEOUT,
     ENV_SOCKET_TIMEOUT,
     ENV_STALL_TIMEOUT,
@@ -712,28 +717,46 @@ def _ingest_bound_banner(stall_timeout_s: float, *,
     never reads this budget, so on that path the line says INERT rather than
     printing a live-looking number for a guard that cannot fire.
 
-    The embedded lane reports n/a for the READ bound, and NOT because it has
-    no graph socket: it runs a Unix-domain-socket client that IS read-bounded
-    by the product knob (``socket_timeout=read_to`` in
-    ``tortoise/projection``). It reports n/a because
-    :func:`_resolved_graph_read_timeout` resolves the PER-LANE var, which the
-    embedded branch never applies — so printing that number here would name a
-    bound the embedded client does not use. The embedded lane's bound is
-    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
+    The embedded lane is read-bounded TOO — by a DIFFERENT knob, and this
+    function reports it as such (#4683). Its client runs over a Unix-domain
+    socket and is built with ``socket_timeout=_socket_timeouts()[1]``
+    (``tortoise/projection``'s embedded branch, #3350), i.e. the #2850
+    PRODUCT knob ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``; the embedded branch
+    never applies the eval's PER-LANE ``TORTOISE_DB_SOCKET_TIMEOUT``, so
+    :func:`_resolved_graph_read_timeout` (which resolves the per-lane var)
+    is NOT the embedded bound and must not be printed for it.
+
+    The line used to print ``n/a (embedded lane) (TORTOISE_DB_SOCKET_TIMEOUT)``
+    — two falsehoods at once: a lane with a live read bound reported as
+    unbounded, and the knob named for it one the lane never reads, so an
+    operator debugging an embedded-lane stall had no bound to lower and the
+    wrong variable in hand.
+
+    The per-attempt bound is not the whole wait on this lane: the embedded
+    client's ``retry`` policy (``_embedded_retry``, one retry) makes the
+    worst case ``(1 + retries) x socket_timeout + backoff``, and that
+    attempt count is printed rather than left to be discovered — the same
+    "the reported bound must be the wait the client actually has" property
+    #2969 asks for on the host lane (where the bound IS the wait).
     """
     stall_txt = (f"{stall_timeout_s:g}s" if stall_timeout_s else "disabled")
     if ingest_mode != "v2":
         stall_txt = (f"{stall_txt} (INERT — --ingest-mode {ingest_mode} "
                      f"does not use the heartbeat; set --ingest-mode v2)")
     if db_uri is None:
-        read_txt = "n/a (embedded lane)"
+        # #4683: embedded lane — bounded by the product knob, and the
+        # per-lane var is not read here at all, so neither the value nor the
+        # name may come from `_resolved_graph_read_timeout`.
+        read_txt = (f"{_socket_timeouts()[1]:g}s "
+                    f"({ENV_EMBEDDED_SOCKET_TIMEOUT}; embedded lane, "
+                    f"{1 + _EMBEDDED_RETRY_COUNT} attempts)")
     else:
         read_val = _resolved_graph_read_timeout()
-        read_txt = (f"{read_val:g}s" if read_val
-                    else "UNBOUNDED (explicit opt-out)")
+        read_txt = ((f"{read_val:g}s" if read_val
+                     else "UNBOUNDED (explicit opt-out)")
+                    + f" ({ENV_SOCKET_TIMEOUT})")
     return (f"[longmem_eval] ingest stall budget: {stall_txt} "
-            f"({ENV_STALL_TIMEOUT}); graph socket read timeout: {read_txt} "
-            f"({ENV_SOCKET_TIMEOUT})")
+            f"({ENV_STALL_TIMEOUT}); graph socket read timeout: {read_txt}")
 
 
 @contextlib.contextmanager

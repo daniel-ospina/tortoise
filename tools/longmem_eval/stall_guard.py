@@ -14,7 +14,11 @@ rather than a new error vocabulary:
    bounded ``socket_timeout`` / ``socket_connect_timeout`` — see
    ``tortoise/projection/__init__.py`` (``TORTOISE_DB_SOCKET_TIMEOUT`` /
    ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT``; the eval lane raises the read
-   bound to ``DEFAULT_EVAL_SOCKET_TIMEOUT_S``). A stalled read therefore
+   bound to ``DEFAULT_EVAL_SOCKET_TIMEOUT_S``). That is the ``--db`` lane;
+   the EMBEDDED lane (no ``TORTOISE_DB_URI``) is read-bounded too, but by the
+   #2850 product knob ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` (#3350), and
+   never by the per-lane ``TORTOISE_DB_SOCKET_TIMEOUT`` (#4683). A stalled
+   read therefore
    raises ``redis.exceptions.TimeoutError``, which ``retryable_transient``
    already classifies as a retryable transient — it reaches the write-stage
    retry loop (R1) and, if exhausted, the ``ingest:retries_exhausted``
@@ -93,6 +97,15 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 
 ENV_SOCKET_TIMEOUT = "TORTOISE_DB_SOCKET_TIMEOUT"
 ENV_SOCKET_CONNECT_TIMEOUT = "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"
+#: #4683: the EMBEDDED lane's READ bound is the #2850 PRODUCT knob —
+#: ``tortoise/projection``'s embedded branch builds its client with
+#: ``socket_timeout=_socket_timeouts()[1]`` (#3350) and never consults the
+#: PER-LANE ``ENV_SOCKET_TIMEOUT`` above. Named here because every
+#: operator-facing message about the read bound has to name the knob the
+#: lane ACTUALLY reads; a test pins this string against the production
+#: resolver (``_socket_timeouts``) so a rename on the product side cannot
+#: leave it stale.
+ENV_EMBEDDED_SOCKET_TIMEOUT = "TORTOISE_FALKORDB_SOCKET_TIMEOUT_S"
 ENV_STALL_TIMEOUT = "TORTOISE_EVAL_INGEST_STALL_TIMEOUT"
 
 #: Values that mean "no bound" for a seconds-valued knob.
@@ -281,6 +294,7 @@ class Heartbeat:
             f"ingest stalled: no progress for {idle:.1f}s "
             f"(budget {budget:.1f}s; last stage={snap['stage']!r}, "
             f"beats={snap['beats']}, next={next_stage!r}). The graph "
-            f"socket read is bounded separately by {ENV_SOCKET_TIMEOUT}; "
+            f"socket read is bounded separately ({ENV_SOCKET_TIMEOUT} on the "
+            f"--db lane; {ENV_EMBEDDED_SOCKET_TIMEOUT} on the embedded lane); "
             f"raise or disable the budget with {ENV_STALL_TIMEOUT}=none.",
             stalled_for=idle, stage=str(snap["stage"]), beats=int(snap["beats"]))
