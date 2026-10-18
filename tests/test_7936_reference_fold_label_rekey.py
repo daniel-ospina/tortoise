@@ -43,7 +43,6 @@ from types import SimpleNamespace
 from tortoise.consistency import (
     _ENTITY_ID_PROP,
     _ENTITY_PARITY,
-    _GRAPH_VIEW_LABELS as _GRAPH_VIEW_LABELS_HOME,
     _NAME_MERGE_LABELS,
     _PROJECTION_STATE_FORMAT,
     _PROJECTION_STATE_FORMAT_HISTORY,
@@ -51,6 +50,9 @@ from tortoise.consistency import (
     check_consistency,
     projection_state_path,
     record_projection_state,
+)
+from tortoise.consistency import (
+    _GRAPH_VIEW_LABELS as _GRAPH_VIEW_LABELS_HOME,
 )
 from tortoise.projection import FalkorProjection
 

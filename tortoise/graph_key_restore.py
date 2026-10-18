@@ -1113,7 +1113,6 @@ def restore_graph_key(
                 # published `error=""`, which a consumer testing `error is not None` (the
                 # test the `str | None` annotation invites) reads as an error on a clean
                 # restore. `as_dict()` publishes this field.
-                (
                     "; ".join(
                         part for part in (
                             f"{type(error).__name__}: {error}",
@@ -1123,7 +1122,6 @@ def restore_graph_key(
                     ) or None
                     if error is not None
                     else unmeasured_reason
-                )
             ),
         )
         logger.info("graph-key restore finished: %s", observation.sentence())

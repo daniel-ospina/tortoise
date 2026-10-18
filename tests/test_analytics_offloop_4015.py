@@ -22,7 +22,7 @@ These tests are behavioural where it matters:
 
 The structural pin for "no async body calls the blocking helper directly"
 lives in ``tests/test_health_ready_nonblocking.py``
-(``test_control_plane_seam_calls_are_all_offloaded``, inventory includes
+(``test_no_on_loop_control_plane_helper_calls``, inventory includes
 ``_track_analytics_event``); the ``best_effort`` op-set invariant lives in
 ``tests/test_control_plane_offload_3498.py``
 (``test_best_effort_offload_sites_carry_the_flag``). This file adds the shape

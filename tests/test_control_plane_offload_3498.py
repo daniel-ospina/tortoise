@@ -16,7 +16,7 @@ bound / saturated backlog is fail-closed. Delete the offload and the site test
 fails.
 
 The structural pin lives in ``tests/test_health_ready_nonblocking.py``
-(``test_control_plane_seam_calls_are_all_offloaded``).
+(``test_no_on_loop_control_plane_helper_calls``).
 """
 
 from __future__ import annotations

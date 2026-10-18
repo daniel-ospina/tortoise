@@ -16934,9 +16934,14 @@ async def oauth_clients_count(request: Request):
     zero is the one wrong answer here, because it would read as "nothing has
     accumulated" and silently retire the decision.
 
-    Deliberately no alert threshold: ruling C rejected bounding the growth, so
-    a threshold would be a cap by another name. The revisit triggers are the
-    ruling's own, and are returned so a reader need not go find them.
+    No alert threshold *in this change*: ruling C decided the growth BOUND only
+    (none — no prune, no expiry, no cap) and explicitly left "warning periods"
+    undecided, so a threshold is neither forbidden nor decided by it. Shipping
+    none is this change's scope call, recorded on #2853: the number is the
+    deliverable, and a scheduled reader plus its threshold remains open work
+    tied to the ruling's own 2026-11-15 revisit trigger — not retired here. The
+    revisit triggers are the ruling's own, and are returned so a reader need
+    not go find them.
     """
     _check_internal(request)
 
