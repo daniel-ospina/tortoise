@@ -10758,7 +10758,13 @@ class TortoiseSDK:
         # this one may not precede a `SET` that can legitimately match nothing
         # (see the outbox block above). The payload is the same dict either
         # way — one record shape, one commit point per call.
-        if _promote_arm and res.result_set:
+        # A promote that applies NOTHING never reaches here: a status-only
+        # promote on a live node returns early before its statement is even
+        # issued, and every other zero-row promote raises in the diagnostic
+        # above. So this emit is reached only by a promote that landed — the
+        # `res.result_set` conjunct that used to guard it was unreachable-false
+        # once the early return existed (#8854 review round 11, P3).
+        if _promote_arm:
             self._emit_event("PointRevised", id=id,
                              new_content=props.get("content"), **emit_props)
         return result

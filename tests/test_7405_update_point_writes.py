@@ -1961,12 +1961,18 @@ def test_a_retried_live_promote_with_other_props_raises_the_documented_refusal(
 
 def test_a_live_status_only_promote_emits_no_point_revised(
         tmp_path, monkeypatch):
-    """The `res.result_set` gate: nothing applied ⇒ no `PointRevised`.
+    """A no-op promote journals nothing: nothing applied ⇒ no `PointRevised`.
+
+    The MECHANISM is the early return for a status-only promote on a live node
+    — it happens before the guarded statement is issued, so the tail emit is
+    never reached. (An earlier `res.result_set` conjunct on that emit became
+    unreachable-false once the early return existed; this test pins the
+    OBSERVABLE, so it holds whichever mechanism produces the silence.)
 
     The store half of `PointRevised` is the change-feed switch, which is read
     from the environment AT CALL TIME — so the emit IS observable in this
     fixture, and the positive control below is what makes the empty assertion
-    mean something (without the gate the no-op emits one).
+    mean something (a landed promote must emit one).
 
     Why it matters: the probe-path no-op for the same end state writes nothing
     and emits nothing, so emitting here would journal a revision the graph never
