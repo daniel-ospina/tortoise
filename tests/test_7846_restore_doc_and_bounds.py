@@ -2,7 +2,7 @@
 
 The live restore contract lives in ``test_indexed_graph_key_restore_7846.py``
 (docker/server FalkorDB only). This module needs no server at all: it pins the
-two review findings that are checkable without one.
+review findings that are checkable without one.
 
 1. The restore test's "WHAT WAS MEASURED" table must agree with the committed
    evidence it cites (``docs/evidence/7846-indexed-graph-restore/README.md`` §2).
@@ -12,6 +12,11 @@ two review findings that are checkable without one.
 2. The restore assertion bound must stay BELOW the client socket timeout, so
    "the restore overran its bound" and "the socket timed out" remain
    distinguishable failure modes — the stated point of acceptance criterion 3.
+3. The helper must not claim the whole ``DUMP`` → ``DEL`` → ``RESTORE`` sequence is
+   bounded, when only the RESTORE step is (#8827 review).
+4. Criterion 5 must stay scoped to a caller that ADOPTS ``graph_key_restore``: no
+   production call site does, and the wired path (``hosted_backup``'s ``GRAPH.COPY``)
+   is unwitnessed (#8827 review).
 """
 
 from __future__ import annotations
@@ -99,4 +104,56 @@ def test_restore_bound_is_below_the_socket_timeout() -> None:
         f"the restore bound ({restore._RESTORE_BOUND_S}s) must stay below the "
         f"client socket timeout ({restore._RESTORE_TIMEOUT_S}s), or the two "
         f"failure modes are indistinguishable"
+    )
+
+
+def test_the_live_helper_does_not_claim_the_whole_sequence_is_bounded() -> None:
+    """#8827 review: ``bound_s`` bounds the RESTORE step, never ``DUMP``/``DEL``.
+
+    The helper's ``DUMP`` and ``DEL`` run inline on the caller's thread before the
+    driver starts its worker, so their only limit is the client's own socket timeout.
+    A docstring that reads "BOUNDED" for the whole ``DUMP`` → ``DEL`` → ``RESTORE``
+    sequence tells a caller it may pass an unbounded client — and then a hung ``DUMP``
+    reproduces criterion 1's "hangs with no error it can act on" outside any bound.
+    Pre-fix this fails: the docstring says "BOUNDED and WITNESSED" and never names
+    ``DUMP``/``DEL`` as excluded.
+    """
+    doc = restore._dump_delete_restore.__doc__ or ""
+    assert "does NOT cover ``DUMP`` or ``DEL``" in doc, (
+        "the helper no longer says which step the bound excludes"
+    )
+    assert "BOUNDED and WITNESSED" not in doc, (
+        "the helper claims the whole sequence is bounded"
+    )
+
+
+def test_the_evidence_readme_scopes_criterion_5_to_callers_that_adopt_the_module() -> None:
+    """F5, #8827 review: criterion 5 read "MET at our boundary", which is not true yet.
+
+    The driver's capability is real, but NOTHING in the product calls
+    ``restore_graph_key`` — ``rg`` finds the module and its tests, no caller — and the
+    restore production actually performs is ``tortoise/hosted_backup.py``'s bounded
+    ``GRAPH.COPY`` swap, which is unwitnessed. "MET at our boundary" let a reader take
+    the criterion as landed in the product when it is landed only for an adopter.
+
+    Pre-fix this fails: the criterion-5 row claims MET and names no call-site gap, and no
+    sentence in the doc ties the criterion to adoption.
+    """
+    text = _README.read_text()
+    criterion = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("| 5 |") and "distinguishable from load" in line
+    )
+    assert "MET at our boundary" not in criterion, (
+        f"the criterion-5 row still claims the criterion is met unboundedly: {criterion}"
+    )
+    assert "ADOPTS THE MODULE" in criterion, (
+        f"the row does not scope the claim to a caller that adopts the module: {criterion}"
+    )
+    assert "no production call site adopts it yet" in criterion, (
+        f"the row does not say the module has no production caller: {criterion}"
+    )
+    assert "_graph_copy_with_restore_bound" in criterion and "UNWITNESSED" in criterion, (
+        f"the row does not name the wired restore path and its gap: {criterion}"
     )

@@ -34,11 +34,14 @@ caller cannot tell a long rebuild from a hang.
 
 ⇒ 15× slower, and instance-blocking for the whole rebuild. Acceptance criteria 2
 (*"the instance continues to serve other graphs throughout the restore"*) and 5
-(*"a wedged instance must not be silent"*) are therefore still UNMET, and
-upstream: the caller gets a socket timeout, with no progress, no log line and no
-error to act on. Those two are not assertable-green from here and this file does
-not pretend otherwise — the "other graphs" assertion below runs AFTER the
-restore, not through it.
+(*"a wedged instance must not be silent"*) are therefore still UNMET **upstream**:
+no in-repo change can make a blocked engine serve. What this file CAN do, and now
+does, is stop the silence being silent — the restore is driven through
+``tortoise/graph_key_restore.py``, which bounds it, watches the instance from a
+second connection throughout, and raises a typed error that names which of
+*blocked / dead / loaded* actually happened. The "other graphs" assertion below
+still runs AFTER the restore, never through it; the silence measured DURING it is
+asserted to be the restore's own (it ends when the restore does).
 
 WHAT THESE TESTS PIN — the issue's two in-repo criteria (3 and 4):
 
@@ -56,6 +59,11 @@ WHAT THESE TESTS PIN — the issue's two in-repo criteria (3 and 4):
    and its own lane could not settle it because its vector probe returned no
    rows either way. Here the POPULATED index is a precondition of the fixture,
    so a restore that dropped it could not pass.
+3. **The block is measured, not inferred** (criterion 5, at our boundary). The
+   witness samples below are the evidence: if the instance stops answering, the
+   observation says for how long and that it came back — and if it never comes
+   back, the driver fails with ``GraphRestoreSilentError`` naming the silence
+   instead of a bare socket timeout.
 
 ⛔ **Do NOT extend this file with a restore under a DIFFERENT graph name.** The
 obvious way to prove payload carriage (restore the same payload as a second
@@ -119,6 +127,13 @@ import pytest
 import redis
 
 from tests import _live_utils
+from tortoise.graph_key_restore import (
+    BLOCKED,
+    SERVED,
+    RestoreObservation,
+    restore_graph_key,
+    tcp_is_listening,
+)
 
 #: Node count for the fixture graph. Overridable because the issue's own scale
 #: is 30 000 (≈20 s of writes) and this file is registered on the `core`
@@ -137,11 +152,43 @@ K = 3
 #: would raise at the same instant the assertion would fire, and "the restore
 #: overran its bound" could not be told apart from "the socket timed out" —
 #: the two failure modes criterion 3 exists to distinguish.
+#:
+#: The bound is now the DRIVER's, not the socket's: `_RESTORE_BOUND_S` is passed to
+#: `graph_key_restore.restore_graph_key` as `bound_s`, and `_RESTORE_TIMEOUT_S`
+#: stays the `restore` client's socket timeout — the backstop that stops an
+#: abandoned worker thread from living forever.
 _CONNECT_TIMEOUT_S = 10.0
 _RESTORE_TIMEOUT_S = 120.0
 _RESTORE_BOUND_S = 90.0
 _INDEX_READY_BOUND_S = 180.0
 _BATCH = 500
+
+#: The witness probe: its own connection, its own (short) socket timeout, sampled
+#: every `_WITNESS_POLL_S`. A blocked instance answers NOTHING, so this probe's
+#: timeout is the resolution of the measured silence.
+_WITNESS_TIMEOUT_S = 1.0
+_WITNESS_POLL_S = 0.1
+
+#: How far the measured outage may exceed the restore's own duration before it is
+#: no longer attributable to the restore. Two measured facts set the size:
+#:
+#: * a witness PING in flight when the restore starts only fails when ITS socket
+#:   timeout expires, and the first answered sample comes up to one poll later;
+#: * an ANSWERED witness PING can outlast the restoring client's own call — measured
+#:   30 000 nodes: restore 4.12 s, slowest answered PING 5 798 ms — because the client
+#:   sees the reply while the instance is still finishing the work the reply covers.
+#:
+#: So the allowance is `elapsed + 2 s`, and at least 1.5x `elapsed`, whichever is
+#: larger. This slack guards the ATTRIBUTION claim only: a genuine wedge never reaches
+#: this assertion at all, because `_RESTORE_BOUND_S` has already failed the restore.
+_SILENCE_SLACK_S = _WITNESS_TIMEOUT_S + 1.0
+
+
+def _max_attributable_outage_ms(observation) -> float:
+    """The largest outage still attributable to this restore (see `_SILENCE_SLACK_S`)."""
+    allowed_s = max(observation.elapsed_s * 1.5, observation.elapsed_s + _SILENCE_SLACK_S)
+    return allowed_s * 1000
+
 
 _SUPPORTED_SCHEMES = ("docker", "redis", "rediss")
 
@@ -272,18 +319,52 @@ def _vector(i: int, dim: int) -> list[float]:
     return [float((i * 7919 + j * 104729) % 1000) / 1000.0 for j in range(dim)]
 
 
-def _dump_delete_restore(client, graph: str) -> tuple[bytes, float]:
-    """``DUMP`` → ``DEL`` → ``RESTORE ... REPLACE``; returns (payload, seconds).
+def _dump_delete_restore(client, graph: str) -> RestoreObservation:
+    """``DUMP`` → ``DEL`` → ``RESTORE ... REPLACE``: WITNESSED throughout, with the
+    RESTORE step BOUNDED (``_RESTORE_BOUND_S``) — and only that step.
 
-    ``REPLACE`` is not optional: the engine keeps the graph in its module
-    registry after the Redis key is deleted, so a bare ``RESTORE`` fails
-    ``BUSYKEY`` — the second trap the issue lists.
+    Delegates to ``tortoise.graph_key_restore.restore_graph_key`` (#7846 criterion 5):
+    the restore runs on a worker thread while a witness on its OWN connection polls
+    ``PING``, so the instance's silence is measured rather than inferred from the
+    operation's duration. On an overrun the driver raises
+    ``GraphRestoreSilentError`` (port still accepts → blocked, not load, not a crash)
+    or ``GraphRestoreLostError`` (port refused → the process died), each carrying the
+    measurement and a recovery instruction — the actionable replacement for the bare
+    ``redis.exceptions.TimeoutError`` this helper used to surface.
+
+    ⛔ ``_RESTORE_BOUND_S`` does NOT cover ``DUMP`` or ``DEL``: they run inline on this
+    thread before the driver's worker starts (#8827 review), so their only limit is
+    ``client``'s own socket timeout — ``_RESTORE_TIMEOUT_S`` (120 s), deliberately
+    above the 90 s restore bound (`test_7846_restore_doc_and_bounds.py` pins that
+    ordering). A caller wiring this into product code must give ITS client a socket
+    timeout of its own; the driver reports the two durations separately
+    (``elapsed_s`` = the whole sequence, ``restore_s`` = the bounded step).
+
+    ``REPLACE`` is not optional: the engine keeps the graph in its module registry
+    after the Redis key is deleted, so a bare ``RESTORE`` fails ``BUSYKEY`` — the
+    second trap the issue lists. ``DUMP`` is binary and every client here is
+    binary-safe (``decode_responses=False``), the first trap.
     """
-    payload = client.execute_command("DUMP", graph)
-    client.execute_command("DEL", graph)
-    started = time.perf_counter()
-    client.execute_command("RESTORE", graph, 0, payload, "REPLACE")
-    return payload, time.perf_counter() - started
+    host, port, _username, _password, _ssl = _TARGET
+    witness = _redis(timeout=_WITNESS_TIMEOUT_S)
+    try:
+        return restore_graph_key(
+            graph=graph,
+            dump=lambda: client.execute_command("DUMP", graph),
+            delete=lambda: client.execute_command("DEL", graph),
+            restore=lambda payload: client.execute_command(
+                "RESTORE", graph, 0, payload, "REPLACE"
+            ),
+            ping=witness.ping,
+            listening=lambda: tcp_is_listening(
+                host, port, timeout_s=_WITNESS_TIMEOUT_S
+            ),
+            bound_s=_RESTORE_BOUND_S,
+            poll_interval_s=_WITNESS_POLL_S,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            witness.close()
 
 
 def _assert_instance_serving(client) -> None:
@@ -405,20 +486,66 @@ def test_graph_key_restore_of_an_indexed_graph_is_bounded_and_keeps_serving(
     graph = indexed_graph.graph
 
     try:
-        payload, elapsed = _dump_delete_restore(raw, graph)
+        observation = _dump_delete_restore(raw, graph)
     except Exception as exc:
         pytest.fail(
             f"the graph-key RESTORE of an index-bearing graph did not return "
-            f"({type(exc).__name__}: {exc}). That is #7846: the instance stops "
-            f"serving and never recovers — the wedged instance is silent, so "
-            f"this failure message is the only signal there is."
+            f"({type(exc).__name__}: {exc}). That is #7846. The driver's message "
+            f"above is the measurement, not a wrapper: it says whether the "
+            f"instance was blocked (port accepts, nothing answers), gone (port "
+            f"refused) or merely slow, so this failure is not the silent wedge "
+            f"the issue was filed for."
         )
 
-    assert len(payload) > 0, "DUMP produced an empty payload"
-    assert elapsed < _RESTORE_BOUND_S, (
-        f"RESTORE took {elapsed:.1f}s (bound {_RESTORE_BOUND_S:.0f}s, socket "
-        f"timeout {_RESTORE_TIMEOUT_S:.0f}s)"
+    assert observation.payload_bytes > 0, "DUMP produced an empty payload"
+    # `bound_s` bounds the RESTORE STEP, not `elapsed_s`: the latter is the caller-held
+    # time for the WHOLE sequence (DUMP + DEL + the bounded restore + the witness join +
+    # the recovery probe), so a restore that returns at 89 s under a 90 s bound
+    # legitimately reports elapsed_s > 90 while status == SERVED. Asserting on
+    # `elapsed_s` here failed with "it should have raised instead" and blamed the driver
+    # for behaving exactly as documented — a misfire that would send whoever raises
+    # TORTOISE_7846_NODES or runs on a slow engine after a non-bug (#8827 review).
+    assert observation.restore_s < _RESTORE_BOUND_S, (
+        f"the driver returned a RESTORE step of {observation.restore_s:.1f}s under a "
+        f"{_RESTORE_BOUND_S:.0f}s bound — it should have raised instead"
     )
+    assert observation.restore_returned is True
+    assert observation.status in (SERVED, BLOCKED), (
+        f"a completed restore reported status={observation.status!r}"
+    )
+    assert observation.witness_samples > 0, (
+        "the witness took no samples: the instance was never actually watched "
+        "through the restore, so every claim below would be unmeasured"
+    )
+
+    # ⛔ Criterion 5, at our boundary: whatever silence the restore caused is
+    # MEASURED, and it is ATTRIBUTABLE — it ends when the restore does. A silence
+    # that outlasts the restore is not the index rebuild and must not be reported
+    # as one.
+    if observation.witness_failures:
+        assert observation.silence_started_s is not None
+        assert observation.silence_ended_s is not None, (
+            f"the instance never answered again inside the observation window "
+            f"({observation.witness_failures} unanswered PINGs, no recovery): the "
+            f"silence outlasted the restore, so it cannot be attributed to the "
+            f"index rebuild and may be a wedge"
+        )
+        assert observation.silent_ms <= _max_attributable_outage_ms(observation), (
+            f"the instance was silent for {observation.silent_ms:.0f} ms while the "
+            f"restore took {observation.elapsed_s:.2f}s: the silence is longer "
+            f"than the operation that supposedly caused it"
+        )
+    if observation.status == BLOCKED:
+        # Either signal (a run of unanswered PINGs, or a PING queued behind the
+        # rebuild) is the #7846 block, and neither may outlast the restore that
+        # caused it.
+        assert observation.blocked_ms <= _max_attributable_outage_ms(observation), (
+            f"the instance was unavailable for {observation.blocked_ms:.0f} ms "
+            f"(slowest answered PING {observation.witness_max_latency_ms:.0f} ms, "
+            f"silence {observation.silent_ms:.0f} ms) while the restore took "
+            f"{observation.elapsed_s:.2f}s: the outage is longer than the "
+            f"operation that supposedly caused it"
+        )
 
     # ⛔ Criterion 3's own assertion.
     _assert_instance_serving(raw)
@@ -458,7 +585,8 @@ def test_the_vector_index_survives_a_graph_key_restore(indexed_graph):
     before = _knn_rows(raw, graph, dim)
     assert before == K, f"precondition: {before} neighbours before the restore"
 
-    _payload, _elapsed = _dump_delete_restore(raw, graph)
+    _observation = _dump_delete_restore(raw, graph)
+    assert _observation.payload_bytes > 0
 
     status = _index_status(raw, graph)
     assert status == "OPERATIONAL", (
