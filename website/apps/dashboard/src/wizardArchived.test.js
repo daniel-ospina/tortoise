@@ -238,15 +238,15 @@ function orFallbacks(ast) {
  * (` && …`) would resolve the END EARLY, shrink the window past the copy it
  * watches, and leave `deepEqual(inCardTitles, [])` passing over the shrunken
  * region — the same false-green shape as the `indexOf`-returns-`-1` defect this PR
- * closes. The boundary is therefore read from the AST (`archivedGateStart`), where
- * prose cannot forge it, and its ORDER is asserted.
+ * closes. The boundary is therefore read from the AST as the archived GATE's
+ * shape (`archivedGateStart`), and its ORDER relative to the card is asserted.
  */
-function welcomeCardWindow(source, ast) {
+function welcomeCardWindow(ast) {
   const heads = jsxElements(ast).filter((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
   assert.equal(heads.length, 1,
     'the welcome-head card must resolve exactly once (a pin over an empty or unbounded window is a false green)')
   const start = heads[0].start
-  const end = archivedGateStart(ast, start)
+  const end = archivedGateStart(ast)
   assert.notEqual(end, -1,
     'the archived-block boundary must resolve (an unresolved end makes the window the rest of the file)')
   assert.ok(end > start,
@@ -255,20 +255,33 @@ function welcomeCardWindow(source, ast) {
 }
 
 /**
- * Source offset of the archived block that ENDS the live welcome card: the first
- * `LEGACY_WIZARD_ARCHIVED` REFERENCE after `start`, read from the AST. `-1` when
- * there is none.
+ * Source offset of the A0 archived GATE that ends the live welcome card:
+ * `LEGACY_WIZARD_ARCHIVED && welcomeOriented`, the same shape the gate pin in the
+ * first test asserts. `-1` when there is none.
  *
- * Comments are NOT AST nodes, so a comment inside the card that mentions the flag
- * cannot resolve this boundary early — which a raw `source.indexOf(…)` sentinel
- * could not promise. The flag's own `const` declaration sits at `main.jsx:3675`,
- * BEFORE the card, so the first reference after `start` is the archived gate.
+ * #3726 cycle 6: the boundary must be anchored to the gate's SHAPE, not to the
+ * flag's NAME. It was `source.indexOf('LEGACY_WIZARD_ARCHIVED &&', start)` —
+ * prose-forgeable, because `main.jsx`'s own card carries a note that names the
+ * flag (L9262). Reading "the first identifier named LEGACY_WIZARD_ARCHIVED" traded
+ * that for a CODE-forgeable sentinel, which is WORSE: a
+ * `{LEGACY_WIZARD_ARCHIVED ? <p className="wizard-title">…</p> : null}` inside the
+ * card — the most plausible way the forbidden in-card label comes back, guarded by
+ * the flag itself — resolved the boundary early and left the in-card pin GREEN with
+ * the label present (measured). Requiring the `&&` with `welcomeOriented` on the
+ * right is the gate's actual shape: a ternary, a comparison, an object key and a
+ * member property cannot forge it, and a gate that loses this shape fails LOUD here
+ * instead of silently shrinking the window.
+ *
+ * The FIRST gate in the file, not the first after `start`, so the ordering check in
+ * `welcomeCardWindow` is live: a gate that moves ABOVE the card reddens instead of
+ * quietly becoming the window's start.
  */
-function archivedGateStart(ast, start) {
+function archivedGateStart(ast) {
   let found = -1
   walkNodes(ast, (node) => {
-    if (node.type !== 'Identifier' || node.name !== 'LEGACY_WIZARD_ARCHIVED') return
-    if (node.start <= start) return
+    if (node.type !== 'LogicalExpression' || node.operator !== '&&') return
+    if (node.left.type !== 'Identifier' || node.left.name !== 'LEGACY_WIZARD_ARCHIVED') return
+    if (node.right.type !== 'Identifier' || node.right.name !== 'welcomeOriented') return
     if (found === -1 || node.start < found) found = node.start
   })
   return found
@@ -287,8 +300,8 @@ function archivedGateStart(ast, start) {
  * fallback is a static string (any quoting, any spacing), and the site is in the
  * card. A `||` elsewhere cannot satisfy it.
  */
-function readyCopyOrgFallbacks(source, ast) {
-  const { start, end } = welcomeCardWindow(source, ast)
+function readyCopyOrgFallbacks(ast) {
+  const { start, end } = welcomeCardWindow(ast)
   return orFallbacks(ast)
     .filter((f) => f.left === 'shownOrgName' && f.start > start && f.start < end)
     .map((f) => f.value)
@@ -385,7 +398,7 @@ test('live wizard renders WIZARD_STEPS (the 5 human steps), not legacy labels', 
   // BOTH ends, and are shared with the ready-copy pin below. An unresolved END is
   // the hazard that makes a negative pin vacuous; an unresolved START makes it
   // empty, which passes `!includes(...)`.
-  const { start: headOpen, end: headEnd } = welcomeCardWindow(src, SRC_AST)
+  const { start: headOpen, end: headEnd } = welcomeCardWindow(SRC_AST)
   // #3726 cycle 3: the assertion itself was still a two-delimiter regex, so the
   // third delimiter — and the JSX container form — kept the pin GREEN while the
   // label was genuinely back in the card. Class names from the AST instead: one
@@ -429,11 +442,18 @@ test('#3726 falsifiability: the legacy-label pin reads the ARRAY, not copy that 
     ']',
   ].join('\n')
   assert.ok(asShipped.includes(mainNeedle),
-    'the pre-fix needle matched the array in its ORIGINAL (escaped) spelling')
+    'a source written in the pre-fix spelling contains the pre-fix needle')
   assert.deepEqual(legacyWizardLabels(parseModule(asShipped)), {
     declarators: 1,
     labels: ["Connect your tool", "Memory sources", "Your agent's toolkit", "Seed your graph", "You're set"],
-  }, 'the synthetic is the legacy array as shipped (same five labels), so the re-quote below is the same input the pin reads')
+  }, 'the synthetic parses as one array of the five labels')
+  // Tie the synthetic to the REAL input BY VALUE: the same five labels the live
+  // `wizardSteps` holds. Spelling cannot redden this (a re-quote reads the same
+  // labels), so the demo cannot drift into asserting a fiction the repository no
+  // longer contains.
+  assert.deepEqual(legacyWizardLabels(parseModule(asShipped)).labels,
+    legacyWizardLabels(SRC_AST).labels,
+    'the synthetic reproduces the LIVE wizardSteps labels — the pre-fix spelling below is a spelling this array once had, not an invented one')
   const requoted = [
     'const wizardSteps = [',
     '  "Connect your tool",',
@@ -468,7 +488,7 @@ test('#3726 falsifiability: the legacy-label pin reads the ARRAY, not copy that 
     'the AST pin finds no legacy array, so the same source reddens instead')
 })
 
-test('#3726 falsifiability: the welcome-card window fails LOUD on a missing end bound and ignores prose', () => {
+test('#3726 falsifiability: the welcome-card window fails LOUD on a missing gate and ignores prose', () => {
   // Two ways the ONE guarded span in this file can stop naming the live card.
   const card = (block) => [
     '<div className="welcome-head">',
@@ -484,7 +504,7 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing end 
   //    the rest of the file — a pin watching a region it does not name.
   const unmarked = card([]).replace(
     '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (', '{someOtherFlag && (')
-  assert.throws(() => welcomeCardWindow(unmarked, parseModule(unmarked)), /must resolve/,
+  assert.throws(() => welcomeCardWindow(parseModule(unmarked)), /must resolve/,
     'an unresolved end must fail LOUD, not widen the window to the rest of the file')
   // 2. The boundary still RESOLVES but a note INSIDE the card names the flag — the
   //    live shape of this hazard: main.jsx:9262 already mentions
@@ -498,17 +518,40 @@ test('#3726 falsifiability: the welcome-card window fails LOUD on a missing end 
   const notedAst = parseModule(notedInCard)
   const notedHead = jsxElements(notedAst).find((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
   const forgedEnd = notedInCard.indexOf('LEGACY_WIZARD_ARCHIVED &&', notedHead.start)
-  assert.ok(forgedEnd > notedHead.start && forgedEnd < archivedGateStart(notedAst, notedHead.start),
+  assert.ok(forgedEnd > notedHead.start && forgedEnd < archivedGateStart(notedAst),
     'the comment really is EARLIER than the archived gate — the sentinel the pre-fix reader searched is inside the card')
   assert.deepEqual(
     jsxElements(notedAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > notedHead.start && e.start < forgedEnd),
     [],
     'the raw-indexOf window is EMPTY, so `deepEqual(inCardTitles, [])` passed with the forbidden label sitting in the card')
-  const { start, end } = welcomeCardWindow(notedInCard, notedAst)
+  const noted = welcomeCardWindow(notedAst)
   assert.deepEqual(
-    jsxElements(notedAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > start && e.start < end).length,
+    jsxElements(notedAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > noted.start && e.start < noted.end).length,
     1,
     'the AST boundary ignores the prose, so the in-card label is still SEEN and the negative pin reddens')
+  // 3. The boundary must be anchored to the GATE'S SHAPE, not to the flag's NAME.
+  //    This is the shape the forbidden label comes back in when it is guarded by the
+  //    flag itself: a TERNARY, not the `&&` gate. The in-card label is genuinely
+  //    present, so the window has to reach the real gate and see it.
+  const ternaryInCard = card([
+    '  {LEGACY_WIZARD_ARCHIVED ? (<p className="wizard-title">{wizardSteps[wizardStep]}</p>) : null}',
+  ])
+  const ternaryAst = parseModule(ternaryInCard)
+  const ternaryHead = jsxElements(ternaryAst).find((e) => e.tag === 'div' && hasClass(e.cls, 'welcome-head'))
+  const ternaryWindow = welcomeCardWindow(ternaryAst)
+  assert.ok(ternaryWindow.end > ternaryHead.start,
+    'the ternary is not the gate — the boundary resolves at the real `&& welcomeOriented` gate below the card')
+  assert.deepEqual(
+    jsxElements(ternaryAst).filter((e) => hasClass(e.cls, 'wizard-title') && e.start > ternaryWindow.start && e.start < ternaryWindow.end).length,
+    1,
+    'a flag-guarded TERNARY in the card must not shrink the window past the label it contains')
+  // …and with the gate gone, a ternary does NOT stand in for it: the boundary fails
+  // LOUD. Anchoring on the flag's NAME instead let the ternary resolve the boundary
+  // early, and the in-card pin then passed with the label in the card (measured).
+  const ternaryOnly = ternaryInCard.replace(
+    '{LEGACY_WIZARD_ARCHIVED && welcomeOriented && (', '{someOtherFlag && (')
+  assert.throws(() => welcomeCardWindow(parseModule(ternaryOnly)), /must resolve/,
+    'a ternary, an object key or a member property must not resolve the archived gate')
 })
 
 test('#3726 falsifiability: the <h1> pin is selected by class and names every override', () => {
@@ -550,11 +593,11 @@ test('#3726 falsifiability: the in-card title pin fires on EVERY className spell
       `    <p className={${className}}>{wizardSteps[wizardStep]}</p>`,
       '  </div>',
       ')',
-      'export const Legacy = () => LEGACY_WIZARD_ARCHIVED && null',
+      'export const Legacy = () => LEGACY_WIZARD_ARCHIVED && welcomeOriented && null',
     ].join('\n')
     // The SAME window helper the live pin uses — so the synthetic exercises the
     // boundary checks too, rather than re-deriving a window with its own fallback.
-    const { start: headOpen, end: headEnd } = welcomeCardWindow(synthetic, parseModule(synthetic))
+    const { start: headOpen, end: headEnd } = welcomeCardWindow(parseModule(synthetic))
     const inCard = jsxOf(synthetic)
       .filter((e) => e.start > headOpen && e.start < headEnd && hasClass(e.cls, 'wizard-title'))
     assert.equal(inCard.length, 1, `an in-card label spelled className={${className}} must redden the pin`)
@@ -598,7 +641,7 @@ test('DE2E-2 copy sweep: org-create dialog + wizard copy say Organization', () =
   // to the LIVE WELCOME CARD and to the `shownOrgName` operand. The card's only
   // other org fallback is the connect-step key line, which spells the string with
   // a capital O (`'your Organization'`) and therefore cannot satisfy this pin.
-  assert.ok(readyCopyOrgFallbacks(src, SRC_AST).includes('your organization'),
+  assert.ok(readyCopyOrgFallbacks(SRC_AST).includes('your organization'),
     'the live welcome ready copy falls back to the user\'s Organization — a `||` in another card cannot satisfy this')
   assert.ok(src.includes('Creating your Organization and API key'), 'provisioning copy')
   assert.ok(src.includes('Your Organization and API key are live'), 're-entry + first-data cards')
@@ -616,22 +659,22 @@ test('#3726 falsifiability: the ready-copy pin is anchored to the welcome card, 
   ].join('\n')
   // The archived block is the window's END sentinel; without it the window has no
   // documented end and `welcomeCardWindow` refuses (fail loud, not rest-of-file).
-  const archived = 'export const Legacy = () => LEGACY_WIZARD_ARCHIVED && null'
+  const archived = 'export const Legacy = () => LEGACY_WIZARD_ARCHIVED && welcomeOriented && null'
   const otherCard = "export const Other = () => <h2>Continue setting up {shownOrgName || 'your organization'}</h2>"
   const withFallback = `${card("{shownOrgName || 'your organization'}")}\n${archived}\n${otherCard}`
   const withoutFallback = `${card('{shownOrgName}')}\n${archived}\n${otherCard}`
-  assert.deepEqual(readyCopyOrgFallbacks(withFallback, parseModule(withFallback)), ['your organization'],
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(withFallback)), ['your organization'],
     'the ready copy resolves when its fallback is present')
   // The pre-fix form: collect every `x || '<string>'` in the module. It stays
   // satisfied by the heading in the OTHER card — the false green.
   assert.ok(orFallbacks(parseModule(withoutFallback)).map((f) => f.value).includes('your organization'),
     'a whole-module scan is still satisfied by the unrelated card — that is the false green this pin must not have')
-  assert.deepEqual(readyCopyOrgFallbacks(withoutFallback, parseModule(withoutFallback)), [],
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(withoutFallback)), [],
     'deleting the ready-copy fallback must REDDEN the anchored pin')
   // …and a formatting-only edit (spaces inside the braces, a template fallback)
   // is still the same input, which is what reading the AST buys.
   const spaced = `${card('{ shownOrgName || `your organization` }')}\n${archived}\n${otherCard}`
-  assert.deepEqual(readyCopyOrgFallbacks(spaced, parseModule(spaced)), ['your organization'],
+  assert.deepEqual(readyCopyOrgFallbacks(parseModule(spaced)), ['your organization'],
     'spacing and a template-literal fallback are formatting, not behaviour')
 })
 
