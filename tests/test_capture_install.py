@@ -14,6 +14,7 @@ belong here.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import math
 import os
@@ -3414,7 +3415,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
-                             "pi": 3}
+                             "pi": 4}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3459,7 +3460,15 @@ def test_shipped_install_contract_generations(harness):
     a #5838 bump; #5109 then moved `pi` 2→3 (the read-side store-mode warning
     added to `resolveConfig` — a behavioural edit to the shipped artifact, so an
     already-installed generation-2 copy must read as STALE rather than as
-    `modified-artifact`, i.e. "local edit").  Those
+    `modified-artifact`, i.e. "local edit").  #3512 then moved `pi` 3→4 on a
+    PROSE-ONLY edit (a stale sentence in the header about the agent-infra
+    producer's egress gate), and the generation moves anyway: the detector's
+    final test is `installed.read_bytes() != contract.source.read_bytes()`, so
+    an installed generation-3 copy carrying the previous comment is accused of
+    being a LOCAL EDIT it never made, while a bump makes it read as STALE and
+    prompts a reinstall — the right advice whenever the shipped bytes move
+    (`test_a_shipped_pi_seam_byte_change_moves_the_generation` pins that pair).
+    Those
     numbers are a reviewed decision, not a detail, so they are pinned once and
     explicitly.
 
@@ -3496,15 +3505,97 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 3`` from
+    Mutation: delete ``// tortoise-hook-version: 4`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 3
+    assert hook_install.read_hook_version(_PI_SRC) == 4
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
+
+
+#: The ``(generation, sha256)`` pair the shipped Pi seam must carry.  They are
+#: ONE unit: ``detect_artifact_install`` first compares the
+#: ``tortoise-hook-version`` marker and, **when the markers MATCH**, the raw
+#: bytes — so a byte change under an unchanged generation is a state the
+#: classification cannot represent, and it degrades to ``modified-artifact``
+#: ("local edit").  #3512 walked into exactly that with a comment-only header
+#: edit at generation 3: no test watched, because every install test copies the
+#: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
+#: the generation, update this pair — all three in one commit.
+_PINNED_PI_SEAM_INSTALL_CONTRACT = (
+    4, "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498")
+
+
+def test_a_shipped_pi_seam_byte_change_moves_the_generation():
+    """A shipped-artifact edit that leaves the generation alone is a regression.
+
+    The generation pin above tracks whatever number is current, and the
+    installed-artifact tests elsewhere install the SHIPPED bytes (byte-identical
+    by construction), so neither can see the shape #3512 shipped: bytes changed,
+    marker unchanged.  This pins the pair so the two can never move apart
+    silently — the generation alone catches a revert, the digest catches a byte
+    change, and only BOTH moving together is green.
+
+    Measured consequence (the pre-fix state, verified: ``git show
+    HEAD:tortoise/pi-hooks/tortoise-capture.ts`` is generation 3 with sha256
+    ``8caaf76c…21cf``): an installed copy of those bytes reads
+    ``modified-artifact`` — a BLOCKING "local edit" finding — against the
+    corrected shipped file.  That is the accusation the bump removes.
+
+    Mutation: revert the header to the pre-#3512 text (generation 3, sha256
+    ``8caaf76c…21cf``) with this pair left alone — this REDs on the digest; bump
+    only the digest for a prose edit — this REDs on the generation.
+    """
+    generation, digest = _PINNED_PI_SEAM_INSTALL_CONTRACT
+    shipped = hook_install.read_hook_version(_PI_SRC)
+    actual = hashlib.sha256(_PI_SRC.read_bytes()).hexdigest()
+    assert (shipped, actual) == (generation, digest), (
+        "the shipped Pi seam's install contract moved: "
+        f"(generation, sha256) is {(shipped, actual)}, pinned "
+        f"{(generation, digest)}.  A BYTE change at an unchanged generation is "
+        "read as `modified-artifact` (\"local edit\") by every install made "
+        "from the previous bytes, so move the generation (tortoise-hook-version) "
+        "and update _EXPECTED_INSTALL_CONTRACT + this pair in the same commit.")
+
+
+def test_a_same_generation_header_edit_reads_as_a_local_edit(tmp_path):
+    """The mechanism the pair above protects, executed rather than described.
+
+    A copy whose marker is CURRENT and whose bytes differ by one comment line
+    is ``modified-artifact`` — blocking, i.e. the user is told they hand-edited
+    a file they never touched — while the unedited shipped bytes read as having
+    no findings at all.  That asymmetry is why a prose-only edit to this
+    artifact still has to move the generation.
+
+    Mutation: make the byte-compare branch report ``stale-artifact`` instead of
+    ``modified-artifact`` in ``detect_artifact_install`` — this REDs.
+    """
+    shipped = _PI_SRC.read_text(encoding="utf-8")
+    marker = "// tortoise-capture — the in-repo Pi capture extension"
+    assert marker in shipped, (
+        "the fixture edit no longer matches the shipped header — re-anchor it")
+    edited = shipped.replace(marker, "// tortoise-capture — an edited header", 1)
+
+    ext_dir = tmp_path / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    installed = ext_dir / capture_install.PI_EXTENSION_NAME
+
+    installed.write_text(edited, encoding="utf-8")
+    assert (hook_install.read_hook_version(installed)
+            == hook_install.read_hook_version(_PI_SRC)), (
+        "the fixture must keep the SHIPPED generation — that is the shape under "
+        "test; a marker edit would classify as stale instead")
+    assert ("modified-artifact", True) in [
+        (f.kind, f.blocking)
+        for f in hook_install.detect_artifact_install(ext_dir, "pi")], (
+        "a same-generation byte edit must read as a blocking local-edit finding")
+
+    installed.write_text(shipped, encoding="utf-8")
+    assert hook_install.detect_artifact_install(ext_dir, "pi") == [], (
+        "the shipped bytes must read as CURRENT — the install tests rely on it")
 
 
 def test_pi_seam_generation_moved_past_the_unchecked_store_generation():

@@ -108,6 +108,17 @@ importing a module that is no longer beside them: exactly the "capture
 installed but unwired" window the PR ordering in
 `daniel-ospina/agent-infra#1671` exists to prevent.
 
+**The modules' own suites move with them, and each recorder's suite with its
+owner.** The inventory above is the runtime half; the test half is the same
+pair, and it is CI-executed: `extensions/shared/capture-gate.test.ts` (20,873 B)
+and `extensions/shared/capture-attribution.test.ts` (18,073 B) both import the
+module they sit beside, and both run through the `extensions/shared/*.test.ts`
+glob in `ci-main.yml`. Move the two `.ts` modules and leave these two behind and
+agent-infra's CI goes red on a missing import — the mirror of the unwired
+window, in the test half. Each recorder's own suite
+(`tortoise-capture/index.test.ts`, `reflect-hook.test.ts`) moves with **its**
+body, i.e. with the consolidation that is **#3515**'s.
+
 **The disposition (recorded decision for #3512):** the agent-infra copy is **kept
 as a shim** — it is reduced to a pointer at this directory and carries **no
 capture code of its own**, so it cannot drift; the farm workflow keeps working
@@ -119,9 +130,13 @@ a **sibling file** beside it.
 
 > **Current state: the shim is the TARGET, not a description of the repo.**
 > Measured 2026-10-17 (table above), **no copy is a shim yet** — both recorders
-> are real files that agent-infra still CI-tests. Reading "kept as a shim" as
-> already-done is how a lane skips the reduction and leaves two live producers;
-> the reduction itself is `daniel-ospina/agent-infra#1671`, and it is **open**.
+> are real files on `agent-infra@origin/main`. Their CI coverage is **not**
+> equal, and the table above says so: `reflect-hook.test.ts` has its own
+> `ci-main.yml` step, while `tortoise-capture/index.test.ts` is executed by
+> **no** agent-infra workflow (the extension glob is `extensions/*/test*.mjs`,
+> which does not match a `.ts` file). Reading "kept as a shim" as already-done
+> is how a lane skips the reduction and leaves two live producers; the
+> reduction itself is `daniel-ospina/agent-infra#1671`, and it is **open**.
 
 The cross-repo deliverable (the shim, the dev-machine repoint and the **PR
 ordering** so no window exists where capture is installed but unwired) is

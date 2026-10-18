@@ -42,6 +42,17 @@ have a reducer half-move the pair and leave both recorders importing a module
 that is no longer beside them. A record is only worth pinning if it is the
 record a lane can act on, so the stale claims are pinned out and the complete
 inventory is pinned in.
+
+**The same defect was then found in the PR's own note (2026-10-17).** The new
+current-state note said agent-infra "still **CI-tests**" both recorders while
+the table it points at ("table above") records that
+``tortoise-capture/index.test.ts`` is executed by **no** workflow, and the
+"complete inventory" omitted the two shared modules' **own suites** — which that
+same table's CI row says are executed by the ``extensions/shared/*.test.ts``
+glob. Both are pinned here, and the note's assertions are scoped to the NOTE
+block rather than to the 273-line file: a whole-file substring check cannot tell
+"the note says X" from "X appears somewhere", and the pre-fix README already
+contained both ``1671`` and the per-recorder CI row.
 """
 from __future__ import annotations
 
@@ -74,10 +85,43 @@ def _prose(path: Path) -> str:
     split by ``//`` comment markers in the extension's header, so a raw
     substring check over either record is vacuous — verified against the
     pre-fix records from ``git show HEAD:…`` before these assertions were
-    written: every one of them fails there and passes on the corrected text.
+    written: every assertion that pins a **new** fact fails there and passes on
+    the corrected text. The qualifier is load-bearing — two clauses of the
+    inventory guard (``capture-attribution.ts`` is named, and the cross-repo
+    owner is present) hold on the pre-fix record too, because they pin facts
+    that were already true; the **new** facts this file adds are
+    ``capture-gate.ts``, "both shared modules", "TARGET" and "no copy is a
+    shim", and those are the ones that red on the pre-fix text.
     """
     text = _text(path)
     text = re.sub(r"(?m)^\s*(?://|#)\s?", "", text)
+    text = text.replace("**", "").replace("`", "")
+    return re.sub(r"\s+", " ", text)
+
+
+#: How the README's measured current-state blockquote opens. It is a blockquote,
+#: so it is delimited by ``>`` — which is what makes a NOTE-scoped assertion
+#: possible: a whole-file substring check cannot tell "the note says X" from "X
+#: appears somewhere in 273 lines", and a note can lose its content while the
+#: file still contains every word of it elsewhere (measured: the pre-#3512
+#: README already contained ``1671`` and the CI row).
+_NOTE_PREFIX = "> **Current state:"
+
+
+def _note_block(path: Path) -> str:
+    """The README's current-state blockquote alone, marker- and whitespace-collapsed."""
+    lines = _text(path).splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if line.startswith(_NOTE_PREFIX)), None)
+    assert start is not None, (
+        f"{path.name} has no current-state note — the measured TARGET-state "
+        "blockquote is where a lane reads whether the reduction is done")
+    block: list[str] = []
+    for line in lines[start:]:
+        if not line.startswith(">"):
+            break
+        block.append(line)
+    text = " ".join(block)
     text = text.replace("**", "").replace("`", "")
     return re.sub(r"\s+", " ", text)
 
@@ -229,21 +273,85 @@ def test_the_move_inventory_names_every_shared_capture_module():
         "inventory is what half-moves them (#803 added capture-gate.ts)")
 
 
+def test_the_move_inventory_names_the_shared_suites_too():
+    """The inventory is "complete", so it must include the modules' own tests.
+
+    Measured on ``agent-infra@origin/main`` 2026-10-17:
+    ``extensions/shared/capture-gate.test.ts`` (20,873 B) and
+    ``extensions/shared/capture-attribution.test.ts`` (18,073 B) both import the
+    module they sit beside, and agent-infra's ``ci-main.yml`` runs whatever the
+    ``extensions/shared/*.test.ts`` glob matches. A reducer following a
+    "complete inventory" that named only the two ``.ts`` modules would move them
+    and leave both suites importing a file that is no longer there — agent-infra
+    CI red, the test-half twin of the "installed but unwired" window the PR
+    ordering exists to prevent. The recorders' own suites are a different move
+    (they belong with the recorder bodies, #3515), so the record must say which
+    is which.
+    """
+    readme = _text(SEAM_README)
+    prose = _prose(SEAM_README)
+    for suite in ("capture-gate.test.ts", "capture-attribution.test.ts"):
+        assert suite in readme, (
+            f"the move inventory omits {suite} — the two shared modules' own "
+            "suites are CI-executed by the same glob, so a modules-only move "
+            "leaves agent-infra CI red on a missing import")
+    assert re.search(r"recorder'?s own suite", prose, re.IGNORECASE), (
+        "the record must say the RECORDERS' suites are a separate move (with "
+        "their bodies, #3515) — otherwise a reducer takes all four suites with "
+        "the shared pair and splits each recorder from its own tests")
+
+
 def test_the_shim_is_recorded_as_target_state_not_current_state():
     """The shim is an end state; the repo today is two real files.
 
     The disposition test above requires the word "shim", which passes just as
     well when the record claims the shim as ACHIEVED. Measured 2026-10-17 both
-    copies are real, CI-tested files in agent-infra, so a record that reads as
-    done lets a lane skip the reduction (`daniel-ospina/agent-infra#1671`, still
-    open) — the same "reads as settled, is not" shape as the dead
+    copies are real files in agent-infra, so a record that reads as done lets a
+    lane skip the reduction (`daniel-ospina/agent-infra#1671`, still open) — the
+    same "reads as settled, is not" shape as the dead
     ``tortoise/pi-extension/`` home.
+
+    Every assertion here is scoped to the NOTE, not to the file: the pre-#3512
+    README already contained ``1671`` (the cross-repo deliverable paragraph) and
+    the per-recorder CI row, so a whole-file check would stay green while the
+    note lost its content — measured against ``git show HEAD:…``.
     """
-    readme = _text(SEAM_README)
-    assert "TARGET" in readme, (
-        "the record must mark the shim as TARGET state, not as current state")
-    assert re.search(r"(no copy is a shim|not a shim yet)", readme), (
-        "the record must state the measured current state: both copies are real "
+    note = _note_block(SEAM_README)
+    assert "TARGET" in note, (
+        "the note must mark the shim as TARGET state, not as current state")
+    assert re.search(r"(no copy is a shim|not a shim yet)", note), (
+        "the note must state the measured current state: both copies are real "
         "files in agent-infra, so the shim is a target")
-    assert "1671" in readme, (
+    assert "1671" in note, (
         "the current-state note must name the owner that does the reduction")
+
+
+def test_the_current_state_note_does_not_claim_ci_coverage_it_denies():
+    """A note that tidies away its own table is the defect this PR corrects.
+
+    The note used to say "both recorders are real files that agent-infra still
+    **CI-tests**" while the table four lines above it — cited by the note as
+    "(table above)" — records that ``tortoise-capture/index.test.ts`` is
+    executed by **no** agent-infra workflow (the extension glob is
+    ``extensions/*/test*.mjs``, which does not match a ``.ts`` file). That is
+    the same class as the stale gate claim: a lane that trusts the prose instead
+    of the measurement. "agent-infra still CI-tests both recorders" is also the
+    argument for keeping both alive, which makes the clause load-bearing for the
+    disposition the note defends.
+
+    Mutation: restore the claim "both recorders are real files that agent-infra
+    still CI-tests" — this REDs on the denier, and a note that drops the
+    per-recorder split REDs on both the ``index.test.ts`` and the "no agent-infra
+    workflow" clauses.
+    """
+    note = _note_block(SEAM_README)
+    assert "still CI-tests" not in note, (
+        "the note claims agent-infra still CI-tests BOTH recorders — the table "
+        "it points at says `tortoise-capture/index.test.ts` runs in no workflow")
+    assert "tortoise-capture/index.test.ts" in note, (
+        "the note must carry the measured gap by name, not a rounded claim")
+    assert re.search(r"no agent-infra workflow", note), (
+        "the note must state that the second recorder's suite runs in NO "
+        "agent-infra workflow — that gap is part of what #1671 must fix")
+    assert "reflect-hook.test.ts" in note, (
+        "the split is only honest if the CI-covered recorder is named too")
