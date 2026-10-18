@@ -29,7 +29,7 @@ interpreter from a copied-out directory. ``tortoise/embedded_reaper.py`` and
 delegating, and ``tests/test_env_truthy.py`` pins both the mirrors and the
 standalone import purity.
 
-Two shapes, deliberately distinct:
+Three shapes, deliberately distinct:
 
   * ``is_truthy(raw)`` — a raw-VALUE predicate. Unset/blank/falsy/garbage ->
     False. Pair it with an explicit default VALUE when a knob is default-ON and a
@@ -37,6 +37,13 @@ Two shapes, deliberately distinct:
   * ``env_flag(name, default)`` — a tristate RESOLVER. unset/blank/garbage ->
     ``default`` (a typo never flips a knob); explicit truthy -> True; explicit
     falsy -> False.
+  * ``env_flag_from_value(raw, default)`` — the SAME resolver over a raw VALUE
+    instead of a variable name, for a caller that takes an injectable value
+    (``tortoise.time_aware.prefer_latest_enabled(raw=…)``). It lives HERE, and
+    ``env_flag`` delegates to it, so the resolution order has exactly ONE copy:
+    #8487 review round 8 found the resolver duplicated in ``time_aware``, where
+    nothing pinned the two copies together — the sixth spelling of the
+    resolution this module exists to prevent.
 """
 from __future__ import annotations
 
@@ -66,11 +73,21 @@ def env_flag(name: str, default: bool) -> bool:
     False. A blank value is *unset*, not a statement — the contract
     ``retrieval.ask_env_bool`` implemented.
     """
-    raw = _normalized(os.environ.get(name))
-    if not raw:
+    return env_flag_from_value(os.environ.get(name), default)
+
+
+def env_flag_from_value(raw: object, default: bool) -> bool:
+    """`env_flag`'s resolution order over a RAW VALUE instead of a name.
+
+    The one copy of the order, so an INJECTED value cannot resolve differently
+    from the environment (#8487 review round 8): unset/blank/garbage ->
+    `default`; explicit truthy -> True; explicit falsy -> False.
+    """
+    value = _normalized(raw)
+    if not value:
         return default
-    if raw in TRUTHY:
+    if value in TRUTHY:
         return True
-    if raw in FALSY:
+    if value in FALSY:
         return False
     return default
