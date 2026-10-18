@@ -1107,7 +1107,8 @@ surfaces:
   # not. `tortoise/hosted_api.py` and `tortoise/acl_graph_users.py` are BOTH
   # exact `api` SOURCE_PATTERNS matches, so an either-file-only diff selects
   # `api` and REPLACES the `core` fallback (`core` is added only in the
-  # `if not found:` branch), and `tortoise/sdk.py` is a SHARED_MODULE → full
+  # `if not found:` branch; `CORE_ALSO` is the separate post-match addition and
+  # lists neither file), and `tortoise/sdk.py` is a SHARED_MODULE → full
   # matrix. Those diffs reach this pin through `tier1`, never through `core`.
   # The rule is stated the same way ~900 lines above, in the #2969 entry.
   - test_8093_registry_namespace_doc.py
@@ -6079,7 +6080,7 @@ durations:
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
   test_orchestrator_harness.py: 23.3
-  test_8093_registry_namespace_doc.py: 2.0  # unmeasured — new in #8093; no sweep has collected it, so it carries the flat default exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file. Refresh from the first post-merge main run that includes it. The row is also load-bearing for the 90% floor — dropping it moves 818/909 back under the ratio.
+  test_8093_registry_namespace_doc.py: 2.0  # unmeasured — new in #8093; no sweep has collected it, so it carries the flat default exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file. Refresh from the first post-merge main run that includes it. Do NOT read the row as "load-bearing for the 90% floor": on the #9026 head's manifest, dropping it moves 825/915 = 90.16% to 824/915 = 90.05% — still above `DURATION_COVERAGE_MIN` (0.90), and 824 is the LAST passing count (823/915 = 89.95% fires). It buys the pool its remaining one-file margin, not the floor itself; re-measure the ratio instead of trusting these figures, which move with every main merge.
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

@@ -19,12 +19,17 @@ Class-B test doctrine:
       shape from the cell; un-marking the legacy prefix; or changing the code
       derivation the cell is pinned to.
   (2) *Does the test reach it?*  Yes — the shapes are read from the committed
-      doc cell AND from the live derivation functions, so the assertion is
-      doc-against-code, never the doc against itself.
+      doc cell AND from the code that derives them, so the assertion is
+      doc-against-code, never the doc against itself. That code side is a
+      derivation call for the custom shape and the hosted default
+      (``_graph_namespace`` / ``_org_graph_name``), and ``sdk.py``'s own source
+      line for the registry-lane default (``org_{name}``), which no exported
+      function returns.
 
-Hermetic: five file reads (the two docs, plus ``backup_sweep.py``,
-``mcp_server.py`` and ``hosted_api.py`` for the "still recognised" anchors) and
-three pure derivations — no fixture, no DB. ``tier1`` is the load-bearing registration, not ``core``: a
+Hermetic: six file reads (the two docs, plus ``backup_sweep.py``,
+``mcp_server.py`` and ``hosted_api.py`` for the "still recognised" anchors and
+``sdk.py`` for the registry-lane ``org_{name}`` derivation) and three pure
+derivations — no fixture, no DB. ``tier1`` is the load-bearing registration, not ``core``: a
 ``docs/``-only diff takes ``select()``'s early return and runs ``tier1`` alone,
 so a docs-only edit is exactly the change class this pin exists for.
 """
@@ -130,9 +135,12 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         `_default_graph_clause()`, the slice that actually states the default
         graph's namespace, so deleting the hosted `org_{org_id}` clause reds
         even though `org_{org_id}` survives as a substring of the custom shape
-        stated later in the same cell. And `hosted_api._org_graph_name` is the
-        shared seam the export/open paths use; its no-stored-name fallback is
-        asserted to be `org_{org_id}`, which is what the clause must say.
+        stated later in the same cell. And each half is anchored to its own
+        code side: `hosted_api._org_graph_name` is the shared seam the
+        export/open paths use, and its no-stored-name fallback is asserted to
+        be `org_{org_id}`; the registry-lane `org_{name}` half is anchored to
+        `sdk.org_create`'s derivation, which no exported function returns —
+        without that anchor the assertion would be the doc against itself.
     """
     from tortoise.hosted_api import _org_graph_name
 
@@ -149,6 +157,17 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
             "whole-cell substring test cannot see this: `org_{org_id}` is also "
             f"a substring of the custom shape `{CUSTOM_SHAPE}` stated later in "
             "the same cell, so the hosted clause can vanish green")
+    # The `org_{name}` half's code side: the registry lane's stored org
+    # `graph_name` — `sdk.org_create` derives it from the org name (spaces →
+    # `_`) and the registry `kind='default'` node takes it as its namespace. The
+    # cell attributes the shape to that method, so the pin must read that method
+    # or it is only the doc agreeing with itself.
+    sdk_src = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    assert "graph_name = f\"org_{name}\".replace(' ', '_')" in sdk_src, (
+        "`sdk.org_create` must keep deriving the registry-lane default "
+        "namespace as org_{name} (spaces → `_`) — the §Graph cell states that "
+        "shape for that lane, so a change here re-stales the cell")
+
     assert "team_<name>" not in clause, (
         "the pre-#3543 `team_<name>` is not the default graph's namespace")
     assert "team_<name>" not in _namespace_cell(), (
