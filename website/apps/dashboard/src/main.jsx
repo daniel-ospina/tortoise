@@ -113,6 +113,29 @@ import {
   trashDaysLeft,
   trashEraseLabel,
 } from './graphs.js'
+// #2728: per-graph pack selection — the Configured-packs home + modal. Every
+// decision the surface makes that can be a pure function lives in packs.js
+// (node --test unit-tested — packs.test.js); the server contract it renders is
+// GET/PUT /v1/graphs/{graph_id}/packs.
+import {
+  PACK_CONSEQUENCE,
+  PACK_SETTINGS_SECTION_ID,
+  addListEmptyLine,
+  addToDraft,
+  addableFromDraft,
+  defaultPacksGraphId,
+  draftFromBody,
+  draftIsDirty,
+  draftRows,
+  graphLabel,
+  packCountLine,
+  packErrorState,
+  packSaveBody,
+  removeFromDraft,
+  revisionMovedAfterSave,
+  selectorGraphs,
+  toggleDraftStatus,
+} from './packs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
 import {
@@ -538,6 +561,11 @@ function SettingsTab(props) {
     sessionDetail, detailLoading, sessionDetailError,
     onDeleteSession, deletingSessionId, sessionsActionError,
     onClearSessionsActionError,
+    // #2728: the Configured-packs home. `graphs` was the prop this tab never
+    // had (every per-graph affordance lived on the Graphs tab); the home needs
+    // it for the graph selector. `packs` bundles the summary read + handlers so
+    // the home renders ONE state and the App stays the single owner of it.
+    graphs, packs,
   } = props
   const reposNote = githubConnected
     ? (github.repos != null ? `${github.repos} repos available`
@@ -860,6 +888,99 @@ function SettingsTab(props) {
                 </div>
               )
             })()}
+          </>
+        )}
+      </section>
+
+      {/* ── Home 5: Configured packs (#2728) — which packs a graph draws its
+          vocabulary from, and the entry point to the Configured-packs modal.
+          It lives here (not only on the Graphs tab) because the owner directed
+          a Settings home for it; the Graphs tab keeps a per-row entry point as
+          the graph-contextual door. The graph SELECTOR is what resolves the
+          F3 tension (Settings itself has no graph context) — without it a
+          team-scoped panel would edit an unnamed per-graph object. ── */}
+      <section className="settings-home" aria-labelledby={PACK_SETTINGS_SECTION_ID}>
+        <h3 id={PACK_SETTINGS_SECTION_ID} tabIndex={-1}>Configured packs</h3>
+        <p className="dim small">
+          Each graph draws its vocabulary from the packs configured here. A pack you turn off stops
+          minting its kinds on this graph; memories it already produced stay searchable. Changes apply
+          to one graph only.
+        </p>
+        {selectorGraphs(graphs).length === 0 ? (
+          /* #2728 review P2-1: a FAILED graph read is not "still loading".
+             `graphsLoaded` is set only on a 200, so gating the empty copy on it
+             alone left a failed (or denied) first read rendering
+             "Loading graphs…" forever — with no error copy and no retry — the
+             same eternal-shimmer state #1842 P2-1 removed from the Graphs tab.
+             The status bit is what distinguishes "not read yet" from "read and
+             empty"; the error arm also carries the retry, because the Settings
+             door to the Configured-packs modal does not exist without a graph
+             to select. */
+          packs.graphsStatus === 'error' ? (
+            <>
+              <p className="dim small" role="alert">
+                Couldn't load graphs — check your connection and try again.
+              </p>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => packs.onRetryGraphs()}
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            <p className="dim small">
+              {packs.graphsStatus === 'denied'
+                ? 'Graph list is only visible to members.'
+                : packs.graphsStatus === 'ok'
+                  ? 'No graphs yet — create one on the Graphs tab, then configure its packs here.'
+                  : 'Loading graphs…'}
+            </p>
+          )
+        ) : (
+          <>
+            <div className="packs-home-controls">
+              <label htmlFor="packs-graph-select" className="dim small">Graph</label>
+              <select
+                id="packs-graph-select"
+                className="graph-recording-select"
+                aria-label="Graph whose packs to configure"
+                value={packs.graphId || ''}
+                onChange={(e) => packs.onSelectGraph(e.target.value)}
+              >
+                {selectorGraphs(graphs).map((g) => (
+                  <option key={g.graph_id} value={g.graph_id}>
+                    {graphLabel(g)}{g.kind === 'default' ? ' (default)' : ''}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={!packs.graphId}
+                onClick={(e) => packs.onOpen(e.currentTarget)}
+              >
+                {packs.canManage ? 'Configure packs' : 'View packs'}
+              </button>
+            </div>
+            {/* #2728: honest states — a failed read must never read as
+                "0 active packs" (an EMPTY set is a legitimate, preservable
+                state on this graph, so the two are only distinguishable by
+                the status bit). */}
+            {packs.status === 'loading' ? (
+              <p className="dim small">Loading packs…</p>
+            ) : packs.status === 'error' ? (
+              <p className="error" role="alert">
+                {packs.error || 'Couldn\u2019t load this graph\u2019s packs.'}{' '}
+                <button type="button" className="ghost small" onClick={() => packs.onReload()}>Retry</button>
+              </p>
+            ) : packs.body ? (
+              <p className="dim small" aria-live="polite">{packCountLine(packs.body)}</p>
+            ) : null}
+            {!packs.canManage && (
+              <p className="dim small">Only owners and admins can change a graph’s packs.</p>
+            )}
           </>
         )}
       </section>
@@ -2595,6 +2716,67 @@ function claimIntentInFlight() {
   // Panel-request sequence — a slow open must not clobber a NEWER open's
   // panel (panelGraphId in the handler closure is stale by design).
   const graphPanelReqRef = React.useRef(0)
+  // ── #2728: Configured packs (Settings home 5 + the modal) ──
+  // ONE state object for the whole surface: the Settings home and the
+  // Graphs-tab row both open the SAME dialog, and two entry points may never
+  // disagree about which graph it is editing. `packsGraphId === null` is
+  // "closed"; `packsStatus` distinguishes closed/loading/ok/error so a failed
+  // read is never a fabricated empty set (the remove-all state is legitimate
+  // here, which makes that distinction load-bearing rather than cosmetic).
+  const [packsGraphId, setPacksGraphId] = React.useState(null)
+  const [packsStatus, setPacksStatus] = React.useState('closed') // closed|loading|ok|error
+  const [packsBody, setPacksBody] = React.useState(null) // GET payload (revision + rows + add-list)
+  const [packsDraft, setPacksDraft] = React.useState([]) // the WHOLE desired set (PUT is a full replace)
+  const [packsError, setPacksError] = React.useState(null) // packErrorState(e) — one distinct state per failure
+  const [packsNotice, setPacksNotice] = React.useState('') // success / out-of-band-change notice
+  const [packsSaving, setPacksSaving] = React.useState(false)
+  const [packsAddNs, setPacksAddNs] = React.useState('') // chosen namespace in the Add picker
+  const packsReqRef = React.useRef(0) // a slow load must not clobber a NEWER graph's read
+  const packsTriggerRef = React.useRef(null) // dialogFocus.js: the control that opened the dialog
+  // #2577 (a11y): the Configured-packs dialog is a FOURTH aria-modal surface, so
+  // it owes the same two containment obligations the other three carry — Tab
+  // wrapped (containTabFocus) and the background inert (applyBackgroundInert,
+  // the half a keydown handler cannot do: `inert` also removes the page behind
+  // the backdrop from the accessibility tree). Held in a ref because the close
+  // path must release inert BEFORE restoreFocus — an element inside an inert
+  // subtree is not focusable, so a synchronous restore would silently no-op.
+  //
+  // The third obligation is focus INTO the dialog, and it must hold in EVERY
+  // state, not only once the read lands. Marking the background inert removes
+  // the opener's subtree from the tab order, so the browser drops focus to
+  // <body> — and the dialog's Tab/Escape handler sits on the CONTAINER, which
+  // only receives keys when focus is inside it. The `ok` state autoFocuses
+  // Close, but `loading` and `error` have no autofocusable control: without the
+  // explicit focus below, a slow or failed read left Escape dead (and, while
+  // loading, not even a control to Tab to) until it resolved. tabIndex={-1} is
+  // on the container for exactly this; a control that already owns focus wins.
+  const packsDialogRef = React.useRef(null)
+  const packsInertRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!packsGraphId || typeof document === 'undefined') return undefined
+    const el = packsDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    packsInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
+    return () => { packsInertRef.current = null; release() }
+  }, [packsGraphId])
+  // The Settings home's own summary read (graph selector + count line). Kept
+  // separate from the modal's state: the home must show a live count WITHOUT
+  // the dialog being open, and the dialog always re-reads on open (a stale
+  // revision would turn the first Save into a 409).
+  const [packsHomeGraphId, setPacksHomeGraphId] = React.useState(null)
+  const [packsHomeStatus, setPacksHomeStatus] = React.useState('idle') // idle|loading|ok|error
+  const [packsHomeBody, setPacksHomeBody] = React.useState(null)
+  const [packsHomeError, setPacksHomeError] = React.useState(null)
+  // Its OWN sequence counter, not `packsReqRef`: that one is the DIALOG's and
+  // closing the dialog bumps it. The home's read needs the same "a slow load
+  // must not clobber a NEWER graph's read" guard the dialog has — switching the
+  // selector A -> B while A's read is in flight otherwise paints A's count line
+  // (or A's error) under B's selection, and nothing re-reads because the
+  // effect's deps did not change.
+  const packsHomeReqRef = React.useRef(0)
   // One-time key reveal (C7 indicator 2 / surface 4): {plaintext, title} —
   // the ONLY place a minted plaintext is ever shown. Set from a create-graph
   // or per-graph mint response; cleared on dismiss / team switch; no route
@@ -2778,6 +2960,12 @@ function claimIntentInFlight() {
       err.status = res.status
       if (sus) err.suspended = sus
       if (coded && typeof coded.code === 'string') err.code = coded.code
+      // #2728: `error_code` is the convention most hosted_api routes use
+      // (`detail={"error_code": "PACK_SET_REVISION_CONFLICT", …}`), so a
+      // surface that classifies on a machine-readable code must be able to
+      // see it. Attached on its OWN field (never merged into `.code`) so no
+      // existing `one_free_org_limit`/`SUSPENDED` reader changes behaviour.
+      if (coded && typeof coded.error_code === 'string') err.error_code = coded.error_code
       if (coded && typeof coded.org_id === 'string') err.orgId = coded.org_id
       throw err
     }
@@ -5899,6 +6087,29 @@ function claimIntentInFlight() {
     setTrashInspectId(null)
     setTrashInspect(null)
     setTrashMsg('')
+    // #2728: the Configured-packs state is team-scoped on BOTH sides — the
+    // home's selected graph id would 404 on the new team, and an open dialog
+    // would keep editing the OLD team's graph. Bump the sequence so any
+    // in-flight read is discarded.
+    packsReqRef.current += 1
+    packsHomeReqRef.current += 1
+    setPacksGraphId(null)
+    setPacksStatus('closed')
+    setPacksBody(null)
+    setPacksDraft([])
+    setPacksError(null)
+    setPacksNotice('')
+    setPacksAddNs('')
+    // The in-flight LOCK is part of the surface: a save whose `finally`
+    // skipped its reset (the org moved under it) would otherwise leave this
+    // flag true forever, and `saving` gates EVERY exit from the dialog —
+    // backdrop, Escape and the Close button — so the next open would be a
+    // dead, undismissable surface until a page reload.
+    setPacksSaving(false)
+    setPacksHomeGraphId(null)
+    setPacksHomeStatus('idle')
+    setPacksHomeBody(null)
+    setPacksHomeError(null)
     setRevealKey(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
@@ -6398,6 +6609,149 @@ function claimIntentInFlight() {
     }
   }
 
+  // ── #2728: Configured packs — read/close/save ──────────────────────────
+  //
+  // Per-graph pack selection is the MANAGEMENT plane (`GET`/`PUT
+  // /v1/graphs/{graph_id}/packs`): owner/admin (session) may write; any member
+  // may read. The dialog edits the WHOLE desired set locally and saves once —
+  // the API is a full desired-state replace with `expected_revision`, so a
+  // per-row PATCH would neither match the contract nor give the user one
+  // reviewable change (one audit record) per save.
+  async function loadGraphPacks(graphId, trigger) {
+    const _teamAtCall = currentOrgId
+    const seq = ++packsReqRef.current
+    if (trigger) packsTriggerRef.current = trigger
+    setPacksGraphId(graphId)
+    setPacksStatus('loading')
+    setPacksError(null)
+    setPacksNotice('')
+    setPacksAddNs('')
+    try {
+      const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const body = await api(`/v1/graphs/${encodeURIComponent(graphId)}/packs${q}`, { useSession: true })
+      if (seq !== packsReqRef.current || orgIdRef.current !== _teamAtCall) return
+      setPacksBody(body)
+      setPacksDraft(draftFromBody(body))
+      setPacksStatus('ok')
+    } catch (e) {
+      if (seq !== packsReqRef.current || orgIdRef.current !== _teamAtCall) return
+      setPacksError(packErrorState(e))
+      setPacksStatus('error')
+    }
+  }
+
+  // The Settings home's count line. A FAILED read must never render as "0
+  // active packs" — this graph's remove-all state is legitimate, so an error
+  // and an empty set are indistinguishable in a bare count. The sequence guard
+  // is the same one `loadGraphPacks` carries: the selector can move while a
+  // read is in flight, and the LAST-RESOLVING response must not be the one on
+  // screen (a large graph's pack read is materially slower than a small one).
+  async function loadPacksSummary(graphId) {
+    const _teamAtCall = currentOrgId
+    const seq = ++packsHomeReqRef.current
+    setPacksHomeStatus('loading')
+    setPacksHomeError(null)
+    try {
+      const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const body = await api(`/v1/graphs/${encodeURIComponent(graphId)}/packs${q}`, { useSession: true })
+      if (seq !== packsHomeReqRef.current || orgIdRef.current !== _teamAtCall) return
+      setPacksHomeBody(body)
+      setPacksHomeStatus('ok')
+    } catch (e) {
+      if (seq !== packsHomeReqRef.current || orgIdRef.current !== _teamAtCall) return
+      setPacksHomeBody(null)
+      setPacksHomeError(packErrorState(e).message)
+      setPacksHomeStatus('error')
+    }
+  }
+
+  function closePacksModal() {
+    packsReqRef.current += 1 // cancel any in-flight read for this dialog
+    setPacksGraphId(null)
+    setPacksStatus('closed')
+    setPacksBody(null)
+    setPacksDraft([])
+    setPacksError(null)
+    setPacksNotice('')
+    setPacksAddNs('')
+    // #2577: release the background inert BEFORE restoring focus — a trigger
+    // inside a still-inert subtree cannot take focus (the effect cleanup
+    // re-runs the same one-shot release harmlessly).
+    if (packsInertRef.current) packsInertRef.current()
+    requestAnimationFrame(() => restoreFocus(packsTriggerRef))
+  }
+
+  // After a successful save the PUT response's revision is THIS write's own
+  // bump, so it can never tell us whether an out-of-band writer also moved the
+  // set (the marker does not move for `POST /v1/packs/manifests` or an import
+  // restore). Only a FRESH read can, so the success path re-reads and compares
+  // the revision it saved against the revision it now sees. Reusing the PUT
+  // response here instead would fire the "changed again since" branch on every
+  // save a user can perform — Save is only enabled when the draft is dirty,
+  // which is exactly the case the server bumps (expected -> expected + 1).
+  async function recheckPacksAfterSave(graphId, savedRevision, seq, teamAtCall) {
+    try {
+      const q = teamAtCall ? `?org_id=${encodeURIComponent(teamAtCall)}` : ''
+      const fresh = await api(`/v1/graphs/${encodeURIComponent(graphId)}/packs${q}`, { useSession: true })
+      if (seq !== packsReqRef.current || orgIdRef.current !== teamAtCall) return
+      if (!revisionMovedAfterSave(savedRevision, fresh)) return
+      setPacksNotice(`Saved — but this graph's packs have changed again since (now at revision ${fresh.revision}). Reload to see the current set.`)
+    } catch {
+      // The SAVE succeeded; a failed re-read must never turn it into an error
+      // state or retract the success notice.
+    }
+  }
+
+  // Save the whole draft. On a 409 the dialog keeps the user's edits and
+  // offers Reload — a silent last-write-win would erase the other admin's
+  // change, which is exactly what `expected_revision` exists to prevent.
+  async function saveGraphPacks() {
+    if (!packsBody || !packsGraphId) return
+    const _teamAtCall = currentOrgId
+    const graphId = packsGraphId
+    const expected = packsBody.revision
+    const seq = packsReqRef.current
+    setPacksSaving(true)
+    setPacksError(null)
+    setPacksNotice('')
+    try {
+      const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const saved = await api(`/v1/graphs/${encodeURIComponent(graphId)}/packs${q}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true,
+        body: JSON.stringify(packSaveBody(packsDraft, expected)),
+      })
+      if (orgIdRef.current !== _teamAtCall) return
+      setPacksBody(saved)
+      setPacksDraft(draftFromBody(saved))
+      setPacksAddNs('')
+      setPacksNotice('Saved — new extraction on this graph uses the set above.')
+      // The Settings home keeps its OWN read of this graph (the count line must
+      // render without the dialog open), so the save has to feed it too — or the
+      // home keeps describing the PRE-save set until a tab switch re-reads it.
+      // The PUT response is the same payload shape as the GET, so no second hop.
+      if (graphId === packsHomeGraphId) {
+        setPacksHomeBody(saved)
+        setPacksHomeStatus('ok')
+        setPacksHomeError(null)
+      }
+      void recheckPacksAfterSave(graphId, saved.revision, seq, _teamAtCall)
+    } catch (e) {
+      if (orgIdRef.current !== _teamAtCall) return
+      setPacksError(packErrorState(e))
+    } finally {
+      // UNGUARDED on purpose. This flag is a LOCK, not a message: `saving`
+      // disables Close, the backdrop handler and Escape, so a lock left set is
+      // a dialog that cannot be dismissed at all. A flag set by THIS
+      // invocation is safe to clear whatever team the app is on now — the
+      // sibling long-running handlers in this file (`setGraphBusy(false)` in
+      // deleteGraphRow/restoreTrashRow) reset unconditionally for the same
+      // reason. Team-switch state is handled by the reset block in switchTeam.
+      setPacksSaving(false)
+    }
+  }
+
   // Delete a CUSTOM graph (indicator 4). The default graph row never shows
   // the action (graphs.js graphCanDelete — its 🗑 renders disabled) and the
   // server 403s the default as a code guard. #2701: the row's 🗑 opens a
@@ -6739,6 +7093,40 @@ function claimIntentInFlight() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentOrgId])
+
+  // #2728: the Configured-packs home's summary read. Keyed on the SELECTED
+  // graph (a selector change refetches) and on the Settings tab (nothing else
+  // renders a count), with the graph list supplying the initial default. The
+  // first pass only CHOOSES a graph — the read happens on the next pass, so a
+  // late-arriving /v1/graphs list cannot race a read of the wrong graph.
+  //
+  // A DELETED graph must not stay selected: `deleteGraphRow` refreshes `graphs`
+  // but nothing clears the selection, so a stale id would be truthy, the
+  // `defaultPacksGraphId` fallback would never be consulted, and the home
+  // would re-read a 404 forever (with a Retry that can only re-issue it). The
+  // non-empty guard keeps a graph list that has not loaded yet (or a transient
+  // empty refresh) from clearing a valid selection.
+  React.useEffect(() => {
+    if (tab !== 'settings' || !currentOrgId) return
+    const known = (graphs || []).filter((g) => g && g.graph_id).map((g) => g.graph_id)
+    const selectedGone = !!packsHomeGraphId && known.length > 0
+      && !known.includes(packsHomeGraphId)
+    const gid = selectedGone ? null : (packsHomeGraphId || defaultPacksGraphId(graphs))
+    if (gid !== packsHomeGraphId) {
+      setPacksHomeGraphId(gid)
+      if (selectedGone) {
+        // Never leave the dead graph's count line (or its 404 copy) on screen
+        // while the replacement read is in flight.
+        setPacksHomeBody(null)
+        setPacksHomeStatus(gid ? 'loading' : 'idle')
+        setPacksHomeError(null)
+      }
+      return
+    }
+    if (!gid) return
+    loadPacksSummary(gid)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, packsHomeGraphId, graphs, currentOrgId])
 
   // #1842 P2-3: the role=status cue must announce the loading→loaded
   // transition exactly ONCE — keying on `team` alone announced while the
@@ -10406,6 +10794,36 @@ function claimIntentInFlight() {
             sessionsActionError={sessionsActionError}
             onClearSessionsActionError={() => setSessionsActionError(null)}
             memorySourcesProps={memorySourcesProps}
+            // #2728: the Configured-packs home (home 5). `graphs` is the prop
+            // this tab never carried — the graph selector needs it.
+            graphs={graphs}
+            packs={{
+              graphId: packsHomeGraphId,
+              // 'idle' has not started yet; render it as loading so the home
+              // never flashes an empty count before the first read.
+              status: packsHomeStatus === 'idle' ? 'loading' : packsHomeStatus,
+              body: packsHomeBody,
+              error: packsHomeError,
+              canManage: isOwnerAdmin,
+              // A graph list that has not loaded yet is not "no graphs" — the
+              // empty copy must not be shown for a state we have not read.
+              // #2728 review P2-1: the three-way STATUS (loading / ok / error /
+              // denied), not the `graphsLoaded` boolean, is what the home reads:
+              // a failed load is not a load in progress, and a denied list is
+              // not an empty one. `graphsLoaded` stays true only on a 200, so
+              // it cannot answer either question on its own.
+              graphsStatus,
+              // The error arm's retry: the SAME funnel every other refresh uses
+              // (team switch, delete, create) — never a bespoke fetch.
+              onRetryGraphs: () => loadGraphs(currentOrgId),
+              onSelectGraph: (gid) => {
+                setPacksHomeGraphId(gid)
+                setPacksHomeBody(null)
+                setPacksHomeStatus('loading')
+              },
+              onOpen: (trigger) => loadGraphPacks(packsHomeGraphId, trigger),
+              onReload: () => loadPacksSummary(packsHomeGraphId),
+            }}
           />
         )}
 
@@ -10888,6 +11306,17 @@ function claimIntentInFlight() {
                       )}
                     </td>
                     <td className="graph-actions">
+                      {/* #2728: the graph-contextual door to Configured packs
+                          (the Settings home is the primary one). Any member
+                          may READ a graph's pack set; the dialog gates writes
+                          on owner/admin, mirroring the server's authz. */}
+                      <button
+                        className="ghost small"
+                        onClick={(e) => loadGraphPacks(g.graph_id, e.currentTarget)}
+                        aria-label={`Configured packs for graph ${g.name || g.graph_id}`}
+                      >
+                        Packs
+                      </button>
                       {canManageGraphKeys(g) && (
                         <button
                           className="ghost small"
@@ -11512,7 +11941,259 @@ function claimIntentInFlight() {
           </section>
         )}
 
+        {/* #2728: the Configured-packs dialog. Rendered at the App root (NOT
+            inside the Settings tab or the Graphs tab) because BOTH entry
+            points open it and a tab switch must not unmount an open dialog. */}
+        <PacksModal
+          graphId={packsGraphId}
+          dialogRef={packsDialogRef}
+          graphName={graphLabel(graphs.find((g) => g.graph_id === packsGraphId))}
+          status={packsStatus}
+          body={packsBody}
+          draft={packsDraft}
+          error={packsError}
+          notice={packsNotice}
+          saving={packsSaving}
+          addNs={packsAddNs}
+          canManage={isOwnerAdmin}
+          onClose={closePacksModal}
+          onReload={() => loadGraphPacks(packsGraphId)}
+          onSave={saveGraphPacks}
+          onToggle={(ns) => setPacksDraft((d) => toggleDraftStatus(d, ns))}
+          onRemove={(ns) => setPacksDraft((d) => removeFromDraft(d, ns))}
+          onAddNsChange={setPacksAddNs}
+          onAdd={() => {
+            setPacksDraft((d) => addToDraft(d, packsAddNs))
+            setPacksAddNs('')
+          }}
+        />
+
               </main>
+    </div>
+  )
+}
+
+// #2728: the Configured-packs dialog — the product surface the state model and
+// its REST pair landed for (PR #8648). It edits the graph's WHOLE pack set in
+// one draft and saves once, because `PUT /v1/graphs/{graph_id}/packs` is a full
+// desired-state replace with `expected_revision`: one save is one revision bump
+// and one audit record, and "remove" is expressed by OMITTING the namespace
+// (the server tombstones it — a `status: 'removed'` input is a 422, so the
+// dialog never sends one).
+//
+// States are distinct by construction, not by copy: loading; load error with a
+// reload (and a 404/403 variant whose remedy is closing the dialog, not
+// retrying); an explicit EMPTY set (legitimate — configuration pins the graph,
+// so "no packs" is preservable and must not be confused with an error); a
+// non-admin read-only view (the controls are disabled with the reason stated,
+// mirroring — never preceding — the server's 403); and a save error that keeps
+// the user's draft intact so a 409 is "reload and retry", not "start over".
+function PacksModal(props) {
+  const {
+    graphId, graphName, status, body, draft, error, notice, saving, addNs,
+    canManage, onClose, onReload, onSave, onToggle, onRemove,
+    onAddNsChange, onAdd, dialogRef,
+  } = props
+  if (!graphId) return null
+  // Both derivations read the DRAFT, not `body`: the table is the set the save
+  // will apply (so Remove/Add are visible the moment they are clicked) and the
+  // add-list is diffed against the same set (so a removed pack is offered back
+  // without discarding the whole draft). `body` supplies display-only fields.
+  const rows = draftRows(body || { packs: [] }, draft)
+  const offered = addableFromDraft(body, draft)
+  const dirty = body ? draftIsDirty(body, draft) : false
+  return (
+    <div
+      className="modal-backdrop"
+      onClick={() => { if (!saving) onClose() }}
+    >
+      <div
+        className="modal packs-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="packs-modal-title"
+        ref={dialogRef}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // #2577: APG modal containment — wrap Tab/Shift+Tab at the dialog
+          // boundary. The background is inert too (applyBackgroundInert, held
+          // by the App's effect), so focus cannot reach the page behind the
+          // backdrop by Tab or by a screen reader's virtual cursor.
+          if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() } else if (e.key === 'Escape' && !saving) onClose()
+        }}
+      >
+        <h3 id="packs-modal-title">Configured packs — {graphName}</h3>
+        <p className="dim small">
+          Which packs this graph draws its vocabulary from. What is already in the graph is never
+          deleted — turning a pack off stops new classification into its kinds.
+        </p>
+
+        {status === 'loading' && (
+          <>
+            <p className="dim">Loading packs…</p>
+            {/* A state with no dismissable control is a trap: the read may be
+                slow (the graph's pack read is O(nodes)), so Close is offered
+                while it is in flight — the same control, and the same
+                never-mid-save gate, as the ok state's. */}
+            <button type="button" className="ghost small" disabled={saving} onClick={onClose}>Close</button>
+          </>
+        )}
+
+        {status === 'error' && (
+          <div className="error" role="alert" style={{ marginTop: '0.5rem' }}>
+            {(error && error.message) || 'Couldn\u2019t load this graph\u2019s packs.'}
+            <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem' }}>
+              {error && error.kind === 'missing' ? null : (
+                <button type="button" className="ghost small" onClick={onReload}>Reload</button>
+              )}
+              <button type="button" className="ghost small" onClick={onClose}>Close</button>
+            </div>
+          </div>
+        )}
+
+        {status === 'ok' && body && (
+          <>
+            {body.configured === false && (
+              // The back-compat contract made visible: an unconfigured graph
+              // still resolves to the whole catalog, so the set below is the
+              // seeded/starter state and saving is what pins the graph.
+              <p className="dim small" style={{ marginTop: '0.4rem' }}>{PACK_CONSEQUENCE.unconfigured}</p>
+            )}
+            {rows.length === 0 ? (
+              <p className="dim small" style={{ marginTop: '0.4rem' }}>
+                No packs configured for this graph — add one below.
+              </p>
+            ) : (
+              <table className="packs-table">
+                <thead>
+                  <tr>
+                    <th>Pack</th><th>Namespace</th><th>Version</th><th>Kinds</th><th>Source</th><th>Status</th><th><span className="sr-only">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => {
+                    // `r.status` IS the draft's status (draftRows reads the draft,
+                    // not the last server read), so a toggle or a removal shows
+                    // up on the very next render.
+                    const pending = r.status
+                    return (
+                      <tr key={r.namespace} className={pending === 'disabled' ? 'pack-row-off' : undefined}>
+                        <td>{r.name}</td>
+                        <td><code>{r.namespace}</code></td>
+                        <td>{r.version}</td>
+                        <td>{r.kindCountLabel}</td>
+                        <td>{r.sourceLabel}</td>
+                        <td>
+                          <span className={pending === 'active' ? 'live' : 'revoked'}>{pending === 'active' ? 'Active' : 'Off'}</span>
+                        </td>
+                        <td className="pack-row-actions">
+                          <button
+                            type="button"
+                            className="ghost small"
+                            disabled={!canManage || saving}
+                            title={pending === 'active' ? PACK_CONSEQUENCE.disable : PACK_CONSEQUENCE.enable}
+                            aria-label={`${pending === 'active' ? 'Turn off' : 'Turn on'} ${r.name} for this graph`}
+                            onClick={() => onToggle(r.namespace)}
+                          >{pending === 'active' ? 'Turn off' : 'Turn on'}</button>{' '}
+                          <button
+                            type="button"
+                            className="ghost small"
+                            disabled={!canManage || saving}
+                            title={PACK_CONSEQUENCE.remove}
+                            aria-label={`Remove ${r.name} from this graph`}
+                            onClick={() => onRemove(r.namespace)}
+                          >Remove</button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+
+            {/* What each verb does to data the graph already holds. One
+                sentence per verb, from packs.js — the same strings the row
+                buttons carry as titles, so the copy cannot drift. */}
+            <ul className="dim small packs-consequences">
+              <li><strong>Turn off</strong> — {PACK_CONSEQUENCE.disable}</li>
+              <li><strong>Remove</strong> — {PACK_CONSEQUENCE.remove}</li>
+              <li><strong>Add</strong> — {PACK_CONSEQUENCE.add}</li>
+            </ul>
+
+            <div className="packs-add">
+              <label htmlFor="packs-add-select" className="dim small">Add a pack</label>
+              {offered.length === 0 ? (
+                <p className="dim small">
+                  {/* `catalog_ok: false` is the server saying it could not READ
+                      the catalog — an empty add-list then must not claim that
+                      everything is already on the graph. */}
+                  {addListEmptyLine(body)}
+                  {body.catalog_ok === false && (
+                    <>{' '}<button type="button" className="ghost small" onClick={onReload}>Reload</button></>
+                  )}
+                </p>
+              ) : (
+                <>
+                  <select
+                    id="packs-add-select"
+                    className="graph-recording-select"
+                    value={addNs}
+                    disabled={!canManage || saving}
+                    aria-label="Pack to add to this graph"
+                    onChange={(e) => onAddNsChange(e.target.value)}
+                  >
+                    <option value="">Choose a pack…</option>
+                    {offered.map((p) => <option key={p.namespace} value={p.namespace}>{p.label}</option>)}
+                  </select>{' '}
+                  <button
+                    type="button"
+                    className="ghost small"
+                    disabled={!canManage || saving || !addNs}
+                    onClick={onAdd}
+                  >Add</button>
+                </>
+              )}
+            </div>
+
+            {notice && (
+              <p className="dim small" role="status" aria-live="polite">
+                {notice}
+                {/* The out-of-band notice tells the user to reload, so the
+                    action it names has to be HERE — it otherwise points at a
+                    control that only exists in the error states. */}
+                {' '}<button type="button" className="ghost small" onClick={onReload}>Reload</button>
+              </p>
+            )}
+            {error && (
+              <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>
+                {error.message}
+                {error.kind === 'conflict' && (
+                  <>{' '}<button type="button" className="ghost small" onClick={onReload}>Reload</button></>
+                )}
+              </p>
+            )}
+
+            <div className="new-key-actions" style={{ marginTop: '0.8rem' }}>
+              {/* Initial focus lands on Close (always enabled, least
+                  destructive) so focus is INSIDE the dialog the moment it
+                  opens — autoFocus on Save would no-op whenever the draft is
+                  clean, which is every time the dialog opens. */}
+              <button type="button" className="ghost" autoFocus disabled={saving} onClick={onClose}>Close</button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={!canManage || saving || !dirty}
+                title={canManage ? undefined : 'Only owners and admins can change a graph\u2019s packs.'}
+                onClick={onSave}
+              >{saving ? 'Saving…' : 'Save changes'}</button>
+            </div>
+            {!canManage && (
+              <p className="dim small">Read-only — only owners and admins can change a graph’s packs.</p>
+            )}
+          </>
+        )}
+      </div>
     </div>
   )
 }

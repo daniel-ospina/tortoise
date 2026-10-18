@@ -821,6 +821,13 @@ def test_event_retention_loop_awaits_the_cost_refresh():
                 # relative order as the boot tuple in ``_run_boot_sweeps``, and
                 # it MUST be an offload (the sweep is sync FalkorDB I/O).
                 ("invite ghost sweep", "_sweep_invite_ghosts", "offload"),
+                # #8089: the Supabase lane's clock-expiry sweep. Declared for the
+                # same reason (a new periodic step must be DELIBERATE) and it
+                # MUST be an offload — `expire_stale_invitations` is a sync
+                # PostgREST PATCH, so awaiting it directly would run the write
+                # on the event loop.
+                ("expired invitation sweep", "_sweep_expired_invitations",
+                 "offload"),
                 # #4241: the period-anchor repair. Declared here because the pin
                 # exists to force a new periodic step to be DELIBERATE; it sits
                 # in the same relative order as the boot tuple in
@@ -911,6 +918,9 @@ def test_a_raising_step_cannot_kill_the_retention_loop(monkeypatch, caplog):
     # #1890: the invite-ghost sweep does real registry-graph I/O, so it is
     # neutralised here too — this test owns the guard, not the sweep.
     monkeypatch.setattr(ha, "_sweep_invite_ghosts", lambda *_a, **_k: None)
+    # #8089: inert unless Supabase mode is enabled, but neutralised explicitly
+    # for the same reason — this test owns the guard, not the sweeps.
+    monkeypatch.setattr(ha, "_sweep_expired_invitations", lambda *_a, **_k: None)
     # The 4th step is the one the sibling test owns; keep this test focused.
     monkeypatch.setattr(ha, "_refresh_cost_allocation", _noop)
 
@@ -1321,6 +1331,10 @@ _BOOT_SWEEPS = (
     # too, so the per-step guard parametrization below covers it (a sweep that
     # is not listed here is a sweep whose guard nothing exercises).
     ("invite-ghosts", "_sweep_invite_ghosts", "boot invite ghost sweep"),
+    # #8089: the Supabase lane's clock-expiry sweep. Declared HERE so the
+    # per-step guard parametrization below covers it too.
+    ("expired-invitations", "_sweep_expired_invitations",
+     "boot expired invitation sweep"),
     # #4241: the period-anchor repair. Declared HERE so the parametrization
     # below covers it too. It is LAST in this tuple, so an unguarded raise here
     # would not abandon a sweep after it — it is caught because the raise

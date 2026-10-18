@@ -145,6 +145,22 @@ TRAILING_HOLE_SITES = {
     # endpoint (main.jsx `setGraphRecording`), adding a 2nd ambiguous
     # trailing-hole call site at this path — a deliberate +1, not a new route.
     ("api", "/v1/graphs", "PATCH"): 2,
+    # #2728: the Configured-packs surface adds three sites at the per-graph packs
+    # route — TWO reads (the Settings home's summary and the dialog's own fresh
+    # read; the dialog may not reuse the summary's revision, or its first Save
+    # becomes a 409) and ONE PUT. They land in this bucket rather than a key of
+    # their own because the `?org_id=` pin is the same elastic trailing hole the
+    # recording control's sites use (the ambiguity key is the segment BEFORE the
+    # first hole). Deliberate counts, not a new route: GET and PUT
+    # /v1/graphs/{graph_id}/packs both exist in the live table, which is what the
+    # shape assertions above prove — a broken site would fail THERE instead.
+    #
+    # The GET count is 3, re-measured after the review: the save path needs a
+    # THIRD read (`recheckPacksAfterSave`) because the PUT response's revision
+    # is this write's own bump and cannot answer "did an out-of-band writer also
+    # move the set" — see packs.js `revisionMovedAfterSave`.
+    ("api", "/v1/graphs", "GET"): 3,
+    ("api", "/v1/graphs", "PUT"): 1,
     ("api", "/v1/index/docs", "POST"): 1,
     ("api", "/v1/index/github/re-poll", "POST"): 1,
     ("api", "/v1/onboarding/github/connect", "POST"): 1,

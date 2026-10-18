@@ -148,6 +148,25 @@ class TestResolvedPackSet:
         assert [p["namespace"] for p in get_tenant_packs(sdk)] == [DEV]
         assert dict(_raw_installs(sdk))[MARKETING] == "removed"
 
+    def test_include_removed_is_the_one_reader_that_sees_tombstones(
+            self, tmp_path):
+        """``include_removed=True`` is the Configured-packs add-list's read.
+
+        The user surface must be able to add a removed pack BACK: removal is a
+        desired-state OMIT, so without this arm a removed namespace is in
+        neither the introspection list (tombstones omitted) nor — for a
+        tenant-authored pack — the shared catalog. FAIL-ON: the default call
+        still omits it (that contract is asserted directly above), so an
+        implementation that widened the default would red the sibling test.
+        """
+        sdk = _sdk(tmp_path, "test_sel_include_removed")
+        set_graph_packs(sdk, packs=[{"namespace": DEV}, {"namespace": MARKETING}],
+                        expected_revision=0)
+        set_graph_packs(sdk, packs=[{"namespace": DEV}], expected_revision=1)
+        rows = {p["namespace"]: p["status"]
+                for p in get_tenant_packs(sdk, include_removed=True)}
+        assert rows == {DEV: "active", MARKETING: "removed"}
+
     def test_removed_status_is_not_settable(self, tmp_path):
         """``removed`` is a derived tombstone, never an input status."""
         sdk = _sdk(tmp_path, "test_sel_badstatus")
@@ -404,6 +423,324 @@ class TestGraphPacksRest:
         body = r.json()
         assert body["configured"] is False
         assert body["revision"] == 0
+
+    def test_get_offers_catalog_packs_the_graph_does_not_have(
+            self, sel_client):
+        """The Configured-packs view must be able to ADD a pack, which means
+        the read has to name what is addable — the graph's own records cannot
+        answer that.
+
+        FAIL-ON: a payload without ``available`` (or one that echoed the
+        graph's own set back) leaves the modal with no source for an add-list,
+        so "add" would either not exist or offer a namespace already present.
+        ``venture`` is asserted specifically: it ships in the catalog and is
+        NOT a starter, so a starter-derived add-list would miss it — the one
+        pack a per-graph approval surface most needs to be able to offer.
+        """
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-avail")
+        _auth(tc, "t-sel-avail")
+        r = tc.put("/v1/graphs/default/packs?org_id=t-sel-avail", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        offered = {p["namespace"] for p in body["available"]}
+        assert DEV not in offered, "a listed pack must never be offered twice"
+        assert MARKETING in offered
+        assert "venture" in offered, (
+            "a catalog pack that is not a starter must still be addable")
+        by_ns = {p["namespace"]: p for p in body["available"]}
+        assert by_ns[MARKETING]["status"] == "available"
+        assert by_ns[MARKETING]["kind_count"] is not None
+
+    def test_a_removed_pack_is_offered_back_with_its_status(
+            self, sel_client):
+        """Removal must not be a one-way door in the UI: the removed
+        namespace has to come back in the add-list, marked as previously
+        removed, and re-adding it must restore it.
+
+        FAIL-ON: an add-list built from the catalog ALONE would hide a
+        tenant-authored tombstone entirely (no catalog entry exists for it).
+        """
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-readd")
+        _auth(tc, "t-sel-readd")
+        first = tc.put("/v1/graphs/default/packs?org_id=t-sel-readd", json={
+            "packs": [{"namespace": DEV}, {"namespace": MARKETING}],
+            "expected_revision": 0})
+        assert first.status_code == 200, first.text
+        removed = tc.put("/v1/graphs/default/packs?org_id=t-sel-readd", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 1})
+        assert removed.status_code == 200, removed.text
+        body = removed.json()
+        assert [p["namespace"] for p in body["packs"]] == [DEV]
+        offered = {p["namespace"]: p for p in body["available"]}
+        # MARKETING is in the shared catalog, so the catalog arm offers it as
+        # a fresh 'available' — either shape is addable; what must hold is
+        # that it is OFFERED and not duplicated.
+        assert MARKETING in offered
+        assert offered[MARKETING]["status"] in ("available", "removed")
+        assert sum(1 for p in body["available"]
+                   if p["namespace"] == MARKETING) == 1, (
+            "a namespace must appear at most once in the add-list")
+        back = tc.put("/v1/graphs/default/packs?org_id=t-sel-readd", json={
+            "packs": [{"namespace": DEV}, {"namespace": MARKETING}],
+            "expected_revision": 2})
+        assert back.status_code == 200, back.text
+        assert {p["namespace"]: p["status"]
+                for p in back.json()["packs"]}[MARKETING] == "active"
+
+    def test_a_tenant_authored_tombstone_is_offered_back(self, sel_client,
+                                                         monkeypatch):
+        """The add-list's TOMBSTONE arm — the reason ``available`` exists.
+
+        ``available`` is justified by the tenant-authored case ("removal would
+        have been a one-way door — a tenant-authored pack appears in no shared
+        catalog"), which is the ``for row in sorted(removed, ...)`` arm of
+        ``_packs_payload``. The sibling test above cannot reach it: it removes
+        MARKETING, which IS in the shared catalog, so the CATALOG arm offers it
+        and the tombstone arm ``continue``s — the two shapes are
+        interchangeable there. Reachable in production: a tenant-manifest
+        install (``POST /v1/packs/manifests``) mints ``:PackInstall`` records
+        for namespaces outside the catalog, and ``set_graph_packs`` permits
+        re-adding them because ``existing`` still carries the tombstone.
+
+        FAIL-ON: drop the tombstone arm (back to "catalog only") and the
+        namespace disappears from ``available`` entirely — a removed
+        tenant-authored pack could never be added back, which is the one-way
+        door this surface exists to open. Every other test in the file stays
+        green without it, which is why it is pinned here.
+        """
+        tc, db_path = sel_client
+        org = "t-sel-tenant-pack"
+        tenant = "acme-ops"
+        _seed_org(db_path, org)
+        _auth(tc, org)
+        # The state: a namespace the WRITE side knows (as a manifest install
+        # makes it — the record is what permits re-adding) but that NO shipped
+        # pack carries. Only ``ps._resolve_catalog`` is widened; the VIEW's
+        # catalog (``hosted_api._pack_catalog_rows``, read off the domain
+        # registry) never sees it, so the catalog arm cannot offer it.
+        real_catalog = ps._resolve_catalog
+        monkeypatch.setattr(
+            ps, "_resolve_catalog",
+            lambda: dict(real_catalog(), **{tenant: {"namespace": tenant}}))
+        first = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": tenant}], "expected_revision": 0})
+        assert first.status_code == 200, first.text
+        assert [p["namespace"] for p in first.json()["packs"]] == [tenant]
+
+        removed = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [], "expected_revision": 1})
+        assert removed.status_code == 200, removed.text
+        body = removed.json()
+        assert body["packs"] == [], "a removed pack leaves the visible set"
+        offered = [p for p in body["available"] if p["namespace"] == tenant]
+        assert len(offered) == 1, (
+            "the tenant-authored tombstone must be offered back exactly once "
+            f"(available={[p['namespace'] for p in body['available']]})")
+        assert offered[0]["status"] == "removed", (
+            "the row must say it WAS removed — 'available' would pretend the "
+            "namespace is new to this graph")
+
+        # …and the door really opens both ways: re-adding restores it.
+        back = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": tenant}], "expected_revision": 2})
+        assert back.status_code == 200, back.text
+        assert {p["namespace"]: p["status"]
+                for p in back.json()["packs"]}[tenant] == "active"
+
+    def test_available_rows_carry_the_source_the_save_will_write(
+            self, sel_client):
+        """The Source column must be the value the WRITE will store, not a
+        client-side guess.
+
+        ``available`` rows are catalog rows and carried no ``source`` at all,
+        so ``packs.js``'s ``toRow`` invented one — and labelled a
+        shipped-but-not-starter pack "Starter" while claiming "Manual" in the
+        same row object, flipping to "Manual" only after the save wrote the
+        install record. ``set_graph_packs`` writes ``"starter" if ns in
+        starter else "manual"``, so the read now says the same thing.
+
+        FAIL-ON: without ``source`` on the catalog rows (and without
+        ``catalog_ok``) both assertions raise KeyError.
+        """
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-source")
+        _auth(tc, "t-sel-source")
+        r = tc.put("/v1/graphs/default/packs?org_id=t-sel-source", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["catalog_ok"] is True, (
+            "a readable catalog must be reported as readable, or the client "
+            "cannot tell an empty add-list from an unread one")
+        by_ns = {p["namespace"]: p for p in body["available"]}
+        assert by_ns[MARKETING]["source"] == "starter", (
+            "a starter namespace's row must say starter — the same value the "
+            "install record will carry")
+        assert by_ns["venture"]["source"] == "manual", (
+            "venture ships in the catalog but is NOT a starter, so its row "
+            "must not claim to be one")
+
+    def test_a_degraded_catalog_is_reported_not_papered_over(
+            self, sel_client, monkeypatch):
+        """An unreadable catalog must be VISIBLE as such.
+
+        ``_pack_catalog_rows`` degrades to an empty dict rather than 503 a
+        read that already has the graph's own set in hand. The add-list is
+        then empty for the opposite reason it is normally empty, and the
+        client rendered that as the confident claim "Every pack in the
+        catalog is already on this graph." ``catalog_ok`` is the status bit
+        that lets it say "the catalog could not be read" instead.
+
+        FAIL-ON: without ``catalog_ok`` the assertion raises KeyError; with a
+        flag that is always True a degraded read would be indistinguishable
+        from a complete one.
+        """
+        import tortoise.hosted_api as ha
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-catalog-down")
+        _auth(tc, "t-sel-catalog-down")
+        monkeypatch.setattr(ha, "_pack_catalog_rows", lambda: ({}, False))
+        r = tc.get("/v1/graphs/default/packs?org_id=t-sel-catalog-down")
+        assert r.status_code == 200, (
+            "degrading is the point — the graph's own set is still readable")
+        body = r.json()
+        assert body["catalog_ok"] is False
+        assert body["available"] == [], (
+            "the add-list is empty precisely BECAUSE the catalog was unread — "
+            "the bit, not the emptiness, is what the client must render")
+
+    def test_an_unavailable_registry_is_not_reported_as_a_readable_catalog(
+            self, monkeypatch):
+        """``catalog_ok`` must be FALSE when the pack registry is UNAVAILABLE.
+
+        ``_get_registry()`` RETURNS ``None`` on its documented degradation path
+        (``domain_loader``: "None if packs are unavailable") — it does not
+        raise. Dereferencing that with ``getattr(reg, "packs", None) or {}``
+        yields an EMPTY dict with no exception, so the reader reported
+        ``catalog_ok=True`` over a catalog it never read: the modal then
+        rendered "Every pack in the catalog is already on this graph" (the
+        confident claim about an unread catalog) and withheld the Reload that
+        only the degraded copy carries. Both sibling readers of the same
+        function guard the None (``pack_state._resolve_catalog``,
+        ``domain_loader._pack_kinds_by_bucket``).
+
+        FAIL-ON: pre-fix this returns ``({}, True)``. ``None`` — not an
+        exception — is the failure mode the ``except`` cannot catch, and no
+        other test reaches it (the sibling degradation test monkeypatches
+        ``_pack_catalog_rows`` itself, so it pins the plumbing of the bit and
+        never the classification inside it).
+        """
+        import tortoise.domain_loader as dl
+        import tortoise.hosted_api as ha
+
+        monkeypatch.setattr(dl, "_get_registry", lambda: None)
+        assert ha._pack_catalog_rows() == ({}, False), (
+            "an unavailable registry is not a readable catalog")
+
+    def test_a_tombstoned_record_keeps_its_recorded_source(
+            self, sel_client, monkeypatch):
+        """The add-list's ``source`` must be the value the SAVE will store.
+
+        ``set_graph_packs`` writes ``rec.get("source") or ("starter" if ns in
+        starter else "manual")`` — an EXISTING record's source always wins. The
+        catalog arm derived from the CURRENT starter set instead, so a
+        namespace whose record disagreed with that derivation flipped its
+        Source column under the user the moment they added it back (the
+        "column flipped after a Save" defect the Source column exists to
+        prevent).
+
+        The disagreement is reachable: a namespace seeded as ``starter`` and
+        later dropped from ``TORTOISE_STARTER_PACKS`` keeps ``source='starter'``
+        on its record (the additive-only-removal case ``pack_state``'s module
+        docstring contemplates), while the derivation now says ``manual``.
+
+        FAIL-ON: pre-fix the offer carries the derivation (``manual`` under the
+        narrowed starter set) while the record — and therefore the re-add —
+        says ``starter``.
+        """
+        tc, db_path = sel_client
+        org = "t-sel-source-record"
+        _seed_org(db_path, org)
+        _auth(tc, org)
+        # MARKETING is a starter, so the write mints its record with
+        # source='starter' (the starter set is still the default here).
+        first = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": MARKETING}], "expected_revision": 0})
+        assert first.status_code == 200, first.text
+        # …and now the DERIVATION disagrees with that record.
+        monkeypatch.setattr(ps, "_starter_namespaces", lambda: [])
+        removed = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [], "expected_revision": 1})
+        assert removed.status_code == 200, removed.text
+        body = removed.json()
+        offered = [p for p in body["available"] if p["namespace"] == MARKETING]
+        assert len(offered) == 1, (
+            "MARKETING is in the shared catalog, so the catalog arm offers it "
+            "exactly once")
+        assert offered[0]["source"] == "starter", (
+            "the offer must carry the RECORD's source — the value the re-add "
+            "will store — not a fresh starter-set derivation that says manual")
+
+    def test_a_null_source_record_reads_the_value_the_save_will_store(
+            self, sel_client):
+        """#2728 review P2-2: the READ's ``source`` derivation is the WRITE's.
+
+        ``get_tenant_packs`` defaulted a NULL ``source`` to ``starter``
+        unconditionally, while ``set_graph_packs`` derives
+        ``rec.get("source") or ("starter" if ns in starter else "manual")``.
+        A record with NO source is produced by the live import path
+        (``_apply_import_pack_config`` MERGEs version/status/installed_at and
+        never ``source``), so restoring a dump that names a catalog NON-starter
+        showed **"Starter"** on the row and — after any edit + Save wrote
+        ``source='manual'`` — became **"Manual"**: the "column flipped after a
+        Save" defect the Source column exists to prevent, and the contract the
+        ``_packs_payload`` docstring and ``docs/EXPANSION_PACKS.md`` state.
+
+        FAIL-ON: pre-fix the row reads ``starter`` for ``venture`` (a catalog
+        non-starter), i.e. a different value from the one the Save below
+        stores — the two assertions disagree with each other, which is the
+        whole defect. The record is seeded raw because no API path mints a
+        sourceless install (only a restored pre-``source`` dump does).
+        """
+        tc, db_path = sel_client
+        org = "t-sel-null-source"
+        _seed_org(db_path, org)
+        _auth(tc, org)
+        # ``org_<org_id>`` is the physical graph the route resolves;
+        # ``_make_sdk(graph_name=…)`` is the EXACT construction
+        # ``_graph_packs_view_for`` reads it through, so the seed cannot land on
+        # a sibling graph (a `namespace=f"org_{org}"` SDK would prepend `org_`
+        # a second time).
+        import tortoise.hosted_api as ha
+        tenant = ha._make_sdk(graph_name=f"org_{org}")
+        tenant._get_proj().g.query(
+            "MERGE (p:PackInstall {namespace: $ns}) "
+            "SET p.version = '0.1.0', p.status = 'active'",
+            params={"ns": "venture"})
+        read = tc.get(f"/v1/graphs/default/packs?org_id={org}")
+        assert read.status_code == 200, read.text
+        rows = {p["namespace"]: p for p in read.json()["packs"]}
+        assert "venture" in rows, (
+            "the seeded install must be the record the route reads "
+            f"(got {sorted(rows)})")
+        read_source = rows["venture"]["source"]
+        assert read_source == "manual", (
+            "a sourceless record for a NON-starter namespace must read as "
+            "manual — the value set_graph_packs writes for it — not a "
+            "starter default that flips on the next Save")
+        # …and the proof that "manual" is the value the write stores: any edit
+        # (here a no-op re-save of the same set) leaves the column unchanged.
+        saved = tc.put(f"/v1/graphs/default/packs?org_id={org}", json={
+            "packs": [{"namespace": "venture"}], "expected_revision": 0})
+        assert saved.status_code == 200, saved.text
+        saved_source = {p["namespace"]: p
+                        for p in saved.json()["packs"]}["venture"]["source"]
+        assert saved_source == read_source, (
+            "the read and the write must agree on source, or the Source "
+            "column flips under the user on Save")
 
     def test_put_then_get_round_trips_and_version_stays_monotonic(
             self, sel_client):

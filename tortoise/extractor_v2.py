@@ -474,7 +474,8 @@ OPERATOR_SEMANTICS_RULE = (
 )
 
 
-def _s2s4_rules(master: dict | None = None) -> str:
+def _s2s4_rules(master: dict | None = None, *,
+                 core_only: bool = False) -> str:
     """The shared rule block inserted at the {anti_routine} slot of the S2
     and S4 mapping prompts: the anti-routine NOOP gate (#2424) paired with
     the value-fidelity rule (#2453) and the operator-structure rule (#2552).
@@ -490,12 +491,66 @@ def _s2s4_rules(master: dict | None = None) -> str:
     the policy does and not in the master render. ``None``
     (or a master whose packs declare nothing — every shipped pack today)
     renders the pre-#4894 block byte-for-byte.
+
+    #2818: ``master`` also carries ``pack_values`` — the per-kind value-field
+    declarations a pack makes. The declared FIELDS are rendered per kind in
+    the PACK KINDS list (``_render_master*``); THIS slot states the policy for
+    them (exact values, declared names, closed list), which is the same reason
+    the #4894 hints ride here. A master with no declaration renders the
+    pre-#2818 block byte-for-byte.
+
+    ``core_only`` (#1695 classify-later) SUPPRESSES the value-field block:
+    that mode takes the pack vocabulary out of the S2/S4 prompt entirely (the
+    post-extraction classifier assigns the kind), so a namespaced pack kind
+    must not reappear here through its value declarations. The pack-HINT
+    block is unaffected — a policy hint names no kind.
     """
     block = (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
              + "\n\n" + OPERATOR_SEMANTICS_RULE
              + "\n\n" + SHORT_SESSION_FACT_RULE)
-    hints = _pack_hints_text(master)
-    return f"{block}\n\n{hints}" if hints else block
+    values_text = "" if core_only else _pack_values_text(master)
+    extras = [t for t in (values_text, _pack_hints_text(master)) if t]
+    return "\n\n".join([block, *extras])
+
+
+def _pack_values_text(master: dict | None) -> str:
+    """The per-kind value-field POLICY as a prompt block (or "").
+
+    The consumer half of the #2818 declaration: a pack declares which value
+    properties a kind carries, ``compile_value_brief`` carries them on the
+    brief, ``_build_master_from_brief`` puts them on ``pack_values``, and this
+    block states what the mapper must DO with them.
+
+    ⛔ It deliberately does NOT enumerate the declared fields. WHICH fields a
+    kind declares is rendered ONCE per kind in the PACK KINDS list
+    (``_render_master*``); listing them again here would be a second source
+    for one vocabulary — and in compact mode it would name kinds that
+    ``_select_pack_kinds`` dropped from this story's PACK KINDS section,
+    contradicting "EVERY kind you emit MUST come from this list". Policy,
+    never vocabulary. ``""`` when nothing is declared, so the S2/S4 rule slot
+    is byte-identical for every pack that declares none (every shipped pack
+    today).
+    """
+    values = (master or {}).get("pack_values") or {}
+    if not isinstance(values, dict) or not values:
+        return ""
+    # Gated on what actually RENDERS, so a malformed section (no usable
+    # declaration) does not emit a rule about a [values: …] segment that no
+    # PACK KINDS line carries.
+    if not _values_suffixes(master):
+        return ""
+    return (
+        "KIND VALUE FIELDS (declared by the installed packs for their own "
+        "kinds — #2818): a kind in the PACK KINDS list may show a "
+        "[values: …] segment naming the value properties that kind carries, "
+        "with each one's value kind and constraints. When a claim of such a "
+        "kind states one of those values, keep it EXACT under VALUE "
+        "FIDELITY, use the DECLARED field name, and never move it to another "
+        "kind. There is no dedicated output slot for a value property, so "
+        "name it in `content` where the claim states it rather than as an "
+        "extra JSON key. The list is CLOSED: do NOT invent a value field for "
+        "a kind that declares none, and do NOT invent a value kind."
+    )
 
 
 def _pack_hints_text(master: dict | None) -> str:
@@ -601,6 +656,13 @@ def _build_master_from_brief(brief: dict,
     and pack_kinds keeps the brief's insertion order (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
+    # #2818: the per-kind value-field declarations, kept in a SEPARATE section
+    # rather than folded into ``pack_kinds``' string values — every existing
+    # consumer of ``pack_kinds`` (``master_kind_forms``, the write gates, the
+    # compact selector) treats a value as the kind's description string, and a
+    # props-less kind must render byte-identically. Empty for every shipped
+    # pack today, so the render is unchanged unless a pack declares one.
+    pack_values: dict[str, list] = {}
     # #4894: the brief's RESERVED, non-kind sections are skipped by the SAME
     # set ``value_extractor`` uses to keep them out of the objectKind
     # vocabulary — the brief's own module owns the reservation, so a new
@@ -613,12 +675,22 @@ def _build_master_from_brief(brief: dict,
             objects.setdefault(k, _desc(brief, k))
             continue
         pack_kinds[k] = _desc(brief, k)
+        entry = brief.get(k)
+        if (isinstance(entry, dict)
+                and isinstance(entry.get("values"), list)
+                and entry["values"]):
+            pack_values[k] = list(entry["values"])
     master = {
         "objects": objects,
         "subjects": dict(SUBJECTS),
         "points": dict(POINTS),
         "events": dict(EVENTS),
         "pack_kinds": pack_kinds,
+        # #2818: per-kind value-field declarations (only kinds that declare
+        # one appear). A SEPARATE section so ``pack_kinds``' description
+        # strings keep their meaning for every existing reader; empty for
+        # every shipped pack today (so no render changes).
+        "pack_values": pack_values,
         "chains": {name: {"path": list(c["path"]), "note": c["note"]}
                    for name, c in CHAINS.items()},
         "memory_granularity": dict(brief.get("memory_granularity", {})),
@@ -960,21 +1032,51 @@ def _render_master_core_only(master: dict, rng=None) -> str:
     return "\n".join(lines)
 
 
+def _values_suffixes(master: dict | None) -> dict[str, str]:
+    """kind → `` [values: name(valueKind[, required][, many]), …]`` (#2818).
+
+    Only kinds that DECLARE value fields appear, so every ``- kind — desc``
+    line for a props-less kind is byte-identical to pre-#2818 (``{}`` for the
+    whole shipped catalog today). Shared by the verbose and compact renders so
+    the two prompt modes spell a declaration the same way.
+    """
+    from tortoise.pack_values import value_field_annotations
+    master = master or {}
+    out: dict[str, str] = {}
+    pack_values = master.get("pack_values")
+    # Mirrors _pack_values_text's guard: a master built by hand (or from JSON) can
+    # carry a non-dict here, and the RENDER path must never raise on it.
+    if not isinstance(pack_values, dict):
+        return out
+    for kind, values in pack_values.items():
+        if not isinstance(values, list):
+            # Per-kind too: `{kind: 7}` is the same class of malformed master.
+            continue
+        decls = [value_field_annotations(v) for v in values
+                 if isinstance(v, dict) and v.get("name")]
+        if decls:
+            out[kind] = " [values: " + ", ".join(decls) + "]"
+    return out
+
+
 def _render_master_compact(master: dict, story: str | None,
                            rng=None) -> str:
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list. Do NOT mint kinds.",
     ]
+    _values = _values_suffixes(master)
 
-    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False,
+               suffixes: dict[str, str] | None = None) -> str:
         keys = list(d)
         if shuffle and rng is not None:
             rng.shuffle(keys)
         out = [f"\n{title}"]
         for k in keys:
             v = d[k]
-            out.append(f"- {k}" if not _needs_gloss(k, v) else f"- {k} — {v}")
+            base = f"- {k}" if not _needs_gloss(k, v) else f"- {k} — {v}"
+            out.append(base + ((suffixes or {}).get(k, "")))
         return "\n".join(out)
 
     lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
@@ -982,7 +1084,8 @@ def _render_master_compact(master: dict, story: str | None,
     lines.append(_group("POINTS", master["points"], shuffle=True))
     lines.append(_group("EVENTS", master["events"], shuffle=True))
     selected = _select_pack_kinds(story, master["pack_kinds"])
-    lines.append(_group("PACK KINDS", selected, shuffle=True))
+    lines.append(_group("PACK KINDS", selected, shuffle=True,
+                        suffixes=_values))
     # granularity: matched-domain subsections only (compact). Hint blocks
     # (memory granularity, user-personal-state, carve-out) are EXCLUDED from
     # the shuffle — only the kind vocabulary randomizes.
@@ -1005,12 +1108,13 @@ def _render_master_verbose(master: dict, rng=None) -> str:
         "to the nearest listed kind or drop the item.",
     ]
 
-    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False,
+               suffixes: dict[str, str] | None = None) -> str:
         keys = list(d)
         if shuffle and rng is not None:
             rng.shuffle(keys)
         out = [f"\n{title}"]
-        out += [f"- {k} — {d[k]}" for k in keys]
+        out += [f"- {k} — {d[k]}{(suffixes or {}).get(k, '')}" for k in keys]
         return "\n".join(out)
 
     lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
@@ -1018,7 +1122,8 @@ def _render_master_verbose(master: dict, rng=None) -> str:
     lines.append(_group("POINTS", master["points"], shuffle=True))
     lines.append(_group("EVENTS", master["events"], shuffle=True))
     lines.append(_group("PACK KINDS (from the pack manifests)",
-                        master["pack_kinds"], shuffle=True))
+                        master["pack_kinds"], shuffle=True,
+                        suffixes=_values_suffixes(master)))
 
     lines.append("\nCHAINS (the business logic of mapping)")
     for name, c in master["chains"].items():
@@ -1662,7 +1767,8 @@ def render_s2_prompt(master: dict | None = None, *,
                 master, story, core_only=core_only))
             .replace("{pack_namespaces}", pack_ns)
             .replace("{chains_text}", chains)
-            .replace("{anti_routine}", _s2s4_rules(master))
+            .replace("{anti_routine}", _s2s4_rules(
+                master, core_only=core_only))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
             .replace("{output_contract}", contract)
@@ -2786,7 +2892,8 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
             .replace("{master_list}", _render_master(
                 master, story, core_only=core_only))
             .replace("{chains_text}", chains)
-            .replace("{anti_routine}", _s2s4_rules(master))
+            .replace("{anti_routine}", _s2s4_rules(
+                master, core_only=core_only))
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
