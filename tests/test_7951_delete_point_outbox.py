@@ -34,7 +34,10 @@ This suite pins the fix — the append is the COMMIT POINT of the hard delete:
   (`record_committed=False`, no cache write) and the landed record is applied by
   the next replay (T8);
 * the evidence probe's own class-attribute patch is restored to the CLASS
-  FUNCTION, so each section measures its OWN graph (T9).
+  FUNCTION, so each section measures its OWN graph (T9);
+* the message names THIS door's record (`EntityMutated op=delete`, derived from
+  the door, never `PointAdded`) and attaches the graph to the CACHE clause, not
+  the record's (T10).
 
 ⛔ SCOPE — what this suite does NOT claim. It does not claim the raw guarded
 handle (`proj.g.query`) is closed, and it does not claim the remaining

@@ -114,9 +114,11 @@ delete is unconditional once the probe passes, so the record can and must preced
 | T7 | the `None` outcome (no journal / nothing to log — the DEFAULT embedded shape) is read as a refusal, so every delete on every journal-less SDK fails closed | `test_a_journal_less_sdk_still_deletes` (journal-less SDK ⇒ `delete_point` returns `True` and the node is gone) | no (guard) |
 | T8 | an append that LANDS and then raises is reported as committed | `test_an_append_that_lands_then_raises_is_reported_as_unconfirmed` (append writes then raises ⇒ refusal with `record_committed=False`, `DETACH DELETE` not issued, record on disk, replay removes the Point) | **YES** — the pre-change door ignored `_emit_event`'s outcome, so no refusal is raised at all |
 | T9 | the evidence probe restores a BOUND method onto the guarded handle's class, so sections 2-4 silently address section 1's graph | `test_the_evidence_probe_rebinds_the_guarded_handle_per_instance` (patch → restore ⇒ the class attribute is the class FUNCTION again, and a second SDK's write is visible only on its OWN underlying handle) | **YES** (against the pre-fix PROBE, not the door) — its restore assigned `proj.g.query` (bound) to the class, so SDK #2's write lands in SDK #1's graph |
+| T10 | the refusal names a record this door never writes (`PointAdded`) and attaches the graph name to the RECORD clause, sending a caller to the store that does not hold the destruction | `test_the_message_names_the_doors_own_record_and_graph` (the committed and unconfirmed arms both say `EntityMutated op=delete`, never `PointAdded`, and the graph sits in "in the record and not in the cache on graph 'cache_graph'"-style text only on the cache clause) | **YES** — red on the pre-change hardcoded `PointAdded` wording and misplaced `_where` |
 
-**Measured** (`TORTOISE_TEST_CARVE_OUT=1`, embedded lane): `4 failed, 5 passed` on the pre-change
-source (`origin/main`'s `tortoise/sdk.py` — T1/T2/T3/T8 red, T4-T7/T9 green), `9 passed` after. The
+**Measured** (`TORTOISE_TEST_CARVE_OUT=1`, embedded lane): `5 failed, 5 passed` on the pre-change
+source (`origin/main`'s `tortoise/sdk.py` and `tortoise/exceptions.py` — T1/T2/T3/T8/T10 red,
+T4-T7/T9 green), `10 passed` after. The
 guards (T4-T7) pass on both sides by design and say so in their docstrings rather than implying
 detection power. T9 is a guard on the EVIDENCE ARTIFACT, not on the door: it is red against the
 pre-fix probe (whose restore put a BOUND method on the guarded handle's class) and green against the

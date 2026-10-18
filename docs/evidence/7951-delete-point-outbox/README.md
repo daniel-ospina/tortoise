@@ -71,18 +71,20 @@ per-run); every measured line is stable.
 ```console
 $ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
     tests/test_7951_delete_point_outbox.py -q
-9 passed
+10 passed
 ```
 
 `tests/test_7951_delete_point_outbox.py` carries the threat rows this increment declares: T1 ordering,
 T2 failed-append refusal, T3 committed-record healability, T4 no record for a no-op delete, T5 the
 record's declared shape, T6 the `:GraphEvent` subscriber row, T7 the journal-less (`None`) arm, T8 an
-append that lands then raises, T9 the evidence probe's own instrumentation. **T1/T2/T3 (and T8) were
-measured RED on the pre-change source** (`['cache', 'journal']`; `DID NOT RAISE WriteNotLandedError`;
-`[]` instead of `[('delete', 'Point')]`; no refusal at all for a landed-then-raised append) — the
-docstrings name the mutation that reddens each. T4-T7 and T9 are declared guards: T4-T7 pass on both
-sides by design, and T9 reddens if the probe restores a BOUND method onto the guarded handle's CLASS,
-which would silently misroute every later section's reads and writes to section 1's graph.
+append that lands then raises, T9 the evidence probe's own instrumentation, T10 the delete door's own
+record in the refusal and the graph on the cache clause. **T1/T2/T3/T8/T10 were measured RED on the
+pre-change source** (5 failed, 5 passed: `['cache', 'journal']`; `DID NOT RAISE WriteNotLandedError`;
+`[]` instead of `[('delete', 'Point')]`; no refusal at all for a landed-then-raised append; the
+`PointAdded` wording this door never writes) — the docstrings name the mutation that reddens each.
+T4-T7 and T9 are declared guards: T4-T7 pass on both sides by design, and T9 reddens if the probe
+restores a BOUND method onto the guarded handle's CLASS, which would silently misroute every later
+section's reads and writes to section 1's graph.
 
 ## The residuals, shown rather than hidden
 
