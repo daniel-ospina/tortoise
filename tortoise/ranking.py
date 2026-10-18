@@ -220,8 +220,14 @@ def resolve_contested_relevance(
             # counter-claim. The same identity ``ep.get_contested_claims`` and
             # the audit wiring checks use; all three widened in this change, so
             # they must not disagree on how a node is addressed.
-            f"WHERE {epistemic_identity('c')} "
-            f"<> {epistemic_identity('n')} "
+            # The CONTESTED-vs-NANDer comparison uses the INTERNAL node id,
+            # which is unique. The coalesced identity is NOT: ``id`` is a
+            # tested-colliding property (``_event_guarded_merge``'s suffix
+            # branch leaves ``id`` at the candidate while ``eventId`` takes the
+            # suffix, so two distinct Events both coalesce to the candidate),
+            # and a value collision silently DROPS a genuine counter-claim —
+            # measured: a real non-self NAND returned ``{}``.
+            f"WHERE id(c) <> id(n) "
             # The SELF-REFERENCE guard: skip the comparison only when ``src``
             # has NO identity at all (an unkeyed optional match). Written with
             # ``OR`` across the two keys it is dead for every ordinary source —
@@ -230,9 +236,11 @@ def resolve_contested_relevance(
             # a self-referential NAND (``create_operator('NAND', p, [p])`` is
             # accepted) boost the contested point by its OWN text — measured:
             # ``{'self-x': 0.05}`` where the pre-widening guard returned ``{}``.
-            f"AND ({epistemic_identity('src')} IS NULL "
-            f"     OR {epistemic_identity('src')} "
-            f"        <> {epistemic_identity('n')}) AND ("
+            # Self-reference guard: ``src`` is an OPTIONAL match, so it is
+            # skipped only when it matched nothing. Compared on the internal
+            # id for the same reason as above — the earlier two-key form was
+            # both dead (``OR`` across the keys) and collision-blind.
+            f"AND (id(src) IS NULL OR id(src) <> id(n)) AND ("
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
             "  ((c.is_operator = false OR c.is_operator IS NULL) "
             "   AND c.op_type IS NULL)) "
@@ -242,6 +250,13 @@ def resolve_contested_relevance(
             f"RETURN {epistemic_identity('n')}, "
             f"  coalesce({epistemic_identity('src')}, "
             f"           {epistemic_identity('c')}), "
+            # The INTERNAL id of whichever node supplied the claim, for the
+            # per-node dedupe below. The coalesced identity above is a DISPLAY
+            # value and is NOT unique (see ``live.EPISTEMIC_ID_KEYS``) — keying
+            # a dict on it overwrote a distinct counter-claim that happened to
+            # collide, so its text never reached the conflict test and the
+            # boost silently did not fire (#7927 review).
+            "  coalesce(id(src), id(c)), "
             # #7927: the counter-claim TEXT must come from the node that
             # actually carries it. A :Subject/:Object stores ``name``/``title``
             # (never ``content``), so the old chain fell through to
@@ -258,14 +273,16 @@ def resolve_contested_relevance(
         # a NANDer with persisted EP mean >= 0.6 is a high-severity dispute
         # and ranks above medium ones; ids break the tie deterministically
         # (Cypher row order never decides the budgeted subset).
-        pending: dict[str, dict[str, dict]] = {}
-        for pid, claim_id, content, a, b in rows:
+        pending: dict[str, dict[int, dict]] = {}
+        for pid, claim_id, claim_nid, content, a, b in rows:
             if not pid or not claim_id:
                 continue
             a_f, b_f = float(a), float(b)
             s = a_f + b_f
             mean = (a_f / s) if s > 0 else 0.5
-            pending.setdefault(pid, {})[claim_id] = {
+            # Keyed on the INTERNAL node id, so two distinct counter-claims that
+            # coalesce to one identity do not overwrite each other.
+            pending.setdefault(pid, {})[claim_nid] = {
                 "content": str(content or ""),
                 "mean": mean,
                 "claim_id": claim_id,

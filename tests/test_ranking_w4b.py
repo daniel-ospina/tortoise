@@ -106,10 +106,12 @@ class _FakeProjection:
             self.nand_query_count += 1
             if self.nand_rows is not None:
                 return self._Rows(self.nand_rows)
-            # (pid, claim_id, content, alpha, beta) — mirror the resolver's
-            # RETURN; neutral (1.0, 1.0) alpha/beta => medium severity.
+            # (pid, claim_id, claim_nid, content, alpha, beta) — mirror the
+            # resolver's RETURN, INCLUDING the internal node id the resolver
+            # dedupes on (the coalesced identity is not unique). Neutral
+            # (1.0, 1.0) alpha/beta => medium severity.
             return self._Rows([
-                (pid, f"{pid}-c{i}", content, 1.0, 1.0)
+                (pid, f"{pid}-c{i}", 1000 + i, content, 1.0, 1.0)
                 for i, (pid, content) in enumerate(self.counter_claims)
             ])
         self.signal_query_count += 1

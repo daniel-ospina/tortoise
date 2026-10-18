@@ -1912,27 +1912,32 @@ class TortoiseEP:
                 "WHERE v > $t "
                 # ``:Event`` writers stamp ``id`` (``entities._upsert_event``
                 # sets it "for edge matching") but key on ``eventId``, so the
-                # coalesce keeps the row ADDRESSABLE (and the dedupe below
-                # from collapsing every id-less Event onto a ``None`` key).
-                f"RETURN {epistemic_identity('n')}, "
-                "       coalesce(n.content, n.name, n.title, n.label, ''), "
-                "       a, b, v",
+                # coalesce keeps the row ADDRESSABLE. The dedupe below keys on
+                # ``id(n)``, not on this value — see its own note.
+                f"RETURN {epistemic_identity('n')}, id(n), "
+                "       a, b, v, "
+                "       coalesce(n.content, n.name, n.title, n.label, '')",
                 params={"t": variance_threshold},
             ).result_set)
         # A multi-labelled node (``:Point:Object`` — ``update_point``'s promote
-        # arm mints one) is returned by MORE THAN ONE sweep: collapse on id,
-        # first-wins, so it is listed once (the Point leg runs first and is the
-        # label the claim rule applies to). The key is the row's identity
-        # column (``coalesce(id, eventId)``), never a nullable property.
-        by_id: dict[str, list] = {}
+        # arm mints one) is returned by MORE THAN ONE sweep: collapse, first-wins,
+        # so it is listed once (the Point leg runs first and is the label the
+        # claim rule applies to).
+        # The dedupe key is the INTERNAL node id (``row[1]``), which is unique.
+        # The returned identity (``row[0]``) is not: ``id`` is a tested-colliding
+        # property — ``_event_guarded_merge``'s suffix branch leaves ``id`` at
+        # the candidate while ``eventId`` takes the suffix, so two distinct
+        # Events coalesce to the SAME value and a value-keyed dedupe would drop
+        # one of them from the report (measured: two rows collapsed to one).
+        by_nid: dict[object, list] = {}
         for row in rows:
-            by_id.setdefault(row[0], row)
+            by_nid.setdefault(row[1], row)
         # A per-label ``ORDER BY`` cannot order the MERGED set, and Cypher row
         # order across four queries never decides an order — sort here,
-        # variance-descending with an id tiebreak for determinism.
-        ordered = sorted(by_id.values(),
-                         key=lambda r: (-float(r[4]), str(r[0])))
-        return [{"id": r[0], "content": r[1], "alpha": r[2],
+        # variance-descending with an identity tiebreak for determinism.
+        ordered = sorted(by_nid.values(),
+                         key=lambda r: (-float(r[4]), str(r[0]), str(r[1])))
+        return [{"id": r[0], "content": r[5], "alpha": r[2],
                  "beta": r[3], "variance": r[4]} for r in ordered]
 
     def invalidate_messages(self, point_ids: list[str] | None = None) -> int:

@@ -388,8 +388,11 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 #     bound (0.73s -> 1.50s against a 1.2s limit) — a Point-only id set must
 #     stay ONE anchored read.
 #
-# ``:Event`` carries ``eventStatus``, never ``status`` (its lifecycle has no
-# status fold — ``consistency._STATUS_COMPARED_LABELS``). That does NOT need a
+# ``:Event`` writers stamp ``eventStatus`` and do not FOLD ``status`` (its
+# lifecycle has no status fold — ``consistency._STATUS_COMPARED_LABELS``), though
+# a writer-supplied ``status`` can still land, because ``_EVENT_HANDLED`` omits
+# the key (``projection/entities.py`` says so, and ``_promote_incident_operators``
+# reads it). That does NOT need a
 # per-label branch on a widened leg: ``_live_only`` treats an ABSENT status as
 # LIVE (``_terminal_excluded``'s NULL check), so an Event passes the same
 # predicate a Point does, and the draft filter is a no-op for it by
@@ -423,11 +426,20 @@ EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
 #: ``consistency._graph_view_key`` (eventId first for ``Event``): those answer
 #: "which key identifies this node for the graph view", this answers "which key
 #: does a READ hand back". ``id`` is the right answer for the second because the
-#: belief fold addresses an Event's belief BY ``id`` (#7936), and the order is
-#: functionally safe for every in-tree writer — ``_upsert_event`` MERGEs on
-#: ``eventId`` and then sets ``id = eid``, so wherever BOTH exist they are equal
-#: and the choice cannot change the result. ``session_indexer`` writes
-#: ``eventId`` only, which is the case the second key exists for.
+#: belief fold addresses an Event's belief BY ``id`` (#7936), and
+#: ``session_indexer`` writes ``eventId`` only — which is the case the second key
+#: exists for.
+#:
+#: ⛔ The coalesced value is NOT a unique identity, and must not be used as one.
+#: ``_upsert_event`` sets ``id = eid`` on the plain path, but
+#: ``_event_guarded_merge``'s SUFFIX branch MERGEs on the suffixed ``eventId``
+#: while ``id`` keeps the CANDIDATE — so two distinct Events both coalesce to the
+#: candidate value. The cross-key shape ``consistency`` already models (#8879:
+#: ``:Event {id:'X'}`` beside ``:Event {eventId:'X'}``) collides the same way.
+#: Use this for DISPLAY and for handing a value back to a caller; use ``id(n)``
+#: (the internal node id) for every COMPARISON (a self-reference guard) and every
+#: DEDUPE key. Both bugs are recorded: a value-collision silently dropped a real
+#: counter-claim, and a value-collision dedupe dropped a distinct Event row.
 EPISTEMIC_ID_KEYS = ("id", "eventId")
 
 

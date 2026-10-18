@@ -42,7 +42,6 @@ from tortoise.live import (  # #7927: traversal-position widening + the ONE
     # surface must resolve through.
     epistemic_disjunction,
     epistemic_identity,
-    epistemic_identity_key,
 )
 
 # resolve_tier precedence: explicit credibilityTier (T0-T4) > sourceKind
@@ -228,6 +227,26 @@ class AuditResult:
 def _count(proj, query: str, params: dict | None = None) -> int:
     r = proj.g.query(query, params=params or {})
     return r.result_set[0][0] if r.result_set else 0
+
+
+def _node_pattern(alias: str, keys: dict[str, object]) -> str | None:
+    """``(m {id:…, eventId:…})`` — a pattern naming the NODE, never a value.
+
+    Every key the node actually carries is rendered, so two DISTINCT nodes that
+    happen to share one key value cannot both match: measured, two Events
+    carrying ``id='coll-x'`` (``_event_guarded_merge``'s suffix branch leaves
+    ``id`` at the candidate while ``eventId`` takes the suffix) both matched a
+    single-key ``(m {id:'coll-x'})``, so one issue's repair repaired the other's
+    edge — the same overreach the key-agnostic form had, one level down.
+
+    ``None`` when the node carries no key at all: there is then nothing to name
+    it by, and the caller must refuse rather than widen.
+    """
+    present = {k: v for k, v in keys.items() if v is not None}
+    if not present:
+        return None
+    rendered = ", ".join(f"{k}:{_quoted(v)}" for k, v in present.items())
+    return f"({alias} {{{rendered}}})"
 
 
 def _quoted(value: object) -> str:
@@ -516,8 +535,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # into the message and the guidance ("mark X as superseded too"), never
         # re-anchored as an ``id``, so this is the place ``epistemic_identity``
         # IS right (unlike an id-keyed frontier, #8538).
-        f"RETURN DISTINCT sup.id, sup.content, type(r), "
-        f"{epistemic_identity('active')} LIMIT {SAMPLE_LIMIT}",
+        "RETURN DISTINCT sup.id, sup.content, type(r), "
+        f"{epistemic_identity('active')}, id(active) "
+        f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
     _record("superseded_active_edges", [
@@ -526,11 +546,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="medium",
             node_id=str(sup_id),
             detail=(f"Superseded '{sup_content}' has active {edge_type} edge "
-                    f"from {active_id}"),
-            fix=(f"Remove edges into {_quoted(sup_id)} or mark "
-                 f"{_quoted(active_id)} as superseded too"),
+                    f"from {active_id if active_id is not None else '<no id or eventId>'}"
+                    + ("" if active_id is not None else
+                       " — that endpoint carries no identity, so it cannot be "
+                       "named by the repair; remove the edges by hand")),
+            # ``_quoted(None)`` renders the literal ``'None'`` — a phantom
+            # identity that can even address a real node whose id is "None", so
+            # an unaddressable endpoint contributes NO clause rather than one.
+            fix=(f"Remove edges into {_quoted(sup_id)}" + (
+                f" or mark {_quoted(active_id)} as superseded too"
+                if active_id is not None else "")),
         )
-        for sup_id, sup_content, edge_type, active_id in rows4
+        for sup_id, sup_content, edge_type, active_id, _active_nid in rows4
     ], count4)
 
     # ── 5. impl_instead_of_nand (low, advisory heuristic) ──────────
@@ -565,8 +592,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # on ``eventId`` only (the #7936 residual ``consistency.py`` describes),
         # and ``id:'None'`` in a repair string addresses nothing. Same identity
         # ``ep.get_contested_claims`` coalesces.
-        f"RETURN {epistemic_identity('src')}, {epistemic_identity('tgt')}, "
-        "coalesce(tgt.content, tgt.name, tgt.title, '') "
+        # The emitted repair is an SDK CALL (``create_operator`` resolves its
+        # endpoints by ``id``), so this leg returns the ``id``s — and the
+        # internal node id, which is UNIQUE, for the dedupe below. A coalesced
+        # identity is neither: ``id`` is not unique (``_event_guarded_merge``'s
+        # suffix branch leaves ``id`` at the candidate while ``eventId`` takes
+        # the suffix) and an ``eventId`` is not an ``id`` the call can resolve.
+        "RETURN src.id, tgt.id, "
+        "coalesce(tgt.content, tgt.name, tgt.title, ''), "
+        "id(src), id(tgt) "
         f"LIMIT {CHECK5_FETCH_LIMIT}",
         params=params,
     )
@@ -574,7 +608,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     issues5: list[AuditIssue] = []
     seen5: set[tuple[str, str]] = set()
     count5 = 0
-    for src_id, tgt_id, tgt_content in rows5:
+    for src_id, tgt_id, tgt_content, src_nid, tgt_nid in rows5:
         low = (tgt_content or "").lower()
         hit = next(
             (kw for kw, pat in zip(CONTRADICTION_KEYWORDS, patterns5) if pat.search(low)),  # noqa: B905
@@ -582,21 +616,35 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         )
         if hit is None:
             continue
-        key = (str(src_id), str(tgt_id))
+        # Dedupe on the INTERNAL node id: a shared ``id`` value is a tested
+        # shape (see ``_node_pattern``), and keying on it would drop a genuine
+        # second edge as a duplicate of the first.
+        key = (src_nid, tgt_nid)
         if key in seen5:
             continue
         seen5.add(key)
         count5 += 1
         if len(issues5) < SAMPLE_LIMIT:
+            # ``create_operator`` resolves endpoints by ``id`` — an endpoint
+            # keyed on ``eventId`` alone cannot be named by the repair, so it
+            # gets NO statement rather than one that raises
+            # (``Points [...] do not exist``) or, worse, names its TWIN.
+            if src_id is None or tgt_id is None:
+                fix, suffix = "", (
+                    " — an endpoint has no `id`, and the repair is id-keyed, so "
+                    "it cannot name that endpoint; convert by hand")
+            else:
+                fix, suffix = (
+                    "Verify semantic contradiction BEFORE converting — if "
+                    f"confirmed: tortoise_create_operator('NAND', {_quoted(src_id)}, "
+                    f"[{_quoted(tgt_id)}])"), ""
             issues5.append(AuditIssue(
                 issue_type="impl_instead_of_nand",
                 severity="low",
                 node_id=str(src_id),
                 detail=(f"IMPL edge {src_id} → '{str(tgt_content)[:80]}' "
-                        f"(keyword: '{hit}') — verify whether NAND applies"),
-                fix=f"Verify semantic contradiction BEFORE converting — if "
-                    f"confirmed: tortoise_create_operator('NAND', {_quoted(src_id)}, "
-                    f"[{_quoted(tgt_id)}])",
+                        f"(keyword: '{hit}') — verify whether NAND applies{suffix}"),
+                fix=fix,
             ))
     # conf 58: count5 is an UPPER-BOUNDED fetch sample (LIMIT
     # CHECK5_FETCH_LIMIT candidates, word-boundary filtered Python-side) — not
@@ -703,10 +751,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         and two parallel direct edges between one pair share a single message
         slot (``ep._affected_factors``) — the repair must not mint the second.
         """
-        key = epistemic_identity_key({"id": m_id, "eventId": m_eid})
-        if key is not None:
-            target = f"(m {{{key}:{_quoted(m_id if key == 'id' else m_eid)}}})"
-        else:
+        target = _node_pattern("m", {"id": m_id, "eventId": m_eid})
+        if target is None:
             return "", (" — the endpoint carries neither `id` nor `eventId`, so "
                         "no statement can address it; repair by hand")
         return (f"MATCH (op:Point {{id:{_quoted(op_id)}}})-[r:mitigates]->"

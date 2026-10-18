@@ -1031,3 +1031,115 @@ def test_legacy_repair_refuses_an_endpoint_with_no_identity(sdk):
             f"addressed: {issue.fix!r}")
         assert "neither `id` nor `eventId`" in issue.detail, (
             f"the refusal is not explained in the message: {issue.detail!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 7. The coalesced identity is NOT unique — comparisons and dedupe must
+#    use the internal node id, and a repair must NAME its node
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_contested_relevance_survives_two_events_sharing_one_identity(sdk):
+    """`_event_guarded_merge`'s SUFFIX branch MERGEs on the suffixed
+    ``eventId`` while ``id`` keeps the CANDIDATE, so two distinct Events
+    coalesce to the SAME value.
+
+    Comparing that value made the self-reference guard drop a GENUINE
+    counter-claim (measured: a real non-self NAND returned ``{}``). The guard
+    compares ``id(n)`` — the internal node id, which is unique — so a real
+    conflict still fires even when a value collides.
+    """
+    proj = sdk._get_proj()
+    # Two DISTINCT Events that COALESCE to the same value: one carries ``id``,
+    # the other carries the same token as its ``eventId`` — exactly the pair
+    # ``_event_guarded_merge``'s suffix branch and the #8879 cross-key shape
+    # produce. ``src`` (the counter-claim) is the keyless twin; ``target`` is
+    # the id-keyed one. They are different nodes; their identities collide.
+    target = "shared-token"
+    proj.g.query("CREATE (n:Event {id:'shared-token', name:'a contested belief'})")
+    proj.g.query("CREATE (s:Event {eventId:'shared-token', "
+                 "name:'the cache rollback is the safer default'})")
+    proj.g.query(
+        "CREATE (op:Point {id:'coll-op', is_operator:true, op_type:'NAND', "
+        "label:'contra', status:'live'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'coll-op'}), (s:Event {eventId:'shared-token'}) "
+        "MERGE (s)-[ri:INPUT]->(op) SET ri.idx = 0")
+    proj.g.query(
+        "MATCH (op:Point {id:'coll-op'}), (t:Event {id:'shared-token'}) "
+        "MERGE (op)-[r:NAND]->(t) SET r.idx = 1")
+
+    boosts = resolve_contested_relevance(proj, [target], "cache rollback")
+    assert boosts == {target: W4_CONTESTED_BOOST}, (
+        "a genuine counter-claim was dropped by an IDENTITY COLLISION — the "
+        "guard is comparing a value instead of the node: "
+        f"{boosts}")
+
+
+def test_legacy_repair_names_the_node_not_a_colliding_value(sdk):
+    """Two DISTINCT endpoints carrying the same ``id`` value must not share a
+    repair: a single-key pattern matches both, so one issue's fix repairs the
+    other's edge (measured: two byte-identical fixes, both edges gone)."""
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'coll-repair-op', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    proj.g.query("CREATE (e1:Event {id:'coll-x', name:'one'})")
+    proj.g.query("CREATE (e2:Event {id:'coll-x', eventId:'coll-x-suffix', "
+                 "name:'two'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'coll-repair-op'}), (e:Event {name:'one'}) "
+        "MERGE (op)-[:mitigates]->(e)")
+    proj.g.query(
+        "MATCH (op:Point {id:'coll-repair-op'}), (e:Event {name:'two'}) "
+        "MERGE (op)-[:mitigates]->(e)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == "coll-repair-op"]
+    assert len(legacy) == 2, f"expected one issue per edge, got {len(legacy)}"
+    assert len({i.fix for i in legacy}) == 2, (
+        "two distinct endpoints produced the SAME repair — it names a value, "
+        f"not the node, so it repairs both edges: {[i.fix for i in legacy]}")
+
+
+def test_impl_conversion_repair_refuses_an_endpoint_without_an_id(sdk):
+    """``create_operator`` resolves its endpoints by ``id``, so a repair naming
+    an endpoint keyed only on ``eventId`` either raises
+    (``Points [...] do not exist``) or names its TWIN. It must be refused."""
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (s:Subject {id:'impl-src', name:'a source claim', "
+                 "subjectKind:'concept', status:'live'})")
+    proj.g.query("CREATE (t:Event {eventId:'impl-keyless', "
+                 "name:'this claim cannot hold'})")
+    proj.g.query(
+        "MATCH (s:Subject {id:'impl-src'}), (t:Event {eventId:'impl-keyless'}) "
+        "MERGE (s)-[:IMPL]->(t)")
+
+    issues = [i for i in audit_graph(proj).issues
+              if i.issue_type == "impl_instead_of_nand"
+              and i.node_id == "impl-src"]
+    assert issues, "fixture broken: the IMPL edge was not reported"
+    for issue in issues:
+        assert issue.fix == "", (
+            "an id-keyed conversion was emitted for an endpoint that has no "
+            f"id: {issue.fix!r}")
+
+
+def test_superseded_repair_never_names_a_nonexistent_identity(sdk):
+    """``_quoted(None)`` renders the literal ``'None'`` — a phantom identity
+    that can even address a real node whose id is "None"."""
+    proj = sdk._get_proj()
+    sup = _point(sdk, "a superseded claim")
+    proj.g.query("MATCH (n:Point {id:$i}) SET n.status = 'superseded'",
+                 params={"i": sup})
+    proj.g.query("CREATE (e:Event {eventKind:'test', name:'no key'})")
+    proj.g.query(
+        "MATCH (s:Point {id:$s}), (e:Event) WHERE e.name = 'no key' "
+        "MERGE (e)-[:IMPL]->(s)", params={"s": sup})
+
+    issues = [i for i in audit_graph(proj).issues
+              if i.issue_type == "superseded_active_edges"
+              and i.node_id == str(sup)]
+    assert issues, "fixture broken: the active edge was not reported"
+    for issue in issues:
+        assert "None" not in issue.fix, (
+            f"the repair names a phantom identity: {issue.fix!r}")
