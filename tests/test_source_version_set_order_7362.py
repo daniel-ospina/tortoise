@@ -57,7 +57,6 @@ import contextlib
 import os
 import re
 import sys
-import tempfile
 from contextlib import contextmanager
 
 import pytest
@@ -76,9 +75,18 @@ _SET_OPEN = re.compile(r"\b(?:ON CREATE |ON MATCH )?SET\b")
 #: follow a ``SET`` in the same statement must be here, or the list body runs
 #: PAST the clause and a neighbouring clause's read is charged to the last SET
 #: item — a false positive (`SET s.b = 1 MERGE (t:Tag {name: s.b})`).
+#:
+#: ``SET`` itself is the case that bites in BOTH directions (#8939 review):
+#: ``SET … SET …`` is legal Cypher. Without ``SET`` here the FIRST list swallows
+#: the second clause — a read in clause 2 of a property clause 1 wrote is
+#: charged to clause 1's last item when that list has a top-level comma (the
+#: loud false positive), and missed entirely when it does not, because the
+#: second ``_set_lists`` body is only found via ``_SET_OPEN`` and starts with a
+#: fresh ``written`` map (the SILENT false negative — the exact left-to-right
+#: hazard this file exists to catch).
 _SET_CLOSE = re.compile(
     r"\b(?:RETURN|DELETE|REMOVE|WITH|ON CREATE|ON MATCH|MERGE|CREATE|MATCH|"
-    r"WHERE|CALL|UNWIND|FOREACH|LIMIT|ORDER|SKIP|UNION)\b")
+    r"WHERE|CALL|UNWIND|FOREACH|LIMIT|ORDER|SKIP|UNION|SET)\b")
 
 
 class _RecordingGraph:
@@ -201,7 +209,7 @@ def _strip_literals(text: str) -> str:
 def _same_clause_violations(
     statement: str, *, only: str | None = None
 ) -> list[str]:
-    """Every ``SET`` item that READS a property an EARLIER item in the same list writes.
+    """Every ``SET`` item that READS a property an EARLIER item in the same statement writes.
 
     The ``contentHash`` case above is the instance that broke production (#7362),
     but the hazard is the whole rule, not that one property: on a left-to-right
@@ -215,12 +223,31 @@ def _same_clause_violations(
     An item reading the property IT assigns is fine: its right-hand side is
     evaluated against the pre-write record on both engines, so
     ``s.contentHash = coalesce(s.contentHash, $h)`` is not a violation.
+
+    TWO ``SET`` CLAUSES IN ONE STATEMENT ARE SCANNED AS ONE SEQUENCE (review
+    round 9): ``SET … SET …`` is legal, executes in order, and on a
+    left-to-right engine the second clause reads what the first wrote — so a
+    ``written`` map that restarted per clause read that hazard as clean (the
+    silent false negative). Writes therefore CARRY ACROSS consecutive bare
+    ``SET`` clauses.
+
+    They do NOT carry across a ``MERGE … ON CREATE SET … ON MATCH SET …`` arm
+    boundary: only one arm of a ``MERGE`` ever executes, so an ``ON MATCH``
+    read of a property ``ON CREATE`` writes is not a read of anything (and
+    ``ON CREATE`` writing ``contentHash`` with no reader in front of it is the
+    legitimate shape the two-arm split exists to allow).
     """
     violations: list[str] = []
-    for keyword, body in _set_lists(statement):
+    # Writes by an EARLIER, NON-EXCLUSIVE (bare) ``SET`` clause of this same
+    # statement: property → (clause index, item index), plus the map wildcard.
+    carried: dict[str, tuple[int, int]] = {}
+    carried_wildcard: tuple[int, int] | None = None
+    for clause, (keyword, body) in enumerate(_set_lists(statement)):
         items = _set_items(body)
-        written: dict[str, int] = {}
-        wildcard: int | None = None
+        # A MERGE arm starts a fresh (mutually exclusive) write sequence.
+        bare = keyword == "SET"
+        written: dict[str, tuple[int, int]] = dict(carried) if bare else {}
+        wildcard: tuple[int, int] | None = carried_wildcard if bare else None
         for i, (_s, _e, raw) in enumerate(items):
             text = _strip_literals(raw)
             assign = _ITEM_ASSIGN.match(text)
@@ -232,24 +259,46 @@ def _same_clause_violations(
                     continue  # its own right-hand side: pre-write on both engines
                 if prop not in written and wildcard is None:
                     continue
-                wrote_at = written.get(prop, wildcard)
-                violations.append(
-                    f"{keyword}: item {i} of the SET list READS `s.{prop}` AFTER "
-                    f"item {wrote_at} WROTE it — on a left-to-right engine "
-                    f"(falkordb 6.x, the production backend) that read sees the "
-                    f"value the same clause just installed, so its guarded "
-                    f"branch never fires."
-                    f"\n  … {text.strip()[:180]} …"
-                )
+                hit = written.get(prop, wildcard)
+                assert hit is not None  # the guard above excluded the empty case
+                w_clause, w_item = hit
+                if w_clause == clause:
+                    violations.append(
+                        f"{keyword}: item {i} of the SET list READS `s.{prop}` AFTER "
+                        f"item {w_item} WROTE it — on a left-to-right engine "
+                        f"(falkordb 6.x, the production backend) that read sees the "
+                        f"value the same clause just installed, so its guarded "
+                        f"branch never fires."
+                        f"\n  … {text.strip()[:180]} …"
+                    )
+                else:
+                    violations.append(
+                        f"{keyword}: item {i} of the SET list READS `s.{prop}`, which "
+                        f"an EARLIER `SET` clause of the same statement (clause "
+                        f"{w_clause}, item {w_item}) WROTE — on a left-to-right "
+                        f"engine (falkordb 6.x, the production backend) the two "
+                        f"clauses execute in order, so that read sees the value "
+                        f"the earlier clause installed."
+                        f"\n  … {text.strip()[:180]} …"
+                    )
                 break
             if assign:
-                written.setdefault(assign.group(1), i)
+                written.setdefault(assign.group(1), (clause, i))
             if _ITEM_MAP_ASSIGN.match(text):
                 # Recorded AFTER the read scan: the item's own right-hand side
                 # may legitimately read a property it is about to write, and the
                 # wildcard must not make that item look like it reads its own
                 # output.
-                wildcard = i if wildcard is None else wildcard
+                wildcard = (clause, i) if wildcard is None else wildcard
+        if bare:
+            # Hand this clause's writes to the next bare ``SET`` clause, if any.
+            # ``written`` already carries every earlier clause's writes, so a
+            # chain of three or more ``SET`` clauses composes.
+            carried, carried_wildcard = written, wildcard
+        else:
+            # An arm boundary ends the chain: what a MERGE arm writes is not
+            # visible to whatever follows on the other arm.
+            carried, carried_wildcard = {}, None
     return violations
 
 
@@ -288,8 +337,13 @@ def _drive_connector(proj) -> None:
 
 
 @pytest.fixture()
-def proj():
-    db_path = os.path.join(tempfile.mkdtemp(prefix="tt_set_order_7362_"), "t.db")
+def proj(tmp_path):
+    """A projection for the writer; ``tmp_path`` so pytest reclaims the store.
+
+    A hand-rolled ``tempfile.mkdtemp`` here would leak one tree per test — the
+    #4096 class `tests/test_tmpdir_hygiene_4096.py` fails the whole suite on.
+    """
+    db_path = str(tmp_path / "t.db")
     sdk = TortoiseSDK(db_path)
     try:
         yield sdk._get_proj()
@@ -502,14 +556,26 @@ def test_the_capability_probe_agrees_with_the_engine_it_measures(proj):
     probe's verdict equals a bare control clause's ordinal on the SAME engine —
     which is what keeps it honest on ANY backend.
 
-    The `proj` fixture here is the EMBEDDED backend and nothing else: it passes an
-    explicit `db_path`, and `TortoiseSDK.__init__` only honours `TORTOISE_DB_URI`
-    when `db_path is None` (`tortoise/sdk.py`). So this test measures the probe
-    against a PRE-write engine — the case where a lying probe would run the live
-    file vacuously. The left-to-right half of the contract is covered where such
-    an engine exists: the live file runs this same probe and skips on its own
-    verdict, so a probe stuck on either answer is visible there as a skip that
-    should have been a run (or the reverse).
+    The `proj` fixture here FOLLOWS THE LANE, so the contract is measured on
+    whatever engine that lane runs — and that is exactly what makes it
+    lane-agnostic. It passes an explicit `db_path`, and `TortoiseSDK.__init__`
+    only honours `TORTOISE_DB_URI` when `db_path is None` (`tortoise/sdk.py`) —
+    but the SDK is only the FIRST gate: `_get_proj` then constructs
+    `FalkorProjection(path=…)` with an explicit path, and that class's Epic
+    #1647 TEST-MODE redirect discards the path and connects to
+    `TORTOISE_DB_URI` (`tortoise/projection/__init__.py`) unless the caller's
+    stem is exempt in `TEST_NO_REDIRECT_STEMS`, which this module is NOT
+    (`tests/_embedded.py`). So:
+      * on a URI-less carve-out lane, `proj` is the EMBEDDED backend — a
+        PRE-write engine, the case where a lying probe would run the live file
+        vacuously;
+      * on ANY URI lane (the docker shards, a 6.x measurement lane), `proj` IS
+        that server, so the LEFT-TO-RIGHT half of the contract is covered here
+        too.
+    Both readings are taken on the SAME engine in either case, which is the
+    property the assertion needs. (Two earlier versions of this paragraph each
+    mis-stated the redirect — first "follows TORTOISE_DB_URI", then "embedded
+    and nothing else"; both were false on one lane or the other.)
     """
     from tests.test_8870_version_anchor_write_order import (
         SET_ORDER_LEFT_TO_RIGHT,
@@ -540,6 +606,66 @@ def test_the_detector_does_not_charge_a_neighbouring_clause_to_a_set_item():
     """
     assert _same_clause_violations(
         "MATCH (s:Source) SET s.b = $b, s.a = 1 MERGE (t:Tag {name: s.b})"
+    ) == []
+
+
+def test_a_second_set_clause_is_scanned_with_the_first_clauses_writes():
+    """`SET … SET …` is legal and runs in order — the second clause is not clean.
+
+    #8939 review round 9, the SILENT half. `SET` was missing from `_SET_CLOSE`,
+    so with no top-level comma the first list swallowed the second clause
+    (`'s.a = 1 SET s.b = s.a'` became ONE item whose own-read exemption hid the
+    read), and the second `_set_lists` body started from a fresh `written` map.
+    Either way a cross-clause read-after-write — the exact left-to-right hazard
+    this file exists for — was reported clean. PRE-FIX: 0 violations here.
+    """
+    violations = _same_clause_violations(
+        "MATCH (s:Source {url:$u}) SET s.a = 1 SET s.b = s.a"
+    )
+    assert len(violations) == 1, violations
+    assert "EARLIER `SET` clause" in violations[0], violations
+
+    # …and a violation INSIDE the second clause is found too. PRE-FIX this was
+    # invisible as well: the clause boundary was never located, so the second
+    # clause's own item list was never scanned with its own writes.
+    inside = _same_clause_violations(
+        "MATCH (s:Source {url:$u}) SET s.a = 1 SET s.b = 2, s.c = s.b"
+    )
+    assert len(inside) == 1, inside
+    assert "item 0 WROTE it" in inside[0], inside
+
+
+def test_the_second_set_clause_is_not_charged_to_the_first_clause_items():
+    """#8939 review round 9, the LOUD half: ATTRIBUTION.
+
+    With `SET` missing from `_SET_CLOSE` the first list body of the comma form
+    is ``'s.a = 1, s.b = 2 SET s.c = s.a'``, so the second clause's read was
+    charged to the FIRST list's item 1 — naming an item (`s.b = 2`) that reads
+    nothing at all. A guard that mis-attributes a violation is a guard that
+    gets deleted, so the read must be charged to the clause that contains it
+    and to the clause (and item) that actually wrote the property.
+    """
+    violations = _same_clause_violations(
+        "MATCH (s:Source {url:$u}) SET s.a = 1, s.b = 2 SET s.c = s.a"
+    )
+    assert len(violations) == 1, violations
+    assert "clause 0, item 0" in violations[0], violations
+    assert "s.b = 2 SET" not in violations[0], (
+        "the second clause's read was charged to the first clause's last item\n"
+        + violations[0])
+
+
+def test_the_detector_does_not_carry_writes_across_merge_arms():
+    """`MERGE … ON CREATE SET … ON MATCH SET …` — only ONE arm ever runs.
+
+    So an `ON MATCH` read of a property `ON CREATE` writes is not a read of
+    anything (`ON CREATE` writing `contentHash` with no reader in front of it is
+    the legitimate shape the two-arm split exists to allow). The cross-clause
+    carry must not leak across that boundary, or every arm-split writer reds
+    falsely.
+    """
+    assert _same_clause_violations(
+        "MERGE (s:Source {url:$u}) ON CREATE SET s.a = 1 ON MATCH SET s.b = s.a"
     ) == []
 
 
