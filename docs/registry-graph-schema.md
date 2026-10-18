@@ -101,11 +101,15 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
                      // SHAPE is decided by the MINTING PATH, not by the
                      // deployment lane: `org_{org_id}` on every path that
                      // derives it — `provision_tenant` (selfhost-only; 503 in
-                     // Supabase mode), `register_user`, `agent_signup`, and the
-                     // Supabase-lane `create_org` + onboarding sub-org — and
-                     // `org_{name}` (spaces → `_`), STORED only by
-                     // `sdk.org_create`, the registry create_org lane, itself
-                     // reached through the hosted API. Customs = `org_{org_id}_{gid}`
+                     // Supabase mode), `register_user`, `agent_signup`
+                     // (including the registry `kind='default'` node it
+                     // writes), the Supabase-lane `create_org` + onboarding
+                     // sub-org — and `org_{name}` (spaces → `_`), STORED only
+                     // by `sdk.org_create`, the registry create_org lane, which
+                     // is itself reached through the hosted API and writes that
+                     // same `kind='default'` node KIND with THIS shape, so the
+                     // path, never the node kind, decides. Customs =
+                     // `org_{org_id}_{gid}`
                      // (`_graph_create` / `_provision_graph`) — the graph
                      // SWITCHER/contexts ride this. `team_*` is the LEGACY
                      // pre-#3543 prefix: still recognised by the tombstone
