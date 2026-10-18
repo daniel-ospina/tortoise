@@ -964,14 +964,16 @@ _BEST_EFFORT_OPS = frozenset({
 })
 
 
-def test_never_raise_offload_sites_pass_best_effort():
-    """Structural guard for the review's "telemetry must not gate auth" fix:
-    every `_cp_offload` wrapping a never-raise helper carries
-    ``best_effort=True``, AND the set of best-effort ops is exactly the declared
-    set — so a rename/deletion cannot hollow the guard out. The declared set is
-    the BEST-EFFORT one, which is wider than "never-raise helpers": a site
-    whose own handler converts any failure into a fail-soft body belongs here
-    too, and that is what a raising helper at a best-effort site looks like.
+def test_best_effort_offload_sites_carry_the_flag():
+    """Structural guard for the review's "telemetry must not gate auth" fix.
+
+    Two properties, both pinned: every DECLARED best-effort `_cp_offload` site
+    carries ``best_effort=True``, and the set of sites that pass the flag is
+    EXACTLY the declared set — so a rename/deletion cannot hollow the guard out.
+    The declared set is the BEST-EFFORT one, which is wider than "never-raise
+    helpers": a site whose own handler converts any failure into a fail-soft
+    body belongs here too — that is what a raising helper at a best-effort site
+    looks like (``oauth_clients_count``, #8839).
     """
     import ast
 

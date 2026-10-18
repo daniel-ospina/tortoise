@@ -172,12 +172,13 @@ def test_an_unstated_total_is_unavailable_and_carries_no_count(client, counts,
                                                               caplog):
     """`None` is "the server did not say", never "0 rows".
 
-    The body's vocabulary cannot say WHICH infrastructure state produced this
-    (a stripped `Content-Range`, a `*` total, or `count_exact` no longer being
-    sent — all three arrive here as `None`), so the server-side warning is the
-    only record of the cause. The `caplog` arm therefore exists to make deleting
-    that warning red the suite: without it the branch fires silently, which is
-    exactly the regression this arm was added for.
+    `_content_range_total` returns `None` for five shapes (absent header, no
+    `/`, empty total, `*` total, unparseable), and every one of them lands here.
+    The body can say EMPTY (`ok`/`count: 0`) versus UNSTATED, but it cannot say
+    WHICH shape produced the unstated case — so the warning is the only
+    server-side record that this arm fired at all. The `caplog` arm exists to
+    make deleting that warning red the suite; without it the branch fires
+    silently, which is the regression this arm was added for.
     """
     counts["total"] = None
 
@@ -192,7 +193,8 @@ def test_an_unstated_total_is_unavailable_and_carries_no_count(client, counts,
         "would read as 'nothing has accumulated' and retire the ruling"
     )
     assert body["reason"]
-    hits = [rec for rec in caplog.records if "stated no total" in rec.getMessage()]
+    hits = [rec for rec in caplog.records
+            if "stated no numeric total" in rec.getMessage()]
     assert hits, "the unstated-total path must leave a server-side trace"
     assert hits[0].levelname == "WARNING"
 

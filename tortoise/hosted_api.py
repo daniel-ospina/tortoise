@@ -17024,22 +17024,26 @@ async def oauth_clients_count(request: Request):
         }
     _rows, total = read
     if total is None:
-        # No server-side number is an INFRASTRUCTURE state — the server stopped
-        # stating `Content-Range`, returned a `*` total, or `count_exact`
-        # stopped being sent — not a quiet "no rows". A healthy EMPTY deployment
-        # takes the `total == 0` path and renders `ok` with `count: 0`, so the
-        # body does draw that distinction; what nothing else records is the
-        # CAUSE, which makes this the one arm that would otherwise fire silently.
+        # `_content_range_total` returns None for FIVE shapes, and this arm sees
+        # all of them: no header, no `/` in it, an empty total, a `*` total
+        # (PostgREST's answer when `Prefer: count=exact` was not honoured), or an
+        # unparseable one. None is "could not be confirmed", never "no rows": a
+        # healthy EMPTY deployment sends `*/0`, which parses to `0` and renders
+        # `ok` with `count: 0`, so the body does draw the EMPTY-vs-UNSTATED
+        # distinction. What no surface can say is WHICH of the five occurred, so
+        # this warning is the only server-side record that the arm fired at all —
+        # that is exactly what the caplog assertion in
+        # `test_an_unstated_total_is_unavailable_and_carries_no_count` pins.
         _logger.warning(
-            "oauth clients count: control plane stated no total (no "
-            "Content-Range total, or a `*` total); reporting unavailable "
-            "rather than 0",
+            "oauth clients count: control plane stated no numeric total "
+            "(Content-Range absent, or a `*` / empty / unparsable total); "
+            "reporting unavailable rather than 0",
         )
         return {
             "status": "unavailable",
             "reason": (
-                "the control plane did not state a total count (no "
-                "Content-Range total); a page length is not a total"
+                "the control plane did not state a numeric total in its "
+                "Content-Range; a page length is not a total"
             ),
             "revisit_triggers": list(_OAUTH_CLIENTS_COUNT_REVISIT_TRIGGERS),
         }
