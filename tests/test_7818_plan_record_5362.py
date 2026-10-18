@@ -28,10 +28,14 @@ Class-B test doctrine:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PLAN = REPO / "docs" / "plans" / "2026-10-09-5362-retroactive-correction.md"
+
+# Any `file.py:NNN` citation — see the rot test at the bottom of this file.
+_LINE_CITATION = re.compile(r"\S*\.py:\d+")
 
 # The pre-#7818 claims. Both are asserted ABSENT; each is present verbatim in
 # the plan before the correction and must not come back.
@@ -97,6 +101,42 @@ def test_5362_plan_r2_prices_the_half_open_flip() -> None:
         "adjacent files that do not move")
     assert "sdk.py:19221" not in row, (
         "the R2 cell still cites `_inverted` at a line the #8337 rename "
-        "invalidated; the current definition is sdk.py:25167")
+        "invalidated; cite the symbol instead")
     assert "well-formed-EMPTY" in row, (
         "the priced flip names the marker it needs WITH it (R2's own terms)")
+
+
+def test_5362_plan_r2_cites_the_read_path_by_symbol_never_by_line() -> None:
+    """R2 names the read-path surfaces; it carries no `file.py:NNN` citation.
+
+    R2 is the row the owner weighs, and every line number it used to carry had
+    rotted: `_inverted` was cited at `sdk.py:19221` (moved to `:25167` by the
+    #8337 rename, then to `:25458` when `origin/main` #8487 added 291 lines to
+    the same file), `retrieval._validity_marker` at `retrieval.py:865` (now
+    `:905`), `assembly` at `:1014` (no longer that marker), `time_aware` at
+    `:277`/`:316` (now `_as_date`/`is_stale_entry`), and `audit` at `:665`
+    (still the inverted check, by luck). Six pointers, five wrong — and a lane
+    that trusts one lands in unrelated code. Symbols do not rot; the numbers do.
+
+    (1) *What value makes this test fail?*  Re-adding any `file.py:NNN` to the
+        R2 row — e.g. the pre-fix `sdk.py:25167`, `retrieval.py:865`,
+        `:1014`, `:277`/`:316`, `:665` — or restoring the bare `:NNN`
+        continuation form the row used for sibling files.
+    (2) *Does the test reach it?*  Yes — the pattern is applied to the R2 row
+        sliced by its row key, so a citation added anywhere in the cell reds.
+    """
+    plan = PLAN.read_text(encoding="utf-8")
+    rows = [ln for ln in plan.splitlines() if ln.startswith("| **R2** |")]
+    assert len(rows) == 1, (
+        f"expected exactly one R2 row in the #5362 plan, found {len(rows)}")
+    row = rows[0]
+
+    stale = _LINE_CITATION.findall(row)
+    assert stale == [], (
+        "R2 cites code by line number; these go stale on the next rename or "
+        f"merge of the same file: {stale}. Cite the symbol instead")
+    # the bare `:NNN` continuation form is how the sibling files were cited,
+    # and it rots identically while evading the `file.py:NNN` pattern.
+    assert not re.search(r"`:\d+`", row), (
+        "R2 still carries a bare `:NNN` continuation citation — a reader cannot "
+        "tell which file it belongs to, nor whether the line is current")
