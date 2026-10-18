@@ -82,15 +82,22 @@ test('#3700/#4915: the comment strip kept the files it is scanning', () => {
 // #4915: the DOM lane renders the COMPONENT. Only a source read can see that the
 // application still mounts it, and where — an unmounted card would leave the DOM
 // suite green while the user sees nothing.
-test('#4915: main.jsx mounts the card once, inside MemorySources, with its three props', () => {
+test('#4915: main.jsx mounts the card once, inside MemorySources, with its four props', () => {
   const mounts = [...mainCode.matchAll(/<HarnessStatusCard\b[\s\S]{0,240}?\/>/g)].map((m) => m[0])
   assert.equal(mounts.length, 1,
     'exactly one mount — a second one would render a second, unpinned card')
   assert.match(mounts[0], /\bstate=\{state\}/, 'the mount must pass the live state')
   assert.match(mounts[0], /\bsessionsOn=\{sessionsOn\}/,
-    'the mount must pass the recording switch the snippet render is gated on')
+    'the mount must pass the recording switch the install-pointer render is gated on')
   assert.match(mounts[0], /\bwizardHarness=\{wizardHarness\}/,
     'the mount must pass the wizard pick the `current` row marker is keyed to')
+  // #3513 §2: the surface decides whether the manual-install recipe renders at
+  // all (epic #1714 decision #2 — the wizard mount never carries it). A mount
+  // that stops forwarding it silently reverts to the fail-closed default and
+  // the Settings disclosure disappears, which no DOM test can see (the DOM lane
+  // renders the component, not this wiring).
+  assert.match(mounts[0], /\bsurface=\{surface\}/,
+    'the mount must forward the surface the recipe gate depends on')
   const memorySources = mainCode.indexOf('function MemorySources(props)')
   assert.notEqual(memorySources, -1, 'MemorySources must exist')
   const settingsTab = mainCode.indexOf("\ncreateRoot(document.getElementById('root'))", memorySources)

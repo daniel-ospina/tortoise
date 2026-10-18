@@ -26,6 +26,12 @@
 //      in the fragment's place cannot satisfy (1) and (4) at once);
 //   5. a failed attempt renders the disclosure AND the assertive alert is
 //      described by the name group that carries it.
+//   6. #3513 §2 — the SURFACE split (epic #1714 decision #2): the WIZARD mount
+//      renders status + the install POINTER and NEVER the recipe; the SETTINGS
+//      mount renders the recipe as a COLLAPSED, UNCONDITIONAL disclosure. This
+//      is the render-level proof that the shared row is not itself an install
+//      surface, and that "Settings carries it collapsed" is a real collapsed
+//      `<details>`, not a comment.
 //
 // WHAT IT IS NOT. It renders the COMPONENT with fabricated props — it cannot
 // see that `main.jsx` still mounts it (the tripwire pins that mount), nor any
@@ -54,7 +60,7 @@ import {
   HARNESS_NAMES,
   HARNESS_ORDER,
 } from './harnesses.js'
-import { captureErrorForHarness, harnessAttributionForHarness } from './captureStatus.js'
+import { captureErrorForHarness, harnessAttributionForHarness, CAPTURE_INSTALL_POINTER } from './captureStatus.js'
 
 // The shipped stylesheet, loaded into the jsdom document (vite.config.js sets
 // `test.css: true`). Without this the visibility assertion in test 2 would read
@@ -171,35 +177,95 @@ test('#3700: the disclosure is DERIVED — a supported row with nothing observed
     'the row states the honest nothing-observed state instead')
 })
 
-test("#4915: the install snippet is the row's OWN command, and only while recording is on", () => {
-  // This node is the one #4885's main.jsx prose census used to pin
-  // (`<pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>`); it moved here
-  // with the row (see `wizardRenderedCopy.js` → IMPORTED_NAMES), so the DOM lane
-  // carries it. Two claims a text pin approximated and this makes: the text the
-  // user receives is THIS harness's command (not a literal, not a neighbour's),
-  // and the recording-off gate is real.
+test("#3513 §2: the WIZARD mount never carries the install recipe — it carries status + the pointer", () => {
+  // Epic #1714's settled decision #2 (do not re-litigate): "The install runs in
+  // the agent prompt … the WIZARD mount never carries the recipe." This is the
+  // defect #3517's agent-prompt-install decision exists to remove: a shared row
+  // that renders the recipe on BOTH mounts gives the user two install surfaces
+  // that can disagree. The wizard renders the POINTER instead.
+  const state = { session_recording: true }   // every supported row: install-pending
+  for (const [label, node] of [
+    ['default (an undeclared surface must not publish the manual path)',
+      <HarnessStatusCard state={state} sessionsOn={true} wizardHarness={null} />],
+    ['surface="wizard"',
+      <HarnessStatusCard state={state} sessionsOn={true} wizardHarness={null} surface="wizard" />],
+  ]) {
+    const { container, unmount } = render(node)
+    assert.equal(container.querySelector('pre.snippet'), null,
+      `${label}: the wizard mount renders NO install command`)
+    assert.equal(container.querySelector('details.manual-install'), null,
+      `${label}: the wizard mount renders no manual-install disclosure either`)
+    const row = rowOf(container, SUPPORTED)
+    assert.equal(norm(row.textContent).includes(norm(CAPTURE_INSTALL_POINTER)), true,
+      `${label}: the row states the pointer — what replaced the recipe`)
+    unmount()
+  }
+
+  // the pointer is not noise on an installed row: it is the install-pending
+  // slot's answer (the state where the user needs to know how it gets installed).
+  // Row-scoped: every OTHER supported harness is still install-pending in these
+  // fixtures, so a container-wide text read would see their pointers.
+  const active = { session_recording: true, [`session_capture_receipt_${SUPPORTED}`]: true }
+  const on = render(<HarnessStatusCard state={active} sessionsOn={true} wizardHarness={null} />)
+  assert.equal(norm(rowOf(on.container, SUPPORTED).textContent).includes(norm(CAPTURE_INSTALL_POINTER)), false,
+    'an active row has already installed — it carries no install pointer')
+  const off = render(<HarnessStatusCard state={state} sessionsOn={false} wizardHarness={null} />)
+  assert.equal(norm(rowOf(off.container, SUPPORTED).textContent).includes(norm(CAPTURE_INSTALL_POINTER)), false,
+    'recording off → no pointer, even while the state is install-pending')
+})
+
+test("#3513 §2: the SETTINGS mount carries the recipe as a COLLAPSED disclosure, unconditionally", () => {
+  // "The dashboard owns STATUS + the off-switch: … the SETTINGS mount may carry a
+  // collapsed manual-install disclosure, a Settings-first user having no other
+  // path to it." Collapsed is the claim that keeps it from being a SECOND
+  // install surface: it cannot disagree with the agent prompt until opened.
   const state = { session_recording: true }   // every supported row: install-pending
   const other = HARNESS_ORDER.find((h) => h !== SUPPORTED && HARNESS_CAPTURE_SUPPORT[h]
     && HARNESS_CAPTURE_INSTALL[h] !== HARNESS_CAPTURE_INSTALL[SUPPORTED])
   assert.ok(other, 'precondition: a second supported harness with its own install command')
 
-  const { container, unmount } = render(
-    <HarnessStatusCard state={state} sessionsOn={true} wizardHarness={null} />)
-  const snippet = rowOf(container, SUPPORTED).querySelector('pre.snippet')
-  assert.ok(snippet, 'an install-pending supported row renders its install command while recording is on')
+  const { container } = render(
+    <HarnessStatusCard state={state} sessionsOn={true} wizardHarness={null} surface="settings" />)
+  const details = rowOf(container, SUPPORTED).querySelector('details.manual-install')
+  assert.ok(details, 'the Settings mount renders the manual-install disclosure')
+  assert.equal(details.hasAttribute('open'), false,
+    'the disclosure is COLLAPSED by default — never expanded at first paint')
+  assert.equal(norm(details.querySelector('summary').textContent), 'Install manually',
+    'the disclosure has a labelled, focusable summary (the default <details> tab stop)')
+  const snippet = details.querySelector('pre.snippet')
+  assert.ok(snippet, 'the collapsed disclosure holds the install command')
   assert.equal(snippet.textContent, HARNESS_CAPTURE_INSTALL[SUPPORTED],
     'the row renders its OWN harness\'s command')
-  assert.equal(rowOf(container, other).querySelector('pre.snippet').textContent,
+  assert.equal(rowOf(container, other).querySelector('details.manual-install pre.snippet').textContent,
     HARNESS_CAPTURE_INSTALL[other],
     'the neighbouring row renders ITS command — a single literal cannot satisfy both rows')
-  assert.equal(rowOf(container, UNSUPPORTED).querySelector('pre.snippet'), null,
+  assert.equal(rowOf(container, UNSUPPORTED).querySelector('details.manual-install'), null,
     'an unsupported row has no install path, so it renders no command')
-  unmount()
-
-  const off = render(<HarnessStatusCard state={state} sessionsOn={false} wizardHarness={null} />)
-  assert.equal(off.container.querySelector('pre.snippet'), null,
-    'recording off → no install command, even while the state is install-pending')
 })
+
+test('#3513 §2: the Settings disclosure is UNCONDITIONAL — install state and the recording switch do not gate it', () => {
+  // The recorded rule: render it "regardless of install state and of the
+  // recording switch", because a Settings-first user who never ran the agent
+  // prompt has no other path to the recipe and a redundant disclosure is
+  // strictly better than an orphaned pointer. Both arms below must still find
+  // it — a gate re-added here is the regression this test exists for.
+  const cases = [
+    ['recording off, nothing observed', { state: { session_recording: true }, sessionsOn: false }],
+    ['recording off entirely', { state: {}, sessionsOn: false }],
+    ['already active (installed and filing)',
+      { state: { session_recording: true, [`session_capture_receipt_${SUPPORTED}`]: true }, sessionsOn: true }],
+    ['waiting (install probe observed)',
+      { state: { session_recording: true, [`install_probe_${SUPPORTED}`]: true }, sessionsOn: true }],
+  ]
+  for (const [label, { state, sessionsOn }] of cases) {
+    const { container } = render(
+      <HarnessStatusCard state={state} sessionsOn={sessionsOn} wizardHarness={null} surface="settings" />)
+    const details = rowOf(container, SUPPORTED).querySelector('details.manual-install')
+    assert.ok(details, `${label}: the Settings disclosure still renders`)
+    assert.equal(details.hasAttribute('open'), false, `${label}: and stays collapsed`)
+  }
+})
+
 
 test('#3700: a failed attempt renders the disclosure, and the alert is described by its name group', () => {
   const DETAIL = 'timed out'

@@ -24,6 +24,22 @@
 // `main.jsx` imports this module and renders it where the inline block used to
 // be; the DOM output is unchanged. Copy still lives in `harnesses.js` /
 // `captureStatus.js` — this module renders helpers' returns and authors none.
+//
+// #3513 §2 — THE `surface` PROP, AND WHY THE RECIPE IS NOT THE SHARED ROW'S.
+// Epic #1714's settled decision #2 (do not re-litigate): "The install runs in
+// the agent prompt … the dashboard owns STATUS + the off-switch: the WIZARD
+// mount never carries the recipe, while the SETTINGS mount may carry a
+// collapsed manual-install disclosure, a Settings-first user having no other
+// path to it." So the row renders status + `CAPTURE_INSTALL_POINTER` on every
+// surface, and the manual recipe ONLY on `surface="settings"`, inside a
+// collapsed `<details>`. The recipe is not deleted — the agent prompt consumes
+// it — but a shared row that renders it unconditionally gives the user TWO
+// install surfaces that can disagree, which is the defect #3517's
+// agent-prompt-install decision exists to remove.
+//
+// The default is `'wizard'` deliberately (fail-closed): a caller that does not
+// declare a surface must not publish the manual path, and every site that fails
+// to declare one is a wizard. Only the Settings mount opts in by name.
 import {
   HARNESS_CAPTURE_INSTALL,
   HARNESS_CAPTURE_REASON,
@@ -32,13 +48,14 @@ import {
   HARNESS_ORDER,
 } from './harnesses.js'
 import {
+  CAPTURE_INSTALL_POINTER,
   captureErrorForHarness,
   captureStatusForHarness,
   captureStatusLabelForHarness,
   harnessAttributionForHarness,
 } from './captureStatus.js'
 
-export function HarnessStatusCard({ state, sessionsOn, wizardHarness }) {
+export function HarnessStatusCard({ state, sessionsOn, wizardHarness, surface = 'wizard' }) {
   const status = (h) => captureStatusForHarness(state, h)
   const lastError = (h) => captureErrorForHarness(state, h)
   // #3700: the per-row harness attribution — rendered beside the harness name.
@@ -95,8 +112,27 @@ export function HarnessStatusCard({ state, sessionsOn, wizardHarness }) {
               {supported && <span className="capture-state">{captureStatusLabelForHarness(state, h)}</span>}
             </div>
             {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
+            {/* #3513 §2: the POINTER, not the recipe. Rendered in the slot the
+                inline recipe used to occupy (recording on, nothing observed
+                yet) — the state where a user needs to know HOW the recorder
+                gets installed, answered with the path that actually installs
+                it: the agent prompt. */}
             {supported && st === 'install-pending' && sessionsOn && (
-              <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
+              <p className="dim small">{CAPTURE_INSTALL_POINTER}</p>
+            )}
+            {/* The Settings mount is the ONE recorded exception (epic decision
+                #2). It renders the manual recipe COLLAPSED and UNCONDITIONALLY
+                — regardless of install state and of the recording switch —
+                because a Settings-first user who never saw the agent prompt
+                would otherwise be pointed at a prompt they never saw, and a
+                redundant disclosure is strictly better than an orphaned
+                pointer. A collapsed <details> is not a second install surface:
+                it cannot disagree with the prompt until the user opens it. */}
+            {surface === 'settings' && supported && (
+              <details className="manual-install">
+                <summary className="dim small">Install manually</summary>
+                <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
+              </details>
             )}
             {/* #3700: the alert's description is the row's name group
                 (name + disclosure). */}

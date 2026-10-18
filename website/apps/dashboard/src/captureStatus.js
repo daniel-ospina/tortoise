@@ -21,10 +21,23 @@ import {
 // the dashboard panel, and the harness copy reference verbatim.
 export const CAPTURE_STATES = Object.freeze(['off', 'install-pending', 'waiting', 'active'])
 
+// #3513 §2 (epic #1714 decision #2: "the install runs in the agent prompt"):
+// the dashboard owns STATUS + the off-switch, so the shared capture row renders
+// this POINTER instead of the install recipe. The recipe itself is not deleted —
+// it is consumed by the setup prompt the connect step hands to the agent
+// (`HARNESS_INSTALL`), and the Settings mount additionally exposes it as a
+// collapsed manual-install disclosure for a Settings-first user who never saw
+// that prompt. Copy lives here so both mounts cannot drift into two different
+// sentences (this module is the copy home; harnessStatusCard.jsx renders it).
+export const CAPTURE_INSTALL_POINTER =
+  'Your agent installs the recorder — the setup prompt on the connect step sets it up.'
+
 // Per-harness capture status from onboarding state:
 // - off            — the team's session_recording off-switch is not set
 // - install-pending — recording on, NO server-visible install probe yet (the
-//                     install steps render inline)
+//                     row states that honest state and points at the agent
+//                     prompt; it never renders the install recipe — see
+//                     CAPTURE_INSTALL_POINTER and harnessStatusCard.jsx)
 // - waiting        — install probe seen (a server-visible install signal), no
 //                    capture receipt yet (waiting shown only after a probe)
 // - active         — a per-harness capture receipt is present
