@@ -518,10 +518,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "AND (tgt.is_operator IS NULL OR tgt.is_operator = false) "
         "AND tgt.op_type IS NULL\n"
         # #7927: the emitted FIX interpolates these ids, so the identity must be
-        # the node's real key. ``entities._upsert_event`` writes ``eventId`` and
-        # may leave ``id`` unset, and ``id:'None'`` in a repair string matches
-        # nothing — the "unactionable fix" failure the label was dropped for.
-        # Same coalesce ``ep.get_contested_claims`` uses for the same reason.
+        # the node's real key. ``_upsert_event`` sets ``id == eventId``, so an
+        # in-tree Event is fine — but a legacy / out-of-tree Event may be keyed
+        # on ``eventId`` only (the #7936 residual ``consistency.py`` describes),
+        # and ``id:'None'`` in a repair string addresses nothing. Same identity
+        # ``ep.get_contested_claims`` coalesces.
         f"RETURN coalesce(src.id, src.eventId), coalesce(tgt.id, tgt.eventId), "
         "coalesce(tgt.content, tgt.name, tgt.title, '') "
         f"LIMIT {CHECK5_FETCH_LIMIT}",
@@ -624,8 +625,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         proj,
         "MATCH (op:Point {is_operator: true})-[mit:mitigates]->(m)\n"
         f"WHERE {epistemic_disjunction('m')} AND {_op_in_kinds('op', 'm')}\n"
-        # #7927: ``m`` may be an :Event keyed on ``eventId`` with no ``id``;
-        # the emitted repair interpolates this value, so it must be the real key.
+        # #7927: ``m`` may be an :Event keyed on ``eventId`` with no ``id``
+        # (legacy / out-of-tree — ``_upsert_event`` sets both), so the identity
+        # is coalesced. That value alone is NOT enough: the repair below used to
+        # MATCH ``(m {id:'<value>'})``, which matches NOTHING on an
+        # eventId-keyed node, so the emitted fix silently left the very edge
+        # this check reports. Hence the coalesced WHERE below.
         "RETURN DISTINCT op.id, coalesce(m.id, m.eventId), "
         "coalesce(m.content, m.name, m.title, '') "
         f"LIMIT {SAMPLE_LIMIT}",
@@ -641,10 +646,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # #7927: ``m`` is unlabeled in the FIX too — it may now be a
             # :Subject/:Object/:Event, and a ``(m:Point {id:…})`` pattern would
             # match nothing, making the suggested repair a silent no-op that
-            # leaves the very edge this issue reports.
-            fix=(f"MATCH (op:Point {{id:'{op_id}'}})-[r:mitigates]->"
-                 f"(m {{id:'{m_id}'}}) DELETE r "
-                 f"CREATE (op)-[:mitigated_by]->(m)"),
+            # leaves the very edge this issue reports. The match is key-AGNOSTIC
+            # for the same reason: an eventId-keyed ``:Event`` has no ``id``
+            # property, so ``(m {{id:'…'}})`` is just as unaddressable.
+            fix=(f"MATCH (op:Point {{id:'{op_id}'}})-[r:mitigates]->(m) "
+                 f"WHERE coalesce(m.id, m.eventId) = '{m_id}' "
+                 f"DELETE r CREATE (op)-[:mitigated_by]->(m)"),
             legacy=True,
         )
         for op_id, m_id, m_content in rows6b

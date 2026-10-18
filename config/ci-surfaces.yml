@@ -5002,11 +5002,12 @@ durations:
 
   # #7927 (#3400 policy, found by review): a file ADDED BY A PR can never appear
   # in a junit artifact, so it packs at the flat 2.0s default — and its weight is
-  # a SHARD-LAYOUT input, not decoration. 45.0 is the observed MAXIMUM rounded up
-  # across three warm `TORTOISE_TEST_CARVE_OUT=1` embedded-lane runs (sum of
-  # testcase/@time: 31.27s, 42.13s; a third run under fleet load read 48.17s wall
-  # for the whole file, hence the rounded-up ceiling) — the conservative side for
-  # the shard-balance veto.
+  # a SHARD-LAYOUT input, not decoration. The measured metric is the sum of
+  # ``testcase/@time`` over two warm `TORTOISE_TEST_CARVE_OUT=1` embedded-lane
+  # runs: 31.27s and 42.13s. 45.0 sits above the larger of those — the
+  # conservative side for the shard-balance veto. (A third, fleet-loaded run read
+  # 48.17s WALL for the whole file; wall time is NOT this metric, so it is not
+  # what the weight was derived from.)
   #
   # MEASURED AT THE HEAD THAT ADDS IT: `--integrity` is GREEN with OR without the
   # row (fast files 911; coverage 821/911 = 90.12% with it, 820/911 = 90.01%

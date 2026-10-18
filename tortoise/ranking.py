@@ -210,14 +210,27 @@ def resolve_contested_relevance(
             # :Subject/:Object/:Event belief.
             f"  WHERE {epistemic_disjunction('src')} "
             "WITH n, c, r, src, ri "
-            "WHERE c.id <> n.id AND (src.id IS NULL OR src.id <> n.id) AND ("
+            # #7927: identity is ``coalesce(id, eventId)``, NOT a bare ``id``.
+            # A legacy / out-of-tree ``:Event`` may be keyed on ``eventId``
+            # only, and then ``c.id <> n.id`` evaluates NULL and DROPS the row
+            # (and a bare ``coalesce(src.id, c.id)`` returns NULL, so the
+            # caller's ``if not pid or not claim_id: continue`` drops it again)
+            # — the W4 boost would silently never fire for a keyless-Event
+            # counter-claim. The same identity ``ep.get_contested_claims`` and
+            # the audit wiring checks use; all three widened in this change, so
+            # they must not disagree on how a node is addressed.
+            "WHERE coalesce(c.id, c.eventId) <> coalesce(n.id, n.eventId) "
+            "AND (src.id IS NULL OR src.eventId IS NULL "
+            "     OR coalesce(src.id, src.eventId) "
+            "        <> coalesce(n.id, n.eventId)) AND ("
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
             "  ((c.is_operator = false OR c.is_operator IS NULL) "
             "   AND c.op_type IS NULL)) "
             # #7927: ``c`` is the NANDer — the counter-claim is epistemic too.
             f"AND {epistemic_disjunction('c')} "
             "AND " + _exclude_status_clause("c") + " "
-            "RETURN n.id, coalesce(src.id, c.id), "
+            "RETURN coalesce(n.id, n.eventId), "
+            "  coalesce(src.id, src.eventId, c.id, c.eventId), "
             # #7927: the counter-claim TEXT must come from the node that
             # actually carries it. A :Subject/:Object stores ``name``/``title``
             # (never ``content``), so the old chain fell through to

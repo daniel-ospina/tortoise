@@ -748,12 +748,20 @@ def test_why_layer_records_its_residual_where_it_will_be_edited():
 
 
 def test_audit_wiring_check_names_a_key_less_event_by_its_real_key(sdk):
-    """The widened wiring checks EMIT a repair string that interpolates the
-    endpoint's key. An ``:Event`` written by ``entities._upsert_event`` may carry
-    ``eventId`` and no ``id`` — so a bare ``RETURN m.id`` renders
-    ``(m {id:'None'})``, a "fix" that matches nothing and silently leaves the
-    very edge the check just reported. The same ``coalesce(id, eventId)``
-    identity ``ep.get_contested_claims`` uses, for the same reason.
+    """The widened wiring checks EMIT a repair that must be APPLICABLE.
+
+    A legacy / out-of-tree ``:Event`` may be keyed on ``eventId`` with no ``id``
+    (``_upsert_event`` sets both, so this is not its shape — see the #7936
+    residual in ``consistency.py``). A bare ``RETURN m.id`` then renders
+    ``(m {id:'None'})``; interpolating the coalesced VALUE alone is no better,
+    because ``(m {id:'<the eventId>'})`` matches nothing on a node with no
+    ``id`` property. Either way the emitted "fix" silently leaves the very edge
+    the check just reported.
+
+    So this asserts the EFFECT, not the string: the emitted repair is executed
+    and the edge must actually be gone. An emitted-but-unapplicable fix is the
+    defect, not the message — the same ISSUED-vs-APPLIED distinction the BFS
+    draft test makes.
     """
     proj = sdk._get_proj()
     proj.g.query("CREATE (op:Point {id:'audit-op-6b', is_operator:true, "
@@ -770,8 +778,20 @@ def test_audit_wiring_check_names_a_key_less_event_by_its_real_key(sdk):
     legacy = [i for i in report.issues
               if i.issue_type == "legacy_mitigates_edge"]
     assert legacy, f"the widened check did not see the :Event endpoint: {report}"
+    def _edges(rel: str) -> int:
+        return proj.g.query(
+            f"MATCH (:Point {{id:'audit-op-6b'}})-[r:{rel}]->() RETURN count(r)"
+        ).result_set[0][0]
+
+    assert _edges("mitigates") == 1, "fixture broken: the legacy edge is absent"
     for issue in legacy:
         assert "None" not in issue.fix, (
             f"the repair string interpolates a missing key: {issue.fix!r}")
         assert "audit-ev-keyless" in issue.fix, (
             f"the repair string cannot address the node it reports: {issue.fix!r}")
+        proj.g.query(issue.fix)
+    assert _edges("mitigates") == 0, (
+        "the emitted repair did not remove the edge it reports — it is "
+        "unapplicable, which is the defect this test exists for")
+    assert _edges("mitigated_by") == 1, (
+        "the emitted repair did not create the replacement edge")

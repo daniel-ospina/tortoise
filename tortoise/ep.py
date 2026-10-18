@@ -1849,8 +1849,9 @@ class TortoiseEP:
         # widened the EP factor extraction: a non-Point endpoint of a factor is
         # measured, which ``test_7902_write_path_label_widening::
         # test_operator_non_point_input_is_ep_live`` asserts by reading the
-        # neighbour's posterior back. (Not the SEED half — no test seeds a
-        # non-Point into ``_affected_claims``.) A
+        # neighbour's posterior back — and ``_affected_claims`` resolves a
+        # non-Point SEED too, so an entity reached only as a seed is measured as
+        # well. A
         # measured-but-evidence-free entity reaches a SYMMETRIC posterior
         # (α=β, measured 1.26/1.26 → variance 0.071), which is over the 0.04 bar
         # and DOES list — consistent with every other surface, which reads such
