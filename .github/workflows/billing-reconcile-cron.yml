@@ -33,7 +33,8 @@ name: billing-reconcile-cron
 #         retrying does not repair them; the body's `reason` names the leg. (A
 #         control-plane OUTAGE is a different path entirely: `query_all` raises a
 #         bare RuntimeError, which this endpoint does not catch, so it arrives as
-#         an unnamed 500 with no body. Do not describe that as retryable here.)
+#         an unnamed 500 whose body is the app's generic
+#         `{"detail": "Internal server error"}` — no `status`, no `reason`.)
 #       - `reconcile_stuck`: a previous pass has held the reconcile lock past
 #         its staleness bound and is presumed WEDGED — the fleet is NOT being
 #         reconciled, and retrying will NOT help (the lock clears when that pass
