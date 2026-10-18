@@ -1116,10 +1116,10 @@ Packs declare equivalences between kinds across packs via `equivalentTo`:
 
 ```yaml
 equivalentTo:
-  issue: [pm:task]
+  issue: [pm:issue]
 ```
 
-Bidirectional: querying `dev:issue` also returns `pm:task`, and vice versa.
+Bidirectional: querying `dev:issue` also returns `pm:issue`, and vice versa.
 
 ---
 
