@@ -68,7 +68,9 @@ def _flat(text: str) -> str:
     `//` and hard-wrapped, so a phrase assertion against the RAW slice is
     defeated by a line break (verified: "not by the deployment lane" straddles a
     wrap and was invisible to a raw `in` test). Every phrase-level assertion
-    therefore reads the FLATTENED cell; shape-level ones can keep the raw slice.
+    therefore reads the FLATTENED text (the cell, its default-graph clause, and
+    the Default-graph-semantics bullet); shape-level ones can keep the raw
+    slice.
     """
     return " ".join(text.replace("//", " ").split())
 
@@ -309,14 +311,17 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
             in hosted_src), (
         "`agent_signup`'s registry branch must keep writing that SAME "
         "`kind='default'` node kind from its own `graph_name` "
-        "(`org_{org_id}`) — the other half of the cell's node-kind claim", )
+        "(`org_{org_id}`) — the other half of the cell's node-kind claim")
 
     assert "team_<name>" not in clause, (
         "the pre-#3543 `team_<name>` is not the default graph's namespace")
     assert "team_<name>" not in _namespace_cell(), (
         "the pre-#3543 `team_<name>` must not appear anywhere in the cell")
 
-    bullet = _default_graph_bullet()
+    # Flattened, like every other phrase assertion: this slice is hard-wrapped
+    # too, so a future re-wrap that splits the clause would false-RED a raw
+    # `in` test — the failure `_flat` exists to prevent.
+    bullet = _flat(_default_graph_bullet())
     assert "namespace IS that stored `graph_name`" in bullet, (
         "the no-migration bullet must say the default graph's namespace IS the "
         "stored `graph_name` — a bare 'graph_name' substring is satisfied by the "
@@ -521,10 +526,11 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
     assert "sdk.org_create" in row_name_half, (
         "the row's `org_{name}` half must name `sdk.org_create` as that shape's "
         "only source")
-    assert "the lane does" not in row, (
-        "the row must not claim the deployment lane decides the shape — "
-        "`register_user` / `agent_signup` mint `org_{org_id}` before any lane "
-        "branch, and `provision_tenant` is selfhost-only")
+    # (`the lane does` is asserted as a negative on the CELL only. The row never
+    # carried that phrase — its pre-#9052 wording is "Which lane mints the
+    # graph decides the shape" — so a row-level `"the lane does" not in row`
+    # fires on no version of this file: it reads as a guard and guards nothing.
+    # The row's axis is carried below by assertions that actually bite.)
     # The AXIS, positively and negatively — the correction this PR makes, not
     # just the shapes it lists. `origin/main`'s row states "Which lane mints the
     # graph decides the shape, not whether the deployment is hosted" and passes
@@ -546,11 +552,30 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
     assert "Which lane mints" not in row, (
         "the row must not carry the literal pre-#9052 claim that the lane that "
         "mints decides the shape — that is the framing this PR corrects")
-    assert "the registry default node" not in row, (
-        "the row must not list the registry `kind='default'` node as a bare "
-        "deriver: that node KIND is written with BOTH shapes (`agent_signup`'s "
-        "registry branch with `org_{org_id}`, `sdk.org_create` with "
-        "`org_{name}`), so it must be named by its minter, as the cell does")
+    # The node-kind attribution, POSITIVELY first: the row must name the node
+    # through its MINTER, exactly as the cell does. The negative alone was
+    # inert — the identifier both docs use is "the registry `kind='default'`
+    # node", which does not contain the literal "the registry default node", so
+    # a bare-deriver regression (`... `agent_signup`, the registry `kind='default'`
+    # node; `org_{name}` only from `sdk.org_create` ...`) passed it green while
+    # dropping the parenthetical. So require the minter form, then bound the
+    # number of node mentions: one, the minter one. (A literal ban on a
+    # particular bare spelling is what failed before — a reworded bare listing
+    # slips past it, the same defect the authz-note pin's docstring names.)
+    minter_ref = ("`agent_signup` (including the registry `kind='default'` node "
+                  "it writes)")
+    assert minter_ref in row_org_id_half, (
+        "the row must attribute the registry `kind='default'` node to the "
+        "MINTER that writes it — `agent_signup`'s registry branch stores "
+        "`org_{org_id}` there — not list it as one more `org_{org_id}` deriver: "
+        "that node KIND is written with BOTH shapes (`agent_signup` with "
+        "`org_{org_id}`, `sdk.org_create` with `org_{name}`), so the artifact "
+        "alone does not decide the shape")
+    assert row.count("the registry `kind='default'` node") == 1, (
+        "and it must be the row's ONLY mention of the registry "
+        "`kind='default'` node — a second, bare mention lists it as one more "
+        "`org_{org_id}` deriver, and `sdk.org_create` writes that same node "
+        "KIND with `org_{name}`, so the node kind is not the discriminator")
     cited = re.findall(r"supabase/migrations/[\w.\-]+\.sql", row)
     assert cited, (
         "the coarse-isolation row must keep citing the `graphs` table's own "
