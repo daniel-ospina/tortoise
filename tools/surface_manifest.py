@@ -79,6 +79,16 @@ from pathlib import Path
 
 import yaml
 
+# #4828: `_code_digest`, `_attribute_digest` and `_served_attributes` below are
+# DELIBERATE duplicates of the same helpers in `tools/surface-guard.py`, and this
+# duplication must NOT be "tidied" into a shared module. CI pins the guard to the base
+# ref by OVERWRITING that one file in the PR's tree, so a module it imported would be
+# PR-authored — a PR could then hand the gate that measures it a digest returning the
+# baseline's recorded values, and the expansion gate would go green on a real surface
+# change (#4606, #5132). What holds the copies together instead is
+# `tests/test_surface_manifest.py::test_the_two_drivers_agree_on_the_served_identity_helpers`:
+# a change applied to ONE copy reds there. Edit BOTH, or it reds.
+
 
 def _code_digest(code) -> str:
     """Move-invariant, implementation-complete digest of a code object.

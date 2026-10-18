@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import difflib
 import pathlib
 import subprocess
 import sys
@@ -1215,6 +1216,182 @@ def test_code_digest_is_move_invariant_and_constant_sensitive():
     exec(compile(spaced, "<t>", "exec"), g2)
     assert g1["f"].__code__.co_firstlineno != g2["f"].__code__.co_firstlineno
     assert guard._code_digest(g1["f"].__code__) == guard._code_digest(g2["f"].__code__)
+
+
+# ── #4828: the two copies of the served-identity helpers are a CONTRACT ───────
+# `tools/surface_manifest.py` (the generator / `check` side) and `tools/surface-guard.py`
+# (the pinned expansion gate) each carry their OWN copy of the three helpers that define the
+# identity of a served handler: `_code_digest`, `_attribute_digest`, `_served_attributes`.
+# They are code-identical today (measured, docstrings blind), and they CANNOT be unified into
+# a shared module — CI pins the guard to the base ref by overwriting that ONE file in the
+# PR's tree, so a sibling module it imported would be PR-authored and the pinned gate would
+# be influenceable by the PR it measures. The net that replaces the shared module is this
+# section: a fix applied to ONE copy reds here, instead of leaving the other silently stale
+# over the identity of the SAME served handler.
+
+#: The identity helpers both drivers must keep in lockstep. All three feed the same recorded
+#: fingerprint (`_served_attributes` -> `_attribute_digest` -> `_code_digest`), so guarding
+#: only the first would leave the other two free to diverge.
+IDENTITY_HELPERS = ("_code_digest", "_attribute_digest", "_served_attributes")
+
+#: The richest fixture the digest can be handed: a docstring (`co_consts` carries it, so the
+#: digest is docstring-sensitive), a nested code object (which must be RECURSED, never
+#: repr'd), and a non-ASCII constant.
+_IDENTITY_FIXTURE_SRC = '''
+def f(arg=None):
+    """fixture docstring — carried in co_consts, so the digest is docstring-sensitive."""
+    def inner(x):
+        return x * 2
+    return f"h\u00e9llo:{arg!r}:{inner(2)}"
+'''
+
+#: `co_code`/`co_consts` are interpreter-version-specific, so the golden is keyed by the
+#: version that produced it — `.python-version` and the `surface-guard` CI job both pin 3.12.
+_PINNED_CODE_DIGEST = {(3, 12): "f9a6ea1687a6e3c8"}
+
+
+def _helper_code(path: Path, name: str) -> str:
+    """One module-level function's code as comparable, readable source.
+
+    `ast.unparse` drops comments and normalises formatting, so the comparison is about CODE,
+    and a mismatch prints as a real diff. Docstrings are stripped on top: each copy's prose
+    names its own driver ("this gate" vs "this file"), which is not a behavioural difference.
+    """
+    import ast
+
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                node.body = body[1:] or [ast.Pass()]
+            return ast.unparse(node)
+    raise AssertionError(f"{path.name} does not define {name}()")
+
+
+def _fixture_code(src: str = _IDENTITY_FIXTURE_SRC):
+    namespace: dict = {}
+    exec(compile(src, "<identity-fixture>", "exec"), namespace)
+    return namespace["f"].__code__
+
+
+def test_the_two_drivers_agree_on_the_served_identity_helpers():
+    """#4828 — a fix applied to ONE copy of an identity helper is caught here.
+
+    The failure this prevents, named: the two drivers would then compute DIFFERENT
+    identities for the SAME served handler, and the disagreement is silent — each gate
+    still compares against the baseline it produced with its own copy, so both stay green
+    while the surface gate and the derivation lint measure different things.
+    """
+    manifest_src = ROOT / "tools" / "surface_manifest.py"
+    guard_src = ROOT / "tools" / "surface-guard.py"
+
+    for name in IDENTITY_HELPERS:
+        manifest_code = _helper_code(manifest_src, name)
+        guard_code = _helper_code(guard_src, name)
+        delta = "\n".join(
+            difflib.unified_diff(
+                manifest_code.splitlines(),
+                guard_code.splitlines(),
+                f"surface_manifest.py::{name}",
+                f"surface-guard.py::{name}",
+                lineterm="",
+                n=1,
+            )
+        )
+        assert not delta, (
+            f"{name}() has diverged between the two drivers — they now disagree about the "
+            f"identity of the SAME served handler, silently. Apply the change to BOTH "
+            f"copies (#4828); they cannot be unified, because the guard is pinned to the "
+            f"base ref and must stay self-contained.\n{delta}"
+        )
+
+
+def test_both_drivers_digest_the_same_fixture_identically():
+    """Behavioural parity, not textual: both copies over the rich fixture, one answer."""
+    code = _fixture_code()
+    manifest_digest = _load_manifest_tool()._code_digest(code)
+    guard_digest = _load_guard()._code_digest(code)
+
+    assert guard_digest == manifest_digest, (
+        f"the two copies digested the same fixture differently "
+        f"({guard_digest} vs {manifest_digest}) — they are not one contract"
+    )
+
+
+def test_the_digest_definition_is_pinned_to_a_measured_value():
+    """Freeze the DEFINITION, not only the agreement.
+
+    Parity alone is satisfied by a change applied to both copies together (a new `co_*`
+    folded in, a different truncation length, a different const-recursion rule) — which
+    silently redefines what "the same served handler" means, and would then re-stamp every
+    row of the baseline as an unrelated diff.
+    """
+    pinned = _PINNED_CODE_DIGEST.get(sys.version_info[:2])
+    if pinned is None:
+        pytest.skip(
+            f"no pinned digest for Python {sys.version_info[:2]} — `co_code` is "
+            f"interpreter-version-specific; measure one on this interpreter and add it "
+            f"to _PINNED_CODE_DIGEST"
+        )
+    assert _load_guard()._code_digest(_fixture_code()) == pinned, (
+        "the served-identity digest changed value — this re-identifies every served "
+        "handler, so it must be a deliberate act with a re-cut, not a silent edit (#4828)"
+    )
+
+
+def test_the_digest_is_docstring_sensitive():
+    """The measured property #4828 asks to record in the contract.
+
+    `co_consts` carries the docstring, so a docstring-only edit changes a handler's
+    identity — the module-level form too, at `co_consts[0]`. Stated as a test because it is
+    counter-intuitive (a docstring is not behaviour) and a lane reading the digest's
+    docstring is entitled to check the claim.
+    """
+    base = _load_guard()._code_digest(_fixture_code())
+    renamed_docstring = _IDENTITY_FIXTURE_SRC.replace("fixture docstring", "a DIFFERENT docstring")
+    assert _load_guard()._code_digest(_fixture_code(renamed_docstring)) != base
+
+    # …and the pure move the digest deliberately ignores still does NOT move it.
+    moved = "\n\n\n" + _IDENTITY_FIXTURE_SRC
+    assert _load_guard()._code_digest(_fixture_code(moved)) == base
+
+
+def test_the_pinned_gate_imports_no_module_from_the_tree():
+    """#4828 — WHY the two copies are not unified, asserted instead of left as prose.
+
+    CI pins `tools/surface-guard.py` by OVERWRITING that one file in the PR's tree, so the
+    pinned gate is self-contained by construction: `_read_manifest`, `_canonical_approval`
+    and the identity helpers are its own. If it imported a sibling `tools/` module, that
+    module would be PR-authored, and a PR could hand the gate that measures it a
+    `_code_digest` returning the baseline's already-recorded values — the expansion gate
+    would then go green on a real surface change. (`.github/workflows/python-ci.yml` →
+    "PIN THE ENFORCEMENT, NOT THE GENERATOR"; `tools/surface-guard.py::_canonical_approval`
+    records the same rule for the approval reader.)
+
+    The scan is static: a dynamic import would evade it, which is a review question.
+    """
+    import ast
+
+    tool_modules = {p.stem for p in (ROOT / "tools").glob("*.py")} | {"tools"}
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse((ROOT / "tools" / "surface-guard.py").read_text())):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+
+    leaked = sorted(imported & tool_modules)
+    assert not leaked, (
+        f"tools/surface-guard.py imports {leaked} from the checkout's own `tools/` tree — "
+        f"the base-ref pin overwrites only that one file, so the gate would be influenceable "
+        f"by the PR it measures (#4606, #5132). Keep the gate self-contained; #4828's "
+        f"duplication is the price of that and is held together by the parity tests above."
+    )
 
 
 def test_served_attributes_sees_what_the_code_object_cannot():

@@ -89,6 +89,15 @@ import ast as _ast
 import types
 from pathlib import Path
 
+# #4828: `_code_digest`, `_attribute_digest` and `_served_attributes` below are
+# DELIBERATE duplicates of the same helpers in `tools/surface_manifest.py` — this gate is
+# PINNED TO THE BASE REF, so it must be self-contained: a module it imported would be
+# PR-authored, and the PR it measures could then hand it a digest returning the baseline's
+# recorded values. In `tests/test_surface_manifest.py`,
+# `test_the_two_drivers_agree_on_the_served_identity_helpers` and
+# `test_the_pinned_gate_imports_no_module_from_the_tree` are the net: a change to ONE copy
+# reds there. Keep the copies in step; do not unify them.
+
 
 def _code_digest(code) -> str:
     """Move-invariant, implementation-complete digest of a code object.
