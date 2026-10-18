@@ -104,9 +104,9 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
                      // Supabase mode), `register_user`, `agent_signup`
                      // (including the registry `kind='default'` node it
                      // writes), the Supabase-lane `create_org` + onboarding
-                     // sub-org — and `org_{name}` (spaces → `_`) ONLY on
-                     // `sdk.org_create`, the registry create_org lane, which is
-                     // itself reached through the hosted API and writes that
+                     // sub-org — and `org_{name}` (spaces → `_`), STORED only
+                     // by `sdk.org_create`, the registry create_org lane, which
+                     // is itself reached through the hosted API and writes that
                      // same `kind='default'` node KIND with THIS shape, so the
                      // path, never the node kind, decides. Customs =
                      // `org_{org_id}_{gid}`
