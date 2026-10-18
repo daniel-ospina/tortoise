@@ -120,6 +120,7 @@ import {
 import {
   PACK_CONSEQUENCE,
   PACK_SETTINGS_SECTION_ID,
+  addListEmptyLine,
   addToDraft,
   addableFromDraft,
   defaultPacksGraphId,
@@ -2731,6 +2732,13 @@ function claimIntentInFlight() {
   const [packsHomeStatus, setPacksHomeStatus] = React.useState('idle') // idle|loading|ok|error
   const [packsHomeBody, setPacksHomeBody] = React.useState(null)
   const [packsHomeError, setPacksHomeError] = React.useState(null)
+  // Its OWN sequence counter, not `packsReqRef`: that one is the DIALOG's and
+  // closing the dialog bumps it. The home's read needs the same "a slow load
+  // must not clobber a NEWER graph's read" guard the dialog has — switching the
+  // selector A -> B while A's read is in flight otherwise paints A's count line
+  // (or A's error) under B's selection, and nothing re-reads because the
+  // effect's deps did not change.
+  const packsHomeReqRef = React.useRef(0)
   // One-time key reveal (C7 indicator 2 / surface 4): {plaintext, title} —
   // the ONLY place a minted plaintext is ever shown. Set from a create-graph
   // or per-graph mint response; cleared on dismiss / team switch; no route
@@ -2914,6 +2922,12 @@ function claimIntentInFlight() {
       err.status = res.status
       if (sus) err.suspended = sus
       if (coded && typeof coded.code === 'string') err.code = coded.code
+      // #2728: `error_code` is the convention most hosted_api routes use
+      // (`detail={"error_code": "PACK_SET_REVISION_CONFLICT", …}`), so a
+      // surface that classifies on a machine-readable code must be able to
+      // see it. Attached on its OWN field (never merged into `.code`) so no
+      // existing `one_free_org_limit`/`SUSPENDED` reader changes behaviour.
+      if (coded && typeof coded.error_code === 'string') err.error_code = coded.error_code
       if (coded && typeof coded.org_id === 'string') err.orgId = coded.org_id
       throw err
     }
@@ -6040,6 +6054,7 @@ function claimIntentInFlight() {
     // would keep editing the OLD team's graph. Bump the sequence so any
     // in-flight read is discarded.
     packsReqRef.current += 1
+    packsHomeReqRef.current += 1
     setPacksGraphId(null)
     setPacksStatus('closed')
     setPacksBody(null)
@@ -6047,6 +6062,12 @@ function claimIntentInFlight() {
     setPacksError(null)
     setPacksNotice('')
     setPacksAddNs('')
+    // The in-flight LOCK is part of the surface: a save whose `finally`
+    // skipped its reset (the org moved under it) would otherwise leave this
+    // flag true forever, and `saving` gates EVERY exit from the dialog —
+    // backdrop, Escape and the Close button — so the next open would be a
+    // dead, undismissable surface until a page reload.
+    setPacksSaving(false)
     setPacksHomeGraphId(null)
     setPacksHomeStatus('idle')
     setPacksHomeBody(null)
@@ -6583,19 +6604,23 @@ function claimIntentInFlight() {
 
   // The Settings home's count line. A FAILED read must never render as "0
   // active packs" — this graph's remove-all state is legitimate, so an error
-  // and an empty set are indistinguishable in a bare count.
+  // and an empty set are indistinguishable in a bare count. The sequence guard
+  // is the same one `loadGraphPacks` carries: the selector can move while a
+  // read is in flight, and the LAST-RESOLVING response must not be the one on
+  // screen (a large graph's pack read is materially slower than a small one).
   async function loadPacksSummary(graphId) {
     const _teamAtCall = currentOrgId
+    const seq = ++packsHomeReqRef.current
     setPacksHomeStatus('loading')
     setPacksHomeError(null)
     try {
       const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
       const body = await api(`/v1/graphs/${encodeURIComponent(graphId)}/packs${q}`, { useSession: true })
-      if (orgIdRef.current !== _teamAtCall) return
+      if (seq !== packsHomeReqRef.current || orgIdRef.current !== _teamAtCall) return
       setPacksHomeBody(body)
       setPacksHomeStatus('ok')
     } catch (e) {
-      if (orgIdRef.current !== _teamAtCall) return
+      if (seq !== packsHomeReqRef.current || orgIdRef.current !== _teamAtCall) return
       setPacksHomeBody(null)
       setPacksHomeError(packErrorState(e).message)
       setPacksHomeStatus('error')
@@ -6678,7 +6703,14 @@ function claimIntentInFlight() {
       if (orgIdRef.current !== _teamAtCall) return
       setPacksError(packErrorState(e))
     } finally {
-      if (orgIdRef.current === _teamAtCall) setPacksSaving(false)
+      // UNGUARDED on purpose. This flag is a LOCK, not a message: `saving`
+      // disables Close, the backdrop handler and Escape, so a lock left set is
+      // a dialog that cannot be dismissed at all. A flag set by THIS
+      // invocation is safe to clear whatever team the app is on now — the
+      // sibling long-running handlers in this file (`setGraphBusy(false)` in
+      // deleteGraphRow/restoreTrashRow) reset unconditionally for the same
+      // reason. Team-switch state is handled by the reset block in switchTeam.
+      setPacksSaving(false)
     }
   }
 
@@ -7029,11 +7061,31 @@ function claimIntentInFlight() {
   // renders a count), with the graph list supplying the initial default. The
   // first pass only CHOOSES a graph — the read happens on the next pass, so a
   // late-arriving /v1/graphs list cannot race a read of the wrong graph.
+  //
+  // A DELETED graph must not stay selected: `deleteGraphRow` refreshes `graphs`
+  // but nothing clears the selection, so a stale id would be truthy, the
+  // `defaultPacksGraphId` fallback would never be consulted, and the home
+  // would re-read a 404 forever (with a Retry that can only re-issue it). The
+  // non-empty guard keeps a graph list that has not loaded yet (or a transient
+  // empty refresh) from clearing a valid selection.
   React.useEffect(() => {
     if (tab !== 'settings' || !currentOrgId) return
-    const gid = packsHomeGraphId || defaultPacksGraphId(graphs)
+    const known = (graphs || []).filter((g) => g && g.graph_id).map((g) => g.graph_id)
+    const selectedGone = !!packsHomeGraphId && known.length > 0
+      && !known.includes(packsHomeGraphId)
+    const gid = selectedGone ? null : (packsHomeGraphId || defaultPacksGraphId(graphs))
+    if (gid !== packsHomeGraphId) {
+      setPacksHomeGraphId(gid)
+      if (selectedGone) {
+        // Never leave the dead graph's count line (or its 404 copy) on screen
+        // while the replacement read is in flight.
+        setPacksHomeBody(null)
+        setPacksHomeStatus(gid ? 'loading' : 'idle')
+        setPacksHomeError(null)
+      }
+      return
+    }
     if (!gid) return
-    if (gid !== packsHomeGraphId) { setPacksHomeGraphId(gid); return }
     loadPacksSummary(gid)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, packsHomeGraphId, graphs, currentOrgId])
@@ -11966,7 +12018,15 @@ function PacksModal(props) {
             <div className="packs-add">
               <label htmlFor="packs-add-select" className="dim small">Add a pack</label>
               {offered.length === 0 ? (
-                <p className="dim small">Every pack in the catalog is already on this graph.</p>
+                <p className="dim small">
+                  {/* `catalog_ok: false` is the server saying it could not READ
+                      the catalog — an empty add-list then must not claim that
+                      everything is already on the graph. */}
+                  {addListEmptyLine(body)}
+                  {body.catalog_ok === false && (
+                    <>{' '}<button type="button" className="ghost small" onClick={onReload}>Reload</button></>
+                  )}
+                </p>
               ) : (
                 <>
                   <select
@@ -11990,7 +12050,15 @@ function PacksModal(props) {
               )}
             </div>
 
-            {notice && <p className="dim small" role="status" aria-live="polite">{notice}</p>}
+            {notice && (
+              <p className="dim small" role="status" aria-live="polite">
+                {notice}
+                {/* The out-of-band notice tells the user to reload, so the
+                    action it names has to be HERE — it otherwise points at a
+                    control that only exists in the error states. */}
+                {' '}<button type="button" className="ghost small" onClick={onReload}>Reload</button>
+              </p>
+            )}
             {error && (
               <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>
                 {error.message}

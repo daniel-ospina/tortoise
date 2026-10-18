@@ -52,7 +52,7 @@ test('#2728: the Settings home exists, is addressable, and renders the shared co
   // non-vacuity: the slice must actually contain the home's body
   assert.ok(home.length > 200, 'the Configured-packs home slice is suspiciously small')
   assert.match(home, /id=\{PACK_SETTINGS_SECTION_ID\}/,
-    'the heading must carry the section id (the #3890 deep-link contract keys off settings-*-heading)')
+    'the heading must carry the section id (a local anchor, named by the #3890 `settings-*-heading` convention)')
   assert.match(home, /<label htmlFor="packs-graph-select"/,
     'the graph selector is required — without it a team-scoped panel edits an unnamed graph')
   assert.match(home, /value=\{packs\.graphId \|\| ''\}/,
@@ -235,8 +235,77 @@ test('#2728: a team switch clears the whole packs surface on both sides', () => 
   const body = sliceBetween('function switchTeam', 'setRevealKey(null)')
   assert.match(body, /packsReqRef\.current \+= 1/,
     'in-flight reads must be discarded on a team switch')
+  assert.match(body, /packsHomeReqRef\.current \+= 1/,
+    "the home's in-flight read must be discarded too (it has its own sequence)")
   assert.match(body, /setPacksGraphId\(null\)/, 'an open dialog must close on a team switch')
   assert.match(body, /setPacksHomeGraphId\(null\)/, "the home's selection is team-scoped")
+  // FAIL-ON: `packsSaving` is a LOCK — `saving` disables Close, the backdrop
+  // and Escape. Omitting it here (with the rest of the surface) plus a guarded
+  // `finally` left it true for the rest of the session, i.e. a dialog that
+  // renders and cannot be dismissed by any control except a page reload.
+  assert.match(body, /setPacksSaving\(false\)/,
+    'the in-flight save lock is part of the team-scoped surface')
+})
+
+test('#2728: the save lock is released unconditionally (a lock is not a message)', () => {
+  // FAIL-ON: `if (orgIdRef.current === _teamAtCall) setPacksSaving(false)` skips
+  // the reset when the org moved while the PUT was in flight — the one case the
+  // guard was written for is the one it strands.
+  const save = fnBody('saveGraphPacks')
+  const finallyBlock = save.slice(save.indexOf('} finally {'))
+  assert.ok(finallyBlock.length > 0, 'saveGraphPacks must have a finally block')
+  assert.match(finallyBlock, /setPacksSaving\(false\)/,
+    'the save lock must be released on every exit')
+  assert.doesNotMatch(finallyBlock, /orgIdRef\.current === _teamAtCall\s*\)?\s*setPacksSaving/,
+    'a lock guarded by the team it was taken under is never released after a switch')
+})
+
+test('#2728: the home summary read carries the sequence guard the dialog has', () => {
+  // FAIL-ON: two reads for two graphs, the later-RESOLVING one wins — so a slow
+  // read of graph A paints A's count line (or A's error) under graph B's
+  // selection, and nothing re-reads (the effect's deps did not change).
+  const summary = sliceBetween('async function loadPacksSummary(', 'function closePacksModal')
+  assert.match(summary, /const seq = \+\+packsHomeReqRef\.current/,
+    'the home read must take its own sequence number')
+  const guards = summary.match(/if \(seq !== packsHomeReqRef\.current \|\| orgIdRef\.current !== _teamAtCall\) return/g) || []
+  assert.equal(guards.length, 2,
+    'BOTH the success and the failure arm must drop a stale response')
+  // …and the dialog's counter must not be reused for it (closing the dialog
+  // bumps packsReqRef, which would silently cancel the home's read).
+  assert.doesNotMatch(summary, /packsReqRef/,
+    'the home read must not share the dialog-scoped sequence')
+})
+
+test('#2728: a deleted graph is dropped from the home selection', () => {
+  // FAIL-ON: `packsHomeGraphId || defaultPacksGraphId(graphs)` trusts a stale
+  // id, so a deleted graph stayed selected and its 404 (with a Retry that can
+  // only re-issue it) was re-read on every graph-list refresh.
+  const effect = sliceBetween("#2728: the Configured-packs home's summary read", '}, [tab, packsHomeGraphId, graphs, currentOrgId])')
+  assert.ok(effect.length > 500, 'the home read effect slice is suspiciously small')
+  assert.match(effect, /known\.includes\(packsHomeGraphId\)/,
+    'a selection that no longer exists in `graphs` must be invalidated')
+  assert.match(effect, /const selectedGone =/)
+  assert.match(effect, /setPacksHomeBody\(null\)/,
+    'the dead graph\'s count line must not stay on screen')
+})
+
+test('#2728: the notice names an action that exists, and the add-list never overclaims', () => {
+  const modal = sliceBetween('function PacksModal(', '// #2784: per-graph "last backup"')
+  // FAIL-ON: the out-of-band notice said "Reload to see the current set" while
+  // a Reload control existed ONLY in the error states — an instruction the
+  // user could not follow from the success state that printed it.
+  const notice = sliceBetween('{notice && (', '{error && (')
+  assert.match(notice, /onClick=\{onReload\}/,
+    'the notice must render the Reload it tells the user to use')
+  assert.match(notice, /role="status"/, 'the notice stays a live status region')
+  // FAIL-ON: an empty add-list rendered the confident claim about the catalog
+  // even when the server degraded (`catalog_ok: false`).
+  assert.match(modal, /addListEmptyLine\(body\)/,
+    'the empty add-list copy must come from the packs.js derivation')
+  assert.doesNotMatch(modal, /Every pack in the catalog is already on this graph\./,
+    'the unqualified claim must not be inlined in the JSX — it is wrong when the catalog was unreadable')
+  assert.match(modal, /body\.catalog_ok === false/,
+    'a degraded catalog must be distinguishable in the add-list')
 })
 
 test('#2728: no client-side pack catalog is invented (the server owns it)', () => {

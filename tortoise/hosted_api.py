@@ -18929,19 +18929,33 @@ async def _resolve_graph_data_namespace(org_id: str, graph_id: str) -> str | Non
     return None
 
 
-def _pack_catalog_rows() -> dict[str, dict]:
-    """#2728 — the shared catalog, as Configured-packs rows.
+def _pack_catalog_rows() -> tuple[dict[str, dict], bool]:
+    """#2728 — the shared catalog, as Configured-packs rows, plus an OK bit.
 
     Best-effort: the catalog is read-only for tenants and a registry failure
     must DEGRADE the view (counts omitted, add-list empty), never 503 a read
-    that already has the graph's own pack set in hand.
+    that already has the graph's own pack set in hand. The boolean is what
+    lets the CLIENT tell that degradation apart from "every catalog pack is
+    already on this graph" — without it an empty add-list reads as a
+    confident claim about a catalog that was never read (the same fail-open
+    class `packCountLine` exists to avoid on the count line).
+
+    ``source`` mirrors the value `set_graph_packs` writes for a NEW install
+    (``"starter"`` for a starter namespace, else ``"manual"``), so a pack
+    offered by the add-list shows the same Source it will carry once saved
+    instead of a client-side guess.
     """
     try:
         from tortoise.domain_loader import _get_registry
         reg = _get_registry()
         packs = getattr(reg, "packs", None) or {}
     except Exception:
-        return {}
+        return {}, False
+    try:
+        from tortoise.pack_state import _starter_namespaces
+        starter = set(_starter_namespaces())
+    except Exception:  # noqa: BLE001 — a missing starter set must not blank the catalog
+        starter = set()
     out: dict[str, dict] = {}
     for ns, p in packs.items():
         try:
@@ -18951,13 +18965,14 @@ def _pack_catalog_rows() -> dict[str, dict]:
                 "version": getattr(p, "version", None),
                 "tier": getattr(p, "tier", "free"),
                 "description": getattr(p, "description", "") or "",
+                "source": "starter" if ns in starter else "manual",
                 "kind_count": (len(getattr(p, "object_kinds", ()) or ())
                                + len(getattr(p, "event_kinds", ()) or ())
                                + len(getattr(p, "point_kinds", ()) or ())),
             }
         except Exception:  # noqa: BLE001 — one odd pack must not blank the list
             continue
-    return out
+    return out, True
 
 
 def _graph_packs_view(gsdk) -> tuple[dict, list[dict]]:
@@ -18999,8 +19014,15 @@ def _packs_payload(graph_id: str, resolved: dict,
     graph's own tombstones, minus namespaces already listed. Keeping the two
     in one response is what lets the modal render an honest add-list without
     a second round trip — and lets a REMOVED pack be added back.
+
+    ``catalog_ok`` says whether the shared catalog could be READ at all. It
+    is the difference between an add-list that is empty because everything is
+    already listed and one that is empty because the registry read failed
+    (``_pack_catalog_rows`` degrades rather than 503s) — an empty
+    ``available`` must never be rendered as a claim about the catalog
+    otherwise.
     """
-    catalog = _pack_catalog_rows()
+    catalog, catalog_ok = _pack_catalog_rows()
     packs = [p for p in rows if p.get("status") != "removed"]
     removed = [p for p in rows if p.get("status") == "removed"]
     listed = {p["namespace"] for p in packs}
@@ -19028,6 +19050,7 @@ def _packs_payload(graph_id: str, resolved: dict,
         "configured": resolved["configured"],
         "packs": packs,
         "available": available,
+        "catalog_ok": catalog_ok,
     }
 
 
@@ -19081,11 +19104,18 @@ async def get_graph_packs(graph_id: str, org_id: str,
                           key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
     """#2728 — read ONE graph's configured pack set + its catalog metadata.
 
-    Response: ``{graph_id, revision, configured, packs: [{namespace, name,
-    version, tier, description, status, source, installed_at, kind_count}]}``.
+    Response: ``{graph_id, revision, configured, catalog_ok,
+    packs: [{namespace, name, version, tier, description, status, source,
+    installed_at, kind_count}],
+    available: [{namespace, name, version, tier, description, source,
+                 kind_count, status: 'available'|'removed'}]}``.
     ``configured=false`` means the graph was never explicitly configured, so
     ``packs`` reflects the legacy starter/starter-healed state; a configured
-    graph with ``packs == []`` is a deliberate empty set.
+    graph with ``packs == []`` is a deliberate empty set. ``available`` is the
+    add-list (shared catalog plus this graph's own tombstones, minus what is
+    already listed) and ``catalog_ok`` reports whether the shared catalog was
+    readable — an empty ``available`` with ``catalog_ok=false`` means the
+    catalog could not be read, not that nothing is left to add.
     """
     return await _graph_packs_read(graph_id, org_id, key_ctx)
 

@@ -4,10 +4,16 @@
 // packsModalTripwire.test.js; this file pins the DECISIONS.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
+  ADD_LIST_DEGRADED_LINE,
+  ADD_LIST_EMPTY_LINE,
   PACK_CONSEQUENCE,
   PACK_SETTINGS_SECTION_ID,
   PACK_STATUS_LABEL,
+  addListEmptyLine,
   addToDraft,
   addableFromDraft,
   addablePacks,
@@ -28,6 +34,8 @@ import {
   sourceLabel,
   toggleDraftStatus,
 } from './packs.js'
+
+const SRC = dirname(fileURLToPath(import.meta.url))
 
 const ROW = (ns, status = 'active', extra = {}) => ({
   namespace: ns,
@@ -58,9 +66,31 @@ const BODY = (over = {}) => ({
   ...over,
 })
 
-test('#2728: the Settings home id follows the #3890 deep-link convention', () => {
+test('#2728: the Settings home id follows the #3890 heading convention', () => {
   assert.equal(PACK_SETTINGS_SECTION_ID, 'settings-packs-heading')
   assert.match(PACK_SETTINGS_SECTION_ID, /^settings-.+-heading$/)
+  // The #3890 deep-link contract is a CLOSED registry (overviewEmptyAction.js
+  // SECTION_HASHES), so the id alone does NOT make the home addressable — the
+  // source comment used to claim it did. Pin the honest wording so the claim
+  // cannot creep back without the registry entry that would make it true.
+  const src = readFileSync(join(SRC, 'packs.js'), 'utf8')
+  assert.match(src, /LOCAL anchor only/,
+    'the id must be documented as a local anchor until SECTION_HASHES registers it')
+  assert.doesNotMatch(src, /the id is what makes the home addressable/)
+})
+
+test('packErrorState: the code the SERVER sends is error_code, and it is read', () => {
+  // The packs routes raise `detail={"error_code": …}` (hosted_api.py), and
+  // main.jsx's api() now attaches it as `err.error_code`. A classification
+  // pinned ONLY on `err.code` tests a shape this route never produces.
+  assert.equal(packErrorState({ error_code: 'PACK_SET_REVISION_CONFLICT', status: 200 }).kind,
+    'conflict', 'error_code alone (no matching status) must classify')
+  assert.equal(packErrorState({ error_code: 'GRAPH_SCOPED_TEAM_SURFACE', status: 200 }).kind,
+    'forbidden')
+  // Both fields still work — `code` is the older convention and neither may
+  // regress into a status-only fallback.
+  assert.equal(packErrorState({ code: 'PACK_SET_REVISION_CONFLICT', status: 200 }).kind,
+    'conflict')
 })
 
 test('packRows: sorts ACTIVE first then OFF, then by namespace', () => {
@@ -94,6 +124,51 @@ test('sourceLabel: starter vs custom vs manual', () => {
   assert.equal(sourceLabel('starter'), 'Starter')
   assert.equal(sourceLabel('custom'), 'Custom')
   assert.equal(sourceLabel(undefined), 'Manual')
+})
+
+test('toRow: the Source badge and its label never disagree', () => {
+  // FAIL-ON: `source: meta.source || 'starter'` beside
+  // `sourceLabel: sourceLabel(meta.source)` labelled a row 'starter' and
+  // 'Manual' at the same time — and after a Save the column flipped, because
+  // the server then writes source='manual' for a non-starter. One value now
+  // feeds both fields.
+  const body = BODY({
+    available: [
+      // what the server now sends for a catalog row: the value the write will
+      // store (starter) or 'manual' for a non-starter
+      { namespace: 'pm', name: 'PM', kind_count: 4, status: 'available', source: 'manual' },
+      { namespace: 'dev2', name: 'DEV2', kind_count: 2, status: 'available', source: 'starter' },
+      // a legacy/older row with no source at all must not invent 'Starter'
+      { namespace: 'legacy', name: 'Legacy', kind_count: 1, status: 'available' },
+    ],
+  })
+  const rows = draftRows(body, [
+    { namespace: 'pm', status: 'active' },
+    { namespace: 'dev2', status: 'active' },
+    { namespace: 'legacy', status: 'active' },
+  ])
+  for (const r of rows) {
+    assert.equal(r.sourceLabel, sourceLabel(r.source),
+      `row ${r.namespace}: the badge (${r.source}) and the label (${r.sourceLabel}) must agree`)
+  }
+  assert.equal(rows.find((r) => r.namespace === 'pm').sourceLabel, 'Manual')
+  assert.equal(rows.find((r) => r.namespace === 'dev2').sourceLabel, 'Starter')
+  assert.equal(rows.find((r) => r.namespace === 'legacy').sourceLabel, 'Manual',
+    'an unknown source must never be rendered as the confident claim "Starter"')
+})
+
+test('addListEmptyLine: an unreadable catalog is never claimed complete', () => {
+  // FAIL-ON: the modal rendered "Every pack in the catalog is already on this
+  // graph." for `available: []` whatever the reason, including the server's
+  // deliberate degradation (`_pack_catalog_rows` returns {} on a registry
+  // failure → also `catalog_ok: false`).
+  assert.equal(addListEmptyLine({ catalog_ok: true }), ADD_LIST_EMPTY_LINE)
+  assert.equal(addListEmptyLine({}), ADD_LIST_EMPTY_LINE)
+  const degraded = addListEmptyLine({ catalog_ok: false })
+  assert.equal(degraded, ADD_LIST_DEGRADED_LINE)
+  assert.doesNotMatch(degraded, /already on this graph/,
+    'a failed catalog read must not read as a confident claim about the catalog')
+  assert.match(degraded, /could not be read/)
 })
 
 test('addablePacks: excludes namespaces already on the graph, and never duplicates', () => {

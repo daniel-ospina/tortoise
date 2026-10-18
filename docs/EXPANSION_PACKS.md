@@ -361,7 +361,11 @@ UI's add-list comes from the server rather than a second copy of the catalog in
 the browser. That list is what keeps *removal* from being a one-way door:
 removal is a desired-state OMIT, and a **tenant-authored** pack appears in no
 shared catalog, so without the tombstone leg it would be un-addable once
-removed.
+removed. Its rows carry the same `source` the write would store
+(`starter`/`manual`), and the read carries **`catalog_ok`**: `false` means the
+shared catalog could not be read (the read degrades rather than `503`-ing), so
+an empty `available` must be shown as *"the catalog could not be read"* — never
+as the claim that everything is already on the graph.
 
 > The dashboard Settings → **Configured packs** home (`settings-packs-heading`)
 > renders this contract, with a graph selector and a modal that lists each

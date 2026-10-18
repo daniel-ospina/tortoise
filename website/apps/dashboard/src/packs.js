@@ -7,10 +7,10 @@
 // render/wiring half is pinned separately by packsModalTripwire.test.js.
 //
 // Server contract (GET/PUT /v1/graphs/{graph_id}/packs, verified on 9c2137470):
-//   GET → {graph_id, revision, configured,
+//   GET → {graph_id, revision, configured, catalog_ok,
 //          packs: [{namespace, name, version, tier, description, status,
 //                   source, installed_at, kind_count}],
-//          available: [{namespace, name, version, tier, description,
+//          available: [{namespace, name, version, tier, description, source,
 //                       kind_count, status: 'available'|'removed'}]}
 //   PUT body → {packs: [{namespace, status: 'active'|'disabled'}],
 //               expected_revision: <int, REQUIRED>}
@@ -22,9 +22,12 @@
 // (#2714 indicator 3). The surface says that in words — a user must not read
 // "5 packs listed" as "5 packs enforced".
 
-// The Settings home's heading id. #3890's deep-link contract
-// (resolveSectionHash/focusDeepLinkTarget) works off `settings-*-heading`, so
-// the id is what makes the home addressable from elsewhere in the app.
+// The Settings home's heading id. It is a LOCAL anchor only, deliberately: the
+// #3890 deep-link contract is a CLOSED registry (`overviewEmptyAction.js`
+// `SECTION_HASHES`), so a `#settings-packs-heading` hash resolves to null and
+// does not open the Settings tab. Naming a section `settings-*-heading` keeps
+// it consistent with that convention and makes REGISTERING it later a
+// one-line addition — it does not, by itself, make the home addressable.
 export const PACK_SETTINGS_SECTION_ID = 'settings-packs-heading'
 
 // One sentence per status, shared by the table and the consequence note — ONE
@@ -91,14 +94,20 @@ function sortRows(rows) {
 function toRow(index, namespace, status) {
   const meta = index.get(namespace) || {}
   const st = status === 'disabled' ? 'disabled' : 'active'
+  // One value, two renderings: the badge and the label must never disagree
+  // (`source: 'starter'` beside `sourceLabel: 'Manual'` was that defect).
+  // The server sends `source` on BOTH row lists (a catalog row carries the
+  // value `set_graph_packs` will write — starter vs manual), and only a
+  // legacy row without one falls back, to the same value the label would say.
+  const source = String(meta.source || 'manual').toLowerCase()
   return {
     namespace,
     name: meta.name || namespace,
     version: meta.version == null ? '—' : String(meta.version),
     status: st,
     statusLabel: PACK_STATUS_LABEL[st],
-    source: meta.source || 'starter',
-    sourceLabel: sourceLabel(meta.source),
+    source,
+    sourceLabel: sourceLabel(source),
     kindCount: meta.kind_count == null ? null : Number(meta.kind_count),
     kindCountLabel: kindCountLabel(meta.kind_count),
     description: meta.description || '',
@@ -167,6 +176,24 @@ export function addableFromDraft(body, draft) {
 // exactly `addableFromDraft(body, draftFromBody(body))`.
 export function addablePacks(body) {
   return addableFromDraft(body, draftFromBody(body))
+}
+
+// The copy for an EMPTY add-list. `available == []` has two causes and they
+// are not the same statement: everything catalog-shipped is already on the
+// graph, OR the server could not read the catalog at all (`_pack_catalog_rows`
+// degrades to empty rather than 503 — `catalog_ok: false`). An unqualified
+// "Every pack in the catalog is already on this graph" is a confident claim
+// about a catalog that was never read, so the degraded case gets its own line
+// (and the modal offers a Reload beside it).
+export const ADD_LIST_EMPTY_LINE =
+  'Every pack in the catalog is already on this graph.'
+export const ADD_LIST_DEGRADED_LINE =
+  'The pack catalog could not be read, so the add-list may be incomplete.'
+
+export function addListEmptyLine(body) {
+  return body && body.catalog_ok === false
+    ? ADD_LIST_DEGRADED_LINE
+    : ADD_LIST_EMPTY_LINE
 }
 
 // "2 of 6 packs on this graph" — the count line. `configured === false` is
@@ -276,13 +303,16 @@ export function draftIsDirty(body, draft) {
 // a 409 is reload-and-retry (the set moved under you), a 403 is read-only (your
 // role), a 503 is the catalog being unavailable (transient, retry later), and a
 // 404 means the graph is gone (close the modal). The machine-readable code is
-// read from `err.code` (main.jsx's api() promotes a structured detail's `code`)
-// or from `err.status`.
+// read from `err.code` (a structured detail's `code`, lifted by main.jsx's
+// api()) or `err.error_code` — the convention these packs routes actually use
+// (`detail={"error_code": "PACK_SET_REVISION_CONFLICT", …}`) — and every arm
+// also accepts the matching STATUS, so the classification is real rather than
+// aspirational if only one of the two reaches the client.
 export const PACK_ERROR_KINDS = Object.freeze(['conflict', 'forbidden', 'unavailable', 'missing', 'error'])
 
 export function packErrorState(err) {
   const status = err && err.status
-  const code = (err && err.code) || ''
+  const code = (err && (err.code || err.error_code)) || ''
   if (code === 'PACK_SET_REVISION_CONFLICT' || status === 409) {
     return {
       kind: 'conflict',

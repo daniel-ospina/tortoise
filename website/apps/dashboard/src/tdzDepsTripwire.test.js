@@ -389,6 +389,8 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   "tab, team, checking, authed, welcomeMode, deepLinkTick",
   "reposLoaded, onboarding, reposList, currentOrgId, reposLoadFailed",
   "accountMenuOpen",
+  // #2728: the dialog's background-inert effect, keyed on the graph it holds.
+  "packsGraphId",
   "createTeamOpen",
   "revealKey",
   "authMode, sessionBooted",

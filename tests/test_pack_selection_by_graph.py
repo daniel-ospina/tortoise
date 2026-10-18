@@ -550,6 +550,68 @@ class TestGraphPacksRest:
         assert {p["namespace"]: p["status"]
                 for p in back.json()["packs"]}[tenant] == "active"
 
+    def test_available_rows_carry_the_source_the_save_will_write(
+            self, sel_client):
+        """The Source column must be the value the WRITE will store, not a
+        client-side guess.
+
+        ``available`` rows are catalog rows and carried no ``source`` at all,
+        so ``packs.js``'s ``toRow`` invented one — and labelled a
+        shipped-but-not-starter pack "Starter" while claiming "Manual" in the
+        same row object, flipping to "Manual" only after the save wrote the
+        install record. ``set_graph_packs`` writes ``"starter" if ns in
+        starter else "manual"``, so the read now says the same thing.
+
+        FAIL-ON: without ``source`` on the catalog rows (and without
+        ``catalog_ok``) both assertions raise KeyError.
+        """
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-source")
+        _auth(tc, "t-sel-source")
+        r = tc.put("/v1/graphs/default/packs?org_id=t-sel-source", json={
+            "packs": [{"namespace": DEV}], "expected_revision": 0})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["catalog_ok"] is True, (
+            "a readable catalog must be reported as readable, or the client "
+            "cannot tell an empty add-list from an unread one")
+        by_ns = {p["namespace"]: p for p in body["available"]}
+        assert by_ns[MARKETING]["source"] == "starter", (
+            "a starter namespace's row must say starter — the same value the "
+            "install record will carry")
+        assert by_ns["venture"]["source"] == "manual", (
+            "venture ships in the catalog but is NOT a starter, so its row "
+            "must not claim to be one")
+
+    def test_a_degraded_catalog_is_reported_not_papered_over(
+            self, sel_client, monkeypatch):
+        """An unreadable catalog must be VISIBLE as such.
+
+        ``_pack_catalog_rows`` degrades to an empty dict rather than 503 a
+        read that already has the graph's own set in hand. The add-list is
+        then empty for the opposite reason it is normally empty, and the
+        client rendered that as the confident claim "Every pack in the
+        catalog is already on this graph." ``catalog_ok`` is the status bit
+        that lets it say "the catalog could not be read" instead.
+
+        FAIL-ON: without ``catalog_ok`` the assertion raises KeyError; with a
+        flag that is always True a degraded read would be indistinguishable
+        from a complete one.
+        """
+        import tortoise.hosted_api as ha
+        tc, db_path = sel_client
+        _seed_org(db_path, "t-sel-catalog-down")
+        _auth(tc, "t-sel-catalog-down")
+        monkeypatch.setattr(ha, "_pack_catalog_rows", lambda: ({}, False))
+        r = tc.get("/v1/graphs/default/packs?org_id=t-sel-catalog-down")
+        assert r.status_code == 200, (
+            "degrading is the point — the graph's own set is still readable")
+        body = r.json()
+        assert body["catalog_ok"] is False
+        assert body["available"] == [], (
+            "the add-list is empty precisely BECAUSE the catalog was unread — "
+            "the bit, not the emptiness, is what the client must render")
+
     def test_put_then_get_round_trips_and_version_stays_monotonic(
             self, sel_client):
         tc, db_path = sel_client
