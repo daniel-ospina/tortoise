@@ -483,11 +483,14 @@ customer's writes) and a `direction`:
   auto-downgraded either. Counted and logged loudly; a non-zero number is a
   person to look at.
 - `skipped` — nothing to reconcile: no `subscription_id` / `stripe_customer_id`
-  at all, **or** a Stripe customer binding that never became a paid
-  subscription (every abandoned checkout leaves one — `hosted_api` persists
-  `stripe_customer_id` before the checkout session — and its `tier` is at or
-  below Free's cap, so there is no entitlement to verify). Routine; not a
-  symptom.
+  at all, **or** a Stripe customer binding whose stored `tier` is at or below
+  Free's cap — there is no entitlement to verify. The usual cause is an
+  abandoned checkout (every abandoned checkout leaves a binding — `hosted_api`
+  persists `stripe_customer_id` before the checkout session), but it is not the
+  only one: an unpaid-tier org whose active subscription could not be checked at
+  all (the customer lookup failed) also lands here. Routine in that nothing is
+  written and nothing is owed — but only because leaving it alone is free, not
+  because Stripe was heard from.
 - `unrepaired` — Stripe resolved a tier the store did NOT end up holding. That
   is a broken repair, not a clean pass; treat it as an incident.
 - `checked` / `repaired` / `unchanged` / `failed` — as named: orgs with a

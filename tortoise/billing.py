@@ -779,7 +779,11 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     - Org has ``subscription_id`` but it is INACTIVE → LIST the customer's
       subscriptions → first active/trialing/past_due → mirror (this also
       rewrites the stale pointer); with none active, mirror the stored one —
-      a real cancellation, which must still downgrade.
+      a real cancellation, which must still downgrade. ⛔ If the LIST itself
+      FAILS, neither applies: the org is returned as ``action: "noop"`` and
+      left alone (a provider error is not a verdict — mirroring the stored one
+      there would re-cap a paying org, which is the bug this branch exists to
+      fix).
     - elif Org has ``stripe_customer_id`` (missed checkout event blind spot)
       → LIST subscriptions → first active/trialing/past_due → mirror.
     - else no-op.
@@ -1119,8 +1123,13 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
     - ``checked`` — orgs with a billing identity this pass attempted
     - ``skipped`` — orgs with nothing to reconcile: no ``subscription_id`` /
       ``stripe_customer_id`` (a free org that never checked out), or a Stripe
-      binding that never became a paid subscription (an abandoned checkout —
-      ``tier`` at or below Free's cap, so there is no entitlement to verify).
+      binding whose stored ``tier`` is at or below Free's cap — nothing to
+      verify. The USUAL cause is an abandoned checkout (``hosted_api`` persists
+      ``stripe_customer_id`` before the checkout session), but it is not the
+      only one: an unpaid-tier org whose active subscription could not be
+      checked at all (the customer LIST failed) also lands here, and that is
+      routine only because it costs nothing to leave alone — a provider error
+      is not a verdict.
       The second kind DID cost an attempt, so it is counted in ``checked`` as
       well: ``checked`` is how many identity-bearing orgs the pass attempted,
       and ``skipped`` says how many of them (plus the never-checked-out ones)

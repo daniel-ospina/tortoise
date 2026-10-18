@@ -2721,8 +2721,10 @@ class TestReconcileSweep:
         Uncaught, that refusal renders as an opaque ``500 {"detail": "Internal
         Server Error"}`` — and the daily driver's ``::error::`` line is the
         page, so "HTTP 500" names nothing an operator can act on. ``503
-        enumeration_incomplete`` says which leg failed and that a retry is the
-        response (the fleet was not READ, not mis-repaired).
+        enumeration_incomplete`` names which leg refused, and all three legs are
+        STRUCTURAL (a partial page, a lower-bound page, a missing enumeration
+        seam), so a retry alone does not repair them (the fleet was not READ,
+        not mis-repaired).
         """
         import tortoise.supabase_control as sc
         from tortoise import billing as bl
@@ -2741,8 +2743,8 @@ class TestReconcileSweep:
         assert r.status_code == 503, r.text
         assert r.json()["status"] == "enumeration_incomplete"
         # The refusal has SEVERAL legs and NONE of them clears on retry: a
-        # lower-bound page, a missing enumeration seam, and an unrecognised
-        # arm are all structural. (A control-plane OUTAGE is a different path —
+        # partial page, a lower-bound page, and a missing enumeration seam are
+        # all structural. (A control-plane OUTAGE is a different path —
         # `query_all` raises a bare RuntimeError, which the endpoint does not
         # catch, so it arrives as a 500 and never reaches this arm.) A fixed
         # detail string threw the distinction away and sent every operator down
