@@ -583,31 +583,57 @@ def test_uri_mutations_declared_files_exist():
 # Restoration guard (#2084) — static scope/evidence analysis helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def _paren_deltas(src: str) -> list[int]:
-    """Net bracket delta per LINE, counted from TOKENS rather than characters.
+def _code_bracket_deltas(src: str) -> list[int]:
+    """Net bracket delta per line, counting ONLY brackets in CODE (#8995).
 
-    ``_scope_map`` needs to know which lines are continuation lines, and it used to count
-    raw characters. Brackets inside a STRING literal then unbalance the counter forever:
-    ``assert not any("(as of" in t for t in ...)`` opens a paren that is never closed, so
-    every later ``def`` is read as a continuation and the whole tail of the file is
-    attributed to whichever function was open at that line — which reported three
-    violations against a helper that DOES save and restore its URI
-    (``tests/test_time_aware_sdk_2520.py``, blocking ``test (i)`` on an unrelated PR).
+    `_scope_map`'s continuation counter decides whether a `def` line is a real
+    definition or a wrapped continuation of the expression above it, so a
+    bracket counted as code when it is actually COPY poisons the classification
+    for the REST of the file. That is exactly what happened to
+    `test_time_aware_sdk_2520.py`: `assert "(as of" in t` (line 115) opened a
+    paren that nothing closes, so every later `def` — including the `_ku_sdk`
+    contextmanager that saves and restores `TORTOISE_DB_URI` — was read as a
+    continuation line of the test above it. Its restore then fell OUTSIDE that
+    test's body window and `test_uri_mutations_restored` reded on a mutation
+    that is restored in a `finally`, with a message naming the wrong function.
+    An unmatched bracket in copy is not an open expression.
 
-    The tokenizer knows where strings and comments END, so a bracket that is text is not
-    counted. Untokenizable input answers all-zero (the same "no open bracket" state a clean
-    file has), so a file the tokenizer cannot read never gains a phantom continuation.
+    String and comment tokens are located with `tokenize` (which understands
+    quoting, escapes, triple quotes and f-strings), and their spans are skipped
+    by the counter. An unparsable fragment falls back to the raw count — the
+    pre-#8995 behaviour, never a silent under-count.
     """
-    deltas = [0] * (src.count("\n") + 1)
+    lines = src.split("\n")
+    excluded: dict[int, list[tuple[int, int]]] = {}
+    stringish = {tokenize.STRING, tokenize.COMMENT}
+    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
+    if fstring_middle is not None:
+        stringish.add(fstring_middle)
     try:
-        for token in tokenize.generate_tokens(io.StringIO(src).readline):
-            if token.type != tokenize.OP or token.string not in "([{}])":
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type not in stringish:
                 continue
-            row = token.start[0] - 1
-            if 0 <= row < len(deltas):
-                deltas[row] += 1 if token.string in "([{" else -1
+            (start_row, start_col), (end_row, end_col) = tok.start, tok.end
+            for row in range(start_row, end_row + 1):
+                if row - 1 >= len(lines):
+                    continue
+                span_start = start_col if row == start_row else 0
+                span_end = end_col if row == end_row else len(lines[row - 1])
+                excluded.setdefault(row, []).append((span_start, span_end))
     except (tokenize.TokenError, IndentationError, SyntaxError):
-        return [0] * len(deltas)
+        excluded = {}
+    deltas: list[int] = []
+    for row, line in enumerate(lines, start=1):
+        spans = excluded.get(row, ())
+        delta = 0
+        for col, ch in enumerate(line):
+            if any(s <= col < e for s, e in spans):
+                continue
+            if ch in "([{":
+                delta += 1
+            elif ch in ")]}":
+                delta -= 1
+        deltas.append(delta)
     return deltas
 
 
@@ -624,8 +650,10 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
     monkeypatch fixtures are restored by pytest at teardown, the #2062
     leak class lives in the "top" and "fixture" scopes."""
     lines = src.split("\n")
-    deltas = _paren_deltas(src)
     scopes: list[tuple[str, str | None]] = [("top", None)] * len(lines)
+    # Continuation state comes from CODE brackets only — a bracket inside a
+    # string literal or comment is copy, not an open expression (#8995).
+    deltas = _code_bracket_deltas(src)
     stack: list[tuple[int, str, str]] = []  # (indent, kind, name)
     paren = 0
     pending_fixture = False
@@ -656,10 +684,9 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
         else:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        # paren balance for continuation detection. TOKEN-derived (`_paren_deltas`): counting
-        # raw characters let a bracket inside a STRING open a continuation that never closed,
-        # which mis-attributed entire files to one enclosing function.
-        paren = max(0, paren + deltas[i]) if i < len(deltas) else paren
+        # paren balance for continuation detection (CODE brackets only —
+        # brackets inside string literals/comments are copy, #8995)
+        paren = max(0, paren + deltas[i])
     return scopes
 
 
@@ -942,6 +969,49 @@ def test_uri_mutations_restored():
         + "\n".join(violations))
 
 
+def test_scope_map_reads_code_brackets_only():
+    """#8995: a bracket inside a string literal is COPY, not an open
+    expression — and counting it poisoned every `def` after it.
+
+    This is the #8995 regression reproduced as a minimal source: an assert on a
+    literal containing an unmatched `(` (test_time_aware_sdk_2520.py:115,
+    `assert "(as of" in t`) left the scope map's continuation counter open for
+    the rest of the file. Every later `def` was classified as a continuation of
+    the function above it, so `_ku_sdk`'s `finally` restore landed outside
+    `test_off_path_embeds_the_bare_query`'s evidence window and
+    ``test_uri_mutations_restored`` reded — naming the WRONG function — on a
+    mutation that is restored exactly as the guard requires. Pre-fix, the
+    middle assertion below fails: `second` is reported as `first`.
+    """
+    src = (
+        'import os\n'
+        'def first():\n'
+        '    assert "(unbalanced" in _text()\n'
+        '\n'
+        '\n'
+        'def second():\n'
+        '    old = os.environ.get("TORTOISE_DB_URI")\n'
+        '    os.environ["TORTOISE_DB_URI"] = _uri()\n'
+        '    try:\n'
+        '        yield\n'
+        '    finally:\n'
+        '        os.environ["TORTOISE_DB_URI"] = old\n'
+    )
+    scopes = _scope_map(src)
+    assert scopes[1] == ("fn", "first"), scopes[1]
+    assert scopes[5] == ("fn", "second"), (
+        "the def after a string literal holding an unmatched bracket must be "
+        f"its OWN scope, not a continuation of `first` — got {scopes[5]}")
+    assert _restoration_violations([("synthetic_8995.py", src)]) == [], (
+        "a mutation restored in a finally must stay green even when an earlier "
+        "line carries an unmatched bracket inside copy")
+    # Falsifiability: the same source WITHOUT the restore must still red, so the
+    # assertion above cannot pass by the guard going blind to this shape.
+    unrestored = src.replace('os.environ["TORTOISE_DB_URI"] = old\n', '')
+    assert _restoration_violations([("synthetic_8995.py", unrestored)]), (
+        "the guard must still catch an unrestored mutation in the same shape")
+
+
 def test_module_scoped_pop_without_restore_reds():
     """#2084 negative: the pre-#2073 test_index_restore pattern — a
     module-scoped autouse fixture that pops TORTOISE_DB_URI at setup and
@@ -1088,41 +1158,6 @@ def test_module_scoped_pop_without_restore_reds():
         "fn-scope pop bounded by a module-level autouse save/restore "
         "fixture must stay green (#2084 review P2): "
         + "; ".join(bounded_violations))
-
-
-def test_a_bracket_inside_a_STRING_does_not_misattribute_the_file():
-    """The scope map must not count brackets that are TEXT (#8965).
-
-    ``_scope_map``'s continuation counter used to scan raw characters, so
-    ``assert not any("(as of" in t for t in ...)`` opened a paren that never closed: every
-    later ``def`` was read as a continuation line and the whole tail of the file stayed
-    attributed to the function that was open there. In
-    ``tests/test_time_aware_sdk_2520.py`` that made a helper which DOES save and restore its
-    URI (``_ku_sdk``) report three violations *inside an unrelated test*, reddening the
-    required ``test (i)`` leg on a diff that never touched either file.
-
-    Pre-fix this source yields three violations for ``helper_with_a_bracket_in_a_string``
-    (the function open at the mutation lines); it must yield none.
-    """
-    src = (
-        'import os\n'
-        '\n'
-        'def helper_with_a_bracket_in_a_string():\n'
-        '    assert not any("(as of" in t for t in ["x"])\n'
-        '\n'
-        'def restores_its_uri():\n'
-        '    old = os.environ.get("TORTOISE_DB_URI")\n'
-        '    os.environ["TORTOISE_DB_URI"] = "other"\n'
-        '    try:\n'
-        '        pass\n'
-        '    finally:\n'
-        '        os.environ["TORTOISE_DB_URI"] = old\n'
-    )
-
-    assert _restoration_violations([("test_bracket_in_string.py", src)]) == [], (
-        "a bracket inside a string literal shifted the scope map and blamed an "
-        "unrelated function for a save-restore that is right there"
-    )
 
 
 def test_bare_monkeypatch_without_undo_reds():

@@ -279,7 +279,14 @@ print(json.dumps({'contextModification': {
 " 2>/dev/null || true
     ;;
   *)
-    # Unknown harness — print the block plainly (harmless where unsupported).
+    # Unknown harness: print the block plainly so the hook never fails a turn.
+    # That is NOT an injection, and it is NOT the fail-open posture: a harness
+    # that parses hook stdout (Gemini CLI's strict-JSON rule) renders non-JSON
+    # text as a systemMessage SHOWN TO THE USER, and a harness that parses
+    # nothing delivers nothing to the model. A per-harness arm is a small
+    # addition once demand arrives — see docs/research/2026-09-01-gbrain-learnings/platform-seams.md
+    # (correction log, #2124). The comment that stood here presented the bare
+    # block as harmless; that claim is retracted.
     printf '%s\n' "$BLOCK"
     ;;
 esac

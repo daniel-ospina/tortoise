@@ -11,6 +11,8 @@ from __future__ import annotations  # noqa: I001
 import logging
 import math
 import random
+import re
+import time
 
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
 from .live import (
@@ -41,6 +43,167 @@ logger = logging.getLogger(__name__)
 _EP_GUARD_FULL_GRAPH_FRACTION = 0.5
 _EP_GUARD_FRONTIER_CAP = 200
 _EP_GUARD_MIN_GRAPH_CLAIMS = 500
+
+
+try:  # redis-py is a hard dependency of the graph lane; guard anyway (#6211)
+    from redis.exceptions import RedisError as _RedisError
+    from redis.exceptions import ResponseError as _ResponseError
+except Exception:  # pragma: no cover - import-environment guard
+    class _ResponseError(Exception):  # type: ignore[no-redef]
+        """Stand-in when redis-py is unavailable (nothing to catch)."""
+
+    class _RedisError(Exception):  # type: ignore[no-redef]
+        """Stand-in when redis-py is unavailable (nothing to catch)."""
+
+
+#: A hop whose query the graph engine ABORTED on its own timeout. Matching on
+#: the message is the only signal the engine gives: FalkorDB reports a timeout
+#: as a generic ``ResponseError: Query timed out`` (measured, TIMEOUT=1000 on
+#: falkordb/falkordb:latest), indistinguishable from a syntax/permission error
+#: except by text. Wrapped narrowly on purpose — see
+#: :meth:`TortoiseEP._hop_query` for why a non-timeout ``ResponseError`` is
+#: re-raised untouched.
+_QUERY_TIMEOUT_RE = re.compile(r"query\s+timed\s+out|query\s+timeout",
+                               re.IGNORECASE)
+
+
+class EPSubgraphHopError(_ResponseError):
+    """A hop of the affected-claim BFS could not complete (#6211).
+
+    WHY THIS EXISTS. At the graph's own scale the hop query is the part of an
+    EP pass that dies. Measured on a 3,353-claim / 160,000-edge graph: the
+    two-hop bridge ``MATCH (n)<-[r]-(op:Point)-[r2]->(m) WHERE n.id IN $ids``
+    takes 2.7 s on a second-hop frontier, so on an engine with the 1,000 ms
+    default query timeout the pass aborts after 1.1 s with
+    ``redis.exceptions.ResponseError: Query timed out`` — a bare, hop-less
+    error that escapes ``compute_confidence`` and tells the caller nothing
+    about WHERE the pass stopped. A caller could not even distinguish "this
+    graph is too big for one hop" from "this query was malformed".
+
+    This class carries the hop identity so the failure is *addressable*: a
+    caller can bound the hop (smaller seeds / fewer hops), report which hop
+    was unaffordable, or retry that hop alone. The attributes are delivered on
+    the exception an SDK caller catches; the MCP/HTTP wire path flattens
+    exceptions to a prose error payload (``mcp_server._safe``), so a hosted
+    caller still reads the hop out of the message until that channel gets a
+    structured arm (tracked on #6211), and the ``recovery`` sentence in the
+    message is written to be actionable on its own.
+
+    COMPATIBILITY. It subclasses ``redis.exceptions.ResponseError`` (the
+    exception the engine actually raised), so every existing
+    ``except ResponseError:`` clause — including the retry classifier in
+    ``tortoise/retry.py`` — keeps catching it exactly as before. This is an
+    additive typing, not a changed contract.
+
+    Attributes:
+        hop:           BFS hop index within this ``_affected_claims`` call:
+                       ``0`` is the SEED phase (the same two-hop pattern and
+                       the seed-set sweeps, run BEFORE the loop — so they are
+                       usually the first queries that can die), and
+                       ``1..max_hops`` are the loop's hops. ``None`` for a
+                       PASS-LEVEL query: one that walks the finished affected
+                       set rather than a hop frontier (factor extraction, the
+                       epoch read, the degeneration guard's claim count), so
+                       no hop index exists to name.
+        phase:         which query failed — ``"seed_lookup"`` /
+                       ``"seed_operators"`` / ``"seed_direct_edge"`` /
+                       ``"seed_neighbourhood"`` (hop 0: the seed phase);
+                       ``"operator_bridge"`` (the operator-mediated two-hop
+                       pattern) or ``"direct_edge"`` (the operator-less
+                       IMPL|NAND hop) for the BFS loop's hops; and
+                       ``"factor_extraction"`` / ``"draft_filter"`` /
+                       ``"claim_count"`` / ``"ep_epoch"`` / ``"cache_load"`` /
+                       ``"cache_flush"`` / ``"evidence_prewrite"`` for
+                       pass-level queries.
+
+                       A pass reads and writes the WHOLE affected set, not just
+                       its frontier: `_load_cache` sweeps 16 statements over it,
+                       `_flush_cache` writes it back, and `run` pre-writes the
+                       evidence priors over it. Every one of those is typed
+                       too — they are the largest queries of a pass, so an
+                       untyped one would keep the issue's symptom (a bare,
+                       hop-less ``Query timed out``) reachable on the biggest
+                       statement the pass makes.
+        frontier_size: how many claim ids the failed query was scoped to.
+                       For a hop this is the frontier being expanded FROM —
+                       the quantity that drives the hop's cost, so the number
+                       an operator needs to bound the pass. ``None`` for a
+                       query with no id set (the epoch read).
+        elapsed_s:     wall time the failed query consumed before the engine
+                       aborted it (``None`` when unknown).
+    """
+
+    def __init__(self, *, hop: int | None, phase: str,
+                 frontier_size: int | None,
+                 elapsed_s: float | None = None, detail: str = "") -> None:
+        self.hop = hop
+        self.phase = phase
+        self.frontier_size = frontier_size
+        self.elapsed_s = elapsed_s
+        self.detail = detail
+        took = "" if elapsed_s is None else f" after {elapsed_s:.2f}s"
+        if hop is None:
+            if frontier_size is None:
+                subject = f"EP pass-level query ({phase}) could not complete{took}"
+            else:
+                subject = (
+                    f"EP pass-level query ({phase}) could not complete{took} "
+                    f"over the {frontier_size}-claim affected set"
+                )
+        else:
+            subject = (
+                f"EP affected-subgraph BFS: hop {hop} ({phase}) could not "
+                f"complete{took} over a {frontier_size}-claim frontier"
+            )
+        message = (
+            f"{subject} — the graph engine aborted the query (query timed "
+            f"out). {_recovery_sentence(phase)}"
+        )
+        if detail:
+            message = f"{message} [engine: {detail}]"
+        super().__init__(message)
+
+
+def _recovery_sentence(phase: str) -> str:
+    """The remedy for a timed-out pass query, told per phase (#6211).
+
+    A remedy that cannot affect the failing query is worse than none: on the
+    epoch read and the claim count, narrowing the pass' seeds or ``max_hops``
+    does NOT make the query cheaper, so pointing an operator at those knobs
+    sends them to tune something unrelated. The cache phases are separated for
+    the same reason — a load failure means the pass never started, a flush
+    failure means the posteriors were dropped.
+    """
+    if phase in ("claim_count", "ep_epoch"):
+        return (
+            "This query is not hop-scoped — narrowing the pass (fewer seeds or "
+            "fewer max_hops) cannot make it cheaper. Raise the engine's query "
+            "TIMEOUT (the graph is large enough that a whole-graph read no "
+            "longer fits it); on the flush path the epoch re-read rejects the "
+            "write-back, so THIS RUN'S POSTERIORS WERE NOT PERSISTED."
+        )
+    if phase == "cache_load":
+        return (
+            "The pass could not load the affected set it had selected, so it "
+            "never ran: narrow the pass (fewer seeds or fewer max_hops) or "
+            "raise the engine's query TIMEOUT."
+        )
+    if phase == "cache_flush":
+        return (
+            "THIS RUN'S POSTERIORS WERE NOT PERSISTED: raise the engine's "
+            "query TIMEOUT, or narrow the pass so the write-back spans fewer "
+            "rows."
+        )
+    return (
+        "The affected-claim expansion is incomplete: narrow the pass (fewer "
+        "seeds or fewer max_hops) or raise the engine's query TIMEOUT."
+    )
+
+
+def _is_query_timeout(exc: BaseException) -> bool:
+    """True when *exc* is the engine's own query-timeout abort."""
+    return isinstance(exc, _RedisError) and bool(
+        _QUERY_TIMEOUT_RE.search(str(exc)))
 
 
 class TortoiseEP:
@@ -108,12 +271,52 @@ class TortoiseEP:
         self._run_ep_version: int = -1
         self._flush_skipped: bool = False
 
+    def _hop_query(self, cypher: str, params: dict, *, hop: int | None,
+                   phase: str, frontier_size: int | None) -> list:
+        """Run one EP pass query, typing an engine timeout (#6211).
+
+        A hop that the engine ABORTS on its own timeout used to escape as a
+        bare ``redis.exceptions.ResponseError: Query timed out`` — no hop, no
+        frontier size, indistinguishable from a malformed query. Here it becomes
+        :class:`EPSubgraphHopError`, which says WHICH hop failed and over how
+        large a frontier, while remaining a ``ResponseError`` subclass so every
+        existing ``except`` clause (and ``tortoise/retry.py``'s classifier) is
+        unaffected.
+
+        Used for every id-set query of a pass, not only the two-hop expansions:
+        the seed phase (hop 0), the loop's hops, and the PASS-LEVEL queries that
+        walk the finished affected set — factor extraction over thousands of ids
+        is the largest query of the whole pass, so leaving it bare would keep
+        the issue's exact symptom on one of the paths it measured (#6211 review
+        round 2). Those pass-level callers pass ``hop=None``.
+
+        ONLY timeouts are wrapped, deliberately. A ``ResponseError`` that is not
+        a timeout (WRONGTYPE, a malformed recipe, a permission refusal) is a
+        DIFFERENT failure — it is not "this hop was too big", the remedy is not
+        "narrow the pass", and ``retry.py`` classifies some of them (MISCONF,
+        write-lock, graph-abort) into retry arms that a rewriting wrapper would
+        hide behind a new message. Those re-raise untouched.
+        """
+        started = time.perf_counter()
+        try:
+            return self.g.query(cypher, params=params).result_set
+        except _ResponseError as exc:
+            if not _is_query_timeout(exc):
+                raise
+            raise EPSubgraphHopError(
+                hop=hop, phase=phase, frontier_size=frontier_size,
+                elapsed_s=time.perf_counter() - started, detail=str(exc),
+            ) from exc
+
     def _graph_ep_version(self) -> int:
         """Current graph-wide EP epoch (the :EpMeta node's ep_version).
 
-        0 on a graph that has never dirtied EP (no EpMeta node yet)."""
-        rows = self.g.query(
-            "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+        0 on a graph that has never dirtied EP (no EpMeta node yet).
+        """
+        rows = self._hop_query(
+            "MATCH (m:EpMeta) RETURN m.ep_version", {},
+            hop=None, phase="ep_epoch", frontier_size=None,
+        )
         if not rows:
             return 0
         try:
@@ -148,8 +351,10 @@ class TortoiseEP:
                 "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0), "
                 "       coalesce(n.baseline_set, false)"
             ):
-                rows.extend(self.g.query(
-                    _q, params={"ids": list(affected_claims)}).result_set)
+                rows.extend(self._hop_query(
+                    _q, {"ids": list(affected_claims)}, hop=None,
+                    phase="cache_load", frontier_size=len(affected_claims),
+                ))
             for cid, a, b, is_baseline in rows:
                 self._node_cache[cid] = (float(a), float(b))
                 # #844: explicit baselines (baseline_set=true) are IMMUTABLE
@@ -168,8 +373,10 @@ class TortoiseEP:
                 "WHERE c.id IN $ids "
                 "RETURN o.id, c.id, coalesce(r.msg_alpha,0.0), coalesce(r.msg_beta,0.0)"
             ):
-                rows.extend(self.g.query(
-                    _q, params={"ids": list(affected_claims)}).result_set)
+                rows.extend(self._hop_query(
+                    _q, {"ids": list(affected_claims)}, hop=None,
+                    phase="cache_load", frontier_size=len(affected_claims),
+                ))
             for oid, cid, ma, mb in rows:
                 self._msg_cache[(oid, cid, rel)] = (float(ma), float(mb))
 
@@ -191,8 +398,10 @@ class TortoiseEP:
                 "RETURN a.id, b.id, type(r), "
                 "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)"
             ):
-                back_rows.extend(self.g.query(
-                    _q, params={"ids": list(affected_claims)}).result_set)
+                back_rows.extend(self._hop_query(
+                    _q, {"ids": list(affected_claims)}, hop=None,
+                    phase="cache_load", frontier_size=len(affected_claims),
+                ))
             for src, tgt, rel, ma, mb in back_rows:
                 self._back_cache[(src, tgt, rel)] = (float(ma), float(mb))
 
@@ -250,8 +459,11 @@ class TortoiseEP:
                 "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END "
                 "RETURN n.id"
             ):
-                result = self.g.query(_q, params={"params": params_list})
-                written.update(row[0] for row in result.result_set)
+                result = self._hop_query(
+                    _q, {"params": params_list}, hop=None,
+                    phase="cache_flush", frontier_size=len(params_list),
+                )
+                written.update(row[0] for row in result)
             # #2884 D3: journal EXACTLY what this statement committed — one
             # ConfidenceChanged per MATCHed node, once per flush (the cache
             # is the batched accumulator; emitting per EP iteration would
@@ -279,21 +491,22 @@ class TortoiseEP:
                     # #7853: o is id-anchored (the operator); drop the child's
                     # label and filter the traversal with the disjunction —
                     # no index is lost (the edge is reached FROM o).
-                    result = self.g.query(
+                    result = self._hop_query(
                         f"UNWIND $params AS p "
                         f"MATCH (o:Point {{id: p.oid}})-[r:{rel}]->(c) "
                         f"WHERE {epistemic_disjunction('c')} "
                         "AND c.id = p.cid "
                         "SET r.msg_alpha = p.a, r.msg_beta = p.b "
                         "RETURN p.oid, p.cid, p.a, p.b",
-                        params={"params": params_list},
+                        {"params": params_list}, hop=None,
+                        phase="cache_flush", frontier_size=len(params_list),
                     )
                     # #5380: journal EXACTLY the edges this statement
                     # committed. ``RETURN`` makes the journal set the committed
                     # set — a parameter whose edge vanished mid-run is NOT
                     # journaled as a write (the node arm's `RETURN n.id`
                     # discipline, above).
-                    for _oid, _cid, _a, _b in result.result_set:
+                    for _oid, _cid, _a, _b in result:
                         self._emit_edge_message(
                             _oid, _cid, rel, self.EDGE_MESSAGE_FWD_SLOTS,
                             (_a, _b))
@@ -318,10 +531,12 @@ class TortoiseEP:
                         "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b "
                         "RETURN p.src, p.tgt, p.a, p.b"
                     ):
-                        _res = self.g.query(
-                            _q, params={"params": params_list})
+                        _res = self._hop_query(
+                            _q, {"params": params_list}, hop=None,
+                            phase="cache_flush", frontier_size=len(params_list),
+                        )
                         # #5380: one record per committed edge, per label.
-                        for _s, _t, _a, _b in _res.result_set:
+                        for _s, _t, _a, _b in _res:
                             self._emit_edge_message(
                                 _s, _t, rel,
                                 self.EDGE_MESSAGE_BACK_SLOTS, (_a, _b))
@@ -937,11 +1152,16 @@ class TortoiseEP:
             # A node carries exactly one epistemic label, so the first label
             # in EPISTEMIC_LABELS order that resolves wins — the same
             # stop-at-first result as the per-seed sweep.
-            rows = self.g.query(
+            # #6211: the whole SEED PHASE is hop 0 and is typed: these queries'
+            # operand is the caller's full seed set (2,073 ids in the issue's
+            # measurement), so they are the FIRST place a dense graph aborts on
+            # the engine's query timeout — before the BFS loop makes a hop.
+            rows = self._hop_query(
                 f"MATCH (n:{_label}) WHERE n.id IN $ids "
                 "RETURN n.id, (n.is_operator = true), n.status",
-                params={"ids": unresolved},
-            ).result_set
+                {"ids": unresolved}, hop=0,
+                phase="seed_lookup", frontier_size=len(unresolved),
+            )
             for sid, is_op, status in rows:
                 seed_meta[sid] = (_label, bool(is_op), status)
             unresolved = [s for s in unresolved if s not in seed_meta]
@@ -966,12 +1186,13 @@ class TortoiseEP:
                 conds.append(live_c)
             if live_o:
                 conds.append(live_o)
-            rows = self.g.query(
+            rows = self._hop_query(
                 "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
                 "WHERE o.id IN $oids AND " + " AND ".join(conds) + " "
                 "RETURN DISTINCT c.id",
-                params={"oids": op_seeds},
-            ).result_set
+                {"oids": op_seeds}, hop=0,
+                phase="seed_operators", frontier_size=len(op_seeds),
+            )
             affected.update(r[0] for r in rows)
 
         for _label, group in plain_by_label.items():
@@ -988,7 +1209,7 @@ class TortoiseEP:
                 conds.append(live_b)
             if live_a:
                 conds.append(live_a)
-            rows = self.g.query(
+            rows = self._hop_query(
                 f"MATCH (a:{_label})-[r:IMPL|NAND]-(b) "
                 "WHERE a.id IN $ids AND " + " AND ".join(conds) + " "
                 # #3139/#3154: index-independent non-operator predicate
@@ -996,8 +1217,9 @@ class TortoiseEP:
                 "AND (b.is_operator IS NULL OR b.is_operator = false) "
                 "AND b.op_type IS NULL "
                 "RETURN DISTINCT b.id",
-                params={"ids": group},
-            ).result_set
+                {"ids": group}, hop=0,
+                phase="seed_direct_edge", frontier_size=len(group),
+            )
             affected.update(r[0] for r in rows)
             live_group = [
                 s for s in group
@@ -1038,7 +1260,7 @@ class TortoiseEP:
                 # Strip drafts from the frontier BEFORE expanding: a draft
                 # claim must never propagate to live claims (#780).
                 if not include_draft:
-                    draft_ids = self._filter_draft_ids(set(frontier))
+                    draft_ids = self._filter_draft_ids(set(frontier), hop=hops)
                     if draft_ids:
                         affected -= draft_ids
                         frontier = [n for n in frontier if n not in draft_ids]
@@ -1078,8 +1300,10 @@ class TortoiseEP:
                         f"AND {_live_only('m.status', include_draft)} "
                         "RETURN DISTINCT n.id, m.id"
                     ):
-                        nbr_rows.extend(self.g.query(
-                            _qn, params={"ids": list(frontier)}).result_set)
+                        nbr_rows.extend(self._hop_query(
+                            _qn, {"ids": list(frontier)}, hop=hops,
+                            phase="operator_bridge",
+                            frontier_size=len(frontier)))
                     for _nid, mid in nbr_rows:
                         if mid not in affected:
                             affected.add(mid)
@@ -1112,8 +1336,10 @@ class TortoiseEP:
                         "AND b.op_type IS NULL "
                         "RETURN DISTINCT a.id, b.id"
                     ):
-                        dir_rows.extend(self.g.query(
-                            _qa, params={"ids": list(frontier)}).result_set)
+                        dir_rows.extend(self._hop_query(
+                            _qa, {"ids": list(frontier)}, hop=hops,
+                            phase="direct_edge",
+                            frontier_size=len(frontier)))
                     for _aid, bid in dir_rows:
                         if bid not in affected:
                             affected.add(bid)
@@ -1177,18 +1403,30 @@ class TortoiseEP:
         only form that counts distinct nodes without shipping every id back,
         and one whole-graph count per unbounded-regime hop is the accepted
         price of the widening.
+
+        #6211: typed like every other query of the pass. It counts the WHOLE
+        graph, so on a large graph it is not cheap and can be the query the
+        engine aborts — pass-level (``hop=None``): there is no hop frontier it
+        walks.
         """
-        rows = self.g.query(
+        rows = self._hop_query(
             "MATCH (n) "
             f"WHERE {epistemic_disjunction('n')} "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND n.op_type IS NULL "
-            "RETURN count(n)"
-        ).result_set
+            "RETURN count(n)",
+            {}, hop=None, phase="claim_count", frontier_size=None,
+        )
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
-    def _filter_draft_ids(self, ids: set[str]) -> set[str]:
-        """Return the subset of ids whose nodes have status == 'draft' (#780)."""
+    def _filter_draft_ids(self, ids: set[str],
+                          hop: int | None = None) -> set[str]:
+        """Return the subset of ids whose nodes have status == 'draft' (#780).
+
+        #6211: typed. ``hop`` is the hop that asked (the loop's frontier) or
+        ``None`` for the pass-level strips (the seed phase and the final
+        fail-safe sweep over the whole affected set).
+        """
         if not ids:
             return set()
         rows: list = []
@@ -1197,7 +1435,10 @@ class TortoiseEP:
             "MATCH (n:{label}) WHERE n.id IN $ids AND n.status = 'draft' "
             "RETURN n.id"
         ):
-            rows.extend(self.g.query(_q, params={"ids": list(ids)}).result_set)
+            rows.extend(self._hop_query(
+                _q, {"ids": list(ids)}, hop=hop, phase="draft_filter",
+                frontier_size=len(ids),
+            ))
         return {r[0] for r in rows}
 
     def _live_neighbors_many(self, node_ids: list[str], include_draft: bool,
@@ -1247,8 +1488,13 @@ class TortoiseEP:
         queries = [template.replace("{label}", label)]
         rows: list = []
         for _q in queries:
-            rows.extend(self.g.query(
-                _q, params={"ids": list(node_ids)}).result_set)
+            # #6211: this is the SEED neighbourhood — the expansion that runs
+            # before the BFS loop makes its first hop (hop index 0). It is the
+            # same two-hop pattern, so it is the same failure: on a dense graph
+            # it is the FIRST query that can exceed the engine's query timeout.
+            rows.extend(self._hop_query(
+                _q, {"ids": list(node_ids)}, hop=0,
+                phase="seed_neighbourhood", frontier_size=len(node_ids)))
         return [r[0] for r in rows]
 
     def _affected_factors(self, affected_claims: set[str],
@@ -1309,8 +1555,10 @@ class TortoiseEP:
             f"WHERE {where_b1} "
             "RETURN DISTINCT o.id, o.op_type, o.label, o.direction"
         ):
-            rows.extend(self.g.query(
-                _q, params={"ids": list(affected_claims)}).result_set)
+            rows.extend(self._hop_query(
+                _q, {"ids": list(affected_claims)}, hop=None,
+                phase="factor_extraction", frontier_size=len(affected_claims),
+            ))
         for op_id, op_type, label, direction in rows:
             if op_id not in op_info:
                 op_info[op_id] = (op_type, label, direction)
@@ -1330,7 +1578,7 @@ class TortoiseEP:
         # (NAND_BASE_WEIGHT — #855 — for NAND, 1.0 for IMPL). Parallel direct
         # edges between the same pair share one message slot (last-writer
         # wins) — unsupported; creation paths must not duplicate edges.
-        dir_rows = self.g.query(
+        dir_rows = self._hop_query(
             "MATCH (a)-[r:IMPL|NAND]->(b) "
             # #7902: both endpoints of a direct edge may carry any of the four
             # epistemic labels (the write path was widened with the same
@@ -1349,8 +1597,9 @@ class TortoiseEP:
             f"{('AND ' + live_a + ' AND ' + live_b + ' ') if live_a else ''}"
             "RETURN a.id, b.id, type(r), coalesce(r.direction, 'bidirectional'), "
             "       r.weight",
-            params={"ids": list(affected_claims)},
-        ).result_set
+            {"ids": list(affected_claims)}, hop=None,
+            phase="factor_extraction", frontier_size=len(affected_claims),
+        )
         for src_id, tgt_id, rel, direction, weight in dir_rows:
             if weight is None:
                 weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
@@ -1384,14 +1633,15 @@ class TortoiseEP:
         # is then NOT provably the source, so the directional source-slot
         # guard must not fire (it could check the wrong slot — #943 review).
         op_idx_known: dict[str, bool] = {op_id: True for op_id in op_info}
-        rows = self.g.query(
+        rows = self._hop_query(
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
             "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false) "
             "ORDER BY coalesce(r.idx, 0), c.id",
-            params={"ids": list(op_info.keys())},
-        ).result_set
+            {"ids": list(op_info.keys())}, hop=None,
+            phase="factor_extraction", frontier_size=len(op_info),
+        )
         for op_id, claim_id, idx, status, outdated in rows:
             op_inputs[op_id].append(claim_id)
             # Participation is UNCONDITIONAL on status (#2422): a terminal
@@ -1772,7 +2022,10 @@ class TortoiseEP:
                 "    n.posterior_beta  = CASE WHEN coalesce(n.baseline_set,false) "
                 "                           THEN n.posterior_beta  ELSE null END"
             ):
-                self.g.query(_q, params={"params": params_list})
+                self._hop_query(
+                    _q, {"params": params_list}, hop=None,
+                    phase="evidence_prewrite", frontier_size=len(params_list),
+                )
             # #2884 D3: this pre-write CLEARS the posterior of every
             # NON-baseline evidence claim (baseline'd claims keep theirs — the
             # CASE above), and it is a committed write whenever the run then
@@ -1792,13 +2045,15 @@ class TortoiseEP:
             if self._emit is not None:
                 # #7853: single disjunction query (not a per-label sweep) so a
                 # multi-labelled node is read — and journaled — exactly once.
-                rows = self.g.query(
+                rows = self._hop_query(
                     "MATCH (n) "
                     f"WHERE {epistemic_disjunction('n')} AND n.id IN $ids "
                     "AND coalesce(n.baseline_set, false) = false "
                     "RETURN n.id",
-                    params={"ids": list(run_evidence)},
-                ).result_set
+                    {"ids": list(run_evidence)}, hop=None,
+                    phase="evidence_prewrite",
+                    frontier_size=len(run_evidence),
+                )
                 for row in rows:
                     self._emit("ConfidenceChanged", id=row[0],
                                posterior_alpha=None, posterior_beta=None)

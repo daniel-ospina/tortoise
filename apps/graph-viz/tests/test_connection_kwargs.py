@@ -29,15 +29,54 @@ def _load_helper():
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for k in ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_USERNAME",
-              "FALKORDB_PASSWORD", "FALKORDB_GRAPH", "FALKORDB_SSL"):
+              "FALKORDB_PASSWORD", "FALKORDB_GRAPH", "FALKORDB_SSL",
+              # #8118: the socket bounds come from the product's resolver, so the
+              # operator knobs are part of this builder's env contract too.
+              "TORTOISE_DB_SOCKET_TIMEOUT", "TORTOISE_DB_SOCKET_CONNECT_TIMEOUT"):
         monkeypatch.delenv(k, raising=False)
 
 
 def test_defaults_match_local_dev():
-    """No env → the docker-compose local defaults (unchanged behavior)."""
+    """No env → the docker-compose local defaults (unchanged behavior).
+
+    The socket pair is asserted separately (#8118) rather than pinned inside this
+    dict equality, so an added bound never looks like a change of ENDPOINT.
+    """
     mod = _load_helper()
     kwargs = mod.build_connection_kwargs()
-    assert kwargs == {"host": "localhost", "port": 16379}
+    assert {k: v for k, v in kwargs.items() if not k.startswith("socket_")} == {
+        "host": "localhost", "port": 16379}
+
+
+def test_socket_bounds_are_present_by_default():
+    """#8118: ``FalkorDB`` defaults ``socket_timeout=None`` — the read is UNBOUNDED.
+
+    A missing bound is not "redis-py's default"; ``falkordb`` passes its own
+    ``None`` to redis-py explicitly. One wedged read then parks the boot loop in
+    ``recv()`` forever, so the pair must be PRESENT without any env set.
+    """
+    mod = _load_helper()
+    kwargs = mod.build_connection_kwargs()
+    assert kwargs["socket_timeout"] is not None, (
+        "an absent read bound is the unbounded recv() #8118 exists to kill")
+    assert kwargs["socket_timeout"] > 0
+    assert kwargs["socket_connect_timeout"] is not None
+    assert kwargs["socket_connect_timeout"] > 0
+
+
+def test_socket_bounds_follow_the_product_knobs(monkeypatch):
+    """The bound is the PRODUCT's policy, not a literal re-derived here.
+
+    With the package importable the operator's knobs must reach this server, or
+    the viz boot would be the one client that ignores them.
+    """
+    pytest.importorskip("tortoise")
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", "3")
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", "0.5")
+    mod = _load_helper()
+    kwargs = mod.build_connection_kwargs()
+    assert kwargs["socket_timeout"] == 3.0
+    assert kwargs["socket_connect_timeout"] == 0.5
 
 
 def test_username_passthrough(monkeypatch):

@@ -39,6 +39,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from tortoise.api import EventAPI, provenance  # noqa: I001
 from tortoise.ep import TortoiseEP
 from tortoise.log import EventLog
+# #8118: the ONE socket-bound resolver — imported at module scope, NOT inside the
+# `try` below, so a broken import cannot be swallowed by the embedded fallback and
+# turn a missing bound into a silent mode change.
+from tortoise.projection import _bounded_server_socket_kwargs
 
 
 # ── Minimal projection (duck-types FalkorProjection) ──────────────
@@ -98,7 +102,13 @@ def _connect(graph_name: str, embedded_path: str | None = None) -> tuple[str, ob
     # Try server first
     try:
         from falkordb import FalkorDB as ServerDB
-        db = ServerDB(host='localhost', port=16379)
+        # #8118: bounded read. ``falkordb.FalkorDB`` defaults ``socket_timeout=None``
+        # and hands it to redis-py explicitly, so the liveness query below could park
+        # the whole smoke test in ``recv()`` forever against a wedged engine — and only
+        # a hang would do it, so the ``except Exception`` fallback below could never
+        # fire (a hang raises nothing).
+        db = ServerDB(host='localhost', port=16379,
+                      **_bounded_server_socket_kwargs())
         g = db.select_graph(graph_name)
         g.query("MATCH (n) RETURN count(n) LIMIT 1")  # liveness check
         return 'server', db, g

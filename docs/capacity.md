@@ -211,7 +211,8 @@ curve, and one of those guards has a **measured failure threshold**.
 | Dimension | Value | Source |
 |---|---|---|
 | EP affected-claim frontier guard (new **claims** per hop) | **200** (`_EP_GUARD_FRONTIER_CAP`) | `tortoise/ep.py` |
-| Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning | `tortoise/analyze.py` |
+| Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning — and reported in the caller's RESULT as `truncated` / `operators_seen` / `operators_used` since #6211 | `tortoise/analyze.py` |
+| EP pass query that the engine aborts on its own query timeout | raised as **`EPSubgraphHopError`** (a `ResponseError` subclass) carrying the hop index (or `None` for a pass-level query), phase and frontier size (#6211) | `tortoise/ep.py` |
 | EP degenerate-run guard | fires when the pass has collected **≥ 50%** of the graph's claims, on graphs of **≥ 500** claims | `tortoise/ep.py` |
 | Dreaming per-pass window budget (stale-first) | **200** operators (`TORTOISE_DREAM_WINDOW_BUDGET`) | `tortoise/dream.py` |
 | Dreaming full-mode operator cap (`dream_all`) | **200,000** (`max_total_operators`) | `tortoise/dream.py` |
@@ -233,6 +234,48 @@ This is why the frontier guard exists, and why it is a *bound* rather than an
 optimisation: the guard trades an exact closure for staying inside the store's
 query budget. The graph instruction to "add your findings as you go" is what
 surfaced it — the writes succeeded and the calibration could not run.
+
+**What #6211 changed (the reporting half).** Two of the three failure modes are
+now visible to a programmatic caller instead of to a human reading stderr:
+
+- The 200-operator cap travels in `compute_confidence`'s **result**
+  (`truncated`, `operators_seen`, `operators_used`). Before it, a capped pass
+  and a full-graph pass both returned `{iterations, converged, confidences}` with
+  `converged: true` — a published ranking with 0.0067 margins came from a capped
+  pass and nothing in the result said so. The cap itself is deliberately NOT
+  raised: the truncated topology is the honest problem, not the bound.
+- A query of the pass that the engine aborts on its own query timeout raises
+  `EPSubgraphHopError` (still a `redis.exceptions.ResponseError`, so existing
+  handlers are unaffected), naming the hop index, the phase and the frontier
+  size it was scoped to. Typed is the WHOLE pass, not only the two-hop
+  expansion: the seed phase (`seed_lookup` / `seed_operators` /
+  `seed_direct_edge` / `seed_neighbourhood`, hop 0), the loop's hops
+  (`operator_bridge` / `direct_edge`), and the pass-level queries that walk the
+  finished affected set (`factor_extraction`, `draft_filter`, `cache_load`,
+  `cache_flush`, `evidence_prewrite`, `claim_count`, `ep_epoch`) — those report
+  `hop: None`, because there is no hop to name (`draft_filter` is the one phase
+  that appears in BOTH shapes: hop-scoped when the loop asks it, `hop: None` on
+  the final fail-safe strip). The cache phases are the
+  WIDEST statements a pass makes (16 load sweeps over the whole affected set,
+  plus the write-back) — a different query from factor extraction's single
+  largest one, and untyped it would keep the issue's symptom
+  reachable on the largest query of the pass; a `cache_flush` timeout is
+  reported as "this run's posteriors were NOT persisted", and `claim_count` /
+  `ep_epoch` say plainly that narrowing seeds or `max_hops` cannot help,
+  because those reads are not hop-scoped. An
+  earlier revision typed only the expansions, which left the issue's own
+  symptom reproducible on the largest query of the pass.
+  Measured on a 3,353-claim / 160,000-edge graph with the engine's 1,000 ms
+  timeout posture: the bridge query aborted after **1.00 s** over a
+  **188–257-claim** frontier, and the pass failed after 1.1–2.9 s.
+- **Still open — the clearing path.** `ep_dirty` is cleared only by the dreaming
+  adapters' `_sweep_dirty_roots` (epoch-guarded, convergence-gated, and scoped to
+  the pass's `affected` set). The targeted fast path
+  (`compute_confidence(factors=…)` / `compute_confidence(anchors=…)`) never runs
+  it: measured, a converged targeted pass over three freshly-written claims left
+  all three `ep_dirty`, while a no-arg pass on the same graph cleared them. So a
+  writer that follows the documented "compute confidence for my claims" call has
+  **no** API that clears its own flags — #6211's second failure mode, still open.
 
 ### The full-mode cap is a refusal, not a silent truncation
 

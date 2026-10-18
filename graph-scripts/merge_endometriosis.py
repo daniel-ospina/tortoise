@@ -11,9 +11,23 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
         f"`uv run python graph-scripts/merge_endometriosis.py`"
     )
 
+import os
+
 from falkordb import FalkorDB
 
-db = FalkorDB(host="localhost", port=16379)
+# Repo-root import (matches the sibling graph-scripts).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tortoise.projection import _bounded_server_socket_kwargs
+
+# #8118: bounded on the product's ONE resolver, never a hand-derived literal.
+# ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands it to redis-py
+# explicitly, so this construction ran UNBOUNDED: a stalled engine (#2969's
+# defrag loop, #2838's MERGE lock) parked the merge in ``recv()`` forever, alive at
+# 0% CPU with no error — mid-merge, which is the worst place to be unable to say
+# whether anything ran.
+db = FalkorDB(host="localhost", port=16379,
+              **_bounded_server_socket_kwargs())
 src = db.select_graph("endometriosis_melasma")
 dst = db.select_graph("endometriosis_melasma_ep")
 

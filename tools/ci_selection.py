@@ -1062,6 +1062,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # silent-drop class as the entry above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261014000001_record_subject_props_no_derived.sql",
+             # #2782: the FORWARD record migration that ADDS the five money
+             # COLUMNS to `public.point` (`ALTER TABLE … ADD COLUMN`). Same gap
+             # as the #8263 entry above and it sorts outside the
+             # `2026101200000` prefix: a forward-migration-only diff selects NO
+             # surface, so neither reader (`test_record_projection.py`,
+             # `test_record_schema_placement.py`) would run on the change that
+             # can drift them. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
              # #8469 review P1: the orchestrator harness's shipped shell scripts
              # (lane.sh, merged-not-closed.sh, refresh-candidates.sh, orch-loop.sh,
@@ -1252,7 +1261,32 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tools/queue_resweep.py` entry above. Pinned by
              # tests/test_8491_cal_attendee_grounding.py::
              # test_bridge_change_selects_core_so_this_guard_runs.
-             "integrations/crm/twenty/bridge.py")
+             "integrations/crm/twenty/bridge.py",
+             # PR #8986 review (P1/P2, four independent reviews): the two
+             # served-identity DRIVERS are the files whose one-copy edit
+             # `tests/test_surface_manifest.py` exists to catch. That suite is
+             # `core`-registered AND a `slow_files` member
+             # (config/ci-surfaces.yml), so it can only run on the `test-slow`
+             # leg — and `tools/` is a flat NON_PYTHON_PREFIXES entry matching
+             # no SOURCE_PATTERNS row, so a driver-only diff came back with
+             # `changed == []`, took the docs-only early return and returned
+             # `surfaces=[]`, `slow_run=False`: the parity net was ASLEEP on the
+             # exact diff class it was written for. The required `surface-guard`
+             # CI job cannot backstop it either — it OVERWRITES
+             # `tools/surface-guard.py` with the base ref's copy before running,
+             # so a PR-side edit to that copy is discarded before measurement,
+             # and its `surface_manifest.py check` step reads the UNCHANGED
+             # manifest copy. Measured before this entry: `select([
+             # "tools/surface-guard.py"])` -> surfaces=[], full=False, 46
+             # tier-1 files, `test_surface_manifest.py` absent. Same
+             # #1349/#3332/#3616 silent-drop class as `tools/lane_stash.py`
+             # above; `CORE_ALSO` (not `TOOL_CARVEOUTS`) is the documented seam
+             # because the guard is `core`-registered, and a name in a surface's
+             # test_files only runs when that surface is ALREADY selected.
+             # Pinned by
+             # tests/test_ci_selection.py::test_surface_tools_change_selects_core_not_tier1.
+             "tools/surface-guard.py",
+             "tools/surface_manifest.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

@@ -55,9 +55,12 @@ test('#3513: the step renders the grid through the ONE shared component', () => 
   const branch = dataSourcesBranch()
   assert.match(branch, /<MemorySources\s*\{\.\.\.memorySourcesProps\}\s*order=\{DATA_SOURCES_ORDER\}/,
     'the wizard mount must pass the explicit order')
-  // review P2: no `surface` prop — the component never read it, so it was
-  // dropped rather than left looking load-bearing.
-  assert.doesNotMatch(branch, /surface=/, 'the wizard mount must not pass a dead surface prop')
+  // #3513 §2: the wizard mount IS the one surface that must never carry the
+  // install recipe (epic #1714 decision #2), so it declares itself — the same
+  // shape as the README's "both call sites pass it". The full surface assertion
+  // (both mounts + the component default) lives in the dedicated test below.
+  assert.match(branch, /\bsurface="wizard"/,
+    'the wizard mount must declare its surface, or the recipe gate cannot tell it apart from Settings')
   // review P2: the wizard is the ONE mount that knows the connect-step pick, so
   // it must pass it — null when no pick was established, so the 'claude' default
   // is never presented as a user choice.
@@ -105,8 +108,8 @@ test('#3513: MemorySources renders the tile grid as the single source-list prese
     'the grid is the list presentation')
   assert.match(src, /\{gridTiles\.map\(\(t\) => \{/, 'it maps the ordered tiles')
   // the SAME component is mounted at all three sites (the two live mounts plus
-  // the dead ARCHIVED block); no mount carries a `surface` prop — it was dead
-  // and dropped, so the tests below assert its absence
+  // the dead ARCHIVED block); the LIVE mounts declare which surface they are
+  // (#3513 §2 — the surface decides whether the manual-install recipe renders)
   assert.equal((src.match(/<MemorySources/g) || []).length, 3,
     'Settings + wizard + the dead archived block')
 })
@@ -152,11 +155,27 @@ test('#3513: the grid order is a prop, never the array literal', () => {
   assert.match(src, /order: DATA_SOURCES_ORDER,/, 'the prop bundle declares the order explicitly')
   assert.match(src, /<MemorySources \{\.\.\.memorySourcesProps\} \/>/,
     'Settings spreads the same bundle (same order)')
-  // review P2: the `surface` prop was dead, so neither mount carries it
-  assert.doesNotMatch(src, /<MemorySources[^>]*surface=/,
-    'the dead surface prop must not be re-added to any mount')
   // the order itself is the pinned ship order, declared once in the module
   assert.deepEqual([...DATA_SOURCES_ORDER], ['agent_sessions', 'github_issues', 'github_documents'])
+})
+
+test('#3513 §2: the surface prop is explicit at BOTH live mounts (the recipe gate depends on it)', () => {
+  // Epic #1714 decision #2: the install runs in the agent prompt, the WIZARD
+  // mount never carries the recipe, and the SETTINGS mount carries it COLLAPSED.
+  // That split is invisible to the DOM lane (it renders the component, not the
+  // wiring), so both call sites are pinned here. The bundle default is
+  // 'settings' and the wizard OVERRIDES it — the same shape as `wizardHarness`,
+  // so the two live mounts cannot drift into one rendering.
+  assert.match(src, /\bsurface: 'settings',/, 'the shared prop bundle is the Settings surface')
+  assert.match(src, /<MemorySources[\s\S]{0,200}?\bsurface="wizard"/,
+    'the wizard mount overrides the surface — the one mount that must never carry the recipe')
+  // and MemorySources must FORWARD it to the row that renders the recipe
+  assert.match(src, /<HarnessStatusCard[^>]*\bsurface=\{surface\}/,
+    'the row must be told its surface, or the recipe gate cannot fire')
+  // a mount that passes nothing falls back to 'wizard' (fail-closed): the
+  // component default must not be 'settings', which would publish the manual
+  // path from every undeclared mount
+  assert.match(src, /\bsurface = 'wizard',/, "the component default is 'wizard' — fail closed")
 })
 
 test('#3513 review P2: the logo branch renders the descriptor it is handed, never a bare "?"', () => {

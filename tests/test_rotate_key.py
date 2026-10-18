@@ -21,10 +21,15 @@ surface of the #4355 scoping comment, class by class:
   T7  concurrent rotate of one row              → the conditional-revoke CLAIM
       admits one winner; a loser rolls back and 409s
 
-Supabase lane (FakeControlPlane) — the hosted E2E suite covers the registry
-lane. Session-authentication is used where a test needs more than one live
-credential (the anon org's derived tier caps `max_api_keys` at 1) or needs to
-exercise the owner/admin session gates.
+Supabase lane (FakeControlPlane) is the default for this file. The registry
+lane is covered here too, but only where a defect is LANE-SPECIFIC: the
+concurrent-claim race (T7) has two implementations — the Supabase PATCH and the
+Cypher twin in `hosted_api._claim_key_revocation` — so each is raced against its
+own store (#4721). Everything else is asserted on the Supabase lane, and the
+hosted E2E suite (`tests/e2e/hosted/test_02_free_tier_limits.py`) covers the
+registry lane end-to-end. Session-authentication is used where a test needs
+more than one live credential (the anon org's derived tier caps `max_api_keys`
+at 1) or needs to exercise the owner/admin session gates.
 """
 from __future__ import annotations
 
@@ -165,6 +170,39 @@ def _mint(client, headers, body) -> dict:
 def _rotate(client, key_id, headers, body=None):
     return client.post(f"/v1/team/keys/{key_id}/rotate", headers=headers,
                        json=body or {})
+
+
+def _reraise_captured_skip(errors: list[BaseException]) -> None:
+    """Re-raise a `pytest.skip` that a RACE THREAD captured, in the main thread.
+
+    pytest honours a skip only when it is raised in the TEST's own frame. The
+    verdict seam (`tests/_verdict.py::verdict_client`) raises the #5049
+    INCONCLUSIVE skip at the point of the request, and in a threaded race that
+    point is inside the worker — so `except BaseException` captures it into
+    `errors` and a bare `assert not errors` then flattens a NON-ANSWER into a
+    hard FAIL. That is rule 1 of #5049 (`load must skip INCONCLUSIVE, never
+    red`) failing from the seam adopted to prevent it: a loaded box would
+    manufacture a red out of machine load.
+
+    A captured skip NEVER downgrades a genuine failure (#4721 review P2): the
+    list is PARTITIONED, so the skip is re-raised only when EVERY captured
+    exception is a skip. The earlier shape raised the first skip it found and
+    returned through the `raise`, silently discarding a real exception
+    captured alongside it — a red reported as INCONCLUSIVE, i.e. the #5049
+    rule broken in the opposite direction (fail-open). Genuine failures win:
+    with `errors == [<failure>, <skip>]` the failure is what pytest records.
+
+    Call this AFTER the deadlock (liveness) assertion and BEFORE
+    `assert not errors`. The liveness fact is independent of the skip
+    contract — a worker still parked in the rendezvous is a real failure and
+    must not be reported as a skip.
+    """
+    skips = [e for e in errors if isinstance(e, pytest.skip.Exception)]
+    others = [e for e in errors if not isinstance(e, pytest.skip.Exception)]
+    if others:
+        raise others[0]
+    if skips:
+        raise skips[0]
 
 
 # ── T2: the cap proof + the spent-slot refusals ─────────────────────────────
@@ -763,10 +801,17 @@ def test_concurrent_rotate_of_one_row_admits_exactly_one(client, fake, monkeypat
         t.start()
     for t in threads:
         t.join(timeout=120)
-    assert not errors, errors
+    # The liveness fact comes FIRST: a worker still parked in the rendezvous is
+    # a real failure, and a captured skip must not report it as INCONCLUSIVE.
     assert not any(t.is_alive() for t in threads), (
         "a rotate thread never returned — the claim rendezvous deadlocked"
     )
+    # #5049: a load refusal reaches this race as a skip raised INSIDE the
+    # worker (verdict_client), so it must be re-raised here to count as a skip
+    # rather than be asserted into a red below — and only when it is the ONLY
+    # kind of thing captured (see `_reraise_captured_skip`).
+    _reraise_captured_skip(errors)
+    assert not errors, errors
     statuses = sorted(r.status_code for r in results)
     assert statuses == [200, 409], [
         (r.status_code, r.text) for r in results
@@ -843,3 +888,372 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/team/keys answered" in message
+
+
+def test_a_threaded_non_answer_is_re_raised_as_the_contracts_skip(monkeypatch):
+    """#5049 across a THREAD boundary — the exchange these races depend on.
+
+    ``verdict_client`` raises the INCONCLUSIVE skip at the point of the
+    REQUEST (``tests/_verdict.py::_answered``); in a threaded race that point
+    is inside the worker. pytest honours a skip only in the test's own frame,
+    so a worker's skip captured by ``except BaseException`` and then asserted
+    with a bare ``assert not errors`` becomes a RED — a NON-ANSWER reported as
+    a failure, i.e. #5049 rule 1 broken by the very seam adopted to obey it.
+
+    Non-vacuity in both directions: the pre-fix shape (``assert not errors``)
+    fails on the captured skip below, and the fix re-raises it as the
+    contract's skip. The bound is forced to 0 s, so the refusal comes from the
+    real ``WaitBoundMiddleware`` — no load and no wall-clock wait.
+    """
+    from tortoise import mcp_auth
+
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    errors: list[BaseException] = []
+    box: list = []
+
+    def _worker(tc) -> None:
+        try:
+            box.append(tc.post("/v1/team/keys", json={}))
+        except BaseException as e:  # mirrors the race workers above
+            errors.append(e)
+
+    with verdict_client(app) as tc:
+        t = threading.Thread(target=_worker, args=(tc,))
+        t.start()
+        t.join(timeout=60)
+    assert not t.is_alive(), "the worker never returned from its refused request"
+    assert not box, "the refusal must not produce a response"
+    assert errors and isinstance(errors[0], pytest.skip.Exception), errors
+    # The pre-fix shape: the skip is flattened into a hard FAIL.
+    with pytest.raises(AssertionError):
+        assert not errors, errors
+    # The fix: re-raised in the main thread, where pytest records the skip.
+    with pytest.raises(pytest.skip.Exception):
+        _reraise_captured_skip(errors)
+
+
+def test_a_captured_skip_never_downgrades_a_genuine_failure(monkeypatch):
+    """The other direction of the #5049 seam: failures win, skips do not mask.
+
+    A loaded box can refuse ONE worker's request (captured skip) while its
+    partner hits a real fault — a 500 through TestClient's
+    ``raise_server_exceptions``, an embedded-DB error, or the winner's own
+    path. The pre-fix shape raised the FIRST skip it found and returned
+    through the `raise`, so a genuine exception sitting next to it was
+    discarded and the run was recorded as SKIP: a real failure reported as
+    INCONCLUSIVE (fail-open), which is the #5049 contract broken in the
+    opposite direction.
+
+    Non-vacuity: with ``errors == [AssertionError, Skipped]`` the pre-fix
+    helper raises the skip (the test below fails on that), the fix raises the
+    AssertionError. Built from a REAL captured skip (the forced-0s bound) so
+    the element under test is the one the race workers actually produce.
+    """
+    from tortoise import mcp_auth
+
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
+        tc.post("/v1/team/keys", json={})
+    captured_skip = excinfo.value
+    assert isinstance(captured_skip, pytest.skip.Exception)
+
+    failure = AssertionError("the other worker hit a real fault")
+    # The order that defeats the pre-fix shape: the genuine failure is FIRST,
+    # so a `for` loop raising the first skip it meets walks past it. The call's
+    # escape is captured rather than asserted with `pytest.raises` — under the
+    # pre-fix helper it raises the SKIP, which pytest would honour and record
+    # as a skip (the masking this case exists to catch); captured, it is a plain
+    # red on the assertion below.
+    mixed: list[BaseException] = [failure, captured_skip]
+    raised_exc: BaseException | None = None
+    try:
+        _reraise_captured_skip(mixed)
+    except BaseException as e:  # noqa: BLE001 — the raised TYPE is the assertion
+        raised_exc = e
+    assert raised_exc is failure, (
+        "a captured skip must never downgrade a genuine failure — the FAILURE "
+        f"is what pytest records; got {raised_exc!r}"
+    )
+    # And a skip-only race still skips: the conversion this seam exists for.
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        _reraise_captured_skip([captured_skip])
+    assert skipped.value is captured_skip
+    # Nothing captured at all: nothing raised (the ordinary green race).
+    assert _reraise_captured_skip([]) is None
+
+
+# ── T7, registry lane: the CYPHER twin's claim, raced ───────────────────────
+# `test_concurrent_rotate_of_one_row_admits_exactly_one` above races the
+# Supabase claim (`claim_api_key_revocation`, a conditional PATCH). The
+# registry/selfhost lane uses the Cypher twin in
+# `hosted_api._claim_key_revocation` — `MATCH … WHERE k.revoked_at IS NULL SET
+# … RETURN k.id` — and NOTHING raced it: this file is Supabase-only (the
+# autouse `_env` fixture above) and the hosted E2E covers cap-neutrality and
+# the non-occupying refusal but not the concurrent claim. "Believed correct"
+# is not the standard a rotate claim is held to (#4721).
+
+_REG_SDKS: list = []
+
+
+@pytest.fixture
+def reg_client(_env, monkeypatch):
+    """A hosted REST client on the REGISTRY lane (one temp DB, its own graphs).
+
+    `_env` is requested explicitly, not assumed: it is autouse and pins
+    `TORTOISE_CONTROL_PLANE=supabase` at setup, so this fixture runs AFTER it
+    and undoes exactly that (the fixture ordering, not luck, is what makes the
+    lane switch deterministic). `patched_tortoise_sdk` binds every no-path SDK
+    construction to one temp DB (the #1497/#1950 anchor rules).
+
+    Lane scope, measured rather than assumed (#4721 review): under a
+    `TORTOISE_DB_URI` lane the #1647 redirect fires here (the temp path is
+    passed POSITIONALLY, so `explicit_path` is true and this stem is not in
+    `TEST_NO_REDIRECT_STEMS`), so both SDKs land on the SERVER — but not in a
+    shared graph: the redirect renames it per run to `test_<pathstem>_<hash>`
+    and `_get_registry` derives `test_registry_<...>_control_plane` from that,
+    both `test_`-prefixed and journaled for the session sweep. Two consecutive
+    docker-lane runs of the cases below are green. The assertions still do not
+    rely on it: the seeded ids carry a per-run suffix, so a row left by ANY
+    other run can never enter this test's live set.
+
+    The client is `verdict_client`, matching this module's `client` fixture. A
+    request parked past `_TRANSPORT_WAIT_BOUND_S` under machine load is a
+    NON-ANSWER, and the exact `sorted(statuses) == [200, 409]` assertion below
+    cannot tell a 504 refusal from a real verdict — so a raw `TestClient` would
+    turn load into a red. The seam converts that refusal into the contract's
+    INCONCLUSIVE skip (#5049) **provided the test re-raises it out of the
+    worker thread**, which pytest cannot do on its own: the requests here run
+    in threads, so the cases below call `_reraise_captured_skip(errors)` before
+    asserting on `errors` (see
+    `test_a_threaded_non_answer_is_re_raised_as_the_contracts_skip`).
+    """
+    import tempfile
+
+    from tests._http_fixtures import patched_tortoise_sdk
+
+    for var in ("TORTOISE_CONTROL_PLANE", "SUPABASE_URL",
+                "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        patched_tortoise_sdk(os.path.join(tmpdir, "rotate-registry.db")),
+    ):
+        try:
+            with verdict_client(app) as tc:
+                yield tc
+        finally:
+            while _REG_SDKS:
+                try:  # noqa: SIM105
+                    _REG_SDKS.pop().close()
+                except Exception:
+                    pass
+
+
+@pytest.fixture
+def reg():
+    """The registry graph handle (kept alive past the test — #1588)."""
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(namespace="registry")
+    _REG_SDKS.append(sdk)
+    return sdk._get_registry()
+
+
+def _reg_seed_org(reg, org_id: str, *, max_api_keys: int = 5) -> None:
+    """One Team with headroom above the cap gate.
+
+    The cap must NOT decide this race: the loser's admission check runs after
+    the winner's insert, so at a cap of 2 it would 402 before ever reaching the
+    claim — and then an UNCONDITIONAL claim would still pass the assertion. 5
+    keeps the gate out of the way so the CLAIM is the deciding write (the same
+    reason the Supabase twin uses the `solo` tier).
+    """
+    reg.query(
+        "CREATE (t:Team {id:$id, name:$id, tier:'free', max_api_keys:$mak})",
+        params={"id": org_id, "mak": max_api_keys},
+    )
+
+
+def _reg_seed_key(reg, org_id: str, key_id: str, *, token: str | None = None,
+                  created_via: str = "provisioned",
+                  revoked_at: str | None = None) -> None:
+    """A registry APIKey node. `token` makes it AUTHENTICABLE (real
+    salt:hash + its 10-char prefix, the shape `get_current_org` scans for); no
+    `scopes`/`delegation_depth` props → `legacy_full_access`, i.e. the owner
+    class `_require_keys_manage` admits."""
+    from tortoise.auth import hash_api_key
+
+    reg.query(
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp, "
+        "created_at:$ca, revoked_at:$ra, expires_at:null, created_via:$cv})",
+        params={
+            "id": key_id, "tid": org_id,
+            "kh": hash_api_key(token) if token else "salt:unused",
+            "kp": token[:10] if token else "tt_unseen_",
+            "ca": datetime.now(UTC).isoformat(),
+            "ra": revoked_at, "cv": created_via,
+        },
+    )
+
+
+def _reg_live(reg, org_id: str) -> list[str]:
+    rows = reg.query(
+        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN k.id",
+        params={"tid": org_id},
+    ).result_set
+    return sorted(r[0] for r in rows)
+
+
+def _reg_revoked(reg, key_id: str):
+    rows = reg.query(
+        "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at", params={"id": key_id},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def test_registry_lane_concurrent_rotate_of_one_row_admits_exactly_one(
+        reg_client, reg):
+    """T7 on the CYPHER twin: two real clients rotating the SAME registry node
+    simultaneously. Both are held at the claim write, so both have already
+    proved the row live and minted their replacements — then the conditional
+    `SET … WHERE k.revoked_at IS NULL` decides. Exactly one 200, one 409, and
+    the live count is where it started.
+
+    Non-vacuity: the rendezvous is what makes the claim the deciding write. On
+    the registry lane the claim is a single `graph.query`, so the barrier wraps
+    that call; dropping the `WHERE k.revoked_at IS NULL` guard (an
+    unconditional SET returning the row) makes BOTH calls claim and this
+    assertion fails with two 200s.
+    """
+    # Per-RUN ids, not fixed ones: the live-set equality below must be a
+    # statement about THIS run's rows only. Nothing in this test may depend on
+    # the graph having been empty when it started (a fixed id would make the
+    # assertion an equality against whatever a previous run left behind).
+    suffix = uuid.uuid4().hex[:8]
+    org_id = f"team-4721r-{suffix}"
+    target = f"key_target_4721-{suffix}"
+    caller_key = f"key_caller_4721-{suffix}"
+    caller_token = f"tt_caller_{suffix}_signin"
+    _reg_seed_org(reg, org_id)
+    _reg_seed_key(reg, org_id, caller_key, token=caller_token)
+    _reg_seed_key(reg, org_id, target)
+
+    before = _reg_live(reg, org_id)
+    assert before == [caller_key, target], before
+
+    gate = threading.Barrier(2, timeout=60)
+    # Both threads must actually ARRIVE at the claim: if the barrier timed out
+    # (or only one thread ever ran the claim), the broken wait raises into the
+    # caller's `except Exception` and produces a 409 that looks exactly like a
+    # lost claim — a false pass. Counting the waiters makes the race itself an
+    # assertion, not an assumption.
+    claim_waiters: list[int] = []
+    from tortoise.sdk import TortoiseSDK as _SDK
+
+    real_get_registry = _SDK._get_registry
+    claim_marker = "SET k.revoked_at = $now RETURN k.id"
+
+    class _RendezvousAtClaim:
+        """Delegating proxy: waits for BOTH threads on the CLAIM statement
+        only, then performs the real write. Only SCHEDULING is wrapped — the
+        predicate under test is untouched."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def query(self, cypher, *args, **kwargs):
+            if claim_marker in cypher:
+                claim_waiters.append(1)
+                gate.wait(timeout=60)
+            return self._inner.query(cypher, *args, **kwargs)
+
+    def _patched_get_registry(self, *a, **kw):
+        return _RendezvousAtClaim(real_get_registry(self, *a, **kw))
+
+    from unittest import mock
+
+    results: list = [None, None]
+    errors: list = []
+
+    def _worker(i: int) -> None:
+        try:
+            results[i] = _rotate(reg_client, target, _auth(caller_token))
+        except BaseException as e:
+            errors.append(e)
+
+    with mock.patch.object(_SDK, "_get_registry", _patched_get_registry):
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in (0, 1)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+    # Same order as the Supabase twin: liveness first (a deadlock is a real
+    # failure), then the #5049 re-raise, then the errors assertion.
+    assert not any(t.is_alive() for t in threads), (
+        "a rotate thread never returned — the claim rendezvous deadlocked"
+    )
+    _reraise_captured_skip(errors)
+    assert not errors, errors
+    statuses = sorted(r.status_code for r in results)
+    assert statuses == [200, 409], [(r.status_code, r.text) for r in results]
+    assert len(claim_waiters) == 2, (
+        "both rotates must reach the CLAIM write — otherwise the two requests "
+        "serialized and the claim was never the deciding write"
+    )
+
+    # The claim, not the cap gate, decided: the loser reached the claim (it
+    # minted a replacement and compensated it) rather than 402ing earlier.
+    loser = next(r for r in results if r.status_code == 409)
+    assert "rolled back" in loser.json()["detail"], (
+        "the loser must be the CLAIM refusal (replacement rolled back), not the "
+        f"non-occupying refusal: {loser.json()['detail']}"
+    )
+
+    winner = next(r for r in results if r.status_code == 200)
+    after = _reg_live(reg, org_id)
+    assert len(after) == len(before), (
+        f"a rotate racing a rotate must leave the live count unchanged: {after}"
+    )
+    assert target not in after, "the winner's claim revoked the displaced row"
+    assert winner.json()["id"] in after, (
+        "the winner's replacement is the live row that replaced it"
+    )
+    assert winner.json()["replaced_revoked"] is True
+    assert _reg_revoked(reg, target) is not None, (
+        "the winner's claim must have revoked the displaced row"
+    )
+    assert _reg_revoked(reg, winner.json()["id"]) is None, (
+        "the winner's replacement must be the live one"
+    )
+
+
+def test_registry_lane_claim_refuses_a_row_already_revoked(reg_client, reg):
+    """The registry twin's other half: an unconditional SET would still pass
+    the race above whenever the two calls serialize, so pin the CONDITION — a
+    second claim on an already-revoked row reports False (nothing matched) and
+    does not overwrite the winner's `revoked_at`.
+
+    This pins the CLAIM primitive only (the boolean IS the claim). The
+    endpoint-level consequence — the rotate refuses 409 and compensates its
+    replacement, leaving no orphan live key — is pinned by the race case
+    above, not here."""
+    from tortoise.hosted_api import _claim_key_revocation
+
+    suffix = uuid.uuid4().hex[:8]  # per-run rows — see the race case above
+    org_id = f"team-4721s-{suffix}"
+    target = f"key_target_4721s-{suffix}"
+    prior = datetime.now(UTC).isoformat()
+    _reg_seed_org(reg, org_id)
+    _reg_seed_key(reg, org_id, target, revoked_at=prior)
+
+    now = datetime.now(UTC).isoformat()
+    assert _claim_key_revocation(org_id, target, now) is False, (
+        "a claim on a revoked row must report NO match — that boolean IS the "
+        "claim"
+    )
+    assert _reg_revoked(reg, target) == prior, (
+        "a losing claim must not overwrite the winner's revoked_at"
+    )

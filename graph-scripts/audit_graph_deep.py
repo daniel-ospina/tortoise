@@ -68,9 +68,17 @@ def _connect(key: str):
     a racing caller a ``KeyError``). Import-time stays inert.
     """
     if key not in _CONN:
+        # #8118: the audit's SHARED client is bounded on the product's ONE resolver.
+        # ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands it to redis-py
+        # explicitly, so an unbounded client parks the audit in ``recv()`` forever against a
+        # stalled engine (#2969's defrag loop) — alive, 0% CPU, no error, no log. The
+        # sibling scripts re-derived 5s/120s literals; this one derived nothing.
+        from tortoise.projection import _bounded_server_socket_kwargs
+
         client = FalkorDB(host=_cfg["host"], port=_cfg["port"],
                           username=_cfg["username"] or None,
-                          password=_cfg["password"] or None)
+                          password=_cfg["password"] or None,
+                          **_bounded_server_socket_kwargs())
         _CONN.update({"DB": client, "G": client.select_graph(_cfg["graph"])})
     return _CONN[key]
 
