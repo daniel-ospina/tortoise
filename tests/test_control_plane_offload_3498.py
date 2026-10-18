@@ -997,8 +997,9 @@ def test_never_raise_offload_sites_pass_best_effort():
         if op.value in _BEST_EFFORT_OPS and not marked:
             offenders.append((call.lineno, op.value))
     assert not offenders, (
-        "never-raise offload site(s) missing best_effort=True: "
-        f"{offenders} — telemetry must not be able to fail auth"
+        "declared best-effort offload site(s) missing best_effort=True: "
+        f"{offenders} — a lost offload must not map onto the seam's "
+        "fail-closed 503"
     )
     assert best_effort_ops == _BEST_EFFORT_OPS, (
         "the best-effort op set drifted from the declared best-effort set: "

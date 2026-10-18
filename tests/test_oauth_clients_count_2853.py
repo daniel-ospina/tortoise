@@ -132,7 +132,7 @@ def test_the_read_runs_off_the_event_loop(client, counts):
 
 
 @pytest.mark.parametrize("undelivered", [None, "OFFLOAD_REFUSED"])
-def test_an_offload_that_never_ran_the_read_is_not_a_count(
+def test_an_offload_that_delivered_no_result_is_not_a_count(
         client, counts, monkeypatch, undelivered):
     """The seam can deliver no RESULT (wait bound expired / pool refused).
 
@@ -168,11 +168,21 @@ def test_an_offload_that_never_ran_the_read_is_not_a_count(
 
 
 # ── the absence, which must NOT look like zero ───────────────────────────────
-def test_an_unstated_total_is_unavailable_and_carries_no_count(client, counts):
-    """`None` is "the server did not say", never "0 rows"."""
+def test_an_unstated_total_is_unavailable_and_carries_no_count(client, counts,
+                                                              caplog):
+    """`None` is "the server did not say", never "0 rows".
+
+    The body's vocabulary cannot say WHICH infrastructure state produced this
+    (a stripped `Content-Range`, a `*` total, or `count_exact` no longer being
+    sent — all three arrive here as `None`), so the server-side warning is the
+    only record of the cause. The `caplog` arm therefore exists to make deleting
+    that warning red the suite: without it the branch fires silently, which is
+    exactly the regression this arm was added for.
+    """
     counts["total"] = None
 
-    r = client.get(_PATH, headers=_HEADERS)
+    with caplog.at_level("WARNING", logger="tortoise.hosted_api"):
+        r = client.get(_PATH, headers=_HEADERS)
 
     assert r.status_code == 200
     body = r.json()
@@ -182,6 +192,9 @@ def test_an_unstated_total_is_unavailable_and_carries_no_count(client, counts):
         "would read as 'nothing has accumulated' and retire the ruling"
     )
     assert body["reason"]
+    hits = [rec for rec in caplog.records if "stated no total" in rec.getMessage()]
+    assert hits, "the unstated-total path must leave a server-side trace"
+    assert hits[0].levelname == "WARNING"
 
 
 def test_an_empty_table_is_a_real_zero_and_not_unavailable(client, counts):

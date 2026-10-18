@@ -17025,13 +17025,15 @@ async def oauth_clients_count(request: Request):
     _rows, total = read
     if total is None:
         # No server-side number is an INFRASTRUCTURE state — the server stopped
-        # stating `Content-Range`, or `count_exact` stopped being sent — not a
-        # quiet "no rows", so it leaves a trace like the two arms above. An
-        # operator reading only the body cannot tell this from a healthy empty
-        # deployment, and this is the branch that would otherwise fire silently.
+        # stating `Content-Range`, returned a `*` total, or `count_exact`
+        # stopped being sent — not a quiet "no rows". A healthy EMPTY deployment
+        # takes the `total == 0` path and renders `ok` with `count: 0`, so the
+        # body does draw that distinction; what nothing else records is the
+        # CAUSE, which makes this the one arm that would otherwise fire silently.
         _logger.warning(
             "oauth clients count: control plane stated no total (no "
-            "Content-Range total); reporting unavailable rather than 0",
+            "Content-Range total, or a `*` total); reporting unavailable "
+            "rather than 0",
         )
         return {
             "status": "unavailable",
