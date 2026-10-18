@@ -1234,3 +1234,331 @@ def test_an_else_branch_call_reds_the_off_switch_check():
         "scan reports it as the documented gate — S4 could run only when there "
         "is no story while the off-switch check stayed green"
     )
+
+
+# ── the fold's successor is ABSENT ─────────────────────────────────────────
+#
+# #8500's question (3) is the migration ORDER — *"S4 cannot leave the step list
+# before its successor lands"* — and question (1) is whether the §4.0 purpose
+# test's fold is correct. Both turn on a fact the record above did not state:
+# has the successor the design promises actually LANDED?
+#
+# It has not, and the trap is that the fold's two stages DO exist in the shipped
+# tree (`_vet_gate.apply_vet` and `kind_classifier.classify_items`), so "the
+# fold's stages are present" reads as "the successor landed" — and a lane then
+# deletes `run_s4` believing gap-filling moved. What decides it is the REMEDY
+# half: neither stage can ADD an item a coverage check found missing. These
+# tests pin that half, so the pre-condition for removal stays measurable
+# instead of inferable from a stage list.
+
+#: §4.0's fold: the clause that gives S2.2 VET the coverage question S4's
+#: removal relies on. If the design re-assigns that purpose, the record's
+#: basis moved and this must be re-derived (not deleted).
+FOLD_STATEMENT = "did we account for everything the narrative said?"
+#: The clause that closes the "S2.2/S2.3 exist ⇒ successor landed" misreading.
+SUCCESSOR_ABSENT = "THE SUCCESSOR HAS NOT LANDED"
+
+#: `check_batch`'s DOCUMENTED signals (its docstring: coverage + abstraction).
+#: An ALLOW-LIST, because the successor's first appearance would be a new,
+#: ACTIONABLE key here (``missing``, ``additions``, ``remedy`` …). A deny-list
+#: is satisfied by every spelling it does not name.
+BATCH_SIGNAL_ALLOW = frozenset({
+    "narrative_statements", "candidates", "by_section",
+    "coverage_ratio", "coverage_suspect",
+})
+#: `classify_items`' documented return keys. A key carrying ITEMS would make
+#: classify a candidate producer — the successor under another name.
+CLASSIFY_RETURN_ALLOW = frozenset({"assignments", "stats", "warnings"})
+
+
+def _signal_violations(keys) -> list[str]:
+    """New/missing `check_batch` signals — empty means report-only, as documented."""
+    unknown = sorted(set(keys) - BATCH_SIGNAL_ALLOW)
+    missing = sorted(BATCH_SIGNAL_ALLOW - set(keys))
+    problems: list[str] = []
+    if unknown:
+        problems.append(
+            "`check_batch` gained signal(s) " + ", ".join(unknown) + " — if one "
+            "of them is ACTIONABLE (a remedy, not a report), the coverage "
+            "detector became a gap-filler and the G5 record must stop saying "
+            "no shipped stage can add a missing candidate")
+    if missing:
+        problems.append(
+            "`check_batch` lost signal(s) " + ", ".join(missing) + " — the "
+            "record's 'reported, never acted on' coverage claim is about these")
+    return problems
+
+
+def _classify_return_violations(keys) -> list[str]:
+    unknown = sorted(set(keys) - CLASSIFY_RETURN_ALLOW)
+    return ([
+        "`classify_items` now returns " + ", ".join(unknown) + " — a return key "
+        "carrying ITEMS makes S2.3 a candidate producer, i.e. the gap-filling "
+        "successor the ordering obligation is waiting for. Reconcile the G5 "
+        "record and this guard (they currently state classify LABELS only)"
+    ] if unknown else [])
+
+
+def _dict_return_key_sets(source: str, func_name: str) -> list[set[str]]:
+    """The constant key-sets of `func_name`'s dict-valued `return` statements.
+
+    Resolved by `ast.walk`, not by the top-level `_function` helper: the
+    classifier's entry point is a METHOD on `KindClassifier`, not a module-level
+    function. Takes SOURCE so a mutation can be judged without touching disk.
+    """
+    tree = ast.parse(source)
+    fns = [node for node in ast.walk(tree)
+           if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+           and node.name == func_name]
+    assert fns, f"{func_name}() is gone — re-verify the claim"
+    out: list[set[str]] = []
+    for fn in fns:
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Dict):
+                continue
+            keys = {k.value for k in node.value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            out.append(keys)
+    return out
+
+
+def _return_dict_key_sets(path: Path, func_name: str) -> list[set[str]]:
+    return _dict_return_key_sets(path.read_text(encoding="utf-8"), func_name)
+
+
+def _successor_clause_violations(doc: str) -> list[str]:
+    """The record's successor clause — the measured half, not the obligation."""
+    problems: list[str] = []
+    if SUCCESSOR_ABSENT not in doc:
+        problems.append(
+            "the G5 record no longer states that the successor has NOT landed; "
+            "the ordering obligation then reads as satisfiable by S2.2/S2.3 "
+            "merely existing, and `run_s4` is deleted believing gap-filling moved")
+    for required, why in (
+        ("is NOT the test that it has",
+         "the record must name the trap: the fold's stages EXIST, which is not "
+         "the successor landing"),
+        ("apply_vet",
+         "the record must name the gate's symbol that cannot add (removal-only)"),
+        ("classify_items",
+         "the record must name the classifier's symbol that labels only"),
+        ("can ADD",
+         "the record must state the removal pre-condition as a stage that can "
+         "ADD a candidate — not a stage that reviews or labels one"),
+    ):
+        if required not in doc:
+            problems.append(f"the record lost {required!r}: {why}")
+    return problems
+
+
+def _marker_successor_violations(marker: str) -> list[str]:
+    problems: list[str] = []
+    for required, why in (
+        ("NOT the test that the successor has",
+         "the marker must warn that the fold's stages existing is not the "
+         "successor landing — this is the misreading that deletes a live stage"),
+        ("can ADD",
+         "the marker must state the removal pre-condition as a stage that can "
+         "ADD a candidate"),
+    ):
+        if required not in marker:
+            problems.append(f"the drift marker lost {required!r}: {why}")
+    return problems
+
+
+def test_the_design_folds_s4_into_s2_2_and_s2_3():
+    """The record's read of §4.0 is the basis on which S4's removal is even
+    contemplated. If the design re-assigns that purpose, the record is stale in
+    a way its own ordering obligation hides (the obligation is about a successor
+    the design no longer names).
+    """
+    assert FOLD_STATEMENT in _flat_doc(), (
+        "§4.0's purpose row no longer gives S2.2 VET the coverage question "
+        f"({FOLD_STATEMENT!r}) — the G5 record's 'folded into S2.2/S2.3' basis "
+        "moved, so re-derive the record rather than keeping a claim about a fold "
+        "that no longer exists (#8500)."
+    )
+
+
+def test_vet_coverage_is_a_detector_and_cannot_gap_fill():
+    """S2.2 VET is the design's named successor half. Measured: it REPORTS
+    coverage, and only fires in the degenerate zero-candidate case — it cannot
+    emit the item a gap is missing. Pinned behaviourally, because the record's
+    claim is about what the gate can DO, not about a docstring.
+    """
+    from tortoise import vet_gate as vg
+
+    empty = {"entities": [], "points": [], "events": [], "operators": []}
+    batch = vg.check_batch(empty, "One thing. Two things.")
+    assert not _signal_violations(batch), "; ".join(_signal_violations(batch))
+    assert batch["coverage_suspect"] is True, (
+        "the degenerate case (prose in, nothing out) must still be reported — "
+        "if even this stopped firing, VET would detect nothing at all and the "
+        "record's 'only DETECTS' claim would overstate it"
+    )
+
+    # Non-vacuity: partial coverage does NOT fire — `coverage_suspect` is a
+    # definite-loss signal, not a threshold. A `True` here would mean the gate
+    # claims a loss on every imperfect batch (a different, unmeasured claim).
+    partial = vg.check_batch(
+        {"entities": [{"name": "the plan doc", "kind": "core:other"}],
+         "points": [], "events": [], "operators": []},
+        "One thing. Two things.")
+    assert partial["coverage_suspect"] is False, (
+        "coverage_suspect must stay the unambiguous zero-candidate signal; a "
+        "partial batch firing it would be an unmeasured threshold claim"
+    )
+    assert partial["coverage_ratio"] is not None, (
+        "the coverage RATIO is the reported signal — it must be present for the "
+        "hand review the detector exists to serve"
+    )
+
+
+def test_apply_vet_cannot_emit_an_item():
+    """The removal-only half, pinned as a SET relation so it cannot pass
+    vacuously: `apply_vet` may drop items, never introduce one."""
+    from tortoise import vet_gate as vg
+
+    def texts(el):
+        return [(section, vg._item_text(section, item))
+                for section, _i, item in vg._iter_items(el)]
+
+    el = {
+        "entities": [{"name": "plan doc", "kind": "core:other"},
+                     {"name": "the roadmap", "kind": "core:other"}],
+        "points": [{"content": "the plan doc is stale", "pointKind": "statement",
+                    "about_entities": ["plan doc"]}],
+        "events": [], "operators": [],
+    }
+    before = texts(el)
+    kept, _w = vg.apply_vet(el, {})
+    assert set(texts(kept)) <= set(before), (
+        "`apply_vet` introduced an item with no verdict — the gate is not "
+        "removal-only any more, so it CAN gap-fill and the G5 record's successor "
+        "claim is false"
+    )
+    assert set(texts(kept)) == set(before), (
+        "with NO decisions nothing may be dropped (fail-open) — otherwise the "
+        "subset assertion above is not about additions"
+    )
+
+    # Non-vacuity: a real DISCARD must SHRINK the set, or the subset relation
+    # could hold because apply_vet does nothing at all.
+    discards = {vg._item_id("points", i, item): {"outcome": vg.DISCARD}
+                for i, item in enumerate(el["points"])}
+    shrunk, _w2 = vg.apply_vet(el, discards)
+    assert len(texts(shrunk)) < len(before), (
+        "the DISCARD fixture must remove something, or this test proves nothing "
+        "about apply_vet's removal half"
+    )
+
+
+def test_classify_labels_and_never_adds_items():
+    """S2.3 CLASSIFY is the fold's other named half. Measured: it returns KIND
+    ASSIGNMENTS for ids that already exist, and the write-back edits items in
+    place — it produces no candidate. That is what makes 'the fold's stages are
+    present' different from 'the successor landed'.
+    """
+    from tortoise import extractor_v2 as v2
+
+    key_sets = _return_dict_key_sets(
+        ROOT / "tortoise" / "kind_classifier.py", "classify_items")
+    assert key_sets, "`classify_items` has no dict-valued return to inspect"
+    for keys in key_sets:
+        problems = _classify_return_violations(keys)
+        assert not problems, "; ".join(problems)
+
+    el = {"entities": [{"name": "plan doc", "kind": "core:plan"}],
+          "points": [], "events": [], "operators": []}
+    item = el["entities"][0]
+    key = f"{v2._classify_item_id('entities', item)}#0"
+    out = v2._apply_classify_kinds(el, {key: {"kind": "core:other"}})
+    assert out is el, (
+        "`_apply_classify_kinds` must write back IN PLACE — a copy could "
+        "silently diverge from the list the pipeline merges"
+    )
+    lengths = {s: len(out.get(s) or []) for s in ("entities", "points", "events")}
+    assert lengths == {"entities": 1, "points": 0, "events": 0}, (
+        "the classify write-back changed the item COUNT — it is labelling, not "
+        f"candidate production: {lengths}"
+    )
+    assert item["kind"] == "core:other", (
+        "the non-vacuity half: the assignment must actually LAND, or the "
+        "count assertion above holds because the function does nothing"
+    )
+
+
+def test_the_record_states_the_successor_has_not_landed():
+    doc = _module_docstring(EXTRACTOR.read_text(encoding="utf-8"))
+    problems = _successor_clause_violations(doc)
+    assert not problems, "; ".join(problems)
+
+
+def test_the_marker_warns_that_the_fold_stages_existing_is_not_the_successor():
+    marker = _marker_block()
+    problems = _marker_successor_violations(marker)
+    assert not problems, "; ".join(problems)
+
+
+def test_the_successor_checks_red_on_the_mutations_they_exist_to_catch():
+    """Non-vacuity for the two prose checks: each shape they exist to prevent
+    must red them, on the REAL text with only that shape removed."""
+    source = EXTRACTOR.read_text(encoding="utf-8")
+    doc = _module_docstring(source)
+    assert not _successor_clause_violations(doc), (
+        "the unmutated record must be clean, or the mutations below cannot be "
+        "attributed to them"
+    )
+    # The whole clause cut, and — separately — the trap sentence reworded away
+    # while the heading survives (a heading-only membership check stays green).
+    cut = source.replace(SUCCESSOR_ABSENT, "")
+    assert _successor_clause_violations(_module_docstring(cut)), (
+        "removing the successor clause must red the check — otherwise the "
+        "ordering obligation can be left reading as satisfiable again"
+    )
+    reworded = source.replace("is NOT the test that it has",
+                              "is the evidence that it has")
+    assert _successor_clause_violations(_module_docstring(reworded)), (
+        "inverting the trap sentence (existing stages ARE the evidence the "
+        "successor landed) must red the check"
+    )
+
+    marker = _marker_block()
+    assert not _marker_successor_violations(marker), (
+        "the unmutated marker must be clean"
+    )
+    doc_source = DOC.read_text(encoding="utf-8")
+    stripped = doc_source.replace("can ADD", "can review")
+    assert _marker_successor_violations(_marker_block(stripped)), (
+        "the marker's removal pre-condition must be pinned: weakening 'can ADD' "
+        "to 'can review' restores exactly the misreading it exists to stop"
+    )
+
+    # The ALLOW-LIST checks — the shape a successor would FIRST appear in. Both
+    # must red on it, or they are deny-lists that report clean on any spelling
+    # they do not happen to name.
+    assert _signal_violations(BATCH_SIGNAL_ALLOW | {"missing"}), (
+        "a new coverage signal that names what is MISSING must red the allow-list"
+    )
+    assert _classify_return_violations(CLASSIFY_RETURN_ALLOW | {"items"}), (
+        "a `classify_items` return key carrying items must red the allow-list"
+    )
+    # …and the AST half of the classify check, on a mutated source: adding an
+    # item-carrying key to the real return statement must be seen.
+    classifier_source = (ROOT / "tortoise" / "kind_classifier.py").read_text(
+        encoding="utf-8")
+    assert _dict_return_key_sets(classifier_source, "classify_items"), (
+        "the unmutated classifier must expose a dict return, or the mutation "
+        "below proves nothing"
+    )
+    mutated = classifier_source.replace(
+        'return {"assignments": assignments,',
+        'return {"items": list(items), "assignments": assignments,', 1)
+    assert mutated != classifier_source, (
+        "the classify return statement moved — re-point this mutation fixture"
+    )
+    mutated_keys = _dict_return_key_sets(mutated, "classify_items")
+    assert any(_classify_return_violations(keys) for keys in mutated_keys), (
+        "a classify return that also carries ITEMS must red the check — that "
+        "is the gap-filling successor appearing under S2.3's name"
+    )

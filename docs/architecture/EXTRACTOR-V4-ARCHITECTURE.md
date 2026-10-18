@@ -623,6 +623,18 @@ This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 > half and states it *must not absorb* other work, and it contains no reference to `S4`. **Never delete
 > `run_s4` on the strength of this document alone.**
 >
+> ⚠️ **"S2.2 VET and S2.3 CLASSIFY already exist in the code" is NOT the test that the successor has
+> landed.** §4.0 folds S4's purpose into those two steps and both do ship (`_vet_gate.apply_vet`,
+> `kind_classifier.classify_items`), so a lane can read the fold as already executed. It is not: the
+> fold's **remedy** half is unimplemented in both. VET only **detects** coverage (`check_batch`'s
+> `coverage_suspect` — *"reported, never acted on"*, and only for a narrative that produced **zero**
+> candidates) and only **removes** (`apply_vet`; `OUTCOMES` = KEEP/NOOP/DISCARD/MERGE, `MERGE`
+> recorded-not-applied — `#5006`). CLASSIFY only **labels** (`classify_items` returns a kind per
+> **existing** id; `_apply_classify_kinds` adds no item). So **no shipped stage can emit a candidate a
+> coverage check found missing** — removing `run_s4` today DELETES gap-filling instead of relocating
+> it. The pre-condition for removal is a stage that can ADD; building it is the migration deliverable.
+> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
+>
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
 > docstring), with `S2.2 VET` present in the production path. **`S0` and `S6` have no code
 > counterpart** — those two are v4 design names. ⚠️ **`S2.3` DOES have one; it is DISABLED, not absent:** the

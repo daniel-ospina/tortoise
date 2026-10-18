@@ -79,6 +79,29 @@ record does state is the measured shipped state: ``run_s4`` is what runs today,
 so it must not be deleted on the strength of the design doc alone; a lane that
 needs the precedence settled asks the owner on **#8500**.
 
+⚠️ THE SUCCESSOR HAS NOT LANDED — and *"S2.2 and S2.3 already exist in the
+code"* is NOT the test that it has. §4.0 folded S4's purpose into S2.2 VET
+(*"did we account for everything the narrative said?"*) and S2.3 CLASSIFY, and
+both stages DO ship (``extract_session_v2`` runs ``_vet_gate.apply_vet`` and
+``kind_classifier.classify_items``). So "the fold's stages are present" reads as
+"the successor landed" — while the fold's REMEDY half is unimplemented in both:
+
+  * S2.2 VET only DETECTS, and only in one degenerate case. ``check_batch``'s
+    coverage signals are "reported, never acted on": ``coverage_suspect``
+    fires only when a non-empty narrative produced ZERO candidates, and
+    ``apply_vet`` only REMOVES (``OUTCOMES`` = KEEP/NOOP/DISCARD/MERGE, with
+    MERGE recorded-not-applied, #5006). Nothing there can EMIT an item a
+    coverage check found missing.
+  * S2.3 CLASSIFY only LABELS: ``classify_items`` returns ``assignments`` (a
+    kind per EXISTING id) and ``_apply_classify_kinds`` writes that kind onto an
+    item already in the list. It adds none.
+
+So no shipped stage performs S4's gap review-and-fill: deleting ``run_s4``
+today loses that capability outright rather than relocating it. The removal
+pre-condition is a stage that can ADD a candidate a coverage check found
+missing — building it is the migration deliverable, and the absence of that
+stage is pinned by ``tests/test_extractor_v4_s4_stage_claims.py``.
+
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
 REAL backend; chains warn + repair, hard-block never; solar-pro4 parked;
