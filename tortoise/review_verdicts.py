@@ -382,27 +382,74 @@ class VerdictLayer:
             prior_review = props.get(review_key)
             prior_reviewed = props.get("reviewed")
 
+            def _promotion_landed() -> bool:
+                """True when the promotion CAS already landed.
+
+                ``promote_point`` answers ``already_live`` for a node that was
+                live BEFORE its CAS — it returns, it does not raise — so a
+                raise reaching here with a LIVE node is a promotion that
+                landed and whose post-CAS tail failed: ``_mark_dirty`` (a
+                retried write that can exhaust), the ``alreadyDecided`` dedup
+                wire (a ``ValueError`` when the prior is deleted between
+                promote_point's own check and that call), the
+                incident-operator promote, or the ``PointPromoted`` emit.
+                Rolling the review write back there is the INVERSE of the
+                #2354 limbo: the node is live and can never be promoted
+                again, its ``merge`` stamp is destroyed, and ``sweep()`` —
+                which filters on the stamp, not on status — re-examines it and
+                journals a SECOND ``DedupeRecorded`` for one logical merge.
+
+                An unreadable graph reads as landed: a rollback that cannot be
+                verified is worse than the limbo re-issuing ``keep`` recovers,
+                and a graph unreadable at this instant is one that could not
+                have been written either.
+                """
+                try:
+                    rows = self._proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.status",
+                        params={"id": candidate_id},
+                    ).result_set
+                except Exception:
+                    logger.warning(
+                        "review rollback skipped: could not read %r after a "
+                        "failed promote — leaving the review stamps in place",
+                        candidate_id, exc_info=True)
+                    return True
+                return bool(rows) and rows[0][0] == "live"
+
             def _roll_back_review_write() -> None:
                 # Roll the review write back so the candidate is NOT left
                 # reviewed-but-unpromoted (#2354), then surface the failure.
                 # The ``DedupeRecorded`` emit inside approve_merge cannot be
                 # unjournaled — it remains an audit record of an attempt.
-                # This must cover a RAISE as well as a ``blocked`` answer: an
-                # absent node (promote_point raises ``ValueError``) and a
-                # quarantine race are the same limbo if only one is rolled
-                # back.
-                self._proj.g.query(
-                    f"MATCH (n:Point {{id:$id}}) "
-                    f"SET n.{review_key} = $prior, n.reviewed = $reviewed",
-                    params={"id": candidate_id, "prior": prior_review,
-                            "reviewed": prior_reviewed},
-                )
+                # Reached for a ``blocked`` answer (which never follows a
+                # landed CAS: ``not_draft`` means the CAS matched nothing,
+                # ``already_live`` answers blocked=False) and for a raise that
+                # did NOT land (an absent node, or a rebuild that exhausted
+                # its retries before the CAS) — ``_promotion_landed`` excludes
+                # the post-CAS raise, where the stamps are correct.
+                # A failed cleanup must never mask the failure it cleans up:
+                # the caller re-raises the ORIGINAL exception, so this only
+                # logs.
+                try:
+                    self._proj.g.query(
+                        f"MATCH (n:Point {{id:$id}}) "
+                        f"SET n.{review_key} = $prior, n.reviewed = $reviewed",
+                        params={"id": candidate_id, "prior": prior_review,
+                                "reviewed": prior_reviewed},
+                    )
+                except Exception:
+                    logger.warning(
+                        "review rollback FAILED for %r — the review stamps may "
+                        "be left applied (the #2354 limbo)", candidate_id,
+                        exc_info=True)
 
             self.sdk.approve_merge(candidate_id, action="merge")
             try:
                 applied = self.sdk.promote_point(candidate_id)
             except Exception:
-                _roll_back_review_write()
+                if not _promotion_landed():
+                    _roll_back_review_write()
                 raise
             if applied.get("blocked"):
                 _roll_back_review_write()

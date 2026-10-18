@@ -2523,11 +2523,14 @@ def test_a_promote_point_that_refuses_the_cas_is_not_reported_as_a_graph_abort(
     """Every status that EXPLAINS the zero row must NOT spend the retry budget.
 
     The CAS matches only the literal ``'draft'``, so the classes that explain a
-    zero row are exactly `not draft` — a concurrent terminal transition, or a
-    statusless legacy node (`null = 'draft'` is null, not true). Read as "keep
-    retrying" they exhaust the 7-14 s window and then raise "graph was deleted
-    or replaced" for a node that is present and simply unpromotable; read
-    correctly they are answered at once by the documented `not_draft` branch.
+    zero row are exactly `not draft` — a concurrent promote, a concurrent
+    terminal transition, or a statusless legacy node (`null = 'draft'` is null,
+    not true). Read as "keep retrying" they exhaust the 7-14 s window and then
+    raise "graph was deleted or replaced" for a node that is present and
+    simply unpromotable; read correctly they are answered at once — the
+    concurrent promote as `already_live`, the other two as `not_draft` (this
+    test's two parametrizations; the `already_live` arm is pinned by
+    ``test_a_promote_point_that_races_a_concurrent_promote_reports_already_live``).
     """
     sleeps: list[float] = []
     monkeypatch.setattr("tortoise.retry.time",

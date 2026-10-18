@@ -465,7 +465,7 @@ class TestDeterministicDrainer:
 
 
 def test_keep_rolls_the_review_write_back_when_the_promote_RAISES(sdk, monkeypatch):
-    """A promote that RAISES must not leave the candidate reviewed-but-unpromoted.
+    """A promote that raises BEFORE its CAS must not leave the candidate reviewed.
 
     ``VerdictLayer.decide(..., VERDICT_KEEP)`` calls ``approve_merge`` (a durable
     ``DedupeRecorded`` emit plus the ``*_reviewed='merge'``/``reviewed`` stamps)
@@ -474,8 +474,54 @@ def test_keep_rolls_the_review_write_back_when_the_promote_RAISES(sdk, monkeypat
     and the SDK's. Only the ``blocked`` answer used to be rolled back, so that
     raise escaped with the stamps already applied: the #2354 limbo
     (reviewed, unpromoted, undecided, and out of ``list_*_candidates``).
+
+    The stamp is observed INSIDE the raise, before anything is rolled back — the
+    post-conditions alone cannot tell "rolled back" from "never written", and
+    the inverse arm (a promote that landed and then raised keeps its stamps) is
+    ``test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised``.
     """
     _seed_candidate(sdk, "rv-a", "rv-prior")
+    stamped: dict = {}
+
+    def refuse(point_id):
+        stamped.update(_props(sdk, point_id))
+        raise ValueError(f"No point {point_id!r}")
+
+    monkeypatch.setattr(sdk, "promote_point", refuse)
+
+    with pytest.raises(ValueError, match="No point"):
+        VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    assert stamped.get("temporal_reviewed") == "merge", (
+        "positive control: approve_merge must have stamped the review write "
+        f"before the raise (saw {stamped.get('temporal_reviewed')!r})")
+    assert stamped.get("reviewed") is True, (
+        f"positive control: the derived flag must have been set (saw {stamped.get('reviewed')!r})")
+    props = _props(sdk, "rv-a")
+    assert props, "fixture precondition: the candidate node must still exist"
+    assert props.get("temporal_reviewed") is None, (
+        "the review stamp must be rolled back when the promote raises: "
+        f"saw {props.get('temporal_reviewed')!r}")
+    assert props.get("reviewed") is None, (
+        f"the derived reviewer flag must be rolled back too: saw {props.get('reviewed')!r}")
+
+
+def test_the_rollback_restores_the_prior_stamps_rather_than_clearing_them(
+        sdk, monkeypatch):
+    """The rollback restores ``prior_*``; it does not hard-code NULL.
+
+    Reachable in production: a re-issued ``keep`` whose ``approve_merge``
+    early-returns on the idempotent ``temporal_reviewed`` match
+    (``sdk.approve_merge``'s ``already_reviewed`` return), so the stamps' priors
+    are the values the earlier attempt left. Clearing them would rewrite a
+    review record that was already correct — and the two rollback tests seeding
+    a stamp-less candidate could not tell the difference.
+    """
+    _seed_candidate(sdk, "rv-a", "rv-prior")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.temporal_reviewed = 'merge', "
+        "n.reviewed = true",
+        params={"id": "rv-a"})
 
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
@@ -486,9 +532,47 @@ def test_keep_rolls_the_review_write_back_when_the_promote_RAISES(sdk, monkeypat
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
 
     props = _props(sdk, "rv-a")
-    assert props, "fixture precondition: the candidate node must still exist"
-    assert props.get("temporal_reviewed") is None, (
-        "the review stamp must be rolled back when the promote raises: "
+    assert props.get("temporal_reviewed") == "merge", (
+        "the rollback must restore the prior stamp, not clear it: "
         f"saw {props.get('temporal_reviewed')!r}")
-    assert props.get("reviewed") is None, (
-        f"the derived reviewer flag must be rolled back too: saw {props.get('reviewed')!r}")
+    assert props.get("reviewed") is True, (
+        f"the prior reviewer flag must survive: saw {props.get('reviewed')!r}")
+
+
+def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
+        sdk, monkeypatch):
+    """A raise AFTER the promotion CAS must NOT roll the review write back.
+
+    ``promote_point`` lands the CAS (``status='live'``, ``promotedAt``,
+    ``reviewed=true``) and then runs a tail of untried writes: ``_mark_dirty``
+    (a retried write that can exhaust), the ``alreadyDecided`` dedup wire, the
+    incident-operator promote, the ``PointPromoted`` emit. Rolling the stamps
+    back there is the INVERSE of the #2354 limbo — the node is live and can
+    never be promoted again, its ``merge`` stamp is destroyed, and ``sweep()``
+    (which filters on the stamp, not on status) re-examines it and journals a
+    SECOND ``DedupeRecorded`` for one logical merge.
+
+    ``already_live`` is not the discriminator: ``promote_point`` RETURNS it for
+    a node live before the CAS. A raise with a live node can only be a landed
+    promotion whose tail failed.
+    """
+    _seed_candidate(sdk, "rv-a", "rv-prior")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("post-CAS tail failed")
+
+    monkeypatch.setattr(sdk, "_mark_dirty", boom)
+
+    with pytest.raises(RuntimeError, match="post-CAS"):
+        VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    props = _props(sdk, "rv-a")
+    assert props.get("status") == "live", (
+        "fixture precondition: the CAS must land before the raise promotes: "
+        f"saw status {props.get('status')!r}")
+    assert props.get("temporal_reviewed") == "merge", (
+        "a landed promotion keeps its review stamp: "
+        f"saw {props.get('temporal_reviewed')!r}")
+    assert props.get("reviewed") is True, (
+        f"a landed promotion keeps the reviewer flag: saw {props.get('reviewed')!r}"
+    )
