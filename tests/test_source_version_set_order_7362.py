@@ -32,9 +32,15 @@ engine-independent and fails on the pre-fix statement in EVERY lane:
 
 The two orderings the fix chose (``version`` before ``contentHash`` in the
 connector writer; the ``contentHash`` write LAST in ``_upsert_source``'s
-``ON MATCH`` list) are the ones that are correct on BOTH engines. The
-behavioural pins that cover the server engine's own outcome live beside the
-writers they cover: ``test_document_version_counter_advances_with_the_hash``
+``ON MATCH`` list) are the ones that are correct on BOTH engines.
+
+DIVISION OF LABOUR with ``tests/test_8870_version_anchor_write_order.py`` (the
+sibling pin for this defect, deliberately kept separate): that file asserts the
+BEHAVIOUR on a live server engine and skips, loudly, where there is none — the
+strongest evidence, available only in the docker lane. This file asserts the
+ORDER, which needs no engine, so the defect stays guarded in the embedded
+carve-out lane and in any future lane whose backend reads pre-write values. The
+behavioural pins that cover the writers' own outcomes: ``test_document_version_counter_advances_with_the_hash``
 (``test_projection.py``), ``test_a_content_changing_repoll_advances_the_hash_
 and_the_ordinal`` (``test_connector_source_version_5214.py``) and
 ``test_a_rebuild_reproduces_the_source_field_for_field``

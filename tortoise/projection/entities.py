@@ -4951,19 +4951,31 @@ class _EntityHandlers:
             # in the `SET`'s CASE pair: the WHERE is what makes an unchanged
             # re-poll a true no-op (nothing is written, nothing is dirtied), and
             # the CASE pair is what keeps the two columns moving together if the
-            # query is ever run without it. The WHERE is evaluated on the MATCH
-            # — always the PRE-write `s.contentHash`, on every engine. The SET's
-            # CASE pair is NOT: on a server engine (falkordb 6.x) the items
-            # apply left-to-right and each sees the earlier writes, so `version`
-            # MUST be written BEFORE `contentHash` (#7362 class, #8870); the
-            # embedded engine and falkordb-server v4.20.6 read pre-write values
-            # and are order-insensitive. MEASURED 2026-10-18 on 6.0.1: the
-            # `contentHash`-first order left the ordinal at 1 through EVERY
-            # content change (`['sha2', 1]`, expected 2) — the exact "the hash
-            # advances, the counter does not" defect the sibling document writer
-            # had, invisible in the embedded/v4.20.6 lanes. Pinned behaviourally
-            # by `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`
-            # and order-only (engine-independent) by
+            # query is ever run without it. The two readers do NOT agree on
+            # WHEN they read, and that asymmetry is the whole defect:
+            #   * the `WHERE` is evaluated on the MATCH — always the PRE-write
+            #     `s.contentHash`, on every engine;
+            #   * the `SET`'s CASE pair is NOT, on a server engine. falkordb 6.x
+            #     (the production `TORTOISE_DB_URI` backend) applies the items
+            #     LEFT TO RIGHT and each sees the earlier writes, so a
+            #     `contentHash`-first list made this clause's own
+            #     `s.contentHash <> $ch` guard read the hash it had just
+            #     installed. The embedded engine (falkordblite) and
+            #     falkordb-server v4.20.6 (the CI docker lane) read PRE-write
+            #     values and are order-insensitive — which is why three green
+            #     pins sat on a broken production path (#8870).
+            #
+            # ⛔ ORDER IS LOAD-BEARING: `s.version` is computed BEFORE
+            # `s.contentHash` is written, so its guard still sees the STORED
+            # hash — the one order that is correct on BOTH engines. MEASURED
+            # 2026-10-18 on falkordb/falkordb:6.0.1: the `contentHash`-first
+            # order left the ordinal at 1 through EVERY content change
+            # (`['sha2', 1]`, expected 2); this order gives 2. Pinned
+            # behaviourally by
+            # `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`
+            # (on the live engine, and `tests/test_8870_version_anchor_write_
+            # order.py` pins it there explicitly) and order-only,
+            # engine-independently, by
             # `tests/test_source_version_set_order_7362.py`.
             self.g.query(
                 "MATCH (s:Source {url: $url}) "
@@ -5307,26 +5319,28 @@ class _EntityHandlers:
             # contentHash/references survive, version unchanged). Stubs
             # (NULL stored hash) are still COMPLETED by a real $hash, and the
             # hash-diff bump is unchanged for callers that DO carry a hash.
-            # ⛔ ORDER IS LOAD-BEARING (#8870/#7362). Every ON MATCH item whose
-            # expression READS `s.contentHash` — `title`, `version`,
-            # `updatedAt`, `validFrom`, `_searchText` — is written BEFORE the
-            # `s.contentHash` assignment, which is placed at the END of this
-            # list. On a SERVER engine (falkordb 6.x, the production
-            # `TORTOISE_DB_URI` backend) SET items apply LEFT TO RIGHT and each
-            # sees what the earlier ones just wrote, so a `contentHash`-first
-            # list made every one of those guards read the hash the SAME clause
-            # had just installed: the hash advanced while `version`, `title`,
-            # `updatedAt`, `validFrom` and `_searchText` all fell through to
-            # their preserve branch — the #7362 class ("the hash advances, the
-            # counter does not") on the very writer §4.6's `stale`/`current`
-            # anchor reads. MEASURED 2026-10-18 on falkordb/falkordb:6.0.1,
-            # h1→h2: `contentHash`-first left `version=1, title='t1'`; write
-            # last gives `version=2, title='T2'`. The embedded engine
-            # (falkordblite) and falkordb-server v4.20.6 evaluate every
-            # right-hand side against the PRE-write record, so the order is a
-            # NO-OP there and neither the carve-out lane nor the CI docker lane
-            # can see the defect — pinned order-only, engine-independently, by
-            # `tests/test_source_version_set_order_7362.py`; behaviourally by
+            # ⛔ THE GUARDED COLUMN IS WRITTEN LAST (#8870/#7362). On a SERVER
+            # engine (falkordb 6.x — the production `TORTOISE_DB_URI` backend)
+            # the `SET` items of one clause apply LEFT TO RIGHT and each item
+            # observes the values the earlier items just wrote; the EMBEDDED
+            # engine (falkordblite) and falkordb-server v4.20.6 (the CI docker
+            # lane) read PRE-write values instead. Every item below tests
+            # `s.contentHash` against `$hash` to decide "is this a NEW
+            # version?", so the hash must not be installed until ALL of them
+            # have read it — otherwise each comparison reads the hash this same
+            # clause just wrote, sees "unchanged", and `title`, `version`,
+            # `updatedAt`, `validFrom` and `_searchText` are silently skipped on
+            # the only engine that can see it: the #7362 class ("the hash
+            # advances, the counter does not") on the very writer §4.6's
+            # `stale`/`current` anchor reads. MEASURED 2026-10-18 on
+            # falkordb/falkordb:6.0.1, h1→h2: `contentHash`-first left
+            # `version=1, title='t1'`; last gives `version=2, title='T2'` — a
+            # content-changing repoll with the hash moving `bf64f552…` →
+            # `01c54ed4…` and `version` stuck at 1. Placed LAST rather than
+            # swapped forward so the next guarded field added here cannot
+            # reintroduce the defect. Pinned order-only, engine-independently,
+            # by `tests/test_source_version_set_order_7362.py`; behaviourally by
+            # `tests/test_8870_version_anchor_write_order.py` and
             # `test_a_rebuild_reproduces_the_source_field_for_field`
             # (`version == 6` on the server engine).
             "ON MATCH SET s.title = CASE WHEN $hash IS NULL THEN s.title "
@@ -5430,15 +5444,15 @@ class _EntityHandlers:
             # so the #900 T3 cycle-4 retitle-refresh semantics are unchanged.
             "                        THEN coalesce($st, s._searchText) "
             "                        ELSE s._searchText END, "
-            # ⛔ the WRITE of `s.contentHash` — LAST, after every reader of it in
-            # this ON MATCH list (see the ORDER note where the list starts).
-            "           s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
-            "                          WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                          THEN $hash ELSE s.contentHash END, "
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
-            "           s.format = coalesce($fmt, s.format) "
+            "           s.format = coalesce($fmt, s.format), "
+            # ⛔ LAST, and it must stay last — see the ORDER note at the head of
+            # this ON MATCH clause (#8870).
+            "           s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
+            "                             WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                             THEN $hash ELSE s.contentHash END "
             # #5024 P1-A: the atomic pre-write capture above rides the write's
             # own result. `null` (a create) is a REAL value here, not a
             # swallowed failure — the caller no longer has a pre-read that can
