@@ -668,9 +668,9 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
         # to prevent.
         # De-duplicated, order preserved — as `index_catalogue.indexed_field_names`
         # documents. A `properties` cell that repeats a name would otherwise yield two
-        # IDENTICAL definitions, so the second DROP raises on an engine that rejects the
-        # duplicate (the shape this module documents) and aborts the restore AFTER the
-        # index was dropped; `same_index_definitions` is set-based and could not catch it.
+        # IDENTICAL definitions, so the same index would be DROPped twice. The result of
+        # that second DROP is UNMEASURED — no artifact in this repo records it — so it must
+        # simply not be issued. `same_index_definitions` is set-based and could not catch it.
         indexed_names = list(dict.fromkeys(_properties_column_names(row)))
         for kind_name in types_by_name:
             if kind_name not in indexed_names:
@@ -2223,29 +2223,35 @@ def _append_state_to_message(exc: BaseException, state: str) -> None:
 
     The exception TYPE is deliberately preserved: callers distinguish "the restore did not
     return" from "an index could not be re-created" by type and several tests pin that, so
-    a new wrapper type would trade a real contract for the message. Only a single-string-arg
-    message is extended — appending to structured args would corrupt what ``str(exc)`` means
-    for those types.
+    a new wrapper type would trade a real contract for the message.
+
+    WHICH SHAPES ARE REACHED, stated because ``__str__`` is not args-derived for every
+    class. Two are handled: an ``OSError`` (through ``errno``/``strerror``, which is what
+    ITS ``__str__`` renders) and a plain single-string message. A structured ``(int, str)``
+    exception is DECLARED RESIDUAL and deliberately left alone — rewriting its ``args``
+    damages the evidence without moving ``str(exc)``, which is worse than the note-only
+    state it started in (``subprocess.CalledProcessError`` is the measured example: its
+    ``__str__`` renders ``returncode``/``cmd``, so rewriting ``args[1]`` would put the index
+    state into a ``cmd`` that never ran).
     """
+    if isinstance(exc, OSError):
+        # A dead or unreachable engine raises exactly this family (`ConnectionRefusedError`,
+        # `socket.gaierror`) — the failure this module calls "the process died" (#8270) — so
+        # leaving it untouched re-opened the note-only defect one level down.
+        # `OSError.__str__` renders `errno`/`strerror`, NOT `args` (whose length never
+        # exceeds 2 for any legal positional form): the attributes are what must move.
+        strerror = exc.strerror
+        exc.strerror = f"{strerror}\n{state}" if isinstance(strerror, str) else state
+        errno = exc.errno
+        if errno is None and exc.args and isinstance(exc.args[0], int):
+            # A bare `OSError(111)` leaves `strerror` None; fill it so the state has
+            # somewhere to land instead of staying note-only.
+            errno = exc.args[0]
+            exc.errno = errno
+        exc.args = (errno, exc.strerror) if errno is not None else (exc.strerror,)
+        return
     if len(exc.args) == 1 and isinstance(exc.args[0], str):
         exc.args = (f"{exc.args[0]}\n{state}",)
-        return
-    # The OSError family (`ConnectionRefusedError`, `socket.gaierror`) is EXACTLY what a
-    # dead or unreachable engine raises — the failure this module calls "the process died"
-    # (#8270). Leaving that shape untouched re-opened the same note-only defect one level
-    # down. `OSError.__str__` renders `errno`/`strerror`, NOT `args`, so the attributes are
-    # what must move; `args` is kept in step for any reader that goes through it.
-    if isinstance(exc, OSError) and isinstance(exc.strerror, str):
-        exc.strerror = f"{exc.strerror}\n{state}"
-        if len(exc.args) >= 2:
-            exc.args = (exc.args[0], exc.strerror, *exc.args[2:])
-        return
-    if (
-        len(exc.args) >= 2
-        and isinstance(exc.args[0], int)
-        and isinstance(exc.args[1], str)
-    ):
-        exc.args = (exc.args[0], f"{exc.args[1]}\n{state}", *exc.args[2:])
 
 
 def _index_state_note(
@@ -2293,10 +2299,21 @@ def _index_state_note(
             "assume the graph is there before re-creating its index."
         )
     elif graph_restored:
-        lines.append(
-            "the graph itself WAS restored (the failure is above); do NOT re-issue the "
-            "restore — fix the index only."
-        )
+        # The instruction must match what was MEASURED. When the catalogue proves every
+        # dropped definition present (`failed` empty — a CREATE can take effect engine-side
+        # and still raise), telling the caller to "fix the index" contradicts the very sets
+        # this note just printed above.
+        if failed:
+            lines.append(
+                "the graph itself WAS restored (the failure is above); do NOT re-issue the "
+                "restore — fix the index only."
+            )
+        else:
+            lines.append(
+                "the graph itself WAS restored (the failure is above); do NOT re-issue the "
+                "restore, and there is no index to fix — every index this path dropped is "
+                "PRESENT in the catalogue."
+            )
     else:
         lines.append(
             "the graph key was NEVER deleted (the sequence did not reach `delete()`), so "

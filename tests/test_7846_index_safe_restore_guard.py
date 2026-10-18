@@ -163,7 +163,7 @@ class _FakeGraph:
 
     def __init__(self, rows=None, *, drop_works=True, echo=None, restore_error=None,
                  dump_error=None, drop_fails_on=(), create_fails_on=(),
-                 fail_list_on=()):
+                 create_applies_then_raises_on=(), fail_list_on=()):
         #: keyed by the properties cell so insertion order survives and a per-index drop
         #: can remove exactly one row
         self.rows: dict[str, list] = {
@@ -175,6 +175,10 @@ class _FakeGraph:
         self.dump_error = dump_error
         self.drop_fails_on = set(drop_fails_on)
         self.create_fails_on = set(create_fails_on)
+        #: Properties whose CREATE TAKES EFFECT engine-side and STILL raises (a connection
+        #: reset after the statement was accepted). Models `gone == []`: the catalogue
+        #: proves every definition present although the call reported a failure.
+        self.create_applies_then_raises_on = set(create_applies_then_raises_on)
         #: 1-based `list_indexes()` call numbers that RAISE — models a catalogue read that
         #: fails at a specific point in the sequence (a transient outage, the case where a
         #: failure must not be reported as a measured fact).
@@ -215,6 +219,10 @@ class _FakeGraph:
         options = self.echo(definition) if self.echo is not None else None
         row = _catalogue_row(definition, options=options)
         self.rows[_row_key(row)] = row
+        if definition.property in self.create_applies_then_raises_on:
+            raise RuntimeError(
+                f"engine: connection reset after CREATE {definition.property}"
+            )
 
     def dump(self):
         self.calls.append("dump")
@@ -791,6 +799,58 @@ def test_the_missing_index_is_in_the_MESSAGE_not_only_in_the_note() -> None:
     # ... and the note is still there for the traceback reader.
     assert "NOT re-created" in " ".join(getattr(raised.value, "__notes__", [])), (
         "the note stopped being attached; keep both, the message AND the note"
+    )
+
+
+def test_a_create_that_takes_effect_and_STILL_raises_does_not_say_fix_the_index() -> None:
+    """#8965 review: ``gone == []`` is REACHABLE, and the instruction must match it.
+
+    A ``CREATE`` can take effect engine-side and still raise (a connection reset after the
+    statement was accepted). ``_missing_from_catalogue`` then proves every definition
+    PRESENT, so NO index is lost — and neither the message nor the note may tell the caller
+    to "fix the index", which contradicts the very sets printed in the same breath.
+
+    This arm is the one the sibling message test cannot reach: ``create_fails_on`` raises
+    BEFORE the catalogue row appears, so it always leaves a non-empty ``gone`` and would
+    pass with the guard deleted. The companion rule is pinned by
+    ``test_the_missing_index_is_in_the_MESSAGE_not_only_in_the_note``: when an index IS
+    missing the state must reach ``str(exc)``.
+    """
+    engine = _FakeGraph(
+        [list(_INDEXED_ROWS[0])], create_applies_then_raises_on={"embedding"}
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        engine.safe()
+
+    message = str(raised.value)
+    assert "fix the index only" not in message, (
+        f"the message tells the caller to fix an index the catalogue proves PRESENT — and "
+        f"it contradicts the sets it prints itself: {message!r}"
+    )
+    assert "NOT re-created" not in message, message
+    assert "CREATE VECTOR INDEX" not in message, (
+        f"the message carries a CREATE statement for an index the catalogue proves "
+        f"PRESENT: {message!r}"
+    )
+    # THE GUARD ITSELF: nothing was lost, so the caller's own error must not be buried under
+    # an index report. This is what an unconditional append (the pre-fix shape) fails.
+    assert "PRESENT in the catalogue" not in message, (
+        f"the index state was appended to the message although the catalogue proves NOTHING "
+        f"was lost, so the caller's own error is buried under an index report: {message!r}"
+    )
+
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "re-created: " in notes, (
+        f"the note stopped reporting the measured state: {notes!r}"
+    )
+    assert "fix the index only" not in notes, (
+        f"the NOTE — what a formatted traceback renders — still instructs the caller to "
+        f"fix an index the catalogue proves PRESENT: {notes!r}"
+    )
+    assert "PRESENT in the catalogue" in notes, (
+        f"the note does not say the index is present, so the reader is left with a failure "
+        f"and no account of the index: {notes!r}"
     )
 
 
