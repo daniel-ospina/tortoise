@@ -24,8 +24,10 @@ silently reverting: the consolidation of agent-infra's two recorder bodies is
 ``daniel-ospina/agent-infra#1671``. If the record stops naming either, the next
 lane re-derives the cycle the #3512 scoping comment spent a section resolving.
 
-Scope note: ``docs/`` is in ``ci_selection.NON_PYTHON_PREFIXES``, so a
-docs-only PR deliberately skips the Python matrix. The record's code-adjacent
+Scope note: most ``docs/`` edits skip the Python matrix (``docs/`` is in
+``ci_selection.NON_PYTHON_PREFIXES``), but this record's plan doc is itself a
+``CORE_ALSO`` claim entry (the #3554 carve-out in ``tools/ci_selection.py``), so a
+plan-only edit selects ``core`` and runs this file. The record's code-adjacent
 half — ``tortoise/pi-hooks/README.md`` — matches no ``SOURCE_PATTERNS`` entry
 and therefore selects ``core`` through the ``tortoise/`` fallback, which is why
 this file is registered there.

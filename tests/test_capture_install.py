@@ -3561,11 +3561,11 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
     carrying either accusation.
 
     Mutation: revert the header to the pre-#3512 text (``1f653d9b…0580``,
-    generation 3) with this pair left alone — this REDs on the digest; update the
-    pair's digest for a prose edit and leave the generation alone — this REDs on
-    ``_GENERATION_DIGESTS``.  Rewriting BOTH is not caught here: what one commit
-    can enforce is that the pair alone does not certify a byte set, not that a
-    past entry was never rewritten.
+    generation 3) with this pair left alone — this REDs on the pair, because the
+    marker moved; rewrite the pair's digest for a prose edit and leave the
+    generation alone — this REDs on ``_GENERATION_DIGESTS``.  Rewriting BOTH is not
+    caught here: what one commit can enforce is that the pair alone does not
+    certify a byte set, not that a past entry was never rewritten.
     """
     generation, digest = _PINNED_PI_SEAM_INSTALL_CONTRACT
     shipped = hook_install.read_hook_version(_PI_SRC)
