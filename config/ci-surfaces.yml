@@ -4404,10 +4404,14 @@ tier1:
 # this branch's own legs — run 39165691659, 2026-10-18 — which covers all 65
 # pool files (4,575 tests, 37.88m of test time). Local CPU is not quoted
 # anywhere in this block, and the per-file `durations` rows for the pool were
-# rewritten from that junit, each with `# #9017 CI-junit` and, where it moved,
+# rewritten from that junit, each with `# #9017 CI-junit` and, where it moved by
+# more than 0.1s,
 # `; was <the value the map carried before>`.
 #
-# THE MEASUREMENT ITSELF, largest first (the row's previous value in brackets):
+# THE MEASUREMENT ITSELF, largest first. The bracketed figure is the value the map
+# carried BEFORE #9035's local-CPU pass — the reading this table is correcting —
+# not the CPU value #9035 left behind (that one is on each row, after `was`):
+#
 #   test_surface_manifest      199.1  [132.2]   — 1.5x understated
 #   test_ci_selection          184.1  [ 39.9]   — 4.6x understated
 #   test_battery_setup         177.7  [ 98.8]   — 1.8x

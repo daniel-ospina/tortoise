@@ -1437,8 +1437,9 @@ jobs:
           #      written (#4711) and were never rechecked.
           #
           # #9017 re-cut both rows from the CI's OWN per-test junit (2026-10-18,
-          # run 39165691659): the committed map had rotted — 28 of the leg files
-          # carried an `# unmeasured` placeholder — so a first pass re-measured
+          # run 39165691659): the committed map had rotted — 28 of the 64 leg
+          # files of that measurement (29 of today's 65) carried an `# unmeasured`
+          # placeholder — so a first pass re-measured
           # locally and got the wrong answer, because this repo's host runs a
           # fleet and local CPU seconds inflate non-uniformly under that load
           # (`test_index_cli` measured 338s of local CPU for 25s of CI time).
