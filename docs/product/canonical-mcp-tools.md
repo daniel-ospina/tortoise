@@ -19,7 +19,7 @@ related:
   - "#4114"
 ---
 
-# Canonical MCP tool list — 23 proposed tools (the beta target is 26)
+# Canonical MCP tool list — 23 proposed tools (the beta target is 27 as of the 2026-10-17 #3540 amendment; it was 26)
 
 **Owner-approved 2026-09-18.** This is the target MCP surface. Everything not on this
 list is retired, folded into a member below, or archived. The surface is frozen in both
@@ -30,7 +30,7 @@ generated view of the current baseline) and the gate in `tools/surface-guard.py`
 document left **OPEN** are settled — `manage_deployment` is **off the MCP**,
 `run_onboarding` is **dropped for `check_connection`**, and `packs_list`/`pack_install` are
 **SDK/REST, post-beta** (#4663). The **23** is this list's own proposal count; the **MCP
-target is 26**. `approved: 2026-09-18` above stays the original ruling date; this paragraph
+target was 26 at that ruling** (27 since #3540, 2026-10-17). `approved: 2026-09-18` above stays the original ruling date; this paragraph
 records the amendment.
 
 **Amended 2026-10-12** (owner ruling, recorded on **#7852**): `create_operator`
@@ -75,6 +75,44 @@ now records the actual order plus the separate inner extractor-provider 503. **N
 added, removed or renamed; the served schema, parameters and bindings are unchanged** — only
 the description text, and hence the handler digest, changes. status: approved · principal:
 daniel-ospina · PR #8563 · date: 2026-10-14.
+
+**Amended 2026-10-17** (owner ruling on **#3540**, **PR #8863**): **one tool is added and two
+are retired — a net REDUCTION of one**, which is the ruling's own requirement. The TARGET count
+moves the other way: the **MCP target count is 27** (it was 26), because the two retired
+switches were never ON this target list: the
+merged list gains `tortoise_manage_sources` while the SERVED surface loses one net (**82 → 81**).
+Both pairs are stated because they move in opposite directions, and a generated table that prints
+"27" must not be read as contradicting this record. Owner's words:
+*"b sounds good because we enable agents to configure the system (assuming they have
+permission) and that's better UX than clicking on the UI"* (2026-10-12).
+
+`tortoise_manage_sources(action=list|enable|disable,
+source=github_issues|github_documents|agent_sessions)` is ONE consolidated source-management
+operation. It replaces the two per-source switches `tortoise_onboarding_github_index` and
+`tortoise_onboarding_session_recording`, which are **retired through `RETIRED_USE_INSTEAD`**
+(#3883), not deleted — a caller still resolves them and is handed the replacement. It also
+closes the tracked `github_documents` gap, which had no tool at all.
+
+`tortoise_onboarding_github_connect` is deliberately **not** folded in: it is the OAuth
+handshake, and the ruling's own *"credentials never pass through the model"* condition is
+what keeps it out of an agent-callable list/enable/disable operation.
+
+Permission is the condition the owner attached to the ruling and is enforced at the tool
+boundary: the entry declares `writes=True`, so `_enforce_mcp_tool_scope` requires
+`graphs:write` and denies an unresolvable name. Agent session recording keeps its recorded
+`#1927` default (ON — the optional off-switch, ToS-covered); the ruling's "deny-by-default"
+is taken to govern what the assistant may DO, not to reverse what the product ALREADY does.
+
+> **OVERRIDES:** the "reads and writes never share a tool" principle stated immediately below,
+> and `beta-sdk-surface.md`'s "account tenancy is not on the MCP" — the owner ruled for **one**
+> consolidated operation that both lists and switches sources, over per-source tools
+> (2026-10-12, on #3540). The permission condition is what makes the departure safe rather than
+> the split: `writes=True` means a read-only key is refused even for `action="list"`, so the
+> read inside a write-gated tool can never be reached by a read-scoped caller. A future lane
+> that "fixes" this by splitting `list` into its own read tool would restore the principle and
+> **undo the ruling's single-tool arithmetic** — reopen #3540 instead of editing this tool.
+
+status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 
 ## Principle: reads and writes never share a tool
 
@@ -135,7 +173,8 @@ currently absorbs `get_confidence`, which is read-labelled but writes. See **Ope
 **Rows 22 and 23 are settled OFF the MCP (2026-09-22).** `manage_deployment` is account tenancy
 (`org_create`) plus two tenant-served pack operations; `run_onboarding` mixed a write with two
 tenant-served reads. Neither container ships on the MCP target. The rehomed members and the
-dropped capability are recorded in **Open items**; the **MCP target count is unchanged at 26** —
+dropped capability are recorded in **Open items**; the **MCP target count stayed at 26 for
+that ruling** (27 since #3540, 2026-10-17 — see the amendment above) —
 the beta list already carries `check_connection` in `run_onboarding`'s place and the tenancy
 surface outside the MCP. Nothing below is a silent deletion: every member is either rehomed or
 listed as retired.
@@ -195,7 +234,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 | **`packs_list` is tenant-facing and NOT on the MCP.** The registry has it `_ro()`, `http_policy=True`, described as *"List this team's active packs … another tenant's packs are never observable"* (`tortoise/tool_registry.py`). **Settled 2026-09-22: it is SDK/REST only and POST-BETA** — the tenant read is preserved there, and no competitor exposes pack installation on its agent API, so the agent-facing MCP does not carry it. Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
 | **`pack_install` is tenant-facing too — an unflagged write.** It has `http_policy=True` and is described as *"Install a custom expansion pack on the **HOSTED surface** … stores the manifest in the tenant graph and activates it"* (`tortoise/tool_registry.py`); the baseline records it `served: http`. **Settled 2026-09-22: SDK/REST only and POST-BETA**, so the tenant-visible write survives instead of being destroyed by folding it into an operator-only tool. (Its `hosted_only=True` flag is separately dead — see #4114.) Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
 | **`run_onboarding` absorbs two read-only tenant-served tools** — `onboarding_state` and `onboarding_github_status` are `_ro()` and `http_policy=True`. So it is both read and write on the customer-grantable surface, which the principle above forbids. **Settled 2026-09-22: the container is DROPPED** for `check_connection` (*programmatic, returns a result — not a wizard*), and its two tenant-visible reads are **rehomed to the tenancy block (SDK/REST)**. The MCP surface therefore **loses both reads by design** — the capability is reachable, just not through the agent API. The other five setup members are not on the MCP target. | **✅ RESOLVED 2026-09-22 — dropped for `check_connection`; two reads rehomed to SDK/REST** |
-| **`graph_set_recording` — dropping it removes an agent's self-heal path.** The registry says the capture `409` (*"Session recording is disabled for this graph"*) *"routes agents here; call this tool to turn recording back on, then retry the capture"* (the `tortoise_graph_set_recording` entry in `tortoise/tool_registry.py`). REST exposes the same operation at `PATCH /v1/graphs/{graph_id}`, but **an MCP client cannot reach REST** — so dropping it would leave an agent that hits a 409 with no recovery path inside MCP. **Owner ruling 2026-09-21: KEEP IT.** It becomes a **24th approved tool** — this list's own count, not the beta target's, which becomes **26** after its other deltas (a write; needs a `team:manage`-scoped key, so it is not a universal self-heal path). Its SDK method is the builder-only `update_memory_graph`; the SDK's own per-field `graph_set_recording` stays discarded, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ RESOLVED — kept; the MCP target is 26** |
+| **`graph_set_recording` — dropping it removes an agent's self-heal path.** The registry says the capture `409` (*"Session recording is disabled for this graph"*) *"routes agents here; call this tool to turn recording back on, then retry the capture"* (the `tortoise_graph_set_recording` entry in `tortoise/tool_registry.py`). REST exposes the same operation at `PATCH /v1/graphs/{graph_id}`, but **an MCP client cannot reach REST** — so dropping it would leave an agent that hits a 409 with no recovery path inside MCP. **Owner ruling 2026-09-21: KEEP IT.** It becomes a **24th approved tool** — this list's own count, not the beta target's, which becomes **26** after its other deltas (a write; needs a `team:manage`-scoped key, so it is not a universal self-heal path). Its SDK method is the builder-only `update_memory_graph`; the SDK's own per-field `graph_set_recording` stays discarded, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ RESOLVED — kept; the MCP target became 26 at that ruling (27 since #3540, 2026-10-17)** |
 | **SDK method `TortoiseSDK.get_entity`** keeps the narrow meaning while this tool takes the broad one — same name, two meanings, one layer apart. | resolve in the SDK pass |
 | **Bridge table** — every `type=`/`mode=` value in these 23 mapped to the SDK method behind it, before implementation starts. | pre-flight |
 
@@ -219,7 +258,7 @@ and **17 of the 23 names appear nowhere else in the repo** — the six that do a
 `run_onboarding`, and in every case the match is a different identifier or the existing
 tool of the same name. The one unplaced tool is `graph_set_recording`, whose disposition is
 **RESOLVED by owner ruling 2026-09-21: kept** — see the row above. The unplaced tool is now the
-**24th** approved tool (the beta target becomes 26), so "zero orphans" holds.
+**24th** approved tool (the beta target became 26 at that ruling; 27 since #3540, 2026-10-17), so "zero orphans" holds.
 Six breakages were found and
 folded into the list above; two were filed as issues: **#4113** (surface guards assert tool
 names by string, so they go vacuous on any rename) and **#4114** (`hosted_only` is declared

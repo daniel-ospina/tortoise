@@ -1206,6 +1206,38 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         rest_spec=RestSpec(method="POST", path="/v1/onboarding/seed"),
     ),
     ToolDefinition(
+        name="tortoise_manage_sources",
+        id="surface.manage_sources",
+        writes=True,
+        description=(
+            "Configure the memory sources this team uses (the ones Tortoise "
+            "reads FROM). action: list|enable|disable; source: github_issues|"
+            "github_documents|agent_sessions. list returns EVERY source with "
+            "its current state and its default, in one call. enable/disable "
+            "act only within the caller's own permission for this team — a key "
+            "without graphs:write is REFUSED, never self-granted — and no "
+            "action accepts, returns or echoes a credential: authorising "
+            "GitHub stays a host/user-side step (use "
+            "tortoise_onboarding_github_connect for that). source is required "
+            "for enable/disable and ignored by list. The two GitHub sources "
+            "share ONE connection but have SEPARATE enable intent (#1924), so "
+            "disable switches off only the named source and leaves the "
+            "connection and the sibling source intact; that flag is intent-only "
+            "today and the payload says so. "
+            "agent_sessions is ON by default (an optional off-switch, #1927): "
+            "disable stops recording; enable there reports already-on rather "
+            "than changing a recorded default."
+        ),
+        annotations=_rw(),
+        http_policy=True,
+        # Custom handler in mcp_server.py, following `tortoise_overview`'s
+        # consolidation precedent (one entry point, dispatching). NO `rest_spec`
+        # — per the ruling the tool sits ON TOP OF the existing endpoints
+        # (POST /v1/index/github, /v1/index/docs, /v1/onboarding/session-recording)
+        # and adds no live route of its own.
+        sdk_method="",
+    ),
+    ToolDefinition(
         name="tortoise_onboarding_session_recording",
         id="surface.onboarding_session_recording",
         writes=True,
@@ -1264,8 +1296,8 @@ def get_write_tool_names() -> frozenset[str]:
     Covers the SERVED set (#3883): a retired name still answers through the
     warning shim, so a write served under a retired name must not be recorded as
     a read. Since #4474 two retired shims ARE writers (`tortoise_ingest_corpus`,
-    `tortoise_index_sessions`), so the served census (47) exceeds the live census
-    (45) — the derivation over the served set is what keeps them counted, and it
+    `tortoise_index_sessions`), so the served census (48) exceeds the live census
+    (44) — the derivation over the served set is what keeps them counted, and it
     stops the census from silently shrinking when a live writer is retired."""
     return frozenset(
         t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
@@ -1516,6 +1548,11 @@ GROUP_BY_NAME: dict[str, str] = {
     # onboarding
     "tortoise_onboarding_demo_create": "onboarding", "tortoise_onboarding_state": "onboarding",
     "tortoise_onboarding_seed": "onboarding",  # #1999 (W3)
+    # #3540 ruling B: the consolidated source-management tool. The two
+    # per-source switches it replaces keep their entries (they are RETIRED via
+    # RETIRED_USE_INSTEAD, so they resolve and warn) and therefore keep their
+    # group mapping too.
+    "tortoise_manage_sources": "onboarding",
     "tortoise_onboarding_session_recording": "onboarding",
     "tortoise_onboarding_github_connect": "onboarding",
     "tortoise_onboarding_github_index": "onboarding",
@@ -1567,6 +1604,28 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
     "tortoise_index_sessions": "tortoise_index_files(directory)",
     "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+    # #3540 ruling B (owner, 2026-10-12): ONE consolidated source-management
+    # operation replaces the two per-source switches, so the surface ends one
+    # tool FEWER while the number of agent-settable sources grows (the
+    # github-documents gap closes through the same tool, without an addition).
+    #
+    # These two are RETIRED, not deleted: #3883 requires a retired name to keep
+    # resolving and to name its replacement, and a deletion would answer "tool
+    # not found" instead. `tortoise_onboarding_github_connect` is deliberately
+    # NOT here — it is the OAuth handshake, and the ruling's own "credentials
+    # never pass through the model" condition is what keeps it out of an
+    # agent-callable list/enable/disable operation.
+    # NB: no `|` in these values. `RETIRED_USE_INSTEAD` is rendered into
+    # markdown table cells (docs/product/mcp-rename-table.md, Part A and Part B),
+    # where an unescaped pipe ends the cell — it produced a row with one cell too
+    # many and TRUNCATED the value when the table rendered (MD056). The word "or"
+    # says the same thing and cannot break a table.
+    "tortoise_onboarding_github_index":
+        'tortoise_manage_sources(action="enable", source="github_issues")'
+        ' (no per-repo scope: it indexes every connected repo)',
+    "tortoise_onboarding_session_recording":
+        'tortoise_manage_sources(action="enable" or "disable", '
+        'source="agent_sessions")',
 }
 
 

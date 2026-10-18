@@ -115,6 +115,9 @@ honest residual).
 - Slice A gate: C1's 0.780 reproduced (no regression) + the 2 C2 regressions
   recovered when the arms are re-enabled on top of the fixed assembly (the arms
   stay OFF-by-default; Slice A must make the product robust to them).
+  ⛔ **EXPIRED — see §9 (2026-10-16).** The baseline this line measures against
+  no longer exists (#2978 / PR #3000 changed the window 3 days after the slice
+  merged). Re-specified, not silently re-scoped: `docs/runbook/8043-slice-a-t-gate.md`.
 - Slice B gate: aggregation-class accuracy moves on the same slice with the
   SAME reader (no reader change); per-question: the value-bearing evidence is
   verbatim-present + deduped in the reader's package.
@@ -189,3 +192,43 @@ Status 2026-09-10: Run A in flight on `falkordb-eval:6380` at sha b3ed420d9
 arming. The one-time pass ran far over the ~4.5 h estimate because the shared
 box was at load 90–229 (47 concurrent pi sessions; a runaway `find`, `npm ci`).
 Runs B/C remain, pending Run A completion.
+
+> ⚠️ **Superseded — see §9.** Runs B/C were never recorded (no
+> `tools/longmem_eval/receipts/` ever existed), and the plan above is
+> un-runnable as written: the Run A control arm it compares against is a
+> pre-#2978 window. The T line this plan serves is settled in §9.
+
+---
+
+## 9. Slice A status — the T gate: baseline expired, re-specified, structural leg RUN (2026-10-16, #8043)
+
+**T as written is VOID** — `Slice A gate: C1's 0.780 reproduced … the 2 C2
+regressions recovered` (§6). It is unfalsifiable, not failed: **PR #3000
+(`c01d9c468`, 2026-09-11 23:00 -0500 = 2026-09-12Z)** fixed #2978 so
+content-less operator hits stopped consuming a reader-context item slot —
+**three days after** Slice A merged (`b3ed420d9`, 2026-09-09). "Recover" was
+defined against a window that can no longer be produced, so a re-run would
+confound the assembly change with the #2978 change. No receipt for Runs A/B/C
+was ever **committed** — `git ls-files` carries none, and the uncommitted cycle
+receipts this document's §7 names lived in one lane's `.worktrees/opt/
+2080-measure/` checkout, which no longer exists.
+
+**The gate is re-specified** (`docs/runbook/8043-slice-a-t-gate.md`; receipt
+`docs/runbook/8043-slice-a-t-gate-receipt.json`; instrument
+`tools/longmem_eval/slice_a_flood_bound.py`; guard
+`tests/longmem_eval/test_slice_a_flood_bound.py`):
+
+| Leg | Statement | State |
+|---|---|---|
+| **T-1** structural | on a C2-shaped pool the shipped window admits **0** content-less slots; the assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool returns byte-identically | **RUN** — measured on the shipped `assemble_context` / `package_evidence_pool`: pre-#2978 60.0% content-less + 40% of the window on ONE fact; post-#2978 **0** content-less but **100%** of the window on that one fact (i.e. #2978 alone does **not** bound the flood); assembly ON **2** slots + **4/4** value-critical claims |
+| **T-2** end-to-end | same frozen reader/judge on the frozen 50 qids, `TORTOISE_LME_EVIDENCE_ASSEMBLY` **ON vs OFF**, reported as a delta against the **post-#2978 OFF arm** (never against C1's 0.780) | **NOT RUN** — re-homed to the end-to-end run in **#8486** (0 extra ingest: the arm is not in the run fingerprint). Recorded there, so the gate has an owner until it runs |
+
+The two arms are **not retired**: they are OFF everywhere (nothing ships on an
+unmeasured path), and the withdrawal branch would reverse a delivered, tested
+capability because a measurement was inconvenient — the T-2 vehicle is cheap
+and exists.
+
+**One measured scope limit travels with T-1:** the bound holds for hits
+carrying `quote` / `source_turn_id`. On the product ask lane those fields are
+absent (**#8658**), where the measured cost is 12 flood slots instead of 2 —
+the instrument measures that state rather than assuming it away.

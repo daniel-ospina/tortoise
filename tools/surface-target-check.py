@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The surface TARGET compliance check (#4185).
 
-OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from the two product docs — the MCP target from docs/product/canonical-mcp-tools.md (cross-checked in docs/product/beta-sdk-surface.md), the SDK target from docs/product/beta-sdk-surface.md — so no count appears here and this file cannot drift from them.
 
 WHY THIS IS NOT tools/surface-guard.py
     `surface-guard.py` answers "does the live declaration MATCH THE FROZEN BASELINE?"
@@ -21,9 +21,9 @@ WHY THIS IS NOT tools/surface-guard.py
 THE TARGET IS READ, NEVER TYPED HERE
     A target number USED AS THE TARGET in this file would be the SAME drift class that caused
     #4185: a number maintained beside the document that owns it. Both numbers are parsed out
-    of the two product docs at run time. (The mandated `OVERRIDES:` marker above quotes the
-    owner's `26/40` as the historical approval record — it is prose, never read as the
-    target.) If a doc's wording changes so the numbers can no
+    of the two product docs at run time — the `OVERRIDES:` marker above names both owning
+    documents and deliberately carries no count, so it cannot drift from them.
+    If a doc's wording changes so the numbers can no
     longer be read, this tool REFUSES (non-zero) rather than guessing — a compliance
     check that cannot read the target must not report success.
 
@@ -112,8 +112,9 @@ def _frontmatter(path: Path) -> dict:
 # amendment that moved only the canonical `MCP target count` look ambiguous
 # (`len(mcp_numbers) != 1`) and refuse a correctly-readable target. `[\s*]*` lets a phrase
 # span a markdown bold boundary and a line wrap.
-# The canonical doc states it as `MCP target count is unchanged at 26` AND as `MCP target
-# is 26`; the single optional-chain pattern matches both. It must NEVER be `beta target`,
+# The canonical doc states it as `the MCP target count is 27` AND as `the MCP target
+# was 26 at that ruling`; the single optional-chain pattern matches the PRESENT-TENSE form
+# and must not match the historical one — hence `is`, never `was`. It must NEVER be `beta target`,
 # which names the beta list's OWN count rather than the MCP target's — the two can move
 # independently, so reading the wrong phrase is a wrong number waiting to happen.
 _CANONICAL_MCP_PATTERNS = (
