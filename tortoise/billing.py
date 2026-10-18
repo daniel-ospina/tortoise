@@ -1016,15 +1016,19 @@ def _paid_tier_floor(tier: str | None) -> int | None:
     from tortoise.pricing import tier_limits
     try:
         return tier_limits(tier or "free")["max_graph_nodes"]
-    except (KeyError, TypeError, OSError, ValueError):
-        # ⛔ Every way an unreadable ladder can present itself, not just a bad
-        # key: a MALFORMED ``product/pricing.json`` raises ``JSONDecodeError``
-        # (a ``ValueError``) and a MISSING one raises ``FileNotFoundError`` (an
-        # ``OSError``). Letting those escape turned "unreadable ladder" into an
-        # unnamed 500 for the WHOLE pass — the first org that needs the ladder
-        # decision aborts the sweep mid-fleet, which is the partial pass this
-        # cadence exists to prevent, and the driver reports it as a control-plane
-        # outage. The documented behaviour is ``None`` → ``unverified``.
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable ladder is not a verdict
+        # ⛔ EVERY way an unreadable ladder can present itself, deliberately
+        # broad. The shapes are not one exception family: a LOADED tier missing
+        # a limit key raises ``KeyError``; a malformed file ``JSONDecodeError``
+        # (a ``ValueError``); a missing one ``FileNotFoundError`` (an
+        # ``OSError``); and a valid-JSON file whose ROOT (or ``tiers`` value) is
+        # not an object raises ``AttributeError`` at ``data.get(...)``. The last
+        # is the one a hand-written tuple always misses, and any escape here is
+        # not a per-org failure: ``_tier_claim`` runs OUTSIDE the per-org
+        # ``try``, so it aborts the WHOLE pass as an unnamed 500 — the partial
+        # pass this cadence exists to prevent — which the driver then reports as
+        # a control-plane outage. The documented behaviour is ``None`` →
+        # ``unverified``.
         return None
 
 

@@ -722,7 +722,7 @@ class TestApplyLimitsAndReconcile:
 
     def test_a_MALFORMED_or_MISSING_pricing_file_does_not_abort_the_pass(
             self, monkeypatch, stripe_env, billing_sdk):
-        """#8904 review P1: an unreadable ladder has THREE shapes, not one.
+        """#8904 review P1: an unreadable ladder has FOUR shapes, not one.
 
         ``_paid_tier_floor`` caught only ``KeyError``/``TypeError`` (a loaded
         tier missing a limit key). A malformed ``product/pricing.json`` raises
@@ -733,6 +733,11 @@ class TestApplyLimitsAndReconcile:
         population) killed the sweep mid-fleet, which is the partial pass this
         cadence exists to prevent, and the driver reports a 500 as a
         control-plane outage. The documented outcome is ``unverified``.
+
+        The fourth shape is the one a hand-written tuple always misses: a
+        valid-JSON file whose ROOT (or ``tiers`` value) is not an object raises
+        ``AttributeError`` at ``data.get(...)``, outside every exception
+        family the first fix enumerated. That is why the catch is broad now.
         """
         import json
 
@@ -754,7 +759,8 @@ class TestApplyLimitsAndReconcile:
         # too, so patching first would fail in the fixture, not the code under
         # test.)
         for fault in (json.JSONDecodeError("Expecting value", "{bad", 0),
-                      FileNotFoundError("product/pricing.json")):
+                      FileNotFoundError("product/pricing.json"),
+                      AttributeError("'list' object has no attribute 'get'")):
             def _broken(tier, _fault=fault):
                 raise _fault
 

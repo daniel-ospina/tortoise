@@ -496,9 +496,11 @@ customer's writes) and a `direction`:
   could not be read" / "(Stripe named none, or the customer lookup failed)").
   Two shapes, and only ONE of them reaches a RED run:
     * orgs whose repair path reads the ladder raise inside `mirror_subscription`
-      (`KeyError: pricing.json tier … missing required limit keys`), land in
-      `failed`, and redden the run with rows naming the error — so a broken
-      pricing file is NOT a silent no-op;
+      (`KeyError: pricing.json tier … missing required limit keys`, or
+      `JSONDecodeError` / `FileNotFoundError` / `AttributeError` for a
+      malformed, missing, or wrongly-shaped file), land in `failed`, and redden
+      the run with rows naming the error — so a broken pricing file is NOT a
+      silent no-op;
     * orgs with no resolvable ACTIVE subscription take the `noop` arm, land in
       `unverified`, and never fail the run — that much is true of all three
       causes, which is why `unverified` alone is three-way: ladder, fleet-wide
