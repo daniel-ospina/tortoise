@@ -25,8 +25,8 @@ the one thing the old T was really protecting:
 
 Three primary arms on the SAME C2-shaped pool (item-bound 40, the wave's
 window), plus two variant arms measured on it too —
-``post_2978_assembly_value_marked`` (value-critical claims marked, so value
-retention is measurable) and
+``post_2978_assembly_value_marked`` (value-critical claims marked, which makes
+the value-FIRST ORDERING measurable — retention is already 4/4 unmarked) and
 ``provenance_free_assembly`` (provenance stripped, the product ask-lane shape —
 §SCOPE NOTE). Five arm records in the receipt, not three:
 
@@ -177,9 +177,12 @@ _FLOOD_QUOTE = "the cat sheds a lot"
 
 #: The own-source TURNS are the pass-2 own-source leg's shape: POINTS (not raw
 #: chunks) whose content carries the `[user] ` prefix `_is_turn_point()` keys
-#: on, with `source_turn_id` pointing at the anchor's own turn — and whose
-#: verbatim text CONTAINS the anchored quote. Their content differs only by
-#: non-fact-critical filler; a
+#: on and whose verbatim text CONTAINS the anchored quote — that containment is
+#: the leg that fires here (measured: stripping `quote` moves the arm, stripping
+#: `source_turn_id` leaves the receipt byte-identical). The eval lane's OTHER
+#: leg — the turn NODE's id equal to the point's `source_turn_id` — is not
+#: modelled by this fixture, so a regression in that leg would not be caught
+#: here. Their content differs only by non-fact-critical filler; a
 #: numeric filler would be a real value difference and the guard would —
 #: correctly — refuse to treat them as the same utterance.
 _TURN_TAILS = (
@@ -693,10 +696,15 @@ def measure() -> dict[str, Any]:
             ),
             "why": "the 300/400 (normalised overlap 0.80) and 12/60 (0.60) "
             "pairs sit below the 0.90 collapse threshold and carry distinct "
-            "source turns, so they are never collapse CANDIDATES on this "
-            "fixture — the value guard (_pkg_differ_value_critical) is the "
-            "product-side backstop for pairs that DO overlap, and is pinned "
-            "by tests/test_evidence_assembly.py, not exercised here",
+            "turns, so no value pair is a collapse candidate on its own "
+            "account. The guard is still consulted — 39x per provenance arm "
+            "on the >=0.90 content leg, plus one incidental same-turn pair "
+            "(v1 shares source_turn_id t1 with the flood anchor; its quote "
+            "does not overlap) — and every refusal leaves the outcome "
+            "unchanged: disabling _pkg_differ_value_critical reproduces this "
+            "receipt byte-for-byte. Its own regression is "
+            "tests/test_evidence_assembly.py::"
+            "test_production_length_different_values_never_collapse",
         },
         "provenance_leg_is_lane_scoped": {
             "measured": (

@@ -137,14 +137,15 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     the window once the flood is bounded.
 
     On THIS fixture the refusal is structural, not the value guard: measured
-    normalised overlap is 0.80 and 0.60 against a 0.90 collapse threshold, and
-    all four turns are distinct, so the pairs are never collapse CANDIDATES.
-    Disabling `_pkg_differ_value_critical` leaves this receipt byte-identical
-    (verified) — which is why the verdict's `why` names the threshold and says
-    the guard is the product-side backstop, pinned by
-    `tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse`.
-    A docstring claiming the guard did the work here would credit a mechanism
-    this fixture never reaches.
+    normalised overlap is 0.80 and 0.60 against a 0.90 collapse threshold and
+    the four turns are distinct, so no value pair is a collapse candidate on
+    its own account. The guard IS still consulted (39× per provenance arm on
+    the ≥0.90 content leg, plus one incidental same-turn pair whose quote does
+    not overlap), but every refusal leaves the outcome unchanged — disabling it
+    reproduces the receipt byte-for-byte. That is why the verdict's `why` says
+    so, and names where the guard's own regression lives
+    (`tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse`).
+    Neither "the guard caused this" nor "the guard never runs" is true here.
     """
     arm = receipt["arms"]["post_2978_assembly"]
     assert set(arm["value_claims_present"]) == {"v1", "v2", "v3", "v4"}
@@ -152,7 +153,11 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     verdict = receipt["verdicts"]["value_safety"]
     assert "assembly=4/4" in verdict["measured"]
     assert "0.90 collapse threshold" in verdict["why"], verdict["why"]
-    assert "not exercised here" in verdict["why"], verdict["why"]
+    # The guard is CONSULTED (measured: 119 calls, 2 refusals on an incidental
+    # same-turn pair) and determines nothing (disabling it is a no-op). Pin
+    # both halves so neither half can be "tidied" into a false statement.
+    assert "still consulted" in verdict["why"], verdict["why"]
+    assert "byte-for-byte" in verdict["why"], verdict["why"]
 
 
 def test_marked_arm_orders_the_value_claims_first(receipt: dict) -> None:

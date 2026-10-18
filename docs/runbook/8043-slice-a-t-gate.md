@@ -176,11 +176,15 @@ nothing regresses on withdrawal") — and the arms **are** OFF everywhere
   in `tests/test_evidence_assembly.py` + the guard here) **on the grounds that a
   measurement was hard to run** — the easy path, not the good one;
 * the measurement is not hard any more: `TORTOISE_LME_EVIDENCE_ASSEMBLY` is
-  **not in the run fingerprint** (`tools/longmem_eval/run.py` — the
-  fingerprinted read-side knobs are `evidence_boost` / `entity_key_expansion` /
-  `coverage_loop` / `time_aware_qe` / `temporal_aggregate` / the C4 knobs;
-  `evidence_assembly` is absent), so flipping it **alone** does not invalidate
-  the ingest cache. The ON/OFF A/B therefore costs **2× reader+judge calls and
+  **read only at retrieval time** — one read site, `tools/longmem_eval/
+  retrieve.py` (A6); the ask lane's product-side sibling
+  `TORTOISE_ASK_EVIDENCE_ASSEMBLY` is likewise read only in `retrieve`-time
+  code (A8, `tortoise/ask_lane.py`) — and none of the ingest cache's own inputs
+  changes when either flips (`ingest_cache_fingerprint`: extractor code
+  version, extraction model id, extraction prompt digest, the question JSON,
+  `chunk_turns`, `session_workers` — no such flag among them; both are also
+  absent from the read-side knob list the run fingerprint records), so flipping
+  the LME flag **alone** does not invalidate the ingest cache. The ON/OFF A/B therefore costs **2× reader+judge calls and
   0 extra ingest** — the cheapest end-to-end arm available.
 * withdrawing is trivially reversible later; re-deriving the capability is not.
 
