@@ -1,4 +1,4 @@
-// tortoise-hook-version: 3
+// tortoise-hook-version: 4
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -27,6 +27,20 @@
 // Any later behavioural edit here moves it again — the marker is the install
 // contract, not a changelog (see `hook_install.detect_artifact_install`).
 //
+// Generation 4 (#3512): a PROSE-ONLY edit — the note below said the second
+// producer (`agent-infra`'s `reflect-hook`) was ungated, which agent-infra
+// `7e77470e4` (2026-10-16, #803) had already closed by putting both recorders
+// on `extensions/shared/capture-gate.ts`. No line of behaviour changed here,
+// and the generation moves anyway, because `detect_artifact_install` compares
+// BYTES once the markers agree: an installed generation-3 copy carrying the
+// old comment would otherwise read as `modified-artifact` ("marker matches (3)
+// but its bytes differ — local edit") — an accusation against a file the user
+// never touched, which is exactly the harm this marker exists to prevent. A
+// bump makes it read as STALE ("reinstall"), the correct advice whenever the
+// shipped bytes move. `session verify`'s "it captures with older logic"
+// wording is imprecise for this one generation; the classification and the
+// repair it prompts are right.
+//
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
 // `~/.pi/agent/extensions/tortoise-capture.ts` — so a Pi user who clicks
@@ -40,8 +54,13 @@
 // Installing this extension IS the opt-in, and it is the one IN-REPO capture
 // seam that reads no TORTOISE_CAPTURE — unlike the in-repo Claude Code, Codex
 // and Cursor hooks, which file nothing until the machine sets
-// TORTOISE_CAPTURE=1 (#3615). (The agent-infra `reflect-hook` is the other
-// ungated producer and lives outside this repo — agent-infra#1117.) There is
+// TORTOISE_CAPTURE=1 (#3615). (A second producer — agent-infra's `reflect-hook`
+// — lives outside this repo and is NOT shipped to users. It uploaded on key
+// presence alone until agent-infra `7e77470e4` (2026-10-16, #803), and now
+// shares `extensions/shared/capture-gate.ts` there: an explicit `"cloud": true`
+// opt-in *and* a key, with env and a repo-local config able to deny only. The
+// measured disposition, and every module that must move when the two recorders
+// consolidate, are in tortoise/pi-hooks/README.md §Migration (#3512).) There is
 // deliberately NO `autoCapture`-style default-false flag, so the shipped
 // capture step can never silently do nothing. The server can still refuse the
 // capture POST with a 409 while the organization has agent sessions switched

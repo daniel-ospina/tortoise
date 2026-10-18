@@ -33,9 +33,16 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.hosted_api import app, get_current_org, get_current_user
 
-from tests._http_fixtures import patched_tortoise_sdk
+from tests._http_fixtures import (
+    patched_tortoise_sdk,
+    quiesce_testclient_background_work,
+)
 from tests._verdict import require_answered, verdict_client
-from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
+from tests.fake_control_plane import (
+    ErrorControlPlane,
+    FakeControlPlane,
+    rpc_call_named as _rpc_call,
+)
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row  # noqa: F401
 from datetime import UTC
 
@@ -62,19 +69,6 @@ TEST_TEAM = {
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
-
-
-def _rpc_call(fake, name):
-    """The test's OWN provision RPC, selected by name — never by index.
-
-    Background boot-sweep RPCs (#4241's ``metering_repair_period_bounds``,
-    armed through ``run_on_daemon_worker``) share this fake and can land at ANY
-    index, before or after the request's own call. ``rpc_calls[0]`` would then
-    read the sweep and fail a test that never touched it. Selecting by name
-    also KEEPS the wrapper-fn pin: a switch to the other provision wrapper
-    matches nothing and raises, rather than silently passing.
-    """
-    return next(c for c in fake.rpc_calls if c[0] == name)
 
 
 class _RegistrySpy:
@@ -138,6 +132,17 @@ def supabase_env(monkeypatch, fake) -> FakeControlPlane:
 @pytest.fixture
 def client(monkeypatch, supabase_env, spy):
     """TestClient in Supabase mode with a temp embedded DB + registry spy."""
+    # #4816/#8920: `_lifespan` arms `_run_boot_sweeps` on EVERY TestClient
+    # entry, and under `supabase_env` the monkeypatched control plane IS this
+    # fixture's `FakeControlPlane` — so the sweep's metering step records
+    # `metering_repair_period_bounds` in `fake.rpc_calls`, racing the request
+    # under test. Every pin in this module is name/filter-selected, which is
+    # the only reason it never flaked; an index or `len(rpc_calls)` assertion
+    # needs that noise GONE, not filtered. So the seam is applied at the
+    # source (`tests._http_fixtures.quiesce_testclient_background_work` — the
+    # pattern `tortoise/hosted_api.py` records), BEFORE the app is entered so
+    # the arming happens after the patch.
+    quiesce_testclient_background_work(monkeypatch)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "inv.db")
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
@@ -177,6 +182,45 @@ def _owner_membership(**overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+class TestBootSweepQuiesce:
+    """#8920: the `client` fixture QUIESCES the boot sweep, it does not merely
+    happen to tolerate it.
+
+    A #8920 review comment claimed this module's fake never sees the boot
+    sweep; it does (see the `client` fixture and the signup pin). That claim
+    lived on because every pin here is name/filter-selected, so the noise was
+    invisible — which is exactly the state in which someone adds an index or
+    `len(rpc_calls)` assertion and reopens the #4816 flake.
+
+    NON-VACUITY rests on the two IDENTITY assertions, and BOTH redden with the
+    fixture's quiesce removed: `_run_boot_sweeps` is then the real coroutine
+    function, and `event_retention_interval()` returns the production default
+    (3600.0, not the pinned 86400.0). A `rpc_calls` observation is deliberately
+    NOT asserted here: the sweep's RPC lands on a daemon thread roughly 1.5 s
+    after app entry (measured on the docker lane: `rpc_calls == []` at fixture
+    yield, `['metering_repair_period_bounds']` ~1.5 s later), so an instant
+    check of `rpc_calls` cannot tell a quiesced fixture from a just-entered
+    one — it would read RED on the pre-fix fixture only by luck and GREEN on a
+    regressed one.
+    """
+
+    def test_client_fixture_quiesces_boot_sweeps(self, client):
+        import tortoise.hosted_api as ha_mod
+        from tests._http_fixtures import quiet_boot_sweeps
+
+        _tc, _fake, _spy = client
+        assert ha_mod._run_boot_sweeps is quiet_boot_sweeps, (
+            "the `client` fixture must patch ha_mod._run_boot_sweeps — the "
+            "lifespan resolves it as a module global, so a patch anywhere "
+            "else is inert and the sweep runs against this fake"
+        )
+        assert ha_mod.event_retention_interval() == 86400.0, (
+            "the retention loop must be pinned beyond any test's lifetime; "
+            "the UNPATCHED default is 3600.0, so `>= 3600` would pass without "
+            f"the pin — got {ha_mod.event_retention_interval()!r}"
+        )
 
 
 # ── POST /v1/team/keys (create_api_key) ─────────────────────────────────────
@@ -585,11 +629,13 @@ class TestAgentSignup:
         assert identity.startswith("anon-")
 
         # exactly one provision RPC call, identity path, wrapper fn.
-        # Scoped to PROVISION calls: the boot-sweep runner also issues RPCs —
-        # #4241's `metering_repair_period_bounds` — and it is offloaded to a
-        # thread, so it may land BEFORE or AFTER this request. Filtering keeps
-        # the pin (no double provision, and the exact wrapper fn) without
-        # asserting that signup is the only RPC the whole app ever makes.
+        # Scoped to PROVISION calls. The boot-sweep runner used to share this
+        # fake and issue #4241's `metering_repair_period_bounds` on a thread,
+        # landing BEFORE or AFTER this request; the `client` fixture now
+        # quiesces it (#8920), so the noise is gone — the filter stays as the
+        # second line of defence, keeping the pin (no double provision, and the
+        # exact wrapper fn) without asserting that signup is the only RPC the
+        # whole app ever makes.
         provision_calls = [c for c in fake.rpc_calls
                            if c[0] == "provision_team_with_token"]
         assert len(provision_calls) == 1
@@ -1343,8 +1389,10 @@ class TestOnboardingTeam:
             TEST_TEAM, session_user_id=None)
         r = tc.post("/v1/onboarding/team", json={"name": "orphan"})
         assert r.status_code == 403, r.text
-        # no provision attempted. Scoped to provision calls: unrelated
-        # boot-sweep RPCs (#4241) may land asynchronously in this fixture.
+        # no provision attempted. Scoped to provision calls. The boot-sweep
+        # runner used to land its #4241 RPC here asynchronously; the `client`
+        # fixture quiesces it (#8920), so the filter is now the second line of
+        # defence rather than the only one.
         assert [c for c in fake.rpc_calls
                 if c[0] == "provision_team_with_token"] == []
         assert all(t["id"] != "orphan" for t in fake.tables["organizations"])

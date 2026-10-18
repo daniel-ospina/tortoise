@@ -317,9 +317,14 @@ export const CLAUDE_CAPTURE_NOTE = `${captureInstallNote({
 // sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.pi (the setup
 // prompt) and HARNESS_CAPTURE_INSTALL.pi (the Memory-sources inline row) so
 // the two surfaces can never drift. It is the one IN-REPO capture seam with no
-// consent gate (see captureInstallNote above) — the agent-infra `reflect-hook` is
-// the other ungated producer and lives outside this repo (agent-infra#1117);
-// the server can still refuse the capture
+// consent gate (see captureInstallNote above). The agent-infra `reflect-hook` is
+// the SECOND producer and lives outside this repo: it uploaded on key presence
+// alone until agent-infra `7e77470e4` (2026-10-16, #803) put both recorders on
+// `extensions/shared/capture-gate.ts` — an explicit `"cloud": true` in the
+// operator config *and* a key, with env able to deny only. (`agent-infra#1117`
+// is the old key-presence gate's tracker: fixed in code, still open there.
+// `tortoise/pi-hooks/README.md` §Migration is the measured record, #3512.)
+// The server can still refuse the capture
 // POST with a 409 while the organization has agent sessions switched off
 // (Memory sources > Agent sessions). The extension fires an install-probe on
 // load (harness + timestamp only, no content) and files the session when it

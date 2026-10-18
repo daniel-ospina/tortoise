@@ -268,6 +268,14 @@ surfaces:
   # tortoise/monitoring.py and tortoise/supabase_control.py, which select the
   # `api` surface.
   - test_org_create_pool_7678.py
+  # #8920 (review P3): the harness-pointer integrity guard. `tortoise/hosted_api.py`
+  # is the file that RECORDS `tests/_http_fixtures.quiesce_testclient_background_work`
+  # as the canonical #3472/#3505 seam, and it is an EXACT `api` SOURCE_PATTERN
+  # match that REPLACES the `core` fallback — so an `api`-only change to that
+  # comment (a rename relay, or a rename that forgets one) would otherwise run
+  # no guard at all. Dual-registered with `core` (below) because half the check
+  # is dead-symbol references inside `tests/`, which `core` is the fallback for.
+  - test_8920_harness_pointer.py
   # #3365: the session-capture ADMISSION key must name the graph the data path
   # actually OPENS — a legacy key bound to the org's default graph (a real
   # `g_<hex>` id routing to the same physical graph as an org-wide key) must
@@ -1920,6 +1928,11 @@ surfaces:
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
+  # #8920 (review P3): production pointers into `tests/` must resolve, and no
+  # source may still name a symbol the move renamed away. DB-free and static,
+  # so it belongs on the general lane; the `api` arm above covers the exact
+  # `tortoise/hosted_api.py` pointer that replaced `core` in `select()`.
+  - test_8920_harness_pointer.py
   - test_analytics_offloop_4015.py  # #4015: analytics emit off-loop + Stripe fail-soft (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
@@ -3064,8 +3077,9 @@ surfaces:
   # and the same fallback: `tortoise/pi-hooks/README.md` matches no
   # SOURCE_PATTERNS entry, so a README-only edit selects `core` through the
   # `tortoise/` prefix — which is the only arm that runs the guard on the change
-  # it guards. (A `docs/` edit is deliberately skipped by NON_PYTHON_PREFIXES,
-  # so the plan's own copy is covered by review of the `.md`, not by this arm.)
+  # it guards.  (A `docs/` edit is skipped by NON_PYTHON_PREFIXES, but the plan
+  # doc is itself a CORE_ALSO claim entry in `tools/ci_selection.py` (#3554), so a
+  # plan-only edit selects `core` and runs this guard too.)
   - test_pi_capture_disposition.py
   # #3575 P1-A: this pins `tortoise/session_import/parsers.py::window_turns`.
   # `tortoise/session_import/` maps to no named surface, so a parsers.py change
