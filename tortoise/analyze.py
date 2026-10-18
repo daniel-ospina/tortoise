@@ -10,12 +10,11 @@ import json, os, re  # noqa: E401
 from typing import Any
 
 from .live import (
-    EPISTEMIC_LABELS,
     _live_only,
     _terminal_excluded,
     epistemic_disjunction,
-    epistemic_label_queries,
     epistemic_labels_of,
+    epistemic_sweep,
 )
 
 
@@ -509,27 +508,17 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
     _log = logging.getLogger(__name__)
 
     def _sweep(template: str, params: dict, labels: list[str]) -> list:
-        """Run an ID-ANCHORED template once per PRESENT epistemic label.
+        """Sweep this hop's anchored legs over the labels PRESENT (#7927).
 
-        #7927: the frontier/anchor can hold a :Subject/:Object/:Event (§7813
-        ruling), so an anchored leg keeps its LABEL (the per-(label,
-        property) index) and the sweep comes from
-        ``live.epistemic_label_queries`` — never a hand-spelled literal.
-
-        ``labels`` is the RESOLVED label set of this hop, not all four: a
-        Point-only graph would otherwise pay three always-empty queries per
-        leg and blow the #395 interactive-latency budget (measured: the 40-claim
-        AC5 zone went ~0.73s → ~1.50s under an unconditional four-label sweep,
-        back to ~0.72-0.88s with this resolution). Same shape as
-        ``ep._affected_claims``' seed-label resolution.
+        Thin binding of ``live.epistemic_sweep`` to this projection — the
+        frontier/anchor can hold a :Subject/:Object/:Event (§7813 ruling), so
+        an anchored leg keeps its LABEL (the per-(label, property) index) and
+        expands through ``live.epistemic_label_queries``; ``labels`` is the
+        RESOLVED set for this hop, so a Point-only graph pays one query per leg
+        instead of four (an unconditional sweep took the #395 AC5 40-claim
+        zone from ~0.73s to ~1.50s against a 1.2s bound).
         """
-        rows: list = []
-        for _label, _q in zip(
-                EPISTEMIC_LABELS, epistemic_label_queries(template), strict=True):
-            if _label not in labels:
-                continue
-            rows.extend(proj.g.query(_q, params=params).result_set)
-        return rows
+        return epistemic_sweep(proj.g, template, params, labels=labels)
 
     collected: set[str] = set()
     factor_anchors: set[tuple[str, str, str]] = set()

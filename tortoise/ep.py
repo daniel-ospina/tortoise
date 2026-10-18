@@ -1815,7 +1815,7 @@ class TortoiseEP:
         # it). Only the declared-baseline state is removed; ``unmeasured``
         # keeps its deliberate listing. See ``sdk._review_prune`` for the
         # sibling scan that ALSO requires measurement.
-        from .search_engine import ep_prior_only_cypher
+        from .search_engine import ep_measured_cypher, ep_prior_only_cypher
         # #7927: ``n`` is the SUBJECT of this scan — contested claims are
         # enumerated GRAPH-WIDE (no id anchor to index), so the labels come
         # from the shared ``live.EPISTEMIC_LABELS`` declaration and one
@@ -1839,16 +1839,35 @@ class TortoiseEP:
         # nothing would ever measure them (`_stale_first_claims` and
         # ``_affected_claims`` reach claims, not structurally-only entities).
         # So an entity lists only once EP has ACTUALLY measured it.
+        #
+        # NON-OPERATOR predicate (review, P2 — two reviewers). ``is_operator``
+        # ALONE now lies on the Point leg: the pre-#7927 form was a bare
+        # ``= false``, so a legacy ``op_type``-only operator (#2205/#943 — a
+        # Point carrying ``op_type`` and NO ``is_operator``) was excluded by
+        # NULL. Admitting UNSET, as the entity labels need, silently re-admitted
+        # exactly that class, and with NO measured gate on Point a legacy
+        # operator coalesces to Beta(1,1) (v = 1/12) and sorts to the TOP of a
+        # report about claims — an operator is not a claim. So this uses the
+        # CANONICAL non-operator predicate (``sdk._operator_scope_clauses``,
+        # #7108; ``_graph_claim_count`` in this file spells it the same way):
+        # both halves are load-bearing, and the UNSET admission is only the
+        # first.
         rows: list = []
         for _label in EPISTEMIC_LABELS:
             conds = [
                 "(n.is_operator IS NULL OR n.is_operator = false)",
+                "n.op_type IS NULL",
                 _terminal_excluded("n.status"),
                 f"NOT {ep_prior_only_cypher('n')}",
             ]
             if _label != EPISTEMIC_LABELS[0]:
-                conds.append(
-                    "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)")
+                # The canonical measurement predicate (#3276), not a re-spelling:
+                # composed with the prior-only conjunct above it is exactly
+                # ``ep_measured_cypher``, and spelling it out here is how this
+                # function's OWN subject — the #3415/#2206/#3276 "contested
+                # here, unmeasured there" disagreement — gets reintroduced by
+                # the next edit to either term.
+                conds.append(ep_measured_cypher("n"))
             rows.extend(self.g.query(
                 f"MATCH (n:{_label}) "
                 "WHERE " + " AND ".join(conds) + " "
@@ -1858,14 +1877,20 @@ class TortoiseEP:
                 # Entity labels store their text in name/title — a Point's
                 # ``content``-only read returned None for them.
                 "WHERE v > $t "
-                "RETURN n.id, coalesce(n.content, n.name, n.title, "
-                "                        n.label, ''), a, b, v",
+                # ``:Event`` writers stamp ``id`` (``entities._upsert_event``
+                # sets it "for edge matching") but key on ``eventId``, so the
+                # coalesce keeps the row ADDRESSABLE (and the dedupe below
+                # from collapsing every id-less Event onto a ``None`` key).
+                "RETURN coalesce(n.id, n.eventId), "
+                "       coalesce(n.content, n.name, n.title, n.label, ''), "
+                "       a, b, v",
                 params={"t": variance_threshold},
             ).result_set)
         # A multi-labelled node (``:Point:Object`` — ``update_point``'s promote
         # arm mints one) is returned by MORE THAN ONE sweep: collapse on id,
         # first-wins, so it is listed once (the Point leg runs first and is the
-        # label the claim rule applies to).
+        # label the claim rule applies to). The key is the row's identity
+        # column (``coalesce(id, eventId)``), never a nullable property.
         by_id: dict[str, list] = {}
         for row in rows:
             by_id.setdefault(row[0], row)

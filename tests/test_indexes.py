@@ -36,7 +36,7 @@ EXPECTED_RANGE_EMBEDDED = {
     # (its range key is url, below) and no :Document index is created.
     "Subject": ["id", "name"],
     "Object": ["id", "name"],
-    "Event": ["eventId"],
+    "Event": ["eventId", "id"],  # #7927: ``id`` — every epistemic read anchors on it
     "Source": ["id", "url"],
     # #2600: actor-filtered session reads (list_sessions?actor_user_id) must
     # be an index seek on both lanes — plain string single-prop RANGE index

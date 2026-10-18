@@ -19307,6 +19307,15 @@ class TortoiseSDK:
         # ``ep_prior_only_cypher`` so a #2199 baseline cannot read contested
         # there either; only the genuinely UNMEASURED (no persisted prior)
         # listing remains get_contested_claims' deliberate divergence.
+        # #7927: a SECOND divergence now exists, and it is also deliberate —
+        # get_contested_claims sweeps the four epistemic labels (#7813) and
+        # lists a MEASURED :Subject/:Object/:Event belief, while this scan is
+        # ``MATCH (n:Point)`` and therefore cannot. Do not "harmonize" that
+        # either without deciding which surface the entity belongs on: this
+        # scan feeds the PR prune (Point rewiring), not the belief report.
+        # The claim leg below keeps its own pre-#7927 ``n.is_operator = false``
+        # — the same bare form the widened scans replaced — so it is
+        # unchanged by that widening.
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "

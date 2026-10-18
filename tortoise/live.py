@@ -375,9 +375,15 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 #     LABEL. Dropping the label is the obvious widening and is a straight
 #     regression: the indexes are per-(label, property), so a bare
 #     ``MATCH (n {id:$id})`` has NO index anchor and full-scans on every EP
-#     read (#7853 owner measurement). Point/Subject/Object each carry an
-#     ``id`` RANGE index; Event carries one on ``eventId`` only, so an
-#     Event addressed by ``id`` is unindexed today under EITHER shape.
+#     read (#7853 owner measurement). Point/Subject/Object/Event each carry an
+#     ``id`` RANGE index (Event joined them in #7927 — it carried only
+#     ``eventId``, so an Event addressed by ``id`` full-scanned).
+#
+#     Use ``epistemic_sweep`` for the sweep itself: resolve the labels PRESENT
+#     (``epistemic_labels_of``) and run the anchored query only for those. An
+#     unconditional four-label sweep is what breached the #395 AC5 latency
+#     bound (0.73s -> 1.50s against a 1.2s limit) — a Point-only id set must
+#     stay ONE anchored read.
 # ══════════════════════════════════════════════════════════════════════════
 
 #: The four labels on which confidence propagates (#7813 ruling). Ordered
@@ -451,6 +457,38 @@ def epistemic_labels_of(graph, ids) -> list[str]:
             present.append(label)
             unresolved = [i for i in unresolved if i not in found]
     return present or [EPISTEMIC_LABELS[0]]
+
+
+def epistemic_sweep(graph, template: str, params: dict | None = None, *,
+                   ids=None, labels=None) -> list:
+    """Run an ID-ANCHORED template once per PRESENT epistemic label; merge rows.
+
+    The single consumer-side entry point for an id-anchored multi-label read
+    (#7927) — it composes the two primitives above rather than restating them:
+    ``epistemic_label_queries`` expands the template, ``epistemic_labels_of``
+    narrows the sweep to the labels actually present.
+
+    ``graph`` is the Falkor graph handle (``projection.g``). ``ids`` defaults
+    to ``params["ids"]`` (the convention every caller here follows);
+    ``labels`` overrides the resolution when a caller already resolved them for
+    this hop.
+
+    DEDUPE CONTRACT: rows are PER LABEL, so a multi-labelled node
+    (``:Point:Object`` — ``update_point``'s promote arm mints one) can be
+    returned more than once. Key the result by node id, or dedupe — a
+    list-shaped consumer that does neither will double-count.
+    """
+    params = params or {}
+    if ids is None:
+        ids = list(params.get("ids") or [])
+    if labels is None:
+        labels = epistemic_labels_of(graph, ids)
+    rows: list = []
+    for label, query in zip(
+            EPISTEMIC_LABELS, epistemic_label_queries(template), strict=True):
+        if label in labels:
+            rows.extend(graph.query(query, params=params).result_set)
+    return rows
 
 
 # ══════════════════════════════════════════════════════════════════════════
