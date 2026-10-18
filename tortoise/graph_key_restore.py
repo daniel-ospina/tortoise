@@ -449,6 +449,19 @@ class RestoreObservation:
         ``diagnosis()``. So the verdict line now reports the two measurements and stops;
         the status-specific paragraph below draws the conclusion (the zero-sample arm
         already worked this way)."""
+        if self.status == FAILED:
+            # #8827 review round 2: "returned after …s" immediately followed by "The
+            # RESTORE call itself FAILED" is a contradiction, and a consumer switching on
+            # the flag the docstring names would read a failed run as a returned one. The
+            # flag's meaning is "the worker FINISHED inside the bound"; the verdict line
+            # says which of the two it was.
+            return (
+                f"graph-key RESTORE of {self.graph!r} FINISHED after "
+                f"{self.restore_s:.2f}s (bound {self.bound_s:g}s) — its RESTORE call "
+                f"RAISED, so it did not return; {self.witness_failures} of "
+                f"{self.witness_samples} witness PINGs went unanswered (slowest answered "
+                f"{self.witness_max_latency_ms:.0f} ms)."
+            )
         if self.witness_samples == 0:
             gave_up = (
                 f"returned after {self.restore_s:.2f}s"
@@ -533,8 +546,16 @@ class RestoreObservation:
                 f"not discard that payload — re-issue the RESTORE from it before doing "
                 f"anything else, then decide whether the refusal (a ``BUSYKEY``-class "
                 f"error, an index rebuild error, a dropped connection) needs a different "
-                f"recovery. A PING will not tell you any of this: the instance is fine "
-                f"and the KEY is missing."
+                f"recovery. NOTHING HERE MEASURED THE INSTANCE'S LIVENESS: no transport "
+                f"probe runs on this path, so a dropped or reset connection is equally "
+                f"consistent with the process having DIED (#8270) — check the port and "
+                f"that the KEY exists (``GRAPH.LIST`` / an ``EXISTS``-class check) with "
+                f"the restored node count before re-issuing, and do not read a PING "
+                f"reply as 'the restore is fine'."
+                # #8827 review round 2: this branch must not assert a liveness it never
+                # measured. "The instance is fine" was an inference over evidence that
+                # was never taken, and the shape that reaches here with a DEAD instance
+                # is the SIGSEGV/OOM one this module's own rule documents.
             )
         if self.status == CALLER_STALL:
             # Every witness PING answered: the instance WAS serving, so the story is
@@ -602,8 +623,10 @@ class RestoreObservation:
                 f"give the witness client a short timeout (below ``bound_s``), fix its "
                 f"credentials/route if the failure above names them, then re-probe the "
                 f"instance with a PING on a separate connection — and confirm the graph "
-                f"KEY is back (``GRAPH.LIST`` / an ``EXISTS``-class check), because a "
-                f"PING says the instance is up, not that the RESTORE took."
+                f"KEY is back (``GRAPH.LIST`` / an ``EXISTS``-class check) AND that its "
+                f"node count is the restored one, because a PING says the instance is up, "
+                f"not that the RESTORE took, and an existing key holding a partial or "
+                f"empty graph passes a key-exists check."
             )
         if self.witness_failures:
             # `instance_listening is None` on the overrun path is LIVENESS_UNMEASURED and
@@ -990,6 +1013,18 @@ def restore_graph_key(
     # (auth, DNS, a probe bug). Reporting that as "It is a BLOCKED server … Do not
     # retry" told the operator to act on a fabricated engine verdict, so the outage
     # is refused rather than blamed on the engine (#8827 review).
+    # ⚠️ DECLARED RESIDUAL (#8827 review round 2, not fixed here): this accumulator
+    # covers the witness's WHOLE life, while every other attribution number above is
+    # computed from `attributed` (the in-window samples). With the corrected polarity
+    # ("ANY non-transport name disqualifies") a non-transport failure recorded only
+    # AFTER the restore returned — i.e. by the recovery probe — can therefore discard a
+    # MEASURED in-window BLOCK and publish UNMEASURED. Snapshotting the names at
+    # `window_end_s` was tried and REVERTED: on the completed path the recovery probe is
+    # the sample source (an instant restore leaves a ~0 s window), so the snapshot
+    # dropped the auth failure this polarity exists to surface, and it broke
+    # `test_a_MIXED_witness_fault_is_not_published_as_a_trustworthy_block`. Separating
+    # "evidence about the restore" from "evidence about liveness" across the recovery
+    # edge is a change to the witness contract, not a line edit here.
     witness_errors = tuple(sorted(witness.unanswered_errors))
     # ONE shared helper, also used by `RestoreObservation.witness_fault`: the status the
     # caller switches on and the account it reads are the same claim, and while this test
@@ -1047,11 +1082,26 @@ def restore_graph_key(
             witness_max_latency_ms=max_latency_ms,
             blocked_latency_ms=blocked_latency_ms,
             instance_listening=None,
+            # #8827 review round 2: "returned" means the WORKER FINISHED inside the
+            # bound. A RESTORE that RAISED did not return, but it did finish — and the
+            # documented meaning of this flag is the returned-vs-gave-up split, which is
+            # exactly what "the worker is not still running" answers. The status says
+            # which of the two it was; this field must not be read as "the restore
+            # succeeded" (``as_dict`` publishes both).
             restore_returned=True,
             error=(
-                f"{type(error).__name__}: {error}"
-                if error is not None
-                else unmeasured_reason
+                # The witness fault must SURVIVE into the account on this path: with an
+                # error present `unmeasured_reason` used to be dropped, so a run that
+                # both raised AND had a non-transport witness failure named the witness
+                # nowhere (#8827 review round 2).
+                "; ".join(
+                    part for part in (
+                        (f"{type(error).__name__}: {error}"
+                         if error is not None else unmeasured_reason),
+                        ("witness fault: " + ", ".join(instrument_failures)
+                         if instrument_failures else None),
+                    ) if part
+                )
             ),
         )
         logger.info("graph-key restore finished: %s", observation.sentence())
