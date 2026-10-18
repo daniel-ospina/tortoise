@@ -71,6 +71,20 @@ def _extraction_hints(extraction: object) -> dict:
     return out
 
 
+def _value_fields_entry(spec: object) -> dict:
+    """The brief's per-kind ``values`` key — present ONLY when declared (#2818).
+
+    A props-less kind contributes ``{}``, so its brief dict and every rendered
+    prompt stay byte-identical to pre-#2818 (the master gains one EMPTY
+    ``pack_values`` section, the same always-present shape as ``pack_hints``).
+    The declaration is normalized by ``pack_values.declared_value_fields``
+    (which trusts nothing and drops a malformed section rather than raising).
+    """
+    from tortoise.pack_values import declared_value_fields
+    values = declared_value_fields(spec)
+    return {"values": values} if values else {}
+
+
 def compile_value_brief(packs_dir: Path | str | None = None,
                         tenant_manifests: dict[str, str] | None = None,
                         installed_namespaces: Collection[str] | None = None) -> dict:
@@ -146,6 +160,19 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     core vocabulary is never gated — it is always emitted. The gate is a
     pure filter over an unchanged compile: same loop, same order, same
     per-kind payload.
+
+    **#2818 — per-kind value fields.** A kindDef that declares ``values``
+    (the per-kind value-field declaration; vocabulary in
+    ``tortoise/pack_values.py``) carries them on its brief entry as
+    ``values``. The key is present ONLY when the kind declares it, so a
+    props-less kind's brief entry is EXACTLY ``{description, nearMisses}``
+    as before and every rendered prompt stays byte-identical for the shipped
+    catalog. The declaration is carried, never validated here: the compile
+    reads raw YAML, so ``pack_values.declared_value_fields`` normalizes
+    without trusting and a malformed section degrades to absent (the pack
+    validator reports it). It is deliberately absent from
+    ``compile_kind_index_spec`` — see that function's docstring for the npz
+    cache-key constraint.
     """
     from tortoise.pack_registry import PackRegistry  # noqa: I001
     from tortoise.pack_registry import default_packs_dir
@@ -176,6 +203,12 @@ def compile_value_brief(packs_dir: Path | str | None = None,
             kinds[f"{ns}:{k}"] = {
                 "description": spec.get("description", ""),
                 "nearMisses": spec.get("nearMisses", []),
+                # #2818: the kind's declared value fields ride the SAME brief
+                # (the one pack→extractor seam), and only when declared — the
+                # key is ABSENT for every props-less kind, so the brief and
+                # every render of it stay byte-identical for the shipped
+                # catalog.
+                **_value_fields_entry(spec),
             }
     # T12 (#1272): the core objectKind set is aligned to ONTOLOGY §5 Object
     # Kind Vocabulary (16 kinds — Problem added by the #2238 problem-family
@@ -238,6 +271,11 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                     kinds[f"{ns}:{k}"] = {
                         "description": spec.get("description", ""),
                         "nearMisses": spec.get("nearMisses", []),
+                        # #2818: the hosted overlay carries the declaration
+                        # too — this loop IS the tenant-view compile, so a
+                        # tenant pack's value fields reach its prompt the same
+                        # way its kinds do (absent when undeclared).
+                        **_value_fields_entry(spec),
                     }
                     declared.discard(k)
                 # Declared-but-kindDefs-less kinds (the #1935 fixture shape:
@@ -332,7 +370,19 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
     Memoized per ``(RESOLVED packs_dir, installed_namespaces gate)`` — the key
     includes the gate (#5163), so a gated compile is never served to an
     ungated (or differently-gated) caller and vice versa; a custom dir or a
-    different gate is its own slot (cycle-3 P2 unkeyed memo)."""
+    different gate is its own slot (cycle-3 P2 unkeyed memo).
+
+    **#2818: a declared value field is INVISIBLE here by construction.** This
+    spec is built from four named keys — ``description``/``synonyms``/
+    ``examples``/``nearMisses`` — and ``kind_index.cache_key_for`` is a
+    content hash of the spec JSON. Rendering ``values`` into the index ``text``
+    would rotate the npz cache key on every pack install that declares a value
+    field (an unintended, silent re-embed of the whole kind index), so the
+    declaration deliberately never reaches this surface: it belongs to the
+    extraction prompt (``_render_master*``), not to the classification text.
+    ``tests/test_pack_value_declarations_2818.py`` pins the byte-identity of
+    this output with and without a declaration present.
+    """
     import copy
 
     from tortoise.pack_registry import default_packs_dir
@@ -410,7 +460,18 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None,
             # document/event declaration) is never classifiable — skip it.
             if kind in (pack.point_kinds or []) and kind not in declared:
                 continue
-            desc = str(kd.get("description", brief.get(k, "")) or "")
+            # The fallback used to be the whole brief ENTRY, stringified — and
+            # #2818 added `values` to that entry, which would have leaked a
+            # declared value field into the index text (rotating the npz cache
+            # key) for a description-less kind. Keep the pre-#2818 fallback
+            # text EXACTLY (the entry's description/nearMisses, as before) by
+            # excluding the new key: byte-identical with or without a
+            # declaration, for every kind.
+            fallback = brief.get(k, "")
+            if isinstance(fallback, dict):
+                fallback = {kk: vv for kk, vv in fallback.items()
+                            if kk != "values"}
+            desc = str(kd.get("description", fallback) or "")
             syns = [str(s) for s in (kd.get("synonyms") or [])]
             exs = [str(e) for e in (kd.get("examples") or [])]
             nms = [str(n) for n in (kd.get("nearMisses") or [])]

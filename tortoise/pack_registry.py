@@ -177,6 +177,13 @@ VALID_KINDDEF_KEYS = frozenset({
     # canonical slot vocabulary and the shape rules live in
     # ``tortoise/pipeline.py`` (one home); this key only opts the kind in.
     "pipeline",
+    # #2818: the per-kind VALUE FIELDS a kind carries — the declaration seam
+    # #2782's value model needs (`fundingTranche` carries
+    # `committedAmountMinor` as a `money` value). The vocabulary and the shape
+    # rules live in ``tortoise/pack_values.py`` (one home); this key only opts
+    # the kind in. It stays a CLOSED declaration — an unknown key inside an
+    # entry, an unknown `valueKind`, or a namespaced name is a hard error.
+    "values",
 })
 
 # storeAs values — what stream bucket a kind belongs to (R6 §3.1)
@@ -580,7 +587,8 @@ class PackManifest:
     # Manifest v3 (R6 §3.1): per-kind extractor metadata, keyed by pack-local
     # kind name. Allowed value keys: description, synonyms, examples,
     # nearMisses, extractable, storeAs, enforcement, statuses, folds,
-    # pipeline (#2792).
+    # pipeline (#2792), values (#2818 — the per-kind value-field declaration;
+    # vocabulary + shape rules in ``tortoise/pack_values.py``).
     kind_defs: dict[str, dict] = dataclasses.field(default_factory=dict)
 
     # Manifest v3 (R6 §3.2): first-class business-logic chains.
@@ -1399,6 +1407,15 @@ class PackRegistry:
                         from tortoise.pipeline import validate_pipeline_decl
                         for perr in validate_pipeline_decl(spec["pipeline"]):
                             errors.append(f"kindDefs '{kind}': {perr}")
+                    # #2818: the per-kind VALUE FIELDS declaration. Shape and
+                    # closed vocabulary live in ``pack_values`` (one home) so
+                    # the validator, the brief compiler and the prompt
+                    # renderers cannot drift. A malformed declaration is an
+                    # ordinary validation error here — never a dropped pack or
+                    # a TypeError on the way to the prompt.
+                    if "values" in spec:
+                        from tortoise.pack_values import validate_value_fields
+                        errors.extend(validate_value_fields(kind, spec))
                     # #2729: the per-kind lifecycle declaration. Errors isolate
                     # the pack (unknown fold status / orphan fold event /
                     # malformed shape); the shared-vocabulary overlap is a
