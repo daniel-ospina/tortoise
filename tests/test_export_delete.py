@@ -1035,6 +1035,13 @@ class TestDashboardCreatedTeamRoundTrip:
         body = r.json()
         org_id = body["org_id"]
         assert body["graph_name"] == f"org_{org_id}"  # Indicator 1
+        # Index pin, deliberately (#8920): `sb_client` applies
+        # `quiesce_testclient_background_work` BEFORE entering the app, so the
+        # lifespan's boot sweep cannot record its #4241
+        # `metering_repair_period_bounds` RPC first — and the guard module
+        # `tests/test_8920_harness_pointer.py` keeps that fixture in its
+        # CONSUMERS list. If the quiesce ever regresses, this pin returns to the
+        # #4816 1-in-N flake; `test_pack_state.py`'s clean arm is the detector.
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{org_id}"

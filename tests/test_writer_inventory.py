@@ -1389,8 +1389,10 @@ class TestOnboardingTeam:
             TEST_TEAM, session_user_id=None)
         r = tc.post("/v1/onboarding/team", json={"name": "orphan"})
         assert r.status_code == 403, r.text
-        # no provision attempted. Scoped to provision calls: unrelated
-        # boot-sweep RPCs (#4241) may land asynchronously in this fixture.
+        # no provision attempted. Scoped to provision calls. The boot-sweep
+        # runner used to land its #4241 RPC here asynchronously; the `client`
+        # fixture quiesces it (#8920), so the filter is now the second line of
+        # defence rather than the only one.
         assert [c for c in fake.rpc_calls
                 if c[0] == "provision_team_with_token"] == []
         assert all(t["id"] != "orphan" for t in fake.tables["organizations"])

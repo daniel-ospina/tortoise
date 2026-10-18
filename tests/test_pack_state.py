@@ -515,6 +515,13 @@ class TestProvisioningHooks:
             "email": "founder@example.com", "password": "hunter2secret"})
         assert r.status_code == 200, r.text
         org_id = r.json()["org_id"]
+        # Index pin, deliberately, and the OPPOSITE of the parametrized test
+        # below (#8920): `supabase_client` applies
+        # `quiesce_testclient_background_work` BEFORE entering the app, so no
+        # background RPC can precede this request — and the clean arm of
+        # `test_create_team_activates_packs_supabase_mode` asserts that premise
+        # (`metering_repair_period_bounds` is never recorded) instead of
+        # assuming it. A name-selected pin here would hide a quiesce regression.
         assert fake.rpc_calls[0][0] == "provision_team"
         sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)

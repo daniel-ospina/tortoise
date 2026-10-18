@@ -9,8 +9,9 @@ leading underscore (`_quiesce_testclient_background_work` →
 `quiet_boot_sweeps`). The DEFINITIONS moved and were renamed. The REFERENCES
 were not, so five of them named symbols that no longer existed anywhere. The
 moved docstring had the same problem one level down: it named its callee
-`_purge_deleted_teams`, and the callee is `_purge_deleted_orgs` (seven
-occurrences) — a docstring that misnames the function under test is the worst
+`_purge_deleted_teams`, and the callee is `_purge_deleted_orgs` (the
+non-vacuity note at the end of this docstring gives the exact count) — a
+docstring that misnames the function under test is the worst
 case of the same defect, because the enumeration argument below is what keeps
 the seam complete.
 
@@ -96,14 +97,17 @@ STALE_NAMES = (
 SHARED_MODULE = "_http_fixtures"
 HELPER = "quiesce_testclient_background_work"
 #: The fixture modules that APPLY this seam today. This is NOT a completeness
-#: claim, and the distinction is the point: MANY suites (`test_session_login`,
-#: `test_onboarding_email_http`, `test_free_team_entitlement`, …) open
-#: `TestClient(app)` under a monkeypatched fake control plane and let the boot
-#: sweep run; they tolerate it only because every pin in them is
-#: name/filter-selected. The criterion here is the stronger one — a module that
-#: keeps, or may legitimately add, an EXCLUSIVE pin (`rpc_calls` index,
+#: claim, and the distinction is the point: MANY suites open `TestClient(app)`
+#: under a monkeypatched fake control plane and let the boot sweep run, e.g.
+#: `test_session_login`, `test_onboarding_email_http`,
+#: `test_free_team_entitlement` — they tolerate it because NO PIN IN THEM READS
+#: `fake.rpc_calls` at all (verified: zero `rpc_calls` references in each). The
+#: criterion here is the stronger one — a module that keeps, or may legitimately
+#: add, a pin that DOES read the recording (`rpc_calls` index,
 #: `len(rpc_calls)`, or exclusive ownership of a shared temp store) must
-#: quiesce instead of tolerating it.
+#: quiesce instead of tolerating it. Modules that already select by name and
+#: still open a client (`test_agent_signup_idempotency`, `test_claim_endpoints`,
+#: `test_embed_metering`) sit on the tightrope rather than off it.
 #:
 #: `test_writer_inventory.py` was excluded until the second review on a FALSE
 #: premise ("the boot sweep does not reach their fake"). It does — its
@@ -113,9 +117,9 @@ HELPER = "quiesce_testclient_background_work"
 #: there too; that module simply never had a pin that noticed. The premise is
 #: the defect a future reader would trust before adding an index assertion, so
 #: the module now applies the seam and this guard covers it.
-#: `test_supabase_control.py` is the one real exclusion: those tests drive
-#: `provision_org` / `_session_user_org` directly with no `TestClient`, so no
-#: lifespan, so no sweep.
+#: `test_supabase_control.py` is the one real exclusion AMONG THE MODULES THIS
+#: GUARD CLASSIFIES: those tests drive `provision_org` / `_session_user_org`
+#: directly with no `TestClient`, so no lifespan, so no sweep.
 CONSUMERS = (
     "test_export_delete.py",
     "test_pack_state.py",
@@ -216,11 +220,10 @@ def test_the_seam_is_defined_once_and_imported_by_its_consumers():
             and any(alias.name == HELPER for alias in node.names)
             for node in ast.walk(tree)
         )
-        # AST, not a grep: a consumer that merely MENTIONS `<helper>(` in a
-        # comment or docstring (this file's own prose does) must not satisfy
-        # the "and applies it" half, or the guard passes on a fixture that
-        # imports the seam and never calls it — the exact inert-patch shape it
-        # exists to prevent.
+        # AST, not a grep: a commented-out call, or a docstring code sample,
+        # would satisfy a substring search and pass a fixture that imports the
+        # seam and never applies it — the exact inert-patch shape this exists
+        # to prevent.
         called = any(
             isinstance(node, ast.Call)
             and (
