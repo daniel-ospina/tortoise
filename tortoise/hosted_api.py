@@ -35930,13 +35930,16 @@ def _billing_customer_email(sdk: TortoiseSDK | None, org: dict,
        row) and is read as the ``t.email`` twin (#4640: Supabase mode passes
        ``sdk=None`` — the registry graph is deleted post-#669).
     1b. The ACTIVE OWNER's verified user email (#4508) — the Supabase-lane
-       twin of 1, resolved by ``_billing_owner_email`` and only for the orgs
-       whose ``organizations.email`` is NULL (every session-lane create: see
-       that helper — the caller gates the read on exactly that condition, so
-       an org whose step 1 answers never pays for it). Inserted AFTER 1 so
-       the landed precedence keeps holding, and BEFORE 2/3 so a non-owner
-       member clicking **Upgrade** can never bind their own personal address
-       as the org's Stripe customer.
+       twin of 1, but only where step 1 of the chain cannot answer: the
+       ``organizations.email`` column is NULL **or not email-shaped** (a
+       session-lane create leaves it NULL; #1765 leaves stale contact values
+       on the others, and ``_billing_email_like`` is what rejects those). The
+       caller gates the READ on that same ``_billing_email_like`` predicate
+       (``_billing_checkout_sync``), so an org whose step 1 answers never pays
+       for the control-plane + GoTrue round-trips. Inserted AFTER 1 so the
+       landed precedence keeps holding, and BEFORE 2/3 so a non-owner member
+       clicking **Upgrade** can never bind their own personal address as the
+       org's Stripe customer.
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
