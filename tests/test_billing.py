@@ -279,6 +279,54 @@ class TestStripeClient:
         assert _last_http_requests()[0][1].endswith("/subscriptions/sub_1")
 
 
+class TestScrubbedProviderMessages:
+    """#8895 review P2 (round 3): provider text must not name a customer id.
+
+    ``reconcile_fleet`` records ``failed[].error = f"{cls}: {_scrub_secrets(msg)}"``
+    and the cron driver prints that row into a PUBLIC Actions log. Stripe's own
+    error text embeds the request path, so the customer/subscription id rides
+    along inside the sentence — the composite redactor has to know those
+    shapes, not only credentials.
+    """
+
+    def test_stripe_customer_and_subscription_ids_are_redacted(self):
+        from tortoise.billing import _scrub_secrets
+
+        for raw in ("stripe GET customers/cus_PqR3xyz9/subscriptions -> 404: {}",
+                    "stripe POST subscriptions/sub_1AbCdEfGh9 failed: 400"):
+            scrubbed = _scrub_secrets(raw)
+            token = raw.split()[2].split("/")[1]
+            assert token not in scrubbed, (
+                f"{token!r} survived the redactor: {scrubbed!r}")
+            assert "***" in scrubbed, scrubbed
+
+    def test_a_snake_case_word_starting_with_sub_is_not_a_stripe_id(self):
+        """Over-redaction costs diagnostics: ``sub_total`` is prose, not an id."""
+        from tortoise.billing import _scrub_secrets
+
+        assert _scrub_secrets("billing sub_total_price mismatch") == (
+            "billing sub_total_price mismatch")
+
+    def test_the_failed_row_built_from_a_stripe_error_carries_no_customer_id(
+            self):
+        """End of the path the public log reads: the row's own error string."""
+        from tortoise.billing import StripeAPIError, _scrub_secrets
+
+        exc = StripeAPIError(
+            "stripe GET customers/cus_PqR3xyz9/subscriptions -> 404: {}")
+        row_error = f"{exc.__class__.__name__}: {_scrub_secrets(str(exc))}"
+        assert "cus_PqR3xyz9" not in row_error, row_error
+        assert row_error.startswith("StripeAPIError: stripe GET"), row_error
+
+    def test_credentials_are_still_redacted(self):
+        """The pre-existing behaviour is not traded away for the new shapes."""
+        from tortoise.billing import _scrub_secrets
+
+        scrubbed = _scrub_secrets("auth sk_live_SUPERSECRET1234567890 rejected")
+        assert "SUPERSECRET" not in scrubbed, scrubbed
+        assert "***" in scrubbed, scrubbed
+
+
 # ── effective_tier (lazy grace) ─────────────────────────────────────────────
 
 class TestEffectiveTier:

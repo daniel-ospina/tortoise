@@ -117,12 +117,26 @@ _SECRET_PATTERNS = [
 
 
 def _scrub_secrets(text: str) -> str:
-    """Redact obvious secret values (Stripe keys, webhook secrets) from text."""
+    """Redact obvious secret values and Stripe customer identifiers from text.
+
+    Besides secrets, this redacts Stripe's customer-owned object ids
+    (``cus_…`` / ``sub_…``). They are not credentials, but they identify a
+    customer, and this text is what reaches the reconcile summary's
+    ``failed[].error`` — which the cron driver publishes to a PUBLIC Actions
+    log (#8895 review P2). ``StripeAPIError`` embeds the request path
+    (``stripe GET customers/<cus_…>/subscriptions -> 404``), so without this
+    the id would be republished verbatim.
+    """
     out = text
     for pattern in _SECRET_PATTERNS:
         out = pattern.sub("***", out)
     # P2 (Qwen review): catch keys with underscores/hyphens (e.g. re_test_...)
     out = re.sub(r"(?<![A-Za-z0-9])(?:sk|rk|whsec|re)_[A-Za-z0-9_-]{8,}", "***", out)
+    # Customer-owned Stripe object ids (customer, subscription). The trailing
+    # guard keeps ordinary prose (``sub_total``) intact: a Stripe id is the
+    # whole token, never a prefix of a longer snake_case word.
+    out = re.sub(r"(?<![A-Za-z0-9])(?:cus|sub)_[A-Za-z0-9]{6,}(?![A-Za-z0-9_])",
+                 "***", out)
     return out[:200]
 
 

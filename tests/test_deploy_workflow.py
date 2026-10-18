@@ -1555,6 +1555,173 @@ class TestBillingReconcileDriverVerdicts:
         )
 
 
+#: The org-id shape this fleet ACTUALLY mints. ``_new_org_org_id`` and the
+#: Supabase control plane both use ``uuid.uuid4().hex[:26]``, and
+#: ``supabase/migrations/0006_teams.sql`` documents the column as
+#: ``ULID or 26-hex`` — never a hyphenated UUID. A redaction test written with a
+#: hyphenated UUID (or with ``"o1"``) exercises a shape no customer id has, and
+#: passes while every real id is published.
+_REAL_ORG_ID = "a1b2c3d4e5f6a7b8c9d0e1f2a3"
+_OTHER_ORG_ID = "41ed698615f8a7b6c5d4e3f2a1"
+_UUID_ORG_A = "550e8400-e29b-41d4-a716-446655440000"
+_UUID_ORG_B = "11111111-2222-3333-4444-555555555555"
+
+
+def _fingerprint(org_id: str) -> str:
+    import hashlib
+
+    return "org-" + hashlib.sha256(org_id.encode()).hexdigest()[:10]
+
+
+def _run_billing_driver(body, status: int = 200, trigger: str = "schedule"):
+    """Run the workflow's own reconcile step against a stub server."""
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = body if isinstance(body, str) else json.dumps(body)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        def log_message(self, *a):  # silence the default stderr trace
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_port
+        script = _billing_steps()["Run billing reconcile pass"]["run"]
+        return subprocess.run(
+            ["bash", "-c", script],
+            env={
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "INTERNAL_API_URL": f"http://127.0.0.1:{port}",
+                "FASTAPI_INTERNAL_KEY": "test-internal-key",
+                "HOME": "/tmp",
+                "EVENT_NAME": trigger,
+            },
+            capture_output=True, text=True, timeout=120,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class TestBillingReconcileLogRedaction:
+    """#8895 review P2 (round 3): the PUBLIC log must not carry a customer id.
+
+    The summary prints ``failed[].error``/``unrepaired``/``drift_up`` rows, and
+    that error text embeds the org id in PROSE (``update_org_billing: no
+    organizations row matched id='<org_id>'``) as well as carrying Stripe
+    object ids (``stripe GET customers/<cus_…>/subscriptions``). The previous
+    round redacted by hyphenated-UUID shape, which no real org id matches, so
+    every real id reached the log intact while a UUID-shaped test would pass.
+
+    These run the step's own script, so they are anchored to the shipped text.
+    """
+
+    def _failing_body(self):
+        return _billing_case(
+            unchanged=0,
+            failed=[
+                {"org_id": _REAL_ORG_ID,
+                 "error": "RuntimeError: update_org_billing: no organizations row "
+                          f"matched id='{_REAL_ORG_ID}' — the billing write was "
+                          "dropped (fail-closed)"},
+                {"org_id": _UUID_ORG_A, "error": "StripeAPIError: boom"},
+                {"org_id": _UUID_ORG_B,
+                 "error": "StripeAPIError: stripe GET "
+                          "customers/cus_PqR3xyz9/subscriptions -> 404: {}"},
+            ],
+            unrepaired=[{"org_id": _OTHER_ORG_ID, "expected_tier": "pro"}],
+        )
+
+    def test_no_real_customer_id_reaches_the_log(self):
+        proc = _run_billing_driver(self._failing_body())
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 1, (
+            "a pass with failed rows must be red — the redaction test needs the "
+            f"::error:: path to run\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+        for raw in (_REAL_ORG_ID, _OTHER_ORG_ID, _UUID_ORG_A, _UUID_ORG_B,
+                    "cus_PqR3xyz9"):
+            assert raw not in out, (
+                f"the public Actions log published the customer id {raw!r}:\n{out}"
+            )
+
+    def test_the_id_is_redacted_where_it_appears_in_prose(self):
+        """Redaction must follow the id INTO the error sentence.
+
+        A key-based filter (or a shape list that skips 26-hex) leaves the id in
+        ``failed[].error``; the row then stays readable in the log. The prose
+        copy is replaced by the SAME fingerprint as the row's ``org_id``, so the
+        row is still correlatable across runs.
+        """
+        proc = _run_billing_driver(self._failing_body())
+        out = proc.stdout + proc.stderr
+        fingerprint = _fingerprint(_REAL_ORG_ID)
+        assert f"id='{fingerprint}'" in out, (
+            "the error prose no longer names the row by its fingerprint — either "
+            f"the id was redacted to something uncorrelatable, or not at all:\n{out}"
+        )
+        assert fingerprint in out
+
+    def test_fingerprints_stay_distinct_for_every_id_shape(self):
+        """A fingerprint that collapses ids cannot correlate anything.
+
+        Pre-fix, the id was shape-substituted BEFORE it was hashed, so every
+        UUID-shaped org hashed to one constant (``hash('<org-id>')``) and two
+        different customers were indistinguishable. The digest must come from the
+        ORIGINAL id, for every shape.
+        """
+        proc = _run_billing_driver(self._failing_body())
+        out = proc.stdout + proc.stderr
+        fingerprints = {
+            org: _fingerprint(org)
+            for org in (_REAL_ORG_ID, _OTHER_ORG_ID, _UUID_ORG_A, _UUID_ORG_B)
+        }
+        assert len(set(fingerprints.values())) == len(fingerprints)
+        for org, fp in fingerprints.items():
+            assert fp in out, (
+                f"{org} was not summarised under its own fingerprint {fp}\n{out}"
+            )
+
+    def test_a_subscription_id_is_redacted_too(self):
+        body = _billing_case(
+            unchanged=0,
+            failed=[{"org_id": _REAL_ORG_ID,
+                     "error": "StripeAPIError: stripe POST "
+                              "subscriptions/sub_1AbCdEfGh9 failed: 400"}],
+        )
+        out = _run_billing_driver(body).stdout
+        assert "sub_1AbCdEfGh9" not in out, out
+        assert "<stripe-id>" in out, out
+
+    def test_a_non_200_body_is_redacted_by_the_same_shapes(self):
+        """``show_body`` prints a failure body straight to the same public log.
+
+        It carried the same UUID-only assumption, so a 26-hex id or a Stripe
+        object id inside ``detail`` was published verbatim.
+        """
+        body = {"status": "boom",
+                "detail": f"could not enumerate org {_REAL_ORG_ID} "
+                          "(customer cus_PqR3xyz9)"}
+        proc = _run_billing_driver(body, status=500)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 1, out
+        assert _REAL_ORG_ID not in out, out
+        assert "cus_PqR3xyz9" not in out, out
+
+
 def _live_script_refs(job: dict) -> list[str]:
     """Step names in ``job`` whose ``run:`` sources a repo script, LIVE.
 

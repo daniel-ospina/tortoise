@@ -129,12 +129,22 @@ jobs:
           out="$(mktemp)"
           # This repository's Actions logs are PUBLIC, and the reconcile body
           # carries per-org CUSTOMER identifiers (org id + billing state).
-          # Nothing is printed raw: the shell redacts org UUIDs and the summary
-          # below prints a stable fingerprint instead (#8895 review P2). An
-          # operator who needs the real ids re-reads the payload through the
-          # internal endpoint with FASTAPI_INTERNAL_KEY.
+          # Nothing is printed raw: the shell redacts org ids and Stripe object
+          # ids, and the summary below prints a stable fingerprint instead
+          # (#8895 review P2). An operator who needs the real ids re-reads the
+          # payload through the internal endpoint with FASTAPI_INTERNAL_KEY.
+          #
+          # The id shape matters: this fleet mints org ids as 26-hex
+          # (``uuid.uuid4().hex[:26]`` in hosted_api/supabase_control; ULID for
+          # tenant ids), NOT as hyphenated UUIDs, so a UUID-only pattern redacts
+          # nothing an actual customer id looks like. Both shapes are covered
+          # here; the python redactor below redacts the row's own id BY VALUE.
           show_body() {
-            sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<org-id>/g' "$1" | head -c 2000 || true
+            sed -E \
+              -e 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<org-id>/g' \
+              -e 's/(^|[^0-9A-Za-z])[0-9a-f]{26}([^0-9A-Za-z]|$)/\1<org-id>\2/g' \
+              -e 's/(cus|sub)_[A-Za-z0-9]{6,}/<stripe-id>/g' \
+              "$1" | head -c 2000 || true
           }
           # `-m 600` is required, not decoration. `/v1/internal/` is
           # PREFIX-EXEMPT from the 10 s transport wait bound and has no
@@ -186,9 +196,19 @@ jobs:
           python3 - "$out" <<'PY'
           import hashlib, json, re, sys
 
+          # Shape patterns are a SAFETY NET only: the id a row is about is
+          # redacted BY VALUE below, because no shape list can enumerate every
+          # id shape the fleet mints. Two shapes are known to reach this body:
+          # hyphenated UUIDs, and the 26-hex ids ``_new_org_org_id`` actually
+          # mints (``uuid.uuid4().hex[:26]``).
           _UUID = re.compile(
               r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
               re.IGNORECASE)
+          _HEX26 = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{26}(?![0-9A-Za-z])")
+          # Stripe object ids (customers/<cus_…>, subscriptions/<sub_…>) reach
+          # ``failed[].error`` through ``StripeAPIError('stripe GET <path> …')``.
+          _STRIPE_ID = re.compile(
+              r"(?<![A-Za-z0-9])(?:cus|sub)_[A-Za-z0-9]{6,}(?![A-Za-z0-9_])")
 
           def redact_row(row):
               """Replace customer org ids with a STABLE fingerprint.
@@ -198,21 +218,37 @@ jobs:
               still lets an operator correlate one org across runs, which is
               all the log needs.
 
-              Redaction is by SHAPE, not only by key: ``failed[].error`` is the
-              scrubbed provider message and embeds the id in prose
-              (``no organizations row matched id='<uuid>'``), so a key-based
-              filter alone would publish it anyway.
+              The row's OWN id is redacted by VALUE, in every string field —
+              ``failed[].error`` is the scrubbed provider message and embeds it
+              in prose (``no organizations row matched id='<org_id>'``), so a
+              key-based filter, or a shape list that does not name the shape
+              this fleet mints, publishes it anyway. The shape patterns above
+              remain as a net for ids that are not this row's (a Stripe customer
+              id, an org named in a provider message).
+
+              The fingerprint is computed from the ORIGINAL id, before any
+              substitution: hashing a shape-substituted value collapsed every
+              UUID-shaped org onto one constant and defeated the correlation
+              the fingerprint exists for.
               """
               if not isinstance(row, dict):
                   return row
+              raw_id = row.get("org_id")
+              fingerprint = ""
+              if raw_id:
+                  fingerprint = "org-" + hashlib.sha256(
+                      str(raw_id).encode()).hexdigest()[:10]
               out = {}
               for key, value in row.items():
-                  if isinstance(value, str):
-                      value = _UUID.sub("<org-id>", value)
                   if key == "org_id" and value:
-                      digest = hashlib.sha256(
-                          str(value).encode()).hexdigest()[:10]
-                      value = f"org-{digest}"
+                      out[key] = fingerprint
+                      continue
+                  if isinstance(value, str):
+                      if raw_id:
+                          value = value.replace(str(raw_id), fingerprint)
+                      value = _UUID.sub("<org-id>", value)
+                      value = _HEX26.sub("<org-id>", value)
+                      value = _STRIPE_ID.sub("<stripe-id>", value)
                   out[key] = value
               return out
 
