@@ -785,11 +785,9 @@ def event_head_seq(graph) -> int:
     events fallback, whose head is at or above every deliverable seq: it can only
     over-admit, never stall.
 
-    ⚠️ COST, stated rather than implied (an earlier revision of this docstring
-    priced the corrupt path as "one SDK open" — it is not). The fallback is the
-    aggregate over ``:GraphEvent`` the opening paragraph exists to avoid on the
-    steady path, so an UNTRUSTWORTHY graph pays it on every pass, and the counter
-    does not become trustworthy on its own.
+    ⚠️ COST. The fallback is the aggregate over ``:GraphEvent`` the opening
+    paragraph exists to avoid on the steady path, so an UNTRUSTWORTHY graph pays it
+    on every pass, and the counter does not become trustworthy on its own.
 
     ⛔ AND REPAIR IS NOT THIS FUNCTION'S TO DESCRIBE. The store's own repair path
     contradicts the obvious reading of ``next_seq``'s guard, so this paragraph
